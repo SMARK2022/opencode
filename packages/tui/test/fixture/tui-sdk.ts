@@ -65,11 +65,12 @@ export function createEventSource() {
 // #237：扩展 request 参数，让 /log 等端点测试能截获请求体验证日志契约
 // #0503：init 第三参转发 method/body——goal POST 等控制面 mutation 断言依赖它；
 // 既有 handler 忽略额外参数不受影响
+// 异步拦截返回 undefined 时沿既有 await 继续默认响应，不改变真实 SDK 请求形状。
 export type FetchHandler = (
   url: URL,
   request?: Request,
   init?: RequestInit,
-) => Response | Promise<Response> | undefined
+) => Response | Promise<Response | undefined> | undefined
 
 export function createFetch(override?: FetchHandler, events?: ReturnType<typeof createEventSource>) {
   const session = [] as URL[]

@@ -369,23 +369,39 @@ describe("ToolOutputStore", () => {
     ),
   )
 
-  it.live("cleans expired managed files and preserves unrelated files", () =>
-    withStore(({ root, store, fs }) =>
+  it.live("cleans expired managed files and preserves unrelated files", () => {
+    // 真实临时FS只在两个指定entry替换stat结果，不污染全局或绕过实际cleanup。
+    const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      return FSUtil.Service.of({ ...fs, stat: file => {
+        if (file.endsWith("tool_unreadable")) return fs.stat(path.join(file, "missing"))
+        return fs.stat(file).pipe(Effect.map(info => file.endsWith("tool_unknown") ? { ...info, mtime: Option.none() } : info))
+      } })
+    })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+    return withStore(({ root, store, fs }) =>
       Effect.gen(function* () {
         const old = path.join(root, "tool-output", "tool_old")
         const recent = path.join(root, "tool-output", "tool_recent")
         const unrelated = path.join(root, "tool-output", "keep.txt")
+        const unknown = path.join(root, "tool-output", "tool_unknown")
+        const unreadable = path.join(root, "tool-output", "tool_unreadable")
         yield* fs.ensureDir(path.join(root, "tool-output"))
         yield* fs.writeFileString(old, "old")
         yield* fs.writeFileString(recent, "recent")
         yield* fs.writeFileString(unrelated, "keep")
+        yield* fs.writeFileString(unknown, "unknown")
+        yield* fs.writeFileString(unreadable, "unreadable")
         const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000)
         yield* fs.utimes(old, expired, expired)
         yield* store.cleanup()
         expect(yield* fs.exists(old)).toBe(false)
         expect(yield* fs.exists(recent)).toBe(true)
         expect(yield* fs.exists(unrelated)).toBe(true)
+        // mtime缺失与stat失败都不能删，已知过期项仍按原断言删除。
+        expect(yield* fs.exists(unknown)).toBe(true)
+        expect(yield* fs.exists(unreadable)).toBe(true)
       }),
-    ),
-  )
+      undefined, filesystem,
+    )
+  })
 })

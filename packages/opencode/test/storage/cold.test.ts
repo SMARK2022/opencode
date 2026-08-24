@@ -36,21 +36,31 @@ const sharedIt = testEffectShared(Layer.mergeAll(coldLayer, httpApiLayer))
 // 是 SummaryCache 认可的单文件 diff 证据形状；file 以绝对路径传入匹配归一化输入域。
 const addCompletedSummaryEdit = (
   sessions: SessionNs.Interface,
-  input: { sessionID: SessionID; directory: string; file: string; patch: string },
+  input: {
+    sessionID: SessionID
+    directory: string
+    file: string
+    patch: string
+    // #0584：回绕用例需要 caller-selected ID 与固定时间；
+    // 默认仍走 ascending ID + 当前时间以兼容既有用例。
+    userID?: MessageID
+    assistantID?: MessageID
+    created?: number
+  },
 ) =>
   Effect.gen(function* () {
     // #0500：完整 turn = user marker + completed assistant（Tool 挂 assistant）——
     // summary cursor 以 user marker 为闭界，删除 assistant 后 user 仍是合法 cursor。
-    const userID = MessageID.ascending()
+    const userID = input.userID ?? MessageID.ascending()
     yield* sessions.updateMessage({
       id: userID,
       sessionID: input.sessionID,
       role: "user",
-      time: { created: Date.now() },
+      time: { created: input.created ?? Date.now() },
       agent: "build",
       model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
     })
-    const assistantID = MessageID.ascending()
+    const assistantID = input.assistantID ?? MessageID.ascending()
     yield* sessions.updateMessage({
       id: assistantID,
       sessionID: input.sessionID,
@@ -63,7 +73,7 @@ const addCompletedSummaryEdit = (
       path: { cwd: input.directory, root: input.directory },
       cost: 0,
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-      time: { created: Date.now(), completed: Date.now() },
+      time: { created: input.created ?? Date.now(), completed: input.created ?? Date.now() },
     })
     const partID = PartID.ascending()
     const additions = input.patch.split("\n").filter((line) => line.startsWith("+")).length
@@ -892,6 +902,268 @@ describe.serial("ColdStorage", () => {
       expect((yield* sessions.list({ search: outputNeedle })).some((item) => item.id === session.id)).toBe(false)
       expect((yield* sessions.list({ search: textNeedle })).some((item) => item.id === session.id)).toBe(true)
       expect(coldOwnerCount(sync, [session.id])).toBe(1)
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #0584：边界字典序更低但时间更晚：raw id < 会把更早的 msg_z-old 全部排除，
+  // fork 产物丢失完整前缀；tuple 前缀切分必须保留 chronological 前缀。
+  it.instance("forks every Message chronologically before a wrapped boundary", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const source = yield* sessions.create({ title: "chronology fork source" })
+      const oldID = MessageID.make("msg_z-old")
+      const boundaryID = MessageID.make("msg_a-boundary")
+      yield* sessions.updateMessage({
+        id: oldID,
+        sessionID: source.id,
+        role: "user",
+        time: { created: 1_000 },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
+        tools: {},
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: source.id,
+        messageID: oldID,
+        type: "text",
+        text: "chronologically old",
+      })
+      yield* sessions.updateMessage({
+        id: boundaryID,
+        sessionID: source.id,
+        role: "user",
+        time: { created: 2_000 },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
+        tools: {},
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(), sessionID: source.id, messageID: boundaryID,
+        type: "text", text: "excluded boundary content",
+      })
+      const child = yield* sessions.fork({ sessionID: source.id, messageID: boundaryID })
+      // 公开读取必须恰好保留旧轮及其 Part，不复制边界正文或源身份。
+      const messages = yield* sessions.messages({ sessionID: child.id })
+      expect(messages.map((message) => message.info.time.created)).toEqual([1_000])
+      expect(messages.flatMap((message) => message.parts.flatMap((part) => part.type === "text" ? [part.text] : []))).toEqual(["chronologically old"])
+      expect(messages.every((message) => message.info.id !== oldID && message.info.id !== boundaryID)).toBe(true)
+      yield* sessions.remove(child.id)
+      yield* sessions.remove(source.id)
+    }),
+  )
+
+  // #0584：不存在的显式边界必须 NotFound 失败，且 source admission 先于 target 创建，
+  // 不能留下 orphan child session。
+  it.instance("fork with a missing boundary fails and creates no child", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const source = yield* sessions.create({ title: "fork missing boundary" })
+      const before = (yield* sessions.list()).length
+      const result = yield* Effect.exit(sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }))
+      expect(Exit.isFailure(result)).toBe(true)
+      expect((yield* sessions.list()).length).toBe(before)
+      yield* sessions.remove(source.id)
+    }),
+  )
+
+  // #0584：第一次 diff 把 cursor 固定在字典序更高的 msg_z；追加的 msg_a 时间更晚。
+  // raw id > 增量扫描会永远漏掉第二轮 Tool diff。
+  it.instance("includes a post-wrap Tool tail after the persisted summary cursor", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "summary chronology rollover" })
+      const first = { file: "src/first.ts", patch: "+first\n", additions: 1, deletions: 0, status: "added" as const }
+      const second = { file: "src/second.ts", patch: "+second\n", additions: 1, deletions: 0, status: "added" as const }
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: first.file,
+        patch: first.patch,
+        userID: MessageID.make("msg_z-first"),
+        assistantID: MessageID.make("msg_z-first-assistant"),
+        created: 1_000,
+      })
+      expect(yield* sessions.diff(session.id)).toEqual([first])
+      // 第二次 diff 必须从持久 tuple 增量恢复 msg_a 轮，并保持文件首次出现顺序。
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: second.file,
+        patch: second.patch,
+        userID: MessageID.make("msg_a-second"),
+        assistantID: MessageID.make("msg_a-second-assistant"),
+        created: 2_000,
+      })
+      expect(yield* sessions.diff(session.id)).toEqual([first, second])
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #0584：回绕 fixture：target user 及其 assistant 字典序更高但时间更早，through 是
+  // 字典序更低的 chronology 最大行；raw id <= 会把 target 连同 children 全部排除。
+  it.instance("summarize snapshot keeps pre-wrap targets under a wrapped through boundary", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "snapshot tuple rollover" })
+      const database = yield* Database.Service
+      yield* sessions.updateMessage({
+        id: MessageID.make("msg_z-snap-user"),
+        sessionID: session.id,
+        role: "user",
+        time: { created: 1_000 },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
+        tools: {},
+      })
+      yield* sessions.updateMessage({
+        id: MessageID.make("msg_z-snap-child"),
+        sessionID: session.id,
+        role: "assistant",
+        parentID: MessageID.make("msg_z-snap-user"),
+        mode: "build",
+        agent: "build",
+        path: { cwd: session.directory, root: session.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelV2.ID.make("test-model"),
+        providerID: ProviderV2.ID.make("test-provider"),
+        time: { created: 1_001, completed: 1_002 },
+      })
+      yield* sessions.updateMessage({
+        id: MessageID.make("msg_a-snap-through"),
+        sessionID: session.id,
+        role: "user",
+        time: { created: 2_000 },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
+        tools: {},
+      })
+      const rows = yield* MessageV2.targetWithAssistantChildren({
+        sessionID: session.id,
+        messageID: MessageID.make("msg_z-snap-user"),
+        throughMessageID: MessageID.make("msg_a-snap-through"),
+      }).pipe(Effect.provideService(Database.Service, database))
+      // target 与 structural assistant children 都必须落在 tuple 封界内。
+      expect(rows.map((row) => String(row.info.id)).sort()).toEqual(["msg_z-snap-child", "msg_z-snap-user"])
+      // 封界行缺失必须响亮失败，而不是回退全域或 raw-ID 过滤。
+      const missing = yield* Effect.exit(
+        MessageV2.targetWithAssistantChildren({
+          sessionID: session.id,
+          messageID: MessageID.make("msg_z-snap-user"),
+          throughMessageID: MessageID.make("msg_not_persisted"),
+        }).pipe(Effect.provideService(Database.Service, database)),
+      )
+      expect(Exit.isFailure(missing)).toBe(true)
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #0584：空 Session 初始化把 cursor 持久化为 ""；后续 diff 必须把空串当
+  // "无 closed Message" sentinel 跳过解析，而不是报 corruption。
+  it.instance("empty Session diff keeps the empty-string cursor sentinel usable", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "empty sentinel" })
+      expect(yield* sessions.diff(session.id)).toEqual([])
+      expect(yield* sessions.diff(session.id)).toEqual([])
+      const { sync } = yield* Database.Service
+      expect(
+        sync
+          .select({ cursor: SessionTable.summary_cursor })
+          .from(SessionTable)
+          .where(eq(SessionTable.id, session.id))
+          .get()?.cursor,
+      ).toBe("")
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #0584：非空 cursor 指向已删除 Message：下一次公开 diff 必须响亮失败，
+  // 不能忽略边界或借用附近行。
+  it.instance("rejects a persisted summary cursor pointing at a deleted Message", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "dangling summary cursor" })
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/dangling.ts",
+        patch: "+dangling\n",
+      })
+      expect(yield* sessions.diff(session.id)).toHaveLength(1)
+      // 直接把非空 cursor 改成不存在的 MessageID：合法形状但无持久行。
+      const { sync } = yield* Database.Service
+      sync
+        .update(SessionTable)
+        .set({ summary_cursor: "msg_dangling_nonexistent" })
+        .where(eq(SessionTable.id, session.id))
+        .run()
+      expect(Exit.isFailure(yield* Effect.exit(sessions.diff(session.id)))).toBe(true)
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #0584：第二轮把 cursor 推进到字典序更低的 msg_a；随后修改时间更早、字典序更高的
+  // msg_z 轮：raw `mutationID > cursor` 会误判为界后而不失效，留下 stale patch。
+  it.instance("invalidates covered history across a wrapped summary cursor", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "covered invalidation rollover" })
+      const first = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/cov-first.ts",
+        patch: "+cov-old\n",
+        userID: MessageID.make("msg_z-cov-user"),
+        assistantID: MessageID.make("msg_z-cov-asst"),
+        created: 1_000,
+      })
+      expect(yield* sessions.diff(session.id)).toEqual([
+        { file: "src/cov-first.ts", patch: "+cov-old\n", additions: 1, deletions: 0, status: "added" },
+      ])
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/cov-second.ts",
+        patch: "+cov-second\n",
+        userID: MessageID.make("msg_a-cov-user"),
+        assistantID: MessageID.make("msg_a-cov-asst"),
+        created: 2_000,
+      })
+      expect(yield* sessions.diff(session.id)).toHaveLength(2)
+      // 覆盖旧轮 Tool Part 后必须回退旧 diff：tuple 判定把 msg_z 轮识别为界前。
+      yield* sessions.updatePart({
+        id: first.partID,
+        sessionID: session.id,
+        messageID: first.assistantID,
+        type: "tool",
+        callID: "edit-cov-first-replaced",
+        tool: "edit",
+        state: {
+          status: "completed",
+          input: {},
+          output: "ok",
+          title: "edit",
+          metadata: {
+            filediff: {
+              file: path.join(test.directory, "src/cov-first.ts"),
+              patch: "+cov-new\n",
+              additions: 1,
+              deletions: 0,
+            },
+          },
+          time: { start: 0, end: 1 },
+        },
+      })
+      expect(yield* sessions.diff(session.id)).toEqual([
+        { file: "src/cov-first.ts", patch: "+cov-new\n", additions: 1, deletions: 0, status: "added" },
+        { file: "src/cov-second.ts", patch: "+cov-second\n", additions: 1, deletions: 0, status: "added" },
+      ])
       yield* sessions.remove(session.id)
     }),
   )

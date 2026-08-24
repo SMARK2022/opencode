@@ -13,7 +13,7 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
 import { Session } from "../../../src/routes/session"
 import { ArgsProvider } from "../../../src/context/args"
-import { ClipboardProvider } from "../../../src/context/clipboard"
+import { ClipboardProvider, type ClipboardService } from "../../../src/context/clipboard"
 import { DataProvider } from "../../../src/context/data"
 import { EditorContextProvider } from "../../../src/context/editor"
 import { EpilogueProvider } from "../../../src/context/epilogue"
@@ -29,7 +29,7 @@ import { SDKProvider } from "../../../src/context/sdk"
 import { SyncProvider, useSync } from "../../../src/context/sync"
 import { ThemeProvider } from "../../../src/context/theme"
 import { TuiConfigProvider } from "../../../src/config"
-import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
+import { OpencodeKeymapProvider, registerOpencodeKeymap, type OpenTuiKeymap } from "../../../src/keymap"
 import { createPluginRuntime, PluginRuntimeProvider } from "../../../src/plugin/runtime"
 import { FrecencyProvider } from "../../../src/component/prompt/frecency"
 import { PromptHistoryProvider } from "../../../src/component/prompt/history"
@@ -746,24 +746,108 @@ test("session keeps latest streamed content reachable via session.last after scr
   }, { width: 100, height: 18 })
 })
 
+test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)("chronology boundary uses transcript positions: %s", async (scenario) => {
+  // ID 顺序与三个持久时间相反，所有帧和命令共用真实 SyncProvider 投影。
+  const messages: Parameters<typeof withRenderedReview>[0] = [
+    {
+      info: { id: "msg_z_user", sessionID, role: "user", time: { created: 1 }, agent: "build", model: { providerID: "provider", modelID: "model" } },
+      parts: [{ id: "part_z", sessionID, messageID: "msg_z_user", type: "text", text: "KEPT_USER_MARKER" }],
+    },
+    {
+      info: {
+        id: "msg_m_asst", sessionID, role: "assistant", parentID: "msg_z_user", time: { created: 2, ...(scenario === "queued" ? {} : { completed: 3 }) },
+        modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ id: "part_m", sessionID, messageID: "msg_m_asst", type: "text", text: "KEPT_ASST_MARKER" }],
+    },
+    {
+      info: { id: "msg_a_user", sessionID, role: "user", time: { created: 3 }, agent: "build", model: { providerID: "provider", modelID: "model" } },
+      parts: [{ id: "part_a", sessionID, messageID: "msg_a_user", type: "text", text: "REVERTED_USER_MARKER" }],
+    },
+  ]
+  const requests: { operation: string; messageID?: string }[] = []
+  const copies: string[] = []
+  await withRenderedReview(messages, async (app, _route, emit, commands) => {
+    if (scenario === "queued") {
+      emit({ directory, project: "proj_test", payload: { id: "evt_queued_chronology", type: "session.status", properties: { sessionID, status: { type: "busy" } } } })
+      await waitForReviewFrame(app, async (frame) => {
+        if (frame.includes("QUEUED") && frame.includes("REVERTED_USER_MARKER")) return true
+        await Bun.sleep(5)
+        return false
+      }, { maxPasses: 300 })
+      expect(app.captureCharFrame()).toContain("QUEUED")
+      return
+    }
+    if (scenario === "missing") {
+      // 数据已同步后推进实际帧，不能以尚未绘制正文的瞬间证明保守隐藏。
+      for (let pass = 0; pass < 15; pass++) await app.renderOnce()
+      expect(app.captureCharFrame()).not.toContain("KEPT_USER_MARKER")
+      expect(app.captureCharFrame()).not.toContain("KEPT_ASST_MARKER")
+      expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
+      return
+    }
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("message reverted") && (scenario === "redo" || frame.includes("KEPT_ASST_MARKER") && frame.includes("KEPT_USER_MARKER"))) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 300 })
+    if (scenario === "range") {
+      expect(app.captureCharFrame()).toContain("KEPT_USER_MARKER")
+      expect(app.captureCharFrame()).toContain("KEPT_ASST_MARKER")
+      expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
+      return
+    }
+    // 公开 keymap 分发调用真实注册命令；观察 SDK 写请求或注入剪贴板，不调用系统剪贴板。
+    commands.dispatchCommand(scenario === "copy" ? "messages.copy" : `session.${scenario}`)
+    await waitForReviewFrame(app, async () => {
+      if (requests.length || copies.length) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 300 })
+    if (scenario === "copy") expect(copies).toEqual(["KEPT_ASST_MARKER"])
+    if (scenario === "undo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_z_user" }])
+    if (scenario === "redo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_a_user" }])
+  }, { width: 110, height: 40 }, {}, {}, {
+    revert: scenario === "queued" ? undefined : { messageID: scenario === "missing" ? "msg_missing_boundary" : scenario === "redo" ? "msg_z_user" : "msg_a_user" },
+    onRequest: async (url, request, init) => {
+      const operation = url.pathname.split("/").at(-1)
+      if (operation !== "revert" && operation !== "unrevert") return
+      const body: { messageID?: string } = await (request?.clone() ?? new Request(url, init)).json()
+      requests.push({ operation, messageID: body.messageID })
+    },
+    clipboard: { write: async (text) => { copies.push(text) } },
+  })
+})
+
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
-  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
+  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"], commands: OpenTuiKeymap) => Promise<void>,
   dimensions: { width?: number; height?: number } = {},
   children: Record<string, () => typeof messages> = {},
   kv: Record<string, unknown> = {},
+  options: {
+    revert?: { messageID: string }
+    onRequest?: (url: URL, request?: Request, init?: RequestInit) => void | Promise<void>
+    clipboard?: ClipboardService
+  } = {},
 ) {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
   const info = {
     id: sessionID, slug: "review-render", projectID: "proj_test", directory,
     version: "1", title: "Review render", time: { created: 1, updated: 3 },
+    ...(options.revert ? { revert: options.revert } : {}),
   }
   const events = createEventSource()
   // 默认审查子会话和Task子会话共用按ID分发的真实响应形状。
   const sessions: Record<string, () => typeof messages> = { [sessionID]: () => messages, ses_reviewer_child: () => [], ...children }
-  const calls = createFetch((url) => {
+  const calls = createFetch(async (url, request, init) => {
+    await options.onRequest?.(url, request, init)
     const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }), ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}) })
+    // mutation 响应保持既有 SDK 形状，观察请求不启动 Server 或第二条写入路径。
+    if (url.pathname === `/session/${sessionID}/abort`) return json(true)
+    if (url.pathname === `/session/${sessionID}/revert` || url.pathname === `/session/${sessionID}/unrevert`) return json(info)
     if (url.pathname === "/session") return json(Object.keys(sessions).map(details))
     const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
     if (match && sessions[match[1]]) {
@@ -774,8 +858,8 @@ async function withRenderedReview(
     if (url.pathname.startsWith("/session/")) return json([])
   }, events)
   const messageIDs = messages.map((message) => message.info.id)
-  const observed: { route?: ReturnType<typeof useRoute>; syncReady: boolean } = { syncReady: false }
-  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
+  const observed: { route?: ReturnType<typeof useRoute>; commands?: OpenTuiKeymap; syncReady: boolean } = { syncReady: false }
+  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} onKeymap={(keymap) => { observed.commands = keymap }} clipboard={options.clipboard} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
     width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen", useThread: false,
   })
   try {
@@ -788,8 +872,8 @@ async function withRenderedReview(
       await new Promise((resolve) => process.nextTick(resolve))
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    if (!observed.route) throw new Error("review route was not mounted")
-    await run(app, observed.route, events.emit)
+    if (!observed.route || !observed.commands) throw new Error("review route and commands were not mounted")
+    await run(app, observed.route, events.emit, observed.commands)
   } finally {
     app.renderer.destroy()
   }
@@ -802,17 +886,20 @@ function ReviewHarness(props: {
   messageIDs: string[]
   onSyncReady: () => void
   observe: (route: ReturnType<typeof useRoute>) => void
+  onKeymap: (keymap: OpenTuiKeymap) => void
+  clipboard?: ClipboardService
 }) {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
+  props.onKeymap(keymap)
   const runtime = createPluginRuntime()
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
   return (
     <TestTuiContexts paths={{ state: props.state }}>
       <OpencodeKeymapProvider keymap={keymap}>
         <ArgsProvider><ExitProvider exit={() => {}}><EpilogueProvider set={() => {}}>
-          <ClipboardProvider value={{}}><KVProvider><ToastProvider>
+          <ClipboardProvider value={props.clipboard ?? {}}><KVProvider><ToastProvider>
             <RouteProvider initialRoute={{ type: "session", sessionID }}><TuiConfigProvider config={config}>
               <PluginRuntimeProvider value={runtime}>
                 <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>

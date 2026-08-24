@@ -104,11 +104,12 @@ const Cursor = Schema.Struct({
 type Cursor = typeof Cursor.Type
 
 // #557：time.created 来自持久 row，不借助进程内事件到达顺序；ID 只解决同毫秒冲突。
+// 同毫秒按 UTF-8 字节序与 SQLite BINARY 对齐，避免内存与 SQL 对同一边界分歧。
 export function compareChronology(
   a: { id: MessageID; time: { created: number } },
   b: { id: MessageID; time: { created: number } },
 ) {
-  return a.time.created - b.time.created || a.id.localeCompare(b.id)
+  return a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
 }
 
 const decodeCursor = Schema.decodeUnknownSync(Cursor)
@@ -888,13 +889,26 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
   throughMessageID: MessageID
 }) {
   const { db, sync } = yield* Database.Service
+  // snapshot 上界先解析为同 Session 持久 tuple，不能用回绕后的 raw ID 排除旧轮或泄漏界后 Tool。
+  const through = yield* db
+    .select({ id: MessageTable.id, time: MessageTable.time_created })
+    .from(MessageTable)
+    .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.throughMessageID)))
+    .get()
+    .pipe(Effect.orDie)
+  // #0584：封界行缺失是持久化一致性破坏：报错而不是回退全域或 raw-ID 过滤。
+  if (!through) throw new Error(`Snapshot boundary is not resolvable: ${input.throughMessageID}`)
   const rows = yield* db
     .select()
     .from(MessageTable)
     .where(
       and(
         eq(MessageTable.session_id, input.sessionID),
-        lte(MessageTable.id, input.throughMessageID),
+        // #0584：闭区间上界按 (time_created, BINARY id) tuple 切分，同毫秒时用 ID 字节序。
+        or(
+          lt(MessageTable.time_created, through.time),
+          and(eq(MessageTable.time_created, through.time), lte(MessageTable.id, through.id)),
+        ),
         or(
           eq(MessageTable.id, input.messageID),
           and(
@@ -912,11 +926,13 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
 })
 
 // #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
-// messageID按同会话的(time_created,id)定位exclusive前缀；不存在的锚点沿用全量可见复制。
+// messageID按同会话持久tuple定位exclusive前缀，显式缺失边界在创建子会话前拒绝。
 export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
   const conditions = [eq(MessageTable.session_id, input.sessionID), sql`json_type(${MessageTable.data}, '$.hidden') is null`]
   const anchor = input.messageID ? db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
     .where(and(...conditions, eq(MessageTable.id, input.messageID))).get() : undefined
+  // 保留同Session、hidden过滤和Part join；不能以缺失边界放大为全量复制。
+  if (input.messageID && !anchor) return { messages: [], parts: [], missing: true as const }
   if (anchor) conditions.push(sql`(${MessageTable.time_created}, ${MessageTable.id}) < (${anchor.time}, ${anchor.id})`)
   const messages = db
     .select({ id: MessageTable.id })
@@ -933,7 +949,7 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionI
         .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
         .all()
     : []
-  return { messages, parts }
+  return { messages, parts, missing: false as const }
 }
 
 // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取

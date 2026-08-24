@@ -699,6 +699,11 @@ const layer: Layer.Layer<
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
       const title = getForkedTitle(original.title)
+      // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
+      const { sync } = database
+      // 显式 fork 边界缺失须在创建子会话前失败，raw 读取仍占用同一预留连接。
+      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
+      if (raw.missing) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
       const session = yield* createNext({
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
@@ -706,11 +711,8 @@ const layer: Layer.Layer<
         title,
         metadata: structuredClone(original.metadata),
       })
-      // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
-      const { sync } = database
       // #493：source→target 映射在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
       // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
-      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
       const messageMap = raw.messages.map((row) => ({ sourceID: row.id, targetID: MessageID.ascending() }))
       const partMap = raw.parts.map((row) => ({ sourceID: row.id, targetID: PartID.ascending() }))
       yield* events

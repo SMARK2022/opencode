@@ -99,16 +99,17 @@ function createModel(opts: {
 
 const wide = () => ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000 }) })
 
-function createUserMessage(sessionID: SessionID, text: string) {
+function createUserMessage(sessionID: SessionID, text: string, opts?: { id?: MessageID; created?: number }) {
   return Effect.gen(function* () {
     const ssn = yield* SessionNs.Service
     const msg = yield* ssn.updateMessage({
-      id: MessageID.ascending(),
+      // #0584：回绕用例需要 caller-selected ID 与固定时间；默认保持 ascending+当前时间。
+      id: opts?.id ?? MessageID.ascending(),
       role: "user",
       sessionID,
       agent: "build",
       model: ref,
-      time: { created: Date.now() },
+      time: { created: opts?.created ?? Date.now() },
     })
     yield* ssn.updatePart({
       id: PartID.ascending(),
@@ -3055,6 +3056,65 @@ describe("SessionNs.getUsage", () => {
 })
 
 describe("ColdStorage compact eligibility", () => {
+  // #0584：回绕 fixture：old 字典序最低但时间最早，tail 字典序最低中最新；
+  // 验证目标是“冻结权由 tuple 决定”，而不是任何字典序巧合。
+  itCompaction.instance("uses persisted Message chronology for a completed Compaction boundary", () =>
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      // 与现有 eligibility 用例构造相同的已结算 Tool，不在 fixture 中模拟冻结资格。
+      const addCompletedToolPart = (input: { sessionID: SessionID; messageID: MessageID; tool: string; output: string }) => ssn.updatePart({
+        id: PartID.ascending(), type: "tool",
+        sessionID: input.sessionID, messageID: input.messageID,
+        tool: input.tool, callID: crypto.randomUUID(),
+        state: {
+          status: "completed", input: {}, output: input.output,
+          title: input.tool, metadata: {}, time: { start: 1, end: 2 },
+        },
+      })
+      // #493：eligibility 走同步 drizzle client，与运行时同连接。
+      const { sync } = yield* Database.Service
+      const session = yield* ssn.create({ title: "compact chronology rollover" })
+      const old = yield* createUserMessage(session.id, "old", { id: MessageID.make("msg_0-old"), created: 500 })
+      const oldPart = yield* addCompletedToolPart({
+        sessionID: session.id,
+        messageID: old.id,
+        tool: "read",
+        output: "old-output-".repeat(512),
+      })
+      const head = yield* createUserMessage(session.id, "head", { id: MessageID.make("msg_z-head"), created: 1_000 })
+      const headPart = yield* addCompletedToolPart({
+        sessionID: session.id,
+        messageID: head.id,
+        tool: "read",
+        output: "head-output-".repeat(512),
+      })
+      const tail = yield* createUserMessage(session.id, "tail", { id: MessageID.make("msg_a-tail"), created: 2_000 })
+      const marker = yield* ssn.updatePart({
+        id: PartID.ascending(),
+        messageID: head.id,
+        sessionID: session.id,
+        type: "compaction",
+        auto: false,
+        tail_start_id: tail.id,
+        recent_user_messages: [{ id: head.id, text: "memento" }],
+      })
+      const summary = yield* createSummaryAssistantMessage(session.id, head.id, "/tmp", "summary")
+      // summary 时间必须晚于 boundary，否则 boundary query 不会选中本次 marker/Part 对。
+      yield* ssn.updateMessage({ ...summary, time: { ...summary.time, created: 3_000 } })
+
+      // recent Session 下：早于 tail 的 owner 可冻，晚于 tail 的不可冻。
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: oldPart.id })).toBe(true)
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: headPart.id })).toBe(true)
+      // 公开删除 present tail 后，边界不可解析：recent 分支必须 fail closed，
+      // 不得回退 marker 或把全部 owner 当作可冻结。
+      yield* ssn.removeMessage({ sessionID: session.id, messageID: tail.id })
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: oldPart.id })).toBe(false)
+      yield* ssn.remove(session.id)
+      // marker 断言防止 fixture 意外丢失 boundary 结构而不被发现。
+      expect(marker.id).toBeTruthy()
+    }),
+  )
+
   itCompaction.instance("freezes only the compacted head when the session is still recent", () =>
     Effect.gen(function* () {
       // recent+completed boundary 先证明 head eligible、tail ineligible，再把同 session 变老证明 age 规则覆盖 tail。

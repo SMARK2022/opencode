@@ -167,6 +167,25 @@ function basePart(messageID: string, id: string) {
   }
 }
 
+describe("session.message-v2.compareChronology", () => {
+  test("uses persisted UTF-8 byte order for equal timestamps", () => {
+    // #0584：U+E000 与 U+10000 的 UTF-16/locale 顺序可不同；SQLite BINARY 按 UTF-8 bytes 排前者。
+    // 该断言独立锁定数据库可观察顺序，避免 Revert 与 App 对同一 boundary 作相反解释。
+    expect(
+      MessageV2.compareChronology(
+        { id: MessageID.make("msg_\uE000"), time: { created: 0 } },
+        { id: MessageID.make("msg_\u{10000}"), time: { created: 0 } },
+      ),
+    ).toBeLessThan(0)
+    expect(
+      MessageV2.compareChronology(
+        { id: MessageID.make("msg_\u{10000}"), time: { created: 0 } },
+        { id: MessageID.make("msg_\uE000"), time: { created: 0 } },
+      ),
+    ).toBeGreaterThan(0)
+  })
+})
+
 describe("session.message-v2.toModelMessage", () => {
 
   // [local-smark] 新 generic interrupted 记录携带 executionElapsedMs marker：

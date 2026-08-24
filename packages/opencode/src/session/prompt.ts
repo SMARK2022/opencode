@@ -107,7 +107,8 @@ function deriveGoalTurn(
       return [{ id: message.info.id, created: message.info.time.created, userInitiated }]
     })
     // caller 可以自选 MessageID，因此 chronology 必须先看持久化时间；ID 只处理同毫秒 tie。
-    .toSorted((a, b) => a.created - b.created || a.id.localeCompare(b.id))
+    // #0584：tie 复用 SQLite BINARY 的 UTF-8 字节序，不再用 JS locale 字典序。
+    .toSorted((a, b) => MessageV2.compareChronology({ id: a.id, time: { created: a.created } }, { id: b.id, time: { created: b.created } }))
   const current = turns.at(-1)
   if (!current) return
   // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
@@ -1466,9 +1467,15 @@ const layer = Layer.effect(
       }
       const result = yield* loop({ sessionID: input.sessionID })
       // 只有被更新parent合并的旧请求需要零计费闭合，既有终态不可二次覆盖。
-      if (reqUsage && result.info.role === "assistant" && !result.info.summary && message.info.id < result.info.parentID) {
+      if (reqUsage && result.info.role === "assistant" && !result.info.summary) {
         const request = yield* reqUsage.get({ sessionID: input.sessionID, requestID: message.info.id })
         if (request?.status === "running") {
+          // 仅待结算请求需要解析实际 parent；缺行响亮失败，不回退 raw ID 或猜测合并关系。
+          const parent = yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.info.parentID }).pipe(
+            Effect.provideService(Database.Service, database),
+            Effect.orDie,
+          )
+          if (MessageV2.compareChronology(message.info, parent.info) >= 0) return result
           // 不复制assistant账单；取消与provider失败分别保留aborted/error语义。
           yield* reqUsage.complete({
             sessionID: input.sessionID, requestID: message.info.id,
