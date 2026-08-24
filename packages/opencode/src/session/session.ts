@@ -806,13 +806,16 @@ export const layer: Layer.Layer<
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
       const title = getForkedTitle(original.title)
+      // source admission 先于 target 创建：非法边界必须在任何持久化制作用前失败，
+      // 避免留下空 orphan session 再回滚的第二条成功路径。
+      const raw = MessageV2.rawForkRows({ sessionID: input.sessionID, messageID: input.messageID })
+      if (raw.missing) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
       const session = yield* createNext({
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
         workspaceID: original.workspaceID,
         title,
       })
-      const raw = MessageV2.rawForkRows({ sessionID: input.sessionID, messageID: input.messageID })
       // source-to-target map 在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
       // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
       // 一个 Forked event 把 owner inserts 与 refcount 增量放进同一 SyncEvent transaction。

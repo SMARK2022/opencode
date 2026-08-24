@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import path from "path"
-import { and, asc, desc, eq, gt, isNull, lte, sql, type SQL } from "drizzle-orm"
+import { and, asc, desc, eq, gt, isNull, lte, or, sql, type SQL } from "drizzle-orm"
 import { Database, type TxOrDb } from "@/storage/db"
 import { ColdStorage, type SummaryPayload } from "@/storage/cold"
 import { InstanceState } from "@/effect/instance-state"
@@ -25,6 +25,48 @@ type ToolDiffPart = {
 type ToolDiffMessage = {
   info: { id: MessageID; hidden?: unknown }
   parts: ToolDiffPart[]
+}
+
+type MessageCursor = { id: MessageID; time: number }
+
+// 持久 cursor 只存 MessageID；任何非空 cursor 在使用前必须解析回同 Session 的持久 tuple。
+// 解析失败即 corruption：不允许借用附近行或忽略边界继续扫描。
+
+function resolveMessageCursor(db: TxOrDb, sessionID: SessionID, id: string): MessageCursor {
+  const row = db
+    .select({ id: MessageTable.id, time: MessageTable.time_created })
+    .from(MessageTable)
+    .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, MessageID.make(id))))
+    .get()
+  if (!row) throw new ColdStorage.CorruptionError({ message: `Session summary cursor is not resolvable: ${sessionID}` })
+  return row
+}
+
+// 开区间增量：只取严格晚于 cursor 的行，避免每次 load 重复累计同一 patch。
+function afterCursor(cursor: MessageCursor) {
+  return or(
+    gt(MessageTable.time_created, cursor.time),
+    and(eq(MessageTable.time_created, cursor.time), gt(MessageTable.id, cursor.id)),
+  )
+}
+
+// 闭区间上界：同毫秒时用 SQLite BINARY 的 ID 序，不能把同时间整段都纳入。
+function throughCursor(cursor: MessageCursor) {
+  return or(
+    sql`${MessageTable.time_created} < ${cursor.time}`,
+    and(eq(MessageTable.time_created, cursor.time), lte(MessageTable.id, cursor.id)),
+  )
+}
+
+// 空字符串是无 closed Message 的合法 sentinel，恒早于任何具体行；
+// 其余比较复用持久 (time, UTF-8 ID) 序，禁止 JS locale 字典序。
+function compareMessageCursors(db: TxOrDb, sessionID: SessionID, left: string, right: string) {
+  if (left === right) return 0
+  if (left === "") return -1
+  if (right === "") return 1
+  const a = resolveMessageCursor(db, sessionID, left)
+  const b = resolveMessageCursor(db, sessionID, right)
+  return a.time - b.time || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
 }
 
 type DiffAccumulator = {
@@ -166,17 +208,22 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
     sql`json_type(${MessageTable.data}, '$.hidden') is null`,
     closed,
   ]
-  // after 是已提交 cursor 的开区间，避免每次 load 重复累计同一 patch。
-  if (after) messageConditions.push(gt(MessageTable.id, MessageID.make(after)))
-  // through 是稳定历史闭区间，单轮 summary 不越过调用方目标。
-  if (through) messageConditions.push(lte(MessageTable.id, MessageID.make(through)))
+  // cursor 只保存 MessageID，但范围判断必须先恢复同 Session 的 persisted tuple。
+  if (after) {
+    const condition = afterCursor(resolveMessageCursor(db, sessionID, after))
+    if (condition) messageConditions.push(condition)
+  }
+  if (through) {
+    const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
+    if (condition) messageConditions.push(condition)
+  }
   // Message 与 Part 分开查询，只搬运必要 Tool rows 而不构造完整 transcript。
-  // 两组查询按持久 ID 排序，SQLite 扫描顺序不会改变 aggregate hash。
+  // 两组查询按 persisted chronology 排序，SQLite 扫描顺序不会改变 aggregate hash。
   const messages = db
     .select()
     .from(MessageTable)
     .where(and(...messageConditions))
-    .orderBy(asc(MessageTable.id))
+    .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
     .all()
   // snapshot cursor 基于全部可见 closed Message，即使没有 Tool diff 也推进已观察位置。
   const snapshotConditions: SQL[] = [
@@ -184,12 +231,15 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
     sql`json_type(${MessageTable.data}, '$.hidden') is null`,
     closed,
   ]
-  if (through) snapshotConditions.push(lte(MessageTable.id, MessageID.make(through)))
+  if (through) {
+    const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
+    if (condition) snapshotConditions.push(condition)
+  }
   const snapshotMaxID = db
     .select({ id: MessageTable.id })
     .from(MessageTable)
     .where(and(...snapshotConditions))
-    .orderBy(desc(MessageTable.id))
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
     .limit(1)
     .get()?.id ?? ""
   const partConditions: SQL[] = [
@@ -198,14 +248,16 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
     sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
     sql`json_type(${PartTable.data}, '$.hidden') is null`,
   ]
-  if (after) partConditions.push(gt(PartTable.message_id, MessageID.make(after)))
-  if (through) partConditions.push(lte(PartTable.message_id, MessageID.make(through)))
+  // Part 归属以已选 Message 集合为准：回绕后 message_id 与 cursor 无共同排序，
+  // 不能用 id 范围二次过滤。
+  const selectedMessageIDs = new Set(messages.map((row) => row.id))
   const parts = db
     .select()
     .from(PartTable)
     .where(and(...partConditions))
     .orderBy(asc(PartTable.message_id), asc(PartTable.id))
     .all()
+    .filter((row) => selectedMessageIDs.has(row.message_id))
   // inspect 只在内存恢复 metadata，不持久 thaw compacted head。
   const restored = ColdStorage.inspectPartRows(db, parts)
   // 最小消息形状只服务 collectToolDiffs，禁止借此读取 Text 或 provider context。
@@ -356,7 +408,7 @@ function greatestClosedMessageID(db: TxOrDb, sessionID: SessionID) {
     .select({ id: MessageTable.id, data: MessageTable.data })
     .from(MessageTable)
     .where(eq(MessageTable.session_id, sessionID))
-    .orderBy(desc(MessageTable.id))
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
     .all()
   return rows.find((row) => !row.data.hidden && (row.data.role === "user" || row.data.time.completed !== undefined))?.id ?? ""
 }
@@ -531,7 +583,7 @@ function prepareDeltaState(
     // 已缓存路径先扫描 cursor 后的 Tool，无变化时不解压旧 aggregate。
     const collected = loadToolDiffMessages(db, input.sessionID, session.summaryCursor ?? undefined)
     // cursor 落后是正常增量，超前则证明历史被外部改写，必须 hard-fail。
-    if (session.summaryCursor !== null && collected.cursor < session.summaryCursor) {
+    if (session.summaryCursor !== null && compareMessageCursors(db, input.sessionID, collected.cursor, session.summaryCursor) < 0) {
       throw new Error(`Session summary cursor is ahead of message history: ${input.sessionID}`)
     }
     const delta = collectToolDiffs(collected.messages, base)

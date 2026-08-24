@@ -228,6 +228,9 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+  // Sync 数组已是 chronology 投影：路由决策统一用位置索引 + exact ID，
+  // 不再用 Message ID 字典序猜测时间顺序。
+  const messagePositions = createMemo(() => new Map(messages().map((message, index) => [message.id, index] as const)))
   // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
   // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
   const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
@@ -780,7 +783,11 @@ export function Session() {
         const status = sync.data.session_status?.[route.sessionID]
         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
         const revert = session()?.revert?.messageID
-        const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
+        // 命令保持显式 fail closed：boundary 不在 bounded snapshot 时 no-op，
+        // 不猜测 raw 位置也不触发服务端写。
+        const boundary = revert ? messagePositions().get(revert) : undefined
+        if (revert && boundary === undefined) return
+        const message = messages().findLast((x, index) => (boundary === undefined || index < boundary) && x.role === "user")
         if (!message) return
         void sdk.client.session
           .revert({
@@ -818,7 +825,9 @@ export function Session() {
         dialog.clear()
         const messageID = session()?.revert?.messageID
         if (!messageID) return
-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
+        const boundary = messagePositions().get(messageID)
+        if (boundary === undefined) return
+        const message = messages().find((x, index) => x.role === "user" && index > boundary)
         if (!message) {
           void sdk.client.session.unrevert({
             sessionID: route.sessionID,
@@ -1038,8 +1047,14 @@ export function Session() {
       category: "Session",
       run: () => {
         const revertID = session()?.revert?.messageID
+        const boundary = revertID ? messagePositions().get(revertID) : undefined
+        if (revertID && boundary === undefined) {
+          toast.show({ message: "No assistant messages found", variant: "error" })
+          dialog.clear()
+          return
+        }
         const lastAssistantMessage = messages().findLast(
-          (msg) => msg.role === "assistant" && (!revertID || msg.id < revertID),
+          (msg, index) => msg.role === "assistant" && (boundary === undefined || index < boundary),
         )
         if (!lastAssistantMessage) {
           toast.show({ message: "No assistant messages found", variant: "error" })
@@ -1241,13 +1256,21 @@ export function Session() {
 
   const revertInfo = createMemo(() => session()?.revert)
   const revertMessageID = createMemo(() => revertInfo()?.messageID)
+  const revertBoundaryIndex = createMemo(() => {
+    const messageID = revertMessageID()
+    // boundary 不在 bounded snapshot 内时，它必然早于窗口全部消息（窗口取的是最新段），
+    // 因此 -1 让隐藏范围 fail closed：窗口内所有消息都落入已回退区间，而不是全部误显示。
+    return messageID ? (messagePositions().get(messageID) ?? -1) : undefined
+  })
 
   const revertDiffFiles = createMemo(() => getRevertDiffFiles(revertInfo()?.diff ?? ""))
 
   const revertRevertedMessages = createMemo(() => {
     const messageID = revertMessageID()
     if (!messageID) return []
-    return messages().filter((x) => x.id >= messageID && x.role === "user")
+    const boundary = revertBoundaryIndex()
+    if (boundary === undefined) return []
+    return messages().filter((x, index) => index >= boundary && x.role === "user")
   })
 
   const revert = createMemo(() => {
@@ -1256,6 +1279,7 @@ export function Session() {
     if (!info.messageID) return
     return {
       messageID: info.messageID,
+      boundaryIndex: revertBoundaryIndex(),
       reverted: revertRevertedMessages(),
       diff: info.diff,
       diffFiles: revertDiffFiles(),
@@ -1381,7 +1405,7 @@ export function Session() {
                           )
                         })()}
                       </Match>
-                      <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
+                      <Match when={revert()?.messageID && index() >= (revert()?.boundaryIndex ?? -1)}>
                         <></>
                       </Match>
                       <Match when={message.role === "user"}>
@@ -1402,6 +1426,7 @@ export function Session() {
                           message={message as UserMessage}
                           parts={sync.data.part[message.id] ?? []}
                           pending={pending()}
+                          pendingIndex={pending() ? messagePositions().get(pending()!) : undefined}
                         />
                       </Match>
                       <Match when={message.role === "assistant"}>
@@ -1565,6 +1590,7 @@ function UserMessage(props: {
   onMouseUp: (goalContinuation: boolean) => void
   index: number
   pending?: string
+  pendingIndex?: number
 }) {
   const ctx = use()
   const local = useLocal()
@@ -1588,7 +1614,8 @@ function UserMessage(props: {
   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
-  const queued = createMemo(() => props.pending && props.message.id > props.pending)
+  const queued = createMemo(() => props.pending && props.pendingIndex !== undefined && props.index > props.pendingIndex)
+  // QUEUED 徽标同样以数组位置为准：pending ID 字典序在回绕后不再代表时间先后。
   const color = createMemo(() => local.agent.color(props.message.agent))
   const queuedFg = createMemo(() => selectedForeground(theme, color()))
   const metadataVisible = createMemo(() => queued() || ctx.showTimestamps())

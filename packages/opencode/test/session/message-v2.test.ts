@@ -108,6 +108,18 @@ function basePart(messageID: string, id: string) {
   }
 }
 
+describe("session.message-v2.compareChronology", () => {
+  test("uses persisted UTF-8 byte order for equal timestamps", () => {
+    // U+E000 与 U+10000 的 UTF-16/locale 顺序可不同；SQLite BINARY 按 UTF-8 bytes 排前者。
+    const privateUse = userInfo("msg_\uE000")
+    const supplementary = userInfo("msg_\u{10000}")
+
+    // 该断言独立锁定数据库可观察顺序，避免 Revert 与 App 对同一 boundary 作相反解释。
+    expect(MessageV2.compareChronology(privateUse, supplementary)).toBeLessThan(0)
+    expect(MessageV2.compareChronology(supplementary, privateUse)).toBeGreaterThan(0)
+  })
+})
+
 describe("session.message-v2.toModelMessage", () => {
   test("filters out messages with no parts", async () => {
     const input: MessageV2.WithParts[] = [

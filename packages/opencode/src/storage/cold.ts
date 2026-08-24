@@ -922,6 +922,25 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
     .get()
   if (!session) return
   const boundary = CompactionBoundary.latest(sessionID)
+  // marker fallback 仅在 tail 缺失时成立（shipped compatibility）；
+  // tail 存在但行已删除时 boundary 不可解析，语义分支必须失效。
+  const boundaryID = boundary?.tailStartID ?? boundary?.markerID
+  const boundaryRow = boundaryID
+    ? db
+        .select({ id: MessageTable.id, time: MessageTable.time_created })
+        .from(MessageTable)
+        .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, boundaryID)))
+        .get()
+    : undefined
+  // semantic eligibility 需要 owner 与 boundary 的持久时间；维护 cursor 仍只负责物理枚举，不复用这里的顺序。
+  const messageTimes = new Map<string, number>(
+    db
+      .select({ id: MessageTable.id, time: MessageTable.time_created })
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .all()
+      .map((row) => [row.id, row.time] as const),
+  )
   // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
   const aged = session.parentID
     ? (() => {
@@ -931,19 +950,44 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
     : session.updated <= now - rootOlderThanMs
   return {
     aged,
-    boundary: boundary ? (boundary.tailStartID ?? boundary.markerID) : undefined,
+    boundary: boundaryRow ? { id: boundaryRow.id, time: boundaryRow.time } : undefined,
     markerID: boundary?.markerID,
     summaryID: boundary?.summaryID,
+    messageTimes,
   }
 }
 
-// aged session 的所有 owner 都可检查白名单；recent session 只允许严格早于 tail_start_id 的 compacted head。
-// 使用 MessageID 的持久字典序，因为 ID ascending 是仓库既有时间排序 invariant，不能改用 wall-clock 猜顺序。
+// aged session 的所有 owner 都可检查白名单；recent session 只允许严格早于 completed boundary 的 compacted head。
+// 边界与 owner 都按持久 (time_created, BINARY id) tuple 比较：回绕后 raw ID 字典序不再代表时间。
 // marker、summary 与 tail 即使通过 age/boundary，仍必须通过 extraction 白名单才能真正冻结。
 function eligible(state: ReturnType<typeof eligibility>, messageID: string, markerPart = false) {
   if (!state) return false
   if (!state.aged && ((markerPart && messageID === state.markerID) || (!markerPart && messageID === state.summaryID))) return false
-  return state.aged || (state.boundary !== undefined && messageID < state.boundary)
+  if (state.aged) return true
+  const ownerTime = state.messageTimes.get(messageID)
+  if (ownerTime === undefined || state.boundary === undefined) return false
+  // 同时间 ID 必须按 SQLite BINARY 的 UTF-8 bytes 比较，不能把 caller ID 字典序当作 chronology。
+  return ownerTime < state.boundary.time ||
+    (ownerTime === state.boundary.time && Buffer.compare(Buffer.from(messageID), Buffer.from(state.boundary.id)) < 0)
+}
+
+// 空 cursor 是无 closed Message 的 sentinel：任何真实变更都晚于它，无需查行。
+// 非空 cursor 解析失败则是持久化损坏，必须响亮失败而不是猜测边界。
+function compareStoredMessageCursor(db: TxOrDb, sessionID: SessionID, messageID: MessageID, cursor: string) {
+  if (cursor === "") return 1
+  const message = db
+    .select({ time: MessageTable.time_created })
+    .from(MessageTable)
+    .where(and(eq(MessageTable.id, messageID), eq(MessageTable.session_id, sessionID)))
+    .get()
+  if (!message) return undefined
+  const boundary = db
+    .select({ id: MessageTable.id, time: MessageTable.time_created })
+    .from(MessageTable)
+    .where(and(eq(MessageTable.id, MessageID.make(cursor)), eq(MessageTable.session_id, sessionID)))
+    .get()
+  if (!boundary) throw new CorruptionError({ message: `Session summary cursor is not resolvable: ${sessionID}` })
+  return message.time - boundary.time || Buffer.compare(Buffer.from(messageID), Buffer.from(boundary.id))
 }
 
 // 单 hash 反算只服务普通 owner update/delete 的强一致检查；批量维护必须使用 ownerCounts 避免 N+1 SQL。
@@ -1853,7 +1897,9 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
     if (session.summaryRef || session.summarySeed || (session.summaryCursor === null && session.summaryInitDirty)) {
       throw new CorruptionError({ message: `Session summary initialization state is inconsistent: ${sessionID}` })
     }
-    if (session.summaryCursor === null || messageID > session.summaryCursor) return
+    if (session.summaryCursor === null) return
+    const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summaryCursor)
+    if (relation === undefined || relation > 0) return
     const parent = db
       .select({ data: MessageTable.data })
       .from(MessageTable)
@@ -1872,16 +1918,24 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
     throw new CorruptionError({ message: `Session summary cache state is inconsistent: ${sessionID}` })
   }
   if (!session.summaryRef) {
-    if (!session.summarySeed || messageID > session.summarySeed.cursor) return
+    if (!session.summarySeed) return
+    const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summarySeed.cursor)
+    if (relation === undefined || relation > 0) return
     db.update(SessionTable)
       .set({ summary_seed: null, time_updated: SessionTable.time_updated })
       .where(eq(SessionTable.id, sessionID))
       .run()
     return
   }
-  if (session.summaryCursor === null || messageID > session.summaryCursor) return
+  // 三条分支全部改为 tuple 判定：dirty-claim、seed 退休与 ref 失效共用同一 chronology 语义，
+  // 变更行早于边界才覆盖 cache，之后则保持增量可扩展。
+  if (session.summaryCursor === null) return
+  const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summaryCursor)
+  if (relation === undefined || relation > 0) return
   const payload = decodeSummary(db, session.summaryRef)
-  const seed = payload.seed && messageID > payload.seed.cursor ? payload.seed : undefined
+  // seed 内部 cursor 与外层 cursor 各自独立解析：保留晚于变更行的 seed，丢弃已被覆盖的 seed。
+  const seedRelation = payload.seed ? compareStoredMessageCursor(db, sessionID, messageID, payload.seed.cursor) : undefined
+  const seed = payload.seed && (seedRelation === undefined || seedRelation > 0) ? payload.seed : undefined
   const updated = db
     .update(SessionTable)
     .set({

@@ -39,11 +39,13 @@ function sqlite(db: Database.TxOrDb, sessionID: SessionID): SessionMessageUpdate
         .find((message): message is SessionMessage.Assistant => message.type === "assistant" && !message.time.completed)
     },
     getCurrentCompaction() {
+      // compaction "当前行"由 (time_created, BINARY id) 决定；回绕后新事件的 ascending ID
+      // 字典序更低，按 raw id DESC 会把 delta/ended 合入旧纪元行。
       return db
         .select()
         .from(SessionMessageTable)
         .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "compaction")))
-        .orderBy(desc(SessionMessageTable.id))
+        .orderBy(desc(SessionMessageTable.time_created), desc(SessionMessageTable.id))
         .all()
         .map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }))
         .find((message): message is SessionMessage.Compaction => message.type === "compaction")

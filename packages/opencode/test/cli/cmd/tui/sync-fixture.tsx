@@ -57,7 +57,12 @@ export function createEventSource() {
   }
 }
 
-type FetchHandler = (url: URL, request?: Request, init?: RequestInit) => Response | Promise<Response> | undefined
+// 异步 handler 允许中途回落（返回 undefined 时继续走默认 switch），供请求拦截钩子复用。
+type FetchHandler = (
+  url: URL,
+  request?: Request,
+  init?: RequestInit,
+) => Response | Promise<Response | undefined> | undefined
 
 export function createFetch(override?: FetchHandler) {
   const session = [] as URL[]

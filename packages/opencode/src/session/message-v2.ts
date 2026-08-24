@@ -790,8 +790,8 @@ export function compareChronology(
   b: { id: MessageID; time: { created: number } },
 ) {
   // time.created 来自持久 row，不借助进程内事件到达顺序。
-  // ID 只解决同毫秒冲突，不能反向覆盖 caller 指定的时间。
-  return a.time.created - b.time.created || a.id.localeCompare(b.id)
+  // 同时间 ID 必须复刻 SQLite BINARY 的 UTF-8 byte order，避免 Revert 与 page 对 boundary 分歧。
+  return a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
 }
 
 const decodeCursor = Schema.decodeUnknownSync(Cursor)
@@ -1569,6 +1569,17 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
   messageID: MessageID
   throughMessageID: MessageID
 }) {
+  // snapshot 封界必须先解析为持久 tuple：回绕后 chronology 最大 ID 是 lexical-low，
+  // raw id <= 会把全部 pre-wrap 行（含 target user）错误排除或泄漏界后 Tool。
+  const through = Database.use((db) =>
+    db
+      .select({ id: MessageTable.id, time: MessageTable.time_created })
+      .from(MessageTable)
+      .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.throughMessageID)))
+      .get(),
+  )
+  // 封界行缺失是持久化一致性破坏：报错而不是回退全域或 raw-ID 过滤。
+  if (!through) throw new Error(`Snapshot boundary is not resolvable: ${input.throughMessageID}`)
   const rows = Database.use((db) =>
     db
       .select()
@@ -1576,7 +1587,10 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
       .where(
         and(
           eq(MessageTable.session_id, input.sessionID),
-          lte(MessageTable.id, input.throughMessageID),
+          or(
+            lt(MessageTable.time_created, through.time),
+            and(eq(MessageTable.time_created, through.time), lte(MessageTable.id, through.id)),
+          ),
           or(
             eq(MessageTable.id, input.messageID),
             and(
@@ -1594,33 +1608,37 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
 })
 
 // fork 只读取 raw storage rows 和结构关系，不经 info/part decoder，因而不会把 source prefix 持久 thaw。
-// messageID 是 exclusive fork point；Message 与 Part 使用相同 ascending ID 边界保留完整前缀。
-// Part 直接按 session+message_id 范围选择，避免把全部 MessageID 展开成超 SQLite 上限的 IN 参数。
+// messageID 是 exclusive fork point；边界按持久 chronology 位置切前缀，Part 按已选 Message 精确归属。
 // 第一阶段只选择 Message ID 与 Part ID/message_id；完整 JSON 只由 clone transaction 读取一次。
 // 该分层让 Session 负责新 ID map、storage 负责 raw clone，双方都不重复搬运 hot payload。
 export function rawForkRows(input: { sessionID: SessionID; messageID?: MessageID }) {
   return Database.use((db) => {
-    const conditions = [eq(MessageTable.session_id, input.sessionID)]
-    if (input.messageID) conditions.push(lt(MessageTable.id, input.messageID))
-    const messages = db
+    // 先取全量有序行再在内存切前缀：fork 边界是持久 tuple 位置，
+    // 回绕后 lexical-low 边界不能用 raw id < 比较表达。
+    const rows = db
       .select({ id: MessageTable.id })
       .from(MessageTable)
-      .where(and(...conditions))
+      .where(eq(MessageTable.session_id, input.sessionID))
       .orderBy(MessageTable.time_created, MessageTable.id)
       .all()
+    const boundary = input.messageID ? rows.findIndex((row) => row.id === input.messageID) : rows.length
+    // missing sentinel 供 Session owner 在创建 target 前判定非法边界，
+    // storage 层不猜错误类型也不越权发错误。
+    if (input.messageID && boundary < 0) return { messages: [], parts: [], missing: true as const }
+    const messages = rows.slice(0, boundary)
+    // Part 按已选 Message 集合精确归属；message_id 与 Message ID 无共同排序合同，
+    // 回绕后同值比较会漏拷或错拷其它 user 的 Part。
+    const selected = new Set(messages.map((row) => row.id))
     const parts = messages.length
       ? db
           .select({ id: PartTable.id, message_id: PartTable.message_id })
           .from(PartTable)
-          .where(
-            input.messageID
-              ? and(eq(PartTable.session_id, input.sessionID), lt(PartTable.message_id, input.messageID))
-              : eq(PartTable.session_id, input.sessionID),
-          )
+          .where(eq(PartTable.session_id, input.sessionID))
           .orderBy(PartTable.message_id, PartTable.id)
           .all()
+          .filter((row) => selected.has(row.message_id))
       : []
-    return { messages, parts }
+    return { messages, parts, missing: false as const }
   })
 }
 

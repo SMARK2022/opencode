@@ -63,6 +63,8 @@ import { InstanceRef } from "@/effect/instance-ref"
 import { tool as aiTool } from "ai"
 import { z } from "zod"
 import { SessionEvent } from "@opencode-ai/core/session-event"
+import { SessionMessage } from "@opencode-ai/core/session-message"
+import * as DateTime from "effect/DateTime"
 
 void Log.init({ print: false })
 
@@ -1407,6 +1409,78 @@ it.instance(
       )
     }),
   { git: true },
+)
+
+it.instance(
+  "v2 projection routes rollover compaction deltas to the chronologically newest row",
+  () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "v2 compaction rollover" })
+      // 直接持久化回绕前旧 compaction 行：ID 字典序更高（evt_z 前缀）但 time_created 更早，
+      // 复现回绕后旧行 ID 大于新事件 ascending ID 的持久形态。若 getCurrentCompaction 仍按
+      // raw id DESC 排序，后续 delta/ended 会合入这旧行而不是新纪元行。
+      Database.use((db) =>
+        db
+          .insert(SessionMessageTable)
+          .values([
+            {
+              id: SessionMessage.ID.make("evt_z_old_compaction"),
+              session_id: chat.id,
+              type: "compaction",
+              time_created: 1_000,
+              time_updated: 1_000,
+              data: { reason: "auto", summary: "old epoch summary", time: { created: 1_000 } } as NonNullable<
+                (typeof SessionMessageTable.$inferInsert)["data"]
+              >,
+            },
+          ])
+          .run(),
+      )
+
+      // 真实 EventV2 发布第二轮 compaction；delta/ended 由 SQLite adapter 的
+      // getCurrentCompaction 定位目标行，必须选中时间最新行而非字典序最大行。
+      const events = yield* EventV2Bridge.Service
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID: chat.id,
+        timestamp: DateTime.makeUnsafe(2_000),
+        reason: "auto",
+      })
+      yield* events.publish(SessionEvent.Compaction.Delta, {
+        sessionID: chat.id,
+        timestamp: DateTime.makeUnsafe(3_000),
+        text: "partial ",
+      })
+      yield* events.publish(SessionEvent.Compaction.Ended, {
+        sessionID: chat.id,
+        timestamp: DateTime.makeUnsafe(4_000),
+        text: "new epoch summary",
+      })
+
+      const rows = Database.use((db) =>
+        db
+          .select({ id: SessionMessageTable.id, time: SessionMessageTable.time_created, data: SessionMessageTable.data })
+          .from(SessionMessageTable)
+          .where(Database.and(Database.eq(SessionMessageTable.session_id, chat.id), Database.eq(SessionMessageTable.type, "compaction")))
+          .orderBy(SessionMessageTable.time_created)
+          .all(),
+      )
+      expect(rows).toHaveLength(2)
+      // 行数断言锁住“新轮建新行”而非“合入旧行”：两条 compaction 必须同时存在。
+      // 旧行必须保持原样：delta/ended 不得合入回绕前的字典序最大行。
+      expect((rows[0]?.data as { summary?: string }).summary).toBe("old epoch summary")
+      expect(String(rows[0]?.id)).toBe("evt_z_old_compaction")
+      // 新行由 started 创建并承载新一轮 summary。
+      expect((rows[1]?.data as { summary?: string }).summary).toBe("new epoch summary")
+
+      // V2Session.context 的 compaction 边界也必须选中时间最新行；
+      // context 本身已是 tuple 查询，此断言锁定两个 owner 不再分叉。
+      const context = yield* SessionV2.Service.use((svc) => svc.context(chat.id)).pipe(
+        Effect.provide(SessionV2.layer),
+      )
+      const compaction = context.filter((message) => message.type === "compaction").at(-1)
+      expect(compaction).toMatchObject({ type: "compaction", summary: "new epoch summary" })
+    }),
 )
 
 it.instance(
@@ -3049,10 +3123,10 @@ accounting.instance(
         .pipe(Effect.forkChild)
       yield* llm.wait(1)
 
-      // 固定两个MessageID可独立证明middle早于latest，不依赖fiber实际被调度的先后。
-      // middle必须进入模型上下文，但只有latest允许成为最终assistant的parent。
-      const middleID = MessageID.ascending()
-      const latestID = MessageID.ascending()
+      // caller-supplied ID 故意让较早 middle 的字典序高于较新的 latest，复现回绕后 raw-ID 判断失效。
+      // 两条 user Message 仍按真实写入时间形成 chronology，只有 latest 允许成为最终 assistant parent。
+      const middleID = MessageID.make("msg_z-middle")
+      const latestID = MessageID.make("msg_a-latest")
       const middle = yield* prompt
         .prompt({
           sessionID: chat.id,
@@ -4921,7 +4995,7 @@ it.instance(
 )
 
 it.instance(
-  "late technical Message cannot rewind blocked continuity past a newer real user",
+  "same-time Unicode Goal turns follow persisted chronology despite a late technical Message",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
@@ -4932,11 +5006,10 @@ it.instance(
         title: "Pinned",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
-      const suffix = crypto.randomUUID().replaceAll("-", "")
-
-      // B 的 caller-selected ID 故意大于后到的 C；Goal turn 顺序必须来自 persisted chronology。
+      // 同毫秒下 U+E000 的 UTF-8 bytes 小于 U+10000，但 localeCompare 给出相反顺序。
+      // B/C 因而必须由 SQLite BINARY-compatible tie-break 决定，不能依赖运行时 locale。
       const b = yield* user(chat.id, "first Goal turn", {
-        id: MessageID.make(`msg_b${suffix}`),
+        id: MessageID.make("msg_\uE000"),
         created: 1_000,
       })
       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
@@ -4951,8 +5024,8 @@ it.instance(
       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
       yield* user(chat.id, "newer real user turn without a blocked attempt", {
-        id: MessageID.make(`msg_a${suffix}`),
-        created: 2_000,
+        id: MessageID.make("msg_𐀀"),
+        created: 1_000,
       })
 
       yield* user(chat.id, "late technical summary for B", {

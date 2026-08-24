@@ -163,7 +163,7 @@ function deriveGoalTurn(
       return [{ id: message.info.id, created: message.info.time.created, userInitiated }]
     })
     // caller 可以自选 MessageID，因此 chronology 必须先看持久化时间；ID 只处理同毫秒 tie。
-    .toSorted((a, b) => a.created - b.created || a.id.localeCompare(b.id))
+    .toSorted((a, b) => MessageV2.compareChronology({ id: a.id, time: { created: a.created } }, { id: b.id, time: { created: b.created } }))
   const current = turns.at(-1)
   if (!current) return
   // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
@@ -2463,11 +2463,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return message
       }
       const result = yield* loop({ sessionID: input.sessionID })
+      // parent 缺失属于持久化一致性破坏：保留响亮失败（orDie），不能静默猜测为未合并。
+      const parent =
+        result.info.role === "assistant"
+          ? yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.info.parentID }).pipe(Effect.orDie)
+          : undefined
       if (
         result.info.role === "assistant" &&
         !result.info.summary &&
-        // own < parent 表示本请求已被更新 user 合并；反向关系代表尚未回答，不能伪完成。
-        message.info.id < result.info.parentID
+        // 用持久 Message 时间和 BINARY ID 判断合并顺序，不能把 caller ID 字典序当作 chronology。
+        parent &&
+        MessageV2.compareChronology(message.info, parent.info) < 0
       ) {
         const requestUsageCoalesced = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
         if (requestUsageCoalesced) {

@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import { NodeFileSystem } from "@effect/platform-node"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { Effect, FileSystem, Layer } from "effect"
+import { Effect, FileSystem, Layer, PlatformError } from "effect"
 import { Truncate } from "@/tool/truncate"
 import { Config } from "@/config/config"
 import { Identifier } from "../../src/id/id"
@@ -15,6 +15,29 @@ const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
 const ROOT = path.resolve(import.meta.dir, "..", "..")
 
 const it = testEffect(Layer.mergeAll(Truncate.defaultLayer, NodeFileSystem.layer, AppFileSystem.defaultLayer))
+
+const removedAfterStatFailure: string[] = []
+const statFailureFileSystem = FileSystem.makeNoop({
+  // 完整 noop service 保留 FileSystem 的 symbol/sink 契约，只覆写本用例可达的三个操作。
+  readDirectory: () => Effect.succeed([Identifier.create("tool", "ascending", 0)]),
+  stat: () =>
+    Effect.fail(PlatformError.systemError({ _tag: "PermissionDenied", module: "FileSystem", method: "stat" })),
+  remove: (file) =>
+    Effect.sync(() => {
+      removedAfterStatFailure.push(file)
+    }),
+})
+const statFailureIt = testEffect(
+  Truncate.layer.pipe(
+    Layer.provide(
+      Layer.mock(AppFileSystem.Service, {
+        ...statFailureFileSystem,
+        // AppFileSystem 额外的同步 matcher 不是本路径输入，但必须维持 service 的完整结构。
+        globMatch: () => false,
+      }),
+    ),
+  ),
+)
 
 const configuredLayer = (cfg: Config.Info) =>
   Layer.mergeAll(
@@ -282,20 +305,36 @@ describe("Truncate", () => {
   describe("cleanup", () => {
     const DAY_MS = 24 * 60 * 60 * 1000
 
-    it.live("deletes files older than 7 days and preserves recent files", () =>
+    statFailureIt.live("preserves entries when stat metadata is unavailable", () =>
+      Effect.gen(function* () {
+        removedAfterStatFailure.length = 0
+        const svc = yield* Truncate.Service
+        yield* svc.cleanup()
+
+        // 未知 metadata 不能被解释为过期；通过 remove 的外部可观察结果锁定保留语义。
+        expect(removedAfterStatFailure).toEqual([])
+      }),
+    )
+
+    it.live("uses file mtime when IDs wrap", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const fs = yield* FileSystem.FileSystem
 
         yield* fs.makeDirectory(Truncate.DIR, { recursive: true })
 
-        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 10 * DAY_MS))
-        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
+        // 两个文件名固定跨越 2^36 ms 回绕边界，避免测试结果依赖执行当天处于哪个 ID 纪元。
+        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36 - 1))
+        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36 + 1))
 
         yield* writeFileStringScoped(old, "old content")
         yield* writeFileStringScoped(recent, "recent content")
+        // retention 的独立真值来自文件元数据：旧文件超过七天，新文件只有三天。
+        yield* fs.utimes(old, new Date(), new Date(Date.now() - 10 * DAY_MS))
+        yield* fs.utimes(recent, new Date(), new Date(Date.now() - 3 * DAY_MS))
         yield* svc.cleanup()
 
+        // lexical-low 的回绕后 ID 仍必须按 recent mtime 保留，不能被当成远古时间。
         expect(yield* fs.exists(old)).toBe(false)
         expect(yield* fs.exists(recent)).toBe(true)
       }),

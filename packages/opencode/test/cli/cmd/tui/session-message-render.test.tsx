@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { expect, test as baseTest } from "bun:test"
+import { expect, mock, test as baseTest } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
@@ -35,7 +35,48 @@ import parsers from "../../../../parsers-config"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
+import { useCommandPalette } from "../../../../src/cli/cmd/tui/context/command-palette"
 import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
+
+// 剪贴板 mock：命令级回绕回归需要观察 copy 副作用，而不是真的写入系统剪贴板。
+// 本文件 serial 运行，模块级 override 不会与其他文件的 clipboard 用例交叉。
+const clipboardCopies: string[] = []
+mock.module("../../../../src/cli/cmd/tui/util/clipboard", () => ({
+  copy: async (text: string) => {
+    clipboardCopies.push(text)
+  },
+  read: async () => undefined,
+}))
+
+// 命令桥：在 Provider 树内获取真实 CommandPalette，让测试以生产注册命令驱动
+// session.undo / session.redo / messages.copy，不新增任何 production 测试出口。
+const commandBridge = { run: (_command: string) => {} }
+
+// fetch 钩子：捕获 SDK 写请求（revert/unrevert/abort）。TUI SDK 会把 body 封装进
+// Request 对象而非 init.body，因此钩子同时接收两者；不修改共享 fixture 默认行为。
+const testFetchHooks: {
+  onRequest?: (
+    url: URL,
+    request?: Request,
+    init?: RequestInit,
+  ) => Response | Promise<Response | undefined> | undefined
+} = {}
+
+// 从 Request 或 init 中读取 JSON body 的 messageID；非 JSON 或缺失时返回 undefined。
+const requestMessageID = async (request?: Request, init?: RequestInit): Promise<string | undefined> => {
+  if (typeof init?.body === "string") return (JSON.parse(init.body) as { messageID?: string }).messageID
+  if (request) {
+    const parsed = (await request.clone().json().catch(() => undefined)) as { messageID?: string } | undefined
+    return parsed?.messageID
+  }
+  return (init?.body as { messageID?: string } | undefined)?.messageID
+}
+
+function CommandBridge() {
+  const palette = useCommandPalette()
+  commandBridge.run = (command: string) => palette.run(command)
+  return <box />
+}
 
 const sessionID = "ses_render"
 // withRenderedSession 会临时改写 Global.Path.state，并驱动真实 OpenTUI
@@ -3549,6 +3590,255 @@ test("reviewer child session shows full reviewer prompt and assistant rationale 
   )
 })
 
+test("revert range hides chronologically later messages despite wrapped IDs", async () => {
+  // 回绕 fixture：较早 user 使用字典序更高 ID，revert 边界是字典序更低的较新 user。
+  // 旧 raw-ID 比较会把 msg_z/msg_m 也判为 >= 边界而全部隐藏；数组位置必须只隐藏边界之后的行。
+  // extraSessions 同 ID 覆盖默认 info，仅注入 revert 字段，消息/Part 仍来自同一 fixture。
+  const messages = [
+    userMessage("msg_z_kept_user", 1),
+    assistantMessage("msg_m_kept_asst", 2, "msg_z_kept_user"),
+    userMessage("msg_a_revert_boundary", 3),
+  ]
+  const parts = {
+    msg_z_kept_user: [textPart("part_kept_user", "msg_z_kept_user", "KEPT_USER_MARKER")],
+    msg_m_kept_asst: [textPart("part_kept_asst", "msg_m_kept_asst", "KEPT_ASST_MARKER")],
+    msg_a_revert_boundary: [textPart("part_revert_boundary", "msg_a_revert_boundary", "REVERTED_USER_MARKER")],
+  }
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      // 单一联合谓词避免负载下中间帧伪装成功：banner、保留以标记必须同帧出现。
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("message reverted")) &&
+          lines.some((line) => line.includes("KEPT_USER_MARKER")) &&
+          lines.some((line) => line.includes("KEPT_ASST_MARKER")) &&
+          !lines.some((line) => line.includes("REVERTED_USER_MARKER")),
+      )
+      expect(frame.some((line) => line.includes("KEPT_USER_MARKER"))).toBe(true)
+      expect(frame.some((line) => line.includes("KEPT_ASST_MARKER"))).toBe(true)
+      expect(frame.some((line) => line.includes("REVERTED_USER_MARKER"))).toBe(false)
+    },
+    {},
+    { height: 40 },
+    {
+      [sessionID]: {
+        info: sessionInfo({ revert: { messageID: "msg_a_revert_boundary" } }),
+        messages,
+        parts,
+      },
+    },
+  )
+})
+
+test("revert boundary outside the bounded snapshot fails closed", async () => {
+  // boundary ID 不在快照内：窗口取最新段，边界必然早于全部可见消息，
+  // 渲染必须按“全部已回退”处理，而不是回退到 raw-ID 猜测或全部显示。
+  // 这是 R13 批准的 fail-closed 合同：宁可全隐藏也不部分显示错误区间。
+  const messages = [userMessage("msg_w1", 1), assistantMessage("msg_w2", 2, "msg_w1")]
+  const parts = {
+    msg_w1: [textPart("part_w1", "msg_w1", "WINDOW_USER_MARKER")],
+    msg_w2: [textPart("part_w2", "msg_w2", "WINDOW_ASST_MARKER")],
+  }
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      // 缺席断言需要一个确定性的渲染沉淀信号：连续多帧渲染后标记仍不出现即证明隐藏。
+      let passes = 0
+      // 连续多帧沉淀后断言缺席：帧数下界防止把异步尚未渲染误判为隐藏成功。
+      const frame = await waitForFrame(app, () => {
+        passes++
+        return passes >= 15
+      })
+      expect(frame.some((line) => line.includes("WINDOW_USER_MARKER"))).toBe(false)
+      expect(frame.some((line) => line.includes("WINDOW_ASST_MARKER"))).toBe(false)
+    },
+    {},
+    {},
+    {
+      [sessionID]: {
+        info: sessionInfo({ revert: { messageID: "msg_gone_out_of_window" } }),
+        messages,
+        parts,
+      },
+    },
+  )
+})
+
+test("queued badge follows transcript position across wrapped pending IDs", async () => {
+  // pending assistant ID 字典序高于其后到达的 user；旧 raw-ID 比较会漏掉 QUEUED 徽标。
+  // 事件用真实 session.status 形状（payload 包装）驱动 SyncProvider，不直接改内部 store。
+  // 覆盖 time 去掉 completed：pendingAssistantID 只在存在未完成 assistant 时生效。
+  const pendingAssistant = {
+    ...assistantMessage("msg_z_pending_asst", 2, "msg_z_pending_user"),
+    time: { created: 2 },
+  } as AssistantMessage
+  await withRenderedSession(
+    [userMessage("msg_z_pending_user", 1), pendingAssistant, userMessage("msg_a_queued_user", 3)],
+    {
+      msg_z_pending_user: [textPart("part_pu", "msg_z_pending_user", "PENDING_TURN_USER_MARKER")],
+      msg_z_pending_asst: [textPart("part_pa", "msg_z_pending_asst", "PENDING_ASST_MARKER")],
+      msg_a_queued_user: [textPart("part_qu", "msg_a_queued_user", "QUEUED_USER_MARKER")],
+    },
+    async (app, emit) => {
+      emit({
+        directory,
+        project: "proj_test",
+        payload: { id: "evt_status_busy", type: "session.status", properties: { sessionID, status: { type: "busy" } } },
+      })
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("QUEUED")))
+      expect(frame.some((line) => line.includes("QUEUED_USER_MARKER"))).toBe(true)
+    },
+  )
+})
+
+test("session.undo command targets the chronologically previous user across wrapped IDs", async () => {
+  // 回绕 fixture：较早 user 字典序更高，revert 边界是字典序更低的较新 user。
+  // 旧 raw `x.id < boundary` 会找不到任何候选而 no-op；数组位置必须选中 msg_z_undo_user。
+  const messages = [
+    userMessage("msg_z_undo_user", 1),
+    assistantMessage("msg_m_undo_asst", 2, "msg_z_undo_user"),
+    userMessage("msg_a_undo_boundary", 3),
+  ]
+  const parts = {
+    msg_z_undo_user: [textPart("part_undo_u", "msg_z_undo_user", "UNDO_USER_MARKER")],
+    msg_m_undo_asst: [textPart("part_undo_a", "msg_m_undo_asst", "UNDO_ASST_MARKER")],
+    msg_a_undo_boundary: [textPart("part_undo_b", "msg_a_undo_boundary", "UNDO_BOUNDARY_MARKER")],
+  }
+  const reverts: string[] = []
+  // undo 前置 abort：status 未初始化时命令会先 abort 再 revert；
+  // 钩子必须吞掉 abort，否则 SDK 响应解析失败会中断断言链。
+  testFetchHooks.onRequest = async (url, request, init) => {
+    if (url.pathname === `/session/${sessionID}/abort`) return json({})
+    if (url.pathname === `/session/${sessionID}/revert`) {
+      reverts.push(String(await requestMessageID(request, init)))
+      return json(sessionInfo())
+    }
+    return undefined
+  }
+  try {
+    await withRenderedSession(
+      messages,
+      parts,
+      async (app) => {
+        await waitForFrame(app, (lines) => lines.some((line) => line.includes("UNDO_USER_MARKER")))
+        // 通过真实注册命令触发，而不是直接调用实现函数。
+        commandBridge.run("session.undo")
+        await waitForFrame(app, () => reverts.length > 0)
+        // 旧 raw-ID 行为在此 fixture 下找不到候选（msg_z > msg_a 字典序），
+        // 断言 revert 目标恰为时间早于边界的 user，锁定数组位置语义。
+        expect(reverts).toEqual(["msg_z_undo_user"])
+      },
+      {},
+      { height: 40 },
+      {
+        [sessionID]: {
+          info: sessionInfo({ revert: { messageID: "msg_a_undo_boundary" } }),
+          messages,
+          parts,
+        },
+      },
+    )
+  } finally {
+    testFetchHooks.onRequest = undefined
+  }
+})
+
+test("session.redo command advances to the next user across wrapped IDs", async () => {
+  // 边界 msg_z_undo_user 字典序最高但时间最早：旧 raw `x.id > boundary` 找不到
+  // 后继 user，会错误落入 unrevert 分支；数组位置必须 revert 到 msg_a_redo_next。
+  const messages = [
+    userMessage("msg_z_redo_boundary", 1),
+    assistantMessage("msg_m_redo_asst", 2, "msg_z_redo_boundary"),
+    userMessage("msg_a_redo_next", 3),
+  ]
+  const parts = {
+    msg_z_redo_boundary: [textPart("part_redo_b", "msg_z_redo_boundary", "REDO_BOUNDARY_MARKER")],
+    msg_m_redo_asst: [textPart("part_redo_a", "msg_m_redo_asst", "REDO_ASST_MARKER")],
+    msg_a_redo_next: [textPart("part_redo_n", "msg_a_redo_next", "REDO_NEXT_MARKER")],
+  }
+  const reverts: string[] = []
+  const unreverts: string[] = []
+  testFetchHooks.onRequest = async (url, request, init) => {
+    if (url.pathname === `/session/${sessionID}/revert`) {
+      reverts.push(String(await requestMessageID(request, init)))
+      return json(sessionInfo())
+    }
+    if (url.pathname === `/session/${sessionID}/unrevert`) {
+      unreverts.push("unrevert")
+      return json(sessionInfo())
+    }
+    return undefined
+  }
+  try {
+    await withRenderedSession(
+      messages,
+      parts,
+      async (app) => {
+        // boundary 是首条消息：其后全部消息落在已回退区间而被隐藏，
+        // ready 信号只能用 revert banner 而不是被隐藏的正文。
+        await waitForFrame(app, (lines) => lines.some((line) => line.includes("message reverted")))
+        commandBridge.run("session.redo")
+        await waitForFrame(app, () => reverts.length + unreverts.length > 0)
+        // redo 必须推进到下一个 user；旧 raw-ID 行为会退化为 unrevert，
+        // 因此 unreverts 断言为空同样是回绕敏感信号。
+        expect(reverts).toEqual(["msg_a_redo_next"])
+        expect(unreverts).toEqual([])
+      },
+      {},
+      { height: 40 },
+      {
+        [sessionID]: {
+          info: sessionInfo({ revert: { messageID: "msg_z_redo_boundary" } }),
+          messages,
+          parts,
+        },
+      },
+    )
+  } finally {
+    testFetchHooks.onRequest = undefined
+  }
+})
+
+test("messages.copy command copies the last assistant before a wrapped revert boundary", async () => {
+  // 边界字典序最低但时间最晚：旧 raw `msg.id < boundary` 会把 lexically 更高的
+  // assistant 排除并报 “No assistant messages found”；数组位置必须复制其文本。
+  const messages = [
+    userMessage("msg_z_copy_user", 1),
+    assistantMessage("msg_m_copy_asst", 2, "msg_z_copy_user"),
+    userMessage("msg_a_copy_boundary", 3),
+  ]
+  const parts = {
+    msg_z_copy_user: [textPart("part_copy_u", "msg_z_copy_user", "COPY_USER_MARKER")],
+    msg_m_copy_asst: [textPart("part_copy_a", "msg_m_copy_asst", "COPY_ASST_TEXT_MARKER")],
+    msg_a_copy_boundary: [textPart("part_copy_b", "msg_a_copy_boundary", "COPY_BOUNDARY_MARKER")],
+  }
+  clipboardCopies.length = 0
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("COPY_ASST_TEXT_MARKER")))
+      commandBridge.run("messages.copy")
+      await waitForFrame(app, () => clipboardCopies.length > 0)
+      // 旧 raw-ID 行为下 assistant 被误排除并走 error toast，剪贴板不会收到任何文本。
+      expect(clipboardCopies).toContain("COPY_ASST_TEXT_MARKER")
+    },
+    {},
+    { height: 40 },
+    {
+      [sessionID]: {
+        info: sessionInfo({ revert: { messageID: "msg_a_copy_boundary" } }),
+        messages,
+        parts,
+      },
+    },
+  )
+})
+
 async function withRenderedSession(
   messages: Array<AssistantMessage | SDKUserMessage>,
   parts: Record<string, Part[]>,
@@ -3570,7 +3860,14 @@ async function withRenderedSession(
   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
 
   const info = sessionInfo()
-  const calls = createFetch((url) => {
+  const calls = createFetch(async (url, request, init) => {
+    // 测试钩子优先于默认 fixture：只拦截显式声明的方法/路径，其余回落原逻辑。
+    // hook 可能返回 Promise，必须 await 后再判定是否命中，否则会拦截全部请求。
+    const hooked = testFetchHooks.onRequest?.(url, request, init)
+    if (hooked) {
+      const response = await hooked
+      if (response) return response
+    }
     const sessions: Record<
       string,
       {
@@ -3680,6 +3977,7 @@ function SessionHarness(props: {
                                       <PromptRefProvider>
                                         <EditorContextProvider>
                                           <Session />
+                                          <CommandBridge />
                                         </EditorContextProvider>
                                       </PromptRefProvider>
                                     </PromptHistoryProvider>
