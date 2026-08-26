@@ -555,13 +555,14 @@ describe("tool.edit", () => {
           ],
         })
 
-        expect(result.output).toContain("Changed:")
-        expect(result.output).toContain("-a")
-        expect(result.output).toContain("+x")
-        expect(result.output).toContain("-b")
-        expect(result.output).toContain("+y")
-        expect(result.output).not.toContain("-c")
-        expect(result.output).not.toContain("+c")
+        const lines = result.output.split(/\r?\n/)
+        expect(lines).toContain("Changed:")
+        expect(lines).toContain("-a")
+        expect(lines).toContain("+x")
+        expect(lines).toContain("-b")
+        expect(lines).toContain("+y")
+        expect(lines).not.toContain("-c")
+        expect(lines).not.toContain("+c")
         expect(result.output).toContain("Warning: 1 of 3 edit(s) were no-ops")
       }),
     )
