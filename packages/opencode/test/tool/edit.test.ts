@@ -523,13 +523,16 @@ describe("tool.edit", () => {
           ],
         })
 
-        expect(result.output).toContain("Changed:")
-        expect(result.output).toContain("-a")
-        expect(result.output).toContain("+x")
-        expect(result.output).toContain("-b")
-        expect(result.output).toContain("+y")
-        expect(result.output).not.toContain("-c")
-        expect(result.output).not.toContain("+c")
+        // Changed 段的 diff 文件头可能含路径子串 -c，不能据此认定删除了 c。
+        // 完整行匹配排除路径误判，同时保留 -c/+c 否定断言。
+        const lines = result.output.split(/\r?\n/)
+        expect(lines).toContain("Changed:")
+        expect(lines).toContain("-a")
+        expect(lines).toContain("+x")
+        expect(lines).toContain("-b")
+        expect(lines).toContain("+y")
+        expect(lines).not.toContain("-c")
+        expect(lines).not.toContain("+c")
         expect(result.output).toContain("Warning: 1 of 3 edit(s) were no-ops")
       }),
     )
