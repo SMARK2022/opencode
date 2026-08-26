@@ -174,6 +174,8 @@ async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name
   const nativeRoot = await packageRoot(nativeName)
   const nativeManifest = await Bun.file(path.join(nativeRoot, "package.json")).json()
   const coreManifest = await Bun.file(path.join(await packageRoot("@opentui/core"), "package.json")).json()
+  // 声明的源码身份与实际包/产物证据分开记录，不以 gitlink 代替安装或远端 tag 授权验证。
+  const declaredSource = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()
   // target 名、manifest 约束和 native 文件必须同时一致；只记录解析到的包名会掩盖 Bun 选错 ABI 的情况。
   if (
     nativeManifest.name !== nativeName ||
@@ -197,6 +199,7 @@ async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name
     target: name,
     opentui: {
       version: coreManifest.version,
+      declaredSource,
       package: nativeName,
       file: nativeFiles[0].replaceAll("\\", "/"),
       sha256: await sha256(nativeFile),
