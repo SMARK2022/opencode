@@ -3,7 +3,6 @@ import * as path from "path"
 import { Effect } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch } from "diff"
 import DESCRIPTION from "./write.txt"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { FileSystem } from "@opencode-ai/core/filesystem"
@@ -11,7 +10,7 @@ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { Format } from "../format"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { trimDiff } from "./edit"
+import { renderFileDiff } from "./file-diff"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
@@ -71,11 +70,10 @@ export const WriteTool = Tool.define(
           // 新文件没有可继承属性，继续逐字采用提交内容，避免 write 对创建行为施加全局 EOL 策略。
           const contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
 
-          const diff = trimDiff(
-            // #131：permission 元数据忽略纯行尾 diff
-            // #518：diff 基于proposal 时的旧内容；ask 展示的是本次写入的意图而非磁盘实时状态。
-            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
-          )
+          // 元数据 diff 走唯一有界 seam：ask 预览与最终 metadata 同界（二进制/超限中段改标记表示）。
+          // #518：diff 基于 proposal 时的旧内容；ask 展示的是本次写入的意图而非磁盘实时状态。
+          const rendered = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew))
+          const diff = rendered.patch
           yield* ctx.ask({
             permission: "edit",
             patterns: [path.relative(instance.worktree, filepath)],
@@ -127,24 +125,20 @@ export const WriteTool = Tool.define(
           // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
           let metadataDiff: string | undefined
           let formattedContent: string | undefined
+          // 显式计数与最终patch同源，摄入端不能从不含增删正文的标记重新推导为0/0。
+          let diffCounts: { additions: number; deletions: number } | undefined
           // #518：finalSource 只在锁内赋值；冲突失败时保持 undefined，不生成误导性 metadata。
           if (finalSource) {
-            // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
             if (exists) {
-            metadataDiff = trimDiff(
-              createTwoFilesPatch(
-                filepath,
-                filepath,
-                // #131：格式化后最终 diff 也归一行尾
-                normalizeLineEndings(contentOld),
-                normalizeLineEndings(finalSource.text),
-              ),
-            )
+              // 覆写仍取锁内最终文本，不能复用格式化前审批结果。
+              const overwrite = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(finalSource.text))
+              metadataDiff = overwrite.patch
+              diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
             } else {
               // 格式化新文件的diff必须取最终落盘文本，不能漏记或回用格式化前内容。
-              metadataDiff = trimDiff(
-                createTwoFilesPatch(filepath, filepath, "", normalizeLineEndings(finalSource.text)),
-              )
+              const created = renderFileDiff(filepath, "", normalizeLineEndings(finalSource.text))
+              metadataDiff = created.patch
+              diffCounts = { additions: created.additions, deletions: created.deletions }
             }
             // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
@@ -153,6 +147,7 @@ export const WriteTool = Tool.define(
           } else {
             // 未格式化的新文件复用写前diff；该分支属于外层最终内容判断。
             metadataDiff = diff
+            diffCounts = { additions: rendered.additions, deletions: rendered.deletions }
           }
           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
           yield* events.publish(Watcher.Event.Updated, {
@@ -201,6 +196,8 @@ export const WriteTool = Tool.define(
               exists,
               // 条件展开：仅在 metadataDiff 存在时展开 diff 字段，避免 undefined 污染 metadata
               ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
+              // 摄入端优先消费显式计数（plan B-02）；有界标记不再被重扫描成 0/0。
+              ...(diffCounts ? { additions: diffCounts.additions, deletions: diffCounts.deletions } : {}),
               // _formattedContent 由 processor 的 completeToolCall 消费：
               // 覆盖 state.input.content 后从此 metadata 中 strip，不持久化
               ...(formattedContent !== undefined ? { _formattedContent: formattedContent } : {}),

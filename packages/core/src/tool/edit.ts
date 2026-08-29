@@ -9,7 +9,7 @@ export * as EditTool from "./edit"
 import path from "path"
 import { ToolFailure } from "@opencode-ai/llm"
 import { FileDiff } from "@opencode-ai/schema/file-diff"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { renderFileDiff } from "./file-diff"
 import { Effect, Layer, Schema, SchemaGetter } from "effect"
 import { makeLocationNode } from "../effect/app-node"
 import { FileMutation } from "../file-mutation"
@@ -248,14 +248,6 @@ const layer = Layer.effectDiscard(
                 const replaced = convertToLineEnding(applied.contentNew, ending)
                 const diffOld = normalizeLineEndings(source.text)
                 const diffNew = normalizeLineEndings(replaced)
-                // 统计和展示共用逻辑文本，CR-only 不得被误计成整行替换。
-                const counts = diffLines(diffOld, diffNew).reduce(
-                  (result, item) => ({
-                    additions: result.additions + (item.added ? (item.count ?? 0) : 0),
-                    deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
-                  }),
-                  { additions: 0, deletions: 0 },
-                )
                 const next = splitBom(replaced)
                 const result = yield* unableToEdit(
                   files.writeIfUnchanged({
@@ -266,6 +258,8 @@ const layer = Layer.effectDiscard(
                   }),
                 )
                 const rewrites = EditApply.provenance(editsLF, applied.normalizedMismatchIndices)
+                // 复用锁内最终表示；无formatter写入仍由相同有界owner派生。
+                const rendered = result.rendered ?? renderFileDiff(result.resource, diffOld, diffNew)
                 const limits = yield* outputStore.limits()
                 // 限制尾段在通用head+tail的保留范围内，默认仍为2KiB/10行；不改变通用owner。
                 const warning = EditApply.warningTail({ rewrites, unchanged: unchangedEntries, total: input.edits.length, maxBytes: Math.min(2048, Math.floor(limits.maxBytes / 4)), maxLines: Math.min(10, Math.floor(limits.maxLines / 4)), channel: "structured" }).slice(2)
@@ -274,15 +268,8 @@ const layer = Layer.effectDiscard(
                   files: [
                     {
                       file: result.resource,
-                      patch: result.diff ?? createTwoFilesPatch(result.resource, result.resource, diffOld, diffNew),
                       status: "modified" as const,
-                      ...(result.text === undefined ? counts : diffLines(diffOld, normalizeLineEndings(result.text)).reduce(
-                        (total, change) => ({
-                          additions: total.additions + (change.added ? change.count ?? 0 : 0),
-                          deletions: total.deletions + (change.removed ? change.count ?? 0 : 0),
-                        }),
-                        { additions: 0, deletions: 0 },
-                      )),
+                      ...rendered,
                     },
                   ],
                   replacements,

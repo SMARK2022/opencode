@@ -2,7 +2,7 @@ export * as ApplyPatchTool from "./apply-patch"
 
 import { ToolFailure } from "@opencode-ai/llm"
 import { FileDiff } from "@opencode-ai/schema/file-diff"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { renderFileDiff, type RenderedFileDiff } from "./file-diff"
 import { Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "../effect/app-node"
 import { FileMutation } from "../file-mutation"
@@ -253,7 +253,7 @@ const layer = Layer.effectDiscard(
                         })
                         applied.push({ type: change.type, resource: result.resource, target: result.target })
                         // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
-                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }), status: result.existed ? "modified" : "added" })
+                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }, result.rendered), status: result.existed ? "modified" : "added" })
                         return
                       }
                       if (change.type === "delete") {
@@ -275,11 +275,11 @@ const layer = Layer.effectDiscard(
                         applied.push({ type: "delete", resource: change.target.resource, target: change.target.canonical })
                         applied.push({ type: result.existed ? "update" : "add", resource: result.resource, target: result.target })
                         patchFiles.push(patchFile({ ...change, type: "delete", after: "" }))
-                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }), status: result.existed ? "modified" : "added" })
+                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }, result.rendered), status: result.existed ? "modified" : "added" })
                         return
                       }
                       applied.push({ type: change.type, resource: result.resource, target: result.target })
-                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
+                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }, result.rendered))
                     }).pipe(Effect.mapError(error => error instanceof FileMutation.MoveIncompleteError
                       ? new ToolFailure({ message: `${fail(change.path).message}. Destination ${error.destination} was written, but source ${error.path} could not be removed: ${error.reason}` })
                       : fail(change.path))),
@@ -304,21 +304,13 @@ export const node = makeLocationNode({
   deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
 })
 
-function patchFile(change: Prepared): typeof FileDiff.Info.Type {
+function patchFile(change: Prepared, rendered?: RenderedFileDiff): typeof FileDiff.Info.Type {
   const before = normalizeLineEndings(change.before)
   const after = normalizeLineEndings(change.after)
-  // 增删统计与展示共用同一逻辑行视图，写入仍使用 prepared 原始内容。
-  const counts = diffLines(before, after).reduce(
-    (result, item) => ({
-      additions: result.additions + (item.added ? (item.count ?? 0) : 0),
-      deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
-    }),
-    { additions: 0, deletions: 0 },
-  )
+  // 成功写入复用锁内最终产物；删除与无formatter写入仍用同一有界owner。
   return {
     file: change.target.resource,
-    patch: createTwoFilesPatch(change.target.resource, change.target.resource, before, after),
     status: change.type === "add" ? "added" : change.type === "delete" ? "deleted" : "modified",
-    ...counts,
+    ...(rendered ?? renderFileDiff(change.target.resource, before, after)),
   }
 }

@@ -2,7 +2,7 @@ export * as FileMutation from "./file-mutation"
 
 import { makeLocationNode } from "./effect/app-node"
 import { Context, Effect, Exit, Layer, Schema } from "effect"
-import { createTwoFilesPatch } from "diff"
+import { renderFileDiff, type RenderedFileDiff } from "./tool/file-diff"
 import { dirname } from "path"
 import { KeyedMutex } from "./effect/keyed-mutex"
 import { FSUtil } from "./fs-util"
@@ -60,6 +60,8 @@ export interface WriteResult {
   // 最终展示和增删统计必须使用同一次持锁写入的前像。
   readonly previous?: string
   readonly diff?: string
+  // 只交接同一锁内最终生成的patch和计数，叶子不得再跑全文diff。
+  readonly rendered?: RenderedFileDiff
   readonly text?: string
   readonly formattedDiff?: string
   readonly formattedContent?: string
@@ -142,14 +144,16 @@ const layer = Layer.effect(
       const before = normalizeLineEndings(previous)
       const after = normalizeLineEndings(text)
       const submitted = normalizeLineEndings(splitBom(input.content).text)
+      const rendered = renderFileDiff(input.target.resource, before, after)
       return {
         ...writeResult(input.target, existed),
         previous,
-        diff: createTwoFilesPatch(input.target.resource, input.target.resource, before, after),
+        diff: rendered.patch,
+        rendered,
         ...(formatted ? { text } : {}),
         ...(formatted && submitted !== after ? {
           // 回传请求与最终落盘之间的实际变化，不能用请求片段伪造 formatter 结果。
-          formattedDiff: createTwoFilesPatch(input.target.resource, input.target.resource, submitted, after),
+          formattedDiff: renderFileDiff(input.target.resource, submitted, after).patch,
           formattedContent: text,
         } : {}),
       }

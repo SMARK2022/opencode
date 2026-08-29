@@ -474,6 +474,18 @@ describe("SessionProjector", () => {
 
   previewIt.effect("persists request-owned tool diffs through the native completion event", () =>
     Effect.gen(function* () {
+      // 两代共享摄入界：巨型首见Write也须有界，显式计数不能被省略标记清零。
+      const aggregate = ToolDiffs.collect([
+        { filepath: "/project/large.ts", diff: "x".repeat(1024 * 1024 + 1), additions: 7, deletions: 3 },
+        { files: [{ file: "/project/large.ts", patch: "+tail\n", additions: 2, deletions: 0 }] },
+      ], "/project")
+      expect(aggregate[0]).toMatchObject({ additions: 9, deletions: 3 })
+      expect(aggregate[0]?.patch?.length).toBeLessThan(1024 * 1024)
+      expect(aggregate[0]?.patch).toContain("aggregated patch elided")
+      // hunk内的三连符号是SQL/Lua内容，不再误当文件头跳过。
+      expect(ToolDiffs.collect([{ resource: "comments.sql", diff: "--- before\n+++ after\n@@\n--- old\n+++ new\n" }], "/project")[0])
+        .toMatchObject({ additions: 1, deletions: 1 })
+
       const db = (yield* Database.Service).db
       const events = yield* EventV2.Service
       yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
@@ -499,7 +511,8 @@ describe("SessionProjector", () => {
         { file: "gone.ts", patch: "-gone\n", additions: 0, deletions: 1, status: "deleted" },
       ] })
       yield* complete(assistantMessageID, "write", "write", { target: "/project/app/new.ts", resource: "new.ts", existed: false,
-        diff: "--- before\n+++ after\n+formatted\n", formattedContent: "formatted\n" })
+        // 旧记录补真实unified hunk；保留+1预期，不能用宽松扫描掩盖错误fixture。
+        diff: "--- before\n+++ after\n@@ -0,0 +1,1 @@\n+formatted\n", formattedContent: "formatted\n" })
       const expected = (yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)
       if (!expected || expected.type !== "assistant") return yield* Effect.die("Missing native tool fixture")
       // 整参数面替换旧字段，暂态真值不在 structured 与历史输入重复保存。
@@ -557,7 +570,7 @@ describe("SessionProjector", () => {
       expect(summary?.diffs[3]).toBeUndefined()
       expect(summary?.diffs[0]).toMatchObject({ file: "app/a.ts", patch: "+edit\n+patch\n", additions: 2, deletions: 0, status: "modified" })
       expect(summary?.diffs[1]?.status).toBe("deleted")
-      expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n+formatted\n" })
+      expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n@@ -0,0 +1,1 @@\n+formatted\n" })
       const settlement = { sessionID, assistantMessageID, timestamp: created, finish: "stop", cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, summary }
       // late completion先恢复完整tool内容，再在同一事件事务中覆盖结算。

@@ -11,6 +11,7 @@ import { SessionSchema } from "./schema"
 import { SessionMessageTable } from "./sql"
 import { RequestUsageAssistantTable } from "./request-usage.sql"
 import { MessageID } from "../v1/session"
+import { boundMergedPatch, countPatchStats } from "../tool/file-diff"
 
 // 同一聚合器只接收已完成、未隐藏工具的真实结果；两代各自负责消息适配和路径基准。
 export function collect(records: readonly Record<string, unknown>[], base: string, fromBase = base): FileDiff.Info[] {
@@ -19,8 +20,11 @@ export function collect(records: readonly Record<string, unknown>[], base: strin
     const rel = path.relative(base, path.isAbsolute(file) ? file : path.resolve(fromBase, file)).replaceAll("\\", "/")
     const hit = byFile.get(rel)
     // 延续source的patch拼接、计数相加和新增/删除优先，不误称为重新计算磁盘净diff。
-    byFile.set(rel, { file: rel, patch: (hit?.patch ?? "") + patch,
-      additions: (hit?.additions ?? 0) + additions, deletions: (hit?.deletions ?? 0) + deletions,
+    const adds = (hit?.additions ?? 0) + additions
+    const dels = (hit?.deletions ?? 0) + deletions
+    // 两代首见/重复文件均受同一表示界约束，精确request与seq选集保持原owner。
+    byFile.set(rel, { file: rel, patch: boundMergedPatch((hit?.patch ?? "") + patch, adds, dels),
+      additions: adds, deletions: dels,
       status: hit?.status === "added" || hit?.status === "deleted" ? hit.status
         : status === "add" || status === "added" ? "added"
         : status === "delete" || status === "deleted" ? "deleted"
@@ -46,11 +50,9 @@ export function collect(records: readonly Record<string, unknown>[], base: strin
     const diff = string(meta.diff)
     const file = string(meta.filepath) ?? string(meta.target) ?? string(meta.resource)
     if (!diff || !file) continue
-    // Write按最终回读patch统计，排除unified文件头；Native的新建状态由真实existed字段判定。
-    const stats = diff.split("\n").reduce((sum, line) => ({
-      additions: sum.additions + Number(line.startsWith("+") && !line.startsWith("+++")),
-      deletions: sum.deletions + Number(line.startsWith("-") && !line.startsWith("---")),
-    }), { additions: 0, deletions: 0 })
+    // 有界标记优先携带的同源计数；历史行才扫描hunk，不能跳过--/++正文。
+    const stats = typeof meta.additions === "number" && typeof meta.deletions === "number"
+      ? { additions: meta.additions, deletions: meta.deletions } : countPatchStats(diff)
     merge(file, diff, stats.additions, stats.deletions, typeof meta.existed === "boolean" ? meta.existed ? "modified" : "added" : undefined)
   }
   return [...byFile.values()]
