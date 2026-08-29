@@ -390,10 +390,8 @@ describe("tool.shell", () => {
       projectRoot,
       Effect.gen(function* () {
         const result = yield* run({
-          // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态：
-          // detached:true 创建新进程组时，Effect stream consumer 可能尚未订阅 proc.stdout，
-          // echo 已写入并退出，数据丢失。sleep 让 shell 存活足够久让 stream 订阅完成。
-          command: "echo test; sleep 0.01",
+          // #590：快退 echo 的输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
+          command: "echo test",
         })
         expect(result.metadata.exit).toBe(0)
         expect(result.metadata.output).toContain("test")
@@ -428,11 +426,10 @@ describe("tool.shell", () => {
       runIn(
         projectRoot,
         Effect.gen(function* () {
-          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
-          // sleep 0.01 防止 macOS CI 上 echo|tr 管道退出过快导致 stdout 竞态
-          //（detached:true + Bun 调度抖动，与 "basic" 测试同款问题）
+          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec；
+          // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
           const result = yield* run({
-            command: "echo 'hello world' | tr a-z A-Z; sleep 0.01",
+            command: "echo 'hello world' | tr a-z A-Z",
           })
           expect(result.metadata.exit).toBe(0)
           expect(result.metadata.output).toContain("HELLO WORLD")
@@ -455,8 +452,8 @@ describe("tool.shell", () => {
 
           const result = yield* bash.execute(
             {
-              // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态
-              command: "echo fallback; sleep 0.01",
+              // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
+              command: "echo fallback",
             },
             ctx,
           )
@@ -1878,8 +1875,8 @@ describe("tool.shell abort", () => {
         projectRoot,
         Effect.gen(function* () {
           const result = yield* run({
-            // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
-            command: `echo stdout_msg && echo stderr_msg >&2; sleep 0.01`,
+            // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
+            command: `echo stdout_msg && echo stderr_msg >&2`,
           })
           expect(result.output).toContain("stdout_msg")
           expect(result.output).toContain("stderr_msg")
@@ -2027,8 +2024,8 @@ describe("tool.shell abort", () => {
       projectRoot,
       Effect.gen(function* () {
         const result = yield* run({
-          // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
-          command: `echo ok; sleep 0.01`,
+          // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
+          command: `echo ok`,
         })
 
         expect(result.metadata.exit).toBe(0)
