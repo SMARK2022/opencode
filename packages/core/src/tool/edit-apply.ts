@@ -56,7 +56,7 @@ type LineSpan = { start: number; end: number }
 // 9. 单元素 edits 与多元素 edits 不得分叉到不同匹配算法。
 // 10. newString 禁止再走 normalizeForMatch，避免改写用户意图插入文本。
 // 11. hybrid 连字符：字面一次、归一化两次 → 无 replaceAll 必歧义失败。
-// 12. 重叠 range 在 reverse 前拒绝，避免部分写盘。
+// 12. range 先按偏移原位排序再重叠检查与 reverse apply（顺序不变性），避免错位拼接与部分写盘。
 // 13. identical 条目校验后跳写并保留提交形态；批级等值仍是唯一 no-op 门，真实编辑记录 actualOld。
 // 14. 兼容 replace() 仅允许 length-1 委托，禁止复制粘贴第二实现。
 
@@ -106,6 +106,7 @@ function getReplacementLineRange(lines: LineSpan[], replacement: TextReplacement
 }
 
 function applyReplacements(content: string, replacements: TextReplacement[], offset = 0): string {
+  // 调用方须传入按 matchIndex 升序排列的区间，preserve 自身也维持这一前提。
   // 从高 offset 到低 offset 写回，保证同一快照上的多 range 互不干扰
   let result = content
   for (let i = replacements.length - 1; i >= 0; i--) {
@@ -492,11 +493,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
     })
   }
 
-  // 重叠拒绝：所有 range（含 replaceAll 展开）在 reverse apply 前检查
-  const sorted = [...allRanges].sort((a, b) => a.matchIndex - b.matchIndex)
-  for (let i = 1; i < sorted.length; i++) {
-    const previous = sorted[i - 1]
-    const current = sorted[i]
+  // 重叠检查与逆序写回共用升序区间，避免低位变长替换使尚未应用的高位坐标失效。
+  // preserve 与 Core patch 也先排序；syncEdits/mismatch 仍按原 editIndex 记录提交身份。
+  allRanges.sort((a, b) => a.matchIndex - b.matchIndex)
+  for (let i = 1; i < allRanges.length; i++) {
+    const previous = allRanges[i - 1]
+    const current = allRanges[i]
     if (previous.matchIndex + previous.matchLength > current.matchIndex) {
       throw new Error(
         `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. Merge them into one edit or target disjoint regions.`,
@@ -508,7 +510,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
   // #521：closest 从未参与这里的 range 生成，任何相似文本都不能越过 exact/closed-normalization 成功域。
   const contentNew = usedNormalized
     ? applyReplacementsPreservingUnchangedLines(content, replacementBase, allRanges)
-    : applyReplacements(replacementBase, sorted)
+    : applyReplacements(replacementBase, allRanges)
 
   if (content === contentNew) {
     throw new Error(
