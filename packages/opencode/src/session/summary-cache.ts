@@ -9,6 +9,7 @@ import { MessageID, SessionID } from "./schema"
 import { Snapshot } from "@/snapshot"
 import type { MessageV2 } from "./message-v2"
 import { NotFoundError, Storage } from "@/storage/storage"
+import { MAX_MERGED_PATCH_CHARS, countPatchStats } from "@/tool/file-diff"
 
 const isDiffs = Schema.is(Schema.Array(Snapshot.FileDiff))
 type Diffs = Snapshot.FileDiff[]
@@ -83,6 +84,13 @@ function createAccumulator(initial: readonly Snapshot.FileDiff[] = []): DiffAccu
   }
 }
 
+// 摄入界降级标记：超限 patch 替换为事实摘要，计数口径不丢（首见与归并共用同一规则）。
+function boundMergedPatch(patch: string, additions: number, deletions: number) {
+  return patch.length > MAX_MERGED_PATCH_CHARS
+    ? `[aggregated patch elided: ${patch.length} chars, +${additions}/-${deletions}]`
+    : patch
+}
+
 function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
   if (!item.file) {
     // 无 file 的历史条目无法安全归并，只能按原顺序追加而不猜测路径。
@@ -93,15 +101,24 @@ function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
   if (index === undefined) {
     // 新文件记录首次 index，后续增量在原位置更新以保持 UI 顺序。
     target.byFile.set(item.file, target.values.length)
-    target.values.push({ ...item })
+    // 首见同样受摄入界约束：单条 legacy 巨型 metadata 不能凭首见绕过（plan §16 切片 4 语义）。
+    target.values.push({ ...item, patch: boundMergedPatch(item.patch ?? "", item.additions, item.deletions) })
     return target.values.length - 1
   }
   const current = target.values[index]
   if (!current) throw new Error(`Summary diff merge index disappeared: ${item.file}`)
+  // 摄入界：逐轮拼接的 patch 超限时降级为事实标记，计数照常累加（INV-05）。这同时
+  // 免疫已入库的 legacy 巨型 tool metadata（事故：216MB user message 行）；后续轮次在
+  // 标记上继续拼接并重新检查，持久值上限 = MAX_MERGED_PATCH_CHARS + 单轮标记开销。
+  const mergedPatch = boundMergedPatch(
+    (current.patch ?? "") + (item.patch ?? ""),
+    current.additions + item.additions,
+    current.deletions + item.deletions,
+  )
   target.values[index] = {
     ...current,
-    // patch 字符串直接连接，保留 producer 原始转义和尾部换行。
-    patch: (current.patch ?? "") + (item.patch ?? ""),
+    // patch 字符串直接连接，保留 producer 原始转义和尾部换行；超限才降级。
+    patch: mergedPatch,
     // 计数直接相加，与首次全量 collect 保持同一 totals 口径。
     additions: current.additions + item.additions,
     deletions: current.deletions + item.deletions,
@@ -173,7 +190,12 @@ export function collectToolDiffs(messages: readonly ToolDiffMessage[], worktree:
       const diff = stringValue(record.diff)
       const file = stringValue(record.filepath)
       if (diff && file) {
-        const stats = countPatchStats(diff)
+        // 工具显式携带计数时优先（write 自有界标记起附带 additions/deletions）：标记
+        // 正文无 +/- 行，重扫描会退化为 0/0（plan B-02）；扫描仅服务已入库遗留行。
+        const adds = record.additions
+        const dels = record.deletions
+        const stats =
+          typeof adds === "number" && typeof dels === "number" ? { additions: adds, deletions: dels } : countPatchStats(diff)
         merge(file, diff, stats.additions, stats.deletions)
       }
     }
@@ -785,16 +807,8 @@ function toWorktreeRel(base: string, target: string, fromBase: string = base) {
   return path.relative(base, abs).replaceAll("\\", "/")
 }
 
-function countPatchStats(patch: string) {
-  let additions = 0
-  let deletions = 0
-  for (const line of patch.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue
-    if (line.startsWith("+")) additions++
-    else if (line.startsWith("-")) deletions++
-  }
-  return { additions, deletions }
-}
+// countPatchStats 迁移至 @/tool/file-diff 并修复为 hunk 门控（原实现把 hunk 内以
+// "--"/"++" 开头的内容行误当文件头跳过，对 SQL/Lua 注释类内容漏计；plan B-01）。
 
 function inferStatus(additions: number, deletions: number): "added" | "deleted" | "modified" {
   if (deletions === 0 && additions > 0) return "added"

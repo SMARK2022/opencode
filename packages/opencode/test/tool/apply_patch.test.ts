@@ -3,6 +3,9 @@ import path from "path"
 import * as fs from "fs/promises"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { ApplyPatchTool } from "../../src/tool/apply_patch"
+import { WriteTool } from "../../src/tool/write"
+import { EditTool } from "../../src/tool/edit"
+import { SummaryCache } from "@/session/summary-cache"
 import { LSP } from "@/lsp/lsp"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Format } from "../../src/format"
@@ -1216,6 +1219,247 @@ EOF`
       expect(result.output).not.toContain("missing line")
       // bad.txt 内容不应被修改
       expect(yield* readText(badFile)).toBe("world\n")
+    }),
+  )
+})
+
+// [local-smark] 元数据 diff 有界切片：二进制 delete 的全文行 diff 是 407MB part 行事故的
+// 直接构成物；本组切片锁定"标记 + 度量 + sha256 身份"的有界表示与计数精确性（INV-01/07/08）。
+describe("tool.apply_patch metadata diff bounding", () => {
+  it.instance("bounds metadata diff for binary file deletion", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const binPath = path.join(test.directory, "bin.dat")
+      // 覆盖全部字节值的确定性二进制：前 8KB 必然含 NUL（与 git buffer_is_binary 同窗口）。
+      const buf = Buffer.alloc(512 * 1024)
+      for (let i = 0; i < buf.length; i++) buf[i] = (i * 7 + 13) & 0xff
+      yield* Effect.promise(() => fs.writeFile(binPath, buf))
+
+      const { ctx, calls } = makeCtx()
+      const result = yield* execute({ patchText: "*** Begin Patch\n*** Delete File: bin.dat\n*** End Patch" }, ctx)
+
+      const meta = result.metadata as {
+        diff: string
+        files: Array<{ patch: string; additions: number; deletions: number }>
+      }
+      for (const diff of [meta.diff, ...meta.files.map((f) => f.patch), calls[0].metadata.diff]) {
+        expect(diff.length).toBeLessThan(64 * 1024)
+        expect(diff).toContain("Binary file")
+      }
+      // 二进制计数与 snapshot git 路径对齐（0/0）；变更执行不受表示影响。
+      expect(meta.files[0].additions).toBe(0)
+      expect(meta.files[0].deletions).toBe(0)
+      yield* expectReadFailure(binPath)
+    }),
+  )
+
+  it.instance("keeps full line diff for normal small text deletion", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const target = path.join(test.directory, "notes.txt")
+      yield* writeText(target, "alpha\n-- sql comment\nbravo\n")
+      const { ctx } = makeCtx()
+
+      const result = yield* execute({ patchText: "*** Begin Patch\n*** Delete File: notes.txt\n*** End Patch" }, ctx)
+
+      const meta = result.metadata as {
+        diff: string
+        files: Array<{ patch: string; additions: number; deletions: number }>
+      }
+      // 正常文本的行级 diff 逐字保留（审计保真），含 "--" 前缀内容行；计数 = 变更行数。
+      expect(meta.files[0].patch).toContain("-- sql comment")
+      expect(meta.files[0].deletions).toBe(3)
+      expect(meta.files[0].additions).toBe(0)
+    }),
+  )
+})
+
+// [local-smark] write/edit 的有界切片按 plan §15 寄居本文件（文件数契约：总触碰 ≤6）。
+// 公共头尾 + 8000 行差异中段（~640KB）：中段超 64KiB 触发重写标记，同时避免全异行
+// Myers 最坏 case 在现状代码上无限挂起（现状实测 >139s，PROBE2 二次方增长）。
+const bigRewriteFixture = (v: string) =>
+  [
+    ...Array.from({ length: 1000 }, (_, i) => `common head ${i} ${"h".repeat(40)}`),
+    ...Array.from({ length: 8000 }, (_, i) => `${v} middle ${i} ${"m".repeat(40)}`),
+    ...Array.from({ length: 1000 }, (_, i) => `common tail ${i} ${"t".repeat(40)}`),
+  ].join("\n")
+
+describe("tool.write metadata diff bounding (hosted per plan §15)", () => {
+  it.instance("bounds metadata diff for large whole-file rewrite", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const bigPath = path.join(test.directory, "big.txt")
+      yield* Effect.promise(() => fs.writeFile(bigPath, bigRewriteFixture("old"), "utf-8"))
+      const { ctx, calls } = makeCtx()
+      const info = yield* WriteTool
+      const tool = yield* info.init()
+
+      const result = yield* tool.execute({ filePath: bigPath, content: bigRewriteFixture("new") }, ctx)
+
+      const meta = result.metadata as { diff: string; additions: number; deletions: number }
+      // 三处消费面同界：result metadata、ask metadata；标记携带中段行数与全文件 sha256 身份。
+      expect(meta.diff.length).toBeLessThan(64 * 1024)
+      expect(meta.diff).toContain("whole-file rewrite")
+      expect(meta.diff).toContain("old: 8000 mid lines")
+      expect(meta.diff).toContain("new: 8000 mid lines")
+      expect(meta.deletions).toBe(8000)
+      expect(meta.additions).toBe(8000)
+      expect(calls[0].metadata.diff.length).toBeLessThan(64 * 1024)
+      // 变更执行不受表示影响：新内容落盘。
+      expect(yield* readText(bigPath)).toBe(bigRewriteFixture("new"))
+    }),
+  )
+})
+
+// [local-smark] edit 盲改保护要求 ctx.messages 含同文件的已完成 read part（与 edit.test.ts 同构造）。
+const editCtxWithPriorRead = (ctx: ToolCtx, filePath: string, directory: string) =>
+  ({
+    ...ctx,
+    messages: [
+      {
+        info: {
+          id: "msg_prior",
+          role: "assistant" as const,
+          sessionID: ctx.sessionID,
+          agent: "build",
+          mode: "build",
+          path: { cwd: directory, root: directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: "test",
+          providerID: "test",
+          time: { created: 0 },
+        },
+        parts: [
+          {
+            id: "p_read",
+            messageID: "msg_prior",
+            sessionID: ctx.sessionID,
+            type: "tool" as const,
+            tool: "read",
+            callID: "call_read",
+            state: { status: "completed" as const, input: { filePath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
+          },
+        ],
+      },
+    ],
+  }) as unknown as ToolCtx
+
+describe("tool.edit metadata diff bounding (hosted per plan §15)", () => {
+  it.instance("emits rewrite marker with exact mid-line counts for oversized middle", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const target = path.join(test.directory, "gen.txt")
+      // 公共头尾各 1000 行，中段各 2000 行（~90KB > 64KiB 界）。
+      const mk = (v: string) =>
+        [
+          ...Array.from({ length: 1000 }, (_, i) => `common head ${i} ${"h".repeat(20)}`),
+          ...Array.from({ length: 2000 }, (_, i) => `${v} ${i} ${"x".repeat(34)}`),
+          ...Array.from({ length: 1000 }, (_, i) => `common tail ${i} ${"t".repeat(20)}`),
+        ].join("\n")
+      yield* writeText(target, mk("old"))
+      const { ctx } = makeCtx()
+      const info = yield* EditTool
+      const tool = yield* info.init()
+
+      const result = yield* tool.execute(
+        { filePath: target, edits: [{ oldString: mk("old"), newString: mk("new") }] },
+        editCtxWithPriorRead(ctx, target, test.directory),
+      )
+
+      const meta = result.metadata as { filediff: { patch: string; additions: number; deletions: number } }
+      expect(meta.filediff.patch).toContain("whole-file rewrite")
+      // 中段口径计数：公共头尾不计，变更行 = 中段行数（INV-08）。
+      expect(meta.filediff.deletions).toBe(2000)
+      expect(meta.filediff.additions).toBe(2000)
+      expect(yield* readText(target)).toBe(mk("new"))
+    }),
+  )
+
+  it.instance("keeps exact counts for changed lines with -- and ++ prefixes", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const target = path.join(test.directory, "sql.txt")
+      yield* writeText(target, "alpha\n-- sql comment\nbravo\n++ keep\n")
+      const { ctx } = makeCtx()
+      const info = yield* EditTool
+      const tool = yield* info.init()
+
+      const result = yield* tool.execute(
+        { filePath: target, edits: [{ oldString: "-- sql comment\nbravo", newString: "bravo\n++ added line" }] },
+        editCtxWithPriorRead(ctx, target, test.directory),
+      )
+
+      const meta = result.metadata as { filediff: { patch: string; additions: number; deletions: number } }
+      // 独立推导（行级 LCS）：公共行 "bravo" 被匹配，变更 = 删 "-- sql comment"、增 "++ added line"。
+      // "--"/"++" 前缀内容行与 unified 文件头同形，锁定 hunk 门控计数不误杀（PROBE1 教训）。
+      expect(meta.filediff.deletions).toBe(1)
+      expect(meta.filediff.additions).toBe(1)
+      expect(meta.filediff.patch).toContain("+++ added line")
+    }),
+  )
+})
+
+// [local-smark] SummaryCache 摄入界切片：聚合端免疫已入库 legacy 巨型 metadata（216MB
+// user message 行事故），且 write 显式计数优先于标记重扫描（plan B-02）。
+const toolDiffMessages = (metadata: Record<string, unknown>) =>
+  [
+    {
+      info: { id: "m1", hidden: false },
+      parts: [{ hidden: false, type: "tool" as const, state: { status: "completed" as const, metadata } }],
+    },
+  ] as unknown as Parameters<typeof SummaryCache.collectToolDiffs>[0]
+
+describe("summary-cache aggregate bounding (hosted per plan §15)", () => {
+  it.effect("bounds aggregate patch while preserving exact counts for legacy giant tool metadata", () =>
+    Effect.gen(function* () {
+      const giant = "+" + "x".repeat(5 * 1024 * 1024)
+      const diffs = SummaryCache.collectToolDiffs(
+        toolDiffMessages({ files: [{ relativePath: "a.txt", patch: giant, additions: 1, deletions: 2 }] }),
+        "/wt",
+      )
+      const entry = diffs.find((d) => d.file === "a.txt")
+      if (!entry) throw new Error("expected aggregated entry for a.txt")
+      expect((entry.patch ?? "").length).toBeLessThan(1024 * 1024)
+      // 计数照常累加：聚合界只降级 patch 文本，不丢统计口径（INV-05）。
+      expect(entry.additions).toBe(1)
+      expect(entry.deletions).toBe(2)
+    }),
+  )
+
+  it.instance("prefers explicit write counts when ingesting bounded markers", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const bigPath = path.join(test.directory, "ingest.txt")
+      yield* Effect.promise(() => fs.writeFile(bigPath, bigRewriteFixture("old"), "utf-8"))
+      const { ctx } = makeCtx()
+      const info = yield* WriteTool
+      const tool = yield* info.init()
+      const result = yield* tool.execute({ filePath: bigPath, content: bigRewriteFixture("new") }, ctx)
+
+      const diffs = SummaryCache.collectToolDiffs(toolDiffMessages(result.metadata), test.directory)
+      const entry = diffs.find((d) => d.file === "ingest.txt")
+      if (!entry) throw new Error("expected ingested entry for ingest.txt")
+      // 显式计数优先：rewrite 标记无 +/- 正文，重扫描会退化为 0/0（plan B-02）；三工具计数口径一致。
+      expect(entry.additions).toBe(8000)
+      expect(entry.deletions).toBe(8000)
+    }),
+  )
+
+  it.instance("keeps exact counts for normal small write ingestion", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const smallPath = path.join(test.directory, "small.txt")
+      const { ctx } = makeCtx()
+      const info = yield* WriteTool
+      const tool = yield* info.init()
+      const result = yield* tool.execute({ filePath: smallPath, content: "hello\nworld\n" }, ctx)
+
+      const meta = result.metadata as { diff: string; additions: number; deletions: number }
+      // 新建两行：+2/-0；正常路径 patch 逐字含全文内容行（INV-02 审计保真）。
+      expect(meta.diff).toContain("+hello")
+      expect(meta.additions).toBe(2)
+      expect(meta.deletions).toBe(0)
     }),
   )
 })

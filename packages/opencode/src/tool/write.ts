@@ -3,7 +3,6 @@ import * as path from "path"
 import { Effect } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch } from "diff"
 import DESCRIPTION from "./write.txt"
 import { Bus } from "../bus"
 import { File } from "../file"
@@ -11,7 +10,7 @@ import { FileWatcher } from "../file/watcher"
 import { Format } from "../format"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { InstanceState } from "@/effect/instance-state"
-import { trimDiff } from "./edit"
+import { renderFileDiff } from "./file-diff"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
@@ -68,10 +67,13 @@ export const WriteTool = Tool.define(
           // 新文件没有可继承属性，继续逐字采用提交内容，避免 write 对创建行为施加全局 EOL 策略。
           const contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
           // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
-
-          const diff = trimDiff(
-            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+          // 元数据 diff 走唯一有界 seam：ask 预览与最终 metadata 同界（二进制/超限中段改标记表示）。
+          const rendered = renderFileDiff(
+            filepath,
+            normalizeLineEndings(contentOld),
+            normalizeLineEndings(contentNew),
           )
+          const diff = rendered.patch
           yield* ctx.ask({
             permission: "edit",
             patterns: [path.relative(instance.worktree, filepath)],
@@ -112,6 +114,9 @@ export const WriteTool = Tool.define(
           }).pipe(Effect.orDie)
           // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
           let metadataDiff: string | undefined
+          // [local-smark] 摄入端（summary-cache diff/filepath 分支）优先读取显式计数，
+          // 避免对有界标记重扫描退化为 0/0（plan B-02）；与 edit/apply_patch 的计数口径一致。
+          let diffCounts: { additions: number; deletions: number } | undefined
           // [local-smark] 当 auto-format 改变了写入内容时，将格式化后的内容
           // 通过 metadata._formattedContent 传递给 processor。
           // processor 的 completeToolCall 会用它直接覆盖 state.input.content，
@@ -123,25 +128,19 @@ export const WriteTool = Tool.define(
           if (exists || formatted) {
             // finalSource 在 commit lock 内读取，metadata 不会引用另一个 mutation 的中间内容。
             if (exists) {
-              metadataDiff = trimDiff(
-                createTwoFilesPatch(
-                  filepath,
-                  filepath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(finalSource.text),
-                ),
+              const overwrite = renderFileDiff(
+                filepath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(finalSource.text),
               )
+              metadataDiff = overwrite.patch
+              diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
             } else {
               // 新文件被 formatter 改变内容：diff 基于格式化后的最终落盘内容，
               // 使 computeDiff 的工具流能按工具归因追踪新文件改动
-              metadataDiff = trimDiff(
-                createTwoFilesPatch(
-                  filepath,
-                  filepath,
-                  "",
-                  normalizeLineEndings(finalSource.text),
-                ),
-              )
+              const created = renderFileDiff(filepath, "", normalizeLineEndings(finalSource.text))
+              metadataDiff = created.patch
+              diffCounts = { additions: created.additions, deletions: created.deletions }
             }
             // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
@@ -151,6 +150,7 @@ export const WriteTool = Tool.define(
             // 新文件且未格式化：用写入前已计算的 diff（空内容 → contentNew），
             // 确保新文件写入也出现在工具流 diff 中，而非仅依赖 git 兜底
             metadataDiff = diff
+            diffCounts = { additions: rendered.additions, deletions: rendered.deletions }
           }
           yield* bus.publish(File.Event.Edited, { file: filepath })
           yield* bus.publish(FileWatcher.Event.Updated, {
@@ -198,6 +198,7 @@ export const WriteTool = Tool.define(
               filepath,
               exists,
               ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
+              ...(diffCounts ? { additions: diffCounts.additions, deletions: diffCounts.deletions } : {}),
               // _formattedContent 由 processor 的 completeToolCall 消费：
               // 覆盖 state.input.content 后从此 metadata 中 strip，不持久化
               ...(formattedContent !== undefined ? { _formattedContent: formattedContent } : {}),

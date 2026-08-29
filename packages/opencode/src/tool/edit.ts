@@ -3,7 +3,7 @@ import { createHash } from "crypto"
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { renderFileDiff } from "./file-diff"
 import DESCRIPTION from "./edit.txt"
 import { File } from "../file"
 import { FileWatcher } from "../file/watcher"
@@ -198,14 +198,8 @@ export const EditTool = Tool.define(
             // oldString="" 仅在文件缺失时是纯 create；已有 proposal 上它仍是 overwrite，须继承磁盘行尾。
             // 新文件没有 EOL 属性，继续保留模型提交字节，避免 create 被隐式规范化。
             contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
-            diff = trimDiff(
-              createTwoFilesPatch(
-                filePath,
-                filePath,
-                normalizeLineEndings(contentOld),
-                normalizeLineEndings(contentNew),
-              ),
-            )
+            // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，ask 预览与最终 metadata 同界）。
+            diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
             yield* ctx.ask({
               permission: "edit",
               patterns: [path.relative(instance.worktree, filePath)],
@@ -299,14 +293,8 @@ export const EditTool = Tool.define(
             const desiredBom = source.bom || Bom.split(contentNew).bom
             contentNew = Bom.split(contentNew).text
 
-            diff = trimDiff(
-              createTwoFilesPatch(
-                filePath,
-                filePath,
-                normalizeLineEndings(contentOld),
-                normalizeLineEndings(contentNew),
-              ),
-            )
+            // 预计算 diff 供权限预览；有界 seam 保证审批 metadata 不携带无界产物。
+            diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
             yield* ctx.ask({
               permission: "edit",
               patterns: [path.relative(instance.worktree, filePath)],
@@ -377,27 +365,14 @@ export const EditTool = Tool.define(
           // 共享出口统一重算 diff：此刻两分支的 contentNew 均已同步 commit/formatter 后的
           // 最终磁盘内容，output 的 Changed 段与 metadata.diff 因此共用 post-formatter 真值；
           // 权限请求的预计算 diff 保留在各自 ask 之前，审批预览不受影响（R5）。
-          diff = trimDiff(
-            createTwoFilesPatch(
-              filePath,
-              filePath,
-              normalizeLineEndings(contentOld),
-              normalizeLineEndings(contentNew),
-            ),
-          )
-          const diffOld = normalizeLineEndings(contentOld)
-          const diffNew = normalizeLineEndings(contentNew)
-          let additions = 0
-          let deletions = 0
-          for (const change of diffLines(diffOld, diffNew)) {
-            if (change.added) additions += change.count || 0
-            if (change.removed) deletions += change.count || 0
-          }
+          // 元数据 diff 走唯一有界 seam，计数随产物单遍推导（删除原第二遍 diffLines，INV-08 单一权威）。
+          const rendered = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew))
+          diff = rendered.patch
           const filediff: Snapshot.FileDiff = {
             file: filePath,
-            patch: diff,
-            additions,
-            deletions,
+            patch: rendered.patch,
+            additions: rendered.additions,
+            deletions: rendered.deletions,
           }
 
           yield* ctx.metadata({
