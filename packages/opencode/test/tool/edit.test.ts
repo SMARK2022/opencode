@@ -1528,6 +1528,103 @@ describe("tool.edit", () => {
       }),
     )
 
+    // INV-01/02：高偏移在前 + 变长替换的乱序提交必须按位置应用。
+    // 历史缺陷：exact 分支按提交顺序逆序写回，低偏移变长替换使高偏移记录失效，
+    // 产生 "B = " + newString + 残尾 的中线拼接（生产事故同构样本）。
+    it.instance("applies out-of-order edits by match position", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "out-of-order.txt")
+        yield* put(filepath, "A = 1 \nB = 2\ndef target():\n    pass \nC = 3\n")
+        yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "def target():\n    pass", newString: "def target():\n    return 1" },
+            { oldString: "A = 1", newString: "A = 111" },
+          ],
+        })
+        expect(yield* load(filepath)).toBe("A = 111 \nB = 2\ndef target():\n    return 1 \nC = 3\n")
+      }),
+    )
+
+    // replaceAll 展开区间与其他 edit 交错：首区间看似升序、全局非升序，
+    // 必须按展开后区间的全局位置套用，而不是按提交顺序。
+    it.instance("applies interleaved replaceAll ranges by global position", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "interleaved-replaceall.txt")
+        yield* put(filepath, "old A\nline1\nMID TARGET\nline2\nold B\nend\n")
+        yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "MID TARGET", newString: "MID REPLACED WITH LONGER TEXT" },
+            { oldString: "old", newString: "OLDISH", replaceAll: true },
+          ],
+        })
+        expect(yield* load(filepath)).toBe(
+          "OLDISH A\nline1\nMID REPLACED WITH LONGER TEXT\nline2\nOLDISH B\nend\n",
+        )
+      }),
+    )
+
+    // 用户不变量：同一组互不重叠 edits，A→B→C 与 C→B→A 两种提交顺序的结果必须逐字节一致。
+    it.instance("submission order does not change multi-edit result", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const forward = path.join(test.directory, "order-forward.txt")
+        const backward = path.join(test.directory, "order-backward.txt")
+        const content = "one\ntwo HEAD\nthree\nmid TARGET\nfour\nfive HEAD\nsix\n"
+        yield* put(forward, content)
+        yield* put(backward, content)
+        yield* run({
+          filePath: forward,
+          edits: [
+            { oldString: "two HEAD", newString: "two REPLACED LONGER" },
+            { oldString: "mid TARGET", newString: "mid R" },
+            { oldString: "five HEAD", newString: "five REPLACED MUCH LONGER" },
+          ],
+        })
+        yield* run({
+          filePath: backward,
+          edits: [
+            { oldString: "five HEAD", newString: "five REPLACED MUCH LONGER" },
+            { oldString: "mid TARGET", newString: "mid R" },
+            { oldString: "two HEAD", newString: "two REPLACED LONGER" },
+          ],
+        })
+        expect(yield* load(backward)).toBe(yield* load(forward))
+        expect(yield* load(forward)).toBe(
+          "one\ntwo REPLACED LONGER\nthree\nmid R\nfour\nfive REPLACED MUCH LONGER\nsix\n",
+        )
+      }),
+    )
+
+    // INV-05 锁定（现状正确，防回退）：字面缩进语义与未触碰前缀字节保真。
+    // (a) 中线锚点：未变的深缩进段必须原样保留；(b) oldString 带缩进、newString 无缩进 → 该缩进按字面移除；
+    // (c) 归一化匹配（ASCII 引号 vs 磁盘弯引号）下缩进严格按 newString 字面变化。
+    it.instance("preserves indentation semantics for exact and normalized matches", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const midline = path.join(test.directory, "indent-midline.txt")
+        yield* put(midline, "        head tail\n")
+        yield* run({ filePath: midline, edits: [{ oldString: "tail", newString: "TAIL" }] })
+        expect(yield* load(midline)).toBe("        head TAIL\n")
+
+        const dedent = path.join(test.directory, "indent-dedent.txt")
+        yield* put(dedent, "    def f():\n        pass\n")
+        yield* run({ filePath: dedent, edits: [{ oldString: "    def f():", newString: "def f():" }] })
+        expect(yield* load(dedent)).toBe("def f():\n        pass\n")
+
+        const normalized = path.join(test.directory, "indent-normalized.txt")
+        yield* put(normalized, "        say “x”\n")
+        yield* run({
+          filePath: normalized,
+          edits: [{ oldString: '        say "x"', newString: '            say "x"' }],
+        })
+        expect(yield* load(normalized)).toBe('            say "x"\n')
+      }),
+    )
+
     // 若顺序应用会得到 baz；快照匹配必须拒绝第二条（bar 不在原文）。
     it.instance("rejects sequential-dependent edits against original snapshot", () =>
       Effect.gen(function* () {

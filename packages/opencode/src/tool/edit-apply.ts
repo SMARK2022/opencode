@@ -51,7 +51,7 @@ type LineSpan = { start: number; end: number }
 // 9. 单元素 edits 与多元素 edits 不得分叉到不同匹配算法。
 // 10. newString 禁止再走 normalizeForMatch，避免改写用户意图插入文本。
 // 11. hybrid 连字符：字面一次、归一化两次 → 无 replaceAll 必歧义失败。
-// 12. 重叠 range 在 reverse 前拒绝，避免部分写盘。
+// 12. range 先按偏移原位排序再重叠检查与 reverse apply（顺序不变性），避免错位拼接与部分写盘。
 // 13. identical（oldString === newString）条目校验后跳写，不推入 allRanges；
 //     唯一 no-op 门是批级内容等值（505-511），逐条不再拒绝。
 //     其 syncEdits 历史为提交形态（零写入即无命中切片可记），真实条目沿用 actualOld。
@@ -119,6 +119,7 @@ function getReplacementLineRange(lines: LineSpan[], replacement: TextReplacement
 }
 
 function applyReplacements(content: string, replacements: TextReplacement[], offset = 0): string {
+  // 前置条件：replacements 必须已按 matchIndex 升序排列（由唯一 owner applyEdits 在重叠门处原位排序）；
   // 从高 offset 到低 offset 写回，保证同一快照上的多 range 互不干扰
   let result = content
   for (let i = replacements.length - 1; i >= 0; i--) {
@@ -504,11 +505,14 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
     })
   }
 
-  // 重叠拒绝：所有 range（含 replaceAll 展开）在 reverse apply 前检查
-  const sorted = [...allRanges].sort((a, b) => a.matchIndex - b.matchIndex)
-  for (let i = 1; i < sorted.length; i++) {
-    const previous = sorted[i - 1]
-    const current = sorted[i]
+  // 重叠拒绝与写回共用同一份原位排序：applyReplacements 的"从高偏移写到低偏移"
+  // 只对按 matchIndex 升序的数组成立（与 preserve 分支内部排序、
+  // patch/index.ts applyChunks、pi 参照实现同一约定）；排序保证低偏移变长
+  // 替换不再使高偏移的记录偏移失效，乱序/交错提交给结果顺序不变性。
+  allRanges.sort((a, b) => a.matchIndex - b.matchIndex)
+  for (let i = 1; i < allRanges.length; i++) {
+    const previous = allRanges[i - 1]
+    const current = allRanges[i]
     if (previous.matchIndex + previous.matchLength > current.matchIndex) {
       throw new Error(
         `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. Merge them into one edit or target disjoint regions.`,
