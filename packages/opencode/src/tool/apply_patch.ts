@@ -6,9 +6,8 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { InstanceState } from "@/effect/instance-state"
 import { Patch } from "../patch"
-import { createTwoFilesPatch, diffLines } from "diff"
 import { assertExternalDirectoryEffect } from "./external-directory"
-import { trimDiff } from "./edit"
+import { renderFileDiff } from "./file-diff"
 import { LSP } from "@/lsp/lsp"
 // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
 import { LSPClient } from "@/lsp/client"
@@ -68,10 +67,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
       const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
       const next = Bom.split(newContent)
-      const diffOld = normalizeLineEndings(oldContent)
-      const diffNew = normalizeLineEndings(next.text)
-      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
-      const { additions, deletions } = countDiff(diffOld, diffNew)
+      // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
+      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
       // #518：add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
       // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
       return {
@@ -79,9 +76,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         oldContent,
         newContent: ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text,
         type: "add" as const,
-        diff,
-        additions,
-        deletions,
+        diff: rendered.patch,
+        additions: rendered.additions,
+        deletions: rendered.deletions,
         bom: next.bom,
         ending,
         expected: [snapshot],
@@ -119,11 +116,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         // #518：每个 parsed entry 保留 Patch owner 的定位边界；Tool 只丢弃 proposal，不运行第二套 matcher。
         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
       }
-      const diffOld = normalizeLineEndings(oldContent)
-      // #533：diff 与计数都来自单次派生的最终 content，与 commit 写盘观察同一份文本。
-      const diffNew = normalizeLineEndings(fileUpdate.content)
-      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
-      const { additions, deletions } = countDiff(diffOld, diffNew)
+      // 元数据 diff 走唯一有界 seam；正常路径产物与旧实现逐字节一致（INV-02）。
+      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
       // #518：expected 只包含 source；update 未声明 move 时不锁任何 destination 路径。
       const expected = [snapshot]
       if (movePath) {
@@ -141,9 +135,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         newContent: fileUpdate.content,
         type: movePath ? ("move" as const) : ("update" as const),
         movePath,
-        diff,
-        additions,
-        deletions,
+        diff: rendered.patch,
+        additions: rendered.additions,
+        deletions: rendered.deletions,
         bom: fileUpdate.bom,
         ending: detectLineEnding(oldContent),
         expected,
@@ -155,28 +149,16 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const snapshot = yield* Mutation.read(afs, group.filePath)
       if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
       const source = Bom.split(Mutation.decode(snapshot))
-      const diffOld = normalizeLineEndings(source.text)
-      const deleteDiff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, ""))
-      const { deletions } = countDiff(diffOld, "")
+      // delete 的全量语义保留：中小文件仍记录全文行 diff；只有二进制/超限中段换标记表示。
+      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(source.text), "")
       // #518：delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
-      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom, expected: [snapshot] }
+      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: rendered.patch, additions: rendered.additions, deletions: rendered.deletions, bom: source.bom, expected: [snapshot] }
     }
     default:
       // 未知 hunk 类型来自 parser 版本差异；拒绝而不是跳过，避免静默丢 hunk。
       return yield* Effect.fail(new Error(`Unknown hunk type: ${(first as { type: string }).type}`))
   }
 })
-
-function countDiff(oldContent: string, newContent: string) {
-  // #518：计数与展示用同一对归一后文本（#131），保证 additions/deletions 与用户看到的 diff 一致。
-  let additions = 0
-  let deletions = 0
-  for (const change of diffLines(oldContent, newContent)) {
-    if (change.added) additions += change.count || 0
-    if (change.removed) deletions += change.count || 0
-  }
-  return { additions, deletions }
-}
 
 function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
   // #533：Tool 只拥有 filesystem identity 与 mutation boundary；old block 语义继续下沉给 Patch owner。

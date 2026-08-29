@@ -125,6 +125,8 @@ describe("WriteTool", () => {
                   resource: "src/new.txt",
                   existed: false,
                   diff: expect.stringContaining("+created"),
+                  additions: 1,
+                  deletions: 0,
                 },
                 content: [{ type: "text", text: "Created file successfully: src/new.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety." }],
               },

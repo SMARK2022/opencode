@@ -108,6 +108,9 @@ describe("FileMutation", () => {
           expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFnew${ending}line${ending}`)
           const formatted = yield* files.writeTextPreservingBom({ target, content: "new\nline\n", format })
           expect(formatted.text).toBe(`formatted${ending}line${ending}`)
+          // 锁内最终diff和计数同源；物理EOL恢复不能造成全文件虚假增删。
+          expect(formatted.rendered).toMatchObject({ additions: 1, deletions: 1 })
+          expect(formatted.rendered?.patch).toBe(formatted.diff)
           expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
           const expected = yield* Effect.promise(() => fs.readFile(target.canonical))
           yield* files.writeIfUnchanged({ target, expected, content: "\uFEFFnew\nline\n", format })
@@ -119,6 +122,8 @@ describe("FileMutation", () => {
           expect(moved.text).toBe(`formatted${ending}line${ending}`)
           expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
           expect(moved.diff).toContain("-destination")
+          expect(moved.rendered).toMatchObject({ additions: 2, deletions: 1 })
+          expect(moved.rendered?.patch).toBe(moved.diff)
           expect(yield* Effect.promise(() => fs.access(target.canonical).then(() => true, () => false))).toBe(false)
         }
         const fresh = yield* mutation.resolve({ path: "new.txt" })

@@ -3,7 +3,7 @@ import * as path from "path"
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { renderFileDiff } from "./file-diff"
 import DESCRIPTION from "./edit.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
@@ -173,10 +173,8 @@ export const EditTool = Tool.define(
             const desiredBom = next.bom
             contentOld = ""
             contentNew = next.text
-            diff = trimDiff(
-              // #131：ask 元数据 diff 忽略纯行尾差异
-              createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
-            )
+            // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，ask 预览与最终 metadata 同界）。
+            diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
             yield* ctx.ask({
               permission: "edit",
               patterns: [path.relative(instance.worktree, filePath)],
@@ -261,14 +259,8 @@ export const EditTool = Tool.define(
               const desiredBom = source.bom || Bom.split(contentNew).bom
               contentNew = Bom.split(contentNew).text
 
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
-              )
+              // 预计算 diff 供权限预览；有界 seam 保证审批 metadata 不携带无界产物。
+              diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
 
               yield* ctx.ask({
                 permission: "edit",
@@ -325,28 +317,14 @@ export const EditTool = Tool.define(
 
           // 两分支都已同步 formatter 后的最终内容，回执与 metadata 因此共用同一 diff。
           // 权限请求仍使用各自 ask 前的预计算，不能拿成功后的真值替代审批预览。
-          diff = trimDiff(
-            createTwoFilesPatch(
-              filePath,
-              filePath,
-              normalizeLineEndings(contentOld),
-              normalizeLineEndings(contentNew),
-            ),
-          )
-          const diffOld = normalizeLineEndings(contentOld)
-          const diffNew = normalizeLineEndings(contentNew)
-          // #131：统计增删行时忽略行尾风格
-          let additions = 0
-          let deletions = 0
-          for (const change of diffLines(diffOld, diffNew)) {
-            if (change.added) additions += change.count || 0
-            if (change.removed) deletions += change.count || 0
-          }
+          // 元数据 diff 走唯一有界 seam，计数随产物单遍推导（删除原第二遍 diffLines，INV-08 单一权威）。
+          const rendered = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew))
+          diff = rendered.patch
           const filediff: Snapshot.FileDiff = {
             file: filePath,
-            patch: diff,
-            additions,
-            deletions,
+            patch: rendered.patch,
+            additions: rendered.additions,
+            deletions: rendered.deletions,
           }
 
           yield* ctx.metadata({

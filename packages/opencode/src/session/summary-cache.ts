@@ -11,6 +11,7 @@ import { MessageID, SessionID } from "./schema"
 import { Snapshot } from "@/snapshot"
 import type { MessageV2 } from "./message-v2"
 import { NotFoundError, Storage } from "@/storage/storage"
+import { boundMergedPatch } from "@/tool/file-diff"
 
 const isDiffs = Schema.is(Schema.Array(Snapshot.FileDiff))
 type Diffs = Snapshot.FileDiff[]
@@ -95,15 +96,24 @@ function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
   if (index === undefined) {
     // 新文件记录首次 index，后续增量在原位置更新以保持 UI 顺序。
     target.byFile.set(item.file, target.values.length)
-    target.values.push({ ...item })
+    // 首见同样受摄入界约束：单条 legacy 巨型 metadata 不能凭首见绕过（plan §16 切片 4 语义）。
+    target.values.push({ ...item, patch: boundMergedPatch(item.patch ?? "", item.additions, item.deletions) })
     return target.values.length - 1
   }
   const current = target.values[index]
   if (!current) throw new Error(`Summary diff merge index disappeared: ${item.file}`)
+  // 摄入界：逐轮拼接的 patch 超限时降级为事实标记，计数照常累加（INV-05）。这同时
+  // 免疫已入库的 legacy 巨型 tool metadata（事故：216MB user message 行）；后续轮次在
+  // 标记上继续拼接并重新检查，持久值上限 = MAX_MERGED_PATCH_CHARS + 单轮标记开销。
+  const mergedPatch = boundMergedPatch(
+    (current.patch ?? "") + (item.patch ?? ""),
+    current.additions + item.additions,
+    current.deletions + item.deletions,
+  )
   target.values[index] = {
     ...current,
-    // patch 字符串直接连接，保留 producer 原始转义和尾部换行。
-    patch: (current.patch ?? "") + (item.patch ?? ""),
+    // patch 字符串直接连接，保留 producer 原始转义和尾部换行；超限才降级。
+    patch: mergedPatch,
     // 计数直接相加，与首次全量 collect 保持同一 totals 口径。
     additions: current.additions + item.additions,
     deletions: current.deletions + item.deletions,

@@ -342,6 +342,46 @@ describe("EditTool", () => {
     ),
   )
 
+  it.live("bounds native structured diffs without changing file mutation", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        return withTool(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            // 同一公开settlement覆盖二进制与大中段，避免只测共享函数却遗漏原生调用点。
+            const cases = [
+              { before: "a\u0000b".repeat(24 * 1024), after: "x\u0000y".repeat(24 * 1024), marker: "Binary file", count: 0 },
+              {
+                before: Array.from({ length: 2200 }, (_, i) => `old ${i} ${"x".repeat(40)}\n`).join(""),
+                after: Array.from({ length: 2200 }, (_, i) => `new ${i} ${"y".repeat(40)}\n`).join(""),
+                marker: "whole-file rewrite",
+                count: 2200,
+              },
+            ]
+            for (const [index, item] of cases.entries()) {
+              const name = `bounded-${index}.txt`
+              const target = path.join(tmp.path, name)
+              yield* Effect.promise(() => fs.writeFile(target, item.before))
+              const settled = yield* settleTool(registry, call({ path: name, oldString: item.before, newString: item.after }, `bounded-${index}`))
+              expect(settled.result.type).toBe("text")
+              // 独立字面量锁定中段计数；表示降级不能变成写盘截断或丢失文件归属。
+              const output = Schema.decodeUnknownSync(EditTool.Output)(settled.output?.structured)
+              // Bun1.3.14的非对称matcher会改写匹配对象，必须先检查原始字符串长度。
+              expect(output.files[0]?.patch?.length).toBeLessThan(64 * 1024)
+              expect(output).toMatchObject({ files: [{ file: name, status: "modified", additions: item.count, deletions: item.count, patch: expect.stringContaining(item.marker) }] })
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(item.after)
+            }
+            expect(writes).toHaveLength(2)
+          }),
+          [...toolHistory("bounded-0.txt"), ...toolHistory("bounded-1.txt")],
+        )
+      },
+      // 文件与托管输出都使用现成fixture/scope释放，不创建独立应用或daemon。
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("accepts an absolute file path inside the active Location", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

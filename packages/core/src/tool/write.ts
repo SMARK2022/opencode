@@ -35,6 +35,9 @@ export const Output = Schema.Struct({
   existed: Schema.Boolean,
   // canonical编码保留覆写diff，供TUI消费；模型成功正文保持原契约。
   diff: Schema.optionalKey(Schema.String),
+  // rewrite标记不含增删行，显式计数必须穿过真实工具codec供摘要消费。
+  additions: Schema.optionalKey(Schema.Number),
+  deletions: Schema.optionalKey(Schema.Number),
   formattedDiff: Schema.optionalKey(Schema.String),
   formattedContent: Schema.optionalKey(Schema.String),
 })
@@ -101,7 +104,8 @@ const layer = Layer.effectDiscard(
                   agent: context.agent,
                   source,
                 })
-                return yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
+                const result = yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
+                return { ...result, ...(result.rendered ? { additions: result.rendered.additions, deletions: result.rendered.deletions } : {}) }
               }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to write ${input.path}` }))),
           }),
           "edit",
