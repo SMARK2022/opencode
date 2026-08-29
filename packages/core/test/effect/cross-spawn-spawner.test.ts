@@ -197,7 +197,9 @@ describe("cross-spawn spawner", () => {
     fx.effect(
       "captures stdout via .all when no stderr",
       Effect.gen(function* () {
-        const handle = yield* ChildProcess.make("echo", ["hello from stdout"])
+        // js() 写手替代 echo：Windows 无 echo.exe，cross-spawn 回退 cmd 包装会对
+        // 参数加引号，输出含字面引号使断言平台分叉；node 写 stdout 字节确定。
+        const handle = yield* js('process.stdout.write("hello from stdout")')
         const all = yield* decodeByteStream(handle.all)
         expect(all).toBe("hello from stdout")
       }),
@@ -210,6 +212,25 @@ describe("cross-spawn spawner", () => {
         const all = yield* decodeByteStream(handle.all)
         expect(all).toBe("hello from stderr")
       }),
+    )
+  })
+
+  describe("output retention across subscription timing", () => {
+    // INV-01：快退写手 + exit 后订阅是「写入↔订阅」窗口的最对抗性排序；
+    // 惰性订阅下该形态实测确定性丢失输出（Windows 10/10、macOS CI basic 红），
+    // 急切缓冲后必须完整保留。fx.live（实时钟）+ 显式 30s 预算：
+    // packages/core 裸跑无 canonical --timeout，循环 10 次实测 ~2.5s，
+    // 5s 默认仅 2 倍余量。
+    fx.live(
+      "retains fast-exit stdout when subscription happens after exit",
+      Effect.gen(function* () {
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const handle = yield* js(`process.stdout.write('instant-${attempt}')`)
+          yield* handle.exitCode
+          expect(yield* decodeByteStream(handle.stdout)).toBe(`instant-${attempt}`)
+        }
+      }),
+      30_000,
     )
   })
 

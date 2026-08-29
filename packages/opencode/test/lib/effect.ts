@@ -24,6 +24,12 @@ function instanceArgs(
 
 const body = <A, E, R>(value: Body<A, E, R>) => Effect.suspend(() => (typeof value === "function" ? value() : value))
 
+// 集成级（真实 fs/git/HTTP/socket，live/instance 注册）测试的默认 bun 预算，
+// 与 canonical runner（package.json `bun test --timeout 30000` 与 test-ci.ts）
+// 一字不差：超时契约内化到注册 seam，裸 bun test / IDE 调用不再落回 5s 默认值，
+// 把"主机慢"误判为行为失败。显式传入的 number | TestOptions 优先于该默认。
+const defaultLiveTimeout = { timeout: 30_000 } as const
+
 const run = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) =>
   Effect.gen(function* () {
     const exit = yield* body(value).pipe(Effect.scoped, Effect.provide(layer), Effect.exit)
@@ -46,10 +52,10 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>) 
     test.skip(name, () => run(value, testLayer), opts)
 
   const live = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test(name, () => run(value, liveLayer), opts)
+    test(name, () => run(value, liveLayer), opts ?? defaultLiveTimeout)
 
   live.only = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test.only(name, () => run(value, liveLayer), opts)
+    test.only(name, () => run(value, liveLayer), opts ?? defaultLiveTimeout)
 
   live.skip = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
     test.skip(name, () => run(value, liveLayer), opts)
@@ -64,7 +70,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>) 
     return test(
       name,
       () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
-      args.testOptions,
+      args.testOptions ?? defaultLiveTimeout,
     )
   }
 
@@ -78,7 +84,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>) 
     return test.only(
       name,
       () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
-      args.testOptions,
+      args.testOptions ?? defaultLiveTimeout,
     )
   }
 

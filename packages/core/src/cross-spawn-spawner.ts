@@ -243,15 +243,29 @@ export const make = Effect.gen(function* () {
     out: ChildProcess.StdoutConfig,
     err: ChildProcess.StderrConfig,
   ) => {
-    let stdout = proc.stdout
+    // 急切缓冲（写入与订阅时序解耦）：spawn 建柄后立即把主 stdout/stderr pipe 进
+    // PassThrough（与下方 extra-fd 输出同款模式）。惰性 fromReadable 下快退子进程
+    // 在订阅前写入并退出会丢管道数据（macOS CI shell basic 红 + Windows 10/10
+    // 探针复现）；立即 pipe 让读取端自 spawn 时刻持有数据，订阅延迟只推迟消费
+    // 时刻、不再影响输出保真。
+    const tapOutput = (node: NodeChildProcess.ChildProcess["stdout"]) => {
+      if (!node) return
+      const tap = new PassThrough()
+      node.on("error", (cause) => tap.destroy(toError(cause)))
+      node.pipe(tap)
+      return tap
+    }
+    const tapOut = tapOutput(proc.stdout)
+    const tapErr = tapOutput(proc.stderr)
+    let stdout = tapOut
       ? NodeStream.fromReadable({
-          evaluate: () => proc.stdout!,
+          evaluate: () => tapOut,
           onError: (cause) => toPlatformError("fromReadable(stdout)", toError(cause), command),
         })
       : Stream.empty
-    let stderr = proc.stderr
+    let stderr = tapErr
       ? NodeStream.fromReadable({
-          evaluate: () => proc.stderr!,
+          evaluate: () => tapErr,
           onError: (cause) => toPlatformError("fromReadable(stderr)", toError(cause), command),
         })
       : Stream.empty

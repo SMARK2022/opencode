@@ -82,6 +82,13 @@ const ref = {
   modelID: ModelID.make("test-model"),
 }
 const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
+// 负载敏感集成用例的平台化预算（先例：shortSessionTimeout 与 shell.test.ts timeoutMs）：
+// 本机退化态实测 pwsh 冷启 + fsmonitor 后台占用使固定 10s/15s/5s 预算顶格（对照实验
+// 证明与代码版本无关）；预算只放宽等待时长，不改变任何断言。内层 wait 预算必须
+// 严格小于所属用例的注册硬顶（reviewPollBudget < heavyLoopBudget，两平台均成立）。
+const heavyLoopBudget = process.platform === "win32" ? 30_000 : 12_000
+const reviewPollBudget = process.platform === "win32" ? "12 seconds" : "5 seconds"
+const snapshotMatrixBudget = process.platform === "win32" ? 90_000 : 40_000
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
 const twoFrameGif = "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs="
 
@@ -1127,7 +1134,13 @@ dynamicSurfaces.instance(
       yield* llm.push(
         reply().wait(gate.promise).tool("read", { filePath: file }).item(),
         reply()
-          .tool("bash", { command: `printf allowed > ${JSON.stringify(bashFile)}`, description: "fresh permission" })
+          // 跨平台写盘：单引号字面量在 POSIX sh 与 pwsh 下语义一致；bun 在测试进程
+          // PATH 内（shortShellDelayCommand 先例）；Bun.write 接受正斜杠 Windows 路径，
+          // 规避 printf 仅 POSIX 的平台分叉。
+          .tool("bash", {
+            command: `bun -e 'await Bun.write(${JSON.stringify(bashFile.replaceAll("\\", "/"))}, "allowed")'`,
+            description: "fresh permission",
+          })
           .item(),
         reply().text("after queue").stop().item(),
       )
@@ -2315,6 +2328,7 @@ it.instance(
           if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
         }),
         "shell auto review never started",
+        reviewPollBudget,
       )
       const reviewID = reviewing.state.status === "running" ? reviewing.state.metadata?.autoReview?.reviewID : undefined
       expect(typeof reviewID).toBe("string")
@@ -2323,6 +2337,7 @@ it.instance(
           return (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
         }),
         "reviewer child session never started",
+        reviewPollBudget,
       )
       yield* pollWithTimeout(
         Effect.gen(function* () {
@@ -2332,11 +2347,12 @@ it.instance(
           )
         }),
         "reviewer child assistant never started",
+        reviewPollBudget,
       )
 
       yield* prompt.cancel(chat.id)
       gate.resolve()
-      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
+      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", reviewPollBudget).pipe(Effect.ignore)
 
       const shell = yield* pollWithTimeout(
         Effect.gen(function* () {
@@ -2346,6 +2362,7 @@ it.instance(
           return part?.state.status === "error" ? part : undefined
         }),
         "shell tool never recorded the review cancellation",
+        reviewPollBudget,
       )
       expect(shell.state.status).toBe("error")
       if (shell.state.status !== "error") return
@@ -2366,6 +2383,7 @@ it.instance(
           return assistants.every((msg) => msg.info.time.completed) ? messages : undefined
         }),
         "reviewer child assistant remained active after cancellation",
+        reviewPollBudget,
       )
       const reviewerParts = reviewerMessages.flatMap((msg) => msg.parts)
       expect(
@@ -2382,7 +2400,8 @@ it.instance(
       ).toBe(false)
     }),
   { git: true },
-  15_000,
+  // 注册硬顶与体内 reviewPollBudget 保持连贯（内层严格小于外层，两平台均成立）。
+  heavyLoopBudget,
 )
 
 it.instance(
@@ -3746,6 +3765,8 @@ observed.instance(
       expect(yield* Effect.promise(() => Bun.file(declaredFile).exists())).toBe(false)
     }),
   { git: true },
+  // 该用例含 3 个会话多轮 loop + git snapshot/revert，是最重用例；平台化预算给足余量。
+  snapshotMatrixBudget,
 )
 
 it.instance(
@@ -4057,8 +4078,9 @@ it.instance(
       expect(lspDirectories.slice(offset)).toEqual([target])
     }),
   { git: true },
-  // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
-  10_000,
+  // shell 进程与测试 LLM 首次请求都有冷启动开销；平台化预算兼顾负载余量与死锁
+  // 检测时延（win32 30s / 其余 12s），断言与并发语义不变。
+  heavyLoopBudget,
 )
 
 it.instance(
@@ -4098,7 +4120,7 @@ it.instance(
     }),
   { git: true },
   // 该用例断言两个 loop 调用共享 shell 完成后的同一次结果；放宽预算不改变并发语义断言。
-  10_000,
+  heavyLoopBudget,
 )
 
 unix(
