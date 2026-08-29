@@ -123,6 +123,10 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
 // #315：短会话用例在 Windows CI 上冷启动开销大；win32 放宽到 15s，其他平台保持 3s 快速反馈。
 const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
 
+// 审查取消的内层观察保留平台余量，所属用例显式设置 Windows 30s / 其他平台 15s 硬顶。
+// 已有队列 30s 与 Snapshot 120s 不收紧，单次等待小于硬顶也不代表顺序等待总量必然满足。
+const reviewPollBudget = process.platform === "win32" ? "12 seconds" : "5 seconds"
+
 function shortShellDelayCommand() {
   // Windows 的默认 shell 会把 `sleep 0.2` 解析成 PowerShell 命令，CI 冷启动时足以吃掉 3s 用例预算。
   // 这里使用测试进程已依赖的 PATH 内 `bun` 执行短延迟脚本，避免 PowerShell 对引号路径需要 `&` 的差异。
@@ -2950,6 +2954,8 @@ it.instance(
           if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
         }),
         "shell auto review never started",
+        // #590：平台化内层预算，严格小于注册硬顶（win32 12s<30s / 其余 5s<15s）。
+        reviewPollBudget,
       )
       const reviewID = reviewing.state.status === "running" ? reviewing.state.metadata?.autoReview?.reviewID : undefined
       expect(typeof reviewID).toBe("string")
@@ -2959,6 +2965,7 @@ it.instance(
           return (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
         }),
         "reviewer child session never started",
+        reviewPollBudget,
       )
       yield* pollWithTimeout(
         Effect.gen(function* () {
@@ -2968,12 +2975,13 @@ it.instance(
           )
         }),
         "reviewer child assistant never started",
+        reviewPollBudget,
       )
 
-      // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
+      // 取消完成后才释放 reviewer 回复，验证迟到决定不能落盘。
       yield* prompt.cancel(chat.id)
       gate.resolve()
-      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
+      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", reviewPollBudget).pipe(Effect.ignore)
 
       const shell = yield* pollWithTimeout(
         Effect.gen(function* () {
@@ -2983,6 +2991,7 @@ it.instance(
           return part?.state.status === "error" ? part : undefined
         }),
         "shell tool never recorded the review cancellation",
+        reviewPollBudget,
       )
       expect(shell.state.status).toBe("error")
       if (shell.state.status !== "error") return
@@ -3004,6 +3013,7 @@ it.instance(
           return assistants.every((msg) => msg.info.time.completed) ? messages : undefined
         }),
         "reviewer child assistant remained active after cancellation",
+        reviewPollBudget,
       )
       const reviewerParts = reviewerMessages.flatMap((msg) => msg.parts)
       // #216：reviewer 的 permission_review_decision 不得在 cancel 后完成——中止须阻止延迟到达的审查决策
@@ -3022,7 +3032,8 @@ it.instance(
       ).toBe(false)
     }),
   { git: true },
-  15_000,
+  // 显式注册预算不会被默认 live/instance 预算覆盖；仅为本取消用例保留平台余量。
+  process.platform === "win32" ? 30_000 : 15_000,
 )
 
 it.instance("failed subtask preserves metadata on error tool state", () =>

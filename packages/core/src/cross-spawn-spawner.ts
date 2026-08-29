@@ -245,15 +245,26 @@ export const make = Effect.gen(function* () {
     out: ChildProcess.StdoutConfig,
     err: ChildProcess.StderrConfig,
   ) => {
-    let stdout = proc.stdout
+    // 与 extra-fd 相同，建柄时立即接入 PassThrough，保留快退写手在订阅前的输出字节。
+    // tap 仍受背压约束；不承诺 chunk 划分、跨 fd 全序或大输出未消费仍能等待退出。
+    const tapOutput = (node: NodeChildProcess.ChildProcess["stdout"]) => {
+      if (!node) return
+      const tap = new PassThrough()
+      node.on("error", (cause) => tap.destroy(toError(cause)))
+      node.pipe(tap)
+      return tap
+    }
+    const tapOut = tapOutput(proc.stdout)
+    const tapErr = tapOutput(proc.stderr)
+    let stdout = tapOut
       ? NodeStream.fromReadable({
-          evaluate: () => proc.stdout!,
+          evaluate: () => tapOut,
           onError: (cause) => toPlatformError("fromReadable(stdout)", toError(cause), command),
         })
       : Stream.empty
-    let stderr = proc.stderr
+    let stderr = tapErr
       ? NodeStream.fromReadable({
-          evaluate: () => proc.stderr!,
+          evaluate: () => tapErr,
           onError: (cause) => toPlatformError("fromReadable(stderr)", toError(cause), command),
         })
       : Stream.empty

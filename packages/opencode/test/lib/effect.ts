@@ -32,6 +32,10 @@ function instanceArgs<E, R>(
 
 const body = <A, E, R>(value: Body<A, E, R>) => Effect.suspend(() => (typeof value === "function" ? value() : value))
 
+// live/instance 的裸调用沿 canonical runner 使用 30s，避免 IDE 默认为 5s 产生负载假失败。
+// 显式 number/TestOptions 整体优先；不重定义 TestClock、skip 或 shared memoMap 的执行方式。
+const defaultLiveTimeout = { timeout: 30_000 } as const
+
 type Runner = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) => Promise<A>
 
 const isolatedRun: Runner = (value, layer) =>
@@ -74,10 +78,10 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>, 
     test.skip(name, () => run(value, testLayer), opts)
 
   const live = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test(name, () => run(value, liveLayer), opts)
+    test(name, () => run(value, liveLayer), opts ?? defaultLiveTimeout)
 
   live.only = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
-    test.only(name, () => run(value, liveLayer), opts)
+    test.only(name, () => run(value, liveLayer), opts ?? defaultLiveTimeout)
 
   live.skip = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
     test.skip(name, () => run(value, liveLayer), opts)
@@ -92,7 +96,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>, 
     return test(
       name,
       () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
-      args.testOptions,
+      args.testOptions ?? defaultLiveTimeout,
     )
   }
 
@@ -106,7 +110,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>, 
     return test.only(
       name,
       () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
-      args.testOptions,
+      args.testOptions ?? defaultLiveTimeout,
     )
   }
 

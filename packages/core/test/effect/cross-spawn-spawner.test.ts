@@ -215,6 +215,29 @@ describe("cross-spawn spawner", () => {
     )
   })
 
+  describe("output retention across subscription timing", () => {
+    // 只运行百字节级自然退出写手，先观察退出再消费，两条 fd 分别验证首尾空白与 CR/LF。
+    // 局部收集原始字节，不让现有 trim 解码 helper 掩盖输出损失，也不放大全量输出背压主张。
+    fx.live(
+      "retains fast-exit stdout and stderr bytes when subscription happens after exit",
+      Effect.gen(function* () {
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const stdout = ` \r\ninstant-${attempt} 中\t\nend \r`
+          const stderr = `\t err-${attempt}\r\n `
+          const handle = yield* ChildProcess.make(process.execPath, ["-e",
+            `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)})`,
+          ])
+          expect(yield* handle.exitCode).toBe(ChildProcessSpawner.ExitCode(0))
+          const out = yield* Stream.runCollect(handle.stdout)
+          const err = yield* Stream.runCollect(handle.stderr)
+          expect(Buffer.concat(out)).toEqual(Buffer.from(stdout))
+          expect(Buffer.concat(err)).toEqual(Buffer.from(stderr))
+        }
+      }),
+      30_000,
+    )
+  })
+
   describe("stdin", () => {
     fx.effect(
       "allows providing standard input to a command",
