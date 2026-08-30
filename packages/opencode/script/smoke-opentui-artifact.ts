@@ -121,6 +121,9 @@ if (process.platform === "win32" && !rootReport) {
 }
 
 const objective = "检查log，请你自行独立完整完成相应的调研与检查，并进行多轮的负载并发、高压"
+// 尾部标记与 objective（上行）同源：三处 goal-frame waitFor 谓词必须同时要求该标记，
+// 只等首个"检查log"会被增量渲染的中间帧满足（部分帧缺第二个"查"，assertFrame 必红）。
+const objectiveTail = "高压"
 const spinnerGlyphs = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⋯"]
 // objective直接复用Goal API的green literal，测试验证的是最终生产字符串而不是缩短后的样例。
 // 两个“查”必须在source和headless frame中数量一致，才能观察到wide glyph跨行重复。
@@ -468,8 +471,9 @@ try {
     () => {
       // 轮询cell frame而不是raw ANSI，因为同一glyph可能在增量diff中被多次擦写。
       // 只有最终viewport能回答用户观察到的重复、错位和replacement character问题。
+      // settle：同时要求 objective 尾部标记，确保增量渲染已完成全段后再交给 assertFrame。
       const frame = capture(terminal)
-      if (!frame.includes("Goal") || !frame.includes("检查log")) return
+      if (!frame.includes("Goal") || !frame.includes("检查log") || !frame.includes(objectiveTail)) return
       return frame
     },
     "compiled TUI never rendered the Goal sidebar",
@@ -488,8 +492,9 @@ try {
   console.error(`[opentui-smoke] ${stage}`)
   const resized = await waitFor(() => {
     // resize完成条件仍要求完整Goal文字，单纯收到SIGWINCH或任意新frame都不足以通过。
+    // settle：尾部标记防止resize后的部分重绘帧提前满足条件。
     const frame = capture(terminal)
-    if (!frame.includes("Goal") || !frame.includes("检查log")) return
+    if (!frame.includes("Goal") || !frame.includes("检查log") || !frame.includes(objectiveTail)) return
     return frame
   }, "compiled TUI did not render Goal after resize")
   assertFrame(resized, "resized")
@@ -500,7 +505,8 @@ try {
   console.error(`[opentui-smoke] ${stage}`)
   const restored = await waitFor(() => {
     const frame = capture(terminal)
-    if (!frame.includes("Goal") || !frame.includes("检查log")) return
+    // settle：恢复尺寸同样要求尾部标记，三处谓词一致才不会在恢复阶段重放闪红。
+    if (!frame.includes("Goal") || !frame.includes("检查log") || !frame.includes(objectiveTail)) return
     return frame
   }, "compiled TUI did not render Goal after restoring size")
   // 恢复尺寸后重新取frame，不能复用窄尺寸的旧字符串作为resize green证据。
