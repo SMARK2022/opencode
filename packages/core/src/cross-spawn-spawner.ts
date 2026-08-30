@@ -281,16 +281,22 @@ export const make = Effect.gen(function* () {
       const proc = launch(command.command, command.args, opts)
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
+      // 生命周期按进程死亡完成，不能等待背压下未排干的stdio；kill/exitCode/finalizer共用此信号。
+      // close仍进入同一个幂等闭包，exit完成后不再重复结算，输出tap继续由原owner排干。
+      const completeSignal = (args: readonly [code: number | null, signal: NodeJS.Signals | null]) => {
+        if (end) return
+        end = true
+        Deferred.doneUnsafe(signal, Exit.succeed(args))
+      }
       proc.on("error", (err) => {
         resume(Effect.fail(toPlatformError("spawn", err, command)))
       })
       proc.on("exit", (...args) => {
         exit = args
+        completeSignal(args)
       })
       proc.on("close", (...args) => {
-        if (end) return
-        end = true
-        Deferred.doneUnsafe(signal, Exit.succeed(exit ?? args))
+        completeSignal(exit ?? args)
       })
       proc.on("spawn", () => {
         resume(Effect.succeed([proc, signal]))
