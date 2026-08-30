@@ -251,7 +251,12 @@ describe("Ripgrep", () => {
       Effect.promise(() => tmpdir()),
       (tmp) =>
         Effect.gen(function* () {
-          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "large.txt"), "x".repeat(4 * 1024 * 1024)))
+          // source的32MiB语料仍出现1ms内完成；目标原4MiB更弱，扩为512×1MiB保留真实超时断言。
+          // 512不越5000候选上限，但仍会预扫；扩容增加扫描成本，不承诺定时器绝无迟调度。
+          const chunk = `${"x".repeat(63)}\n`.repeat(16 * 1024)
+          for (let i = 0; i < 512; i++) {
+            yield* Effect.promise(() => Bun.write(path.join(tmp.path, `large-${i}.txt`), chunk))
+          }
 
           const result = yield* (yield* Ripgrep.Service).search({
             cwd: tmp.path,
