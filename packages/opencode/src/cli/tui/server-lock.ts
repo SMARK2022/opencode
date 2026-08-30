@@ -351,12 +351,17 @@ export async function reconcileMaintenanceTask(taskID: string, dbPath = Database
     return task
   }
 
+  // 正常完成先写terminal checkpoint再释放lease；重读避免首读running覆写刚提交的终态。
+  // 崩溃或checkpoint失败仍可能无终态，仅把重读后仍活跃的最新副本降级，保留其cursor/计数。
+  const settled = await readMaintenanceTask(taskID, dbPath)
+  if (!settled || (settled.status !== "queued" && settled.status !== "running")) return settled
+
   // queued/running 只在持有 maintenance lease 时成立；owner 消失或 pid 已死亡时，
   // 已提交批次由 cursor 保留，状态降为 interrupted 后才能安全 resume。
-  task.status = "interrupted"
-  task.updatedAt = Date.now()
-  await writeMaintenanceTask(task)
-  return task
+  settled.status = "interrupted"
+  settled.updatedAt = Date.now()
+  await writeMaintenanceTask(settled)
+  return settled
 }
 
 // 同一 DB 只允许一个 nonterminal task；多个 record 代表外部复制/损坏，必须由用户先检查而非任意挑选。
