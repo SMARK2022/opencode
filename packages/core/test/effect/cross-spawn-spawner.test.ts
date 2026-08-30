@@ -234,6 +234,41 @@ describe("cross-spawn spawner", () => {
     )
   })
 
+  describe("exit signal decoupled from stdio drain", () => {
+    // INV-06：消费者停止读取且输出超过 tap 缓冲时，kill 后 'close'（= exit + stdio 排干）
+    // 不会到来；kill/exitCode/scope finalizer 必须由进程死亡（'exit'）驱动、有界完成。
+    // INV-07：exit 完成后 tap 缓冲仍可读取开头字节——保真语义不回归。
+    // 显式 20s 预算：修复前该形态确定性挂死（scope finalizer 同源等待），
+    // 预算把挂死转化为可诊断的红而不是冻结运行器。
+    fx.live(
+      "resolves kill and exitCode when backpressured output is never drained",
+      Effect.gen(function* () {
+        const handle = yield* js('process.stdout.write("x".repeat(200_000)); process.stdout.write("y".repeat(200_000))')
+        yield* Effect.sleep(500)
+        yield* handle.kill().pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () => Effect.fail(new Error("kill did not resolve after process death")),
+          }),
+          Effect.orDie,
+        )
+        const chunks: string[] = []
+        yield* Stream.runForEach(Stream.decodeText(handle.stdout), (bytes) =>
+          Effect.sync(() => {
+            chunks.push(bytes.toString())
+          }),
+        ).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () => Effect.fail(new Error("stdout did not end after exit")),
+          }),
+        )
+        expect(chunks.join("")).toContain("x")
+      }),
+      20_000,
+    )
+  })
+
   describe("stdin", () => {
     fx.effect(
       "allows providing standard input to a command",

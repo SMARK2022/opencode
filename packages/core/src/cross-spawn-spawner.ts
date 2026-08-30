@@ -282,16 +282,24 @@ export const make = Effect.gen(function* () {
       const proc = launch(command.command, command.args, opts)
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
+      // exit 信号与 stdio 排干解耦（INV-06）：'close' 要等输出流读完，而 tap 背压下
+      // 消费者提前停止会使流暂停在数据中段、'close' 永不触发——kill/exitCode/scope
+      // finalizer 三处 await 将无限挂起。进程死亡（'exit'）即完成信号；'close' 兜底
+      // 经同一幂等闭包，仅在 exit 缺席时生效，exit 后到达为 no-op。
+      const completeSignal = (args: readonly [code: number | null, signal: NodeJS.Signals | null]) => {
+        if (end) return
+        end = true
+        Deferred.doneUnsafe(signal, Exit.succeed(args))
+      }
       proc.on("error", (err) => {
         resume(Effect.fail(toPlatformError("spawn", err, command)))
       })
       proc.on("exit", (...args) => {
         exit = args
+        completeSignal(args)
       })
       proc.on("close", (...args) => {
-        if (end) return
-        end = true
-        Deferred.doneUnsafe(signal, Exit.succeed(exit ?? args))
+        completeSignal(exit ?? args)
       })
       proc.on("spawn", () => {
         resume(Effect.succeed([proc, signal]))
