@@ -298,12 +298,19 @@ export async function reconcileMaintenanceTask(taskID: string, dbPath = Database
     return task
   }
 
+  // owner 缺失/死亡只证明此刻无 live lease；runner 的 terminal checkpoint 严格早于
+  // lease release（同进程顺序 await），owner 消失 ⇒ completed/failed 已持久可见。
+  // 重读避免把首读与 owner 检查之间落地的 terminal 状态覆写成 interrupted——
+  // 空库快完成任务的毫秒级 straddle 竞态曾以 ~17-30% 概率摧毁 Linux CLI 观察者。
+  const settled = await readMaintenanceTask(taskID, dbPath)
+  if (!settled || (settled.status !== "queued" && settled.status !== "running")) return settled
+
   // queued/running 只在持有 maintenance lease 时成立；owner 消失或 pid 已死亡时，
   // 已提交批次由 cursor 保留，状态降为 interrupted 后才能安全 resume。
-  task.status = "interrupted"
-  task.updatedAt = Date.now()
-  await writeMaintenanceTask(task)
-  return task
+  settled.status = "interrupted"
+  settled.updatedAt = Date.now()
+  await writeMaintenanceTask(settled)
+  return settled
 }
 
 // 同一 DB 只允许一个 nonterminal task；多个 record 代表外部复制/损坏，必须由用户先检查而非任意挑选。

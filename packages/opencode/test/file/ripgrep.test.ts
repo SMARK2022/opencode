@@ -335,7 +335,13 @@ describe("file.ripgrep", () => {
         Effect.gen(function* () {
           // 真实 rg 进程需要足够大的输入才能稳定越过 1ms 预算；该测试验证公开
           // Ripgrep.search 行为，不断言内部 kill 调用形状，避免和进程实现耦合。
-          yield* write(path.join(dir, "large.txt"), "x".repeat(32 * 1024 * 1024))
+          // 512×1MB：32MB 单文件在 Apple Silicon memmem 吞吐下可 <1ms 扫完（CI 实测
+          // timedOut=undefined）；512MB 即使按 100GB/s 理论上限也 ≥5ms，且 512 <
+          // MAX_SEARCH_FILES=5000，不会触发 broad-scope 预过滤。
+          const chunk = `${"x".repeat(63)}\n`.repeat(16 * 1024)
+          for (let i = 0; i < 512; i++) {
+            yield* write(path.join(dir, `large-${i}.txt`), chunk)
+          }
         }),
       )
 
