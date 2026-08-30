@@ -238,6 +238,42 @@ describe("cross-spawn spawner", () => {
     )
   })
 
+  describe("exit signal decoupled from stdio drain", () => {
+    // 大输出无人消费形成背压，杀掉本测试写手后生命周期必须完成，不能等close排干。
+    // 20s是测试预算，不能强制释放旧态finalizer；只在已修复后态运行此用例。
+    fx.live(
+      "resolves kill and exitCode when backpressured output is never drained",
+      Effect.gen(function* () {
+        const handle = yield* js('process.stdout.write("x".repeat(200_000)); process.stdout.write("y".repeat(200_000))')
+        yield* Effect.sleep(500)
+        yield* handle.kill().pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () => Effect.fail(new Error("kill did not resolve after process death")),
+          }),
+          Effect.orDie,
+        )
+        // 信号退出可为typed错误，Windows可为数值码；两者都必须在排干前结算而非挂起。
+        yield* Effect.exit(handle.exitCode)
+        expect(yield* handle.isRunning).toBe(false)
+        // 退出信号不能销毁保留的tap，随后仍应读到写手的前部数据。
+        const chunks: string[] = []
+        yield* Stream.runForEach(Stream.decodeText(handle.stdout), (bytes) =>
+          Effect.sync(() => {
+            chunks.push(bytes.toString())
+          }),
+        ).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () => Effect.fail(new Error("stdout did not end after exit")),
+          }),
+        )
+        expect(chunks.join("")).toContain("x")
+      }),
+      20_000,
+    )
+  })
+
   describe("stdin", () => {
     fx.effect(
       "allows providing standard input to a command",
