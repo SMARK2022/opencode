@@ -471,7 +471,9 @@ export function Session() {
       editor.reconnect(result.data.directory)
       await sync.session.sync(sessionID)
       // #551：会话打开滚动统一入口——锚点优先，否则贴底。
-      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
+      // 594：路径 A 是同会话 sync 完成后的补滚，必须尊重用户已滚离位置（INV-05）；
+      // 首次mount由stickyStart初始化，sync完成后才由带守卫的路径A补滚。
+      if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)
     })().catch((error) => {
       if (route.sessionID !== sessionID) return
       toast.show({
@@ -615,11 +617,14 @@ export function Session() {
 
   // #551：会话打开的唯一滚动语义——reviewID 锚点定位到对应 reviewer 返回消息，
   // 无锚点才贴底；defer 50ms 与 toBottom 同拍，防止旧 toBottom 定时器覆盖锚点。
-  function applySessionOpenScroll() {
+  function applySessionOpenScroll(respectUserScroll = false) {
     if (!scroll || scroll.isDestroyed) return
+    // 594：贴底前按调用者意图检查——补滚不得覆盖用户已滚离位置（INV-05）；
+    // reviewID 锚点 scrollBy 不经此守卫，导航锚点定位语义保持不变。
+    const pinAllowed = () => !respectUserScroll || untrack(viewportStuckToBottom)
     const reviewID = route.reviewID
     if (!reviewID) {
-      scroll.scrollTo(scroll.scrollHeight)
+      if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
       return
     }
     const target = resolveReviewAnchorMessageID(
@@ -629,18 +634,18 @@ export function Session() {
     )
     if (!target) {
       // 锚点 miss（300 条窗口裁剪或消息尚未同步）退化为贴底，不阻断导航。
-      scroll.scrollTo(scroll.scrollHeight)
+      if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
       return
     }
     const child = scroll.getChildren().find((c) => c.id === target)
     if (child) scroll.scrollBy(child.y - scroll.y - 1)
-    else scroll.scrollTo(scroll.scrollHeight)
+    else if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
   }
 
-  function scheduleSessionOpenScroll() {
+  function scheduleSessionOpenScroll(respectUserScroll = false) {
     setTimeout(() => {
       if (!scroll || scroll.isDestroyed) return
-      applySessionOpenScroll()
+      applySessionOpenScroll(respectUserScroll)
     }, 50)
   }
 
@@ -1346,7 +1351,9 @@ export function Session() {
 
   // snap to bottom when session changes
   // #551：会话/reviewID 变化统一走 session-open 滚动——reviewID 存在时锚点优先于贴底。
-  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))
+  // 594：defer 跳过 mount 发射——mount 不是导航，mount 期贴底由 stickyStart 初始位置
+  // 与守卫后的路径 A 承担；dep 变化（真实导航/锚点）仍无条件贴底或锚定（INV-03/04）。
+  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), () => scheduleSessionOpenScroll(), { defer: true }))
 
   return (
     <LocationProvider location={location()}>
