@@ -21,7 +21,8 @@ import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
 import { LocalProvider } from "../../../../src/cli/cmd/tui/context/local"
 import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
 import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
-import { RouteProvider } from "../../../../src/cli/cmd/tui/context/route"
+import { RouteProvider, useRoute } from "../../../../src/cli/cmd/tui/context/route"
+import type { RouteContext } from "../../../../src/cli/cmd/tui/context/route"
 import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
 import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
@@ -1457,10 +1458,9 @@ test("session keeps latest streamed content reachable via session.last after scr
 
       // 越过单行容忍带（4 次 ctrl+alt+y）：viewportStuckToBottom=false；
       // 恒定 culling 下用户滚离后不得被系统强拉回底部（INV-04 前半）。
+      // 滚动位移分帧收敛：等待“尾部离屏”这一已发布信号，立帧捕获会在贴底中间帧上误断言。
       for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
-      await app.renderOnce()
-      const afterScroll = rows(app.captureCharFrame())
-      expect(afterScroll.some((line) => line.includes("OLD_CULL_TAIL"))).toBe(false)
+      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("OLD_CULL_TAIL")))
 
       emit(
         partDeltaEvent(
@@ -1487,6 +1487,43 @@ test("session keeps latest streamed content reachable via session.last after scr
     },
     {},
     { width: 100, height: 18 },
+  )
+})
+
+test("switching sessions after scrolling away still opens the next session pinned to the bottom", async () => {
+  // INV-03/04 行为锁（R3 审计 B-01/N-01）：A 会话滚离携带 viewportStuckToBottom=false，
+  // 但切换到 B 是显式打开导航（路径 B），必须无条件贴底——不得以 A 的滚离状态把 B
+  // 打开在携带的陈旧偏移上。判别几何：B 的可滚高度必须超过携带偏移（A_max-4），
+  // 否则携带 scrollTop 被 clamp 到 B 底部会空洞通过。
+  const userA = userMessage("msg_user_pin_a", 1)
+  const streamerA = assistantMessage("msg_pin_a", 2, userA.id)
+  const extraID = "ses_extra_pin_b"
+  const userB = { ...userMessage("msg_user_pin_b", 1), sessionID: extraID }
+  const streamerB = { ...assistantMessage("msg_pin_b", 2, "msg_user_pin_b"), sessionID: extraID }
+  const partB = { ...textPart("part_pin_b", "msg_pin_b", `${"beta content ".repeat(420)}B_PIN_TAIL`), sessionID: extraID }
+
+  await withRenderedSession(
+    [userA, streamerA],
+    { msg_pin_a: [textPart("part_pin_a", "msg_pin_a", `${"alpha content ".repeat(120)}A_PIN_TAIL`)] },
+    async (app, _emit, route) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("A_PIN_TAIL")))
+      // A 内滚离 4 行：viewportStuckToBottom=false 且尾部离屏。
+      for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("A_PIN_TAIL")))
+
+      route.navigate({ type: "session", sessionID: extraID })
+      // 路径 B 贴底打开：B_PIN_TAIL 在正常帧时限内可见，与 A 的滚离状态无关。
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("B_PIN_TAIL")))
+    },
+    {},
+    { width: 100, height: 18 },
+    {
+      [extraID]: {
+        info: sessionInfo({ id: extraID }),
+        messages: [userB, streamerB],
+        parts: { msg_pin_b: [partB] },
+      },
+    },
   )
 })
 
@@ -3842,7 +3879,11 @@ test("messages.copy command copies the last assistant before a wrapped revert bo
 async function withRenderedSession(
   messages: Array<AssistantMessage | SDKUserMessage>,
   parts: Record<string, Part[]>,
-  run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
+  run: (
+    app: Awaited<ReturnType<typeof testRender>>,
+    emit: (event: GlobalEvent) => void,
+    route: RouteContext,
+  ) => Promise<void>,
   kv: Record<string, unknown> = {},
   dimensions: { width?: number; height?: number } = {},
   extraSessions: Record<
@@ -3895,6 +3936,8 @@ async function withRenderedSession(
   // testRender 返回只表示根已挂载；Session 异步 session.get/sync 后才有 transcript。
   // SyncReadyProbe 观察公开 store，与 frame timeout 分离，避免空白帧被误判为 presentation 回归。
   let syncReady = false
+  // 首帧即回写 route holder；run 在 syncReady 泵浦之后执行，holder 必已就绪。
+  let routeHolder: RouteContext | undefined
   const messageIDs = messages.map((message) => message.id)
   const app = await testRender(
     () => (
@@ -3904,6 +3947,9 @@ async function withRenderedSession(
         messageIDs={messageIDs}
         onSyncReady={() => {
           syncReady = true
+        }}
+        onRoute={(route) => {
+          routeHolder = route
         }}
       />
     ),
@@ -3932,7 +3978,7 @@ async function withRenderedSession(
       await new Promise((resolve) => process.nextTick(resolve))
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    await run(app, events.emit)
+    await run(app, events.emit, routeHolder!)
   } finally {
     app.renderer.destroy()
     Global.Path.state = previous
@@ -3944,6 +3990,7 @@ function SessionHarness(props: {
   events: ReturnType<typeof createEventSource>["source"]
   messageIDs: string[]
   onSyncReady: () => void
+  onRoute: (route: RouteContext) => void
 }) {
   const renderer = useRenderer()
   // visibility 用例通过真实 binding 进入已注册 command，不给所有测试暴露 keymap 内部对象。
@@ -3958,6 +4005,7 @@ function SessionHarness(props: {
           <KVProvider>
             <ToastProvider>
               <RouteProvider initialRoute={{ type: "session", sessionID }}>
+                <RouteProbe onRoute={props.onRoute} />
                 <TuiConfigProvider config={config}>
                   <SDKProvider
                     url="http://test"
@@ -3998,6 +4046,13 @@ function SessionHarness(props: {
       </ArgsProvider>
     </OpencodeKeymapProvider>
   )
+}
+
+// 暴露 route 上下文（navigate）给测试回调：切换会话的行为测试需要显式导航。
+// 每次渲染幂等回写 holder；渲染 <box /> 与 SyncReadyProbe 一致，不参与布局。
+function RouteProbe(props: { onRoute: (route: RouteContext) => void }) {
+  props.onRoute(useRoute())
+  return <box />
 }
 
 // 观察 Sync 公开 store：session 存在、message 列表已装、每个 fixture message 有 part 数组。

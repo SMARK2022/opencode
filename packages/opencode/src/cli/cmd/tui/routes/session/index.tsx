@@ -367,8 +367,9 @@ export function Session() {
       }
       editor.reconnect(result.data.directory)
       await sync.session.sync(sessionID)
-      // sync 后 parts 就绪：与 sessionID→toBottom 共用 applySessionOpenScroll，避免只修贴底路径 A
-      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
+      // sync 后 parts 就绪：与 sessionID→toBottom 共用 applySessionOpenScroll，避免只修贴底路径 A。
+      // respectUserScroll=true：内容就绪补滚不覆盖同会话内用户已滚离的位置（INV-05）。
+      if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)
     })().catch((error) => {
       if (route.sessionID !== sessionID) return
       toast.show({
@@ -553,7 +554,8 @@ export function Session() {
   // session-open 唯一滚动语义：有 reviewID 则锚到返回区，否则贴底（覆盖路径 A/B）。
   // INV-02：auto review 深链必须停在对应返回区；INV-03/04：无锚点或解析失败时保持今日贴底。
   // 禁止在此之外再挂无条件贴底成功路径，否则 50ms toBottom 会覆盖已完成的 anchor。
-  function applySessionOpenScroll() {
+  // respectUserScroll 区分调用者意图：路径 A（内容就绪补滚）true，路径 B（显式打开导航）false。
+  function applySessionOpenScroll(respectUserScroll = false) {
     if (!scroll || scroll.isDestroyed) return
     const reviewID = route.reviewID
     if (reviewID) {
@@ -571,14 +573,18 @@ export function Session() {
         }
       }
     }
-    // residual / 普通打开：贴底（不是 try-anchor-then-other-algorithm 的 fallback）
+    // residual / 普通打开：贴底（不是 try-anchor-then-other-algorithm 的 fallback）。
+    // INV-05：路径 A（内容就绪补滚）不得覆盖用户已滚离的位置；路径 B（显式切换/打开
+    // 导航）是导航意图，保持无条件贴底——INV-03/04 切换贴底不因携带的滚离状态回退。
+    if (respectUserScroll && !untrack(viewportStuckToBottom)) return
     scroll.scrollTo(scroll.scrollHeight)
   }
 
   // 与历史 toBottom 同 50ms defer，对齐 OpenTUI layout；非轮询重试框架。
-  // path A（sync 完成）与 path B（sessionID 变化）都只 schedule 本函数，语义单一。
-  function scheduleSessionOpenScroll() {
-    setTimeout(() => applySessionOpenScroll(), 50)
+  // path A（sync 完成，respectUserScroll=true）与 path B（sessionID 变化，显式导航）
+  // 都只 schedule 本函数，语义单一。
+  function scheduleSessionOpenScroll(respectUserScroll = false) {
+    setTimeout(() => applySessionOpenScroll(respectUserScroll), 50)
   }
 
   function moveFirstChild() {
@@ -1286,11 +1292,14 @@ export function Session() {
     }
   })
 
-  // session 切换贴底路径 B：有 reviewID 时不得无条件 toBottom，统一走 applySessionOpenScroll
+  // session 切换贴底路径 B：有 reviewID 时不得无条件 toBottom，统一走 applySessionOpenScroll。
+  // defer：mount 不是导航——mount 期贴底由 stickyStart 初始位置 + 路径 A（守卫）承担，
+  // 否则 mount+50ms 的无条件贴底会在用户已滚离时覆盖其位置（INV-05）。
   createEffect(
     on(
       () => ({ sessionID: route.sessionID, reviewID: route.reviewID }),
       () => scheduleSessionOpenScroll(),
+      { defer: true },
     ),
   )
 
