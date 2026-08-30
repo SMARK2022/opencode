@@ -86,13 +86,20 @@ describe("auto review deep link wiring contract", () => {
 
   test("session-open scroll is anchored before bottom snap", () => {
     // 统一滚动入口：锚点存在→child.y 对位；miss/无锚点→贴底。
-    expect(source).toContain("function applySessionOpenScroll()")
-    expect(source).toContain("function scheduleSessionOpenScroll()")
+    // 594：入口按调用者意图参数化——补滚（路径 A）传 true 尊重用户滚离位置（INV-05），
+    // 贴底统一过 pinAllowed 守卫，锚点 scrollBy 不受守卫（导航锚定语义不变）。
+    expect(source).toContain("function applySessionOpenScroll(respectUserScroll = false)")
+    expect(source).toContain("const pinAllowed = () => !respectUserScroll || untrack(viewportStuckToBottom)")
+    expect(source).toContain("function scheduleSessionOpenScroll(respectUserScroll = false)")
+    expect(source).toContain("applySessionOpenScroll(respectUserScroll)")
     expect(source).toContain("scrollBy(child.y - scroll.y - 1)")
-    // 两个贴底路径都改走统一入口；undo/prompt on_submit 的 toBottom 保持原语义。
-    expect(source).toContain("if (route.sessionID === sessionID) scheduleSessionOpenScroll()")
-    // useRouteData("session") 已收窄为 SessionRoute——effect 依赖直接读字段。
-    expect(source).toContain("createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))")
+    // 路径 A（sync 完成补滚）传 true：补滚不得覆盖同会话用户已滚离位置。
+    expect(source).toContain("if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)")
+    // 路径 B defer 跳过 mount 发射（mount 不是导航，贴底由 stickyStart+守卫后路径 A 承担）；
+    // 箭头包装避免deps被当首参；仅忽略排版和尾逗号，不放宽依赖及defer合同。
+    expect(source.replace(/\s+/g, "").replace(/,(?=[})])/g, "")).toContain(
+      "createEffect(on(()=>({sessionID:route.sessionID,reviewID:route.reviewID}),()=>scheduleSessionOpenScroll(),{defer:true}))",
+    )
   })
 
   test("assistant messages expose a scroll-child id for anchor lookup", () => {

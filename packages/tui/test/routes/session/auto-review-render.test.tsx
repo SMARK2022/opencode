@@ -716,13 +716,14 @@ test("session keeps latest streamed content reachable via session.last after scr
       await Bun.sleep(10)
       return false
     }, { maxPasses: 300 })
-    // 首帧可见不代表既有 50ms 会话打开滚动已结束；先完成导航再模拟离底。
-    await Bun.sleep(60)
-    await app.renderOnce()
     // 越过一行粘底容差，不能把自动跟随的行为当作离底浏览。
     for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
-    await app.renderOnce()
-    await app.renderOnce()
+    // 等实际离屏信号，不以固定帧数或避开50ms导航窗口掩盖mount重贴。
+    await waitForReviewFrame(app, async (frame) => {
+      if (!frame.includes("OLD_CULL_TAIL")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 300 })
     expect(app.captureCharFrame()).not.toContain("OLD_CULL_TAIL")
     emit({
       directory, project: "proj_test",
@@ -744,6 +745,39 @@ test("session keeps latest streamed content reachable via session.last after scr
     }, { maxPasses: 300 })
     expect(app.captureCharFrame()).toContain("NEW_CULL_TAIL")
   }, { width: 100, height: 18 })
+})
+
+test("switching sessions after scrolling away still opens the next session pinned to the bottom", async () => {
+  const a: AssistantMessage = {
+    id: "msg_pin_a", sessionID, role: "assistant", parentID: "msg_pin_user", time: { created: 1, completed: 2 },
+    modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const extraID = "ses_extra_pin_b"
+  const b: AssistantMessage = { ...a, id: "msg_pin_b", sessionID: extraID }
+  // B的内容高于A携带的偏移，避免clamp到较短B底部造成空洞通过。
+  const partB: Part = { id: "part_pin_b", sessionID: extraID, messageID: b.id, type: "text", text: `${"beta content ".repeat(420)}B_PIN_TAIL` }
+  await withRenderedReview([{ info: a, parts: [{ id: "part_pin_a", sessionID, messageID: a.id, type: "text", text: `${"alpha content ".repeat(120)}A_PIN_TAIL` }] }], async (app, route) => {
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("A_PIN_TAIL")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 300 })
+    for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+    await waitForReviewFrame(app, async (frame) => {
+      if (!frame.includes("A_PIN_TAIL")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 300 })
+    // 使用公开导航，不直接设置scrollTop或Session私有信号。
+    route.navigate({ type: "session", sessionID: extraID })
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("B_PIN_TAIL")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 300 })
+    expect(app.captureCharFrame()).toContain("B_PIN_TAIL")
+  }, { width: 100, height: 18 }, { [extraID]: () => [{ info: b, parts: [partB] }] })
 })
 
 test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)("chronology boundary uses transcript positions: %s", async (scenario) => {
@@ -908,7 +942,7 @@ function ReviewHarness(props: {
                 <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
                   <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
                     <ThemeProvider mode="dark"><LocalProvider><PromptStashProvider><DialogProvider>
-                      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider>
+                      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider integration={{}}>
                         <ReviewProbe observe={props.observe} messageIDs={props.messageIDs} onSyncReady={props.onSyncReady} />
                       </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider>
                     </DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
