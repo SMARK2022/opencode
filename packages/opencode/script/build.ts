@@ -152,14 +152,54 @@ await $`rm -rf dist`
 
 // #489：OpenTUI 构建证据链——package/native/executable 三层同证据落盘，
 // release archive 的 smoke 结果可以借此回溯到确定的 native 输入。
-async function packageRoot(name: string) {
+async function packageRoot(name: string, from = dir) {
   // Bun.resolveSync 可能命中 hoisted 或 target reinstall 的不同 entry；向上找 manifest 才能锁定真实包 owner。
-  let directory = path.dirname(fs.realpathSync(Bun.resolveSync(name, dir)))
+  let directory = path.dirname(fs.realpathSync(Bun.resolveSync(name, from)))
   while (directory !== path.dirname(directory)) {
     if (await Bun.file(path.join(directory, "package.json")).exists()) return directory
     directory = path.dirname(directory)
   }
   throw new Error(`Cannot locate package root for ${name}`)
+}
+
+async function verifyOpenTuiClosure() {
+  const root = path.resolve(dir, "../..")
+  const manifest = await Bun.file(path.join(root, "package.json")).json()
+  const version = manifest.workspaces.catalog["@opentui/core"]
+  const repository = "https://github.com/SMARK2022/opentui"
+  const tag = `v${version}`
+  const release = `${repository}/releases/download/${tag}`
+  // 同一catalog派生整个family；检查锁与override，避免声明版本正确却消费registry或旧tarball。
+  const family = ["@opentui/core", "@opentui/keymap", "@opentui/solid", ...["darwin-arm64", "darwin-x64", "linux-arm64", "linux-arm64-musl", "linux-x64", "linux-x64-musl", "win32-arm64", "win32-x64"].map(target => `@opentui/core-${target}`)]
+  const lock = await Bun.file(path.join(root, "bun.lock")).text()
+  for (const name of family) {
+    const expected = `${release}/${name.replace("@opentui/", "opentui-")}-${version}.tgz`
+    if (manifest.overrides[name] !== expected || !lock.includes(`"${name}": "${expected}"`) || !lock.includes(`"${name}@${expected}"`)) throw new Error(`${name} is not locked to ${expected}`)
+  }
+  // 从实际runtime消费者解析，版本相同但加载两份core或Solid仍会分裂owner；不扫描安装器缓存。
+  const consumers = [root, dir, path.join(root, "packages/tui"), path.join(root, "packages/cli")]
+  for (const name of ["@opentui/core", "@opentui/keymap", "@opentui/solid"]) {
+    const owners = await Promise.all(consumers.map(from => packageRoot(name, from)))
+    if (new Set(owners).size !== 1) throw new Error(`${name} resolves to multiple realpaths: ${owners.join(", ")}`)
+    const installed = await Bun.file(path.join(owners[0], "package.json")).json()
+    if (installed.name !== name || installed.version !== version || installed.repository?.url !== repository) throw new Error(`${name} installed manifest does not match ${tag}`)
+  }
+  // 保留目标Solid版本及补丁，只要求所有真实入口与同一catalog和realpath一致。
+  const solidOwners = await Promise.all([...consumers, await packageRoot("@opentui/solid"), await packageRoot("@opentui/keymap")].map(from => packageRoot("solid-js", from)))
+  const solid = await Bun.file(path.join(solidOwners[0], "package.json")).json()
+  if (new Set(solidOwners).size !== 1 || solid.version !== manifest.workspaces.catalog["solid-js"]) throw new Error("solid-js closure mismatch")
+  const declared = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()
+  // index身份是已选源码，声明不能用任意clean目录自证；发布commit另由远端annotated tag证明。
+  const gitlink = (await $`git ls-files --stage -- thirdparty/opentui`.cwd(root).quiet().text()).trim().split(/\s+/)[1]
+  if (declared.schema !== 1 || declared.releaseTag !== tag || !/^[0-9a-f]{40}$/.test(declared.sourceGitlink) || !/^[0-9a-f]{40}$/.test(declared.releaseCommit) || gitlink !== declared.sourceGitlink) throw new Error("invalid OpenTUI source revision authorization")
+  const ref = `refs/tags/${tag}`
+  // 完整ref与peeled ref缺一不可，不能把lightweight tag或同名branch当作发布授权。
+  const output = await $`git ls-remote --tags ${repository} ${ref} ${`${ref}^{}`}`.cwd(root).quiet().text()
+  const refs = new Map(output.trim().split(/\r?\n/).filter(Boolean).map(line => {
+    const [commit, name] = line.trim().split(/\s+/, 2)
+    return [name, commit] as const
+  }))
+  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== declared.releaseCommit) throw new Error(`OpenTUI ${tag} is not annotated at the authorized release commit`)
 }
 
 async function sha256(file: string) {
@@ -237,6 +277,8 @@ if (!skipInstall) {
     }
   }
 }
+// 发布必须在安装完成后核对真实闭包；本地构建不隐式联网，原native/产物证据继续逐target校验。
+if (process.env.GITHUB_ACTIONS === "true") await verifyOpenTuiClosure()
 for (const item of targets) {
   const name = [
     pkg.name,

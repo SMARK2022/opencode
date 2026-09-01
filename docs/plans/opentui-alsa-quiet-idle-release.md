@@ -426,6 +426,10 @@ packages/core/src/zig/miniaudio_shim.c | 34 +++++(组件 A:ALSA 诊断静默 con
 - WSL bun 1.3.13 与 CI bun 1.3.14 的版本差(仅本地验证环境差,不进 commit)。
 - TUI 交互式冒烟(有声卡真机发声/multipoint 腾挪)属用户真机验收项,自动化不可达。
 
+### Post-verification Follow-up(发布链补丁,2026-09-02)
+
+parent commit da87447942 触发 "Build OpenCode CLI" CI 的 `opentui-closure` 门禁红:本计划 §15 遗漏了 `packages/opencode/script/verify-opentui-closure.ts:8` 的版本常量与 `opentui-source-revision.json` provenance 清单两处 smark.8 钉死;且 smark.9 tag 误打 lightweight,而校验器(opentui-provenance.ts:62)强制 annotated 且仓库规则禁止删除已发布 tag(方案 A 不可行)。按 tag 不可变契约改走 smark.10:submodule `3fa72b17`(仅版本字符串 chore,源码同 smark.9)→ Package CI 绿 → annotated `v0.4.3-smark.10` 发布(12 资产)→ parent 四文件更新(package.json/bun.lock 指向 smark.10 + 上述两脚本)。closure 门禁本地全绿:gitlink=3fa72b17、11 包、单 solid owner、单 native lib 哈希;WSL 端到端对装机 smark.10 实测 stderr_bytes=0。
+
 ## 24. Implementation Audit Record
 
 | Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
