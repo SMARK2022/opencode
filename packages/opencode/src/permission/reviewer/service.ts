@@ -80,6 +80,16 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
 // that owns these hidden child-session turns and prevents future hidden-message
 // consumers from confusing protocol retry cleanup with undo or session repair.
 const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
+// [local-smark] 超时重试的时间预算后缀：只在超时后的重试注入（首次 attempt 不动，
+// 零常规质量影响）。措辞依据文献与生产取证：显式字数锚点比抽象 efficiency 更可
+// 控制（Token-Budget-Aware Reasoning）；正向内容清单（意图/风险/策略）防欠思考
+// （NovaSky：负面"少想"指令在最难任务上崩塌）；禁引用模型看不见的"上一轮分析"
+// （重试为重建全新上下文）。600 词 ≈ 成功评审 reasoning 中位（~800 词）的 3/4，
+// 压掉 15k+ 字符的打转循环同时留足判断空间。
+const TIME_BUDGET_RETRY_USER_ITEM = {
+  type: "text" as const,
+  text: "Time advisory: a previous attempt at this review exceeded its time budget. Think concisely now: keep reasoning within roughly 600 words. State the user's intent and authorization, the action's concrete risk, and the policy rule that matches, then submit the decision. Do not re-derive the transcript, do not re-check alternatives repeatedly, and do not stall in 'wait, but…' loops.",
+}
 const PROTOCOL_RETRY_USER_ITEM = {
   type: "text" as const,
   // [local-smark] R-REQ-4 avoid-xxx 防御纵深 nudge：重试请求不含失败回合（重建
@@ -187,7 +197,11 @@ export const layer = Layer.effect(
           // ReviewerTimedOut 在 catchIf 之外，无法被捕获重试。修复后 timeoutOrElse 在
           // catchIf 内层，超时可被 catchIf 捕获并触发重试。
           const MAX_REVIEWER_ATTEMPTS = 3
-          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
+          // [local-smark] 默认 per-attempt 超时 90s→120s：生产 DB 实测 glm-5.3 系成功
+          // attempt p90=77s，90s 红线切在其自然长尾腰部（185 次 ≈90s 截断、多连链
+          // 62% 全灭）；120s 覆盖 p90 留余量，配合超时重试的时间预算后缀压缩
+          // overthinking（截断时 reasoning 中位 15.8k 字符 vs 成功中位 4.8k）。
+          const perAttemptTimeout = autoReview?.timeout_ms ?? 120_000
 
           function reviewerRetry(
             attemptNum: number,
@@ -205,10 +219,15 @@ export const layer = Layer.effect(
               // 旧代码顺序相反，超时绕过了重试。
               Effect.catchIf(isReviewerRetryable, (error) => {
                 if (attemptNum >= MAX_REVIEWER_ATTEMPTS - 1) return Effect.fail(error)
-                // 协议错误：附加 protocol nudge 修复提交格式；超时：保持原 prompt
+                // 协议错误：附加 protocol nudge 修复提交格式；超时：附加时间预算
+                // 后缀压缩 overthinking（重试不会自我压缩：实测后继 attempt 40/76
+                // 不比被截断者短）。混合链（协议错误→超时）只保留时间后缀：超时
+                // attempt 的问题在时长而非提交格式，时间约束是当时主绑定。
                 const nextMessages = isReviewerDecisionProtocolError(error)
                   ? buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] })
-                  : currentMessages
+                  : error instanceof ReviewerTimedOut
+                    ? buildMessages({ system, userItems: [...userItems, TIME_BUDGET_RETRY_USER_ITEM] })
+                    : currentMessages
                 return reviewerRetry(attemptNum + 1, nextMessages, false)
               }),
             )

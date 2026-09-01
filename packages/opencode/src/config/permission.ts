@@ -19,7 +19,7 @@ export const AutoReview = Schema.Struct({
   // `action: "auto"` is resolved, but these fields are not themselves rules and
   // are skipped by Permission.fromConfig.
   model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
-  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000." }),
+  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000." }),
   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({

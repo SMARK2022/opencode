@@ -2099,6 +2099,13 @@ it.instance(
 
       // 超时后重试成功：共 2 次 provider 调用
       expect(yield* llm.calls).toBe(2)
+      // [local-smark] 超时重试注入时间预算后缀：首次请求不含，重试请求含显式
+      // 字数锚点（600 words）与凝练指令——针对 glm-5.3 系 90s 截断时 reasoning
+      // 中位 15.8k 字符（成功中位 4.8k）的 overthinking 实测形态。
+      const timeoutInputs = yield* llm.inputs
+      expect(JSON.stringify(timeoutInputs[0])).not.toContain("Time advisory")
+      expect(JSON.stringify(timeoutInputs[1])).toContain("Time advisory")
+      expect(JSON.stringify(timeoutInputs[1])).toContain("600 words")
       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
       expect(reviewer).toBeDefined()
       if (!reviewer) return
