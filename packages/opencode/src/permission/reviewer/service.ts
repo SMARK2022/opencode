@@ -103,9 +103,7 @@ const MAX_REVIEWER_ATTEMPTS = 3
 const PROTOCOL_RETRY_USER_ITEM = {
 // #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
   type: "text" as const,
-  // The retry prompt deliberately asks only for the tool/function-call protocol.
-  // JSON text fallback is a runtime compatibility layer, not behavior we should
-  // advertise to the model after it already missed the preferred contract.
+  // 重试仍重建同一证据，nudge明确排除反问/执行承诺，保留source允许的严格JSON兼容入口。
   text: PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT,
 }
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
@@ -125,6 +123,8 @@ export const layer = Layer.effect(
     const session = yield* Session.Service
     // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
+    // 层内记忆明确拒绝tool_choice的provider，避免重复往返；不持久化或扩大到任意参数错误。
+    const toolChoiceRejectedProviders = new Set<ProviderV2.ID>()
 
     const review: Interface["review"] = (input) =>
       // #209：streaming refactor——generateObject 替换为 streamText + permission_review_decision tool，让 reviewer 子会话留下可审计的推理与文本轨迹
@@ -430,7 +430,7 @@ export const layer = Layer.effect(
       const sessionInfo = input.session
       const parentID = input.parentID
       // #209：无子会话或无 parentID 时走纯流式提取——不持久化中间 part，仅从 tool-call 事件取出 assessment
-      if (!sessionInfo || !parentID) return runReviewerStream(input.messages, input.model)
+      if (!sessionInfo || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model)
       return Effect.gen(function* () {
         // #209：先创建 assistant 消息壳——流式 part 挂载到该消息，错误时也能回填 error 字段
         const message: Assistant = {
@@ -462,7 +462,7 @@ export const layer = Layer.effect(
             Effect.catch((cause) => Effect.logWarning("reviewer closeMessageTools failed", { cause, sessionID: sessionInfo.id, messageID: message.id })),
             Effect.catchDefect((cause) => Effect.logWarning("reviewer closeMessageTools defect", { cause, sessionID: sessionInfo.id, messageID: message.id })),
           )
-        const assessment = yield* runReviewerStream(input.messages, input.model, {
+        const assessment = yield* runReviewerStreamWithToolChoice(input.messages, input.model, {
           sessionID: sessionInfo.id,
           messageID: message.id,
           // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
@@ -510,6 +510,7 @@ export const layer = Layer.effect(
       messages: readonly ModelMessage[],
       model: Provider.Model,
       persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: Assistant },
+      forcedToolChoice?: boolean,
     ) {
       return Effect.acquireUseRelease(
         // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
@@ -642,7 +643,8 @@ export const layer = Layer.effect(
                   }),
                 }),
               },
-              // 部分兼容provider拒绝强制工具选择，缺失决策调用仍由下方拒绝。
+              // 默认强制决策工具；明确400参数拒绝才由同一次评审协商去参。
+              toolChoice: forcedToolChoice ? ("required" as const) : undefined,
               maxRetries: 0,
               // #261：providerOptions 和 maxOutputTokens 现由 plugin hook 修改后的 params 提供
               providerOptions: ProviderTransform.providerOptions(model, params.options),
@@ -708,6 +710,8 @@ export const layer = Layer.effect(
 // #227：tool-call 事件携带最终 input——此处提取 assessment 为唯一权威来源
                     assessment = assessmentFromUnknown(event.input)
                   }
+                  // 纯流式分支也传播原始provider错误，不能吞成协议失败使窄400协商失去依据。
+                  if (event.type === "error") return yield* Effect.fail(event.error)
                   return
                 }
                 if (event.type === "reasoning-start") {
@@ -970,6 +974,22 @@ export const layer = Layer.effect(
       )
     }
 
+    // 用户授权窄400拒绝时同次去参重发一次，不递归；共享已有child message而不写伪失败终态。
+    // 协商位于外层tapError/onInterrupt内侧，输出关闭和最终错误仍由原owner处理。
+    function runReviewerStreamWithToolChoice(
+      messages: readonly ModelMessage[],
+      model: Provider.Model,
+      persist?: Parameters<typeof runReviewerStream>[2],
+    ) {
+      const forced = !toolChoiceRejectedProviders.has(model.providerID)
+      return runReviewerStream(messages, model, persist, forced).pipe(
+        Effect.catchIf((error) => forced && isToolChoiceRejection(error), () => {
+          toolChoiceRejectedProviders.add(model.providerID)
+          return runReviewerStream(messages, model, persist, false)
+        }),
+      )
+    }
+
     // #209：标记工具状态为 reviewing——附带 reviewer 子会话 ID 供 UI 导航
     function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
 // #227：reviewing 状态附带 reviewer 子会话 ID——UI 可跳转查看审查过程
@@ -1108,6 +1128,13 @@ function isReviewerDecisionProtocolError(error: unknown) {
 // provider 级 429/503 由 SessionRetry.retry 在每次尝试内处理，不经过此层。
 function isReviewerRetryable(error: unknown): boolean {
   return isReviewerDecisionProtocolError(error) || error instanceof ReviewerTimedOut
+}
+
+// 仅识别AI SDK原始400与tool_choice报文，其他参数错误不得被重发掩盖。
+function isToolChoiceRejection(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const withStatus = error as { statusCode?: unknown; responseBody?: unknown }
+  return withStatus.statusCode === 400 && /tool[_ ]?choice/i.test(String(withStatus.responseBody ?? ""))
 }
 
 // #203：reviewer 启用判定——显式 user 配置优先保留人工审批

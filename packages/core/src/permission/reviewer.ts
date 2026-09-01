@@ -1,7 +1,7 @@
 export * as PermissionReviewer from "./reviewer"
 
 import path from "path"
-import { LLM, LLMClient, LLMEvent, Tool } from "@opencode-ai/llm"
+import { LLM, LLMClient, LLMEvent, Tool, ToolChoice } from "@opencode-ai/llm"
 import { Cause, Context, DateTime, Effect, FileSystem, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import { and, eq } from "drizzle-orm"
 import { Config } from "../config"
@@ -43,6 +43,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
   const db = (yield* Database.Service).db
   const events = yield* EventV2.Service
   const reviewerLocks = new Map<SessionSchema.ID, Semaphore.Semaphore>()
+  // 与V1相同的provider层内记忆；协商不另建请求身份或持久化能力探测结果。
+  const toolChoiceRejectedProviders = new Set<string>()
   const review = Effect.fn("PermissionReviewer.review")(function* (input: PermissionAuto.ReviewInput) {
     const entries = yield* config.entries()
     const sessionID = input.sessionID
@@ -117,7 +119,9 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         })
         let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
         let textOutput = ""
-        return yield* client.stream(LLM.request({
+        const forced = !toolChoiceRejectedProviders.has(selected.model.provider)
+        const request = LLM.request({
+          toolChoice: forced ? ToolChoice.make("required") : undefined,
           model: selected.model, prompt: attemptPrompt,
           // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
           ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
@@ -127,14 +131,22 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
             description: "Submit the structured allow/deny decision for this permission review.",
             parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
           }) }),
-        }), (body) => Effect.sync(() => {
+        })
+        const onPrepared = (body: unknown) => Effect.sync(() => {
           // 同一次compile的最终正文包含真正发出的工具；OAuth策略只归instructions，不重复归system正文。
           inputEstimate = {
             ...Token.estimateRequest(body, samples, selected.openaiOAuth ? [{ kind: "instructions", text: system }] : []),
             contextLimit: selected.model.defaults?.limits?.context ?? selected.model.route.defaults.limits?.context ?? 0,
           }
           // Started读取本尝试的估算；原有Ended仍独立确认真实用量与费用。
-        })).pipe(
+        })
+        return yield* client.stream(request, onPrepared).pipe(
+          // typed400发生于事件交付之前；只在同次timeout和publisher内去参重发一次。
+          Stream.catch((error) => {
+            if (!forced || !("http" in error.reason) || error.reason.http?.response?.status !== 400 || !/tool[_ ]?choice/i.test(error.reason.http.body ?? "")) return Stream.fail(error)
+            toolChoiceRejectedProviders.add(selected.model.provider)
+            return client.stream(LLM.updateRequest(request, { toolChoice: undefined }), onPrepared)
+          }),
           Stream.runForEach((event) => Effect.gen(function* () {
             if (event.type === "tool-error") return yield* protocolError
             yield* publisher.publish(event)

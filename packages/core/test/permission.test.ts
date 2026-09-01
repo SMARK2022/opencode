@@ -14,7 +14,7 @@ import { Config } from "@opencode-ai/core/config"
 import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
-import { LLMClient, LLMEvent, LLMRequest, Model } from "@opencode-ai/llm"
+import { HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMClient, LLMError, LLMEvent, LLMRequest, Model, ToolChoice } from "@opencode-ai/llm"
 import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
 import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth } from "@opencode-ai/llm/route"
@@ -43,6 +43,7 @@ const reviewModels: unknown[] = []
 let reviewGate: Deferred.Deferred<void> | undefined
 let reviewStarted: Deferred.Deferred<void> | undefined
 let malformed = false
+let rejectedToolChoiceBody: string | undefined
 let reviewBeforeStream: Deferred.Deferred<void> | undefined
 let reviewArrivals: Deferred.Deferred<void> | undefined
 let reviewScript: Stream.Stream<LLMEvent>[] | undefined
@@ -60,6 +61,13 @@ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
     const prepared = yield* LLMClient.prepare(request)
     reviewBodies.push(prepared.body)
     if (onPrepared) yield* onPrepared(prepared.body)
+    // 只在强制选择时产生typed400；真实lowering和publisher继续执行，不连接provider。
+    if (rejectedToolChoiceBody && request.toolChoice) return yield* new LLMError({
+      module: "permission-reviewer-test", method: "stream", reason: new InvalidRequestReason({ message: "parameter rejected", http: new HttpContext({
+        request: new HttpRequestDetails({ method: "POST", url: "https://review.test", headers: {} }),
+        response: new HttpResponseDetails({ status: 400, headers: {} }), body: rejectedToolChoiceBody,
+      }) }),
+    })
     // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
     if (reviewScript) {
       const next = reviewScript.shift()
@@ -548,6 +556,9 @@ describe("PermissionV2", () => {
     const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
+    expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.make("required"))
+    expect(JSON.stringify(reviewRequests[0]?.system)).toContain("You are the judge")
+    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide now and submit exactly one permission_review_decision call.")
     expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
     expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
@@ -690,6 +701,25 @@ describe("PermissionV2", () => {
     expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
     expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
     expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
+    yield* Effect.addFinalizer(() => Effect.sync(() => { rejectedToolChoiceBody = undefined }))
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-choice/reviewer" }) })
+    rejectedToolChoiceBody = "Unsupported parameter: tool_choice"
+    const negotiated = reviewRequests.length
+    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/negotiated"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(negotiated + 2)
+    expect(reviewRequests[negotiated]?.toolChoice).toEqual(ToolChoice.make("required"))
+    expect(reviewRequests[negotiated + 1]?.toolChoice).toBeUndefined()
+    expect(reviewRequests[negotiated + 1]?.messages).toEqual(reviewRequests[negotiated]?.messages)
+    // 同provider后续直接去参；换provider后的无关400必须失败而不能学成兼容能力。
+    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/learned"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(negotiated + 3)
+    expect(reviewRequests.at(-1)?.toolChoice).toBeUndefined()
+    rejectedToolChoiceBody = "Instructions are required"
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-other/reviewer" }) })
+    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/unrelated"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(negotiated + 4)
+    expect(reviewRequests.at(-1)?.toolChoice).toEqual(ToolChoice.make("required"))
+    rejectedToolChoiceBody = undefined
     reviewSettings = new Config.Info({})
   }))
 
@@ -950,7 +980,7 @@ describe("PermissionV2", () => {
     expect(yield* run([text(malformedText), tool(accepted)])).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(2)
     const prompts = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"))
-    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.`)
+    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {"risk_level","user_authorization","outcome","rationale"} as your entire message.`)
     expect(hiddenIDs).toHaveLength(2)
     const hidden = yield* Effect.forEach(hiddenIDs, (id) => sessions.message(id))
     expect(hidden.map((record) => record?.message)).toMatchObject([
