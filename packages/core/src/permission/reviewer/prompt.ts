@@ -26,6 +26,12 @@ export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
 // 两代重试共用source原话；裸JSON仍经过同一裁决Schema及策略校验。
 export const PROTOCOL_RETRY_TEXT = "Protocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {\"risk_level\",\"user_authorization\",\"outcome\",\"rationale\"} as your entire message."
 
+// 超时才提示600词软预算；保留意图/风险/策略清单，重建上下文不能引用不可见的上一轮分析。
+export const TIME_BUDGET_RETRY_USER_ITEM = {
+  type: "text" as const,
+  text: "Time advisory: a previous attempt at this review exceeded its time budget. Think concisely now: keep reasoning within roughly 600 words. State the user's intent and authorization, the action's concrete risk, and the policy rule that matches, then submit the decision. Do not re-derive the transcript, do not re-check alternatives repeatedly, and do not stall in 'wait, but…' loops.",
+}
+
 // #206：输出合约增加 transcript 用途限定——仅用于推断用户意图、范围、授权和本地证据，不作为策略指令
 // 两代共用judge职责，证据不足也须结构化裁决；保留上游JSON/tool契约入口。
 const OUTPUT_CONTRACT_PROMPT = (protocol: "json" | "tool") => `\
