@@ -211,11 +211,14 @@ const layer = Layer.effectDiscard(
                       }),
                       (tree) => Effect.sync(() => tree.delete()),
                     )
+                    // 引号化--会移动节点；remote范围与转义检查必须跟同一解析文本对齐。
+                    const parsed = tree.rootNode.text
+                    const parsedRemote = ShellRemote.ranges(parsed, Shell.name(shell))
                     const nodes = tree.rootNode
                       .descendantsOfType("command")
                       .filter((node) => {
                         if (!node) return false
-                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
+                        if (parsedRemote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
                         if (!Shell.ps(shell)) return true
                         // 引号与内部 ERROR 恢复出的远程脚本片段不是本地 PowerShell 命令。
                         let parent = node.parent
@@ -225,7 +228,7 @@ const layer = Layer.effectDiscard(
                         }
                         // 根 ERROR 仍承载真实主机命令，不能因此绕过本地管道的拒绝检查。
                         // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
-                        const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
+                        const escaped = parsed.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
                         return !escaped || escaped.length % 2 === 0
                       })
                     // 同一棵AST同时提供规则键和原始拒绝证据；不改执行串或保存审批资源。

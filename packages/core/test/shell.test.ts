@@ -24,6 +24,31 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
 }
 
 describe("shell", () => {
+  test("normalizes bare double dash only for PowerShell permission parsing", async () => {
+    // 直接调用共享解析器覆盖事故、缺段、三类豁免与残余错误；不启动任何shell进程。
+    for (const [command, expected] of [
+      ['git commit -m "x" -- a.ts', 'git commit -m "x" "--" a.ts'],
+      ['git commit --only -m "a" -m "b" -- p1.txt p2.txt', 'git commit --only -m "a" -m "b" "--" p1.txt p2.txt'],
+      ['git log --oneline -2 -- path', 'git log --oneline -2 "--" path'],
+      ['git checkout --;git reset --hard', 'git checkout "--";git reset --hard'],
+      ['git commit -m "unclosed', 'git commit -m "unclosed'],
+      ['echo "a -- b"', 'echo "a -- b"'],
+      ['git push --% --force', 'git push --% --force'],
+      ['git log --oneline', 'git log --oneline'],
+    ] as const) {
+      const tree = await Shell.parse(command, true)
+      try {
+        expect(tree.rootNode.text).toBe(expected)
+        if (!expected.includes('"--"')) continue
+        expect(tree.rootNode.hasError).toBe(false)
+        expect(tree.rootNode.descendantsOfType("command").length).toBe(command.includes(";") ? 2 : 1)
+      } finally { tree.delete() }
+    }
+    // Bash无需改写；同一共享入口不能扩大归一化范围。
+    const bash = await Shell.parse("git log -- path", false)
+    try { expect(bash.rootNode.text).toBe("git log -- path") } finally { bash.delete() }
+  })
+
   test("keeps guest payload ranges separate from following host commands", () => {
     // 边界识别不执行命令，两个shell族在任何测试平台都可验证。
     for (const [shell, command, guest] of [

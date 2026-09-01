@@ -498,9 +498,47 @@ const parser = lazy(async () => {
   return { bash, ps }
 })
 
+// powershell grammar会丢弃裸--所在命令段；仅归一解析输入，不改执行文本或扩建词法器。
+function normalizeBareDoubleDash(command: string) {
+  if (!command.includes("--")) return command
+  let out = ""
+  let quote: "" | "'" | '"' | "`" = ""
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote) {
+      // 沿source保留反引号及双引号内反斜杠的转义边界，引号内--始终视为数据。
+      const escaped = command[i - 1] === "`" || (quote === '"' && command[i - 1] === "\\")
+      if (ch === quote && !escaped) quote = ""
+      out += ch
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch
+      out += ch
+      continue
+    }
+    const after = command[i + 2]
+    const before = command[i - 1]
+    // 分隔符也是token边界；--%、--flag等带后续字符的形态不改写。
+    if (ch === "-" && command[i + 1] === "-" && after !== "%" && !isTokenChar(after) && !isTokenChar(before)) {
+      out += '"--"'
+      i++
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+// 仅空白、串首尾和;&|分隔符允许独立--，不把参数子串当成分隔标记。
+function isTokenChar(ch: string | undefined) {
+  return ch !== undefined && !/\s/.test(ch) && ch !== ";" && ch !== "&" && ch !== "|"
+}
+
 export async function parse(command: string, ps: boolean) {
   const p = await parser()
-  const tree = (ps ? p.ps : p.bash).parse(command)
+  // 节点偏移属于归一后的tree.text；调用者仍保留原command用于实际执行和授权。
+  const tree = (ps ? p.ps : p.bash).parse(ps ? normalizeBareDoubleDash(command) : command)
   if (!tree) throw new Error("Failed to parse command")
   return tree
 }
