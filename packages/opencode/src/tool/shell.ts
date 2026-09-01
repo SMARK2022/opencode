@@ -763,6 +763,56 @@ function listCommand(name: string) {
   return "the shell-native directory listing command"
 }
 
+// [local-smark] 裸 `--` 词法盲区归一化开始
+// tree-sitter-powershell 0.25.10（package.json 钉版）对引号外的独立 `--` token 没有
+// 词法归类（`--` 前缀预留给自减运算符模式），command 规则在其后断裂：单语句形态
+// 丢失全部 command 节点（生产事故：3 次零权限 ask 的 git commit），紧邻分隔符
+// 形态丢弃所在命令段（审批证据缺段）。引号化为 `"--"` 后两种形态均完整解析
+// （探针实证），且对 bash grammar 无害（其天然接受 `--`）。仅用于权限解析输入，
+// 实际执行命令保持原文（INV-03，先例 :1399 inline-python 的解析/执行分离）。
+// token 边界 = 空白/串首/串尾/分隔符 `;` `&` `|`：分隔符是 shell 的 token 终止符，
+// `--;`/`--&` 形态探针实证裸形丢段、引号化全恢复（R1 审计 B-02）。
+// 豁免：`--%`（PowerShell stop-parsing 保留字）与一切带 sequel 字符的 `--x`
+// 形态（不满足独立 token 判定，天然豁免）；引号内 `--` 是数据，状态机内不触碰。
+function normalizeBareDoubleDash(command: string) {
+  if (!command.includes("--")) return command
+  let out = ""
+  let quote: "" | "'" | '"' | "`" = ""
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote) {
+      // 双引号内 bash 以反斜杠转义、PowerShell 以反引号转义 closing quote；两者都接受。
+      // 过度保持引号态只会错过改写（fail-safe：不改写就不改写），不会错误改写。
+      const escaped = command[i - 1] === "`" || (quote === '"' && command[i - 1] === "\\")
+      if (ch === quote && !escaped) quote = ""
+      out += ch
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch
+      out += ch
+      continue
+    }
+    const after = command[i + 2]
+    const before = command[i - 1]
+    // 独立 `--` token：两侧均非 token 字符且非 `--%` 保留字（sequel 为 % 直接豁免）
+    if (ch === "-" && command[i + 1] === "-" && after !== "%" && !isTokenChar(after) && !isTokenChar(before)) {
+      out += '"--"'
+      i++
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+// token 字符 = 非空白/非分隔符的可见字符；`--` 两侧均非 token 字符即独立 token
+// （`--flag`、`--%`、`-->` 等带 sequel 字符形态不满足，天然豁免）
+function isTokenChar(ch: string | undefined) {
+  return ch !== undefined && !/\s/.test(ch) && ch !== ";" && ch !== "&" && ch !== "|"
+}
+// [local-smark] 裸 `--` 词法盲区归一化结束
+
 function shellCompatibilityError(root: Node, shellName: string): string | undefined {
   if (process.platform !== "win32") return
   if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
@@ -986,6 +1036,7 @@ export const ShellTool = Tool.define(
       ps: boolean,
       shell: string,
       instance: InstanceContext,
+      parseInput: string,
     ) {
       const scan: Scan = {
         dirs: new Set<string>(),
@@ -994,8 +1045,9 @@ export const ShellTool = Tool.define(
         always: new Set<string>(),
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
+      const locals = localCommands(root)
 
-      for (const node of localCommands(root)) {
+      for (const node of locals) {
         const command = parts(node)
         const tokens = command.map((item) => item.text)
         const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
@@ -1023,6 +1075,15 @@ export const ShellTool = Tool.define(
           // evaluate with the same visible prefix.
           if (PermissionPrecheck.canAlwaysAllowPrefix(always)) scan.always.add(always.join(" ") + " *")
         }
+      }
+
+      // [local-smark] 零 command 节点兜底（INV-01）：grammar 归一化后仍解析不出任何
+      // command 节点的非空命令，以解析输入 trim 原文作为 pattern 进入 ask——分级由
+      // precheck 手写 tokenizer 精确完成（进入分类的入口，非 cautious 通道）。
+      // 条件限定零节点而非 patterns 空集：CWD 类命令解析正常但有意零 pattern
+      // （cd-only 契约测试锁定），不属于解析失败，不得扩审批面。
+      if (scan.patterns.size === 0 && locals.length === 0 && parseInput.trim()) {
+        scan.patterns.add(parseInput.trim())
       }
 
       return scan
@@ -1397,15 +1458,19 @@ export const ShellTool = Tool.define(
               // 下对高置信的单一 python -c "..." 命令做引号修复。不命中则返回 undefined，
               // 原命令原样执行，不产生 compatibility error 或 adaptation metadata。
               const normalization = ps ? normalizePowerShellInlinePython(params.command) : undefined
+              // [local-smark] 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
+              // 与 audit 元数据保持 params.command 原文；ps 分支限定因 bash grammar
+              // 对 `--` 天然免疫（探针实证），不改无缺陷路径。
+              const parseInput = ps ? normalizeBareDoubleDash(params.command) : params.command
               yield* Effect.scoped(
                 Effect.gen(function* () {
-                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
+                  const tree = yield* Effect.acquireRelease(parse(parseInput, ps), (tree) =>
                     Effect.sync(() => tree.delete()),
                   )
                   // [local-smark] shell compatibility check
                   const compatibility = shellCompatibilityError(tree.rootNode, name)
                   if (compatibility) throw new Error(compatibility)
-                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
+                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx, parseInput)
                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
                   // 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
                   if (normalization) scan.raw.add(normalization.audit)
