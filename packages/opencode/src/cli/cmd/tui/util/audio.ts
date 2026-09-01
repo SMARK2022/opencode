@@ -9,7 +9,10 @@ const sounds = new Map<string, Promise<AudioSound | null>>()
 function getAudio() {
   if (audio !== undefined) return audio
   try {
-    const next = Audio.create({ autoStart: false })
+    // idleReleaseMs=3000:末次发声后 3s 宽限即完整释放输出通道(对齐 WirePlumber
+    // idle-suspend 惯例),静默期不锁死音频设备(蓝牙 multipoint 可被其他设备抢占);
+    // 无声卡环境 start() 静默失败且无状态,下一次事件自然重试(热插拔友好)
+    const next = Audio.create({ autoStart: false, idleReleaseMs: 3000 })
     next.on("error", (error: Error, context: AudioErrorContext) => {
       log.debug("tui audio error", { error, context })
     })
