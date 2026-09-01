@@ -2313,6 +2313,11 @@ it.instance(
 
       // 超时后重试成功：共 2 次 provider 调用
       expect(yield* llm.calls).toBe(2)
+      // 首次不受预算提示影响；只有超时补试附加600词软约束。
+      const timeoutInputs = yield* llm.inputs
+      expect(JSON.stringify(timeoutInputs[0])).not.toContain("Time advisory")
+      expect(JSON.stringify(timeoutInputs[1])).toContain("Time advisory")
+      expect(JSON.stringify(timeoutInputs[1])).toContain("600 words")
       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
       expect(reviewer).toBeDefined()
       if (!reviewer) return

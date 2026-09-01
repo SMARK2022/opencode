@@ -174,7 +174,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
             return fallback
           })),
           // 每次拥有完整执行期限；仍先完成原onExit收尾，再向外层交付超时供补试。
-          Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
+          Effect.timeoutOrElse({ duration: options.timeout_ms ?? 120_000, orElse: () => Effect.fail(timedOut) }),
           Effect.onExit((exit) => Effect.gen(function* () {
             const finalizer = exit._tag === "Failure"
             const failure = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined
@@ -219,8 +219,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         runReviewerAttempt(currentPrompt, index === 0).pipe(
           Effect.catchIf((error) => error === protocolError || error === timedOut, (error) => {
             if (index >= 2) return Effect.fail(error)
-            // 协议仅追加同一条原话；超时保留当前提示，必须等上次收尾后才重试。
-            return attempt(index + 1, error === protocolError ? `${prompt}\n\n${PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT}` : currentPrompt)
+            // 以最近失败重建单份后缀；先完成原收尾，不累积旧提示或扩大授权证据。
+            return attempt(index + 1, `${prompt}\n\n${error === protocolError ? PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT : PermissionReviewerPrompt.TIME_BUDGET_RETRY_USER_ITEM.text}`)
           }),
         )
       const result = yield* attempt(0)

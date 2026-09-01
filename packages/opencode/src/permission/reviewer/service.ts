@@ -98,6 +98,8 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
 // consumers from confusing protocol retry cleanup with undo or session repair.
 const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
 // #227：协议失败重试的隐藏原因——首次尝试的畸形输出在重试前隐藏，避免用户把 JSON/散文答案误读为已批准
+// 两条reviewer路径共用预算措辞；仅超时后的新请求追加，不污染首次证据。
+const TIME_BUDGET_RETRY_USER_ITEM = PermissionReviewerPrompt.TIME_BUDGET_RETRY_USER_ITEM
 // reviewer 总尝试次数：1 初始 + 2 重试。协议错误与超时共用该预算。
 const MAX_REVIEWER_ATTEMPTS = 3
 const PROTOCOL_RETRY_USER_ITEM = {
@@ -214,7 +216,8 @@ export const layer = Layer.effect(
             }) as Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error, never>
           }
           // timeout_ms是每次执行预算，共三次尝试；清理开销不构成严格的总墙钟上限。
-          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
+          // 默认120秒覆盖source观测长尾；显式配置与三次尝试总数不变。
+          const perAttemptTimeout = autoReview?.timeout_ms ?? 120_000
           // 显式返回注解：递归函数的返回类型无法推断（TS7023/7024）
           const reviewerRetry = (attemptNum: number, currentMessages: readonly ModelMessage[], hideProtocolFailure: boolean): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
             runReviewerAttempt(currentMessages, hideProtocolFailure).pipe(
@@ -226,10 +229,12 @@ export const layer = Layer.effect(
               // 旧代码顺序相反，超时绕过了重试。
               Effect.catchIf(isReviewerRetryable, (error) => {
                 if (attemptNum >= MAX_REVIEWER_ATTEMPTS - 1) return Effect.fail(error)
-                // 协议错误：附加 protocol nudge 修复提交格式；超时：保持原 prompt
+                // 按最近失败重建单份后缀；协议→超时只留时间预算，不累积旧格式提示。
                 const nextMessages = isReviewerDecisionProtocolError(error)
                   ? buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] })
-                  : currentMessages
+                  : error instanceof ReviewerTimedOut
+                    ? buildMessages({ system, userItems: [...userItems, TIME_BUDGET_RETRY_USER_ITEM] })
+                    : currentMessages
                 return reviewerRetry(attemptNum + 1, nextMessages, false)
               }),
             )

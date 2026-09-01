@@ -1082,7 +1082,13 @@ describe("PermissionV2", () => {
     expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
     expect(interrupted).toBe(1)
     expect(reviewRequests).toHaveLength(2)
-    expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
+    // 超时补试保持证据原文，只追加source的一份时间预算，不累积协议提示。
+    const timeoutInputs = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n"))
+    expect(timeoutInputs[0]).not.toContain("Time advisory")
+    expect(timeoutInputs[1]).toContain("Time advisory")
+    expect(timeoutInputs[1]).toContain("600 words")
+    expect(timeoutInputs[1]?.split("\n\nTime advisory:")[0]).toBe(timeoutInputs[0])
+    expect(timeoutInputs[1]?.match(/Time advisory:/g)).toHaveLength(1)
     expect(reviewTerminalWriteFailures).toBe(0)
     expect(reviewTerminals).toEqual(["tool", "assistant"])
     const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
@@ -1105,6 +1111,37 @@ describe("PermissionV2", () => {
     expect(interrupted).toBe(3)
     expect(reviewRequests).toHaveLength(3)
     expect((yield* sessions.context(childID)).filter(message => message.type === "assistant").every(message => message.time.completed !== undefined)).toBe(true)
+    // 完整文本事件表示已完成但未裁决的协议失败；缺text-start会成为运输defect而不应重试。
+    const mixedStarted = yield* Deferred.make<void>()
+    reviewRequests.length = 0
+    reviewScript = [Stream.make(
+      LLMEvent.textStart({ id: "mixed" }), LLMEvent.textDelta({ id: "mixed", text: "No decision" }), LLMEvent.textEnd({ id: "mixed" }),
+      LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
+    ), hang(mixedStarted), success]
+    const mixed = yield* service.ask(request("mixed-retry")).pipe(Effect.forkScoped)
+    yield* Deferred.await(mixedStarted)
+    yield* TestClock.adjust("1 second")
+    expect(yield* Fiber.join(mixed)).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(3)
+    const mixedInputs = reviewRequests.map(item => JSON.stringify(item.messages))
+    expect(mixedInputs[0]).not.toContain("Time advisory")
+    expect(mixedInputs[1]).toContain("Protocol retry:")
+    expect(mixedInputs[1]).not.toContain("Time advisory")
+    expect(mixedInputs[2]).toContain("600 words")
+    expect(mixedInputs[2]).not.toContain("Protocol retry:")
+    expect(mixedInputs[2]?.match(/Time advisory:/g)).toHaveLength(1)
+    // 未配置时真实期限为120秒；显式1000ms的前述回归继续证明配置优先。
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
+    const defaultStarted = yield* Deferred.make<void>()
+    reviewRequests.length = 0
+    reviewScript = [hang(defaultStarted), success]
+    const defaultTimeout = yield* service.ask(request("default-timeout")).pipe(Effect.forkScoped)
+    yield* Deferred.await(defaultStarted)
+    yield* TestClock.adjust("119999 millis")
+    expect(reviewRequests).toHaveLength(1)
+    yield* TestClock.adjust("1 millis")
+    expect(yield* Fiber.join(defaultTimeout)).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(2)
     // 外部取消不是单次超时，不能消费补试次数或留下人工pending。
     const cancelStarted = yield* Deferred.make<void>()
     reviewRequests.length = 0
