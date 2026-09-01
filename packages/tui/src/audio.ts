@@ -7,7 +7,8 @@ const sounds = new Map<string, Promise<AudioSound | null>>()
 function getAudio() {
   if (audio !== undefined) return audio
   try {
-    const next = Audio.create({ autoStart: false })
+    // 最后发声后留3秒宽限，由库完整释放输出设备；TUI不复制voice计数或idle定时器。
+    const next = Audio.create({ autoStart: false, idleReleaseMs: 3000 })
     next.on("error", (error: Error, context: AudioErrorContext) => {
       console.debug("tui audio error", { error, context })
     })
