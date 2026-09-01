@@ -359,6 +359,8 @@ describe("BashTool", () => {
                   "echo ok||sed missing",
                   "echo ok\ntail missing",
                 ]
+                // 归一后偏移不能遮住后续宿主黑名单命令；此夹具的进程边界始终是替身。
+                if (!cmd) blocked.push('git checkout --;head missing', 'git checkout --;ssh host "head ignored";head missing')
                 for (const command of blocked) {
                   reset()
                   const settled = yield* settleTool(registry, call({ command, workdir: path.dirname(tmp.path) }))
@@ -382,7 +384,12 @@ describe("BashTool", () => {
                   // 显式路径即使basename是head也不属于源guard裸名范围，仍走实际授权。
                   '"C:\\tools with spaces\\HEAD.EXE" missing', 'call "C:\\tools with spaces\\grep.exe" missing', '.\\head.exe missing',
                 )
-                if (!cmd) allowed.push('& "C:\\tools with spaces\\HEAD.EXE" missing', ". 'C:\\tools with spaces\\grep.exe' missing", '.\\head.exe missing')
+                if (!cmd) allowed.push('& "C:\\tools with spaces\\HEAD.EXE" missing', ". 'C:\\tools with spaces\\grep.exe' missing", '.\\head.exe missing',
+                  // 每项继续走既有资源/argv断言，证明裸--修复没有改写真实执行或授权原文。
+                  'git commit -m "x" -- a.ts', 'git log --oneline -2 -- path', 'git checkout --;git reset --hard',
+                  'git commit -m "unclosed', 'git checkout --;ssh host "cat /etc/os-release | grep NAME";Write-Output done',
+                  'git checkout --;Write-Output head`;grep.exe',
+                )
                 for (const command of allowed) {
                   reset()
                   expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")

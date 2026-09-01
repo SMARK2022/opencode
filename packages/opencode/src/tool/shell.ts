@@ -447,8 +447,9 @@ export const ShellTool = Tool.define(
         always: new Set<string>(),
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
+      const locals = localCommands(root, Shell.name(shell))
 
-      for (const node of localCommands(root, Shell.name(shell))) {
+      for (const node of locals) {
         const command = parts(node)
         const tokens = command.map((item) => item.text)
         const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
@@ -481,6 +482,11 @@ export const ShellTool = Tool.define(
         scan.patterns.clear()
         scan.patterns.add(root.text.trim())
         scan.always.clear()
+      }
+
+      // 只给零命令节点补送审入口；cd等有意零pattern仍保持原契约，分类交给既有precheck。
+      if (scan.patterns.size === 0 && locals.length === 0 && root.text.trim()) {
+        scan.patterns.add(root.text.trim())
       }
 
       return scan

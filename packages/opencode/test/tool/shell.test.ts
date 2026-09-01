@@ -1624,6 +1624,256 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
     }),
   )
 
+  // 裸--会使PowerShell grammar丢节点或命令段；以下保留事故与缺段形态的公开授权回归。
+  for (const item of ps) {
+    it.live(`asks for bash permission when bare -- separates git command arguments [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：修复前裸 -- 使 grammar 断裂，patterns 空集触发零 ask 直通。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: `git commit -m "x" -- a.ts` },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：引号化后 command 节点恢复，git commit 进入审批 pattern。
+              expect(bashReq!.patterns.some((p) => p.startsWith("git commit"))).toBe(true)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`asks for bash permission for the incident commit shape with bare -- [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：生产事故逐字原形（多 -m+多路径+裸 --）——事故当日三次零 ask 的命令。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: `git commit --only -m "a" -m "b" -- p1.txt p2.txt`,
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：事故原形（双 -m+多路径）完整解析后前缀恢复，非零节点兜底通道。
+              expect(bashReq!.patterns.some((p) => p.startsWith("git commit"))).toBe(true)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  // 精度锁：安全类 git log 形态修复后只恢复 ask，不升级为整体 cautious
+  for (const item of ps) {
+    it.live(`asks for bash permission for git log with bare -- without coarsening [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：git log 属只读安全类——修复不得借机把它升为 cautious 粗断言。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: `git log --oneline -2 -- path` },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns.some((p) => p.startsWith("git log"))).toBe(true)
+              // 600：分级断言交 precheck 既有测试；此处锁 ask 形态与前缀精度不变。
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  // 缺段锁（R1 审计 B-02）：紧邻分隔符的裸 `--` 不得使所在命令段从 patterns 消失
+  for (const item of ps) {
+    it.live(`keeps both command segments when bare -- is adjacent to a separator [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：分隔符 `;` 紧贴 -- 是最小丢段形态（token 边界含分隔符的原因）。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: `git checkout --;git reset --hard`,
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：`;` 前裸 -- 修复前丢弃 git checkout 段——两段前缀都在才证明无丢段。
+              expect(bashReq!.patterns.some((p) => p.startsWith("git checkout"))).toBe(true)
+              expect(bashReq!.patterns.some((p) => p.startsWith("git reset"))).toBe(true)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  // 兜底锁（零 command 节点残余失败）：未闭合引号命令仍须以原文 pattern 进入 ask
+  for (const item of ps) {
+    it.live(`falls back to raw-text pattern when parsing yields zero command nodes [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：未闭合引号是归一化后仍零节点的残余形态——兜底必须仍然 ask。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: `git commit -m "unclosed`,
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：零节点兜底注入解析输入 trim 原文——非空 pattern 即非零 ask。
+              expect(bashReq!.patterns.some((p) => p.trim().length > 0)).toBe(true)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  // 三类豁免：引号内是数据，--%是保留字，--flag不满足独立token边界。
+  for (const item of ps) {
+    it.live(`keeps in-quote double dash untouched in permission pattern [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：引号状态机验证——引号内 token 属数据域，越过引号即破坏语义。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: `echo "a -- b"` },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：引号内 -- 是数据；出现引号化痕迹即状态机越界改写。
+              expect(bashReq!.patterns.some((p) => p.includes("a -- b"))).toBe(true)
+              expect(bashReq!.patterns.some((p) => p.includes('"--"'))).toBe(false)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`keeps stop-parsing sequence --% untouched in permission pattern [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：--% 后续 token 不经 PowerShell 解析——引号化会改变其语义。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: `git push --% --force` },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：--% 是 PowerShell stop-parsing 保留字，sequel 豁免不改写。
+              expect(bashReq!.patterns.some((p) => p.includes("--%"))).toBe(true)
+              expect(bashReq!.patterns.some((p) => p.includes('"--%"'))).toBe(false)
+              expect(bashReq!.patterns.some((p) => p.includes('"--"'))).toBe(false)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`keeps flag-style dashes verbatim in permission pattern [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              // 600：同命令内 flag 与裸 -- 共存——只有独立 token 被引号化。
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: `git log --oneline -2 -- path` },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              // 600：flag 形态 `--oneline` 原样保留；只有独立 `--` 被引号化，
+              // 防止改写器扩大到带参形态（INV-05 第三类豁免）。
+              expect(bashReq!.patterns.some((p) => p.includes("--oneline"))).toBe(true)
+              expect(bashReq!.patterns.some((p) => p.includes('"--oneline"'))).toBe(false)
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
+
   each("matches redirects in permission pattern", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
