@@ -1732,7 +1732,10 @@ it.instance(
 
       const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
       const inputs = yield* llm.inputs
-      expect(inputs[0].tool_choice).not.toBe("required")
+      // [local-smark] INV-02 反转：reviewer 请求现在必须在 API 层强制决策工具
+      // （toolChoice:"required"），与 reviewer-service 的 wire 断言同源；该测试
+      // 单 push 即 reviewer 请求，inputs[0] 就是 reviewer 的 wire body。
+      expect(inputs[0].tool_choice).toBe("required")
       expect(JSON.stringify(inputs[0].tools)).toContain("permission_review_decision")
       expect(inputs[0].tools).toEqual(
         expect.arrayContaining([
@@ -1863,6 +1866,14 @@ it.instance(
       })
 
       expect(yield* llm.calls).toBe(2)
+      // [local-smark] R-REQ-4：第 2 次请求携带 avoid-xxx 防御纵深 nudge（阻断
+      // 反问/自认无能力形态），并显式给出裸 JSON 逃生口（生产 DB 证据：漂移场景
+      // 下 json_fallback 是实测可救回路径）。
+      const retryInputs = yield* llm.inputs
+      const retryInputText = JSON.stringify(retryInputs[1])
+      expect(retryInputText).toContain("Protocol retry")
+      expect(retryInputText).toContain("Avoid prose, questions")
+      expect(retryInputText).toContain("\"risk_level\"")
       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
       expect(reviewer).toBeDefined()
       if (!reviewer) return

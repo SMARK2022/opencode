@@ -105,6 +105,35 @@ describe("permission reviewer prompt", () => {
     expect(items.map((item) => item.text).join("\n")).toContain(">>> APPROVAL REQUEST END")
   })
 
+  test("appends a decision directive after the planned action and hardens the system contract", () => {
+    // R-REQ-3 双落点：user message 尾部（planned action 之后）的决策入口指令是
+    // 小模型权重最高处；system 契约同步声明 judge 角色与“信息不足→结构化
+    // deny/unknown”，把实测漂移形态（反问、自认无法执行）映射为合法决策。
+    const items = PermissionReviewerPrompt.buildUserPromptItems(
+      {
+        entries: [{ role: "user", text: "Please inspect the repo." }],
+        truncated: false,
+      },
+      new ReviewerRequest({
+        permission: "bash",
+        patterns: ["git push"],
+        metadata: { command: "git push" },
+        precheck: { level: "cautious", reason: "git push requires reviewer approval" },
+      }),
+    )
+
+    const last = items[items.length - 1]!.text
+    // 指令项必须是最后一项：planned action（含 APPROVAL REQUEST END）在其前一项
+    expect(items[items.length - 2]!.text).toContain(">>> APPROVAL REQUEST END")
+    expect(last).toContain("permission_review_decision")
+    expect(last).toContain("insufficient evidence")
+    expect(last).toContain("do not ask questions")
+
+    const system = PermissionReviewerPrompt.buildSystemPrompt(PermissionReviewerPrompt.DEFAULT_TENANT_POLICY)
+    expect(system).toContain("You are the judge")
+    expect(system).toContain("no human will reply")
+  })
+
   test("transcript keeps visible conversation and tool evidence without internal reasoning", () => {
     const transcript = PermissionReviewerTranscript.fromMessages([
       {

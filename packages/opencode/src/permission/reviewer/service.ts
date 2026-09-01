@@ -82,10 +82,12 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
 const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
 const PROTOCOL_RETRY_USER_ITEM = {
   type: "text" as const,
-  // The retry prompt deliberately asks only for the tool/function-call protocol.
-  // JSON text fallback is a runtime compatibility layer, not behavior we should
-  // advertise to the model after it already missed the preferred contract.
-  text: "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.",
+  // [local-smark] R-REQ-4 avoid-xxx 防御纵深 nudge：重试请求不含失败回合（重建
+  // 全新 [system, user] 上下文），旧文案的 "the previous response" 对模型不可见，
+  // 且未阻断实测漂移形态（反问、自认无法执行）。新文案自包含、逐项 avoid，
+  // 并显式给出裸 JSON 逃生口——生产 DB 证据表明漂移场景下 json_fallback 是
+  // 实测可救回路径，此设计取代旧「不宣传 JSON fallback」取舍。
+  text: "Protocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {\"risk_level\",\"user_authorization\",\"outcome\",\"rationale\"} as your entire message.",
 }
 
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
@@ -103,6 +105,10 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     const sessions = yield* Session.Service
     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
+    // [local-smark] 已知拒绝 tool_choice 的 provider 集合（进程内记忆）：首次到达
+    // 400 参数拒绝后记录，后续评审直接去参发送，避免每次评审都重复支付一次
+    // 400 轮往返；不持久化——能力探测的授权粒度是「重发一次」，非跨进程契约。
+    const toolChoiceRejectedProviders = new Set<ProviderID>()
 
     const review: Interface["review"] = (input) =>
       Effect.gen(function* () {
@@ -413,7 +419,7 @@ export const layer = Layer.effect(
     }) {
       const session = input.session
       const parentID = input.parentID
-      if (!session || !parentID) return runReviewerStream(input.messages, input.model)
+      if (!session || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model)
       return Effect.gen(function* () {
         const message: MessageV2.Assistant = {
           id: MessageID.ascending(),
@@ -459,7 +465,7 @@ export const layer = Layer.effect(
               ),
             ),
           )
-        const assessment = yield* runReviewerStream(input.messages, input.model, {
+        const assessment = yield* runReviewerStreamWithToolChoice(input.messages, input.model, {
           sessionID: session.id,
           messageID: message.id,
           reviewID: input.reviewID,
@@ -500,6 +506,7 @@ export const layer = Layer.effect(
       messages: readonly ModelMessage[],
       model: Provider.Model,
       persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: MessageV2.Assistant },
+      forcedToolChoice?: boolean,
     ) {
       return Effect.acquireUseRelease(
         Effect.sync(() => new AbortController()),
@@ -637,9 +644,11 @@ export const layer = Layer.effect(
                   }),
                 }),
               },
-              // Some OpenAI-compatible providers reject forced tool_choice even
-              // though they can emit tool calls. The reviewer prompt requires this
-              // tool, and absence of the call still fails closed below.
+              // [local-smark] INV-02：仿照 session/prompt.ts:3194 的 structured-output
+              // 先例，评审请求在 API 层强制决策工具提交，排除 prompt-only 强制在
+              // 长 transcript 下观测到的 prose 漂移失败尾部；已知拒绝该参数的
+              // provider 由 runReviewerStreamWithToolChoice 的兼容重发降级。
+              toolChoice: forcedToolChoice ? ("required" as const) : undefined,
               maxRetries: 0,
               providerOptions: ProviderTransform.providerOptions(model, params.options),
               maxOutputTokens: params.maxOutputTokens,
@@ -705,6 +714,11 @@ export const layer = Layer.effect(
                   if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
                     assessment = assessmentFromUnknown(event.input)
                   }
+                  // [local-smark] NF-1：非 persist 分支同样必须以原始 shape 传播
+                  // provider error 事件，否则 400 等错误被吞成「drain 无 assessment」
+                  // 协议错误盲重试 3 次，且 tool_choice 兼容重发在该 seam 结构
+                  // 不可达——与 persist 分支下方的同款处理语义对齐。
+                  if (event.type === "error") return yield* Effect.fail(event.error)
                   return
                 }
                 if (event.type === "reasoning-start") {
@@ -949,6 +963,26 @@ export const layer = Layer.effect(
       )
     }
 
+    // [local-smark] tool_choice 兼容协商入口（INV-03，用户原话授权：「如果拒绝
+    // 该参数，则兼容性地重发一次」）：默认强制 required；provider 以 400 且报文
+    // 指向 tool_choice 拒绝时，同次评审去参重发恰一次并记忆该 provider。该
+    // catchIf 位于 runReviewerAgent 的 tapError/onInterrupt 管道之内，首次 400
+    // 不会写入 message error 终态；重发复用同一 child message 行（首次 400 在任何
+    // stream 事件前发生，无 parts 落库，safeFinalize 为 no-op）。
+    function runReviewerStreamWithToolChoice(
+      messages: readonly ModelMessage[],
+      model: Provider.Model,
+      persist?: Parameters<typeof runReviewerStream>[2],
+    ) {
+      const forced = !toolChoiceRejectedProviders.has(model.providerID)
+      return runReviewerStream(messages, model, persist, forced).pipe(
+        Effect.catchIf(isToolChoiceRejection, () => {
+          toolChoiceRejectedProviders.add(model.providerID)
+          return runReviewerStream(messages, model, persist, false)
+        }),
+      )
+    }
+
     function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
       return updateToolAutoReview(input, {
         status: "reviewing",
@@ -1080,6 +1114,17 @@ function isReviewerDecisionProtocolError(error: unknown) {
 // provider 级 429/503 由 SessionRetry.retry 在每次尝试内处理，不经过此层。
 function isReviewerRetryable(error: unknown): boolean {
   return isReviewerDecisionProtocolError(error) || error instanceof ReviewerTimedOut
+}
+
+// [local-smark] 仅当 provider 以 400 且报文明确指向 tool_choice 时才归类为
+// 参数拒绝：其它 400（如 Codex 的 instructions/max_output_tokens 拒绝）必须
+// 原样失败（INV-06），不得被去参重发掩盖。窄匹配的残余场景（报文不含该词）
+// 走既有 3-attempt/fail-closed，不加宽匹配。statusCode/responseBody 来自
+// AI SDK APICallError 的原始 shape（与 errorMessage 提取的 responseBody 同源）。
+function isToolChoiceRejection(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const withStatus = error as { statusCode?: unknown; responseBody?: unknown }
+  return withStatus.statusCode === 400 && /tool[_ ]?choice/i.test(String(withStatus.responseBody ?? ""))
 }
 
 function reviewerEnabled(permission: Config.Info["permission"], _metadata: Readonly<Record<string, unknown>>) {

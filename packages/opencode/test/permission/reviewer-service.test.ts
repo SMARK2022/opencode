@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Fiber, Layer } from "effect"
+import { Effect, Exit, Fiber, Layer } from "effect"
 import { createOpenAI } from "@ai-sdk/openai"
 import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
@@ -38,6 +38,7 @@ const REVIEWER_ASSESSMENT = {
 type ReviewerRequestBody = {
   instructions?: unknown
   max_output_tokens?: unknown
+  tool_choice?: unknown
   input: Array<{ role?: unknown; content?: unknown }>
 }
 
@@ -126,6 +127,10 @@ describe("permission reviewer service", () => {
       expect(decision.action).toBe("allow")
       expect(body.instructions).toBeUndefined()
       expect(hasSystemLikeInput(body)).toBe(true)
+      // [local-smark] INV-02：reviewer 请求必须在 API 层强制决策工具（先例
+      // session/prompt.ts:3194 的 structured-output toolChoice:"required"）；
+      // prompt-only 强制在生产 DB 有 6/6 prose 漂移失败尾部。
+      expect(body.tool_choice).toBe("required")
       expectPreservedShellEvidence(inputText(body))
     }),
   )
@@ -170,6 +175,93 @@ describe("permission reviewer service", () => {
       expect(decision.action).toBe("allow")
       expect(inputText(body)).toContain("general")
       expectPreservedShellEvidence(inputText(body))
+    }),
+  )
+
+  // [local-smark] INV-03 兼容重发：provider 显式拒绝 tool_choice 时同次评审去参
+  // 重发恰一次；Set 记忆使同 provider 后续评审不再付费 400。三个用例使用互不
+  // 共享的 fixture 实例（Set 存活于层闭包，跨 it 共享会造成顺序耦合）。
+  const toolChoiceResendFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    { requireInstructions: false, rejectToolChoice: true },
+  )
+  const toolChoiceResend = testEffect(toolChoiceResendFixture.layer)
+
+  toolChoiceResend.effect("resends once without tool_choice after the provider rejects the parameter", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(reviewInput("review_toolchoice_resend"))
+
+      expect(decision.action).toBe("allow")
+      expect(toolChoiceResendFixture.bodies.length).toBe(2)
+      expect(toolChoiceResendFixture.bodies[0]!.tool_choice).toBe("required")
+      // 重发不强制：SDK 未强制时默认 tool_choice:"auto"，语义断言锁定“不再 required”
+      expect(toolChoiceResendFixture.bodies[1]!.tool_choice).not.toBe("required")
+    }),
+  )
+
+  const toolChoiceMemoryFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    { requireInstructions: false, rejectToolChoice: true },
+  )
+  const toolChoiceMemory = testEffect(toolChoiceMemoryFixture.layer)
+
+  toolChoiceMemory.effect("skips forcing tool_choice for later reviews after a provider rejection is learned", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* reviewer.review(reviewInput("review_toolchoice_learn_1"))
+      const before = toolChoiceMemoryFixture.bodies.length
+      yield* reviewer.review(reviewInput("review_toolchoice_learn_2"))
+
+      expect(toolChoiceMemoryFixture.bodies.length).toBe(before + 1)
+      expect(toolChoiceMemoryFixture.bodies[before]!.tool_choice).not.toBe("required")
+    }),
+  )
+
+  const toolChoiceUnrelatedFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    { requireInstructions: false, rejectToolChoiceUnrelated: true },
+  )
+  const toolChoiceUnrelated = testEffect(toolChoiceUnrelatedFixture.layer)
+
+  toolChoiceUnrelated.effect("does not strip tool_choice for unrelated 400 rejections", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const exit = yield* Effect.exit(reviewer.review(reviewInput("review_toolchoice_unrelated")))
+
+      expect(Exit.isSuccess(exit)).toBe(false)
+      // 回归锁：与 tool_choice 无关的 400 不去参重发，维持原样失败（INV-06）
+      expect(toolChoiceUnrelatedFixture.bodies.length).toBe(1)
+    }),
+  )
+
+  // [local-smark] INV-03 persist 生产常规路径：带 sessionID 的评审走 runReviewerAgent
+  // 的 persist 分支（child message 行先建、tapError/onInterrupt 在协商入口之外）。
+  // fixture 复用 reviewerClosureFixture 已验证的 session mock 形态（closure 组绿灯
+  // 证明足以走通 persist 分支），fetch 复现 provider 对强制 tool_choice 的 400 拒绝；
+  // 断言重发成功且复用的 message 行无伪 error 终态（首次 400 无事件落库）。
+  const persistResendFixture = reviewerPersistResendFixture()
+  const persistResend = testEffect(persistResendFixture.layer)
+
+  persistResend.effect("resends without tool_choice on the persist path and completes the reused message row once", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(
+        reviewInput("review_toolchoice_persist", undefined, SessionID.make("session_parent_persist")),
+      )
+
+      expect(decision.action).toBe("allow")
+      expect(persistResendFixture.bodies.length).toBe(2)
+      expect(persistResendFixture.bodies[0]!.tool_choice).toBe("required")
+      expect(persistResendFixture.bodies[1]!.tool_choice).not.toBe("required")
+      const assistantMessages = [...persistResendFixture.messages.values()].filter(
+        (m): m is MessageV2.Assistant => m.role === "assistant",
+      )
+      expect(assistantMessages).toHaveLength(1)
+      const child = assistantMessages[0]!
+      expect(child.finish).toBe("tool-calls")
+      expect(child.error).toBeUndefined()
+      expect(child.time.completed).toBeGreaterThan(0)
     }),
   )
 
@@ -779,12 +871,97 @@ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
   }
 }
 
+// [local-smark] persist 路径重发夹具：session mock 形态复用 reviewerClosureFixture
+// （get/children/create/updateMessage/getPart/updatePart），updateMessage 额外捕获
+// child assistant 终态供「重发复用同一 message 行且无伪 error 终态」断言。
+function reviewerPersistResendFixture() {
+  const bodies: ReviewerRequestBody[] = []
+  const messages = new Map<string, MessageV2.Info>()
+  const parts = new Map<string, MessageV2.Part>()
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as ReviewerRequestBody
+      bodies.push(body)
+      if (body.tool_choice === "required") {
+        return new Response(JSON.stringify({ detail: "Unsupported parameter: tool_choice" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      return new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    },
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model,
+    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+    getLanguage: Effect.fn("ReviewerPersistResendTest.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent_persist"),
+    slug: "parent-persist",
+    projectID: ProjectID.make("project_reviewer_persist"),
+    directory: "/tmp",
+    title: "Parent persist",
+    model: { id: model.id, providerID: model.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer_persist"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (message) =>
+      Effect.sync(() => {
+        messages.set(message.id, structuredClone(message))
+        return message
+      }),
+    getPart: (input) => Effect.succeed(parts.get(input.partID)),
+    updatePart: (part) =>
+      Effect.sync(() => {
+        parts.set(part.id, structuredClone(part))
+        return part
+      }),
+  })
+  return {
+    bodies,
+    messages,
+    layer: PermissionReviewer.layer.pipe(
+      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+    ),
+  }
+}
+
 function reviewerFixture(
   authInfo: Auth.Info | undefined,
   options: {
     requireInstructions: boolean
     providerID?: ProviderID
     rejectMaxOutputTokens?: boolean
+    // [local-smark] rejectToolChoice 复现生产 provider 拒绝 tool_choice 的 400 形态
+    // （报文含 "tool_choice"）；rejectToolChoiceUnrelated 复现报文不含该词的无关
+    // 400，验证窄匹配不会把其它参数错误误解成需要去参重发（INV-06）。
+    rejectToolChoice?: boolean
+    rejectToolChoiceUnrelated?: boolean
     plugin?: Layer.Layer<Plugin.Service>
     permission?: Config.Info["permission"]
   } = { requireInstructions: false },
@@ -814,6 +991,18 @@ function reviewerFixture(
       // reviewer request shape, not a private helper or source-code branch.
       if (options.rejectMaxOutputTokens && body.max_output_tokens !== undefined) {
         return new Response(JSON.stringify({ detail: "Unsupported parameter: max_output_tokens" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      // [local-smark] 两种 400 形态只在请求携带强制 tool_choice==="required" 时触发；
+      // SDK 在未强制时默认发 tool_choice:"auto"（今日生产请求同形且被 provider 接受），
+      // 与生产一致，400 发生在任何 stream 事件之前。
+      if ((options.rejectToolChoice || options.rejectToolChoiceUnrelated) && body.tool_choice === "required") {
+        const detail = options.rejectToolChoice
+          ? "Unsupported parameter: tool_choice"
+          : "Instructions are required"
+        return new Response(JSON.stringify({ detail }), {
           status: 400,
           headers: { "content-type": "application/json" },
         })

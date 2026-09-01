@@ -24,12 +24,14 @@ export interface UserPromptItem {
 
 export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
 
-// The text contract names the decision tool and repeats its JSON-shaped input
-// because provider tool forcing is intentionally not required for every backend.
-// Runtime may accept strict JSON as a compatibility fallback, but the prompt must
-// keep steering models toward the auditable permission_review_decision protocol.
+// [local-smark] 输出契约双落点（R-REQ-3a/3b）：system 契约声明 judge 角色与
+// 「信息不足→结构化 deny/unknown」映射，user 尾部指令（DECISION_DIRECTIVE）
+// 在 planned action 之后抢占最高 recency 权重。历史取舍「不要求 provider 强制
+// 工具调用」已由 runReviewerStream 的 toolChoice:"required"（含 400 兼容重发）
+// 取代；runtime 的严格 JSON 文本兼容入口仍保留，但 prompt 始终优先引导模型
+// 走可审计的 permission_review_decision 工具协议。
 const OUTPUT_CONTRACT_PROMPT = `\
-Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.
+Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. You are the judge, not the executor: you are not being asked to run the action, hold a conversation, or answer questions — no human will reply. If you believe the evidence is insufficient, encode that in the decision itself (deny, or user_authorization "unknown", with rationale) instead of asking for clarification. Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.
 
 Use this tool input schema for every decision, including low-risk allows:
 {
@@ -38,6 +40,14 @@ Use this tool input schema for every decision, including low-risk allows:
   "outcome": "allow" | "deny",
   "rationale": string
 }`
+
+// [local-smark] 决策入口尾指令（R-REQ-3b）：长混乱 transcript 会把小模型漂移成
+// 「反问/自认无法执行」（生产 DB 失败现场 6/6 attempt 同形）；planned action JSON
+// 之后紧跟一条祈使指令，把漂移形态重新映射回结构化决策路径。
+const DECISION_DIRECTIVE_USER_ITEM = {
+  type: "text" as const,
+  text: "Decide now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
+}
 
 export function buildSystemPrompt(tenantPolicy: string) {
   // Tenant policy is inserted into a fixed Guardian-style template; callers pass
@@ -67,6 +77,9 @@ export function buildUserPromptItems(
       type: "text",
       text: "The agent has requested the following action:\n>>> APPROVAL REQUEST START\nAssess the exact planned action below. Use read-only evidence when local state matters.\nPlanned action JSON:\n" + planned + "\n>>> APPROVAL REQUEST END",
     },
+    // [local-smark] 尾部决策指令（R-REQ-3b）：必须是最后一个 user item，
+    // 使输出契约处于 recency 权重最高处而非 planned-action JSON blob。
+    DECISION_DIRECTIVE_USER_ITEM,
   ]
 }
 
