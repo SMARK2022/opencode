@@ -123,6 +123,9 @@ const USER_ACCOUNT_COMMANDS = new Set([
   "usermod", "adduser", "deluser", "addgroup", "delgroup",
 ])
 
+// 进程终止族共用cautious；kill/spps是Stop-Process别名，sp是Set-ItemProperty，不能纳入。
+// 按名批量仍需评审；kill尾-1/killall5的全进程语义由前置分支区分。
+const PROCESS_TERMINATION_COMMANDS = new Set(["kill", "pkill", "killall", "stop-process", "spps", "taskkill", "tskill"])
 
 // #197：禁止 always-allow 的宽泛前缀——授权后可隐藏未来任意载荷文本，用户点击 Always 时 precheck 从未见过这些未来载荷
 const BANNED_AUTO_ALLOW_PREFIXES = [
@@ -1024,8 +1027,18 @@ function classifyTokens(tokens: string[]): Decision | undefined {
       return { level: "cautious", reason: "service state change requires explicit approval" }
   }
   // #220: 全进程终止
-  if (cmd === "kill" && tokens.includes("-9") && tokens.includes("-1"))
+  // 全进程判定先于族规则；-1须在尾操作数位，信号位kill -1 1234仍是cautious。
+  // 精确-l按crontab先例豁免只读列信号，不将无实参kill视为只读。
+  if (cmd === "killall5")
     return { level: "dangerous", reason: "mass process kill" }
+  if (cmd === "kill" && tokens.at(-1) === "-1" && !tokens.slice(1).includes("-l"))
+    return { level: "dangerous", reason: "mass process kill" }
+  if (PROCESS_TERMINATION_COMMANDS.has(cmd)) {
+    const args = tokens.slice(1)
+    const flags = args.filter((item) => item.startsWith("-"))
+    if (args.length > 0 && flags.length > 0 && flags.every((item) => item === "-l")) return
+    return { level: "cautious", reason: "process termination requires explicit approval" }
+  }
   // #220: 定时任务——crontab/schtasks/Register-ScheduledTask
   if (cmd === "crontab") {
     const args = tokens.slice(1)
