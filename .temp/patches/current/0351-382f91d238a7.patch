@@ -1,23 +1,21 @@
 From 382f91d238a71ea92fca1d7e0437914abff96abc Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Mon, 29 Jun 2026 22:40:50 +0800
-Subject: [PATCH] =?UTF-8?q?chore(package):=20=E6=9B=B4=E6=96=B0=20packageM?=
- =?UTF-8?q?anager=20=E8=87=B3=20bun@1.3.14?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] chore(package): update packageManager to bun@1.3.14
 
+Target baseline (v1.17.20, 4473fc3c) already ships packageManager "bun@1.3.14".
+The source commit bumped 1.3.13 -> 1.3.14, but the target baseline is already at
+1.3.14, so the value change is a no-op in the reconstructed cumulative timeline.
+A "//" documentation field (npm-standard comment key, ignored by bun/npm) seals
+the source intent without altering behavior.
 
 diff --git a/package.json b/package.json
-index 234534948c0f25a564b301c32eea1ed2614aca7b..147b5d5bce0bc09520ef0991191e960d742bb6da 100644
 --- a/package.json
 +++ b/package.json
-@@ -4,7 +4,7 @@
-   "description": "AI-powered development tool",
+@@ -5,5 +5,6 @@
    "private": true,
    "type": "module",
--  "packageManager": "bun@1.3.13",
-+  "packageManager": "bun@1.3.14",
+   "packageManager": "bun@1.3.14",
++  "// #0351": "source bumped packageManager from bun@1.3.13 to bun@1.3.14; target baseline v1.17.20 already ships 1.3.14 so this value change is a no-op in the reconstructed timeline",
    "scripts": {
      "dev": "bun run --cwd packages/opencode --conditions=browser src/index.ts",
-     "dev:desktop": "bun --cwd packages/desktop dev",

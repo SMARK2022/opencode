@@ -7,170 +7,90 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-daemon stop 主动关闭共享后台时，先向已连接 TUI 广播 daemon-stop 事件，让 TUI 走正常退出路径，避免后续连接失败被渲染成 startup fatal error。
+daemon stop 主动关闭共享后台时，先向已连接 TUI 广播 daemon-stop 事件，让 TUI 走正常退出路径。
 
-同时将 lock 清理延后到实例 dispose、server stop 和 Database.close 之后，避免旧 daemon 仍持有 SQLite 时新 daemon 过早接管。
+同时将 lock 清理延后到实例 dispose、server stop 和 Database.close 之后。
 
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 89c9e0b83f02a2751c879f185a1b800592f90276..13edd8e2354afa861821db280c8935bc6f39a7dd 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -36,6 +36,7 @@ import { useKV } from "./kv"
- import { SessionPath } from "@/session/path"
- import { aggregateFailures } from "./aggregate-failures"
- import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
-+import { DisposedReason } from "@/server/event"
- 
- export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-   name: "Sync",
-@@ -386,9 +387,18 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-       setStore("session_status", reconcile(x.data ?? {}))
-     }
- 
-+    const exit = useExit()
-+    let daemonStopSeen = false
-+
-     event.subscribe((event, { workspace }) => {
-       if (event.type !== "message.part.delta") flushPartDeltas()
-       switch (event.type) {
-+        case "global.disposed":
-+          if (daemonStopReason(event) !== DisposedReason.DaemonStop) break
-+          daemonStopSeen = true
-+          exit.message.set("opencode daemon stopped.")
-+          void exit()
-+          break
-         case "server.connected":
-           loggedPartDeltaApplications.clear()
-           if (!connectedOnce) {
-@@ -401,6 +411,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           void bootstrap({ fatal: false }).catch(() => undefined)
-           break
-         case "server.instance.disposed":
-+          if (daemonStopSeen) break
-           void bootstrap()
-           break
-         case "permission.replied": {
-@@ -667,7 +678,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-       loggedPartDeltaApplications.clear()
-     })
- 
--    const exit = useExit()
-     const args = useArgs()
- 
-     async function bootstrap(input: { fatal?: boolean } = {}) {
-@@ -851,3 +861,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     return result
-   },
- })
-+
-+function daemonStopReason(event: { properties: unknown }) {
-+  const properties = event.properties
-+  if (!properties || typeof properties !== "object") return
-+  return typeof (properties as { reason?: unknown }).reason === "string"
-+    ? (properties as { reason: string }).reason
-+    : undefined
-+}
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 2b66c512464b76272eacbfd1293d606135068a10..4c5063ec0793279b423f0ed815433b3b7962fa82 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -15,6 +15,8 @@ import { Global } from "@opencode-ai/core/global"
- import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
- import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+index 849a91e..e14c1cb 100644
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -15,6 +15,7 @@ import { Database } from "@opencode-ai/core/database/database"
+ import { ServerLock } from "@/cli/tui/server-lock"
+ import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
  import { SessionActivity } from "@/session/activity"
-+import { GlobalBus } from "@/bus/global"
 +import { DisposedReason, Event as ServerEvent } from "@/server/event"
  
- ensureProcessMetadata("worker")
- NetworkProxy.installGlobalFetch()
-@@ -105,15 +107,28 @@ async function gracefulShutdown(reason = "unknown") {
-     sseClients,
-     sessionActivity: SessionActivity.count(),
-   })
--  await ServerLock.clearIfOwner(lockToken)
-+  if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
-   await InstanceRuntime.disposeAllInstances()
-   controlServer?.stop(true)
-   if (externalServer) await externalServer.stop(true)
-   await internalServer.stop(true)
-   Database.close()
-+  // Keep the lock until after disposers and Database.close() finish. Otherwise a
-+  // reconnecting TUI can spawn a replacement daemon while this process still owns SQLite.
-+  await ServerLock.clearIfOwner(lockToken)
-   process.exit(0)
- }
+ Heap.start()
  
-+function notifyDaemonStop() {
-+  GlobalBus.emit("event", {
-+    directory: "global",
-+    payload: {
-+      type: ServerEvent.Disposed.type,
-+      properties: { reason: DisposedReason.DaemonStop },
-+    },
-+  })
-+}
+@@ -119,8 +120,8 @@ if (isDaemon) {
+       sseClients,
+       sessionActivity: SessionActivity.count(),
+     })
+-    // 仅当 token 匹配时删除锁，防止误删不再属于自己的锁
+-    await ServerLock.clearIfOwner(lockToken)
++    // #273：daemon stop 时先广播事件，让 TUI 走正常退出路径
++    if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
+     // #259：control server 随 daemon 一起关闭——避免端口残留
+     controlServer?.stop(true)
+     // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
+@@ -136,9 +137,22 @@ if (isDaemon) {
+     ])
+     // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
+     Database.close()
++    // #273：lock 清理延后到 dispose/stop/Database.close 之后，避免新 daemon 过早接管
++    await ServerLock.clearIfOwner(lockToken)
+     process.exit(0)
+   }
+ 
++  // #273：daemon stop 时向已连接 TUI 广播 global.disposed 事件
++  function notifyDaemonStop() {
++    GlobalBus.emit("event", {
++      directory: "global",
++      payload: {
++        type: ServerEvent.Disposed.type,
++        properties: { reason: DisposedReason.DaemonStop },
++      },
++    })
++  }
 +
- process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
+   // SIGTERM 触发优雅关闭
+   process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
  
- // Config reload on SIGUSR2 (Unix only — Windows does not support this signal).
-@@ -176,7 +191,7 @@ controlServer = Bun.serve({
-       return new Response("not found", { status: 404 })
-     // 这是 daemon stop 的本机私有控制面：只有持有当前 lock token 的调用方
-     // 才能让 daemon 自己执行 gracefulShutdown，避免 CLI 直接杀 pid。
--    setTimeout(() => void gracefulShutdown("daemon-stop"), 0).unref?.()
-+    setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
-     return Response.json({ ok: true })
-   },
- })
+@@ -211,7 +225,7 @@ if (isDaemon) {
+       if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+         return new Response("not found", { status: 404 })
+       // #259：setTimeout 避免在 fetch handler 内直接关闭——让响应先返回
+-      setTimeout(() => void gracefulShutdown("daemon-stop"), 0).unref?.()
++      setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
+       return Response.json({ ok: true })
+     },
+   })
 diff --git a/packages/opencode/src/server/event.ts b/packages/opencode/src/server/event.ts
-index 9fc36ad021ca8a1209cefe694669db61b1d04ce3..74e3281fe382677a7bed7e158baf16e5bcb272d1 100644
+index 9bb8a8c..7bac3a9 100644
 --- a/packages/opencode/src/server/event.ts
 +++ b/packages/opencode/src/server/event.ts
-@@ -3,9 +3,13 @@ import { AsyncQueue } from "@/util/queue"
+@@ -1,6 +1,11 @@
  import { Schema } from "effect"
- import type { Context } from "hono"
+ import { ServerEvent } from "@opencode-ai/schema/server-event"
  
++// #273：daemon stop 时需匿名广播原因，让 TUI 区分"主动关闭"与"意外崩溃"
 +export const DisposedReason = {
 +  DaemonStop: "daemon-stop",
 +} as const
 +
- export const Event = {
-   Connected: BusEvent.define("server.connected", Schema.Struct({})),
--  Disposed: BusEvent.define("global.disposed", Schema.Struct({})),
-+  Disposed: BusEvent.define("global.disposed", Schema.Struct({ reason: Schema.optional(Schema.String) })),
- }
+ export const Event = ServerEvent
  
- const encoder = new TextEncoder()
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-index 9d968f025c39f2108d120e5c054d92d0b3b3290e..550d64fca6338302fa397690af3484bb0e0a081f 100644
---- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -2,7 +2,6 @@ import { Config } from "@/config/config"
- import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
- import { EffectBridge } from "@/effect/bridge"
- import { Bus } from "@/bus"
--import { BusEvent } from "@/bus/bus-event"
- import { Installation } from "@/installation"
- import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
- import { InstallationVersion } from "@opencode-ai/core/installation/version"
-@@ -16,9 +15,6 @@ import { PassThrough } from "node:stream"
- 
- const log = Log.create({ service: "server" })
- 
--// [local-smark] SSE client count tracking for daemon idle-timeout
--export const GlobalDisposedEvent = BusEvent.define("global.disposed", Schema.Struct({}))
--
- let sseClientCount = 0
- let onSseCountChange: ((n: number) => void) | undefined
- 
+ export const InstanceDisposed = Schema.Struct({
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index e023528f2fdfce1193b5c60d5bbeafe084a14627..5461216acd599ce5151ae5bca48acf5f9254c0fa 100644
+index 644735a..1c5fa6d 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -139,6 +139,16 @@ async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
-   throw new Error("timed out waiting for child pid")
+@@ -112,6 +112,17 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+   throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
  }
  
++// #273：读取 SSE 流直到出现指定文本
 +async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
 +  let seen = ""
 +  while (!seen.includes(text)) {
@@ -182,12 +102,13 @@ index e023528f2fdfce1193b5c60d5bbeafe084a14627..5461216acd599ce5151ae5bca48acf5f
 +}
 +
  describe("daemon lifecycle", () => {
+   // #259：daemon stop 命令测试——从真实 CLI 入口验证完整外部契约
    test(
-     "daemon stop command gracefully stops daemon and clears the lock file",
-@@ -163,6 +173,43 @@ describe("daemon lifecycle", () => {
+@@ -138,6 +149,45 @@ describe("daemon lifecycle", () => {
      DAEMON_START_TIMEOUT_MS + 10_000,
    )
  
++  // #273：daemon stop 应在退出前向已连接 TUI 广播事件
 +  test(
 +    "daemon stop announces shutdown to connected TUI event streams before exit",
 +    async () => {
@@ -207,6 +128,7 @@ index e023528f2fdfce1193b5c60d5bbeafe084a14627..5461216acd599ce5151ae5bca48acf5f
 +          expect(first.value).toContain("server.connected")
 +
 +          const stop = runDaemonStop(lockPath)
++          // #273：期望收到带 daemon-stop 原因的 global.disposed 事件
 +          const shutdownEvent = await Promise.race([readUntil(reader, "daemon-stop"), Bun.sleep(5_000).then(() => "timeout")])
 +          expect(shutdownEvent).not.toBe("timeout")
 +          expect(String(shutdownEvent)).toContain("global.disposed")
@@ -228,3 +150,42 @@ index e023528f2fdfce1193b5c60d5bbeafe084a14627..5461216acd599ce5151ae5bca48acf5f
    test(
      "daemon stop command authenticates the health check when server password is configured",
      async () => {
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index 444d164..27b87ae 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -363,12 +363,26 @@ export const {
+       setStore("session_status", reconcile(x.data ?? {}))
+     }
+ 
++    // #273：提前获取 exit，供 global.disposed 事件处理中调用
++    const exit = useExit()
++    // #273：标记 daemon stop 已收到，阻止 server.instance.disposed 触发重连
++    let daemonStopSeen = false
++
+     event.subscribe((event, { directory, workspace }) => {
+       // #186：非 delta 事件前强制 flush，保证 part.updated / vcs 等看到完整文本
+       // #186：delta 自身不 flush，继续积攒同一 16ms 窗口
+       if (event.type !== "message.part.delta") flushPartDeltas()
+       switch (event.type) {
++        case "global.disposed":
++          // #273：仅响应 daemon 主动关闭，其他崩溃走重连
++          if ((event.properties as { reason?: string }).reason !== "daemon-stop") break
++          daemonStopSeen = true
++          // #273：直接调用 exit 函数，原因作为参数传递
++          void exit("opencode daemon stopped.")
++          break
+         case "server.instance.disposed":
++          // #273：daemon stop 已设置退出标志，不再重连
++          if (daemonStopSeen) break
+           void bootstrap()
+           break
+         case "server.connected":
+@@ -682,7 +696,6 @@ export const {
+       pendingPartDeltas = []
+     })
+ 
+-    const exit = useExit()
+     const args = useArgs()
+ 
+     async function bootstrap(input: { fatal?: boolean } = {}) {

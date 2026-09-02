@@ -13,13 +13,14 @@ Content-Transfer-Encoding: 8bit
 补充 Session GOAL 工作流、相关方案文档和浏览器代理子模块更新，避免无依据扩面、fallback 堆叠与审计范围收缩。
 
 diff --git a/.gitignore b/.gitignore
-index 7ad709c81a31c11d1dcd22dbf5bbd5d12164153b..9e3142427bc67e5c68b85070761b63ddeb93777a 100644
+index ba218258362d27ec2103a5e4473778af7d0570a4..4dd943a3aa7491a3ba56b1df8050c8ab3d98fdec 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -27,6 +27,7 @@ target
+@@ -29,6 +29,8 @@ target
  
  # Local dev files
  opencode-dev
++# 隔离迁移专用 clone：与目标工作区解耦，避免递归污染
 +/thirdparty/opencode-v1.17.18-smark/
  UPCOMING_CHANGELOG.md
  logs/
@@ -2953,5 +2954,5 @@ index 83d16691f12666a8e9ee827acc14dbdade2aa594..6d27a8924669f330a4fb8ce57dc2d07e
 --- a/thirdparty/chatgpt-browser-agent
 +++ b/thirdparty/chatgpt-browser-agent
 @@ -1 +1 @@
--Subproject commit 83d16691f12666a8e9ee827acc14dbdade2aa594
+-Subproject commit a70111b47806e150a347960ce0ac0485366055ec
 +Subproject commit 6d27a8924669f330a4fb8ce57dc2d07e588caf45

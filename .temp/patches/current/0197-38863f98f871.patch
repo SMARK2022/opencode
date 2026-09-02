@@ -148,13 +148,13 @@ new file mode 100644
 +
 +function evaluateShell(command: string, depth: number): Decision {
 +  // #197：递归深度上限 4 防止对抗性嵌套 wrapper 消耗时间——超限返回 prompt 而非 allow 保持失败安全
-+  // #197：递归深度上限 4 防止对抗性嵌套 wrapper 消耗时间——超限返回 prompt 而非 allow 保持失败安全
++  // #197：depth 随 wrapper 解包逐层递增——上限覆盖 bash -c 套 ssh 套 python -c 的常见嵌套，更深视为对抗性输入
 +  if (depth > 4) return { action: "prompt", reason: "nested shell wrapper requires explicit approval" }
 +  // #197：空命令无只读意图证据——可能是解析器残留或占位符，需用户确认实际意图
 +  if (!command.trim()) return { action: "prompt", reason: "empty shell command requires explicit approval" }
 +
 +  // #197：原始扫描先于分词——命令替换/重定向/wrapper 字符串/无效语法中隐藏的危险载荷仍需 fail closed
-+  // #197：原始扫描先于分词——命令替换/重定向/wrapper 字符串/无效语法中隐藏的危险载荷仍需 fail closed
++  // #197：dangerousRaw 在 tokenize 前运行——分词可能丢失引号/重定向上下文，原始文本保留这些语义供正则匹配
 +  const danger = dangerousRaw(command)
 +  // #197：原始扫描命中已知危险模式时直接 deny——deny 而非 prompt 防止用户反复重试绕过护栏
 +  if (danger) return { action: "deny", reason: danger }
@@ -182,7 +182,7 @@ new file mode 100644
 +  if (tokens.length === 0) return { action: "prompt", reason: "empty shell command requires explicit approval" }
 +
 +  // #197：wrapper 脚本递归评估——deny 传播但 allow 不传播，因为 wrapper 本身永远不够安全到可确定性放行
-+  // #197：wrapper 脚本递归评估——deny 传播但 allow 不传播，因为 wrapper 本身永远不够安全到可确定性放行
++  // #197：unwrap 递归解包 wrapper 链——deny 结果直接返回，allow/ask 继续后续检查，wrapper 层数不改变最终语义
 +  const unwrapped = unwrap(tokens)
 +  if (unwrapped.action === "script") {
 +    const decision = evaluateShell(unwrapped.script, depth + 1)
@@ -195,7 +195,7 @@ new file mode 100644
 +  if (unwrapped.action === "ask") return { action: "prompt", reason: unwrapped.reason }
 +
 +  // #197：远程 wrapper 提取脚本后递归 deny 检测——远程执行本身仍 prompt 因跨信任边界
-+  // #197：远程 wrapper 提取脚本后递归 deny 检测——远程执行本身仍 prompt 因跨信任边界
++  // #197：remoteWrapper 独立于本地 unwrap——ssh/wsl 目标主机不在本地信任域，无危险载荷也 prompt
 +  const remote = remoteWrapper(tokens)
 +  if (remote.action === "remote") {
 +    if (remote.script) {
@@ -208,7 +208,7 @@ new file mode 100644
 +  }
 +
 +  // #197：安全 token 判定——先检风险 token（deny/prompt），再检安全 token（allow），最后默认 prompt
-+  // #197：安全 token 判定——先检风险 token（deny/prompt），再检安全 token（allow），最后默认 prompt
++  // #197：riskyTokens 先于 safeTokens——dd/mkfs/shutdown 等破坏性命令优先级高于只读匹配，防前缀误放行
 +  const risk = riskyTokens(tokens)
 +  // #197：风险判定优先于安全判定——已知破坏性命令即使用只读子命令形式也不自动放行
 +  if (risk) return risk
@@ -375,14 +375,14 @@ new file mode 100644
 +  if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
 +    return { action: "ask", reason: "privilege wrapper requires explicit approval" }
 +  }
-+  // #197：不是 wrapper——继续常规 token 级安全检查
++  // #197：非 wrapper 分支返回 none——none 不等于 allow，调用方继续 token 级判定，避免此处单点放行
 +  return { action: "none" }
 +}
 +
 +function remoteWrapper(tokens: string[]): RemoteResult {
 +  // #197：远程 wrapper 与本地解包分离——即使无可检脚本载荷，原因仍为信任边界 prompt
 +  const cmd = normalizeCommandName(tokens[0])
-+  // #197：不是远程 wrapper——返回 none 让调用方继续常规检查
++  // #197：远程集合外返回 none——远程判定仅对 ssh/wsl 生效，本地 wrapper 已由 unwrap 处理，两处职责不重叠
 +  if (!REMOTE_WRAPPERS.has(cmd)) return { action: "none" }
 +  if (cmd === "wsl") {
 +    const script = wslScript(tokens)
@@ -608,7 +608,7 @@ new file mode 100644
 +    if (tokens[i] === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
 +    // #197：git branch 需单独审查——既是只读列表也是 ref 变更命令
 +    if (tokens[i] === "branch") return gitBranchSafe(tokens.slice(i + 1))
-+    // #197：第一个非 flag token 是子命令——仅在安全集合内才 allow
++    // #197：首个非 flag token 即子命令——不在安全集合时返回 false 落入最终 prompt，未知子命令不默认放行
 +    if (!tokens[i].startsWith("-")) return safe.has(tokens[i])
 +  }
 +  // #197：仅有 flag 无子命令时不安全——git 不带子命令的行为不可判定
@@ -670,7 +670,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
  import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decoding"
  // #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
  
-@@ -315,7 +316,7 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
+@@ -315,7 +316,7 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean, shell: string) {
    return tree
  })
  
@@ -679,19 +679,27 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
    if (scan.dirs.size > 0) {
      const directories = Array.from(scan.dirs)
      const globs = directories.map((dir) => {
-@@ -327,7 +328,10 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
-       patterns: globs,
-       always: globs,
-       metadata: {
--        command: input.command,
-+        action_kind: "shell",
+@@ -337,9 +338,16 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string }) {
+   if (scan.patterns.size === 0) return
+   yield* ctx.ask({
+     permission: ShellID.ToolID,
+     patterns: Array.from(scan.patterns),
+     always: Array.from(scan.always),
+-    metadata: {
+-      command: input.command,
+-    },
++    // [local-smark] auto permission preflight needs the exact shell action.
++    // Patterns are user-facing approval summaries and can be split/reordered
++    // by parsing; keep the raw command and resolved cwd here so future reviewers
++    // do not infer security decisions from presentation strings.
++    metadata: {
++      action_kind: "shell",
 +      command: input.command,
 +      cwd: input.cwd,
 +      shell: input.shell,
-         directories,
-         patterns: globs,
-       },
-@@ -648,7 +652,9 @@ export const ShellTool = Tool.define(
++    },
+   })
+@@ -648,7 +656,9 @@ export const ShellTool = Tool.define(
          if (tokens.length && (!cmd || !CWD.has(cmd))) {
            scan.patterns.add(source(node))
            // 高风险 git 写操作不自动加入 always-allow 前缀建议
@@ -702,7 +710,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
          }
        }
  
-@@ -933,7 +939,7 @@ export const ShellTool = Tool.define(
+@@ -933,7 +943,7 @@ export const ShellTool = Tool.define(
                if (compatibility) throw new Error(compatibility)
                const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                    if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)

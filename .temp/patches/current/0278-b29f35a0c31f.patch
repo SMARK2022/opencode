@@ -7,19 +7,20 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-提交当前暂存的 ChatGPT MCP 本地配置与 TUI 渲染审计会话导出，保留审计来源、过程和后续复盘上下文。
-
-未纳入工作区中仍未暂存的 TUI 实现改动，避免把性能优化实现与审计记录混在同一次提交里。
+提交当前暂存的 ChatGPT MCP 本地配置与 TUI 审计会话导出。
 
 diff --git a/.opencode/opencode.jsonc b/.opencode/opencode.jsonc
-index 0ae2fbe26bc4e09d5064665d70f8c34799c5283a..05215e985eb932719194087a481db2e81637120c 100644
+index b0f7d59..c577866 100644
 --- a/.opencode/opencode.jsonc
 +++ b/.opencode/opencode.jsonc
-@@ -2,7 +2,25 @@
-   "$schema": "https://opencode.ai/config.json",
-   "provider": {},
-   "permission": {},
+@@ -12,7 +12,29 @@
+       "path": "~/.local/share/opencode",
+       "description": "Contains opencode logs and data",
+     },
+   },
 -  "mcp": {},
++  // #278：ChatGPT MCP 本地配置——node 与浏览器路径写死为本机绝对路径，
++  // 避免 PATH/环境差异导致 daemon 启动失败；环境变量集中在此便于迁移
 +  "mcp": {
 +    "chatgpt": {
 +      "type": "local",
@@ -35,6 +36,8 @@ index 0ae2fbe26bc4e09d5064665d70f8c34799c5283a..05215e985eb932719194087a481db2e8
 +        "CHATGPT_CLI_TIMEOUT_MS": "310000",
 +        "CHATGPT_DAEMON_START_TIMEOUT_MS": "60000"
 +      },
++      // #278：enabled 显式开启；timeout 覆盖 MCP 连接与工具调用的总上限，
++      // 与 CHATGPT_*_TIMEOUT_MS 阶梯一致：daemon 启动 < CLI 调用 < 响应
 +      "enabled": true,
 +      "timeout": 320000
 +    }
@@ -44,7 +47,7 @@ index 0ae2fbe26bc4e09d5064665d70f8c34799c5283a..05215e985eb932719194087a481db2e8
      "github-pr-search": false,
 diff --git a/session-ses_1837.md b/session-ses_1837.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..303cce417171803683395dd823fd9c9f750255d3
+index 0000000..303cce4
 --- /dev/null
 +++ b/session-ses_1837.md
 @@ -0,0 +1,674 @@
@@ -722,3 +725,4 @@ index 0000000000000000000000000000000000000000..303cce417171803683395dd823fd9c9f
 +
 +---
 +
+

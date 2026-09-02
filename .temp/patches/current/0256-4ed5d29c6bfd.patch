@@ -1,64 +1,48 @@
 From 4ed5d29c6bfd9d6400ce6842b8533f3311d60922 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 15:04:46 +0800
-Subject: [PATCH] =?UTF-8?q?feat(compaction):=20=E6=B7=BB=E5=8A=A0=E6=9C=80?=
- =?UTF-8?q?=E8=BF=91=E7=94=A8=E6=88=B7=E6=8C=87=E4=BB=A4=E7=9A=84=E4=BF=9D?=
- =?UTF-8?q?=E7=95=99=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BC=98=E5=8C=96=E5=8E=8B?=
- =?UTF-8?q?=E7=BC=A9=E4=B8=8A=E4=B8=8B=E6=96=87=E5=A4=84=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
+Subject: [PATCH] feat(compaction): 添加最近用户指令的保留逻辑，优化压缩上下文处理
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index a4d8d02d7e8419f92d041f881015e91ce436068f..d571b4fb16e9eb864fe2b5b9b9c9225f416dee48 100644
+index b450315e1..90e536879 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -41,9 +41,24 @@ export const PRUNE_MINIMUM = 20_000
- export const PRUNE_PROTECT = 40_000
- const TOOL_OUTPUT_MAX_CHARS = 2_000
- const PRUNE_PROTECTED_TOOLS = ["skill"]
-+// Whole-turn tail retention keeps exact assistant/tool continuity when it fits.
-+// The defaults deliberately preserve four recent user turns with a 4k-16k token
-+// adaptive budget: enough for normal coding turns, still bounded so compaction
-+// does not recreate the same oversized context it is trying to replace.
- const DEFAULT_TAIL_TURNS = 4
+@@ -36,6 +36,14 @@ const DEFAULT_TAIL_TURNS = 4
+ // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
  const MIN_PRESERVE_RECENT_TOKENS = 4_000
  const MAX_PRESERVE_RECENT_TOKENS = 16_000
-+// Separate from full-turn tail retention: a large tool-heavy recent turn can be
-+// too expensive to keep verbatim, but the user's latest instructions still need
-+// a bounded handoff lane. 20k mirrors Codex's memento budget as an absolute cap;
-+// preserveRecentUserBudget still clamps it to 20% of the active model's usable
-+// window so a 100k-token usable window can spend at most 20k on the memento.
++// #256：整轮尾部保留之外，还需要一条独立的最近用户指令通道（memento）：工具密集的
++// 最近一轮可能因预算限制整轮被压缩，但用户最新意图必须原样交给后续模型。
++// #256：20K 对齐 Codex memento 的绝对上限；ratio 0.2 使预算始终随模型窗口伸缩。
 +const DEFAULT_PRESERVE_RECENT_USER_TOKENS = 20_000
 +const PRESERVE_RECENT_USER_RATIO = 0.2
-+// The truncation marker is part of the model-visible handoff so the next model
-+// knows missing text was intentionally omitted by the memento budget, not by the
-+// user. Keep it short because it can appear inside an already tight context.
++// #256：截断标记是模型可见交接的一部分——后续模型据此知道缺失文本是 memento 预算
++// 主动省略而非用户删除。保持短小，因为它会出现在本就紧张的上下文中。
 +const RECENT_USER_MEMENTO_TRUNCATED = "...[truncated for compaction memento]"
- const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
- <template>
- ## Goal
-@@ -152,6 +167,71 @@ function preserveRecentBudget(input: { cfg: Config.Info; model: Provider.Model }
+ type Turn = {
+   start: number
+   end: number
+@@ -88,6 +96,72 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
    )
  }
  
-+function preserveRecentUserBudget(input: { cfg: Config.Info; model: Provider.Model; outputTokenMax?: number }) {
-+  // No minimum floor here: unlike the whole-turn tail, this memento is additive
-+  // to the summary and retained tail, so small-context models must be allowed to
-+  // shrink it all the way to zero instead of immediately overflowing again.
-+  return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
++// #256：memento 预算没有下限——与整轮尾部不同，它是 summary+tail 之上的增量，
++// 小窗口模型必须允许把它缩到 0，否则压缩重放后立刻再次溢出。
++function preserveRecentUserBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
++  return Math.min(
++    DEFAULT_PRESERVE_RECENT_USER_TOKENS,
++    Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
++  )
 +}
 +
-+function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; maxTokens: number }) {
++function collectRecentUserMessages(input: { messages: SessionV1.WithParts[]; maxTokens: number }) {
 +  if (input.maxTokens <= 0) return []
-+  const result: NonNullable<MessageV2.CompactionPart["recent_user_messages"]> = []
++  const result: NonNullable<SessionV1.CompactionPart["recent_user_messages"]> = []
++  // #256：从最新到最旧反向收集——预算有限时先保住最新指令；压缩标记消息本身不是用户指令。
 +  for (const msg of input.messages.toReversed()) {
 +    if (msg.info.role !== "user") continue
 +    if (msg.parts.some((part) => part.type === "compaction")) continue
-+    // Preserve only explicit user-authored text. Synthetic editor/file context
-+    // and ignored repair text are already represented elsewhere and replaying
-+    // them here would turn the memento into another unbounded context source.
++    // #256：只保留用户手写文本——synthetic 编辑器/文件上下文与 ignored 修复文本
++    // 已由其他通道表示，再进 memento 会把记忆变成又一个无界上下文源。
 +    const text = msg.parts
 +      .flatMap((part) => {
 +        if (part.type !== "text") return []
@@ -85,12 +69,11 @@ index a4d8d02d7e8419f92d041f881015e91ce436068f..d571b4fb16e9eb864fe2b5b9b9c9225f
 +function truncateRecentUserMessage(input: {
 +  id: MessageID
 +  text: string
-+  result: NonNullable<MessageV2.CompactionPart["recent_user_messages"]>
++  result: NonNullable<SessionV1.CompactionPart["recent_user_messages"]>
 +  maxTokens: number
 +}) {
-+  // Binary search against the same formatted envelope that will be replayed to
-+  // the provider. This keeps the budget guard tied to observable model context
-+  // rather than a second, drift-prone character-count approximation.
++  // #256：二分搜索对同一个将被重放的格式化信封做 token 估算——预算守卫绑定的是
++  // 模型可见上下文，而不是会漂移的字符数近似。
 +  let low = 0
 +  let high = input.text.length
 +  let best = ""
@@ -108,13 +91,15 @@ index a4d8d02d7e8419f92d041f881015e91ce436068f..d571b4fb16e9eb864fe2b5b9b9c9225f
 +  return best
 +}
 +
- function turns(messages: MessageV2.WithParts[]) {
+ function turns(messages: SessionV1.WithParts[]) {
    const result: Turn[] = []
    for (let i = 0; i < messages.length; i++) {
-@@ -441,8 +521,13 @@ export const layer = Layer.effect(
+@@ -373,8 +447,15 @@ const layer = Layer.effect(
        const prior = completedCompactions(history)
        const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
        const previousSummary = prior.at(-1)?.summary
++      // #256：visibleHistory 与 select 共用——memento 从可见窗口收集，避免把 hidden 的
++      // 压缩标记/summary 对当作用户指令回放。
 +      const visibleHistory = history.filter((_, index) => !hidden.has(index))
 +      const recentUserMessages = collectRecentUserMessages({
 +        messages: visibleHistory,
@@ -126,20 +111,19 @@ index a4d8d02d7e8419f92d041f881015e91ce436068f..d571b4fb16e9eb864fe2b5b9b9c9225f
          cfg,
          model,
        })
-@@ -562,10 +647,19 @@ export const layer = Layer.effect(
+@@ -465,10 +546,18 @@ const layer = Layer.effect(
          return "stop"
        }
  
 -      if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
++      // #256：双锚点更新——tail_start_id 保留整轮尾部，recent_user_messages 保留最新用户意图；
++      // 任一变化都触发持久化，保证 memento 与尾部边界在同一压缩边界上对齐。
 +      const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
 +      if (
 +        compactionPart &&
 +        (compactionPart.tail_start_id !== selected.tail_start_id ||
 +          JSON.stringify(compactionPart.recent_user_messages ?? []) !== JSON.stringify(nextRecentUserMessages ?? []))
 +      ) {
-+        // Store both replay anchors on the same compaction boundary. tail_start_id
-+        // keeps whole recent turns when they fit, while recent_user_messages keeps
-+        // the latest user intent available even when a tool-heavy tail is too big.
          yield* session.updatePart({
            ...compactionPart,
            tail_start_id: selected.tail_start_id,
@@ -148,57 +132,10 @@ index a4d8d02d7e8419f92d041f881015e91ce436068f..d571b4fb16e9eb864fe2b5b9b9c9225f
        }
  
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 05ab443a37dc4715a55fcdefb797afb6a21c51b4..c9ff21be5a41190a6fbfe031c07cd95708ec2668 100644
+index 66472a932..dc165a4d2 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -235,6 +235,19 @@ export const CompactionPart = Schema.Struct({
-   auto: Schema.Boolean,
-   overflow: Schema.optional(Schema.Boolean),
-   tail_start_id: Schema.optional(MessageID),
-+  // Recent-user mementos are stored on the completed compaction boundary instead of
-+  // as synthetic user messages. Keeping them structural prevents the agent loop from
-+  // treating the preserved instructions as a fresh user turn while still replaying
-+  // them whenever the compacted context is converted for a provider request.
-+  recent_user_messages: Schema.optional(
-+    Schema.Array(
-+      Schema.Struct({
-+        id: MessageID,
-+        text: Schema.String,
-+        truncated: Schema.optional(Schema.Boolean),
-+      }),
-+    ),
-+  ),
- }).annotate({ identifier: "CompactionPart" })
- export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
- 
-@@ -666,6 +679,26 @@ export type WithParts = {
-   parts: Part[]
- }
- 
-+const RECENT_USER_MEMENTO_INTRO =
-+  "Recent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail."
-+
-+export function formatRecentUserMemento(messages: NonNullable<CompactionPart["recent_user_messages"]>) {
-+  if (messages.length === 0) return ""
-+  // The XML-ish envelope is intentionally stable because it gives the next model
-+  // a bounded, role-neutral handoff section before the normal compaction prompt.
-+  // The ids are diagnostic anchors only; the preserved text remains the contract.
-+  return [
-+    "<recent-user-messages>",
-+    RECENT_USER_MEMENTO_INTRO,
-+    ...messages.flatMap((message, index) => [
-+      `<message index="${index + 1}" id="${message.id}"${message.truncated ? ' truncated="true"' : ""}>`,
-+      message.text,
-+      "</message>",
-+    ]),
-+    "</recent-user-messages>",
-+  ].join("\n")
-+}
-+
- const Cursor = Schema.Struct({
-   id: MessageID,
-   time: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
-@@ -829,6 +862,16 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -256,6 +256,15 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
          }
  
          if (part.type === "compaction") {
@@ -209,17 +146,45 @@ index 05ab443a37dc4715a55fcdefb797afb6a21c51b4..c9ff21be5a41190a6fbfe031c07cd957
 +              text: recentUserMemento,
 +            })
 +          }
-+          // Keep the historical compaction prompt after the memento so existing
-+          // compacted summaries remain paired with the same user boundary, while
-+          // newer models see the latest preserved user intent first.
++          // #256：历史压缩提示保持在 memento 之后——既有摘要仍与同一用户边界配对，
++          // 而更新的模型先看到最新保留的用户意图。
            userMessage.parts.push({
              type: "text",
              text: "What did we do so far?",
+@@ -602,6 +611,28 @@ function visibleCompactions(items: WithParts[]) {
+   })
+ }
+ 
++// #256：memento 信封是模型可见交接——intro 说明保留文本与 retained tail 可能重叠，
++// 让模型把它们当作连续性参考而非新指令。
++const RECENT_USER_MEMENTO_INTRO =
++  "Recent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail."
++
++export function formatRecentUserMemento(messages: NonNullable<CompactionPart["recent_user_messages"]>) {
++  if (messages.length === 0) return ""
++  // #256：XML 风格信封刻意保持稳定——给后续模型一个有界的、角色中立的交接区；
++  // id 只是诊断锚点，保留的文本才是契约。
++  return [
++    "<recent-user-messages>",
++    RECENT_USER_MEMENTO_INTRO,
++    ...messages.flatMap((message, index) => [
++      `<message index="${index + 1}" id="${message.id}"${message.truncated ? ' truncated="true"' : ""}>`,
++      message.text,
++        // #256：多段文本合并为单条指令块后 id 不变——模型可关联回原消息
++      "</message>",
++    ]),
++    "</recent-user-messages>",
++  ].join("\n")
++}
++
+ export function filterCompacted(msgs: Iterable<WithParts>) {
+   // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
+   // #204：调用方传入顺序不一（流式 newest-first 或按时序数组），此处归一化把安全边界留在过滤器内部
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9bc9ad6751 100644
+index c5d036971..a88b36119 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1163,6 +1163,175 @@ describe("session.compaction.process", () => {
+@@ -1137,6 +1137,184 @@ const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"))
      { git: true },
    )
  
@@ -234,6 +199,7 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
 +        const session = yield* ssn.create({})
 +        yield* createUserMessage(session.id, "older context")
 +        const latest = yield* createUserMessage(session.id, "latest user instruction to preserve")
++        // #256：older context 先于最新指令写入——collect 从最新反向遍历，预算内两条都保留
 +        yield* ssn.updateMessage({
 +          id: MessageID.ascending(),
 +          role: "assistant",
@@ -249,23 +215,27 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
 +          time: { created: Date.now() },
 +        })
 +        yield* createSummaryCompaction(session.id)
++        // #256：create 只建立压缩标记边界——memento 采集发生在 process 内
 +
 +        const msgs = yield* ssn.messages({ sessionID: session.id })
 +        const parent = msgs.at(-1)?.info.id
 +        expect(parent).toBeTruthy()
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
++        // #256：auto:false 手动驱动 process——memento 在 select 之后写入 part
 +
-+        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
++        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
 +        const modelMessages = yield* MessageV2.toModelMessagesEffect(filtered, createModel({ context: 100_000, output: 32_000 }))
 +        const compactedContext = JSON.stringify(modelMessages)
 +
 +        expect(compactedContext).toContain("<recent-user-messages>")
 +        expect(compactedContext).toContain("latest user instruction to preserve")
 +        expect(compactedContext).toContain("What did we do so far?")
++        // #256：memento 必须在历史压缩提示之前出现——模型先看到最新用户意图
 +        expect(compactedContext.indexOf("latest user instruction to preserve")).toBeLessThan(
 +          compactedContext.indexOf("What did we do so far?"),
 +        )
-+      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
++      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
++        // #256：tail_turns:1 + 20 token 预算使整轮尾部无法保留——强制 memento 成为唯一交接通道
 +    },
 +    { git: true },
 +  )
@@ -275,6 +245,7 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
 +    () => {
 +      const stub = llm()
 +      const mementoModel = createModel({ context: 10_000, output: 8_000 })
++        // #256：10K 小窗口——memento 预算按 usable 的 20% 收缩，远低于 20K 绝对上限
 +      stub.push(reply("summary"))
 +      return Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -283,6 +254,7 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
 +        const latest = yield* createUserMessage(
 +          session.id,
 +          `start of oversized instruction ${"x".repeat(100_000)} end of oversized instruction`,
++        // #256：100K 字符远超任何预算——强制走到 truncateRecentUserMessage 二分路径
 +        )
 +        yield* ssn.updateMessage({
 +          id: MessageID.ascending(),
@@ -306,23 +278,23 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 +
 +        const modelMessages = yield* MessageV2.toModelMessagesEffect(
-+          MessageV2.filterCompacted(MessageV2.stream(session.id)),
++          MessageV2.filterCompacted(yield* MessageV2.stream(session.id)),
 +          mementoModel,
 +        )
 +        const compactedContext = JSON.stringify(modelMessages)
 +        const compactionPart = yield* readCompactionPart(session.id)
++        // #256：从持久化 part 读回 memento——验证截断结果已随压缩边界落库
 +        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
 +
 +        expect(compactedContext).toContain("start of oversized instruction")
 +        expect(compactedContext).toContain("truncated for compaction memento")
 +        expect(compactedContext).not.toContain("end of oversized instruction")
-+        // The memento cap must follow 20% of the active model window, not just
-+        // the absolute 20k ceiling, or small-context models would immediately
-+        // re-overflow after compaction replay.
++        // #256：memento 上限必须跟随模型窗口的 20%，而不是绝对 20K——小窗口模型
++        // 否则压缩重放后会立刻再次溢出（10K 窗口 → 20% = 2K 内的 400 估算）
 +        expect(TokenEstimate.estimateText(recentUserMemento)).toBeLessThanOrEqual(400)
 +      }).pipe(
 +        withCompaction({
-+          llm: stub.layer,
++          llm: stub.llmLayer,
 +          provider: ProviderTest.fake({ model: mementoModel }),
 +          config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }),
 +        }),
@@ -379,15 +351,17 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 +
 +        const modelMessages = yield* MessageV2.toModelMessagesEffect(
-+          MessageV2.filterCompacted(MessageV2.stream(session.id)),
++          MessageV2.filterCompacted(yield* MessageV2.stream(session.id)),
 +          createModel({ context: 100_000, output: 32_000 }),
 +        )
 +        const compactedContext = JSON.stringify(modelMessages)
 +
 +        expect(compactedContext).toContain("real instruction")
++        // #256：synthetic/ignored part 附加在同一消息上——过滤按 part 粒度生效
++        // #256：synthetic/ignored 文本绝不能进入 memento——它们已被其他通道表示
 +        expect(compactedContext).not.toContain("synthetic editor context should not be preserved")
 +        expect(compactedContext).not.toContain("ignored text should not be preserved")
-+      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
++      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
 +    },
 +    { git: true },
 +  )
@@ -395,15 +369,39 @@ index 640ed1bd2ba3f914206d893bb1598cd4a9b2f035..e96aff55026e548f673975dd3d7c5f9b
    itCompaction.instance(
      "falls back to full summary when retained tail media exceeds preserve token budget",
      () => {
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+index 31d5eedd6..fda29538a 100644
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -210,6 +210,18 @@ export const CompactionPart = Schema.Struct({
+   auto: Schema.Boolean,
+   overflow: Schema.optional(Schema.Boolean),
+   tail_start_id: Schema.optional(MessageID),
++  // #256：最近用户指令记忆存于完成的压缩边界上——结构化存储让 agent 循环不会把
++  // 保留的指令当成新的用户轮次，转换 provider 请求时再重放。
++  recent_user_messages: Schema.optional(
++  // #256：truncated 标记随消息持久化——重放时模型知道省略并非其过错
++    Schema.Array(
++      Schema.Struct({
++        id: MessageID,
++        text: Schema.String,
++        truncated: Schema.optional(Schema.Boolean),
++      }),
++    ),
++  ),
+ }).annotate({ identifier: "CompactionPart" })
+ export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
+ 
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index 48000f8f18af0f8a7879c34fbedc8d2591113a8d..204d94bc3b746eb9a50b2d3e654f539d6f6509e0 100644
+index cc6b59f81..cf8161771 100644
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -702,6 +702,11 @@ export type CompactionPart = {
+@@ -622,6 +622,12 @@ export type CompactionPart = {
    auto: boolean
    overflow?: boolean
    tail_start_id?: string
 +  recent_user_messages?: Array<{
++  // #256：生成文件与 schema 同步——SDK 消费者可类型化读取 memento
 +    id: string
 +    text: string
 +    truncated?: boolean

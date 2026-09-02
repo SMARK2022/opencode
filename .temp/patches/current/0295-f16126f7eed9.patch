@@ -12,10 +12,10 @@ Content-Transfer-Encoding: 8bit
 - 移除恶意代码提醒的相关代码，注释掉相关函数和常量，避免误用。
 
 diff --git a/docs/prompts.md b/docs/prompts.md
-index b2c271a9d7c3f42ca67d6db68e2a4e2441312c64..61256e57c135881abd965551c476313ac5bf00b5 100644
+index 5c5c52137a7937e395164e4ab962a614718a2c04..ce374c358f7c514b7e36959705d07324f3338ccc 100644
 --- a/docs/prompts.md
 +++ b/docs/prompts.md
-@@ -59,7 +59,7 @@
+@@ -64,7 +64,7 @@
  8. 预估 git 文件数、增删行数和是否涉及生成文件/迁移/文档。
  9. 真实风险与开放问题；没有必须用户决策的问题就不要阻塞。
  只输出方案，不要改代码。
@@ -25,21 +25,21 @@ index b2c271a9d7c3f42ca67d6db68e2a4e2441312c64..61256e57c135881abd965551c476313a
  
  -------------
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 6c0fb5ee3eae84d6ad006a38ec573011c91bb3de..a3790551148cf799f1bf3c45ff5b9608acd81305 100644
+index d802a2e09aed6419ad68435a4f33194099bdccbe..cf24291afe588bfa68bf494298cce2e8c7bbb3e9 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -92,8 +92,8 @@ type ReadToolMetadata = {
-   read?: ReadMetadata
- }
+@@ -90,8 +90,8 @@ let cacheSeeded = false
+ export const FILE_UNCHANGED_STUB =
+   "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
  
--// 恶意代码提醒
--const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
-+// // 恶意代码提醒
-+// const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
+-// 恶意代码提醒 - 对高风险扩展名注入安全提示，防止模型改进恶意代码
+-const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
++// // 恶意代码提醒 - 对高风险扩展名注入安全提示，防止模型改进恶意代码
++// const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
  
  // 判断是否为设备文件路径
  function isBlockedDevicePath(filePath: string): boolean {
-@@ -107,10 +107,10 @@ function isBlockedDevicePath(filePath: string): boolean {
+@@ -105,10 +105,10 @@ function isBlockedDevicePath(filePath: string): boolean {
    return false
  }
  
@@ -52,28 +52,28 @@ index 6c0fb5ee3eae84d6ad006a38ec573011c91bb3de..a3790551148cf799f1bf3c45ff5b9608
 +//   return HIGH_RISK_EXTENSIONS.has(ext)
 +// }
  
- // 估算内容 token 数量
+ // 估算内容 token 数量，按文件类型使用不同的 byte/token 比率
  function estimateTokensForContent(content: string, ext: string): number {
-@@ -684,10 +684,10 @@ export const ReadTool = Tool.define(
-         finalOutput += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+@@ -911,10 +911,10 @@ let output = renderReadOutput({
+         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
        }
  
 -      // 恶意代码安全提醒 - 仅对高风险扩展名注入
 -      if (shouldInjectCyberReminder(ext)) {
--        finalOutput += CYBER_REMINDER
+-        output += CYBER_REMINDER
 -      }
 +      // // 恶意代码安全提醒 - 仅对高风险扩展名注入
 +      // if (shouldInjectCyberReminder(ext)) {
-+      //   finalOutput += CYBER_REMINDER
++      //   output += CYBER_REMINDER
 +      // }
  
        return {
          title,
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 9480a96c0743f9b0e675f7fa27ca528aabceee98..e62272fb25983e6639b39a41cdc846b21f0549e7 100644
+index 640fe47b90762d07263b300ac19930c0af7c47f3..b760f53aac69073d9e940e2f7bb4c2e8f64ed42e 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1914,13 +1914,16 @@ describe("tool.shell abort", () => {
+@@ -1525,12 +1525,15 @@ describe("tool.shell abort", () => {
          const script = [
            'console.error("fatal: hidden root cause")',
            "await new Promise((resolve) => setTimeout(resolve, 2100))",
@@ -84,7 +84,6 @@ index 9480a96c0743f9b0e675f7fa27ca528aabceee98..e62272fb25983e6639b39a41cdc846b2
          const command = `${bin} -e ${evalarg(script)}`
          const result = yield* run({
            command: PS.has(sh()) ? `& ${command}` : command,
-           description: "Diagnostic failed command",
 +          // 这个用例只验证 tail 截断隐藏区会生成诊断附录；关闭压缩，并让尾部
 +          // 文本同时超过默认行数/字节阈值，避免平台输出差异让 root cause 仍可见。
 +          compress_output: false,

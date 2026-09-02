@@ -35,3 +35,7 @@ logs/
 # Patch replay artifacts are isolated from the target source tree.
 tsconfig.tsbuildinfo
 /artifacts/
+
+
+.temp/patches/reports
+.temp/patches/states

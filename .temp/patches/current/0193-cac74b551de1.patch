@@ -9,8 +9,8 @@ new file mode 100644
 +++ b/packages/opencode/src/token/accounting.ts
 @@ -0,0 +1,3 @@
 +// #193：token 域统一统计入口；#194 将填充完整实现
-+// #193：从 TUI 包 re-export，保持现有消费端不中断
-+export * from "@opencode-ai/tui/util/token-accounting"
++// #193：TUI 包 exports map 未导出 ./util/token-accounting subpath，改用相对路径保持消费端不中断
++export * from "../../../tui/src/util/token-accounting"
 diff --git a/packages/opencode/src/token/estimate.ts b/packages/opencode/src/token/estimate.ts
 new file mode 100644
 --- /dev/null
@@ -24,10 +24,10 @@ new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/token/estimate.test.ts
 @@ -0,0 +1,43 @@
-+// #193：从 test/util/attachment-token.test.ts 迁移到 test/token/estimate.test.ts
++// #193：测试随模块归入 token 域，消费端 import 与生产路径同步指向 token/estimate
 +// #175：单测锁定消毒、远程跳过与分项 token
 +import { describe, expect, test } from "bun:test"
-+// #193：测试随 estimate 迁移到 token 域
++// #193：测试路径与 token/estimate.ts 对齐，避免生产与测试引用分裂
 +import { AttachmentToken } from "@/token/estimate"
 +
 +describe("AttachmentToken", () => {

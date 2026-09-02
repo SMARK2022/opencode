@@ -18,15 +18,16 @@ toBeUndefined 断言收到 [Function: goal] 必然失败。合并重复的 confi
 引入的端点缺少 scenario 导致 --fail-on-missing 报 missing=1 的问题。
 
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
-index 096d137f059e44cedd1cca44d0583ec16c2fb2f5..59f4366f5cc9471fe49bf3702ab3f99da6e45747 100644
+index 960748276..c3043802f 100644
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1368,6 +1368,21 @@ const scenarios: Scenario[] = [
+@@ -1711,6 +1711,22 @@ const scenarios: Scenario[] = [
        object(body)
        check((body as any).cleared === false, "clearing non-existent goal should return false")
      }),
 +  // [local-smark] session preview 端点 scenario
 +  // 批量预览端点返回 Record<sessionID, string[]>，空 sessionIDs 返回空对象
++  // 解决 0366 引入端点缺少 scenario 导致 --fail-on-missing 报 missing=1
 +  http.protected
 +    .post("/session/preview", "session.preview")
 +    .seeded((ctx) => ctx.session({ title: "Preview session" }))
@@ -44,10 +45,10 @@ index 096d137f059e44cedd1cca44d0583ec16c2fb2f5..59f4366f5cc9471fe49bf3702ab3f99d
      .post("/tui/append-prompt", "tui.appendPrompt")
      .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
-index 4038a37921295e0210c987565188799b3d04e276..332a8327467fb9aa5fb3b27ccd94ff6ca22b8791 100644
+index b7db009b9..4458a1d89 100644
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -379,7 +379,8 @@ it.instance(
+@@ -404,7 +404,8 @@ it.instance(
  )
  
  // [local-smark] 验证 goal_max_turns 从顶层 config 读取，不在 experimental 下
@@ -57,10 +58,10 @@ index 4038a37921295e0210c987565188799b3d04e276..332a8327467fb9aa5fb3b27ccd94ff6c
  it.instance(
    "goal_max_turns is readable from top-level config without experimental gate",
    () =>
-@@ -387,49 +388,9 @@ it.instance(
+@@ -412,51 +413,9 @@ it.instance(
        const config = yield* Config.Service
        const cfg = yield* config.get()
-       // goal_max_turns 在顶层可读，默认 10
+       // goal_max_turns 在顶层可读，默认 10（TestConfig 空桩下回退到默认值）
 -      const maxTurns = (cfg as any).goal_max_turns ?? 10
 -      expect(maxTurns).toBe(10)
 +      expect((cfg as any).goal_max_turns ?? 10).toBe(10)
@@ -95,9 +96,11 @@ index 4038a37921295e0210c987565188799b3d04e276..332a8327467fb9aa5fb3b27ccd94ff6c
 -    Effect.gen(function* () {
 -      const fs = yield* Effect.promise(() => import("fs/promises"))
 -      const path = yield* Effect.promise(() => import("path"))
+-      // 目标仓库中 dialog-goal 位于 packages/tui，相对 packages/opencode 的
+-      // 测试 cwd 需要向上两级再进入 tui 包（source 路径已迁移）
 -      const content = yield* Effect.promise(() =>
 -        fs.readFile(
--          path.join(process.cwd(), "src/cli/cmd/tui/component/dialog-goal.tsx"),
+-          path.join(process.cwd(), "../../tui/src/component/dialog-goal.tsx"),
 -          "utf-8",
 -        ),
 -      )

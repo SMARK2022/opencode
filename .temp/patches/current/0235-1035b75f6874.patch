@@ -11,407 +11,407 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/cli/cmd/tui/context/exit.tsx b/packages/opencode/src/cli/cmd/tui/context/exit.tsx
-index 205025f867de8161736195c4b32c6266618c4314..d75fcf04a35b16d0e2a53ba895a66f945e32d7b5 100644
---- a/packages/opencode/src/cli/cmd/tui/context/exit.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/exit.tsx
-@@ -2,6 +2,12 @@ import { useRenderer } from "@opentui/solid"
- import { createSimpleContext } from "./helper"
- import { FormatError, FormatUnknownError } from "@/cli/error"
- import { win32FlushInputBuffer } from "../win32"
-+import * as Log from "@opencode-ai/core/util/log"
-+import { onCleanup } from "solid-js"
-+
-+const log = Log.create({ service: "tui" })
-+export const ExitSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
-+
- type Exit = ((reason?: unknown) => Promise<void>) & {
-   message: {
-     set: (value?: string) => () => void
-@@ -33,10 +39,12 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
-       (reason?: unknown) => {
-         if (task) return task
-         task = (async () => {
-+          log.info("tui exit requested", { reason: exitReason(reason) })
-           await input.onBeforeExit?.()
-           // Reset window title before destroying renderer
-           renderer.setTerminalTitle("")
-           renderer.destroy()
-+          log.info("tui renderer destroyed")
-           win32FlushInputBuffer()
-           if (reason) {
-             const formatted = FormatError(reason) ?? FormatUnknownError(reason)
-@@ -47,6 +55,7 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
-           const text = store.get()
-           if (text) process.stdout.write(text + "\n")
-           await input.onExit?.()
-+          log.info("tui exit completed")
-         })()
-         return task
-       },
-@@ -54,7 +63,23 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
-         message: store,
-       },
-     )
--    process.on("SIGHUP", () => exit())
-+    const signalHandlers = ExitSignals.map((signal) => {
-+      const handler = () => {
-+        log.info("tui exit signal received", { signal })
-+        void exit()
-+      }
-+      process.on(signal, handler)
-+      return () => process.off(signal, handler)
-+    })
-+    onCleanup(() => {
-+      for (const remove of signalHandlers) remove()
-+    })
-     return exit
-   },
- })
-+
-+function exitReason(reason: unknown) {
-+  if (reason === undefined) return "normal"
-+  if (reason instanceof Error) return reason.name || "Error"
-+  return typeof reason
-+}
-diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
-index 7fbd46b6f3c3bac98ca6ea9f891c2bac2adaa97b..b0d6bd49f5e6b46582fd8a1b37fe0e6b59d888c3 100644
---- a/packages/opencode/src/cli/cmd/tui/daemon.ts
-+++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
-@@ -187,6 +187,7 @@ export async function ensure(args: Args) {
-       env: {
-         ...env,
-         ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
-+        OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
-         ...(external
-           ? {
-               OPENCODE_EXTERNAL_PORT: String(network.port),
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index b35683899b967e522b9d8ece00d5ca49bacb0086..b651e05ecad57d1a1f3e54660ca66617b8122e2d 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -1,5 +1,4 @@
- import { cmd } from "@/cli/cmd/cmd"
--import { tui } from "./app"
- import path from "path"
- import { UI } from "@/cli/ui"
- import { errorMessage } from "@/util/error"
-@@ -137,6 +136,7 @@ export const TuiThreadCommand = cmd({
-         return
-       }
- 
-+      const { tui } = await import("./app")
-       await tui({
-         url: existingUrl,
-         async onSnapshot() {
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index deb20eeaf44a674c84f89054689eab498dc98357..eb061c40a0fa1ab5057d800f3609e793b9dcd590 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -19,6 +19,8 @@ import { SessionActivity } from "@/session/activity"
- ensureProcessMetadata("worker")
- NetworkProxy.installGlobalFetch()
- 
-+const log = Log.create({ service: "daemon" })
-+
- await Log.init({
-   print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",
-   dev: Installation.isLocal(),
-@@ -88,6 +90,12 @@ if (externalPort !== undefined) {
- 
- // Write the lock file atomically (internal port + optional external URL).
- const lockToken = await ServerLock.write(internalServer.port, externalUrl)
-+log.info("daemon lock written", {
-+  pid: process.pid,
-+  port: internalServer.port,
-+  externalUrl,
-+  launcherPID: process.env.OPENCODE_DAEMON_LAUNCHER_PID,
-+})
- 
- // Start the best-effort warm-up only after the lock is visible so a slow npm
- // registry or proxy cannot keep the launcher stuck waiting for daemon health.
-@@ -96,10 +104,18 @@ setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
- // ── Graceful shutdown ──────────────────────────────────────────────────────
- let shutdownInProgress = false
- 
--async function gracefulShutdown() {
-+async function gracefulShutdown(reason = "unknown") {
-   if (shutdownInProgress) return
-   shutdownInProgress = true
--  Log.Default.info("daemon shutting down")
-+  cancelIdleTimer("shutdown")
-+  cancelStartupIdleTimer("shutdown")
-+  cancelLauncherWatcher("shutdown")
-+  log.info("daemon shutting down", {
-+    reason,
-+    hadClient,
-+    sseClients,
-+    sessionActivity: SessionActivity.count(),
-+  })
-   await ServerLock.clearIfOwner(lockToken)
-   await InstanceRuntime.disposeAllInstances()
-   if (externalServer) await externalServer.stop(true)
-@@ -108,7 +124,7 @@ async function gracefulShutdown() {
-   process.exit(0)
- }
- 
--process.on("SIGTERM", () => void gracefulShutdown())
-+process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
- 
- // Config reload on SIGUSR2 (Unix only — Windows does not support this signal).
- if (process.platform !== "win32") {
-@@ -119,34 +135,75 @@ if (process.platform !== "win32") {
- 
- // Ensure lock is cleaned up even when the daemon crashes or receives a fatal
- // signal.  Placed after gracefulShutdown is defined so the closure is valid.
--process.prependListener("unhandledRejection", () => void gracefulShutdown())
--process.prependListener("uncaughtException", () => void gracefulShutdown())
-+process.prependListener("unhandledRejection", () => void gracefulShutdown("unhandledRejection"))
-+process.prependListener("uncaughtException", () => void gracefulShutdown("uncaughtException"))
- 
- // ── Idle timeout ───────────────────────────────────────────────────────────
--// Exit 30 s after the last SSE client disconnects AND no session runners are
--// active.  The timer only starts after the first connection, so a slow-starting
--// TUI does not race the daemon.
-+// daemon 有两段空闲退出保护：
-+//
-+// 1. 启动期：lock 写出后、首个 SSE client 连接前，启动 startup idle timer。
-+//    这段覆盖「daemon 已启动但 TUI 在连上 /global/event 前崩溃或退出」的场景，
-+//    避免 hadClient 永远为 false 导致 daemon 长时间遗留。
-+//
-+// 2. 运行期：一旦至少有一个 SSE client 连接过，之后在最后一个 SSE client
-+//    断开且没有活跃 session runner 时，按常规 idle timer 延迟退出。
-+//
-+// 活跃 SSE client 或 SessionActivity 都会阻止退出；launcher watcher 只在首个
-+// SSE client 到来前生效，用来更快清理已经失去启动 TUI 接管的孤儿 daemon。
- const IDLE_TIMEOUT_MS = (() => {
-   const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
-   return Number.isFinite(value) && value >= 0 ? value : 30_000
- })()
-+const STARTUP_IDLE_TIMEOUT_MS = (() => {
-+  const value = Number(process.env.OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS ?? IDLE_TIMEOUT_MS)
-+  return Number.isFinite(value) && value >= 0 ? value : IDLE_TIMEOUT_MS
-+})()
-+const LAUNCHER_PID = (() => {
-+  const value = Number(process.env.OPENCODE_DAEMON_LAUNCHER_PID)
-+  return Number.isInteger(value) && value > 0 ? value : undefined
-+})()
-+const LAUNCHER_POLL_MS = 1_000
- 
- let hadClient = false
- let sseClients = 0
- let idleTimer: ReturnType<typeof setTimeout> | undefined
-+let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
-+let launcherTimer: ReturnType<typeof setInterval> | undefined
-+
-+function isActive() {
-+  return sseClients > 0 || SessionActivity.count() > 0
-+}
- 
--function cancelIdleTimer() {
-+function cancelIdleTimer(reason: string) {
-   if (!idleTimer) return
-   clearTimeout(idleTimer)
-   idleTimer = undefined
-+  log.info("daemon idle shutdown cancelled", { reason })
-+}
-+
-+function cancelStartupIdleTimer(reason: string) {
-+  if (!startupIdleTimer) return
-+  clearTimeout(startupIdleTimer)
-+  startupIdleTimer = undefined
-+  log.info("daemon startup idle shutdown cancelled", { reason })
-+}
-+
-+function cancelLauncherWatcher(reason: string) {
-+  if (!launcherTimer) return
-+  clearInterval(launcherTimer)
-+  launcherTimer = undefined
-+  log.info("daemon launcher watcher cancelled", { reason, launcherPID: LAUNCHER_PID })
- }
- 
- function maybeScheduleIdleShutdown() {
--  if (!hadClient) return
-+  if (!hadClient) {
-+    maybeScheduleStartupIdleShutdown()
-+    return
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -200,6 +200,9 @@
+           ...env,
+           OPENCODE_PROCESS_ROLE: "worker",
+           ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
++          // #235：launcher PID 供 daemon 判活——首个 SSE client 前的孤儿清理
++          // #235：daemon 侧据此启动 watcher；TUI 直连模式不 spawn 即无此值
++          OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
+           ...(external
+             ? {
+                 OPENCODE_EXTERNAL_PORT: String(network.port),
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -75,8 +75,13 @@
+ if (isDaemon) {
+   // 安装全局 fetch 代理路由，使 daemon 内未显式 routedFetch 的请求也走系统代理
+   NetworkProxy.installGlobalFetch()
++  // #235：daemon 结构化日志——stdout 在非 print-logs 时被 launcher 丢弃，语义与 Log.init 一致
++  const log = {
++    info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
 +  }
+   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
+   // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
++  // #235：内部回环服务器先于锁写入——launcher 健康轮询依赖锁中端口
+   const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
  
-   // Active work prevents idle shutdown.
--  if (sseClients > 0 || SessionActivity.count() > 0) {
--    cancelIdleTimer()
-+  if (isActive()) {
-+    cancelIdleTimer("active")
-     return
+   // 当启动方 TUI 请求时，额外启动一个外部可访问的 HTTP 服务器
+@@ -97,7 +102,15 @@
+   // daemon 启动后写锁，token 用于优雅退出清锁
+   
+   const lockToken = await ServerLock.write(internalServer.port, externalUrl)
++  // #235：锁写入日志带 launcher PID——孤儿判定排障的一手证据
++  log.info("daemon lock written", {
++    pid: process.pid,
++    port: internalServer.port,
++    externalUrl,
++    launcherPID: process.env.OPENCODE_DAEMON_LAUNCHER_PID,
++  })
+   // 延迟预热外部插件：不阻塞锁/健康检查，失败仅 best-effort
++  // #235：预热与空闲保护解耦——慢插件不得影响 startup idle 计时起点
+   setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
+ 
+   // ── 优雅关闭 ───────────────────────────────────────────────────────────
+@@ -105,28 +118,46 @@
+ 
+   // 优雅关闭：清锁、停 HTTP、关库，避免陈旧锁残留
+   
+-  async function gracefulShutdown() {
++  async function gracefulShutdown(reason = "unknown") {
+     if (shutdownInProgress) return
+     shutdownInProgress = true
++    // #235：关闭前取消全部退出保护——避免关闭过程中 timer 再次触发递归关闭
++    cancelIdleTimer("shutdown")
++    cancelStartupIdleTimer("shutdown")
++    cancelLauncherWatcher("shutdown")
++    log.info("daemon shutting down", {
++      reason,
++      hadClient,
++      sseClients,
++      sessionActivity: SessionActivity.count(),
++    })
+     // 仅当 token 匹配时删除锁，防止误删不再属于自己的锁
+     await ServerLock.clearIfOwner(lockToken)
+-    await InstanceRuntime.disposeAllInstances()
+-    if (externalServer) await externalServer.stop(true)
+-    await internalServer.stop(true)
++    // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
++    // #235：（Effect scope closeScopeOnce/实例清理等残留句柄）。
++    // #235：整个清理序列包在 3s 总超时内——不论哪步挂起，daemon 都能完成 exit(0)
++    await Promise.race([
++      Promise.resolve().then(async () => {
++        await InstanceRuntime.disposeAllInstances()
++        if (externalServer) await externalServer.stop(true)
++        await internalServer.stop(true)
++      }),
++      Bun.sleep(3_000),
++    ])
+     // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
+     Database.close()
+     process.exit(0)
    }
  
-@@ -154,26 +211,94 @@ function maybeScheduleIdleShutdown() {
-   if (idleTimer) return
+   // SIGTERM 触发优雅关闭
+-  process.on("SIGTERM", () => void gracefulShutdown())
++  process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
  
-   idleTimer = setTimeout(() => {
-+    idleTimer = undefined
-     // Re-check at fire time: a client or runner may have appeared.
--    if (sseClients > 0 || SessionActivity.count() > 0) {
--      cancelIdleTimer()
-+    if (isActive()) {
-+      log.info("daemon idle shutdown skipped", {
-+        reason: "active-at-fire",
-+        sseClients,
-+        sessionActivity: SessionActivity.count(),
-+      })
-       return
-     }
+   // daemon 致命路径：覆盖空实现并 prepend，确保清锁
+   onUnhandledRejection = (_error: unknown) => {
 -    void gracefulShutdown()
-+    void gracefulShutdown("idle-timeout")
-   }, IDLE_TIMEOUT_MS)
-   idleTimer.unref?.()
-+  log.info("daemon idle shutdown scheduled", { timeoutMs: IDLE_TIMEOUT_MS })
-+}
++    void gracefulShutdown("unhandledRejection")
+   }
+   onUncaughtException = (_error: Error) => {
+-    void gracefulShutdown()
++    void gracefulShutdown("uncaughtException")
+   }
+   process.prependListener("unhandledRejection", onUnhandledRejection)
+   process.prependListener("uncaughtException", onUncaughtException)
+@@ -154,46 +185,166 @@
+     // #173：NaN/负数回退默认；0 合法（尽快 idle 退出，便于测试）
+     return Number.isFinite(value) && value >= 0 ? value : 30_000
+   })()
++  const STARTUP_IDLE_TIMEOUT_MS = (() => {
++    const value = Number(process.env.OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS ?? IDLE_TIMEOUT_MS)
++    // #235：非法值回退常规 idle 超时——启动期保护不弱于运行期
++    return Number.isFinite(value) && value >= 0 ? value : IDLE_TIMEOUT_MS
++  })()
++  const LAUNCHER_PID = (() => {
++    const value = Number(process.env.OPENCODE_DAEMON_LAUNCHER_PID)
++    // #235：非正整数视为未提供——launcher watcher 不启用
++    return Number.isInteger(value) && value > 0 ? value : undefined
++  })()
++  // #235：1s 轮询是延迟与开销的折中——launcher 死亡最迟 1s 被发现
++  const LAUNCHER_POLL_MS = 1_000
+ 
+   let hadClient = false
+   let sseClients = 0
+   let idleTimer: ReturnType<typeof setTimeout> | undefined
++  let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
++  let launcherTimer: ReturnType<typeof setInterval> | undefined
 +
-+function maybeScheduleStartupIdleShutdown() {
-+  if (hadClient || startupIdleTimer) return
-+  startupIdleTimer = setTimeout(() => {
++  // #235：活跃判定统一收敛——SSE client 或 session runner 任一活跃即阻止退出
++  function isActive() {
++    return sseClients > 0 || SessionActivity.count() > 0
++  }
++
++  function cancelIdleTimer(reason: string) {
++    if (!idleTimer) return
++    clearTimeout(idleTimer)
++    idleTimer = undefined
++    log.info("daemon idle shutdown cancelled", { reason })
++  }
++
++  function cancelStartupIdleTimer(reason: string) {
++    if (!startupIdleTimer) return
++    clearTimeout(startupIdleTimer)
 +    startupIdleTimer = undefined
-+    if (hadClient || isActive()) {
-+      log.info("daemon startup idle shutdown skipped", {
-+        reason: "active-at-fire",
-+        hadClient,
-+        sseClients,
-+        sessionActivity: SessionActivity.count(),
-+      })
-+      return
-+    }
-+    if (LAUNCHER_PID && ServerLock.alive(LAUNCHER_PID)) {
-+      log.info("daemon startup idle shutdown skipped", {
-+        reason: "launcher-alive",
-+        launcherPID: LAUNCHER_PID,
-+      })
++    log.info("daemon startup idle shutdown cancelled", { reason })
++  }
++
++  function cancelLauncherWatcher(reason: string) {
++    if (!launcherTimer) return
++    clearInterval(launcherTimer)
++    launcherTimer = undefined
++    log.info("daemon launcher watcher cancelled", { reason, launcherPID: LAUNCHER_PID })
++  }
+ 
+   const armIdleTimer = () => {
+     if (idleTimer) {
+       clearTimeout(idleTimer)
+       idleTimer = undefined
+     }
+-    if (!hadClient) return
+-    if (sseClients > 0) return
+-    if (SessionActivity.count() > 0) return
++    if (!hadClient) {
++      // #235：启动期未接 client 时改走 startup idle——常规 timer 只服务运行期
 +      maybeScheduleStartupIdleShutdown()
 +      return
 +    }
-+    void gracefulShutdown("startup-idle-timeout")
-+  }, STARTUP_IDLE_TIMEOUT_MS)
-+  startupIdleTimer.unref?.()
-+  log.info("daemon startup idle shutdown scheduled", {
-+    timeoutMs: STARTUP_IDLE_TIMEOUT_MS,
-+    launcherPID: LAUNCHER_PID,
-+  })
-+}
-+
-+function startLauncherWatcher() {
-+  if (!LAUNCHER_PID || launcherTimer) return
-+  launcherTimer = setInterval(() => {
-+    if (hadClient) {
-+      cancelLauncherWatcher("first-client")
-+      return
-+    }
-+    if (ServerLock.alive(LAUNCHER_PID)) return
-+    cancelLauncherWatcher("launcher-exited")
 +    if (isActive()) {
-+      log.info("daemon launcher exited before first client but work is active", {
-+        launcherPID: LAUNCHER_PID,
-+        sseClients,
-+        sessionActivity: SessionActivity.count(),
-+      })
++      cancelIdleTimer("active")
 +      return
 +    }
-+    void gracefulShutdown("launcher-exited-before-first-client")
-+  }, LAUNCHER_POLL_MS)
-+  launcherTimer.unref?.()
-+  log.info("daemon launcher watcher started", { launcherPID: LAUNCHER_PID, intervalMs: LAUNCHER_POLL_MS })
- }
- 
- onSseClientCountChange((count) => {
-   sseClients = count
--  if (count > 0) hadClient = true
-+  if (count > 0) {
-+    hadClient = true
-+    cancelStartupIdleTimer("first-client")
-+    cancelLauncherWatcher("first-client")
+     idleTimer = setTimeout(() => {
++      // #235：fire 时先置空句柄——重排逻辑不依赖旧句柄引用
++      idleTimer = undefined
+       // #152：触发时再确认，避免 runner 刚启动被误杀
+-      if (sseClients > 0 || SessionActivity.count() > 0) return
+-      void gracefulShutdown()
++      if (isActive()) {
++        log.info("daemon idle shutdown skipped", {
++          reason: "active-at-fire",
++          sseClients,
++          sessionActivity: SessionActivity.count(),
++        })
++        return
++      }
++      void gracefulShutdown("idle-timeout")
+     }, IDLE_TIMEOUT_MS)
+     idleTimer.unref?.()
++    log.info("daemon idle shutdown scheduled", { timeoutMs: IDLE_TIMEOUT_MS })
 +  }
-+  log.info("daemon sse client count changed", { count, hadClient })
-   maybeScheduleIdleShutdown()
- })
- 
- SessionActivity.onChange(() => {
-+  log.info("daemon session activity changed", { count: SessionActivity.count() })
-   maybeScheduleIdleShutdown()
- })
- 
-+maybeScheduleStartupIdleShutdown()
-+startLauncherWatcher()
 +
- // [local-devsmark][deprecated-rpc-thread] Upstream's per-TUI RPC surface was
- // intentionally disabled. This worker is the shared daemon process and exposes
- // HTTP/SSE via ServerLock instead, so one daemon owns SQLite writes across TUI
++  function maybeScheduleStartupIdleShutdown() {
++    // #235：已接 client 或已有 timer——不重复排程
++    if (hadClient || startupIdleTimer) return
++    startupIdleTimer = setTimeout(() => {
++      startupIdleTimer = undefined
++      if (hadClient || isActive()) {
++        log.info("daemon startup idle shutdown skipped", {
++          reason: "active-at-fire",
++          hadClient,
++          sseClients,
++          sessionActivity: SessionActivity.count(),
++        })
++        return
++      }
++      // #235：launcher 仍存活说明 TUI 可能还在启动——重排而非退出
++      if (LAUNCHER_PID && ServerLock.alive(LAUNCHER_PID)) {
++        log.info("daemon startup idle shutdown skipped", {
++          reason: "launcher-alive",
++          launcherPID: LAUNCHER_PID,
++        })
++        maybeScheduleStartupIdleShutdown()
++        return
++      }
++      void gracefulShutdown("startup-idle-timeout")
++    }, STARTUP_IDLE_TIMEOUT_MS)
++    // #235：startup timer 同样 unref——不阻止进程在正常路径退出
++    startupIdleTimer.unref?.()
++    log.info("daemon startup idle shutdown scheduled", {
++      timeoutMs: STARTUP_IDLE_TIMEOUT_MS,
++      launcherPID: LAUNCHER_PID,
++    })
++  }
++
++  function startLauncherWatcher() {
++    // #235：无 launcher 语义（直连模式）或已启动则跳过
++    if (!LAUNCHER_PID || launcherTimer) return
++    launcherTimer = setInterval(() => {
++      if (hadClient) {
++        cancelLauncherWatcher("first-client")
++        return
++      }
++      if (ServerLock.alive(LAUNCHER_PID)) return
++      // #235：先停 watcher 再判活跃——避免退出期间重复触发
++      cancelLauncherWatcher("launcher-exited")
++      // #235：launcher 已死但有活跃工作——不清场，等 idle 路径接管
++      if (isActive()) {
++        log.info("daemon launcher exited before first client but work is active", {
++          launcherPID: LAUNCHER_PID,
++          sseClients,
++          sessionActivity: SessionActivity.count(),
++        })
++        return
++      }
++      void gracefulShutdown("launcher-exited-before-first-client")
++    }, LAUNCHER_POLL_MS)
++    launcherTimer.unref?.()
++    log.info("daemon launcher watcher started", { launcherPID: LAUNCHER_PID, intervalMs: LAUNCHER_POLL_MS })
+   }
+ 
+   onSseClientCountChange((count) => {
+     sseClients = count
+     if (count > 0) {
+       hadClient = true
+-      if (idleTimer) {
+-        clearTimeout(idleTimer)
+-        idleTimer = undefined
+-      }
+-      return
++      // #235：首个 client 到达——启动期保护不再需要
++      cancelStartupIdleTimer("first-client")
++      cancelLauncherWatcher("first-client")
+     }
++    log.info("daemon sse client count changed", { count, hadClient })
+     armIdleTimer()
+   })
+ 
+   SessionActivity.onChange(() => {
++    log.info("daemon session activity changed", { count: SessionActivity.count() })
+     armIdleTimer()
+   })
+ 
++  // #235：启动即注册两段保护——startup idle 与 launcher watcher 并行
++  maybeScheduleStartupIdleShutdown()
++  startLauncherWatcher()
++
+   // ── 启动任务 ───────────────────────────────────────────────────────────
+   // 启动 1 秒后非阻塞地检查升级，unref 避免阻止进程退出
++  // #235：升级检查保持非阻塞——unref 保证不拖延 idle 退出
+   setTimeout(async () => {
+     await InstanceRuntime.load({ directory: process.cwd() })
+     await upgrade().catch(() => {})
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index b06690cfe08b34a77c8b6e807a4a30248c927f58..efadc905f391ea97fe2ce10a074e4d601bd856ce 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -717,7 +717,9 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string }
+@@ -782,9 +782,12 @@
    })
  }
  
--export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer))
+-export const defaultLayer = layer.pipe(
+-  Layer.provide(LayerNode.compile(Config.node)),
+-  Layer.provide(LayerNode.compile(Provider.node)),
++// #235：suspend 延迟 Config/Provider 层实例化——保留 Session↔Permission 类型导入循环边界
 +export const defaultLayer = Layer.suspend(() =>
-+  layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer)),
-+)
++  layer.pipe(
++    Layer.provide(LayerNode.compile(Config.node)),
++    Layer.provide(LayerNode.compile(Provider.node)),
++  ),
+ )
  
- // Permission.defaultLayer consumes this bundled reviewer layer before building
- // Permission.Service. `Layer.suspend` preserves the historical cycle boundary:
+ // #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-index d8138f0ab6d26749fbbe0db2c147a3a736b0c250..9d968f025c39f2108d120e5c054d92d0b3b3290e 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -65,7 +65,7 @@ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-   // [local-smark] Track SSE client count for daemon idle-timeout
-   sseClientCount++
-   onSseCountChange?.(sseClientCount)
--  log.info("global event connected")
-+  log.info("global event connected", { sseClientCount })
+@@ -38,12 +38,39 @@
+   onSseCountChange = cb
+ }
  
-   const stream = new PassThrough()
-   const write = (event: GlobalBusEvent) => {
-@@ -88,7 +88,7 @@ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-     if (!stream.destroyed) stream.end()
-     sseClientCount = Math.max(0, sseClientCount - 1)
+-function eventResponse() {
++function eventResponse(request: HttpServerRequest.HttpServerRequest) {
+   return Effect.gen(function* () {
+     // SSE 客户端连接计数 +1，通知守护进程空闲计时器
+     sseClientCount++
      onSseCountChange?.(sseClientCount)
--    log.info("global event disconnected")
-+    log.info("global event disconnected", { sseClientCount })
-   }
+-    yield* Effect.logInfo("global event connected")
++    // #235：计数进日志——daemon 空闲退出调试需要连接数上下文
++    yield* Effect.logInfo("global event connected", { sseClientCount })
++    // #235：Effect Stream 的 ensuring 在 Windows 客户端 abort 时不触发（0173 遗留），
++    // #235：显式监听 request abort 保证断开计数/通知可靠到达 daemon
++    // #235：disconnected 去重——abort 监听与 ensuring 共享同一清理，只执行一次
++    let disconnected = false
++    const disconnect = () => {
++      if (disconnected) return
++      disconnected = true
++      sseClientCount = Math.max(0, sseClientCount - 1)
++      onSseCountChange?.(sseClientCount)
++      Effect.logInfo("global event disconnected", { sseClientCount }).pipe(Effect.runSync)
++    }
++    // #235：Bun/Node 的 request.source 是 IncomingMessage——用 aborted/close 事件感知客户端断开
++    // #235：source 类型在 Bun/Node 间不统一——双路径注册保证任意运行时都可靠
++    const source = request.source as { aborted?: boolean; on?: (event: string, listener: () => void) => unknown; off?: (event: string, listener: () => void) => unknown }
++    if (source instanceof Request) {
++      source.signal.addEventListener("abort", disconnect, { once: true })
++    } else if (typeof source?.on === "function") {
++      const onAborted = () => {
++        disconnect()
++        source.off?.("aborted", onAborted)
++        source.off?.("close", onAborted)
++      }
++      // #235：aborted 与 close 任一到达即视为断开——去重由 disconnected 标志保证
++      source.on("aborted", onAborted)
++      source.on("close", onAborted)
++    }
+     const events = Stream.callback<GlobalBusEvent>((queue) => {
+       const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+       return Effect.acquireRelease(
+@@ -62,14 +89,8 @@
+         Stream.map(eventData),
+         Stream.pipeThroughChannel(Sse.encode()),
+         Stream.encodeText,
+-        Stream.ensuring(Effect.logInfo("global event disconnected")),
+-        // SSE 客户端断开时计数 -1，通知守护进程可能需要启动空闲计时器
+-        Stream.ensuring(
+-          Effect.sync(() => {
+-            sseClientCount--
+-            onSseCountChange?.(sseClientCount)
+-          }),
+-        ),
++        // #235：断开清理走去重 disconnect——与 abort 监听共享，避免重复减计数
++        Stream.ensuring(Effect.sync(disconnect)),
+       ),
+       {
+         contentType: "text/event-stream",
+@@ -94,7 +115,8 @@
+     })
  
-   heartbeat.unref?.()
+     const event = Effect.fn("GlobalHttpApi.event")(function* () {
+-      return yield* eventResponse()
++      const request = yield* HttpServerRequest.HttpServerRequest
++      return yield* eventResponse(request)
+     })
+ 
+     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
 diff --git a/packages/opencode/test/cli/cmd/tui/exit.test.tsx b/packages/opencode/test/cli/cmd/tui/exit.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..200d5c1122c3a3659d4db63d90e284302df2b8ff
 --- /dev/null
 +++ b/packages/opencode/test/cli/cmd/tui/exit.test.tsx
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,14 @@
 +import { expect, test } from "bun:test"
-+import { ExitSignals } from "../../../../src/cli/cmd/tui/context/exit"
++import { ExitSignals } from "@opencode-ai/tui/context/exit"
 +
++// #235：终端驱动信号常量——app.tsx 据此注册 SIGINT/SIGTERM/SIGHUP
 +test("ExitProvider listens for terminal-driven exit signals", () => {
 +  expect(ExitSignals).toContain("SIGINT")
 +  expect(ExitSignals).toContain("SIGTERM")
 +  expect(ExitSignals).toContain("SIGHUP")
 +})
 +
++// #235：TUI 包整体导入不触发 provider/reviewer 初始化循环——与 thread 懒加载互补
 +test("TUI app module imports without provider/reviewer initialization cycles", async () => {
-+  await expect(import("../../../../src/cli/cmd/tui/app")).resolves.toBeDefined()
++  await expect(import("@opencode-ai/tui")).resolves.toBeDefined()
 +})
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index 8736c2872bb9853b9a500d3d304b31e92c358f71..2b9419d70f010fae49575e9e09b027a466422b71 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -197,6 +197,74 @@ describe("daemon lifecycle", () => {
-     DAEMON_START_TIMEOUT_MS + 10_000,
+@@ -133,6 +133,78 @@
+     DAEMON_START_TIMEOUT_MS + 5_000,
    )
  
++  // #235：startup idle——首个 SSE client 前无保护会遗留孤儿 daemon
 +  test(
 +    "daemon exits if no SSE client connects before startup idle timeout",
 +    async () => {
 +      await using tmp = await tmpdir()
 +      const lockPath = path.join(tmp.path, "tui-server.json")
++      // #235：startup idle 250ms 远小于常规 idle——验证启动期保护独立生效
 +      const { proc } = await spawnDaemon(lockPath, {
 +        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
 +        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
@@ -429,6 +429,7 @@ index 8736c2872bb9853b9a500d3d304b31e92c358f71..2b9419d70f010fae49575e9e09b027a4
 +    DAEMON_START_TIMEOUT_MS + 10_000,
 +  )
 +
++  // #235：launcher watcher——launcher 先死且无 client 时按 1s 轮询快速清场
 +  test(
 +    "daemon exits when launcher dies before the first SSE client connects",
 +    async () => {
@@ -452,6 +453,7 @@ index 8736c2872bb9853b9a500d3d304b31e92c358f71..2b9419d70f010fae49575e9e09b027a4
 +    DAEMON_START_TIMEOUT_MS + 10_000,
 +  )
 +
++  // #235：launcher 存活时 startup idle 必须重排而非退出——防启动慢的 TUI 误杀
 +  test(
 +    "daemon does not exit before first SSE while the launcher is alive",
 +    async () => {
@@ -478,3 +480,63 @@ index 8736c2872bb9853b9a500d3d304b31e92c358f71..2b9419d70f010fae49575e9e09b027a4
    test(
      "compiled-binary path: spawning with OPENCODE_PROCESS_ROLE=worker env bypasses yargs and starts daemon",
      async () => {
+@@ -187,7 +259,11 @@
+       await using tmp = await tmpdir()
+       const lockPath = path.join(tmp.path, "tui-server.json")
+       // #173：250ms idle，测试不必等 30s
+-      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
++      // #235：startup idle 显式放宽——本测试验证运行期 idle，不能误触启动期保护
++      const { proc, lock } = await spawnDaemon(lockPath, {
++        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250",
++        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "5000",
++      })
+ 
+       try {
+         const ctrl = new AbortController()
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -85,6 +85,7 @@
+ import * as TuiAudio from "./audio"
+ import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
+ import { destroyRenderer } from "./util/renderer"
++import { ExitSignals } from "./context/exit"
+ import { cliErrorMessage, errorFormat } from "./util/error"
+ 
+ registerOpencodeSpinner()
+@@ -253,10 +254,21 @@
+       )
+       yield* Effect.addFinalizer(() => Effect.sync(TuiAudio.dispose))
+       const shutdown = yield* Deferred.make<unknown>()
+-      const onSighup = () => destroyRenderer(renderer)
++      // #235：终端驱动信号全量注册——SIGHUP 之外补 SIGINT/SIGTERM，
++      // #235：acquireRelease 承担 onCleanup 语义，避免组件重挂载重复监听
++      const signalHandlers = ExitSignals.map((signal) => {
++        const handler = () => destroyRenderer(renderer)
++        // #235：注册延迟到 acquire 执行——release 注销同源，保证成对
++        return { register: () => process.on(signal, handler), remove: () => process.off(signal, handler) }
++      })
+       yield* Effect.acquireRelease(
+-        Effect.sync(() => process.on("SIGHUP", onSighup)),
+-        () => Effect.sync(() => process.off("SIGHUP", onSighup)),
++        Effect.sync(() => {
++          for (const signalHandler of signalHandlers) signalHandler.register()
++        }),
++        () =>
++          Effect.sync(() => {
++            for (const signalHandler of signalHandlers) signalHandler.remove()
++          }),
+       )
+       renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
+       const pluginRuntime = createPluginRuntime()
+diff --git a/packages/tui/src/context/exit.tsx b/packages/tui/src/context/exit.tsx
+--- a/packages/tui/src/context/exit.tsx
++++ b/packages/tui/src/context/exit.tsx
+@@ -1,4 +1,7 @@
+ import { createSimpleContext } from "./helper"
++
++// #235：终端驱动退出信号全量注册——SIGINT/SIGTERM/SIGHUP 统一由 app.tsx 消费
++export const ExitSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
+ 
+ export type Exit = (reason?: unknown) => void
+ 

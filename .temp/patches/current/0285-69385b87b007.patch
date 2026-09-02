@@ -1,79 +1,76 @@
 From 69385b87b007c84683c258d2d4ec856830d4388e Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Mon, 8 Jun 2026 15:27:42 +0800
-Subject: [PATCH] =?UTF-8?q?feat(permission):=20=E5=A2=9E=E5=BC=BA=E6=9D=83?=
- =?UTF-8?q?=E9=99=90=E5=A4=84=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E6=94=AF?=
- =?UTF-8?q?=E6=8C=81=E5=8E=9F=E5=A7=8B=E6=8B=92=E7=BB=9D=E6=A8=A1=E5=BC=8F?=
- =?UTF-8?q?=E5=92=8C=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F=E5=A4=84=E7=90=86?=
+Subject: [PATCH] feat(permission): raw deny and env var handling
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
-index eeb2aa28f7a28620d754ce86dc071310eafe1690..16596745a0600803a1437041b1c8d4a71c51c1f8 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -225,6 +225,16 @@ export const layer = Layer.effect(
+@@ -81,6 +81,19 @@
        let needsAuto = false
        const autoPatterns: string[] = []
  
++      // #285：raw_patterns 是 shell 解析的原始拒绝证据，绕过 canonical pattern 评估
 +      for (const pattern of rawDenyPatterns(request.metadata)) {
 +        const denied = rawDenyRule(request.permission, pattern, ruleset)
-+        log.info("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
++        yield* Effect.logInfo("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
 +        if (denied) {
-+          return yield* new DeniedError({
++        // #285：命中 deny 立即 fail-closed，不给后续 ask 规则截获的机会；
++        // ruleset 过滤只保留本 permission 相关规则，错误对象不含无关规则
++          return yield* new PermissionV1.DeniedError({
 +            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
 +          })
 +        }
 +      }
 +
-       // Evaluate every requested pattern before taking action. Static deny keeps
-       // highest precedence, while mixed auto/ask requests preserve both gates:
-       // auto can reject critical payloads, but reviewer allow cannot bypass a
-@@ -476,6 +486,30 @@ function isPermissionObject(input: unknown): input is Record<string, Action> {
+       // #199：逐 pattern 评估规则。静态 deny 立即 fail-closed；auto 收集后统一交由
+       // #199：precheck+reviewer 决定；ask 累积到 needsAsk 等待用户审批。三者优先级
+       // #199：由 evaluate 的 last-match-wins 决定，此处只分流不复核规则语义。
+@@ -350,6 +361,29 @@
    return Boolean(input && typeof input === "object" && !Array.isArray(input))
  }
  
 +function rawDenyPatterns(metadata: Readonly<Record<string, unknown>>) {
 +  const patterns = metadata.raw_patterns
 +  if (!Array.isArray(patterns)) return []
-+  // raw_patterns is emitted by shell parsing for raw command evidence that was
-+  // intentionally removed from canonical approval patterns. It is deny-only so
-+  // sensitive env-assignment rules remain hard stops without giving raw env text
-+  // authority to allow, auto-approve, or require extra asks for the canonical command.
++  // #285：raw_patterns 由 shell 解析产出，用于原始命令证据的拒绝检查。
++  // 它是 deny-only：敏感 env 赋值规则保持硬停止，不赋予原始文本 allow/auto/ask 权限。
 +  return patterns.filter((pattern): pattern is string => typeof pattern === "string")
++  // #285：filter 型守卫保持下游类型收窄，调用方无需再断言
 +}
 +
-+function rawDenyRule(permission: string, pattern: string, ruleset: Ruleset) {
-+  // This intentionally does not use the normal last-match-wins evaluator or
-+  // approved rules. Raw evidence is hidden from canonical approval patterns, so a
-+  // concrete deny such as `GITHUB_TOKEN=*` must remain terminal even if a later
-+  // `bash:*` rule would auto/allow the canonical command.
++function rawDenyRule(permission: string, pattern: string, ruleset: PermissionV1.Ruleset) {
++  // #285：不使用 last-match-wins 评估器或已批准规则。原始证据对 canonical
++  // pattern 不可见，因此 GITHUB_TOKEN=* 的 deny 必须保持终端性，即使后续 bash:* allow。
 +  return ruleset.find(
 +    (rule) =>
 +      rule.action === "deny" &&
 +      rule.pattern !== "*" &&
 +      Wildcard.match(permission, rule.permission) &&
 +      Wildcard.match(pattern, rule.pattern),
++      // #285：rule.pattern !== "*" 防止通配兜底规则吞掉原始证据检查；
++      // 只有显式命名 pattern 的 deny 才能命中 raw_patterns
 +  )
 +}
 +
- export function merge(...rulesets: Ruleset[]): Ruleset {
+ export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {
    return rulesets.flat()
  }
+
+
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index a13d6fabd962f347336c9eb64867da10a79fedae..fb5cee4c3834b52e0cc03acde03fd293e7341e41 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -314,10 +314,30 @@ export function evaluate(input: {
-   // Other permissions default to general allow unless a structured boundary above
-   // promoted them to cautious first, such as workspace delete metadata.
+@@ -216,7 +216,33 @@
+   // #232：默认回到 general allow，除非上方的结构化边界（如 workspace delete metadata）
+   // #232：先把它们提升到 cautious。
    if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
--  return evaluateShell(
--    typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
--    0,
--  )
+-  return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 +  return bashEffect(input)
 +}
 +
@@ -82,56 +79,61 @@ index a13d6fabd962f347336c9eb64867da10a79fedae..fb5cee4c3834b52e0cc03acde03fd293
 +  metadata: Readonly<Record<string, unknown>>
 +}) {
 +  const command = typeof input.metadata.command === "string" ? input.metadata.command : undefined
++  // #285：metadata.command 缺省时退化为 patterns 拼接，保持与旧 evaluateShell 兼容；
++  // 存在原始命令时始终以其为最低基线
 +  const patternCommand = input.patterns.join(" && ")
 +  if (!command) return evaluateShell(patternCommand, 0)
 +
 +  const raw = evaluateShell(command, 0)
 +  if (!patternCommand.trim() || patternCommand === command) return raw
++  // #285：canonical 与原始命令相同时无需二次评估，避免重复解析
 +
-+  // Shell metadata is the raw audit/reviewer evidence, while permission patterns
-+  // are canonical rule keys that may omit POSIX leading environment assignments.
-+  // Auto precheck must consider both views and keep the higher risk so raw
-+  // dangerous payloads cannot be weakened, and env assignments cannot downgrade a
-+  // canonical `git push --force` pattern from cautious to general.
++  // #285：shell metadata 是原始审计证据，permission patterns 是 canonical 规则键。
++  // auto precheck 必须同时考虑两个视角并保留更高风险，防止原始危险载荷被削弱，
++  // 也不能让 env 赋值将 git push --force 从 cautious 降为 general。
 +  return maxRisk(raw, evaluateShell(patternCommand, 0))
 +}
 +
 +function maxRisk(left: Decision, right: Decision) {
++// #285：双视角取风险更高者——env 赋值不得降低 git push --force 的 cautious 等级，
++// 原始危险载荷也不得因安全 pattern 被降级
 +  return LEVELS.indexOf(right.level) > LEVELS.indexOf(left.level) ? right : left
  }
  
- function externalDirectoryEffect(input: {
+ // #232：external_directory 边界统一为 cautious review seam——shell 发起的访问复用同一条
+
+
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 69b30355b6b6eab856225ce8a29c143b5864193e..cc500f4fd31042acae515ed33f763fef09895221 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -126,6 +126,7 @@ type Part = {
+@@ -131,6 +131,8 @@
  type Scan = {
    dirs: Set<string>
    patterns: Set<string>
 +  raw: Set<string>
++  // #285：raw 集合与 patterns 并行收集，两者来源不同（原始文本 vs 规范化 pattern）
    always: Set<string>
  }
  
-@@ -190,10 +191,32 @@ function parts(node: Node) {
+@@ -192,10 +193,32 @@
    return out
  }
  
 -function source(node: Node) {
 +function permissionPattern(node: Node, tokens: string[]) {
 +  const command = tokens.join(" ")
-+  // Permission patterns are the rule-matching key, not raw shell evidence. POSIX
-+  // leading environment assignments are skipped by `parts()` so they cannot hide
-+  // the actual command from a rule like `git push --force*`. Redirection appears
-+  // as a parent suffix in bash and as a child node in PowerShell; in both cases it
-+  // remains part of the visible shell effect for redirect-specific rules.
++  // #285：permission patterns 是规则匹配键，不是原始 shell 证据。POSIX
++  // 前导 env 赋值被 parts() 跳过，避免隐藏实际命令；重定向作为后缀保留。
 +  const redirect =
++  // #285：重定向后缀在去除 env 赋值后必须保留——> output.txt 属于命令语义，
++  // 拆掉会让 pattern 无法复现真实命令
 +    node
 +      .descendantsOfType("redirection")
 +      .filter((item): item is Node => Boolean(item))
 +      .map((item) => item.text.trim())
 +      .join(" ") || redirectedSuffix(node)
 +  if (!redirect) return command
++  // #285：无重定向时直接返回纯命令文本；permissionPattern 与旧 source() 行为对齐
 +  return `${command} ${redirect}`
 +}
 +
@@ -147,19 +149,17 @@ index 69b30355b6b6eab856225ce8a29c143b5864193e..cc500f4fd31042acae515ed33f763fef
  function commands(node: Node) {
    return node.descendantsOfType("command").filter((child): child is Node => Boolean(child))
  }
-@@ -373,6 +396,11 @@ const ask = Effect.fn("ShellTool.ask")(function* (
+@@ -374,6 +394,9 @@
      metadata: {
        action_kind: "shell",
-       command: metadata.command,
-+      // raw_patterns is deny-only compatibility evidence. Canonical patterns
-+      // deliberately omit POSIX env assignments so `git push --force*` still
-+      // matches; the raw form remains available to explicit hard-deny rules
-+      // such as `GITHUB_TOKEN=*` without affecting allow/ask/auto routing.
+       command: input.command,
++      // #285：raw_patterns 是 deny-only 兼容证据。canonical patterns 刻意省略
++      // POSIX env 赋值，使 git push --force* 仍能匹配；原始形式保留给显式硬拒规则
 +      ...(scan.raw.size ? { raw_patterns: Array.from(scan.raw) } : {}),
-       cwd: metadata.cwd,
-       shell: metadata.shell,
+       cwd: input.cwd,
+       shell: input.shell,
        agent: ctx.agent,
-@@ -731,6 +759,7 @@ export const ShellTool = Tool.define(
+@@ -791,6 +814,7 @@
        const scan: Scan = {
          dirs: new Set<string>(),
          patterns: new Set<string>(),
@@ -167,7 +167,7 @@ index 69b30355b6b6eab856225ce8a29c143b5864193e..cc500f4fd31042acae515ed33f763fef
          always: new Set<string>(),
        }
        const shellKind = ShellID.toKind(Shell.name(shell))
-@@ -751,7 +780,10 @@ export const ShellTool = Tool.define(
+@@ -812,7 +836,11 @@
          }
  
          if (tokens.length && (!cmd || !CWD.has(cmd))) {
@@ -176,14 +176,16 @@ index 69b30355b6b6eab856225ce8a29c143b5864193e..cc500f4fd31042acae515ed33f763fef
 +          scan.patterns.add(pattern)
 +          const raw = rawPattern(node)
 +          if (raw && raw !== pattern) scan.raw.add(raw)
++          // #285：raw 与 canonical pattern 相同时不加重复证据；只有差异（如 env 赋值）才进 raw
+           // 高风险 git 写操作不自动加入 always-allow 前缀建议
            const always = BashArity.prefix(tokens)
-           // Auto permission must never suggest broad wrapper or interpreter
-           // allow-rules (for example `bash *`, `python -c *`, or `git *`). Those
+           // #197：高风险 git 写操作与宽泛 wrapper 前缀不自动加入 always-allow
+
+
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
-index 0073386d74a24eac00924ab2edbf081bccb76313..3cddb0d78f1b004417c3419448757fb35e551c95 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -721,6 +721,61 @@ it.instance(
+@@ -756,6 +756,65 @@
    { git: true },
  )
  
@@ -206,12 +208,14 @@ index 0073386d74a24eac00924ab2edbf081bccb76313..3cddb0d78f1b004417c3419448757fb3
 +              ],
 +            }),
 +          )
-+          expect(err).toBeInstanceOf(Permission.DeniedError)
++          expect(err).toBeInstanceOf(PermissionV1.DeniedError)
 +          expect(yield* list()).toHaveLength(0)
 +        }),
 +      )
 +
 +      const approved = yield* ask({
++      // #285：先走一次 ask+always 建立已批准规则，再验证已批准规则仍不能绕过
++      // 后续的硬拒绝——批准不是原始证据的豁免令牌
 +        sessionID: SessionID.make("session_test"),
 +        permission: "bash",
 +        patterns: ["GITHUB_TOKEN=x git push --force"],
@@ -229,6 +233,8 @@ index 0073386d74a24eac00924ab2edbf081bccb76313..3cddb0d78f1b004417c3419448757fb3
 +          permission: "bash",
 +          patterns: ["git push --force"],
 +          metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
++          // #285：ruleset 里 GITHUB_TOKEN=* deny 必须覆盖 canonical pattern 不可见的 env 赋值——
++          // 即使 bash:* 规则为 allow/auto，原始证据仍 fail-closed
 +          always: ["git push *"],
 +          ruleset: [
 +            { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
@@ -236,25 +242,27 @@ index 0073386d74a24eac00924ab2edbf081bccb76313..3cddb0d78f1b004417c3419448757fb3
 +          ],
 +        }),
 +      )
-+      expect(err).toBeInstanceOf(Permission.DeniedError)
++      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
 +      expect(yield* list()).toHaveLength(0)
 +    }),
 +  { git: true },
 +)
 +
+ // #199：验证 precheck fast-path 对只读 git 命令直接 allow，不进入用户审批。
+ // #199：fast-path allow 不产生 pending 请求，验证 list() 为空。
  it.instance(
-   "ask - auto resolves known safe bash commands without pending user approval",
-   () =>
+
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index 706c4b3b541dfb4a030b14e1119aad56d781202e..be04e3d5ab8e0815e76036a5a59087db49a4da08 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -693,4 +693,41 @@ describe("permission precheck bash classifier", () => {
+@@ -674,4 +674,46 @@
      expect(bash("git cherry-pick abc123")).toMatchObject({ level: "cautious" })
      expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
    })
 +
 +  test("keeps cautious classification when shell metadata has environment assignments", () => {
++  // #285：env 赋值是执行前缀，不是命令本体——git push --force 仍是 force push，必须保持 cautious
 +    expect(
 +      PermissionPrecheck.evaluate({
 +        permission: "bash",
@@ -272,6 +280,8 @@ index 706c4b3b541dfb4a030b14e1119aad56d781202e..be04e3d5ab8e0815e76036a5a59087db
 +  })
 +
 +  test("does not lower raw dangerous shell metadata with safer permission patterns", () => {
++  // #285：patterns 只声明 git status，但原始命令 rm -rf / 的评估结果不被削弱
++  // ——metadata 原始证据以更高风险为准
 +    expect(
 +      PermissionPrecheck.evaluate({
 +        permission: "bash",
@@ -282,6 +292,7 @@ index 706c4b3b541dfb4a030b14e1119aad56d781202e..be04e3d5ab8e0815e76036a5a59087db
 +  })
 +
 +  test("does not promote environment-modified read-only shell metadata to safe", () => {
++  // #285：FOO=1 前缀命令仍是 read-only，允许 general；env 赋值本身不升级也不降级风险
 +    expect(
 +      PermissionPrecheck.evaluate({
 +        permission: "bash",
@@ -290,17 +301,21 @@ index 706c4b3b541dfb4a030b14e1119aad56d781202e..be04e3d5ab8e0815e76036a5a59087db
 +      }),
 +    ).toMatchObject({ level: "general" })
 +  })
++
  })
+
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620336f3026 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -261,6 +261,68 @@ describe("tool.shell permissions", () => {
+@@ -270,6 +270,71 @@
      }),
    )
  
 +  if (bash) {
 +    it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
++    // #285：permission pattern 不含 CI=true 前缀，规则只需匹配真实命令；
++    // 原始命令进 raw_patterns 供 deny 检查
 +      withShell(
 +        { label: "bash", shell: bash },
 +        Effect.gen(function* () {
@@ -309,12 +324,11 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +            tmp,
 +            Effect.gen(function* () {
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
 +                  {
 +                    command: 'CI=true git commit -m "test"',
-+                    description: "Commit with CI env",
 +                  },
 +                  capture(requests, err),
 +                ),
@@ -324,6 +338,7 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +              expect(bashReq!.patterns).toContain('git commit -m "test"')
 +              expect(bashReq!.patterns).not.toContain('CI=true git commit -m "test"')
 +              expect(bashReq!.metadata.raw_patterns).toContain('CI=true git commit -m "test"')
++              // #285：raw_patterns 保留完整原始命令，作为审计与硬拒绝证据
 +            }),
 +          )
 +        }),
@@ -331,6 +346,7 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +    )
 +
 +    it.live("omits multiple environment assignments from bash permission patterns [bash]", () =>
++    // #285：多个 env 赋值全部剥离，pattern 只留 echo hello
 +      withShell(
 +        { label: "bash", shell: bash },
 +        Effect.gen(function* () {
@@ -339,12 +355,11 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +            tmp,
 +            Effect.gen(function* () {
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
 +                  {
 +                    command: "FOO=1 BAR=2 echo hello",
-+                    description: "Echo with env",
 +                  },
 +                  capture(requests, err),
 +                ),
@@ -354,6 +369,7 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +              expect(bashReq!.patterns).toContain("echo hello")
 +              expect(bashReq!.patterns).not.toContain("FOO=1 BAR=2 echo hello")
 +              expect(bashReq!.metadata.raw_patterns).toContain("FOO=1 BAR=2 echo hello")
++              // #285：raw_patterns 保留全部前缀赋值——顺序与原文一致，供 deny 规则精确匹配
 +            }),
 +          )
 +        }),
@@ -364,12 +380,13 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
    each("asks for bash permission with multiple commands", () =>
      Effect.gen(function* () {
        const tmp = yield* tmpdirScoped()
-@@ -1558,6 +1620,35 @@ describe("tool.shell permissions", () => {
-     }),
+@@ -1170,6 +1230,39 @@
    )
  
+   // #108：always 模式按 shell 选择命令，避免 Windows cmd/pwsh 硬编码 ls
 +  if (bash) {
 +    it.live("keeps redirects after removing environment assignments from permission pattern [bash]", () =>
++    // #285：重定向不是前缀赋值，归属于命令本体——pattern 必须包含 > output.txt
 +      withShell(
 +        { label: "bash", shell: bash },
 +        Effect.gen(function* () {
@@ -378,16 +395,19 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +            tmp,
 +            Effect.gen(function* () {
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
-+                  { command: "CI=true echo hello > output.txt", description: "Redirect output with env" },
++                  { command: "CI=true echo hello > output.txt" },
++                  // #285：env 赋值 + 重定向混合场景验证 permissionPattern 拼接顺序：命令后接重定向
++                  // （raw 集合则保留完整原文）
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
 +              expect(bashReq!.patterns).toContain("echo hello > output.txt")
++              // #285：parser 剥离 env 后，重定向作为后缀拼回 pattern，可复现真实命令
 +              expect(bashReq!.patterns).not.toContain("CI=true echo hello > output.txt")
 +              expect(bashReq!.metadata.raw_patterns).toContain("CI=true echo hello > output.txt")
 +            }),
@@ -397,6 +417,9 @@ index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620
 +    )
 +  }
 +
-   each("always pattern has space before wildcard to not include different commands", () =>
+   each("always pattern has space before wildcard to not include different commands", (item) =>
      Effect.gen(function* () {
        const tmp = yield* tmpdirScoped()
+
+
+

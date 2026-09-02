@@ -101,10 +101,6 @@ diff --git a/.github/workflows/storybook.yml b/archived/github-workflows/storybo
 similarity index 100%
 rename from .github/workflows/storybook.yml
 rename to archived/github-workflows/storybook.yml
-diff --git a/.github/workflows/sync-zed-extension.yml b/archived/github-workflows/sync-zed-extension.yml
-similarity index 100%
-rename from .github/workflows/sync-zed-extension.yml
-rename to archived/github-workflows/sync-zed-extension.yml
 diff --git a/.github/workflows/triage.yml b/archived/github-workflows/triage.yml
 similarity index 100%
 rename from .github/workflows/triage.yml
