@@ -1,7 +1,9 @@
 import { describe, expect } from "bun:test"
 import path from "path"
 import * as fs from "fs/promises"
+import { parsePatch } from "diff"
 import { Cause, Effect, Exit, Layer } from "effect"
+import { countPatchStats, renderFileDiff } from "@/tool/file-diff"
 import { ApplyPatchTool } from "../../src/tool/apply_patch"
 import { WriteTool } from "../../src/tool/write"
 import { EditTool } from "../../src/tool/edit"
@@ -1396,6 +1398,131 @@ describe("tool.edit metadata diff bounding (hosted per plan §15)", () => {
       expect(meta.filediff.deletions).toBe(1)
       expect(meta.filediff.additions).toBe(1)
       expect(meta.filediff.patch).toContain("+++ added line")
+    }),
+  )
+})
+
+// [local-smark] 门控按真实成本重定向切片（tool-diff-edit-budget-gate-repair R2 §16）：
+// 判据 = 编辑距离预算 + 产物直测，取代中段体积猜测；标记为合法 unified 最小 hunk，
+// 任意 parsePatch 消费者（TUI Diff renderable/权限预览）零特判。
+describe("tool diff gate budgets by real cost (per tool-diff-edit-budget-gate-repair R2 §16)", () => {
+  it.instance("renders real line diff for small edits bracketing a >64KiB middle", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const target = path.join(test.directory, "span.txt")
+      // 镜像 2026-09-02 precheck.ts 事故：1662 行 ~80KB，两处小改相距 ~1090 行，
+      // 中段（含未变行）chars 远超 64KiB，但真实变更只有 3 行、产物 ~1KB。
+      const lines = Array.from({ length: 1662 }, (_, i) =>
+        i === 90 ? "TARGET-A anchor" : i === 1181 ? "TARGET-B anchor" : `filler ${i} ${"x".repeat(34)}`,
+      )
+      yield* writeText(target, lines.join("\n"))
+      const { ctx, calls } = makeCtx()
+      const info = yield* EditTool
+      const tool = yield* info.init()
+
+      const result = yield* tool.execute(
+        {
+          filePath: target,
+          edits: [
+            { oldString: "TARGET-A anchor", newString: "replaced-A\nsecond-A" },
+            { oldString: "TARGET-B anchor", newString: "replaced-B" },
+          ],
+        },
+        editCtxWithPriorRead(ctx, target, test.directory),
+      )
+
+      const meta = result.metadata as { diff: string; filediff: { additions: number; deletions: number } }
+      // 独立推导（行级 LCS）：删 2 个 anchor 行、增 3 个新行；变更跨度不参与判据（INV-02）。
+      expect(meta.diff).not.toContain("whole-file rewrite")
+      expect(parsePatch(meta.diff)[0].hunks).toHaveLength(2)
+      expect(meta.filediff.additions).toBe(3)
+      expect(meta.filediff.deletions).toBe(2)
+      // 权限预览出口同一 seam：同样可解析，不再出现“Error parsing diff”红字根因。
+      expect(parsePatch(calls[0].metadata.diff)[0].hunks).toHaveLength(2)
+    }),
+  )
+
+  it.effect("emits markers that parse as legal unified diff with 0/0 rescan counts", () =>
+    Effect.gen(function* () {
+      const rewrite = renderFileDiff("big.txt", bigRewriteFixture("old"), bigRewriteFixture("new"))
+      // rewrite 标记：合法最小 hunk；context 行不以 +/- 开头，重扫描计数保持 0/0（INV-04）。
+      const rp = parsePatch(rewrite.patch)
+      expect(rp).toHaveLength(1)
+      expect(rp[0].hunks).toHaveLength(1)
+      expect(rp[0].hunks[0].oldLines).toBe(2)
+      expect(rp[0].hunks[0].newLines).toBe(2)
+      expect(rewrite.patch).toContain("old: 8000 mid lines")
+      expect(rewrite.additions).toBe(8000)
+      expect(rewrite.deletions).toBe(8000)
+      expect(countPatchStats(rewrite.patch)).toEqual({ additions: 0, deletions: 0 })
+
+      const binary = renderFileDiff("bin.dat", "a\u0000b\u0000c", "x\u0000y")
+      const bp = parsePatch(binary.patch)
+      expect(bp).toHaveLength(1)
+      expect(bp[0].hunks).toHaveLength(1)
+      expect(bp[0].hunks[0].oldLines).toBe(4)
+      expect(bp[0].hunks[0].newLines).toBe(4)
+      // 大写 "Binary file" 措辞是 :1247 钉死断言的兼容承诺（R2 B-01 修正）。
+      expect(binary.patch).toContain("Binary file")
+      expect(countPatchStats(binary.patch)).toEqual({ additions: 0, deletions: 0 })
+    }),
+  )
+
+  it.effect("falls back to rewrite marker when the product patch exceeds the char bound", () =>
+    Effect.gen(function* () {
+      const oldText = `${"A".repeat(35 * 1024)}\n${"B".repeat(35 * 1024)}`
+      const newText = `${"C".repeat(35 * 1024)}\n${"D".repeat(35 * 1024)}`
+      const rendered = renderFileDiff("giant.txt", oldText, newText)
+      // 编辑距离仅 4 行（探测通过），但产物 ~140KB 超界：巨行按文控处理（INV-01 连续性）。
+      expect(rendered.patch).toContain("whole-file rewrite")
+      expect(rendered.patch).toContain("old: 2 mid lines")
+      expect(rendered.patch.length).toBeLessThan(64 * 1024)
+      expect(rendered.additions).toBe(2)
+      expect(rendered.deletions).toBe(2)
+    }),
+  )
+
+  it.instance("edit dual exits emit parseable markers for genuine large rewrites", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const target = path.join(test.directory, "gen2.txt")
+      const mk = (v: string) =>
+        [
+          ...Array.from({ length: 1000 }, (_, i) => `common head ${i} ${"h".repeat(20)}`),
+          ...Array.from({ length: 2000 }, (_, i) => `${v} ${i} ${"x".repeat(34)}`),
+          ...Array.from({ length: 1000 }, (_, i) => `common tail ${i} ${"t".repeat(20)}`),
+        ].join("\n")
+      yield* writeText(target, mk("old"))
+      const { ctx, calls } = makeCtx()
+      const info = yield* EditTool
+      const tool = yield* info.init()
+
+      const result = yield* tool.execute(
+        { filePath: target, edits: [{ oldString: mk("old"), newString: mk("new") }] },
+        editCtxWithPriorRead(ctx, target, test.directory),
+      )
+
+      const meta = result.metadata as { diff: string; filediff: { additions: number; deletions: number } }
+      // 真实大改（D=4000>2000）两出口各自来自同一 seam 且可解析（INV-06）；不要求两出口
+      // 字节相等——formatter 可能在 commit 后内容上变更（R5 语义）。
+      expect(meta.diff).toContain("whole-file rewrite")
+      expect(parsePatch(meta.diff)[0].hunks).toHaveLength(1)
+      expect(parsePatch(calls[0].metadata.diff)[0].hunks).toHaveLength(1)
+      expect(meta.filediff.additions).toBe(2000)
+      expect(meta.filediff.deletions).toBe(2000)
+    }),
+  )
+
+  it.live("keeps the abort path sub-second for incident-scale rewrites", () =>
+    Effect.sync(() => {
+      const start = Date.now()
+      const rewrite = renderFileDiff("big.txt", bigRewriteFixture("old"), bigRewriteFixture("new"))
+      const giant = renderFileDiff("one.txt", "x".repeat(640 * 1024), "y".repeat(640 * 1024))
+      const elapsed = Date.now() - start
+      // 事故输入（8000 行中段重写、640KB 全重写）在预算内放弃：探测界住 O((N+M)+K²)。
+      expect(rewrite.patch).toContain("whole-file rewrite")
+      expect(giant.patch).toContain("whole-file rewrite")
+      expect(elapsed).toBeLessThan(1000)
     }),
   )
 })
