@@ -88,6 +88,13 @@ const USER_ACCOUNT_COMMANDS = new Set([
   "usermod", "adduser", "deluser", "addgroup", "delgroup",
 ])
 
+// [local-smark] 进程终止族（R3 计划）：Unix/macOS（kill/pkill/killall）、
+// PowerShell（stop-process 及其官方别名 kill/spps——依 :72-73 "ri 与 remove-item
+// 同级"先例，官方别名与主 cmdlet 同级；sp 是 Set-ItemProperty 别名故排除）、
+// Windows 原生（taskkill/tskill）。族内默认 cautious；杀全部进程形态（kill
+// 尾操作数 -1、killall5）在前置分支判 dangerous。
+const PROCESS_TERMINATION_COMMANDS = new Set(["kill", "pkill", "killall", "stop-process", "spps", "taskkill", "tskill"])
+
 // ============================================================
 // 第三部分：敏感路径模式
 // ============================================================
@@ -1179,8 +1186,21 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   }
 
   // ---- 进程终止 ----
-  if (cmd === "kill" && tokens.includes("-9") && tokens.includes("-1"))
+  // [local-smark] 危险前置保序（:718 kill -9 -1 契约）：killall5 唯一语义即向
+  // 全部进程发信号（sysvinit-utils/busybox）无条件 dangerous；kill 的 -1 必须
+  // 处于尾操作数位（POSIX `kill -<signum> <pid>` 中信号位 -1 如 `kill -1 1234`
+  // 是单进程 SIGHUP，属 cautious 档）；-l 只读豁免对齐 crontab -l 先例（flags
+  // 全为 -l 且有实参，容忍非 flag 实参：kill -l / kill -l 9 仅列信号名）。
+  if (cmd === "killall5")
     return { level: "dangerous", reason: "mass process kill" }
+  if (cmd === "kill" && tokens.at(-1) === "-1" && !tokens.slice(1).includes("-l"))
+    return { level: "dangerous", reason: "mass process kill" }
+  if (PROCESS_TERMINATION_COMMANDS.has(cmd)) {
+    const args = tokens.slice(1)
+    const flags = args.filter((item) => item.startsWith("-"))
+    if (args.length > 0 && flags.length > 0 && flags.every((item) => item === "-l")) return
+    return { level: "cautious", reason: "process termination requires explicit approval" }
+  }
 
   // ---- 定时任务 ----
   if (cmd === "crontab") {

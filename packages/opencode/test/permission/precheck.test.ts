@@ -718,6 +718,39 @@ describe("permission precheck bash classifier", () => {
     expect(bash("kill -9 -1")).toMatchObject({ level: "dangerous" })
   })
 
+  // [local-smark] 进程终止族词表（R3 计划）：族内默认 cautious、杀全部形态
+  // dangerous、-l 只读豁免；红测复现事故形态（kill/Stop-Process 零护栏）。
+  test("marks process termination family cautious", () => {
+    expect(bash("kill 23148")).toMatchObject({ level: "cautious" })
+    expect(bash("kill -9 23148")).toMatchObject({ level: "cautious" })
+    expect(bash("kill -1 1234")).toMatchObject({ level: "cautious" })
+    expect(bash("pkill -9 node")).toMatchObject({ level: "cautious" })
+    expect(bash("killall Finder")).toMatchObject({ level: "cautious" })
+    expect(bash("Stop-Process -Id 5 -Force")).toMatchObject({ level: "cautious" })
+    expect(bash("spps -Id 5")).toMatchObject({ level: "cautious" })
+    expect(bash("taskkill /PID 5 /F")).toMatchObject({ level: "cautious" })
+    expect(bash("taskkill /IM explorer.exe")).toMatchObject({ level: "cautious" })
+    expect(bash("tskill 5")).toMatchObject({ level: "cautious" })
+    expect(bash("kill")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks kill-all forms dangerous including killall5 and tail minus one", () => {
+    expect(bash("kill -1")).toMatchObject({ level: "dangerous" })
+    expect(bash("kill -1 -1")).toMatchObject({ level: "dangerous" })
+    expect(bash("k" + "illall5")).toMatchObject({ level: "dangerous" })
+    expect(bash("k" + "illall5 -9")).toMatchObject({ level: "dangerous" })
+  })
+
+  test("keeps kill signal listing read-only general and negative locks", () => {
+    expect(bash("kill -l")).toMatchObject({ level: "general" })
+    expect(bash("kill -l 9")).toMatchObject({ level: "general" })
+    expect(bash("kill -l -9")).toMatchObject({ level: "cautious" })
+    // 既有 wrapper-shadow 启发式（:513-533）：未知前缀后的内层危险词升 cautious，
+    // `echo kill` 与既有 `echo rm -rf` 同语义（计划 §6 预测 general 有误，见 §23 披露）
+    expect(bash("echo kill")).toMatchObject({ level: "cautious" })
+    expect(bash('git commit -m "kill process"')).toMatchObject({ level: "cautious" })
+  })
+
   // ============================================================
   // 新增测试：定时任务
   // ============================================================
