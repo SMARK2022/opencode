@@ -464,13 +464,20 @@ evidence. A missing source path requires symbol, interface, event, producer,
 consumer, and behavior-owner tracing. It never permits behavior omission.
 
 Compare SMARK and upstream behavior hunk by hunk. When upstream is stronger,
-preserve its complete implementation as a non-removable baseline and apply every
-valid SMARK behavior, boundary, test, and constraint on top of it. Do not
-overwrite upstream with the SMARK implementation or select only convenient
-pieces. When upstream has no corresponding capability, build the complete SMARK
-behavior at the correct owner. In both cases, verify that no SMARK semantics are
-lost and that the result contains upstream strengths plus the full valid SMARK
-content. Preserve the upstream design language as well: when it uses Effect,
+preserve its complete implementation as a non-removable baseline and require
+every still-valid SMARK behavior, boundary, test, and constraint on top of it.
+When upstream lacks the capability, require the complete SMARK behavior at the
+correct owner. Determine whether the affected target responsibility remains
+live in V1, V2, or both. Preserve valid V1 behavior where V1 remains live. When
+V2 serves the same product responsibility, require the same defect or semantic
+gap to be addressed without replacing stronger V2 design. When V2 already
+removes the defect at its root or fully carries the same intent, preserve that
+implementation and reject a mechanical copy of the V1 structure, owner, or
+workaround. If upstream removed the complete product capability and no
+replacement path exists, verify that the main agent asked the user before
+restoring or dropping it. The final target must contain upstream strengths plus
+the full still-valid SMARK content across every applicable live path. Preserve
+the upstream design language as well: when it uses Effect,
 Schema, Layer, or an established state/error model, apply SMARK behavior within
 that model. Require the smallest semantic adaptation that fully carries both
 sides. Reject unnecessary owner or path relocation, initialization or
@@ -519,4 +526,4 @@ releases only after both entries pass. Any blocker keeps the whole batch blocked
 and requires repair, cumulative re-materialization from the earliest affected
 index, and full-scope re-audit of the same batch.
 
-> 请保持严格准确，且一旦有降级特征时时请你严格准确且提高警惕！最终审计报告不仅要包含如上的全部内容，同时完整全面包含相对较为严格的完整审计建议，如：#xxxx缺失了很多有效信息，请**全量**完整兼顾上下游以及目标合并分支后进行有效的融合，而不能只修改一处！同时也警惕current patch相较于origin patch出现较大文件长度变化且无合理有效原因和证据说明的改动。整体文档长度必须至少满足50行、3000字符以上，并包含完整全量的有效信息，同时凑字数无效，否则视为`BLOCK`！！！
+> 请保持严格准确，且一旦有降级特征时时请你严格准确且提高警惕！最终审计报告不仅要包含如上的全部内容，同时完整全面包含相对较为严格的完整审计建议，如：#xxxx缺失了很多有效信息，请**全量**完整兼顾上下游以及目标合并分支后进行有效的融合，最好结合相应的V1->V2的迁移的大方向背景思想，避免让feat/fix重新将主路径回退到可能已经删去的V1架构上！同时也警惕current patch相较于origin patch出现较大文件长度变化且无合理有效原因和证据说明的改动。整体文档长度必须至少满足50行、3000字符以上，并包含完整全量的有效信息，同时凑字数无效，否则视为`BLOCK`！！！

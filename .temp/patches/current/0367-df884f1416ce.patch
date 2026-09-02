@@ -19,25 +19,163 @@ SDK 调用使用 as any 绕过未重新生成的类型（与 sync.tsx 一致）�
 修复续跑消息渲染：移除独立的 goal 渲染块（双 Show 双 id 导致堆叠时间距
 累积），改为在 text memo 中统一提取 objective 并反转义 XML 实体，走正常
 用户消息渲染路径。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index e9bc51be368a085c4497dd182a08fc6a4ff4f655..c549442aabed7dad97717628281d10626630707d 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -42,6 +42,8 @@ import { DialogHelp } from "./ui/dialog-help"
- import { DialogAgent } from "@tui/component/dialog-agent"
- import { DialogSessionList } from "@tui/component/dialog-session-list"
- import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
-+// [local-smark] goal dialog
-+import { DialogGoal, DialogGoalMenu } from "@tui/component/dialog-goal"
- // [local-smark] DialogTool for tool selection
- import { DialogTool } from "@tui/component/dialog-tool"
- import { ThemeProvider, useTheme } from "@tui/context/theme"
-@@ -506,6 +508,25 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
+diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
+index b1d3ae727..774d1682c 100644
+--- a/packages/core/src/v1/config/config.ts
++++ b/packages/core/src/v1/config/config.ts
+@@ -173,6 +173,11 @@ export const Info = Schema.Struct({
+       }),
+     }),
+   ),
++  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10。
++  // 0367 起从 experimental 提升为顶层字段，goal 功能始终可用
++  goal_max_turns: Schema.optional(NonNegativeInt).annotate({
++    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
++  }),
+   experimental: Schema.optional(
+     Schema.Struct({
+       disable_paste_summary: Schema.optional(Schema.Boolean),
+@@ -186,14 +191,6 @@ export const Info = Schema.Struct({
+       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
+         description: "Continue the agent loop when a tool call is denied",
+       }),
+-      // #364：goal 功能开关：启用后持久化会话目标与自动续跑可用
+-      goals: Schema.optional(Schema.Boolean).annotate({
+-        description: "Enable persistent session goals with auto-continue",
+-      }),
+-      // #364：单个 goal 最多自动续跑轮数，防止无限循环
+-      goal_max_turns: Schema.optional(NonNegativeInt).annotate({
+-        description: "Maximum auto-continue turns per goal (default: 10)",
+-      }),
+       mcp_timeout: Schema.optional(PositiveInt).annotate({
+         description: "Timeout in milliseconds for model context protocol (MCP) requests",
+       }),
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 54c4307a3..6a140d227 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1490,9 +1490,10 @@ const layer = Layer.effect(
+             // 使用独立 goalTurns 计数器防止无限循环（step++ 在 continue 后跳过）。
+             // 仅对主 session（无 parentID）和非 decide agent 生效。
+             const cfg = yield* config.get()
+-            const maxGoalTurns = cfg.experimental?.goal_max_turns ?? 10
++            // [local-smark] goal 续跑不再需要 experimental 开关，始终可用；
++            // goal_max_turns 已提升为顶层 config 字段（0367）
++            const maxGoalTurns = cfg.goal_max_turns ?? 10
+             if (
+-              cfg.experimental?.goals === true &&
+               maxGoalTurns > 0 &&
+               !session.parentID &&
+               goalTurns < maxGoalTurns
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+index 8c766dc76..fe5e0bd09 100644
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -114,7 +114,7 @@ const layer = Layer.effect(
+     const greptool = yield* GrepTool
+     const patchtool = yield* ApplyPatchTool
+     const skilltool = yield* SkillTool
+-    // #364：goal 工具：仅当 config.experimental.goals 启用时可见
++    // [local-smark] goal 工具：始终注册（0367 起无 experimental 开关）
+     const goaltool = yield* GoalTool
+     const agent = yield* Agent.Service
+     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
+@@ -205,9 +205,6 @@ const layer = Layer.effect(
+           }
+         }
+ 
+-        const cfg = yield* config.get()
+-        // #364：goal 工具仅在 experimental.goals 启用时可见
+-        const goalsEnabled = cfg.experimental?.goals === true
+         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
+ 
+         const tool = yield* Effect.all({
+@@ -253,8 +250,8 @@ const layer = Layer.effect(
+             tool.patch,
+             tool.permission_review_decision,
+             ...(tool.execute ? [tool.execute] : []),
+-            // #364：goal 工具：仅在 experimental.goals 启用时暴露给模型
+-            ...(goalsEnabled ? [tool.goal] : []),
++            // [local-smark] goal 工具：始终暴露给模型，不再需要 experimental 开关
++            tool.goal,
+             ...(flags.experimentalLspTool ? [tool.lsp] : []),
+             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+           ],
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 1efc0a23a..e4094e07c 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -10,10 +10,14 @@ import { InstanceStore } from "@/project/instance-store"
+ import { InstanceBootstrap } from "@/project/bootstrap"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { SessionProjector } from "@opencode-ai/core/session/projector"
++import { Config } from "@/config/config"
++import { TestConfig } from "../fixture/config"
+ import { testEffect } from "../lib/effect"
+ 
+ // #364：测试 layer 组装：SessionGoal 依赖 EventV2Bridge + Database，
+ // Session 依赖 InstanceStore 等，使用与 session.test.ts 相同的模式。
++// [local-smark] Config 层供 goal_max_turns 顶层读取测试；TestConfig 提供
++// 空配置桩（get 返回 {}），goal_max_turns 缺省回退到 10 的断言因此成立。
+ const it = testEffect(
+   AppNodeBuilder.build(
+     LayerNode.group([
+@@ -23,6 +27,7 @@ const it = testEffect(
+       SessionProjector.node,
+       CrossSpawnSpawner.node,
+       InstanceStore.node,
++      Config.node,
+     ]),
+     [
+       [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
+@@ -30,6 +35,7 @@ const it = testEffect(
+         InstanceBootstrap.node,
+         Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
+       ],
++      [Config.node, TestConfig.layer()],
+     ],
+   ),
+ )
+@@ -396,3 +402,20 @@ it.instance(
+     }),
+   { git: true },
+ )
++
++// [local-smark] 验证 goal_max_turns 从顶层 config 读取，不在 experimental 下
++// goal 功能不再需要 experimental.goals 开关，始终可用
++it.instance(
++  "goal_max_turns is readable from top-level config without experimental gate",
++  () =>
++    Effect.gen(function* () {
++      const config = yield* Config.Service
++      const cfg = yield* config.get()
++      // goal_max_turns 在顶层可读，默认 10（TestConfig 空桩下回退到默认值）
++      const maxTurns = (cfg as any).goal_max_turns ?? 10
++      expect(maxTurns).toBe(10)
++      // experimental.goals 不再存在，goal 功能始终可用
++      expect((cfg as any).experimental?.goals).toBeUndefined()
++    }),
++  { git: true },
++)
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index 44dadf590..a5417dbac 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -49,6 +49,8 @@ import { DialogThemeList } from "./component/dialog-theme-list"
+ import { DialogHelp } from "./ui/dialog-help"
+ import { DialogAgent } from "./component/dialog-agent"
+ import { DialogSessionList } from "./component/dialog-session-list"
++// [local-smark] goal dialog：无 goal 时设置框，有 goal 时管理菜单
++import { DialogGoal, DialogGoalMenu } from "./component/dialog-goal"
+ import { DialogWorkspaceList } from "./component/dialog-workspace-list"
+ import { DialogConsoleOrg } from "./component/dialog-console-org"
+ import { ThemeProvider, useTheme } from "./context/theme"
+@@ -644,6 +646,26 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
            dialog.replace(() => <DialogSessionList />)
          },
        },
-+      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单
++      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单。
++      // goal 功能 0367 起始终可用（不再需要 experimental.goals 开关）
 +      {
 +        name: "goal.manage",
 +        title: "Set or manage goal",
@@ -59,24 +197,25 @@ index e9bc51be368a085c4497dd182a08fc6a4ff4f655..c549442aabed7dad97717628281d1062
        {
          name: "session.new",
          title: "New session",
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..b6505e64ebc1f035913c1be600e39669fabe88b3
+index 000000000..f3b93ff25
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-@@ -0,0 +1,140 @@
-+import { DialogPrompt } from "@tui/ui/dialog-prompt"
-+import { DialogSelect } from "@tui/ui/dialog-select"
-+import { useDialog } from "@tui/ui/dialog"
-+import { useSync } from "@tui/context/sync"
-+import { useSDK } from "@tui/context/sdk"
-+import { useToast } from "@tui/ui/toast"
-+import { createMemo, Show } from "solid-js"
++++ b/packages/tui/src/component/dialog-goal.tsx
+@@ -0,0 +1,142 @@
++import { DialogPrompt } from "../ui/dialog-prompt"
++import { DialogSelect } from "../ui/dialog-select"
++import { useDialog } from "../ui/dialog"
++import { useSync } from "../context/sync"
++import { useSDK } from "../context/sdk"
++import { useToast } from "../ui/toast"
++import { createMemo } from "solid-js"
 +
 +// [local-smark] goal 管理 dialog
 +// 无 goal 时 → DialogPrompt 输入 objective 直接创建
 +// 有 goal 时 → DialogSelect 选择 Edit/Pause/Resume/Clear
 +// Edit 选中后用 dialog.replace 切换到 DialogPrompt（无返回导航，可接受）
++// 0367 起 goal 不再依赖 experimental.goals 开关，命令始终注册
 +
 +interface DialogGoalProps {
 +  sessionID: string
@@ -99,6 +238,7 @@ index 0000000000000000000000000000000000000000..b6505e64ebc1f035913c1be600e39669
 +          return
 +        }
 +        // SDK 未重新生成，用 as any 绕过方法不存在检查
++        // (与 sync.tsx 中 goal 读取的 as any 绕过策略一致)
 +        void (sdk.client.session as any)
 +          .goalSet({ sessionID: props.sessionID, objective: value })
 +          .then(() => dialog.clear())
@@ -205,11 +345,12 @@ index 0000000000000000000000000000000000000000..b6505e64ebc1f035913c1be600e39669
 +    />
 +  )
 +}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 25c1ed4cb8c23f8b1ed66255da686f156ecccaac..34d7ccb0da38e7c6794be8cfd928507538003ac7 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1470,26 +1470,21 @@ function UserMessage(props: {
+\ No newline at end of file
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 0d12889d7..88564d72c 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -1571,26 +1571,22 @@ function UserMessage(props: {
  }) {
    const ctx = use()
    const local = useLocal()
@@ -226,7 +367,7 @@ index 25c1ed4cb8c23f8b1ed66255da686f156ecccaac..34d7ccb0da38e7c6794be8cfd9285075
 -      .filter(Boolean)
 -    return texts.join("\n\n")
 -  })
--  // [local-smark] goal 续跑 prompt：synthetic 消息也渲染，
+-  // #364：goal 续跑 prompt：synthetic 消息也渲染，
 -  // 但用 "Goal continuation" 标签区分，让用户知道这一轮是 goal 驱动的
 -  const goalText = createMemo(() => {
 -    const texts = props.parts
@@ -238,7 +379,8 @@ index 25c1ed4cb8c23f8b1ed66255da686f156ecccaac..34d7ccb0da38e7c6794be8cfd9285075
 +        if (x.type !== "text") return null
 +        // 非 synthetic 文本直接使用
 +        if (!x.synthetic) return x.text
-+        // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体
++        // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体，
++        // 走正常用户消息渲染路径，避免独立的 goal 渲染块堆积间距
 +        const m = x.text.match(/<objective>([\s\S]*?)<\/objective>/)
 +        if (!m) return null
 +        return m[1].trim()
@@ -248,11 +390,11 @@ index 25c1ed4cb8c23f8b1ed66255da686f156ecccaac..34d7ccb0da38e7c6794be8cfd9285075
        })
        .filter(Boolean)
      return texts.join("\n\n")
-@@ -1506,33 +1501,6 @@ function UserMessage(props: {
+@@ -1607,33 +1603,6 @@ function UserMessage(props: {
  
    return (
      <>
--      {/* [local-smark] goal 续跑 prompt 渲染：synthetic 消息用特殊样式显示， */}
+-      {/* #364：goal 续跑 prompt 渲染：synthetic 消息用特殊样式显示， */}
 -      {/* 让用户知道这是 goal 驱动的续跑而非用户输入 */}
 -      <Show when={goalText()}>
 -        <box
@@ -282,124 +424,3 @@ index 25c1ed4cb8c23f8b1ed66255da686f156ecccaac..34d7ccb0da38e7c6794be8cfd9285075
        <Show when={text()}>
          <box
            id={props.message.id}
-diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
-index 26f12c76a1aebdda7e2fffd876a64d99830f480f..d2bcde8cbbc31b860e1d4f5936f5e29ddd48dc15 100644
---- a/packages/opencode/src/config/config.ts
-+++ b/packages/opencode/src/config/config.ts
-@@ -286,6 +286,10 @@ export const Info = Schema.Struct({
-       }),
-     }),
-   ),
-+  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10
-+  goal_max_turns: Schema.optional(NonNegativeInt).annotate({
-+    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
-+  }),
-   experimental: Schema.optional(
-     Schema.Struct({
-       disable_paste_summary: Schema.optional(Schema.Boolean),
-@@ -299,14 +303,6 @@ export const Info = Schema.Struct({
-       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
-         description: "Continue the agent loop when a tool call is denied",
-       }),
--      // goal 功能开关：启用后 /goal 命令和自动续跑可用
--      goals: Schema.optional(Schema.Boolean).annotate({
--        description: "Enable persistent session goals with auto-continue",
--      }),
--      // 单个 goal 最多自动续跑轮数，防止无限循环
--      goal_max_turns: Schema.optional(NonNegativeInt).annotate({
--        description: "Maximum auto-continue turns per goal (default: 10)",
--      }),
-       mcp_timeout: Schema.optional(PositiveInt).annotate({
-         description: "Timeout in milliseconds for model context protocol (MCP) requests",
-       }),
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 012c2d9f020c6fae80888d9e1be968f50c77b5c0..425f1a1bbfc00790281cfdf7dd96fd2ff83c6341 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -2137,9 +2137,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             // 使用独立 goalTurns 计数器防止无限循环（step++ 在 continue 后跳过）。
-             // 仅对主 session（无 parentID）和非 decide agent 生效。
-             const cfg = yield* config.get()
--            const maxGoalTurns = cfg.experimental?.goal_max_turns ?? 10
-+            // [local-smark] goal 续跑不再需要 experimental 开关，始终可用
-+            const maxGoalTurns = cfg.goal_max_turns ?? 10
-             if (
--              cfg.experimental?.goals === true &&
-               maxGoalTurns > 0 &&
-               !session.parentID &&
-               goalTurns < maxGoalTurns
-diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
-index 738ea4ecca04537f688f7225077c744cb35161b1..3f096c50a5e6b16d52151245ad89d36a886422df 100644
---- a/packages/opencode/src/tool/registry.ts
-+++ b/packages/opencode/src/tool/registry.ts
-@@ -140,7 +140,7 @@ export const layer: Layer.Layer<
-     const greptool = yield* GrepTool
-     const patchtool = yield* ApplyPatchTool
-     const skilltool = yield* SkillTool
--    // [local-smark] goal 工具：仅当 config.experimental.goals 启用时可见
-+    // [local-smark] goal 工具：始终注册
-     const goaltool = yield* GoalTool
-     const agent = yield* Agent.Service
- 
-@@ -232,8 +232,6 @@ export const layer: Layer.Layer<
- 
-         yield* config.get()
-         const cfg = yield* config.get()
--        // [local-smark] goal 工具仅在 experimental.goals 启用时可见
--        const goalsEnabled = cfg.experimental?.goals === true
-         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
- 
-         const tool = yield* Effect.all({
-@@ -283,8 +281,8 @@ export const layer: Layer.Layer<
-             tool.permission_review_decision,
-             ...(flags.experimentalLspTool ? [tool.lsp] : []),
-             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
--            // [local-smark] goal 工具：仅在 experimental.goals 启用时暴露给模型
--            ...(goalsEnabled ? [tool.goal] : []),
-+            // [local-smark] goal 工具：始终暴露给模型，不再需要 experimental 开关
-+            tool.goal,
-           ],
-           task: tool.task,
-           read: tool.read,
-diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
-index c6aac6895cff95b60801b8d0feafc142fc042e45..5e460236d71d987c8154dc24aa33212dc98191db 100644
---- a/packages/opencode/test/session/goal.test.ts
-+++ b/packages/opencode/test/session/goal.test.ts
-@@ -3,6 +3,7 @@ import { Effect, Exit, Layer, Option } from "effect"
- import { Session as SessionNs } from "@/session/session"
- import { SessionGoal } from "@/session/goal"
- import { Bus } from "@/bus"
-+import { Config } from "@/config/config"
- import { Storage } from "@/storage/storage"
- import { SyncEvent } from "@/sync"
- import { RuntimeFlags } from "@/effect/runtime-flags"
-@@ -26,6 +27,8 @@ const it = testEffect(
-       Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
-       Layer.provide(BackgroundJob.defaultLayer),
-     ),
-+    // [local-smark] Config 层供 goal_max_turns 顶层读取测试
-+    Config.defaultLayer,
-     CrossSpawnSpawner.defaultLayer,
-   ),
- )
-@@ -374,3 +377,20 @@ it.instance(
-     }),
-   { git: true },
- )
-+
-+// [local-smark] 验证 goal_max_turns 从顶层 config 读取，不在 experimental 下
-+// goal 功能不再需要 experimental.goals 开关，始终可用
-+it.instance(
-+  "goal_max_turns is readable from top-level config without experimental gate",
-+  () =>
-+    Effect.gen(function* () {
-+      const config = yield* Config.Service
-+      const cfg = yield* config.get()
-+      // goal_max_turns 在顶层可读，默认 10
-+      const maxTurns = (cfg as any).goal_max_turns ?? 10
-+      expect(maxTurns).toBe(10)
-+      // experimental.goals 不再存在，goal 功能始终可用
-+      expect((cfg as any).experimental?.goals).toBeUndefined()
-+    }),
-+  { git: true },
-+)

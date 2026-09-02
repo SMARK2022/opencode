@@ -1,33 +1,27 @@
 From b734bd7f4b879fc10e6b3cb915cb4894ab20ebec Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Wed, 10 Jun 2026 02:40:06 +0800
-Subject: [PATCH] =?UTF-8?q?feat(sync):=20=E5=A2=9E=E5=8A=A0=E6=B6=88?=
- =?UTF-8?q?=E6=81=AF=E9=99=90=E5=88=B6=EF=BC=8C=E6=8F=90=E5=8D=87=E4=BC=9A?=
- =?UTF-8?q?=E8=AF=9D=E6=B6=88=E6=81=AF=E5=A4=84=E7=90=86=E8=83=BD=E5=8A=9B?=
+Subject: [PATCH] feat(sync): increase message limit from 200 to 300; sync visible window to 300
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 13edd8e2354afa861821db280c8935bc6f39a7dd..c783745cc9efb22b38f741ca3acfff62bf0925b2 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -567,7 +567,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-             }),
-           )
-           const updated = store.message[info.sessionID]
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index 27b87ae1c5e47eff7e57c80b8c8771631e6141ed..c783745cc9efb22b38f741ca3acfff62bf0925b2 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -579,4 +579,5 @@
+           const updated = store.message[event.properties.info.sessionID]
+           // #162：本地缓存消息数阈值与 200 窗口对齐
++          // #290：本地缓存窗口从 200 提升至 300，降低长会话过早截断风险
 -          if (updated.length > 200) {
 +          if (updated.length > 300) {
              const oldest = updated[0]
-             batch(() => {
-               setStore(
-@@ -829,7 +829,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           if (!options?.force && fullSyncedSessions.has(sessionID)) return
-           const [session, messages, todo, diff, status] = await Promise.all([
-             sdk.client.session.get({ sessionID }, { throwOnError: true }),
--            sdk.client.session.messages({ sessionID, limit: 200 }),
-+            sdk.client.session.messages({ sessionID, limit: 300 }),
-             sdk.client.session.todo({ sessionID }),
-             sdk.client.session.diff({ sessionID }),
-             sdk.client.session.status({ workspace: project.workspace.current() }),
+@@ -855,5 +855,6 @@
+             const [session, messages, todo, diff, status] = await Promise.all([
+               sdk.client.session.get({ sessionID }, { throwOnError: true }),
+               // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
++              // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
+-              sdk.client.session.messages({ sessionID, limit: 200 }),
++              sdk.client.session.messages({ sessionID, limit: 300 }),
+               sdk.client.session.todo({ sessionID }),

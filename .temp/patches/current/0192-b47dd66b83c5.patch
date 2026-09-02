@@ -54,7 +54,7 @@ index e4817f514d..f9153ab7c1 100644
  
          const state: State = {
            data: createSessionData(),
-@@ -799,13 +783,17 @@ function createLayer(input: StreamInput) {
+@@ -799,13 +783,19 @@ function createLayer(input: StreamInput) {
            )
          })
  
@@ -67,7 +67,9 @@ index e4817f514d..f9153ab7c1 100644
 +              // #192：live 或 statusBusy 都算活跃
 +              const observed = next.live || next.statusBusy
 +              if (!item) return fallback && observed
++              // #192：daemon 无该 session 记录时仅当已观察到活动才允许结束 turn，防止空窗误判
 +              if (item.type !== "idle") { next.statusBusy = true; return false }
++              // #192：status 非 idle 说明 turn 仍在执行，标记 busy 并继续等待
 +              return observed
              }),
 -            Effect.orElseSucceed(() => fallback),
@@ -75,7 +77,7 @@ index e4817f514d..f9153ab7c1 100644
            ),
          )
  
-@@ -826,19 +814,22 @@ function createLayer(input: StreamInput) {
+@@ -826,19 +814,24 @@ function createLayer(input: StreamInput) {
  
          const touch = (event: Event) => {
            const next = state.wait
@@ -83,6 +85,7 @@ index e4817f514d..f9153ab7c1 100644
 +          if (!next || !active(event, input.sessionID)) { return }
 +          // #192：session.status 单独处理
 +          if (event.type === "session.status") {
++            // #192：session.status 事件是 turn 活跃的直接证据，优先级高于普通事件
 +            if (event.properties.status.type !== "idle") { next.statusBusy = true; next.live = true }
              return
            }
@@ -92,7 +95,8 @@ index e4817f514d..f9153ab7c1 100644
  
          const complete = Effect.fn("RunStreamTransport.complete")(function* (next: Wait, fallback: boolean) {
 -          if (state.wait !== next || !next.armed || !next.live) {
-+          // #192：移除 !next.live
++          // #192：complete 入口只看 armed 与 idle；live 判定下沉到 idle 内部，避免职责重复
++          // #192：idle 内部用 observed 校验 live 与 statusBusy，complete 不再重复该判断
 +          if (state.wait !== next || !next.armed) {
              return
            }
@@ -102,7 +106,7 @@ index e4817f514d..f9153ab7c1 100644
              return
            }
  
-@@ -1124,63 +1115,52 @@ function createLayer(input: StreamInput) {
+@@ -1124,63 +1115,54 @@ function createLayer(input: StreamInput) {
            return true
          })
  
@@ -150,8 +154,8 @@ index e4817f514d..f9153ab7c1 100644
 -                yield* applyEvent(event)
 -                yield* drainBuffered()
 +        const watch = Effect.fn("RunStreamTransport.watch")(function* () {
-+          // #192：while 循环替代单次订阅——SSE clean EOF 时重连而非 fault
-+          // #192：SSE 断线重连——clean EOF 重连而非 fault
++          // #192：订阅生命周期由 watch 循环持有，clean EOF 在循环内重建而非退出
++          // #192：clean EOF 是正常结束信号触发重连；真异常才走 fault 路径
 +          while (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
 +            const events = yield* Effect.tryPromise({
 +              try: () => input.sdk.global.event({ signal: abort.signal }),
@@ -175,11 +179,11 @@ index e4817f514d..f9153ab7c1 100644
 -        )
 -
 +            )
-+            // #192：订阅失败时退出（footer/abort/closed）
++            // #192：终止条件满足时静默退出，否则真实订阅故障走 fault 路径
 +            if (!events) return
 +            const closeCurrentStream = () => { void events.stream.return(StreamClosed).catch(() => {}) }
-+            // #192：closeStream 指向当前流
-+            // #192：closeStream 指向当前流，ensuring 时重置
++            // #192：closeStream 在订阅期间指向当前流，供外部主动关闭
++            // #192：确保只清理当前流的 subscription，旧流 ensure 不改 closeStream 引用
 +            closeStream = closeCurrentStream
 +            input.trace?.write("recv.subscribe", { sessionID: input.sessionID })
 +            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) => error instanceof Error ? error : new Error(String(error))).pipe(
@@ -201,8 +205,10 @@ index e4817f514d..f9153ab7c1 100644
 +              Effect.as(true),
 +              Effect.catch((error) => (abort.signal.aborted ? Effect.succeed(false) : fail(error).pipe(Effect.as(false)))),
 +              Effect.ensuring(Effect.sync(() => { if (closeStream === closeCurrentStream) closeStream = () => {}; closeCurrentStream() })),
++              // #192：closeStream 只在仍指向当前流时重置，旧流的 ensuring 不会误关新订阅
 +            )
-+            // #192：clean EOF 时 ok=false，外层 while 重试
++            // #192：ok 标志区分 clean EOF 与真故障：clean EOF 外层重连，真故障退出
++            // #192：ok=false 表示流正常结束或已 fault；fault 由 catch 置位，clean EOF 走重连
 +            if (!ok) return
 +            // #192：重连节流——100ms 避免死 daemon tight loop
 +            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) yield* Effect.sleep("100 millis")
@@ -211,11 +217,12 @@ index e4817f514d..f9153ab7c1 100644
          yield* Scope.provide(scope)(watch().pipe(Effect.forkScoped))
          yield* bootstrap()
  
-@@ -1203,6 +1183,8 @@ function createLayer(input: StreamInput) {
+@@ -1203,6 +1183,9 @@ function createLayer(input: StreamInput) {
              tick: state.tick,
              armed: false,
              live: false,
 +            // #192：初始无 statusBusy
++            // #192：新 Wait 从非 busy 开始，只有收到事件或 status 才置位
 +            statusBusy: false,
              onVisibleOutput: next.onVisibleOutput,
              done: yield* Deferred.make<void, unknown>(),
@@ -240,13 +247,15 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 index 12c7e266f5..9ac84716c5 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -737,29 +737,36 @@ export function fromError(
+@@ -737,31 +737,40 @@ export function fromError(
          ).toObject()
        }
  
 +      // #192：statusless 非重试 APIError 的 cause 可能是 transport
++        // #192：仅当无 statusCode 时才查 cause，4xx 有明确状态码不应被 cause 改写
 +      if (!parsed.isRetryable && parsed.statusCode === undefined) {
 +        const transport = transportError(e.cause)
++          // #192：此处返回的是升级后的 APIError，重试性与 message 来自 transport 判定
 +        if (transport) return new APIError({ message: transport.message, isRetryable: true, metadata: transport.metadata }, { cause: e }).toObject()
 +      }
        return new APIError(
@@ -262,6 +271,7 @@ index 12c7e266f5..9ac84716c5 100644
          { cause: e },
        ).toObject()
      case !ctx.aborted && !APICallError.isInstance(e) && (() => {
+       // #191：ctx.aborted 表示用户主动取消，不得转为可重试错误
        // #191：在 catch-all 之前检查 transport 层瞬时故障
 -      // #191：先解包 AI SDK RetryError，取 lastError 再判定
 -      const retried = retryErrorCause(e)
@@ -271,7 +281,7 @@ index 12c7e266f5..9ac84716c5 100644
 +      if (retryErrorCause(e)) return true
 +      // #192：非 APICallError 的 cause 链中可能藏 APICallError，需优先解析
 +      if (apiCallErrorCause(e)) return true
-+      // #192：structured stream error 优先于 transport，防 context_overflow 被误重试
++      // #192：结构化 stream 错误（含 code/type）比 transport 判定更具体，优先采用，防 context_overflow 被误重试
 +      if (streamError(e)) return true
 +      // #191：transportError 命中时返回 true
        return Boolean(transportError(e))
@@ -280,13 +290,14 @@ index 12c7e266f5..9ac84716c5 100644
        {
          const retried = retryErrorCause(e)
          if (retried) return fromError(retried, ctx)
-+        // #192：非 APICallError cause 链中藏 APICallError 时递归解析
++        // #192：递归返回的 APICallError 作为新错误重走 fromError，保持分类一致
 +        const apiCall = apiCallErrorCause(e)
 +        if (apiCall) return fromError(apiCall, ctx)
-+        // #192：structured stream error 优先于 transport——防 context_overflow 误重试
++        // #192：fromStreamError 用 parsed 结构构造 ContextOverflow/APIError，responseBody 完整透传，避免 overflow 误判为网络故障
 +        const stream = streamError(e)
 +        if (stream) return fromStreamError(e, stream)
          // #191：transport 层瞬时故障转为可重试 APIError
+           // #191：isRetryable=true 是 retryable() 的入口契约，metadata 保留原始错误信息
          const transport = transportError(e)
          if (transport) {
 @@ -890,5 +897,48 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
@@ -312,7 +323,7 @@ index 12c7e266f5..9ac84716c5 100644
 +function streamError(value: unknown): NonNullable<ReturnType<typeof ProviderError.parseStreamError>> | undefined {
 +  const parsed = ProviderError.parseStreamError(value)
 +  if (parsed) return parsed
-+  // #192：递归检查 cause 链，stream error 可能被 fetch wrapper 包裹
++  // #192：stream error 可能藏在多层 cause 中，递归一层即覆盖 fetch wrapper 包装
 +  const error = errorLike(value)
 +  if (error && error.cause !== undefined && error.cause !== value) {
 +    const causeParsed = ProviderError.parseStreamError(error.cause)
@@ -357,10 +368,10 @@ index 5bb578447f..18be2d0306 100644
      }
    })
  
-+  // #192：clean EOF 重订阅——活动 turn 期间全局 SSE 关闭应重连而非 fault
++  // #192：全局 SSE 关闭若发生在活动 turn 期间，clean EOF 走重连是保活不变量
 +  // #192：第一次 subscribe 关闭后第二次 subscribe 必须接替——不应让活动 turn 失败
 +  // #192：promptAsync 推送 busy 事件后关闭 first stream——模拟 clean EOF
-+  // #192：重连后 second stream 推送 idle 事件——turn 正常完成
++  // #192：second stream 的事件是重连后状态收口的输入源，idle 结束 turn
 +  // #192：subscriptions >= 2 证明重连发生——单次 subscribe 不够
 +  test("resubscribes when the global event stream closes cleanly during an active turn", async () => {
 +    const first = globalFeed()
@@ -369,7 +380,7 @@ index 5bb578447f..18be2d0306 100644
 +    let subscriptions = 0
 +
 +    // #192：globalEvent 第一次返回 first stream，第二次返回 second stream
-+    // #192：promptAsync 推送 busy 后关闭 first——触发 clean EOF
++    // #192：busy 事件后关闭流，验证重连后不丢已确认的 busy 状态
 +    const transport = await createSessionTransport({
 +      sdk: sdk({
 +        globalEvent: () => {
@@ -399,13 +410,13 @@ index 5bb578447f..18be2d0306 100644
 +        includeFiles: false,
 +      })
 +
-+      // #192：等待重连发生——subscriptions > 1 证明第二次 subscribe
++      // #192：断言第二次订阅发生，验证 clean EOF 后确实重连而非丢弃 turn
 +      await waitFor(() => (subscriptions > 1 ? true : undefined))
-+      // #192：重连后推送 idle——turn 正常完成
++      // #192：重连成功后 busy→idle 序列驱动 turn 正常完成，验证 status 收口路径
 +      second.push(globalEvent(idle()))
 +
 +      await expect(turn).resolves.toBeUndefined()
-+      // #192：subscriptions >= 2 证明 clean EOF 触发了重连
++      // #192：clean EOF 必须触发重订阅，subscriptions 计数是重连发生的可观察证据
 +      expect(subscriptions).toBeGreaterThanOrEqual(2)
 +    } finally {
 +      first.close()
@@ -415,7 +426,7 @@ index 5bb578447f..18be2d0306 100644
 +  })
 +
 +  // #192：重连丢失全部 turn 事件时，靠 status polling + statusBusy 完成
-+  // #192：重连后 second stream 不推送任何 turn 事件——模拟事件丢失
++  // #192：事件完全丢失时只能靠 status 轮询判定 turn 状态，是降级主路径
 +  // #192：status polling 第一次返回 busy——确认 turn 仍在执行
 +  // #192：status polling 第二次返回 idle——turn 完成
 +  // #192：waitFor subscriptions > 1 确保重连完成后才开始 status 检查
@@ -565,9 +576,9 @@ index 5bb578447f..18be2d0306 100644
 +
 +  // #192：孤立的 idle 事件在 daemon 未观察 turn 时不应完成——需先看到 busy
 +  // #192：turn.wait 事件表示 transport 正在等待 daemon 响应
-+  // #192：status 返回空——daemon 不知道此 turn
++  // #192：status 无记录时无法结束 turn，等待事件或超时保护
 +  // #192：idle 事件不应完成 turn——可能是前一个 turn 的残留
-+  // #192：settled 必须为 false——孤立 idle 不能错误地完成活动 turn
++  // #192：未观察到 busy 的孤立 idle 是残留事件，不得结束活动 turn
 +  // #192：busy + idle 序列后 turn 才正常完成——需要完整的 busy → idle 生命周期
 +  test("ignores a lone idle event when daemon status has not observed the turn", async () => {
 +    const src = globalFeed()
@@ -625,7 +636,7 @@ index 5bb578447f..18be2d0306 100644
 +
 +  // #192：重订阅失败应 reject 活动 turn——不应静默成功
 +  // #192：第二次 globalEvent 调用抛异常——模拟重连失败
-+  // #192：turn 必须 reject 并携带原始错误——不能隐藏故障
++  // #192：重连失败是硬故障，reject 透传原始错误而非吞掉
 +  // #192：超时 1 秒保护——避免重连失败时 turn 永远 pending
 +  // #192：status 返回 busy 但不应阻止 reject——重连失败优先于 status
 +  test("rejects the active turn when resubscribing the global event stream fails", async () => {
@@ -703,7 +714,7 @@ index 41c9c1727b..e86572b466 100644
  
 +
 +
-+  // #192：statusless（无 statusCode）APICallError 的 transport cause 应转为可重试
++  // #192：无 statusCode 的 APICallError 无法自证重试性，需查 cause 决定重试
 +  // #192：有 statusCode 的 4xx 保持非重试，即使 cause 链中有 transport 故障
 +  // #192：无状态码的 APICallError 可能是 provider 包装了 transport 错误——需解包 cause 判定
 +  // #192：metadata.code 必须透传 transport 错误码（如 ETIMEDOUT），供日志和诊断使用
@@ -726,13 +737,13 @@ index 41c9c1727b..e86572b466 100644
 +    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
 +    // #192：isRetryable=true——transport cause 使非重试变可重试
 +    expect(result.data.isRetryable).toBe(true)
-+    // #192：metadata.code 透传 transport 错误码
++    // #192：metadata.code 让下游能按错误码区分重试原因，便于观测与告警
 +    expect(result.data.metadata?.code).toBe("ETIMEDOUT")
 +    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket timed out" })
 +  })
 +
-+  // #192：4xx + transport cause——4xx 语义优先，不因 transport 降级而变可重试
-+  // #192：statusCode 存在时 APICallError 自身语义决定重试性，transport cause 不覆盖
++  // #192：4xx 是确定性业务错误，transport cause 不改变其重试性
++  // #192：statusCode 存在即进入 APICallError 自身判定，无需解包 cause
 +  // #192：responseBody 必须保留——4xx 的诊断体不能因 cause 解包而丢失
 +  test("keeps explicit APICallError 4xx failures non-retryable even with transport causes", () => {
 +    const result = MessageV2.fromError(
@@ -787,7 +798,7 @@ index 41c9c1727b..e86572b466 100644
 +    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
 +  })
 +
-+  // #192：Error.cause 携带 structured stream error 时应解析为可重试 APIError
++  // #192：cause 携带结构化 stream 错误时按类型精确映射，不丢 responseBody，解析为对应错误类型
 +  // #192：stream error 结构为 { type:"error", error:{ code, message } }——ProviderError.parseStreamError 解析
 +  // #192：server_error 是可重试的 provider 侧故障——与 transport 故障区分
 +  // #192：openai provider 的 stream error 格式与其他 provider 可能不同
@@ -813,12 +824,12 @@ index 41c9c1727b..e86572b466 100644
 +    })
 +  })
 +
-+  // #192：structured stream error 优先于 transport——防 context_overflow 被 fetch wrapper 遮蔽
-+  // #192：responseBody 必须保留到 ContextOverflowError，供诊断和日志使用
++  // #192：context_length_exceeded 等结构化错误必须走 ContextOverflowError，不能退化为 transport 重试
++  // #192：ContextOverflowError 携带 responseBody 供诊断定位，不随 cause 丢失日志使用
 +  // #192：TypeError("fetch failed") 的 cause 可能携带 provider 结构化错误——先查 streamError
 +  // #192：context_length_exceeded 映射为 ContextOverflowError——不可重试，与 transport 故障区分
 +  // #192：parseStreamError 将 context_length_exceeded 映射为统一消息——"Input exceeds context window of this model"
-+  // #192：responseBody 从 ParsedStreamError 透传——fromStreamError 必须保留完整诊断体
++  // #192：responseBody 从 parsed 结果透传到错误对象，供调用方诊断——fromStreamError 必须保留完整诊断信息
 +  test("prioritizes structured stream errors over generic fetch wrappers", () => {
 +    const result = MessageV2.fromError(
 +      new TypeError("fetch failed", {
@@ -836,7 +847,7 @@ index 41c9c1727b..e86572b466 100644
 +    expect(SessionV1.ContextOverflowError.isInstance(result)).toBe(true)
 +    if (!SessionV1.ContextOverflowError.isInstance(result)) throw new Error("expected ContextOverflowError")
 +    expect(result.data.message).toBe("Input exceeds context window of this model")
-+    // #192：responseBody 从 ParsedStreamError 透传到 ContextOverflowError
++    // #192：错误构造时 responseBody 一并携带，避免诊断信息在转换中丢失，透传到 ContextOverflowError
 +    expect(result.data.responseBody).toBeDefined()
 +    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
 +  })
@@ -850,12 +861,12 @@ index db170d2b62..61be0c4b6f 100644
      set(prompt) {
        input.setText(prompt.input)
        setStore("prompt", prompt)
-+      // #192：恢复 draft 时同步 mode
++      // #192：还原草稿必须同时还原 mode，否则 shell 模式残留会让普通输入误走 /shell
 +      if (prompt.mode) { setStore("mode", prompt.mode) }
        restoreExtmarksFromParts(prompt.parts)
        input.gotoBufferEnd()
      },
-@@ -1142,17 +1144,43 @@ export function Prompt(props: PromptProps) {
+@@ -1142,17 +1144,45 @@ export function Prompt(props: PromptProps) {
            ]
          : []
  
@@ -867,14 +878,16 @@ index db170d2b62..61be0c4b6f 100644
 +    function showSubmitFailureToast() {
 +      toast.show({ message: "Sending prompt failed. Your draft was kept.", variant: "error" })
 +    }
-+    // #192：prompt 提交失败时保留 draft 并恢复 move 状态
++    // #192：move 状态与 draft 一起还原，保证失败后 UI 回到提交前形态
 +    function keepDraftAfterSubmitFailure() {
 +      showSubmitFailureToast()
 +      if (finishMoveProgress) move.finishSubmit()
 +      return false
 +    }
 +    // #192：shell/command 后台失败时恢复 draft
++      // #192：shell/command 无接受回执，失败只能靠恢复草稿兜底，且不覆盖用户新输入
 +    function restoreDraftAfterBackgroundFailure(prompt: typeof store.prompt, mode: typeof currentMode) {
++      // #192：后台请求迟到失败不得覆盖用户已输入的新内容，仅空 draft 时恢复
 +      showSubmitFailureToast()
 +      cancelNewSessionNavigation = true
 +      if (newSessionNavigation) clearTimeout(newSessionNavigation)
@@ -894,7 +907,7 @@ index db170d2b62..61be0c4b6f 100644
 -        },
 -        command: inputText,
 -      })
-+      // #192：快照 draft——后台调用无法 await
++      // #192：快照仅用于失败恢复，成功路径直接清空输入，两条路径互斥——后台调用无法 await
 +      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
 +      void sdk.client.session
 +        .shell({
@@ -908,7 +921,7 @@ index db170d2b62..61be0c4b6f 100644
        setStore("mode", "normal")
      } else if (
        inputText.startsWith("/") &&
-@@ -1166,43 +1194,39 @@ export function Prompt(props: PromptProps) {
+@@ -1166,43 +1194,40 @@ export function Prompt(props: PromptProps) {
        const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
        const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
  
@@ -921,7 +934,7 @@ index db170d2b62..61be0c4b6f 100644
 -        variant,
 -        parts: nonTextParts.filter((x) => x.type === "file"),
 -      })
-+      // #192：快照 draft
++      // #192：draft 快照在失败路径被还原，是后台失败时的唯一恢复来源
 +      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
 +      void sdk.client.session
 +        .command({
@@ -963,6 +976,7 @@ index db170d2b62..61be0c4b6f 100644
 -            variant: "error",
 -          })
 +      // #192：promptAsync 替代 prompt+throwOnError——daemon 确认接收后才清 draft
++        // #192：response.error 表示 daemon 未接受，保留 draft 并终止提交流程
 +      const response = await sdk.client.session
 +        .promptAsync({
 +          sessionID,
@@ -977,7 +991,7 @@ index db170d2b62..61be0c4b6f 100644
 +          ],
          })
 +        .catch((error) => ({ error }))
-+      // #192：提交失败时保留 draft
++      // #192：promptAsync 的 error 信封是 daemon 拒绝的信号，与本地异常同等处理
 +      if (response.error) return keepDraftAfterSubmitFailure()
        if (editorParts.length > 0) editor.markSelectionSent()
      }
@@ -991,7 +1005,7 @@ index db170d2b62..61be0c4b6f 100644
 -          type: "session",
 -          sessionID,
 -        })
-+      // #192：新会话跳转可取消
++      // #192：后台失败时取消跳转，避免进入空会话丢失输入
 +      newSessionNavigation = setTimeout(() => {
 +        if (cancelNewSessionNavigation) return
 +        route.navigate({ type: "session", sessionID })
@@ -1007,7 +1021,7 @@ index c0dfc67dc1..865fdaf98b 100644
      // #132：区分首次 connected 与重连
      let connectedOnce = false
 +    // #192：重连后 permission/question 快照版本
-+    // #192：permission/question 版本计数
++    // #192：版本计数决定哪些本地变更应回放，避免重连恢复丢变更
 +    let permissionVersion = 0
 +    let questionVersion = 0
 +    let permissionRefreshes = 0
@@ -1019,22 +1033,26 @@ index c0dfc67dc1..865fdaf98b 100644
      // #186：同一 part/field 的相邻 delta 在 16ms 窗内合并，压低 Solid store 抖动
      // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
      let pendingPartDeltas: EventMessagePartDelta[] = []
-@@ -270,6 +280,53 @@ export const {
+@@ -270,6 +280,61 @@ export const {
      }
  
      // #153：集中刷新 session_status，供 force-sync / stale-busy 复用
-+    // #192：pending request 按 session 分组
++    // #192：快照按 session 建表，供后续增量 update 提供二分查找的排序不变式
 +    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) { return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => { ;(result[request.sessionID] ??= []).push(request); return result }, {}) }
 +    function pendingRequestChangeKey(sessionID: string, requestID: string) { return `${sessionID}\0${requestID}` }
 +    // #192：merge live changes 防 stale 覆盖
++    // #192：快照整体替换负责丢弃断线期间已解决的 blocker，live changes 只回放本地确认的变更
 +    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(snapshot: Record<string, T[]>, current: Record<string, T[]>, changes: Map<string, { sessionID: string; requestID: string; version: number }>, since: number) {
 +      const result = Object.fromEntries(Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]])) as Record<string, T[]>
 +      for (const change of changes.values()) {
 +        if (change.version <= since) continue
++          // #192：版本号小于快照起始的变更已被快照包含，跳过避免重复回放
 +        const currentRequests = current[change.sessionID]
 +        if (!currentRequests) { removePendingRequest(result, change.sessionID, change.requestID); continue }
++          // #192：当前 store 已无该请求说明已解决，快照中对应项也应清除
 +        const currentMatch = search(currentRequests, change.requestID, (request) => request.id)
 +        if (!currentMatch.found) { removePendingRequest(result, change.sessionID, change.requestID); continue }
++          // #192：变更指向的请求在 store 中不存在时同样从快照结果移除
 +        const requests = result[change.sessionID] ?? []
 +        const match = search(requests, change.requestID, (request) => request.id)
 +        if (match.found) { requests[match.index] = currentRequests[currentMatch.index] } else { requests.splice(match.index, 0, currentRequests[currentMatch.index]) }
@@ -1051,19 +1069,23 @@ index c0dfc67dc1..865fdaf98b 100644
 +      if (next.length === 0) { delete requestsBySession[sessionID]; return }
 +      requestsBySession[sessionID] = next
 +    }
-+    // #192：标记 permission 变更
-+    // #192：标记 permission 变更版本
++    // #192：permission 变更记录在本地增量表，重连快照恢复后据此回放
++    // #192：permissionVersion 是本地单调计数，快照恢复时仅回放版本号更新的变更
++    // #192：快照恢复以版本号为界：变更版本高于快照起始才回放，保证不丢不重
 +    function markPermissionRequestChange(sessionID: string, requestID: string) { permissionVersion += 1; if (permissionRefreshes === 0) return; permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: permissionVersion }) }
-+    // #192：标记 question 变更
-+    // #192：标记 question 变更版本
++    // #192：question 变更与 permission 同走增量表，保证两类 blocker 一致恢复
++    // #192：questionVersion 与 permission 同规则，保证两类请求恢复一致
 +    function markQuestionRequestChange(sessionID: string, requestID: string) { questionVersion += 1; if (questionRefreshes === 0) return; questionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: questionVersion }) }
-+    // #192：重连后恢复 permission
-+    // #192：重连后恢复 permission——merge live changes
++    // #192：refreshVersion 是请求计数，仅最新 reconnect 的响应写 store，乱序返回被丢弃
++    // #192：permission 快照恢复与本地变更回放合并，是重连后 store 重建的完整路径
++    // #192：快照整体替换后由本地变更表决定保留哪些请求，阻断期解决的 blocker 不再回放，live changes 只回放本地确认的变更
 +    async function refreshPermissionRequests(workspace: string | undefined) {
 +      const version = permissionVersion; const refreshVersion = permissionRefreshVersion + 1; permissionRefreshVersion = refreshVersion; permissionRefreshes += 1
 +      try { const response = await sdk.client.permission.list({ workspace }); if (refreshVersion !== permissionRefreshVersion) return; setStore("permission", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.permission, permissionChanges, version))) }
++      // #192：竞态守卫比对刷新时的版本号，旧响应即使后到也不覆盖新快照
 +      finally { permissionRefreshes -= 1; if (permissionRefreshes === 0) permissionChanges.clear() }
 +    }
++    // #192：question 与 permission 共用同一快照替换+live merge 规则，保证两类请求恢复一致
 +    async function refreshQuestionRequests(workspace: string | undefined) {
 +      const version = questionVersion; const refreshVersion = questionRefreshVersion + 1; questionRefreshVersion = refreshVersion; questionRefreshes += 1
 +      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.question, questionChanges, version))) }
@@ -1109,7 +1131,7 @@ index c0dfc67dc1..865fdaf98b 100644
              sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
              // #153：bootstrap 走 refreshStatus，与 force-sync 同一入口
              refreshStatus(),
-+            // #192：重连后恢复 pending
++            // #192：refresh 拉取快照后回放本地变更，pending 请求在 store 中重建
 +            refreshPermissionRequests(workspace),
 +            refreshQuestionRequests(workspace),
              sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
@@ -1417,7 +1439,7 @@ index 0000000000..971e4b2d8e
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(20)
 +
-+      // #192：成功后 input 为空——不等命令后台完成
++      // #192：命令后台执行期间输入即可清空，无需等待完成回执
 +      expect(prompt.current.input).toBe("")
 +    },
 +    tmp.path,
@@ -1432,7 +1454,7 @@ index 0000000000..971e4b2d8e
 +// #192：options 控制 initialRoute 和 promptSessionID——新会话测试需要
 +// #192：mounted promise 确保 Prompt ref 就绪后再执行测试
 +// #192：state 传入 tmp.path——TestTuiContexts 设置路径
-+// #192：mounted promise 等待 Prompt ref 就绪——确保测试可以操作
++// #192：mounted promise 是测试同步屏障，避免在 ref 未挂载时操作导致空指针
 +async function withPrompt(
 +  override: FetchHandler,
 +  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>) => Promise<void>,
@@ -1696,11 +1718,11 @@ index 8a1829fe50..faf06f1209 100644
 +      reconnected = true
 +      emit(serverConnectedEvent("evt_connected_reconnect"))
 +
-+      // #192：等待 sync store 收到重连后的 pending 请求
++      // #192：bootstrap 拉取快照后 store 必须出现 pending 请求，验证刷新链路
 +      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
 +      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 +
-+      // #192：permission 和 question 列表必须与 API 返回完全一致
++      // #192：恢复语义是快照对 store 的整体替换，缺失任何请求都违反全量契约
 +      expect(sync.data.permission.ses_1).toEqual([permission])
 +      expect(sync.data.question.ses_1).toEqual([question])
 +    } finally {
@@ -1762,7 +1784,7 @@ index 8a1829fe50..faf06f1209 100644
 +    }
 +  })
 +
-+  // #192：重连快照中不存在的请求应被清除
++  // #192：快照是权威状态，快照中不存在的请求视为已解决，必须从 store 移除
 +  // #192：初始连接后 asked 事件推送请求——sync store 有 pending 请求
 +  // #192：重连后 mount 的默认 fetch 返回空——API 不再有这些请求
 +  // #192：sync store 必须清除——不能保留已过期的请求
@@ -1783,9 +1805,9 @@ index 8a1829fe50..faf06f1209 100644
 +
 +      emit(serverConnectedEvent("evt_connected_reconnect"))
 +
-+      // #192：重连快照返回空——sync store 必须清除已有的 pending 请求
++      // #192：快照为空表示 API 已无 pending，store 必须同步清除过期请求
 +      await wait(() => sync.data.permission.ses_1 === undefined && sync.data.question.ses_1 === undefined)
-+      // #192：permission 和 question 都应 undefined——API 确认无 pending
++      // #192：快照空表经 ?? [] 落到空集合，store 同步清空是空快照的必然结果
 +      expect(sync.data.permission.ses_1).toBeUndefined()
 +      expect(sync.data.question.ses_1).toBeUndefined()
 +    } finally {
@@ -1796,7 +1818,7 @@ index 8a1829fe50..faf06f1209 100644
 +  // #192：重连快照在途时到达的 replied 事件应保留——清除优先于快照恢复
 +  // #192：第一次快照延迟返回 [permission]——stale 快照仍包含已回复的请求
 +  // #192：replied/rejected 事件在 stale 快照到达前推送——应清除请求
-+  // #192：stale 快照延迟到达后不应恢复已回复的请求——replied 优先
++  // #192：replied 事件是最终状态，stale 快照携带的旧状态不得反超
 +  // #192：最终 sync store 必须为空——replied 和 stale 快照都不能恢复请求
 +  test("keeps replied events that arrive while reconnect snapshots are in flight", async () => {
 +    await using tmp = await tmpdir()
@@ -1841,16 +1863,16 @@ index 8a1829fe50..faf06f1209 100644
 +
 +      emit(permissionRepliedEvent(permission))
 +      emit(questionRejectedEvent(question))
-+      // #192：replied/rejected 事件应立即清除请求——不等快照
++      // #192：replied/rejected 是本地权威信号，即使快照在途也立即清除
 +      await wait(() => (sync.data.permission.ses_1?.length ?? 0) === 0 && (sync.data.question.ses_1?.length ?? 0) === 0)
 +
 +      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("reconnect snapshots were not requested")
-+      // #192：stale 快照延迟到达——不应恢复已回复的请求
++      // #192：stale 快照不得恢复已由 replied 清除的请求，版本机制保证
 +      stalePermissionSnapshot()
 +      staleQuestionSnapshot()
 +      await Bun.sleep(30)
 +
-+      // #192：最终列表为空——replied 优先于 stale 快照恢复
++      // #192：replied 与 stale 快照竞态下 replied 恒优先，最终 store 为空
 +      expect(sync.data.permission.ses_1 ?? []).toEqual([])
 +      expect(sync.data.question.ses_1 ?? []).toEqual([])
 +    } finally {
@@ -1899,9 +1921,9 @@ index 8a1829fe50..faf06f1209 100644
 +      emit(permissionAskedEvent(liveSecond))
 +      await wait(() => sync.data.permission.ses_1?.some((request) => request.id === liveSecond.id))
 +
-+      // #192：stale 请求应被清除——快照返回空
++      // #192：重连快照不包含 stale 请求时须清除，保留 live 请求
 +      await wait(() => !sync.data.permission.ses_1?.some((request) => request.id === stale.id))
-+      // #192：live 请求保留——asked 事件版本号保护
++      // #192：asked 事件通过版本号保护，stale 快照不能覆盖新到达的 live 请求
 +      expect(sync.data.permission.ses_1?.map((request) => request.id)).toEqual([liveFirst.id, liveSecond.id])
 +    } finally {
 +      app.renderer.destroy()
@@ -1911,7 +1933,7 @@ index 8a1829fe50..faf06f1209 100644
 +  // #192：多次重连快照中最新者胜出——旧快照延迟到达不覆盖新快照
 +  // #192：第一次重连快照延迟返回空——stalePermissionSnapshot 控制
 +  // #192：第二次重连快照立即返回 [permission]——新快照包含请求
-+  // #192：stale 快照延迟到达后不应覆盖新快照——最新版本号优先
++  // #192：多轮重连竞态下以最高 refreshVersion 的快照为准，低版本延迟响应被忽略
 +  // #192：最终 sync store 必须与新快照一致——permission 和 question 都在
 +  test("keeps the newest reconnect snapshot when an earlier snapshot resolves last", async () => {
 +    await using tmp = await tmpdir()
@@ -1950,17 +1972,17 @@ index 8a1829fe50..faf06f1209 100644
 +      await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
 +      emit(serverConnectedEvent("evt_connected_reconnect_2"))
 +
-+      // #192：新快照已到达——sync store 有 permission
++      // #192：新快照携带请求时 store 更新，验证最新版本号生效
 +      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
 +      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 +
 +      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("stale reconnect snapshots were not requested")
-+      // #192：旧快照延迟到达——不应覆盖新快照
++      // #192：竞态守卫比较 refreshVersion，旧响应即使后到也不写 store
 +      stalePermissionSnapshot()
 +      staleQuestionSnapshot()
 +      await Bun.sleep(30)
 +
-+      // #192：最终列表与新快照一致——最新版本号优先
++      // #192：竞态结束后 store 必须等于最新快照，验证版本号单调性
 +      expect(sync.data.permission.ses_1).toEqual([permission])
 +      expect(sync.data.question.ses_1).toEqual([question])
 +    } finally {

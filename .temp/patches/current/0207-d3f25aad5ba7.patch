@@ -60,14 +60,16 @@ index fe8f9828da..1d71dedf0f 100644
 +// #207：localCommands 过滤远程载荷范围内的命令节点——PowerShell 恢复可能将引号载荷中的命令暴露为根级命令，仅靠父节点检查无法保护主机扫描
  function localCommands(root: Node) {
 +  const remoteRanges = remotePayloadRanges(root.text)
-   return commands(root).filter((node) => {
+-  return commands(root).filter((node) => {
++  const filtered = commands(root).filter((node) => {
 +    // #207：落在远程载荷范围内的命令节点不是本地命令——WSL/SSH 载荷中的 grep/cat 不应触发主机兼容性检查或 external_directory
 +    if (remoteRanges.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
      let cur: Node | null = node
      while (cur) {
        // #158：string/raw_string 等类型包含 string 即视为载荷边界
-@@ -519,6 +546,119 @@ function localCommands(root: Node) {
+@@ -519,6 +546,120 @@ function localCommands(root: Node) {
    })
++  return filtered
  }
  
 +// #207：计算远程/alternate-OS 载荷的源范围——PowerShell 恢复可能将引号载荷中的命令暴露为根级命令

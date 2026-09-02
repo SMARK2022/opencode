@@ -2,23 +2,24 @@ From a91b23ab8ff1db3cb5c0041e3d6925a19cb17322 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sun, 31 May 2026 15:29:20 +0800
 Subject: [PATCH] =?UTF-8?q?test(image):=20=E8=A1=A5=E5=85=85=E5=9B=BE?=
- =?UTF-8?q?=E7=89=87=E9=99=84=E4=BB=B6=E8=BE=B9=E7=95=8C=E7=94=A8=E4=BE=8B?=
+ =?UTF-8?q?=E7=89=87=E9=99=84=E4=BB=B6%E8%BE%B9%E7%95%8C%E7%94%A8%E4%BE%8B?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-覆盖调用方传入更小 token budget 时仍需压缩的图片场景，确保默认限制内的输入不会绕过更严格的调用边界。
+覆盖调用方传入更小 token budget 时仍需压缩的图片场景。
 
-同时补充 read 工具对有效 JPEG 和损坏图片的断言，避免不可解码的图片字节被当作附件继续返回。
+同时补充 read 工具对有效 JPEG 和损坏图片的断言。
 
 diff --git a/packages/opencode/test/image/image.test.ts b/packages/opencode/test/image/image.test.ts
-index c5d832cd5e23d1a444a5395f157534adb9f3a1b8..e5b9eab00fb41566a7be4a820ab253338aa24166 100644
+index 29667f6..ac99f48 100644
 --- a/packages/opencode/test/image/image.test.ts
 +++ b/packages/opencode/test/image/image.test.ts
-@@ -58,6 +58,32 @@ describe("Image", () => {
+@@ -56,6 +56,34 @@ describe("Image", () => {
      }),
    )
  
++  // #276：调用方传入更小 token budget 时，默认限制内的图片仍需压缩
 +  it.effect("shrinks images that fit default limits when a caller supplies a smaller token budget", () =>
 +    Effect.gen(function* () {
 +      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
@@ -34,6 +35,7 @@ index c5d832cd5e23d1a444a5395f157534adb9f3a1b8..e5b9eab00fb41566a7be4a820ab25333
 +      )
 +      const input = part("image/jpeg", Buffer.from(source.get_bytes_jpeg(95)).toString("base64"))
 +      const image = yield* Image.Service
++      // #276：tokenBudget 1_600 应触发压缩，即使默认尺寸限制内
 +      const result = yield* image.normalize(input, { tokenBudget: 1_600 })
 +      const base64 = result.url.slice(result.url.indexOf(";base64,") + ";base64,".length)
 +
@@ -49,41 +51,45 @@ index c5d832cd5e23d1a444a5395f157534adb9f3a1b8..e5b9eab00fb41566a7be4a820ab25333
      Effect.gen(function* () {
        const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 25545ed20e61c31a9e04b5c8f14128dc37ed1784..e979dfa3db6e5dd38139e873290bc46999ae25c0 100644
+index 4bcb84f..fd08941 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -22,6 +22,7 @@ import { Filesystem } from "@/util/filesystem"
- import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+@@ -27,6 +27,8 @@ import {
+   tmpdirScoped,
+ } from "../fixture/fixture"
  import { testEffect } from "../lib/effect"
- import { Reference } from "@/reference/reference"
++// #276：导入 Image.Service 供 read 工具处理图片附件
 +import { Image } from "@/image/image"
  
  const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
  
-@@ -57,6 +58,7 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
-     LSP.defaultLayer,
-     referenceLayer(flags),
-     Truncate.defaultLayer,
-+    Image.defaultLayer,
+@@ -55,6 +57,8 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+       LSP.node,
+       Ripgrep.node,
+       Truncate.node,
++      // #276：read 工具需 Image.Service 处理图片附件
++      Image.node,
+     ]),
    )
  
- const it = testEffect(readLayer())
-@@ -592,7 +594,10 @@ describe("tool.read truncation", () => {
+@@ -515,7 +519,11 @@ describe("tool.read truncation", () => {
    it.live("detects attachment media from file contents", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
 -      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01])
++      // #276：使用可解码的有效 JPEG base64 替代裸字节头部
 +      const jpeg = Buffer.from(
-+        "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z",
++        "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z",
 +        "base64",
 +      )
        yield* put(path.join(dir, "image.bin"), jpeg)
  
        const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
-@@ -602,6 +607,16 @@ describe("tool.read truncation", () => {
+@@ -526,6 +534,17 @@ describe("tool.read truncation", () => {
      }),
    )
  
++  // #276：损坏图片应返回解码错误，而非当作附件继续返回
 +  it.live("fails invalid image attachments instead of returning undecodable bytes", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()

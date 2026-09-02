@@ -8,52 +8,24 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 1f45770ab95505595330ec73d6012b7880dd5361..752bd95159e41aec1d3f4f989ac318087241daba 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -1589,11 +1589,7 @@ test("non-shell auto review status opens the reviewer child session", async () =
-     },
-     async (app) => {
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
--      const raw = app.captureCharFrame().split("\n")
--      const y = raw.findIndex((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
--      expect(y).toBeGreaterThanOrEqual(0)
--
--      await app.mockMouse.click(35, y + 1)
-+      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
- 
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-     },
-@@ -1642,10 +1638,7 @@ test("block auto review click opens reviewer without toggling the tool card", as
-     },
-     async (app) => {
-       let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
--      const y = app.captureCharFrame().split("\n").findIndex((line) => line.includes("✓ auto review · allowed · auth high"))
--      expect(y).toBeGreaterThanOrEqual(0)
--
--      await app.mockMouse.click(35, y + 1)
-+      await clickVisibleText(app, "✓ auto review · allowed · auth high")
- 
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-       frame = rows(app.captureCharFrame())
-@@ -1936,6 +1929,18 @@ function findRow(frame: string[], text: string) {
-   return index
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+index 8ba7309..e9d8d25 100644
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -222,6 +222,16 @@ async function renderFrame(component: () => JSX.Element, options: { width: numbe
+     .trimEnd()
  }
  
-+async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
-+  const raw = app.captureCharFrame().split("\n")
-+  const y = raw.findIndex((line) => line.includes(text))
-+  expect(y).toBeGreaterThanOrEqual(0)
-+  const x = raw[y].indexOf(text)
-+  expect(x).toBeGreaterThanOrEqual(0)
-+  // Click inside the rendered label rather than at a fixed column. The exact
-+  // gutter can shift between OpenTUI renderers in the same process on Linux, but
-+  // the user-visible label is the stable behaviour this test cares about.
-+  await app.mockMouse.click(x + 1, y + 1)
++// #272：Linux 上 OpenTUI 渲染器的 gutter 列宽可能漂移，固定列坐标点击不稳定
++// 此函数返回可见文本在帧中的 {x, y} 位置，供测试用于精准定位而非固定列
++function findVisibleText(frame: string[], text: string): { x: number; y: number } | undefined {
++  const y = frame.findIndex((line) => line.includes(text))
++  if (y < 0) return undefined
++  const x = frame[y].indexOf(text)
++  if (x < 0) return undefined
++  return { x, y }
 +}
 +
- function sessionInfo(extra: Partial<SessionInfo> = {}) {
-   return {
-     id: sessionID,
+ describe("TUI inline tool wrapping", () => {
+   test("falls back for unknown tool names", () => {
+     expect(toolDisplay("bash")).toBe("bash")

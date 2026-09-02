@@ -9,28 +9,35 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
-index c3b4dfd683e9969de45b56b403977461b81a41a0..43d02519545cd5a2ed39eed309ab68d1ac50918b 100644
+index 62c73ec..1ae0cf1 100644
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -12,6 +12,7 @@ import { Flock } from "@opencode-ai/core/util/flock"
- import { Flag } from "@opencode-ai/core/flag/flag"
+@@ -1,4 +1,4 @@
+-import { describe, expect, test } from "bun:test"
++import { afterEach, describe, expect, test } from "bun:test"
+ import { Effect } from "effect"
+ import fs from "fs/promises"
+ import path from "path"
+@@ -19,6 +19,9 @@ import * as ServerLockModule from "../../../src/cli/tui/server-lock"
+ import { UI } from "../../../src/cli/ui"
+ import { mock, spyOn } from "bun:test"
  
- const stop = new Error("stop")
++// #271：保护测试进程的退出码，避免 TuiThreadCommand 设置的 exitCode 在测试间泄漏
 +const originalExitCode = process.exitCode
- const seen = {
-   tui: [] as string[],
-   tuiUrls: [] as string[],
-@@ -50,6 +51,11 @@ describe("tui thread", () => {
-     ThreadModule._setSpawn(undefined)
-     mock.restore()
-     ServerLockModule._setLockPath(undefined)
-+    // TuiThreadCommand intentionally sets process.exitCode for user-facing CLI
-+    // validation errors. Tests assert those branches directly, so reset the
-+    // process-global value after each case; otherwise Bun can report 0 failed
-+    // tests but still exit 1 on Linux when the final process exitCode leaks.
-+    process.exitCode = originalExitCode
-   })
++
+ // 注入 deps 验证单服务器复用与 spawn 主路径
+ // #179：幸福路径 mock 使用永不 resolve 的 exited
+ function hangingExited() {
+@@ -26,6 +29,11 @@ function hangingExited() {
+ }
  
-   async function call(project?: string, overrides?: Partial<ThreadArgs>) {
+ describe("tui thread", () => {
++  // #271：每次测试后重置退出码，避免检验分支设置的 exitCode 影响后续用例
++  afterEach(() => {
++    process.exitCode = originalExitCode
++  })
++
+   test("loads the TUI integration lazily", async () => {
+     const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
+ 

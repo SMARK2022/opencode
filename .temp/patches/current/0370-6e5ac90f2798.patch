@@ -11,10 +11,10 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/docs/prompts.md b/docs/prompts.md
-index 025e088ddb2bd71b37b66b0f7ff80d731fe27adb..4ad3aabde7faf9e70c98342b28a26f074cbeb089 100644
+index d0d37b578..55d690004 100644
 --- a/docs/prompts.md
 +++ b/docs/prompts.md
-@@ -103,5 +103,4 @@ subagent 检查是硬性步骤，不允许省略，不允许降级为自检。
+@@ -109,5 +109,4 @@ subagent 检查是硬性步骤，不允许省略，不允许降级为自检。
  
  ## 创建 commit
  

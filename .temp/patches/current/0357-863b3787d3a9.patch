@@ -6,23 +6,26 @@ Subject: [PATCH] =?UTF-8?q?fix(config):=20=E7=A7=BB=E9=99=A4=E4=B8=8D?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-
 diff --git a/.opencode/opencode.jsonc b/.opencode/opencode.jsonc
-index e5a77a6a25ad9a2d1c5b1eb32864c4010cf4fb6b..d05c4b436e2504495212f335ff3e5db52173d457 100644
+index f1b54f0ad..d568c227c 100644
 --- a/.opencode/opencode.jsonc
 +++ b/.opencode/opencode.jsonc
-@@ -2,18 +2,6 @@
-   "$schema": "https://opencode.ai/config.json",
-   "provider": {},
-   "permission": {},
+@@ -12,23 +12,6 @@
+       "description": "Contains opencode logs and data",
+     },
+   },
+-  // #278：ChatGPT MCP 本地配置——node 与浏览器路径写死为本机绝对路径，
+-  // 避免 PATH/环境差异导致 daemon 启动失败；环境变量集中在此便于迁移
 -  "mcp": {
 -    "chatgpt": {
 -      "type": "local",
 -      "command": [
 -        "D:\\Program Files\\nodejs\\node.exe",
+-        // submodule 从 .temp 迁移到 thirdparty 后，MCP server 路径须同步更新指向新位置
 -        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\chatgpt-browser-agent\\mcp-server.js"
 -      ],
+-      // #278：enabled 显式开启；timeout 覆盖 MCP 连接与工具调用的总上限，
+-      // 与 CHATGPT_*_TIMEOUT_MS 阶梯一致：daemon 启动 < CLI 调用 < 响应
 -      "enabled": true,
 -      // opencode 当前同一个 timeout 同时约束连接与工具调用；这里优先保证长回答不会被宿主提前切断。
 -      "timeout": 690000

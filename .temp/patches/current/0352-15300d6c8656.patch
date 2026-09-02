@@ -1,24 +1,16 @@
 From 15300d6c865618fad552fd8dbcfb5359ed76614e Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Wed, 1 Jul 2026 20:43:08 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E6=AD=A3=20Voice=20?=
- =?UTF-8?q?=E6=8F=90=E7=A4=BA=E5=AE=BD=E5=BA=A6=E9=97=A8=E4=B8=8E=E6=B5=81?=
- =?UTF-8?q?=E5=BC=8F=E6=9C=9F=E8=BD=AC=E5=BD=95=E7=A6=81=E7=94=A8?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] fix(tui): 修正 Voice 提示宽度门与流式期间录音禁用
 
-voice 提示标签改为仅当 promptWidth>140 时显示（复用既有 promptWidth 信号，与 usage 的 >100 同源），窄终端不再挤占输入区；Alt+V 绑定不受影响，窄终端仍可转录。新增 voiceHintVisible 纯显示判定并配行为级测试（红→绿）。
+路径迁移 0299：cli/cmd/tui/component/prompt/index.tsx -> packages/tui/src/component/prompt/index.tsx，
+cli/cmd/tui/prompt-voice-input.ts -> packages/tui/src/prompt-voice-input.ts。
+test/cli/tui/prompt-voice-input.test.ts -> packages/tui/test/prompt/prompt-voice-input.test.ts（0299 已迁移）。
 
-移除 prompt.voice.toggle 绑定的 (!running || recording) 门，允许 assistant 流式输出期间发起/停止/取消录音；安全性由 submitInner 的 voiceInputBusy 提交保护兜底，不会与 assistant 输出竞争 prompt。转录中再按 Alt+V 仍经 cancel() 强制中断（既有逻辑），无需新增 ESC 绑定。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 5c3afbb3dde765d32864d40bfb8a82e9164b58ea..afe361b3615669b9e11603ce12ab6bbd560cb0a4 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -1019,13 +1019,13 @@ export function Prompt(props: PromptProps) {
-   useBindings(() => {
-     return {
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -1067,9 +1067,9 @@
        target: inputTarget,
 +      // 流式期间也允许发起/停止/取消录音：录音不写 prompt，转写文本落盘前由 submitInner 的
 +      // voiceInputBusy 提交保护拦截，不会与 assistant 输出竞争 prompt；仅保留对话框/autocomplete/disabled 通用约束。
@@ -26,14 +18,12 @@ index 5c3afbb3dde765d32864d40bfb8a82e9164b58ea..afe361b3615669b9e11603ce12ab6bbd
          inputTarget() !== undefined &&
          !props.disabled &&
          !auto()?.visible &&
--        dialog.stack.length === 0 &&
+-        !dialog.stack.length &&
 -        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
 -        (!running() || voiceInputStatus().type === "recording"),
-+        dialog.stack.length === 0,
++        !dialog.stack.length,
        commands: [
-         {
-           name: "prompt.voice.toggle",
-@@ -2068,7 +2068,9 @@ export function Prompt(props: PromptProps) {
+@@ -1917,8 +1918,10 @@
                    <text fg={theme.text}>
                      {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                    </text>
@@ -44,24 +34,20 @@ index 5c3afbb3dde765d32864d40bfb8a82e9164b58ea..afe361b3615669b9e11603ce12ab6bbd
                      <text fg={theme.text}>
                        {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
                      </text>
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-index a83a1c8db5d30499031a62c29fc7e9ed73266717..0accbdef34c2096232940e290d4ab543a3b28cde 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-@@ -5,6 +5,9 @@ import path from "path"
- export const VOICE_FILE_PLACEHOLDER = "{file}"
+                   </Show>
+diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
+--- a/packages/tui/src/prompt-voice-input.ts
++++ b/packages/tui/src/prompt-voice-input.ts
+@@ -6,3 +6,6 @@
  // 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
  export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
 +// voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
 +// 比 usage 显示阈值(>100，见 Prompt 组件 showCumulative)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
 +export const VOICE_HINT_MIN_PROMPT_WIDTH = 140
  
- export type VoiceTranscriber = {
-   command: string
-@@ -210,6 +213,12 @@ async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
-   }
+@@ -209,3 +212,9 @@
  }
- 
+
 +// voice 提示是否在 footer 显示：仅当配置了转写器且 prompt 框足够宽时露出。
 +// 纯显示判定，不影响 Alt+V 绑定本身——窄终端隐藏提示文案但快捷键仍可转录，避免引导文案挤占输入区。
 +export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, promptWidth: number): boolean {
@@ -69,12 +55,10 @@ index a83a1c8db5d30499031a62c29fc7e9ed73266717..0accbdef34c2096232940e290d4ab543
 +}
 +
  export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now()) {
-   // 这些文案直接显示在 prompt footer；保持短文本，避免小终端下挤掉输入区。
-   if (status.type === "starting") return "Starting voice..."
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-index 8fb494712ce3467b73e4ff3a2b8beecc8386290c..5af22be5affd58366b13641752986413c9d0ef0e 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
+index 1e661e8b1..5e42fdd1f 100644
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
 @@ -5,6 +5,7 @@ import {
    createVoiceInputController,
    transcribeVoiceFile,
@@ -82,7 +66,7 @@ index 8fb494712ce3467b73e4ff3a2b8beecc8386290c..5af22be5affd58366b13641752986413
 +  voiceHintVisible,
    type VoiceRecorderHandle,
    type VoiceTranscriber,
- } from "../../../src/cli/cmd/tui/prompt-voice-input"
+ } from "../../src/prompt-voice-input"
 @@ -86,6 +87,19 @@ describe("prompt voice input", () => {
      expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
    })

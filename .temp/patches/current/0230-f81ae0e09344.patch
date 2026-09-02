@@ -10,12 +10,10 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-
 diff --git a/docs/opencode-sandbox-windows-design.md b/docs/opencode-sandbox-windows-design.md
-index cd278583b3b8d0c643d7723821eb68d5edd7d003..f6a440db885ad7672e6ec978a7fb05a23494a86b 100644
 --- a/docs/opencode-sandbox-windows-design.md
 +++ b/docs/opencode-sandbox-windows-design.md
-@@ -86,7 +86,8 @@ opencode 的权限先从 agent/session 层组合出来。
+@@ -86,7 +86,8 @@
  - 默认权限由 `packages/opencode/src/agent/agent.ts` 构造。
  - `build` agent 近似全工具可用。
  - `interactive` agent 对 shell/notebook run/env 默认 ask。
@@ -25,7 +23,7 @@ index cd278583b3b8d0c643d7723821eb68d5edd7d003..f6a440db885ad7672e6ec978a7fb05a2
  - 用户配置 `config.permission` 会通过 `Permission.fromConfig` 转成 ruleset。
  - session permission 会和 agent permission 在工具上下文处 merge。
  
-@@ -96,10 +97,12 @@ opencode 的权限先从 agent/session 层组合出来。
+@@ -96,10 +97,12 @@
  auto agent
    bash: auto
    external_directory: auto except whitelisted dirs
@@ -41,42 +39,44 @@ index cd278583b3b8d0c643d7723821eb68d5edd7d003..f6a440db885ad7672e6ec978a7fb05a2
  ### 中层：Tool Context ask 边界
  
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 33de6d8cfa62307af993195131f969ed38e6c867..f6d006746d3478143ea1ceef59dbff9589d7b592 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -171,9 +171,10 @@ export const layer = Layer.effect(
+@@ -185,9 +185,10 @@
+             mode: "primary",
              native: true,
            },
-           // [local-smark] auto 原生 Agent 开始
--          // `auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
--          // 等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
--          // 扩大到新的工具审批面。
+-          // #203：auto 复用 build 权限形状，但只把 shell 命令接入 auto。edit
+-          // #203：等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
+-          // #203：扩大到新的工具审批面
 +          // `apply_patch`、`write` 和 `edit` 在实际执行前都会请求 edit 权限；
 +          // 因此 auto agent 必须把 edit 接入 auto admission，不能只给某个工具名
 +          // 单独加规则。其他 build-like 权限暂不扩大到 auto，避免把本次文件删除
 +          // 审查修复扩散到 read/task/notebook 等无关工具面。
+           // #225：原生 auto agent 的 key/name 均用小写，避免大小写敏感比较错配
            auto: {
              name: "auto",
-             description: "Build-like agent that routes shell commands through auto permission review.",
-@@ -184,6 +185,7 @@ export const layer = Layer.effect(
+@@ -199,6 +200,8 @@
                  question: "allow",
                  plan_enter: "allow",
                  bash: "auto",
 +                edit: "auto",
++        // #230：edit 权限接入 auto admission——apply_patch/write/edit 实际执行前都请求 edit 权限
+                 // #203：external_directory:auto 让 shell 项目外路径门禁进入 auto 路由，
+                 // #203：复用同一条命令的预审证据；白名单目录保持 allow 不被放宽
                  external_directory: {
-                   "*": "auto",
-                   ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 0070e57a5ccf3c2702014e703898603b06d09817..2374ce34cbd67258baf9ed5eb3df1429861711ba 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -305,8 +305,13 @@ export function evaluate(input: {
+@@ -206,16 +206,61 @@
    patterns: readonly string[]
    metadata: Readonly<Record<string, unknown>>
  }): Decision {
--  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具有意回退到
--  // 用户审批而不是猜测不相关的参数模式。
+-  // #197：目前仅 bash 有足够语法证据支持确定性预检——其他工具直接回退到用户审批而非猜测无关参数模式
+-  // #202：非 bash 工具缺乏 shell 级语义证据，归为 general 而非 prompt，保持既有用户审批路径
+-  // #203：shell 发起的 external_directory 不是独立工具动作，复用同一条命令的预审结果，
+-  // #203：避免项目外路径先触发普通 ask 从而绕开 Auto agent 的 bash auto 路由
 +  const fileEffect = structuredFileEffect(input)
++    // #230：结构化文件效果优先于通用规则——delete 是不可逆效果，必须谨慎处理
 +  if (fileEffect) return fileEffect
 +
 +  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具默认回退到
@@ -84,13 +84,15 @@ index 0070e57a5ccf3c2702014e703898603b06d09817..2374ce34cbd67258baf9ed5eb3df1429
 +  // 已经把最终文件效果作为权限 metadata 暴露出来，删除这种不可逆效果必须在
 +  // auto reviewer 边界前被提升为 cautious，而不是留作普通 non-shell general。
    if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
-     // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
-     // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
-@@ -323,6 +328,41 @@ export function evaluate(input: {
-   )
++    // #230：apply_patch 项目外删除——external_directory preflight 后仍须谨慎
+     return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+   }
+   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
+   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
  }
- 
++
 +function structuredFileEffect(input: {
++    // #230：仅 edit/external_directory 两类携带结构化效果 metadata——其他权限无此证据
 +  permission: string
 +  metadata: Readonly<Record<string, unknown>>
 +}): Decision | undefined {
@@ -100,6 +102,7 @@ index 0070e57a5ccf3c2702014e703898603b06d09817..2374ce34cbd67258baf9ed5eb3df1429
 +  // 使用 files metadata 时被误归类为 workspace edit 删除。
 +  if (
 +    input.permission === "edit" &&
++    // #230：edit 权限的 files 数组含 delete 项即提升 cautious——update/add 不提升
 +    Array.isArray(input.metadata.files) &&
 +    input.metadata.files.some((item) => fileEffectType(item) === "delete")
 +  ) {
@@ -115,70 +118,73 @@ index 0070e57a5ccf3c2702014e703898603b06d09817..2374ce34cbd67258baf9ed5eb3df1429
 +    input.metadata.tool === "apply_patch" &&
 +    input.metadata.operation === "delete" &&
 +    typeof input.metadata.patchText === "string"
++    // #230：要求 patchText 存在——仅凭 operation 名不足以下删除结论
 +  ) {
 +    return { level: "cautious", reason: "file deletion requires explicit approval" }
 +  }
 +}
 +
 +function fileEffectType(input: unknown) {
++    // #230：files 元素可能来自外部 metadata——用 type 字段而非 instanceof 判定
 +  if (!input || typeof input !== "object" || !("type" in input)) return
 +  return input.type
 +}
 +
+ 
  export function canAlwaysAllowPrefix(tokens: string[]) {
-   // 前缀来自 shell 解析器的 arity 计算。归一化命令名使得 wsl.exe、/bin/bash
-   // 和大小写变体无法逃脱禁止列表。
+   // #197：前缀来自 shell 解析器的 arity 计算——需与评估时同样规范化命令名，防止 wsl.exe、/bin/bash 等变体逃逸禁用列表
+@@ -1069,3 +1114,4 @@
+ }
+ 
+ export * as PermissionPrecheck from "./precheck"
++
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index c302a18d8f7cfff31fe16ac500478e39ec0bab61..3aafaf3bd857d1eda2f91681be1a4161bea304c2 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -731,6 +731,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           permission
-             .ask({
-               ...req,
-+              // Permission reviewers use metadata.agent as the stable signal that
-+              // a request came from the native auto agent. Centralizing it here
-+              // keeps every tool, including apply_patch/write/edit and plugins,
-+              // on the same security path instead of relying on per-tool metadata.
-+              metadata: { ...req.metadata, agent: input.agent.name },
-               sessionID: input.session.id,
-               tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-               ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
-@@ -965,6 +970,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -542,6 +542,13 @@
              permission
                .ask({
                  ...req,
-+                // Internally materialized task execution bypasses the main tool
-+                // adapter above, so it must attach the same agent evidence here.
-+                // Keep this aligned with the primary ctx.ask wrapper: reviewer
-+                // enablement must depend on the executing agent, not on each tool
-+                // remembering to pass metadata.agent itself.
-+                metadata: { ...req.metadata, agent: task.agent },
++                 // Internally materialized task execution bypasses the main tool
++                 // adapter above, so it must attach the same agent evidence here.
++                 // Keep this aligned with the primary ctx.ask wrapper: reviewer
++                 // enablement must depend on the executing agent, not on each tool
++                 // remembering to pass metadata.agent itself.
++                 metadata: { ...req.metadata, agent: task.agent },
++        // #230：prompt 适配层统一写入 agent 标识——工具实现无需各自复制 ctx.agent
                  sessionID,
                  ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
                })
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -99,6 +99,8 @@
+       permission
+         .ask({
+           ...req,
++          // #230：permission reviewer 以 metadata.agent 为稳定信号——集中在此写入使 apply_patch/write/edit/插件共享同一安全路径
++          metadata: { ...req.metadata, agent: input.agent.name },
+           sessionID: input.session.id,
+           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+           ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
 diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
-index 741113dad03aab748bd007c8b3458e7e5948bafa..36f9300c0deed0d1f994552aec0899160d462456 100644
 --- a/packages/opencode/test/agent/agent.test.ts
 +++ b/packages/opencode/test/agent/agent.test.ts
-@@ -96,19 +96,22 @@ it.instance("interactive agent keeps existing ask gates for command execution",
+@@ -92,7 +92,7 @@ it.instance("interactive agent keeps existing ask gates for command execution",
  
- // [local-smark] auto Agent 行为测试开始
- // 这个行为级测试只固定 auto 的公开权限结果，不检查内部规则顺序或 helper 名。
--// 后续可以重构 auto 分支实现，但必须维持“build-like + shell:auto”的用户契约。
+ // #201：auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
+ // #203：后续可重构 auto 分支实现，但必须维持 "build-like + shell:auto" 的用户契约
 -it.instance("auto agent routes shell through auto while preserving build-like permissions", () =>
-+// auto agent 的安全契约是：命令执行与工作区写入都进入 auto admission；只读、
-+// notebook、task 等仍保持既有 build-like 行为，避免本次 patch delete 修复顺手
-+// 扩大到所有工具权限面。
-+it.instance("auto agent routes shell and workspace edits through auto while preserving other build-like permissions", () =>
++it.instance("auto agent routes shell and workspace edits through auto while preserving build-like permissions", () =>
    Effect.gen(function* () {
+     // #225：get 用小写 agent key
      const auto = yield* load((svc) => svc.get("auto"))
-     expect(auto).toBeDefined()
+@@ -100,11 +100,12 @@ it.instance("auto agent routes shell through auto while preserving build-like pe
      expect(auto?.mode).toBe("primary")
      expect(auto?.native).toBe(true)
  
--    // auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
--    // 或 notebook 执行也引入 auto 分支从而扩大本次切入面。
+-    // #203：auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
+-    // #203：或 notebook 执行也引入 auto 分支从而扩大本次切入面
 +    // apply_patch/write/edit 在 runtime 都通过 edit permission 约束；这里固定
 +    // auto agent 对工作区写入的真实公开行为，防止未来只给 apply_patch 增加
 +    // 孤立规则却漏掉实际执行链路上的 edit gate。
@@ -190,13 +196,10 @@ index 741113dad03aab748bd007c8b3458e7e5948bafa..36f9300c0deed0d1f994552aec089916
      expect(evalPerm(auto, "vscode_notebook_run")).toBe("allow")
      expect(evalPerm(auto, "vscode_notebook_env")).toBe("allow")
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index d955260e8a4fea6129adb9f5ff1c2217f72e8bb8..d1b515503f8e4afc929f4d5eebbff90425b31c84 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -339,6 +339,43 @@ describe("permission auto routing", () => {
-     expect(called).toBe(false)
-   })
- 
+@@ -1,4 +1,41 @@
+ import { describe, expect, test } from "bun:test"
 +  test("routes structured workspace deletes to reviewer as cautious", async () => {
 +    let called = false
 +    await expect(
@@ -234,17 +237,18 @@ index d955260e8a4fea6129adb9f5ff1c2217f72e8bb8..d1b515503f8e4afc929f4d5eebbff904
 +    expect(called).toBe(true)
 +  })
 +
-   test("falls back to existing approval path when reviewer is not wired", async () => {
-     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
-   })
+ import { Effect } from "effect"
+ import { PermissionAuto } from "../../src/permission/auto"
+ 
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index a01ae7eaace7fe87aab955c92d6dc57f6f6bd1fc..a98e21658652d7879ea3158ae642c123bc652bbc 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -245,6 +245,71 @@ describe("permission precheck bash classifier", () => {
-     ).toMatchObject({ level: "general" })
-   })
- 
+@@ -6,6 +6,71 @@
+     permission: "bash",
+     patterns: [command],
+     metadata: { command },
++  })
++
 +  test("marks structured workspace file deletion cautious before non-shell fallback", () => {
 +    // apply_patch reports its final workspace effect through edit metadata.files.
 +    // This is the observable permission payload, so delete risk must be classified
@@ -308,19 +312,17 @@ index a01ae7eaace7fe87aab955c92d6dc57f6f6bd1fc..a98e21658652d7879ea3158ae642c123
 +        },
 +      }),
 +    ).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
-+  })
-+
-   test("filters broad always-allow prefixes", () => {
-     expect(PermissionPrecheck.canAlwaysAllowPrefix(["git"])).toBe(false)
-     expect(PermissionPrecheck.canAlwaysAllowPrefix(["git", "status"])).toBe(true)
+   })
+ 
+ describe("permission precheck bash classifier", () => {
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 2db056de637d42579d7f6dfab577e01c605918fa..62c38b586925ca7f38b08e12eecbce9272fa0dff 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -323,6 +323,20 @@ const waitForBusy = (sessionID: SessionID, duration: Duration.Input = "2 seconds
+@@ -366,6 +367,21 @@
+     `session ${sessionID} never became busy`,
      duration,
    )
- 
++
 +// Permission prompts are asynchronous tool side effects. Poll the public
 +// Permission.Service list so tests observe the same pending request that a UI
 +// would render, without depending on private prompt-loop scheduling details.
@@ -335,13 +337,14 @@ index 2db056de637d42579d7f6dfab577e01c605918fa..62c38b586925ca7f38b08e12eecbce92
 +  )
 +})
 +
+ 
  const hasBash = Effect.sync(() => Bun.which("bash") !== null)
  
- const deferredAsPromise = <A>(deferred: Deferred.Deferred<A>): PromiseLike<A> => ({
-@@ -1189,6 +1203,48 @@ it.instance(
-   15_000,
+@@ -1739,6 +1755,46 @@
  )
  
+ // #216：cancel 在 auto-review 进行中触发——验证中止状态正确传播到工具和 reviewer 子会话
++
 +it.instance(
 +  "auto agent tool permission requests carry auto agent evidence before approval",
 +  () =>
@@ -367,16 +370,13 @@ index 2db056de637d42579d7f6dfab577e01c605918fa..62c38b586925ca7f38b08e12eecbce92
 +          })
 +          .item(),
 +      )
-+
 +      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
 +      const [request] = yield* waitForPermission(1)
-+
 +      expect(request.permission).toBe("todowrite")
 +      // Tool implementations should not each remember to copy ctx.agent into
 +      // metadata. The prompt adapter owns that permission fact so native auto can
 +      // enable reviewer consistently for every non-shell tool request.
 +      expect(request.metadata.agent).toBe("auto")
-+
 +      yield* permission.reply({ requestID: request.id, reply: "reject" })
 +      yield* Fiber.await(fiber)
 +    }),

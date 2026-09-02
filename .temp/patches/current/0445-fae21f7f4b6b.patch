@@ -13,7 +13,7 @@ Content-Transfer-Encoding: 8bit
 
 diff --git a/docs/plans/opencode-disk-write-hotspots.md b/docs/plans/opencode-disk-write-hotspots.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..365e1572f2a02be10db85e8819d838f09651827a
+index 000000000..365e1572f
 --- /dev/null
 +++ b/docs/plans/opencode-disk-write-hotspots.md
 @@ -0,0 +1,2916 @@
@@ -2933,163 +2933,76 @@ index 0000000000000000000000000000000000000000..365e1572f2a02be10db85e8819d838f0
 +
 +当前完整实现不能发布。必须修复 B-01、B-02，并使 B-03 的两个 direct-shell/Session loop 行为测试在原合同下通过；随后针对原始需求、R16 和完整 affected interface 重新执行 full-scope implementation audit。
 +```
-diff --git a/packages/opencode/src/acp/agent.ts b/packages/opencode/src/acp/agent.ts
-index 1adbf8a2e41631680bf40a7a0869b22083cbf9ea..3316bfad6cf52a4941669d10796317d5213eb548 100644
---- a/packages/opencode/src/acp/agent.ts
-+++ b/packages/opencode/src/acp/agent.ts
-@@ -289,17 +289,16 @@ export class Agent implements ACPAgent {
-         // PartUpdated 仍可能携带任意 Part，只有 ToolPart 才进入 ACP tool lifecycle；
-         // shell marker 只合并两个 running channel，不能承担 terminal 顺序或持久化责任。
-         if (part.type === "tool") {
-+          const key = this.callKey(sessionId, part.callID)
-           await this.toolStart(sessionId, part)
+diff --git a/packages/opencode/src/acp/event.ts b/packages/opencode/src/acp/event.ts
+index eea5c8ebd..37b54557b 100644
+--- a/packages/opencode/src/acp/event.ts
++++ b/packages/opencode/src/acp/event.ts
+@@ -247,7 +247,10 @@ export class Subscription {
  
-           switch (part.state.status) {
-             case "pending":
--              this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
-+              if (!this.shellSnapshots.get(key)?.terminal) this.shellSnapshots.delete(key)
-               return
--
-             case "running":
-               const output = this.shellOutput(part)
-               const content: ToolCallContent[] = []
--              const key = this.callKey(sessionId, part.callID)
-               const marker = this.shellSnapshots.get(key)
-               // 旧持久化 Part 允许缺失或非法 version；归一化为 0 才能兼容首次恢复且拒绝后续回退。
-               const progressVersion = this.shellProgressVersion(part)
-@@ -362,7 +361,7 @@ export class Agent implements ACPAgent {
-               return
+     switch (part.state.status) {
+       case "pending":
+-        this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
++        // terminal marker 不被 synthetic pending 清除：迟到的独立 transport
++        // 重新握手时不能把已完成的 Tool 重新打开成执行中。
++        if (!this.shellSnapshots.get(this.callKey(sessionId, part.callID))?.terminal)
++          this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
+         return
  
-             case "completed": {
--              this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+              this.toolStarts.delete(key)
-               this.markShellTerminal(sessionId, part)
-               const kind = toToolKind(part.tool)
-               const content = completedToolContent(part, kind)
-@@ -414,7 +413,7 @@ export class Agent implements ACPAgent {
-               return
-             }
-             case "error":
--              this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+              this.toolStarts.delete(key)
-               this.markShellTerminal(sessionId, part)
-               await this.connection
-                 .sessionUpdate({
-@@ -830,15 +829,15 @@ export class Agent implements ACPAgent {
+       case "running":
+@@ -337,6 +340,8 @@ export class Subscription {
  
-     for (const part of message.parts) {
-       if (part.type === "tool") {
-+        const key = this.callKey(sessionId, part.callID)
-         await this.toolStart(sessionId, part)
-         switch (part.state.status) {
-           case "pending":
--            this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
-+            if (!this.shellSnapshots.get(key)?.terminal) this.shellSnapshots.delete(key)
-             break
-           case "running":
-             const output = this.shellOutput(part)
-             const runningContent: ToolCallContent[] = []
--            const key = this.callKey(sessionId, part.callID)
-             const marker = this.shellSnapshots.get(key)
-             const progressVersion = this.shellProgressVersion(part)
-             if (part.tool === ShellID.ToolID && marker && (marker.terminal || progressVersion <= marker.version)) break
-@@ -873,7 +872,7 @@ export class Agent implements ACPAgent {
-               })
-             break
-           case "completed":
--            this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+            this.toolStarts.delete(key)
-             this.markShellTerminal(sessionId, part)
-             const kind = toToolKind(part.tool)
-             const content = completedToolContent(part, kind)
-@@ -924,7 +923,7 @@ export class Agent implements ACPAgent {
-               })
-             break
-           case "error":
--            this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+            this.toolStarts.delete(key)
-             this.markShellTerminal(sessionId, part)
-             await this.connection
-               .sessionUpdate({
-@@ -1098,6 +1097,8 @@ export class Agent implements ACPAgent {
- 
-   private async toolStart(sessionId: string, part: ToolPart) {
+   private async toolStart(sessionId: string, part: ToolPart, cwd: string) {
      const key = this.callKey(sessionId, part.callID)
 +    // terminal marker 必须在任何 synthetic pending 之前生效，否则拒绝 running 时已经重新打开 lifecycle。
-+    if (part.tool === ShellID.ToolID && this.shellSnapshots.get(key)?.terminal) return
++    if (part.tool === "bash" && this.shellSnapshots.get(key)?.terminal) return
      if (this.toolStarts.has(key)) return
      this.toolStarts.add(key)
-     await this.connection
-diff --git a/packages/opencode/test/acp/event-subscription.test.ts b/packages/opencode/test/acp/event-subscription.test.ts
-index eb40358b3c2b257454b4c05b48acda52fb267c13..3f39d760340f40480fcd8c02c217244ec5bf1568 100644
---- a/packages/opencode/test/acp/event-subscription.test.ts
-+++ b/packages/opencode/test/acp/event-subscription.test.ts
-@@ -801,6 +801,24 @@ describe("acp.agent event subscription", () => {
-             .filter((u) => u.status === "in_progress")
-             .map(inProgressText)
+     await this.input.connection.sessionUpdate({
+diff --git a/packages/opencode/test/acp/event.test.ts b/packages/opencode/test/acp/event.test.ts
+index 4680ff686..e8ccf3750 100644
+--- a/packages/opencode/test/acp/event.test.ts
++++ b/packages/opencode/test/acp/event.test.ts
+@@ -622,9 +622,40 @@ describe("acp event routing", () => {
+     })
+   })
  
-+          // terminal 后观察完整 lifecycle，而不是只筛 in_progress，避免迟到 running
-+          // 先触发 synthetic pending 后再被 marker 拒绝，导致 ACP 状态机重新打开。
-+          for (const { callID } of terminalCases) {
-+            const updates = sessionUpdates.filter(
-+              (item) =>
-+                item.sessionId === sessionId &&
-+                "toolCallId" in item.update &&
-+                item.update.toolCallId === callID,
-+            )
-+            const terminalIndex = updates.findIndex(
-+              (item) =>
-+                isToolCallUpdate(item.update) &&
-+                (item.update.status === "completed" || item.update.status === "failed"),
-+            )
-+            expect(terminalIndex).toBeGreaterThanOrEqual(0)
-+            expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
-+          }
+-  // 完整 terminal-lifecycle 观察（terminal 后 late progress 不重开 tool_call）依赖
+-  // toolStart 的 terminal 守卫，属于 #0445 语义；0443 阶段 terminal marker 只在
+-  // runningTool 内拒绝 stale snapshot。
++  it("keeps completed shell terminal over late running progress and replayed pending", async () => {
++    const harness = createHarness()
++    await Effect.runPromise(harness.session.create({ id: "ses_term", cwd: "/workspace" }))
 +
-           // terminal 到达证明前面的 stale durable 已处理；断言只观察 ACP 用户可见更新序列。
-           // 唯一 marker 模拟不断增长的 provider/tool output，能直接捕获完整 payload 落盘。
-           // sentinel 在 progress 之后写入同一真实 file writer；读到它即证明前序日志已落盘，
-diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 13f685997a0924642876052c8194863d2bf72c28..3d3753514dd91f522a7c26be93f7811f6b0d30e1 100644
---- a/packages/opencode/test/session/prompt.test.ts
-+++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3039,8 +3039,7 @@ it.instance(
-       yield* waitForBusy(chat.id)
++    await harness.subscription.handle(toolUpdated(versionedRunning("ses_term", "call_term", "running", 1)))
++    await harness.subscription.handle(toolUpdated(completedTool("ses_term", "call_term", "done")))
++
++    // terminal 后观察完整 lifecycle，而不是只筛 in_progress：迟到的更高 version running、
++    // replay 的 synthetic pending 都不得把已完成的 Tool 重新打开。
++    await harness.subscription.handle(progressEvent(versionedRunning("ses_term", "call_term", "late", 5)))
++    await harness.subscription.replayMessage(
++      assistantToolMessage({
++        id: "part_call_term",
++        sessionID: "ses_term",
++        messageID: "msg_call_term",
++        type: "tool",
++        callID: "call_term",
++        tool: "bash",
++        state: {
++          status: "pending",
++          input: { cmd: "printf done" },
++          raw: '{"cmd":"printf done"}',
++        },
++      }),
++    )
++
++    const updates = toolUpdates(harness.updates)
++    const terminalIndex = updates.findIndex(
++      (item) => item.update.status === "completed" || item.update.status === "failed",
++    )
++    expect(terminalIndex).toBeGreaterThanOrEqual(0)
++    expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
++    expect(updates.filter((item) => item.update.status === "in_progress")).toHaveLength(1)
++  })
  
-       const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
--      // 只让 queued caller 进入 Run state，不用固定毫秒数猜测本机调度速度。
--      yield* Effect.yieldNow
-+      yield* Effect.sleep(50)
- 
-       expect(yield* llm.calls).toBe(0)
- 
-@@ -3055,7 +3054,8 @@ it.instance(
-       expect(yield* llm.calls).toBe(1)
-     }),
-   { git: true },
--  shortSessionTimeout,
-+  // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
-+  10_000,
- )
- 
- it.instance(
-@@ -3078,8 +3078,7 @@ it.instance(
- 
-       const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-       const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
--      // 两个 caller 在同一协作式调度轮次进入 Runner，避免 wall-clock readiness race。
--      yield* Effect.yieldNow
-+      yield* Effect.sleep(50)
- 
-       expect(yield* llm.calls).toBe(0)
- 
-@@ -3095,7 +3094,8 @@ it.instance(
-       expect(yield* llm.calls).toBe(1)
-     }),
-   { git: true },
--  shortSessionTimeout,
-+  // 该用例断言两个 loop 调用共享 shell 完成后的同一次结果；放宽预算不改变并发语义断言。
-+  10_000,
- )
- 
- unix(
+   it("clears shell snapshot marker when a tool returns to pending", async () => {
+     const harness = createHarness()

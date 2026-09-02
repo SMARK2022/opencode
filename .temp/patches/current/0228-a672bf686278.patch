@@ -12,25 +12,36 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 64f8ae6196ffdfba00addea96909a7c4be7493e7..365629eed653948d09bc36d03bb69ab3ee14458d 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -163,16 +163,45 @@ function relatedPathConditions(input: { path: string; directory?: string; global
- }
+@@ -572,7 +572,7 @@
+           ? db
+               .select()
+               .from(SessionTable)
+-              .where(and(...conditions))
++    .where(and(...conditions))
+           : db.select().from(SessionTable)
+       const rows = yield* query
+         .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+@@ -968,18 +968,60 @@
  
+ // #143：directory 列命名空间（path 为空的历史行）
  function relatedDirectoryConditions(directory: string) {
 -  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
 -  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
 -  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
 -  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
++  // #228：目录相关条件集合——祖先链+子目录通配，与 path 过滤互补
 +  const comparable = comparableDirectoryColumn()
++  // #228：SQL 侧表达式只构造一次——避免每行重复拼 SQL
 +  const value = comparableDirectoryValue(directory)
    return [
      ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
++  // #228：祖先链逐级匹配——跨 project 父会话经 global OR 臂命中
      like(comparable, value ? `${value}/%` : "%"),
++  // #228：子目录通配覆盖深度嵌套——空值退化为全匹配
    ]
  }
- 
 +// Session switching is path-scoped, not raw-directory scoped: the TUI asks with
 +// both `directory` (absolute cwd) and `path` (cwd relative to the project
 +// worktree). `Global.Path.home` is the canonical absolute path for `~`; on
@@ -38,19 +49,26 @@ index 64f8ae6196ffdfba00addea96909a7c4be7493e7..365629eed653948d09bc36d03bb69ab3
 +// slash, or drive-letter casing, so home comparisons must normalize those
 +// spellings without changing the broader directory/path API contract.
 +function comparableDirectoryColumn() {
++// #228：目录列归一化——反斜杠转正斜杠、去尾部斜杠，win32 再统一小写；与存库行的拼写差异解耦
 +  const column = sql<string>`rtrim(replace(${SessionTable.directory}, ${"\\"}, "/"), "/")`
++// #228：SQL 侧 rtrim+replace 一次性完成归一化——避免在 JS 层逐行转换大表
 +  if (process.platform === "win32") return sql<string>`lower(${column})`
++// #228：Windows 盘符大小写不敏感——SQL lower 与 JS toLowerCase 必须两侧一致
 +  return column
 +}
 +
 +function comparableDirectoryValue(directory: string) {
++// #228：JS 侧与 SQL 侧同构的归一化——home 比较与列匹配使用同一规则
 +  const resolved = process.platform === "win32" ? directory : path.resolve(directory)
++// #228：win32 不 resolve（避免盘符/UNC 语义差异）；POSIX resolve 规范化 . 与 ..
 +  const normalized = resolved.replaceAll("\\", "/").replace(/\/+$/, "")
++// #228：反斜杠统一为斜杠并去掉尾部斜杠——C:\Users\Alice/ 与 C:/Users/Alice 等价
 +  if (process.platform === "win32") return normalized.toLowerCase()
 +  return normalized
 +}
 +
 +function homeDirectoryCondition() {
++// #228：home 条件只精确匹配 ~ 本身——不匹配 ~/child 会话，避免跨目录误归
 +  // Match exactly the home directory after applying the same compatibility
 +  // normalization to stored rows and `Global.Path.home`; this deliberately does
 +  // not match `~/child` sessions when another directory asks to include `~`.
@@ -58,145 +76,164 @@ index 64f8ae6196ffdfba00addea96909a7c4be7493e7..365629eed653948d09bc36d03bb69ab3
 +}
 +
 +function isHomeDirectory(directory: string | undefined) {
++// #228：请求目录与 Global.Path.home 归一化后相等即视为 home 切换请求
 +  if (!directory) return false
 +  return comparableDirectoryValue(directory) === comparableDirectoryValue(Global.Path.home)
 +}
 +
- function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
+ 
+ // #143：directory 与 path 是否同一 worktree 相对路径
+ function directoryMatchesPath(input: { directory?: string; path: string; worktree: string }) {
++  // #228：directory 与 path 是否同一 worktree 相对路径——决定能否用 directory 兜底
    if (!input.directory) return false
-   const project = Database.use((db) =>
-@@ -926,40 +955,54 @@ function* listByProject(
+   const left = SessionPath.relative(input.worktree, input.directory)
+   const right = input.path.replaceAll("\\", "/")
+@@ -1001,49 +1043,60 @@
      conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
    }
    if (input.path !== undefined) {
+-    // #143：path 只要定义（含 worktree 根 ""）就必须走 related/global OR，禁止回退 project_id
+-
+-    const isGlobal = String(input.projectID) === "global"
+-    // #143：主项目 path 过滤（祖先+子孙）
 -    const projectPath = or(
 -      ...relatedPathConditions({
--        path: input.path,
 +    const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
-+    // The TUI session switcher uses `directory + path` queries to show the
-+    // existing current/parent/child path range. Treat `~` as the user's global
-+    // switching hub: when the request itself is home, do not add any project or
-+    // path predicate so search/start/limit apply across all sessions; otherwise
-+    // union in only the exact home-directory sessions. Directory-only calls stay
-+    // below in the legacy branch, preserving reset/delete/archive-style exact
-+    // directory behavior.
++// #228：project 作用域不做 home 切换——只有全局/跨 project 视图才展开 home 会话
 +    if (includeHomeSwitchScope && isHomeDirectory(input.directory)) {
-+      // The surrounding workspace/start/search/roots/limit predicates remain in
-+      // force. Only the path/project boundary is widened for `~` switching.
++      // #228：home 作为全局切换枢纽——不添加任何 project/path 谓词，
++      // #228：使 search/start/limit 跨所有 session 应用；workspace/start/search/roots/limit 谓词保持生效
 +    } else {
++      // #143：path 只要定义（含 worktree 根 ""）就必须走 related/global OR，禁止回退 project_id
++
++      const isGlobal = String(input.projectID) === "global"
++  // #228：global 项目自身的 path 条件与并入臂分开构造——避免自引用
++      // #143：主项目 path 过滤（祖先+子孙）
 +      const projectPath = or(
 +        ...relatedPathConditions({
 +          path: input.path,
 +          directory: input.directory,
-+          global: input.projectID === ProjectID.global,
++          global: isGlobal,
 +          root: true,
 +        }),
 +      )!
 +      const useDirectoryFallback = directoryMatchesPath({
-         directory: input.directory,
--        global: input.projectID === ProjectID.global,
++        directory: input.directory,
++  // #228：path 未定义的历史行回退 directory——directoryMatchesPath 判定 worktree 一致性
+         path: input.path,
+-        directory: input.directory,
+-        global: isGlobal,
 -        root: true,
 -      }),
 -    )!
 -    const useDirectoryFallback = directoryMatchesPath({
 -      directory: input.directory,
 -      path: input.path,
--      projectID: input.projectID,
+-      worktree: input.worktree,
 -    })
--    const globalPath = useDirectoryFallback && input.directory
--      ? or(
--          ...relatedPathConditions({
--            path: SessionPath.relative("/", input.directory),
--            directory: input.directory,
--            global: true,
--          }),
--        )
+-    // #143：全局 path（从 / 相对的 directory）供跨 project 父会话
+-    const globalPath =
+-      useDirectoryFallback && input.directory
+-        ? or(
+-            ...relatedPathConditions({
+-              path: SessionPath.relative("/", input.directory),
+-              directory: input.directory,
+-              global: true,
+-            }),
+-          )
++        worktree: input.worktree,
++      })
++      // #143：全局 path（从 / 相对的 directory）供跨 project 父会话
++      const globalPath =
++        useDirectoryFallback && input.directory
++          ? or(
++              ...relatedPathConditions({
++                path: SessionPath.relative("/", input.directory),
++                directory: input.directory,
++                global: true,
++              }),
++            )
++          : undefined
++      const nullPath = input.directory
++  // #228：历史行 path 为 NULL——directory 精确匹配作为兜底臂
++        ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
+         : undefined
+-    const nullPath = input.directory
+-      ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
 -      : undefined
--    const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
--
--    // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
 -    conditions.push(
 -      or(
 -        and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
--        ...(globalPath && input.projectID !== ProjectID.global
--          ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
+-        // #143：非全局项目时并入 global 项目同源 path
+-        // #143：global 项目父会话必须可被 git 子目录 list OR 命中
+-        ...(globalPath && !isGlobal
+-          ? [and(eq(SessionTable.project_id, "global" as ProjectV2.ID), nullPath ? or(globalPath, nullPath)! : globalPath)]
 -          : []),
 -        ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
 -      )!,
 -    )
-+        path: input.path,
-+        projectID: input.projectID,
-+      })
-+      const globalPath = useDirectoryFallback && input.directory
-+        ? or(
-+            ...relatedPathConditions({
-+              path: SessionPath.relative("/", input.directory),
-+              directory: input.directory,
-+              global: true,
-+            }),
-+          )
-+        : undefined
-+      const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
-+
-+      // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
+-  
 +      conditions.push(
 +        or(
 +          and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
-+          ...(globalPath && input.projectID !== ProjectID.global
-+            ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
++          // #143：非全局项目时并入 global 项目同源 path
++          // #143：global 项目父会话必须可被 git 子目录 list OR 命中
++          ...(globalPath && !isGlobal
++            ? [and(eq(SessionTable.project_id, "global" as ProjectV2.ID), nullPath ? or(globalPath, nullPath)! : globalPath)]
 +            : []),
 +          ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
 +          ...(includeHomeSwitchScope ? [homeDirectoryCondition()] : []),
 +        )!,
 +      )
++
 +    }
-   } else if (input.scope !== "project" && !input.experimentalWorkspaces) {
+   } else {
      conditions.push(eq(SessionTable.project_id, input.projectID))
-     if (input.directory) {
-@@ -985,7 +1028,10 @@ function* listByProject(
-     db
-       .select()
-       .from(SessionTable)
--      .where(and(...conditions))
-+      // A home path-scoped switch query intentionally has no project/path
-+      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
-+      // only filters instead of inventing a dummy true condition.
-+      .where(conditions.length > 0 ? and(...conditions) : undefined)
-       .orderBy(desc(SessionTable.time_updated))
-       .limit(limit)
-       .all(),
+     if (input.scope !== "project") {
+@@ -1069,7 +1122,8 @@
+   return db
+     .select()
+     .from(SessionTable)
+-    .where(and(...conditions))
++    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
++    .where(conditions.length > 0 ? and(...conditions) : undefined)
+     .orderBy(desc(SessionTable.time_updated))
+     .limit(limit)
+     .all()
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
-index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cbf572642f 100644
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts
-@@ -3,10 +3,13 @@ import { Effect, Layer } from "effect"
+@@ -7,12 +7,18 @@
+ import { SessionProjector } from "@opencode-ai/core/session/projector"
  import { Session as SessionNs } from "@/session/session"
- import * as Log from "@opencode-ai/core/util/log"
  import { disposeAllInstances, provideInstance, TestInstance } from "../fixture/fixture"
 -import { mkdir } from "fs/promises"
 +import { mkdir, mkdtemp, realpath, rm } from "fs/promises"
  import path from "path"
 +import os from "os"
- import { Database } from "@/storage/db"
- import { SessionTable } from "@/session/session.sql"
-+import { ProjectTable } from "@/project/project.sql"
-+import { ProjectID } from "@/project/schema"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { Project } from "@opencode-ai/schema/project"
++import { AbsolutePath } from "@opencode-ai/core/schema"
+ import { SessionTable } from "@opencode-ai/core/session/sql"
  import { eq } from "drizzle-orm"
- import { SessionPath } from "@/session/path"
  import { testEffect } from "../lib/effect"
-@@ -15,6 +18,7 @@ import { Storage } from "@/storage/storage"
- import { SyncEvent } from "@/sync"
  import { RuntimeFlags } from "@/effect/runtime-flags"
- import { BackgroundJob } from "@/background/job"
++import { $ } from "bun"
 +import { InstanceRef } from "@/effect/instance-ref"
- import { $ } from "bun"
  
- void Log.init({ print: false })
-@@ -34,6 +38,76 @@ const withSession = (input?: Parameters<SessionNs.Interface["create"]>[0]) =>
-     (created) => SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
-   )
+ const layer = (experimentalWorkspaces: boolean) =>
+   AppNodeBuilder.build(LayerNode.group([Database.node, SessionNs.node, SessionProjector.node]), [
+@@ -22,8 +28,74 @@
+ const itWorkspaces = testEffect(layer(true))
  
+ const withSession = (input?: Parameters<SessionNs.Interface["create"]>[0]) =>
++// #228：withSession 负责会话创建与清理——acquireRelease 保证测试隔离
+   Effect.acquireRelease(SessionNs.use.create(input), (created) =>
+     SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
++  )
++
 +const initGitRepo = (directory: string) =>
++// #228：测试前置——临时 git repo 初始化，home 切换场景需要真实 git 项目
 +  Effect.gen(function* () {
 +    yield* Effect.promise(() => $`git init`.cwd(directory).quiet())
 +    yield* Effect.promise(() => $`git config core.fsmonitor false`.cwd(directory).quiet())
@@ -206,11 +243,9 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +    yield* Effect.promise(() => $`git commit --allow-empty -m "root commit"`.cwd(directory).quiet())
 +  })
 +
-+// Home-as-global switching must prove cross-project visibility, so these test
-+// projects live outside the active test worktree. Returning the realpath matches
-+// InstanceStore/AppFileSystem behavior and prevents `/var` vs `/private/var`
-+// aliases on macOS from making exact directory assertions flaky.
++// #228：home-as-global 切换测试需要跨 project 可见性——这些临时 repo 在 active worktree 之外，realpath 匹配 InstanceStore 行为
 +const tempGitRepo = () =>
++// #228：home-as-global 切换需要跨 project 可见性——repo 在 active worktree 之外
 +  Effect.acquireRelease(
 +    Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "opencode-session-list-"))).pipe(
 +      Effect.flatMap((directory) => Effect.promise(() => realpath(directory))),
@@ -219,10 +254,9 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +    (directory) => Effect.promise(() => rm(directory, { recursive: true, force: true })).pipe(Effect.ignore),
 +  )
 +
-+// The plain temporary directory models a non-git `~` instance. It must also use
-+// realpath for the same reason as tempGitRepo: session rows store the resolved
-+// directory, while OPENCODE_TEST_HOME is compared against that stored value.
++// #228：非 git 的 ~ 实例——realpath 保证 session 行存储的 resolved 目录与 OPENCODE_TEST_HOME 比较一致
 +const tempDirectory = () =>
++// #228：非 git 的 ~ 实例——realpath 保证存储目录与 OPENCODE_TEST_HOME 比较一致
 +  Effect.acquireRelease(
 +    Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "opencode-session-list-"))).pipe(
 +      Effect.flatMap((directory) => Effect.promise(() => realpath(directory))),
@@ -230,10 +264,9 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +    (directory) => Effect.promise(() => rm(directory, { recursive: true, force: true })).pipe(Effect.ignore),
 +  )
 +
-+// `Global.Path.home` is backed by OPENCODE_TEST_HOME in tests. Keep the override
-+// scoped so path-range tests can model `~` without leaking a fake home into later
-+// cases that rely on the package preload's default test home.
++// #228：OPENCODE_TEST_HOME 控制 Global.Path.home——scoped override 避免 fake home 泄漏到后续测试
 +const withTestHome = <A, E, R>(home: string, effect: Effect.Effect<A, E, R>) =>
++// #228：OPENCODE_TEST_HOME 控制 Global.Path.home——scoped override 不泄漏到后续测试
 +  Effect.acquireUseRelease(
 +    Effect.sync(() => {
 +      const previous = process.env.OPENCODE_TEST_HOME
@@ -248,11 +281,9 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +      }),
 +  )
 +
-+// Windows path matching is a query-time compatibility boundary: old rows can use
-+// backslashes, forward slashes, or different drive-letter casing. The production
-+// branch is guarded by process.platform, so the test temporarily enters that
-+// branch while still keeping the fake paths lexical and not touching the host FS.
++// #228：Windows 路径匹配是 query-time 兼容边界——临时进入 win32 分支测试反斜杠/大小写归一化
 +const withPlatform = <A, E, R>(platform: typeof process.platform, effect: Effect.Effect<A, E, R>) =>
++// #228：临时进入 win32 分支测试反斜杠/大小写归一化——不触碰真实宿主 FS
 +  Effect.acquireUseRelease(
 +    Effect.sync(() => {
 +      const original = Object.getOwnPropertyDescriptor(process, "platform")
@@ -264,30 +295,41 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +      Effect.sync(() => {
 +        if (original) Object.defineProperty(process, "platform", original)
 +      }),
-+  )
-+
- afterEach(async () => {
-   await disposeAllInstances()
- })
-@@ -136,6 +210,237 @@ describe("session.list", () => {
-     { git: true },
    )
  
-+  it.instance(
+ afterEach(async () => {
+@@ -32,6 +104,7 @@
+ 
+ describe("session.list", () => {
+   it.instance(
++// #228：it.instance 提供 scoped 临时目录与实例上下文
+     "does not filter by directory when directory is omitted",
+     () =>
+       Effect.gen(function* () {
+@@ -60,7 +133,255 @@
+   )
+ 
+   it.instance(
 +    "path-scoped session switching from home includes sessions from every project",
++// #228：核心场景——home 目录 list 必须包含每个 project 的会话，验证 global OR 臂
 +    () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const otherProject = yield* tempGitRepo()
++// #228：跨 project 会话用独立 git repo 构造——验证 global OR 真实命中
 +
 +        yield* withTestHome(
++// #228：测试内切换 home——恢复由 acquireUseRelease 保证
 +          test.directory,
 +          Effect.gen(function* () {
 +            const home = yield* withSession({ title: "home-switch-root" })
++// #228：home 目录内的会话与跨 project 会话都应被 home 视图列出
 +            const other = yield* withSession({ title: "other-switch-root" }).pipe(provideInstance(otherProject))
 +
 +            const ids = (yield* SessionNs.Service.use((session) =>
++// #228：list 断言使用真实 service 路径——不 mock 查询逻辑
 +              session.list({
++// #228：list 入参覆盖 directory/path/start——验证 home 展开与目录过滤组合
 +                directory: test.directory,
 +                path: SessionPath.relative(test.directory, test.directory),
 +                start: Date.now() - 30 * 24 * 60 * 60 * 1000,
@@ -295,6 +337,7 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +            )).map((session) => session.id)
 +
 +            expect(ids).toContain(home.id)
++// #228：home 视图必须包含 home 目录会话——缺省会话不丢失
 +            expect(ids).toContain(other.id)
 +          }),
 +        )
@@ -338,6 +381,7 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const homeDir = yield* tempDirectory()
++// #228：非 git home 目录——验证无 project 会话仍被列出
 +        const otherProject = yield* tempGitRepo()
 +
 +        yield* withTestHome(
@@ -397,28 +441,31 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +  )
 +
 +  it.instance("path-scoped home matching treats Windows home spellings as equivalent", () =>
++// #228：Windows 拼写等价——反斜杠/大小写/尾部斜杠变体必须命中同一 home
 +    Effect.gen(function* () {
-+      const homeProjectID = ProjectID.make("proj_windows_home")
-+      const otherProjectID = ProjectID.make("proj_windows_other")
++      const homeProjectID = Project.ID.make("proj_windows_home")
++// #228：直接插入 DB 行模拟历史 Windows 路径——绕过运行时创建避免路径解析干扰
++      const otherProjectID = Project.ID.make("proj_windows_other")
 +      const home = yield* withSession({ title: "windows-home-switch" })
 +      const other = yield* withSession({ title: "windows-other-switch" })
 +
 +      yield* Effect.addFinalizer(() =>
-+        Effect.sync(() =>
-+          Database.use((db) => {
-+            db.delete(ProjectTable).where(eq(ProjectTable.id, homeProjectID)).run()
-+            db.delete(ProjectTable).where(eq(ProjectTable.id, otherProjectID)).run()
++        Database.Service.use(({ db }) =>
++          Effect.gen(function* () {
++            yield* db.delete(ProjectTable).where(eq(ProjectTable.id, homeProjectID)).run()
++            yield* db.delete(ProjectTable).where(eq(ProjectTable.id, otherProjectID)).run()
 +          }),
-+        ),
++        ).pipe(Effect.ignore),
 +      )
 +
-+      yield* Effect.sync(() =>
-+        Database.use((db) => {
-+          db.insert(ProjectTable)
++      yield* Database.Service.use(({ db }) =>
++        Effect.gen(function* () {
++          yield* db.insert(ProjectTable)
++// #228：project 行固定 worktree——与 session 行的 directory/path 分离构造
 +            .values([
 +              {
 +                id: homeProjectID,
-+                worktree: "C:/Users/Alice",
++                worktree: AbsolutePath.make("C:/Users/Alice"),
 +                vcs: "git",
 +                time_created: Date.now(),
 +                time_updated: Date.now(),
@@ -426,7 +473,7 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +              },
 +              {
 +                id: otherProjectID,
-+                worktree: "D:/Work/Repo",
++                worktree: AbsolutePath.make("D:/Work/Repo"),
 +                vcs: "git",
 +                time_created: Date.now(),
 +                time_updated: Date.now(),
@@ -434,11 +481,12 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +              },
 +            ])
 +            .run()
-+          db.update(SessionTable)
++          yield* db.update(SessionTable)
++// #228：把会话指向特定 project 并写入 Windows 拼写的 directory——构造历史数据
 +            .set({ project_id: homeProjectID, directory: "C:\\Users\\Alice", path: "" })
 +            .where(eq(SessionTable.id, home.id))
 +            .run()
-+          db.update(SessionTable)
++          yield* db.update(SessionTable)
 +            .set({ project_id: otherProjectID, directory: "D:/Work/Repo", path: "" })
 +            .where(eq(SessionTable.id, other.id))
 +            .run()
@@ -446,6 +494,7 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +      )
 +
 +      const ctx = {
++// #228：win32 实例上下文——directory 用小写+尾部斜杠验证归一化路径
 +        directory: "c:/users/alice/",
 +        worktree: "C:/Users/Alice",
 +        project: {
@@ -457,6 +506,7 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +        },
 +      }
 +      const otherCtx = {
++// #228：另一 project 的上下文——验证 home 视图跨 project 可见
 +        directory: "D:/Work/Repo",
 +        worktree: "D:/Work/Repo",
 +        project: {
@@ -469,6 +519,7 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +      }
 +
 +      const ids = yield* withPlatform(
++// #228：win32 分支验证——生产代码按 process.platform 分支
 +        "win32",
 +        withTestHome(
 +          "C:/Users/Alice/",
@@ -501,9 +552,37 @@ index 94bf6ac0d13b263cd20166dae7f9f5330a34d19b..3570c92ea48ed1dd8f6bbda4a3c564cb
 +
 +      expect(otherIDs).toContain(home.id)
 +      expect(otherIDs).toContain(other.id)
++// #228：跨 project 视图也保持双向可见——home 展开不隔离 project
 +    }),
 +  )
 +
-   it.instance("builds path ancestors", () =>
-     Effect.sync(() => {
-       expect(SessionPath.ancestors("packages/opencode/src", { root: true })).toEqual([
++  it.instance(
+     "filters by directory when directory is provided",
++// #228：显式 directory 过滤不受 home 展开影响——目录精确匹配优先
+     () =>
+       Effect.gen(function* () {
+         const test = yield* TestInstance
+@@ -204,6 +525,7 @@
+         )
+ 
+         const { db } = yield* Database.Service
++// #228：直接 DB 写历史行——运行时 API 无法构造的拼写变体
+         yield* db
+           .update(SessionTable)
+           .set({ path: null })
+@@ -335,6 +657,7 @@
+   // #143：git 子项目列表必须 OR 进 global 项目父会话
+   it.instance(
+     "includes global parent sessions from a git child project",
++// #228：git 子项目必须 OR 进 global 父会话——#143 回归覆盖
+     () =>
+       Effect.gen(function* () {
+         const test = yield* TestInstance
+@@ -352,6 +675,7 @@
+         })
+         // #143：无 git 的 outer 会话 project_id=global
+         const parent = yield* withSession({ title: "global-parent" }).pipe(provideInstance(test.directory))
++// #228：无 git 的 outer 会话 project_id=global——子目录 list 必须能命中
+         const current = yield* withSession({ title: "git-current" }).pipe(provideInstance(child))
+         // #143：在 git 子目录上下文 list，才能触发 global OR 臂
+         const ids = (

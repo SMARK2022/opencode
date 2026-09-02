@@ -29,21 +29,28 @@ diff --git a/packages/opencode/src/effect/app-runtime.ts b/packages/opencode/src
 index 52d58e4caa..144761acb8 100644
 --- a/packages/opencode/src/effect/app-runtime.ts
 +++ b/packages/opencode/src/effect/app-runtime.ts
-@@ -20,6 +20,7 @@ import { Skill } from "@/skill"
+@@ -20,6 +20,9 @@ import { Skill } from "@/skill"
  import { Discovery } from "@/skill/discovery"
  import { Question } from "@/question"
  import { Permission } from "@/permission"
 +import { PermissionReviewer } from "@/permission/reviewer/service"
++import { PermissionSessionCache } from "@/permission/cache/session-cache"
++import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
  import { Todo } from "@/session/todo"
  import { Session } from "@/session/session"
  import { SessionStatus } from "@/session/status"
-@@ -75,6 +76,9 @@ export const AppLayer = AppNodeBuilderV1.build(
+@@ -75,6 +76,14 @@ export const AppLayer = AppNodeBuilderV1.build(
      Skill.node,
      Discovery.node,
      Question.node,
 +    // #199：reviewer 在 Permission 之前声明，builder 按 dep 拓扑排序而非数组顺序。
 +    // #199：reviewer 依赖 Config/Provider/Session，这些 node 已在 group 中。
 +    PermissionReviewer.node,
++    // #199：cache/circuit 必须与 Permission 并列声明。LayerNode.compile 用
++    // #199：Layer.provide 组合 deps，丢弃未被静态需求的服务层；Permission 用
++    // #199：serviceOption 可选查询，仅靠 Permission.node deps 隐式提供将运行时不可达。
++    PermissionSessionCache.node,
++    PermissionCircuitBreaker.node,
      Permission.node,
      Todo.node,
      Session.node,
@@ -264,7 +271,7 @@ index 2f2ce98efb..41c583f962 100644
  import { InstanceBootstrap } from "../../src/project/bootstrap"
  import { InstanceStore } from "../../src/project/instance-store"
  import { TestInstance, tmpdirScoped } from "../fixture/fixture"
-@@ -18,7 +22,62 @@ const env = AppNodeBuilder.build(
+@@ -18,7 +22,64 @@ const env = AppNodeBuilder.build(
    LayerNode.group([Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
    [[InstanceStore.bootstrapNode, noopBootstrap]],
  )
@@ -276,6 +283,8 @@ index 2f2ce98efb..41c583f962 100644
 +  LayerNode.group([
 +    Permission.node,
 +    PermissionReviewer.node,
++    PermissionSessionCache.node,
++    PermissionCircuitBreaker.node,
 +    EventV2Bridge.node,
 +    CrossSpawnSpawner.node,
 +    InstanceStore.node,

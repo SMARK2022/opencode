@@ -813,7 +813,30 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 index f34cae5350..dbc8646ca4 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1266,6 +1266,96 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
+@@ -19,6 +19,9 @@ import { Config } from "@/config/config"
+ import { Permission } from "../../src/permission"
++import { PermissionReviewer } from "@/permission/reviewer/service"
++import { PermissionSessionCache } from "@/permission/cache/session-cache"
++import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
+ import { Plugin } from "../../src/plugin"
+ import { Provider as ProviderSvc } from "@/provider/provider"
+ import { Env } from "../../src/env"
+ import { Git } from "../../src/git"
+ import { Image } from "../../src/image/image"
+@@ -181,6 +184,12 @@ const promptRoot = LayerNode.group([
+   AgentSvc.node,
+   Command.node,
+   Permission.node,
++  // #209：reviewer/cache/circuit 必须与 Permission 并列声明——LayerNode.compile 用
++  // #209：Layer.provide 丢弃未被静态需求的服务层；Permission 用 serviceOption 查询，
++  // #209：仅靠 Permission.node deps 隐式提供时 reviewer 运行时不可达，集成测试失败。
++  PermissionReviewer.node,
++  PermissionSessionCache.node,
++  PermissionCircuitBreaker.node,
+   Plugin.node,
+   Config.node,
+   ProviderSvc.node,
+@@ -1266,6 +1275,96 @@ it.instance("loop continues when finish is stop but assistant has tool parts"
    }),
  )
  
@@ -827,7 +850,7 @@ index f34cae5350..dbc8646ca4 100644
 +      const permissions = yield* Permission.Service
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Reviewer stream" })
-+      const command = String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`
++      const command = String.raw`Get-Content - Path "$env:USERPROFILE\.ssh\id_rsa"`
 +      // #209：mock LLM 响应先发 reasoning 再调用 decision tool——模拟真实 reviewer 的推理-决策两阶段流
 +      yield* llm.push(
 +        reply()
