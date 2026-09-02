@@ -11,7 +11,6 @@ Content-Transfer-Encoding: 8bit
 记录 R54 方案、独立审计和完整生命周期证据，并加入五分钟末端语音标记门禁。
 
 固定 nested agent 提交，避免并发 target 创建、过早 deadline 与迟到接受造成回归。
-
 diff --git a/docs/plans/voice-transcription-lifecycle-reliability.md b/docs/plans/voice-transcription-lifecycle-reliability.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..f7ef41c314b86608a6d24bb4e85ace79f7a4a727
@@ -2767,16 +2766,16 @@ index 0000000000000000000000000000000000000000..f7ef41c314b86608a6d24bb4e85ace79
 +- Fallback verdict: pass；未发现DOM听写、第二endpoint、第二POST/second click、retry、catch-and-success、硬编码身份或全局blank cleanup。
 +- Code quality and Chinese-comment verdict: pass；production JS净增`-56`，`E=1850`、`C=283`、required=`278`、ratio=`15.30%`。
 +- Release verdict: **APPROVE**，仅适用于canonical plan R54和本记录列出的完整任务diff；不包含`packages/core/src/models-snapshot.js`、`docs/plans/lsp-diagnostics-reliability.md`等无关worktree修改。
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
 index 1df6f56a149d2e0634bc8c8e14d524167d3ed5fe..e22dff55bbd907406fb582579437bf1bb1b62bed 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
 @@ -1,4 +1,5 @@
  import { describe, expect, test } from "bun:test"
 +import fs from "node:fs/promises"
  import path from "path"
  import { createRoot, createSignal } from "solid-js"
- import { tmpdir } from "../../fixture/fixture"
+ import { tmpdir } from "../fixture/fixture"
 @@ -17,6 +18,37 @@ const nodeJson = (script: string): VoiceTranscriber => ({
    args: ["-e", script, "{file}"],
  })
@@ -2828,7 +2827,7 @@ index 1df6f56a149d2e0634bc8c8e14d524167d3ed5fe..e22dff55bbd907406fb582579437bf1b
 +        throw new Error("voice E2E requires CHATGPT_BROWSER_USER_DATA_DIR for a logged-in agent profile")
 +      }
 +      if (process.platform !== "darwin") throw new Error("voice E2E late-marker fixture requires Darwin system audio tools")
-+      const agent = path.resolve(import.meta.dir, "../../../../../thirdparty/chatgpt-browser-agent")
++      const agent = path.resolve(import.meta.dir, "../../../../thirdparty/chatgpt-browser-agent")
 +      const script = path.join(agent, "chatgpt.js")
 +      const source = path.join(agent, "test-voice-hello.wav")
 +      const root = path.join(process.env.TMPDIR || "/private/tmp", "opencode", "voice")

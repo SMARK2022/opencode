@@ -11,131 +11,170 @@ Content-Transfer-Encoding: 8bit
 
 同时限制 LLM 诊断日志体积并按 Session 隔离 ACP 生命周期，避免迟到进度或重复 callID 引入展示回退。
 
-diff --git a/packages/opencode/src/acp/agent.ts b/packages/opencode/src/acp/agent.ts
-index 665e3712be8ac0a3f49ba84ee38609f69b0d856f..1adbf8a2e41631680bf40a7a0869b22083cbf9ea 100644
---- a/packages/opencode/src/acp/agent.ts
-+++ b/packages/opencode/src/acp/agent.ts
-@@ -146,7 +146,9 @@ export class Agent implements ACPAgent {
-   private sessionManager: ACPSessionManager
-   private eventAbort = new AbortController()
-   private eventStarted = false
--  private shellSnapshots = new Map<string, string>()
+diff --git a/packages/opencode/src/acp/event.ts b/packages/opencode/src/acp/event.ts
+index 7d05fa6ee..eea5c8ebd 100644
+--- a/packages/opencode/src/acp/event.ts
++++ b/packages/opencode/src/acp/event.ts
+@@ -2,12 +2,14 @@ import type { AgentSideConnection } from "@agentclientprotocol/sdk"
+ import type {
+   Event,
+   EventMessagePartDelta,
++  EventMessagePartProgress,
+   EventMessagePartUpdated,
+   OpencodeClient,
+   Part,
+   SessionMessageResponse,
+   ToolPart,
+ } from "@opencode-ai/sdk/v2"
++import { Hash } from "@opencode-ai/core/util/hash"
+ import { Effect } from "effect"
+ import { ACPSession } from "./session"
+ import { ACPPermission } from "./permission"
+@@ -38,7 +40,9 @@ export function start(input: { sdk: OpencodeClient; connection: Connection; sess
+ 
+ export class Subscription {
+   private readonly abort = new AbortController()
+-  private readonly shellSnapshots = new Map<string, string>()
 +  // marker 按 Session+call 保留展示版本和终态，避免不同 Session 的 provider callID 互相污染。
 +  // 终态不能按短 timeout 驱逐，否则迟到的独立 transport 会重新打开 lifecycle。
-+  private shellSnapshots = new Map<string, { hash?: string; version: number; terminal?: true }>()
-   private toolStarts = new Set<string>()
-   private permissionQueues = new Map<string, Promise<void>>()
-   private permissionOptions: PermissionOption[] = [
-@@ -272,29 +274,45 @@ export class Agent implements ACPAgent {
++  private readonly shellSnapshots = new Map<string, { hash?: string; version: number; terminal?: true }>()
+   private readonly toolStarts = new Set<string>()
+   private readonly permission: ACPPermission.Handler
+   private started = false
+@@ -71,6 +75,9 @@ export class Subscription {
+         this.permission.handle(event)
          return
-       }
- 
--      case "message.part.updated": {
--        log.info("message part updated", { event: event.properties })
-+      case "message.part.updated":
-+      case "message.part.progress": {
-+        // live 与 durable snapshot 共享一个 ACP Tool lifecycle；progress 只增加
-+        // in_progress 帧，completed/error 仍由 ordered PartUpdated 决定。
-+        // durable update 保留既有诊断；50ms progress 不得把累计 output 写入文件日志。
-+        if (event.type === "message.part.updated") log.info("message part updated", { event: event.properties })
-         const props = event.properties
-         const part = props.part
-         const session = this.sessionManager.tryGet(part.sessionID)
-         if (!session) return
-         const sessionId = session.id
- 
-+        // PartUpdated 仍可能携带任意 Part，只有 ToolPart 才进入 ACP tool lifecycle；
-+        // shell marker 只合并两个 running channel，不能承担 terminal 顺序或持久化责任。
-         if (part.type === "tool") {
-           await this.toolStart(sessionId, part)
- 
-           switch (part.state.status) {
-             case "pending":
--              this.shellSnapshots.delete(part.callID)
-+              this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
-               return
- 
-             case "running":
-               const output = this.shellOutput(part)
-               const content: ToolCallContent[] = []
-+              const key = this.callKey(sessionId, part.callID)
-+              const marker = this.shellSnapshots.get(key)
-+              // 旧持久化 Part 允许缺失或非法 version；归一化为 0 才能兼容首次恢复且拒绝后续回退。
-+              const progressVersion = this.shellProgressVersion(part)
-+              // live 与 durable 可独立到达；只接受更高 running version，避免旧 checkpoint 回退展示。
-+              // running 用 version 排序，terminal 则无条件支配，二者不能共享数值哨兵语义。
-+              // 先拒绝 terminal marker，后续 hash 去重才不会把终态降回无内容的 in_progress。
-+              if (part.tool === ShellID.ToolID && marker && (marker.terminal || progressVersion <= marker.version))
-+                return
-               if (output) {
-                 const hash = Hash.fast(output)
-                 if (part.tool === ShellID.ToolID) {
--                  if (this.shellSnapshots.get(part.callID) === hash) {
-+                  this.shellSnapshots.set(key, { hash, version: progressVersion })
-+                  if (marker?.hash === hash) {
-                     await this.connection
-                       .sessionUpdate({
-                         sessionId,
-@@ -313,7 +331,6 @@ export class Agent implements ACPAgent {
-                       })
-                     return
-                   }
--                  this.shellSnapshots.set(part.callID, hash)
-                 }
-                 content.push({
-                   type: "content",
-@@ -322,6 +339,8 @@ export class Agent implements ACPAgent {
-                     text: output,
-                   },
-                 })
-+              } else if (part.tool === ShellID.ToolID) {
-+                this.shellSnapshots.set(key, { version: progressVersion })
-               }
-               await this.connection
-                 .sessionUpdate({
-@@ -343,8 +362,8 @@ export class Agent implements ACPAgent {
-               return
- 
-             case "completed": {
--              this.toolStarts.delete(part.callID)
--              this.shellSnapshots.delete(part.callID)
-+              this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+              this.markShellTerminal(sessionId, part)
-               const kind = toToolKind(part.tool)
-               const content = completedToolContent(part, kind)
- 
-@@ -395,8 +414,8 @@ export class Agent implements ACPAgent {
-               return
-             }
-             case "error":
--              this.toolStarts.delete(part.callID)
--              this.shellSnapshots.delete(part.callID)
-+              this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+              this.markShellTerminal(sessionId, part)
-               await this.connection
-                 .sessionUpdate({
-                   sessionId,
-@@ -779,11 +798,31 @@ export class Agent implements ACPAgent {
-         log.error("failed to abort session while closing ACP session", { error, sessionID: params.sessionId })
-       })
- 
-+    // terminal marker 和 synthetic pending 都必须随 ACP Session 一起清理；按 key 前缀
-+    // 区分 Session，不猜测 transport 最大延迟，也不影响其他 Session 的同名 callID。
-+    const prefix = `${params.sessionId}\0`
-+    for (const key of this.shellSnapshots.keys()) {
-+      if (key.startsWith(prefix)) this.shellSnapshots.delete(key)
-+    }
-+    for (const key of this.toolStarts) {
-+      if (key.startsWith(prefix)) this.toolStarts.delete(key)
-+    }
-     this.permissionQueues.delete(params.sessionId)
-     log.info("close_session", { sessionId: params.sessionId })
-     return {}
+       case "message.part.updated":
++      // live 与 durable snapshot 共享一个 ACP Tool lifecycle；progress 只增加
++      // in_progress 帧，completed/error 仍由 ordered PartUpdated 决定。
++      case "message.part.progress":
+         return this.handlePartUpdated(event)
+       case "message.part.delta":
+         return this.handlePartDelta(event)
+@@ -128,24 +135,27 @@ export class Subscription {
+     }
    }
  
-+  private markShellTerminal(sessionId: string, part: ToolPart) {
+-  private async handlePartUpdated(event: EventMessagePartUpdated) {
++  private async handlePartUpdated(event: EventMessagePartUpdated | EventMessagePartProgress) {
+     const part = event.properties.part
+     const sessionId = part.sessionID || event.properties.sessionID
+     const session = await Effect.runPromise(this.input.session.tryGet(sessionId))
+     if (!session) return
+ 
+-    await Effect.runPromise(
+-      this.input.session.recordPartMetadata({
+-        sessionId: session.id,
+-        messageId: part.messageID,
+-        partId: part.id,
+-        partType: part.type,
+-        role: part.type === "reasoning" ? "assistant" : undefined,
+-        ignored: part.type === "text" ? part.ignored : undefined,
+-        toolCallId: part.type === "tool" ? part.callID : undefined,
+-        metadata: "metadata" in part ? part.metadata : undefined,
+-      }),
+-    )
++    // progress 是纯展示快照：只推进 Tool lifecycle，不重复持久化元数据记录。
++    if (event.type === "message.part.updated") {
++      await Effect.runPromise(
++        this.input.session.recordPartMetadata({
++          sessionId: session.id,
++          messageId: part.messageID,
++          partId: part.id,
++          partType: part.type,
++          role: part.type === "reasoning" ? "assistant" : undefined,
++          ignored: part.type === "text" ? part.ignored : undefined,
++          toolCallId: part.type === "tool" ? part.callID : undefined,
++          metadata: "metadata" in part ? part.metadata : undefined,
++        }),
++      )
++    }
+     if (part.type === "tool") {
+       await this.handleToolPart(session.id, part, session.cwd)
+     }
+@@ -237,7 +247,7 @@ export class Subscription {
+ 
+     switch (part.state.status) {
+       case "pending":
+-        this.shellSnapshots.delete(part.callID)
++        this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
+         return
+ 
+       case "running":
+@@ -245,7 +255,7 @@ export class Subscription {
+         return
+ 
+       case "completed":
+-        this.clearTool(part.callID)
++        this.closeToolCall(sessionId, part)
+         await this.input.connection.sessionUpdate({
+           sessionId,
+           update: {
+@@ -261,7 +271,7 @@ export class Subscription {
+         return
+ 
+       case "error":
+-        this.clearTool(part.callID)
++        this.closeToolCall(sessionId, part)
+         await this.input.connection.sessionUpdate({
+           sessionId,
+           update: {
+@@ -281,9 +291,19 @@ export class Subscription {
+   private async runningTool(sessionId: string, part: ToolPart, cwd: string) {
+     if (part.state.status !== "running") return
+ 
+-    const output = part.tool === "bash" ? shellOutputSnapshot(part.state) : undefined
+-    if (output !== undefined) {
+-      if (this.shellSnapshots.get(part.callID) === output) {
++    const isShell = part.tool === "bash"
 +    const key = this.callKey(sessionId, part.callID)
-+    if (part.tool !== ShellID.ToolID) {
++    const marker = this.shellSnapshots.get(key)
++    const progressVersion = this.shellProgressVersion(part)
++    const output = isShell ? shellOutputSnapshot(part.state) : undefined
++    if (isShell) {
++      // live 与 durable 可独立到达；只接受更高 running version，避免旧 checkpoint 回退展示。
++      // running 用 version 排序，terminal 则无条件支配，二者不能共享数值哨兵语义。
++      if (marker && (marker.terminal || progressVersion <= marker.version)) return
++      const hash = output === undefined ? undefined : Hash.fast(output)
++      this.shellSnapshots.set(key, { hash, version: progressVersion })
++      // 接受新版本后 hash 未变：发 duplicate 帧，不发重复 content。
++      if (output !== undefined && marker?.hash === hash) {
+         await this.input.connection.sessionUpdate({
+           sessionId,
+           update: {
+@@ -298,7 +318,6 @@ export class Subscription {
+         })
+         return
+       }
+-      this.shellSnapshots.set(part.callID, output)
+     }
+ 
+     await this.input.connection.sessionUpdate({
+@@ -317,8 +336,9 @@ export class Subscription {
+   }
+ 
+   private async toolStart(sessionId: string, part: ToolPart, cwd: string) {
+-    if (this.toolStarts.has(part.callID)) return
+-    this.toolStarts.add(part.callID)
++    const key = this.callKey(sessionId, part.callID)
++    if (this.toolStarts.has(key)) return
++    this.toolStarts.add(key)
+     await this.input.connection.sessionUpdate({
+       sessionId,
+       update: {
+@@ -333,9 +353,28 @@ export class Subscription {
+     })
+   }
+ 
+-  private clearTool(toolCallId: string) {
+-    this.toolStarts.delete(toolCallId)
+-    this.shellSnapshots.delete(toolCallId)
++  // completed/error 只清 toolStart；shell marker 转为 terminal，
++  // 压过任何迟到的独立 transport running 快照。
++  private closeToolCall(sessionId: string, part: ToolPart) {
++    this.toolStarts.delete(this.callKey(sessionId, part.callID))
++    const key = this.callKey(sessionId, part.callID)
++    if (part.tool !== "bash") {
 +      this.shellSnapshots.delete(key)
 +      return
 +    }
@@ -144,92 +183,1092 @@ index 665e3712be8ac0a3f49ba84ee38609f69b0d856f..1adbf8a2e41631680bf40a7a0869b220
 +    this.shellSnapshots.set(key, { version: 0, terminal: true })
 +  }
 +
-   private async processMessage(message: SessionMessageResponse) {
-     log.debug("process message", message)
-     if (message.info.role !== "assistant" && message.info.role !== "user") return
-@@ -794,11 +833,18 @@ export class Agent implements ACPAgent {
-         await this.toolStart(sessionId, part)
-         switch (part.state.status) {
-           case "pending":
--            this.shellSnapshots.delete(part.callID)
-+            this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
-             break
-           case "running":
-             const output = this.shellOutput(part)
-             const runningContent: ToolCallContent[] = []
-+            const key = this.callKey(sessionId, part.callID)
-+            const marker = this.shellSnapshots.get(key)
-+            const progressVersion = this.shellProgressVersion(part)
-+            if (part.tool === ShellID.ToolID && marker && (marker.terminal || progressVersion <= marker.version)) break
-+            if (part.tool === ShellID.ToolID) {
-+              this.shellSnapshots.set(key, { hash: output ? Hash.fast(output) : undefined, version: progressVersion })
-+            }
-             if (output) {
-               runningContent.push({
-                 type: "content",
-@@ -827,8 +873,8 @@ export class Agent implements ACPAgent {
-               })
-             break
-           case "completed":
--            this.toolStarts.delete(part.callID)
--            this.shellSnapshots.delete(part.callID)
-+            this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+            this.markShellTerminal(sessionId, part)
-             const kind = toToolKind(part.tool)
-             const content = completedToolContent(part, kind)
- 
-@@ -878,8 +924,8 @@ export class Agent implements ACPAgent {
-               })
-             break
-           case "error":
--            this.toolStarts.delete(part.callID)
--            this.shellSnapshots.delete(part.callID)
-+            this.toolStarts.delete(this.callKey(sessionId, part.callID))
-+            this.markShellTerminal(sessionId, part)
-             await this.connection
-               .sessionUpdate({
-                 sessionId,
-@@ -1041,9 +1087,19 @@ export class Agent implements ACPAgent {
-     return output
-   }
- 
 +  private callKey(sessionID: string, callID: string) {
 +    return `${sessionID}\0${callID}`
 +  }
 +
 +  private shellProgressVersion(part: ToolPart) {
 +    const raw = part.state.status === "running" ? part.state.metadata?.progressVersion : undefined
++    // 旧持久化 Part 允许缺失或非法 version；归一化为 0 才能兼容首次恢复且拒绝后续回退。
 +    return typeof raw === "number" && Number.isFinite(raw) && Number.isInteger(raw) && raw >= 0 ? raw : 0
+   }
+ }
+ 
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index b263e662b..e94ea46c8 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -6,7 +6,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { serviceUse } from "@opencode-ai/core/effect/service-use"
+ import { Context, Effect, Layer } from "effect"
+ import * as Stream from "effect/Stream"
+-import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
++import { APICallError, streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
+ import type { LLMEvent } from "@opencode-ai/llm"
+ import { LLMClient } from "@opencode-ai/llm/route"
+ import type { LLMClientService } from "@opencode-ai/llm/route"
+@@ -83,13 +83,14 @@ const live: Layer.Layer<
+     const flags = yield* RuntimeFlags.Service
+ 
+     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
++      // 这些合法标识没有 schema 长度上限；在 observability owner 限制 bytes，避免 prefix 绕过整行预算。
+       yield* Effect.logInfo("stream", {
+-        providerID: input.model.providerID,
+-        modelID: input.model.id,
+-        "session.id": input.sessionID,
++        providerID: utf8Prefix(input.model.providerID, 128),
++        modelID: utf8Prefix(input.model.id, 256),
++        "session.id": utf8Prefix(input.sessionID, 128),
+         small: (input.small ?? false).toString(),
+-        agent: input.agent.name,
+-        mode: input.agent.mode,
++        agent: utf8Prefix(input.agent.name, 128),
++        mode: utf8Prefix(input.agent.mode, 32),
+       })
+ 
+       const [language, cfg, item, info] = yield* Effect.all(
+@@ -287,7 +288,7 @@ const live: Layer.Layer<
+       return {
+         type: "ai-sdk" as const,
+         result: streamText({
+-          onError(error) {
++          onError(event) {
+             bridge.fork(
+               Effect.logError("stream error", {
+                 providerID: input.model.providerID,
+@@ -296,7 +297,7 @@ const live: Layer.Layer<
+                 small: (input.small ?? false).toString(),
+                 agent: input.agent.name,
+                 mode: input.agent.mode,
+-                error,
++                error: streamErrorSummary(event.error),
+               }),
+             )
+           },
+@@ -398,6 +399,27 @@ const live: Layer.Layer<
+ 
+ export const hasToolCalls = LLMRequestPrep.hasToolCalls
+ 
++export function streamErrorSummary(error: unknown) {
++  // provider-controlled message/URL/body/cause 都不得落盘；原始 error 仍由 fullStream 交给 processor。
++  if (!APICallError.isInstance(error)) return { name: "UnknownError", message: "Provider stream failed" }
++  return {
++    name: "APICallError",
++    message: "Provider API call failed",
++    statusCode: error.statusCode,
++    isRetryable: error.isRetryable,
++    responseBytes: error.responseBody === undefined ? undefined : Buffer.byteLength(error.responseBody, "utf8"),
 +  }
++}
 +
-   private async toolStart(sessionId: string, part: ToolPart) {
--    if (this.toolStarts.has(part.callID)) return
--    this.toolStarts.add(part.callID)
-+    const key = this.callKey(sessionId, part.callID)
-+    if (this.toolStarts.has(key)) return
-+    this.toolStarts.add(key)
-     await this.connection
-       .sessionUpdate({
-         sessionId,
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 4e3cf3cd3c9cd32080fcee4cbdad1fe26035c6ec..1e951ab6c3d8b73d9001bd5f050bb138121eea54 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -158,10 +158,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     let pendingPartDeltas: EventMessagePartDelta[] = []
++function utf8Prefix(value: string, bytes: number) {
++  const buffer = Buffer.from(value)
++  if (buffer.length <= bytes) return value
++  return buffer
++    .subarray(0, bytes)
++    .toString("utf8")
++    .replace(/\uFFFD+$/, "")
++}
++
+ export const node = LayerNode.make({
+   service: Service,
+   layer: live,
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 46fd93fa2..03505e6d3 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -109,6 +109,8 @@ export const Event = {
+   Removed: SessionV1.Event.MessageRemoved,
+   PartUpdated: SessionV1.Event.PartUpdated,
+   PartDelta: SessionV1.Event.PartDelta,
++  // 进度快照与 PartDelta 同为纯广播事件，不参与持久化。
++  PartProgress: SessionV1.Event.PartProgress,
+   PartRemoved: SessionV1.Event.PartRemoved,
+ }
+ 
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 8c51b7a8a..54fa58bea 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -65,6 +65,7 @@ export interface Handle {
+   readonly updateToolCall: (
+     toolCallID: string,
+     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
++    delivery?: "durable" | "ephemeral",
+   ) => Effect.Effect<SessionV1.ToolPart | undefined>
+   readonly completeToolCall: (
+     toolCallID: string,
+@@ -273,9 +274,16 @@ const layer = Layer.effect(
+       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
+         toolCallID: string,
+         update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
++        delivery: "durable" | "ephemeral" = "durable",
+       ) {
+         const match = yield* readToolCall(toolCallID)
+         if (!match) return undefined
++        // ephemeral 进度只广播不落盘，避免高频工具输出把 PartUpdated 逐 tick 刷进 SQLite。
++        if (delivery === "ephemeral") {
++          const part = update(match.part)
++          yield* session.publishPartProgress(part)
++          return part
++        }
+         const part = yield* session.updatePart(update(match.part))
+         ctx.toolcalls[toolCallID] = {
+           ...match.call,
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 3af26d96b..24c2f30df 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -35,6 +35,7 @@ import { SessionSummary } from "./summary"
+ import { NamedError } from "@opencode-ai/core/util/error"
+ import { SessionProcessor } from "./processor"
+ import { Tool } from "@/tool/tool"
++import { ToolProgress } from "@/tool/progress"
+ import { Permission } from "@/permission"
+ import { SessionStatus } from "./status"
+ import { LLM } from "./llm"
+@@ -632,13 +633,25 @@ const layer = Layer.effect(
+           callID: part.callID,
+           extra: { bypassAgentCheck: true, promptOps },
+           messages: msgs,
+-          metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
++          metadata: (val: {
++            title?: string
++            metadata?: Record<string, any>
++            delivery?: "durable" | "ephemeral"
++          }) =>
+             Effect.gen(function* () {
+-              part = yield* sessions.updatePart({
++              // delivery 是传输指令不是 ToolState 字段；混入会让进度快照污染持久化 metadata。
++              const { delivery, ...rest } = val
++              const next = {
+                 ...part,
+                 type: "tool",
+-                state: { ...part.state, ...val },
+-              } satisfies SessionV1.ToolPart)
++                state: { ...part.state, ...rest },
++              } satisfies SessionV1.ToolPart
++              // ephemeral 进度只广播不落盘；durable（含 title/终态）照旧走 updatePart。
++              if (delivery === "ephemeral") {
++                yield* sessions.publishPartProgress(next)
++                return
++              }
++              part = yield* sessions.updatePart(next)
+             }),
+           ask: (req: any) =>
+             permission
+@@ -830,6 +843,8 @@ const layer = Layer.effect(
+                 status: "running",
+                 time: { start: started },
+                 input: { command: input.command },
++                // direct shell 与 AI ShellTool 使用同一 legacy-compatible version 基线。
++                metadata: { output: "", progressVersion: 0 },
+               },
+             }
+             yield* sessions.updatePart(part)
+@@ -891,13 +906,31 @@ const layer = Layer.effect(
+                 forceKillAfter: "3 seconds",
+               })
+               const handle = yield* spawner.spawn(cmd)
++              // coordinator 与 child stream 共用这个 scoped lifetime；scope close 会先
++              // flush trailing running snapshot，外层 finish 随后才提交 terminal Part。
++              const progress = yield* ToolProgress.make({
++                live: (metadata) => {
++                  if (part.state.status !== "running") return Effect.void
++                  return sessions.publishPartProgress({
++                    ...part,
++                    state: { ...part.state, metadata },
++                  })
++                },
++                durable: (metadata) => {
++                  if (part.state.status !== "running") return Effect.void
++                  return sessions.updatePart({
++                    ...part,
++                    state: { ...part.state, metadata },
++                  }).pipe(Effect.asVoid)
++                },
++              })
+               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
+                 Effect.gen(function* () {
+                   output += chunk
+-                  if (part.state.status === "running") {
+-                    part.state.metadata = { output }
+-                    yield* sessions.updatePart(part)
+-                  }
++                  if (part.state.status !== "running") return
++                  // direct shell 的 snapshot 是完整 raw 累计输出；coordinator 只负责
++                  // cadence/version，不解释 TerminalDisplay 或改变最终 output。
++                  yield* progress.update({ output })
+                 }),
+               )
+               yield* handle.exitCode
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 95ed2df22..0b79d30e8 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -458,6 +458,7 @@ export interface Interface {
+     partID: PartID
+   }) => Effect.Effect<SessionV1.Part | undefined>
+   readonly updatePart: <T extends SessionV1.Part>(part: T) => Effect.Effect<T>
++  readonly publishPartProgress: (part: SessionV1.Part) => Effect.Effect<void>
+   readonly updatePartDelta: (input: {
+     sessionID: SessionID
+     messageID: MessageID
+@@ -649,6 +650,17 @@ const layer: Layer.Layer<
+         return part
+       }).pipe(Effect.withSpan("Session.updatePart"))
+ 
++    // 进度快照只广播不落盘：PartProgress 事件未注册 durable manifest，
++    // 发布端借此把工具输出推进的磁盘写入从每次 tick 降频到 1s 一写。
++    const publishPartProgress = (part: SessionV1.Part): Effect.Effect<void> =>
++      Effect.gen(function* () {
++        yield* events.publish(SessionV1.Event.PartProgress, {
++          sessionID: part.sessionID,
++          part: structuredClone(part),
++          time: Date.now(),
++        })
++      }).pipe(Effect.withSpan("Session.publishPartProgress"))
++
+     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
+       const row = yield* db
+         .select()
+@@ -935,6 +947,7 @@ const layer: Layer.Layer<
+       removeMessage,
+       removePart,
+       updatePart,
++      publishPartProgress,
+       getPart,
+       updatePartDelta,
+       findMessage,
+diff --git a/packages/opencode/src/tool/progress.ts b/packages/opencode/src/tool/progress.ts
+new file mode 100644
+index 000000000..4635c8d24
+--- /dev/null
++++ b/packages/opencode/src/tool/progress.ts
+@@ -0,0 +1,104 @@
++import { Clock, Effect, Fiber, Queue, Scope } from "effect"
++
++const LIVE_INTERVAL_MS = 50
++const DURABLE_INTERVAL_MS = 1_000
++
++type Versioned<M extends Record<string, unknown>> = M & { progressVersion: number }
++
++export type Interface<M extends Record<string, unknown>> = {
++  update(metadata: M): Effect.Effect<void>
++  close(): Effect.Effect<void>
++}
++
++export function make<M extends Record<string, unknown>>(input: {
++  live(metadata: Versioned<M>): Effect.Effect<void>
++  durable(metadata: Versioned<M>): Effect.Effect<void>
++}): Effect.Effect<Interface<M>, never, Scope.Scope> {
++  return Effect.gen(function* () {
++    let latest: Versioned<M> | undefined
++    let version = 0
++    let closed = false
++    // 两个 delivery state 只拥有 cadence marker；snapshot 与 progressVersion 仍由 latest 唯一持有，
++    // 因此 durable I/O 可以独立等待，而不会复制 producer 状态算法或阻塞 live worker。
++    const live = {
++      wake: yield* Queue.sliding<void>(1),
++      interval: LIVE_INTERVAL_MS,
++      deliver: input.live,
++      version: 0,
++      last: 0,
++    }
++    const durable = {
++      wake: yield* Queue.sliding<void>(1),
++      interval: DURABLE_INTERVAL_MS,
++      deliver: input.durable,
++      version: 0,
++      last: 0,
++    }
++    const start = (delivery: typeof live) =>
++      Effect.forever(
++        // sliding queue 只表示“有新版本”；真正发送前重读 latest，慢 worker 不会补发中间 chunk。
++        // last 记录 delivery 开始时刻，使耗时 adapter 不会缩短相邻 cadence 的最小间隔。
++        Queue.take(delivery.wake).pipe(
++          Effect.andThen(
++            Effect.gen(function* () {
++              while (true) {
++                const current = latest
++                if (!current || current.progressVersion <= delivery.version) return
++                const now = yield* Clock.currentTimeMillis
++                const delay = delivery.version === 0 ? 0 : delivery.last + delivery.interval - now
++                if (delay > 0) yield* Effect.sleep(delay)
++                yield* Effect.gen(function* () {
++                  const next = latest
++                  if (!next || next.progressVersion <= delivery.version) return
++                  const time = yield* Clock.currentTimeMillis
++                  if (delivery.version > 0 && time - delivery.last < delivery.interval) return
++                  yield* delivery.deliver(next)
++                  // adapter 返回才确认 version；不可中断区防止 close 重复已提交的 durable write。
++                  delivery.version = next.progressVersion
++                  delivery.last = time
++                }).pipe(Effect.uninterruptible)
++              }
++            }),
++          ),
++        ),
++      ).pipe(Effect.forkScoped)
++    const liveWorker = yield* start(live)
++    const durableWorker = yield* start(durable)
++    const flush = (delivery: typeof live) =>
++      Effect.gen(function* () {
++        // close 只补尚未确认的 latest；worker 已停止，所以 flush 后不会再出现旧 running event。
++        // live 与 durable 分别确认同一 version，不能用另一 channel 的 marker 跳过必要 recovery 写入。
++        const next = latest
++        if (!next || next.progressVersion <= delivery.version) return
++        yield* delivery.deliver(next)
++        delivery.version = next.progressVersion
++      }).pipe(Effect.uninterruptible)
++    const close = Effect.fnUntraced(function* () {
++      if (closed) return
++      closed = true
++      // 同时 interrupt 可避免先停 live 再等待慢 durable；两个确认区结束后才由 close flush，
++      // 所以返回以后不会再有 running snapshot 越过调用方写入的 terminal Part。
++      yield* Effect.forEach([liveWorker, durableWorker], Fiber.interrupt, { concurrency: "unbounded" }).pipe(
++        Effect.asVoid,
++      )
++      yield* flush(live)
++      yield* flush(durable)
++      yield* Effect.forEach([live.wake, durable.wake], Queue.shutdown, { concurrency: "unbounded" }).pipe(Effect.asVoid)
++    })
++    // Scope interruption、正常完成、abort 与 timeout 都执行同一幂等 close；调用方
++    // 可以提前 close，但 scope finalizer 仍安全地兜住异常退出。
++    yield* Effect.addFinalizer(close)
++    return {
++      update: Effect.fnUntraced(function* (metadata) {
++        if (closed) return
++        version++
++        latest = { ...metadata, progressVersion: version }
++        yield* Queue.offer(live.wake, undefined).pipe(Effect.asVoid)
++        yield* Queue.offer(durable.wake, undefined).pipe(Effect.asVoid)
++      }),
++      close,
++    }
++  })
++}
++
++export * as ToolProgress from "./progress"
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index f8daad033..cd9eb40f0 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -2,6 +2,7 @@ import { Effect, Fiber, Stream } from "effect"
+ import os from "os"
+ import { createWriteStream } from "node:fs"
+ import * as Tool from "./tool"
++import { ToolProgress } from "./progress"
+ import path from "path"
+ import { containsPath, type InstanceContext } from "../project/instance-context"
+ import { InstanceState } from "@/effect/instance-state"
+@@ -1160,29 +1161,25 @@ export const ShellTool = Tool.define(
+       const hiddenDiag = new BashDiagnosticCollector()
+       const started = Date.now()
+ 
++      // version 0 是新 producer initial 与旧持久化 running Part 的共同基线。
+       yield* ctx.metadata({
+         metadata: {
+           output: "",
++          progressVersion: 0,
+         },
+       })
+ 
++      let lastVisible = ""
+       const code: number | null = yield* Effect.scoped(
+         Effect.gen(function* () {
+-          yield* Effect.addFinalizer(closeSink)
+-          const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
+-
+-          // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
+-          // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
+-          // #128：按 input.encoding 锁定或自动探测
+-          const decoder = createAutoTextDecoder({ encoding: input.encoding })
+-          // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
+-          display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
+-          displayed = false
+-          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
+-          // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
++          // initial v0 已在 scope 外 durable 提交；这里的 worker 只协调真实变化，
++          // scope 结束时必须完成 trailing flush 后才能返回 exit code 给 terminal owner。
++          const progress = yield* ToolProgress.make({
++            live: (metadata) => ctx.metadata({ metadata, delivery: "ephemeral" }),
++            durable: (metadata) => ctx.metadata({ metadata, delivery: "durable" }),
++          })
+           const onChunk = (chunk: string) => {
+             if (!chunk) return Effect.void
+-            // #293：诊断只收集被窗口丢弃的 chunk；可见输出不再进入摘录来源
+             // #215：display.push 返回终端屏幕快照，preview 仅做最终长度封顶，CR 覆盖与清行已由渲染器吸收
+             const visible = preview(display.push(chunk))
+             displayed = true
+@@ -1199,48 +1196,48 @@ export const ShellTool = Tool.define(
+               used -= item.size
+               cut = true
+             }
+-
+-            if (file) {
+-              sink?.write(chunk)
+-            } else {
+-              full += chunk
+-              if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
+-                return trunc.write(full).pipe(
+-                  Effect.andThen((next) =>
+-                    Effect.sync(() => {
+-                      file = next
+-                      cut = true
+-                      sink = createWriteStream(next, { flags: "a" })
+-                      full = ""
+-                    }),
+-                  ),
+-                  Effect.andThen(
+-                    ctx.metadata({
+-                      metadata: {
+-                        // `metadata.output` is the default live UI surface. Keep it
+-                        // as a terminal display snapshot so CR progress and clear-line
+-                        // redraws do not leak control bytes into TUI/OpenTUI, while the
+-                        // raw chunks below still feed truncation and the model output.
+-                        output: visible,
+-                      },
+-                    }),
++            const spill = file
++              ? Effect.sync(() => sink?.write(chunk))
++              : Effect.sync(() => {
++                  full += chunk
++                  return Buffer.byteLength(full, "utf-8") > limits.maxBytes
++                }).pipe(
++                  Effect.andThen((overflow) =>
++                    overflow
++                      ? trunc.write(full).pipe(
++                          Effect.andThen((next) =>
++                            Effect.sync(() => {
++                              file = next
++                              cut = true
++                              sink = createWriteStream(next, { flags: "a" })
++                              full = ""
++                            }),
++                          ),
++                        )
++                      : Effect.void,
+                   ),
+                 )
+-              }
+-            }
+-
+-            // #215：每个 chunk 都发出流式显示快照作为默认 live UI，而非只在完成时才更新
+-            return ctx.metadata({
+-              metadata: {
+-                // Same invariant as the truncated branch above: metadata is the
+-                // default display channel, not the faithful model-return channel. An
+-                // empty terminal screen after a clear-line/clear-screen sequence is a
+-                // valid display state, so never fall back to the raw chunk preview here.
+-                output: visible,
+-              },
+-            })
++            if (visible === lastVisible) return spill
++            lastVisible = visible
++            // metadata 是 replace 型终端快照；raw chunk 仍走原有内存/截断路径，
++            // 所以 latest-wins 只减少 UI/SQLite 更新，不会丢失模型可见字节。
++            return spill.pipe(
++              Effect.andThen(progress.update({ output: visible })),
++            )
+           }
+ 
++          yield* Effect.addFinalizer(closeSink)
++          const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
++
++          // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
++          // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
++          // #128：按 input.encoding 锁定或自动探测
++          const decoder = createAutoTextDecoder({ encoding: input.encoding })
++          // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
++          display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
++          displayed = false
++          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
++
+           // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成
+           const output = yield* Effect.forkScoped(
+             // #126：end 时 flush decoder 尾部不完整码点
+diff --git a/packages/opencode/src/tool/tool.ts b/packages/opencode/src/tool/tool.ts
+index c8bc6bf74..3f8f4d672 100644
+--- a/packages/opencode/src/tool/tool.ts
++++ b/packages/opencode/src/tool/tool.ts
+@@ -43,7 +43,7 @@ export type Context<M extends Metadata = Metadata> = {
+   callID?: string
+   extra?: { [key: string]: unknown }
+   messages: SessionV1.WithParts[]
+-  metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
++  metadata(input: { title?: string; metadata?: M; delivery?: "durable" | "ephemeral" }): Effect.Effect<void>
+   ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
+ }
+ 
+diff --git a/packages/opencode/test/acp/event.test.ts b/packages/opencode/test/acp/event.test.ts
+index 8271b2826..4680ff686 100644
+--- a/packages/opencode/test/acp/event.test.ts
++++ b/packages/opencode/test/acp/event.test.ts
+@@ -167,6 +167,24 @@ function toolUpdated(part: ToolPart): Event {
+   }
+ }
+ 
++// 只替换 event kind：progress 与 PartUpdated 共享完整 ToolPart wire shape。
++function progressEvent(part: ToolPart): Event {
++  return {
++    id: `evt_progress_${part.sessionID}_${part.messageID}_${part.id}`,
++    type: "message.part.progress",
++    properties: {
++      sessionID: part.sessionID,
++      time: Date.now(),
++      part,
++    },
++  } as unknown as Event
++}
++
++function versionedRunning(sessionID: string, callID: string, output: string, progressVersion: number): ToolPart {
++  const base = runningTool(sessionID, callID, output)
++  return { ...base, state: { ...base.state, metadata: { output, progressVersion } } } satisfies ToolPart
++}
++
+ function assistantMessage(sessionID: string, messageID: string, partID: string, type: DeltaPartType) {
+   return {
+     info: {
+@@ -576,7 +594,8 @@ describe("acp event routing", () => {
+     await Effect.runPromise(harness.session.create({ id: "ses_replay", cwd: "/workspace" }))
+ 
+     await harness.subscription.replayMessage(assistantToolMessage(runningTool("ses_replay", "call_replay", "first")))
+-    await harness.subscription.handle(toolUpdated(runningTool("ses_replay", "call_replay", "second")))
++    // replay 的 legacy v0 之后，live 更新必须带更高 version 才能穿过 version 合同。
++    await harness.subscription.handle(toolUpdated(versionedRunning("ses_replay", "call_replay", "second", 1)))
+ 
+     expect(toolUpdates(harness.updates).filter((item) => item.update.sessionUpdate === "tool_call")).toHaveLength(1)
+     expect(toolUpdates(harness.updates).map((item) => item.update.sessionUpdate)).toEqual([
+@@ -586,23 +605,27 @@ describe("acp event routing", () => {
+     ])
+   })
+ 
+-  it("dedupes shell output snapshots while still sending status-only running updates", async () => {
++  it("rejects duplicate shell snapshots under the monotonic version contract", async () => {
+     const harness = createHarness()
+     await Effect.runPromise(harness.session.create({ id: "ses_shell", cwd: "/workspace" }))
+ 
++    // 无版本的旧持久化 running Part 归一化为 v0；相同 version 的重复 snapshot
++    // 即使内容相同也被拒绝，避免迟到的独立 transport 重发已有 checkpoint。
+     await harness.subscription.handle(toolUpdated(runningTool("ses_shell", "call_shell", "same")))
+     await harness.subscription.handle(toolUpdated(runningTool("ses_shell", "call_shell", "same")))
+ 
+     const updates = toolUpdates(harness.updates)
+-    expect(updates).toHaveLength(3)
++    expect(updates).toHaveLength(2)
+     expect(updates[1]?.update).toMatchObject({
+       sessionUpdate: "tool_call_update",
+       content: [{ type: "content", content: { type: "text", text: "same" } }],
+     })
+-    expect(updates[2]?.update).toMatchObject({ sessionUpdate: "tool_call_update", status: "in_progress" })
+-    expect("content" in updates[2]!.update).toBe(false)
+   })
+ 
++  // 完整 terminal-lifecycle 观察（terminal 后 late progress 不重开 tool_call）依赖
++  // toolStart 的 terminal 守卫，属于 #0445 语义；0443 阶段 terminal marker 只在
++  // runningTool 内拒绝 stale snapshot。
++
+   it("clears shell snapshot marker when a tool returns to pending", async () => {
+     const harness = createHarness()
+     await Effect.runPromise(harness.session.create({ id: "ses_pending", cwd: "/workspace" }))
+diff --git a/packages/opencode/test/event-manifest.test.ts b/packages/opencode/test/event-manifest.test.ts
+index da0f80cee..6efc21e90 100644
+--- a/packages/opencode/test/event-manifest.test.ts
++++ b/packages/opencode/test/event-manifest.test.ts
+@@ -9,7 +9,8 @@ describe("public event manifest", () => {
+     expect(EventManifest.Definitions).toBe(SchemaEventManifest.Definitions)
+     expect(EventManifest.Latest).toBe(SchemaEventManifest.Latest)
+     expect(EventManifest.Durable).toBe(SchemaEventManifest.Durable)
+-    expect(EventManifest.Latest.size).toBe(88)
++        // PartProgress 注册为 V1-only 纯广播事件后 manifest 集合 +1。
++    expect(EventManifest.Latest.size).toBe(95)
+     expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
+     expect(EventManifest.Latest.get("todo.updated")).toBe(Todo.Event.Updated)
+     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+index 6fc2dfda6..d32f6d31c 100644
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -3,12 +3,12 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import path from "path"
+-import { tool, type ModelMessage } from "ai"
++import { APICallError, tool, type ModelMessage } from "ai"
+ import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+ import { InstanceRef } from "../../src/effect/instance-ref"
+ import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+ import z from "zod"
+-import { LLM } from "../../src/session/llm"
++import { LLM, streamErrorSummary } from "../../src/session/llm"
+ import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
+ import { Provider } from "@/provider/provider"
+ import { _testFetchTimingLog, progressDeadline } from "@/provider/provider"
+@@ -948,6 +948,107 @@ describe("session.llm.stream", () => {
+     },
+   )
+ 
++  it.instance(
++    "bounds stream error logs without changing the error event",
++    () =>
++      Effect.gen(function* () {
++        const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
++        const request = waitRequest(
++          "/chat/completions",
++          new Response(JSON.stringify({ error: { message: requestMarker + "R".repeat(12_000) } }), {
++            status: 500,
++            headers: { "Content-Type": "application/json" },
++          }),
++        )
++
++        const resolved = yield* Provider.use.getModel(
++          ProviderV2.ID.make("bounded-error-compatible"),
++          ModelV2.ID.make("gpt-test"),
++        )
++        const sessionID = SessionID.make("session-bounded-stream-error")
++        const agent = {
++          name: "test",
++          mode: "primary",
++          options: {},
++          permission: [{ permission: "*", pattern: "*", action: "allow" }],
++        } satisfies Agent.Info
++
++        // runCollect 正常返回证明底层 Effect 没有被日志 callback 改成 failure；
++        // 日志丢弃敏感请求，但 error event 保留原始 error，避免越权改变 processor 的分类输入。
++        const events = yield* LLM.Service.use((svc) =>
++          svc
++            .stream({
++              user: {
++                id: MessageID.make("msg-bounded-stream-error"),
++                sessionID,
++                role: "user",
++                time: { created: Date.now() },
++                agent: agent.name,
++                model: {
++                  providerID: ProviderV2.ID.make("bounded-error-compatible"),
++                  modelID: resolved.id,
++                },
++              },
++              sessionID,
++              model: resolved,
++              agent,
++              system: ["You are a helpful assistant."],
++              messages: [{ role: "user", content: requestMarker + "X".repeat(64_000) }],
++              tools: {},
++            })
++            .pipe(Stream.runCollect, Effect.map((chunk) => [...chunk])),
++        )
++        const event = events.find((item) => item.type === "provider-error")
++        if (!event || event.type !== "provider-error") throw new Error("Provider error event was not preserved")
++        expect(JSON.stringify(event)).toContain("requestBodyValues")
++        expect(JSON.stringify(event)).toContain(requestMarker)
++
++        yield* Effect.promise(() => request)
++
++        // 日志侧净化合同：进入 Effect.logError 的唯一 error 形态是 streamErrorSummary；
++        // provider-controlled message/URL/body 都不得出现在返回结构里，
++        // responseBytes 只暴露长度不暴露内容。
++        const raw = new APICallError({
++          message: requestMarker,
++          url: "http://bounded.test/v1/chat",
++          requestBodyValues: { body: requestMarker },
++          statusCode: 500,
++          isRetryable: false,
++          // 当前 ai 包版本的 APICallError 构造不含 isRetryableByUsageLimit，省略。
++        })
++        const summary = streamErrorSummary(raw)
++        expect(summary.name).toBe("APICallError")
++        expect(JSON.stringify(summary)).not.toContain(requestMarker)
++        expect(JSON.stringify(summary)).not.toContain("http://bounded.test")
++        expect(summary.statusCode).toBe(500)
++        expect(summary.isRetryable).toBe(false)
++        expect(summary.responseBytes).toBeGreaterThan(12_000)
++        expect(streamErrorSummary(new Error("plain")).name).toBe("UnknownError")
++      }),
++    {
++      config: () => ({
++        enabled_providers: ["bounded-error-compatible"],
++        provider: {
++          "bounded-error-compatible": {
++            npm: "@ai-sdk/openai-compatible",
++            name: "Bounded Error Provider",
++            options: {
++              apiKey: "test-key",
++              baseURL: `${state.server!.url.origin}/v1`,
++            },
++            models: {
++              "gpt-test": {
++                name: "GPT Test",
++                limit: { context: 400000, input: 272000, output: 128000 },
++                modalities: { input: ["text"], output: ["text"] },
++              },
++            },
++          },
++        },
++      }),
++    },
++  )
++
+   // [local-smark] 行为级验证：用户未配置 timeout / chunkTimeout 时，provider 必须回退到默认值——
+   // 整请求绝对超时 600000ms（10 分钟）、chunk 空闲超时 180000ms（3 分钟）。
+   // 通过 fetch.start 诊断事件里的 timeoutMs / chunkTimeoutMs 字段断言默认值，无需真正等待超时；
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 714861b5a..e0cc78e4b 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -5,6 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { SessionProjector } from "@opencode-ai/core/session/projector"
+ import { eq } from "drizzle-orm"
+ import { EventV2Bridge } from "@/event-v2-bridge"
++import { GlobalBus } from "@/bus/global"
+ import { expect } from "bun:test"
+ import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+ import path from "path"
+@@ -3005,6 +3006,55 @@ it.instance("shell rejects with BusyError when loop running", () =>
+   }),
+ )
+ 
++it.instance(
++  "coalesces direct shell progress without changing final output",
++  () =>
++    Effect.gen(function* () {
++      const { prompt, run, chat } = yield* boot()
++      const durable: SessionV1.ToolPart[] = []
++      const live: SessionV1.ToolPart[] = []
++      // GlobalBus 是 bridge listen 的下游同步总线；用纯回调观察，避免把订阅
++      // fiber 的环境需求泛化成 unknown 而破坏测试体类型。
++      const onEvent = (evt: { payload?: { type: string; properties?: { part?: SessionV1.Part } } }) => {
++        const p = evt.payload
++        if (!p || (p.type !== "message.part.updated" && p.type !== "message.part.progress")) return
++        const part = p.properties?.part
++        if (part?.type !== "tool" || part.sessionID !== chat.id || part.tool !== "bash") return
++        if (p.type === "message.part.updated") durable.push(structuredClone(part))
++        else live.push(structuredClone(part))
++      }
++      GlobalBus.on("event", onEvent)
++      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", onEvent)))
++
++      // 每次写入之间的真实 10ms 间隔让 child stream 产生持续 progress；测试只观察
++      // 公开 Session 事件，不依赖 chunk 数、timer 或 coordinator 私有状态。
++      const result = yield* prompt.shell({
++        sessionID: chat.id,
++        agent: "build",
++        command:
++          "bun -e \"for(let i=1;i<=40;i++){process.stdout.write('DIRECT_PROGRESS_'+i+'\r');await Bun.sleep(10)}\"",
++      })
++      yield* pollWithTimeout(
++        Effect.sync(() => durable.some((part) => part.state.status === "completed") || undefined),
++        "timed out waiting for direct shell terminal event",
++      )
++
++      // 40 个 CR 帧短于 durable 窗口，能在不改变 raw output 的前提下覆盖 leading/trailing budget。
++      // 只有 running Part 属于重连 checkpoint 预算；completed 是权威终态，不能为了满足上限而删除。
++      const running = durable.filter((part) => part.state.status === "running")
++      const tool = completedTool(result.parts)
++      expect(running.length).toBeLessThanOrEqual(3)
++      expect(running[0]?.state.status === "running" ? running[0].state.metadata?.progressVersion : undefined).toBe(0)
++      expect(live.some((part) => part.state.status === "running")).toBe(true)
++      if (tool) {
++        expect(tool.state.output).toContain("DIRECT_PROGRESS_1")
++        expect(tool.state.output).toContain("DIRECT_PROGRESS_40")
++        yield* run.assertNotBusy(chat.id)
++      }
++    }),
++  30_000,
++)
++
+ unixNoLLMServer(
+   "shell captures stdout and stderr in completed tool output",
+   () =>
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 87dfa3ab6..381b7c609 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -2,7 +2,7 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+ import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src/util/output-notice"
+ import { describe, expect, test } from "bun:test"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+-import { Cause, Effect, Exit, Layer } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+ import type * as Scope from "effect/Scope"
+ import os from "os"
+ import path from "path"
+@@ -20,6 +20,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { Plugin } from "../../src/plugin"
+ import { testEffect } from "../lib/effect"
+ import { Tool } from "@/tool/tool"
++import { ToolProgress } from "@/tool/progress"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { InstanceStore } from "@/project/instance-store"
+ 
+@@ -235,6 +236,116 @@ describe("tool.shell", () => {
+     60_000,
+   )
+ 
++  it.live(
++    "coalesces shell progress without changing final output",
++    () =>
++      runIn(
++        projectRoot,
++        Effect.gen(function* () {
++          // JSON.stringify 传输让 CR 转义跨 shell 安全，避免 pwsh/bash 引号解析吃掉字面转义。
++          const script = `for (let i = 1; i <= 40; i++) { process.stdout.write('\rOPENCODE_DISK_WRITE_REPRO ' + i + '/40'); await Bun.sleep(10) }`
++          const command = `bun -e ${JSON.stringify(script)}`
++          // 该 literal 同时是 WAL feedback loop 的可识别输入和最终 output 的独立预期值。
++          // 生产实现不能通过截断或丢弃 CR 帧来伪造较低 durable 计数。
++          const updates: Array<{
++            delivery?: "durable" | "ephemeral"
++            metadata?: Record<string, unknown>
++          }> = []
++
++          // 这里观察真实 Tool Context delivery，而不是 coordinator 调用次数：缺省 delivery
++          // 本身就是 durable 合同，因此旧实现的每个 transport chunk 都会被准确计入。
++          const result = yield* run(
++            { command },
++            {
++              ...ctx,
++              metadata: (input) =>
++                Effect.sync(() => {
++                  updates.push(input)
++                }),
++            },
++          )
++          const durable = updates.filter((item) => item.delivery !== "ephemeral")
++
++          // 短命令允许 initial、leading 与必要 trailing 三个 running durable 快照；
++          // terminal result 不经过 metadata callback，不能混入该预算。
++          expect(durable.length).toBeLessThanOrEqual(3)
++          expect(updates.some((item) => item.delivery === "ephemeral")).toBe(true)
++          expect(durable[0]?.metadata?.progressVersion).toBe(0)
++          expect(result.metadata.output).toContain("OPENCODE_DISK_WRITE_REPRO 40/40")
++          expect(result.output).toContain("OPENCODE_DISK_WRITE_REPRO 40/40")
++        }),
++      ),
++    60_000,
++  )
++
++  it.live(
++    "does not repeat a durable version when close overlaps publication",
++    () =>
++      Effect.gen(function* () {
++        const first = yield* Deferred.make<void>()
++        const second = yield* Deferred.make<void>()
++        const release = yield* Deferred.make<void>()
++        const versions: number[] = []
++        const progress = yield* ToolProgress.make<{ output: string }>({
++          live: () => Effect.void,
++          durable: (metadata) =>
++            Effect.gen(function* () {
++              // 先记录版本再阻塞，模拟 SQLite 已提交但 publication 尚未返回的真实边界。
++              versions.push(metadata.progressVersion)
++              if (metadata.progressVersion === 1) yield* Deferred.succeed(first, undefined)
++              if (metadata.progressVersion !== 2) return
++              yield* Deferred.succeed(second, undefined)
++              yield* Deferred.await(release)
++            }),
++        })
++        yield* progress.update({ output: "a" })
++        yield* Deferred.await(first).pipe(Effect.timeout("2 seconds"))
++        yield* Effect.sleep("1100 millis")
++        yield* progress.update({ output: "ab" })
++        yield* Deferred.await(second).pipe(Effect.timeout("2 seconds"))
++        // close 必须与第二次 publication 重叠；短暂窗口只放大已证实的生命周期竞态。
++        const closing = yield* progress.close().pipe(Effect.forkScoped)
++        yield* Effect.sleep("20 millis")
++        yield* Deferred.succeed(release, undefined)
++        yield* Fiber.join(closing)
++        // 每个 version 对应一次 durable Part transaction，重复值就是额外磁盘写入。
++        expect(versions).toEqual([1, 2])
++      }),
++  )
++
++  it.live(
++    "keeps live progress moving while durable publication is delayed",
++    () =>
++      Effect.gen(function* () {
++        const durableStarted = yield* Deferred.make<void>()
++        const liveTwo = yield* Deferred.make<void>()
++        const release = yield* Deferred.make<void>()
++        const progress = yield* ToolProgress.make<{ output: string }>({
++          live: (metadata) =>
++            metadata.progressVersion === 2 ? Deferred.succeed(liveTwo, undefined).pipe(Effect.asVoid) : Effect.void,
++          durable: (metadata) =>
++            metadata.progressVersion === 1
++              ? Deferred.succeed(durableStarted, undefined).pipe(Effect.andThen(Deferred.await(release)))
++              : Effect.void,
++        })
++
++        yield* progress.update({ output: "a" })
++        yield* Deferred.await(durableStarted).pipe(Effect.timeout("2 seconds"))
++        // 这里只推进真实 50ms cadence；durableStarted 才是 worker 已到达阻塞 seam 的 readiness。
++        yield* Effect.sleep("60 millis")
++        yield* progress.update({ output: "ab" })
++        yield* Deferred.await(liveTwo).pipe(
++          Effect.timeoutOrElse({
++            duration: "500 millis",
++            orElse: () => Effect.fail(new Error("live v2 waited for delayed durable publication")),
++          }),
++          // red 或 green 都先释放 adapter，避免失败测试把 scope finalizer 留在 blocked close。
++          Effect.ensuring(Deferred.succeed(release, undefined)),
++        )
++        yield* progress.close()
++      }),
++  )
++
+   // 回归：cmd() 从 spawn 的 shell 选项改为显式 -c 参数后，
+   // 必须验证含引号、管道的命令仍被 shell 正确解析。
+   // 仅在非 Windows 平台运行：tr 和单引号语义是 POSIX shell 专属。
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+index da42a9c1a..94f77bec8 100644
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -760,6 +760,17 @@ const events = {
+   }),
+ }
+ 
++// 进度快照走纯内存广播（不注册 durable manifest）：发布端按 1s 节流把
++// PartUpdated 的磁盘写入降频，UI 仍可通过 SSE 实时看到工具输出推进。
++export const PartProgress = define({
++  type: "message.part.progress",
++  schema: {
++    sessionID: SessionID,
++    part: Part,
++    time: NonNegativeInt,
++  },
++})
++
+ export const PartDelta = define({
+   type: "message.part.delta",
+   schema: {
+@@ -790,6 +801,7 @@ export const Error = define({
+ export const Event = {
+   ...events,
+   PartDelta,
++  PartProgress,
+   Diff,
+   Error,
+   Definitions: inventory(
+@@ -801,6 +813,7 @@ export const Event = {
+     events.PartUpdated,
+     events.PartRemoved,
+     PartDelta,
++    PartProgress,
+     Diff,
+     Error,
+   ),
+diff --git a/packages/schema/test/event-manifest.test.ts b/packages/schema/test/event-manifest.test.ts
+index 5694afdd3..9d1b24bcd 100644
+--- a/packages/schema/test/event-manifest.test.ts
++++ b/packages/schema/test/event-manifest.test.ts
+@@ -9,8 +9,8 @@ import { WorkspaceEvent } from "../src/workspace-event"
+ 
+ describe("public event manifest", () => {
+   test("owns the complete public event surface", () => {
+-    expect(EventManifest.ServerDefinitions.length).toBe(55)
+-    expect(EventManifest.Definitions.length).toBe(85)
++    expect(EventManifest.ServerDefinitions.length).toBe(60)
++    expect(EventManifest.Definitions.length).toBe(95)
+     expect(SessionV1.Event.Definitions).toEqual([
+       SessionV1.Event.Created,
+       SessionV1.Event.Updated,
+@@ -20,11 +20,12 @@ describe("public event manifest", () => {
+       SessionV1.Event.PartUpdated,
+       SessionV1.Event.PartRemoved,
+       SessionV1.Event.PartDelta,
++      SessionV1.Event.PartProgress,
+       SessionV1.Event.Diff,
+       SessionV1.Event.Error,
+     ])
+-    expect(EventManifest.Latest.size).toBe(85)
+-    expect(EventManifest.Durable.size).toBe(32)
++    expect(EventManifest.Latest.size).toBe(95)
++    expect(EventManifest.Durable.size).toBe(35)
+   })
+ 
+   test("uses canonical definitions for current public events", () => {
+@@ -42,10 +42,11 @@ describe("public event manifest", () => {
+     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
+     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
+     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
+-    expect(EventManifest.Definitions.slice(40, 43)).toEqual([
++    expect(EventManifest.Definitions.slice(42, 46)).toEqual([
+       SessionV1.Event.PartDelta,
++      SessionV1.Event.PartProgress,
+       SessionV1.Event.Diff,
+       SessionV1.Event.Error,
+     ])
+     expect(EventManifest.Durable.has("session.next.step.ended.1")).toBe(false)
+     expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+index 1df38ee00..6b4276348 100644
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -15,6 +15,7 @@ export type Event =
+   | EventMessageUpdated
+   | EventMessageRemoved
+   | EventMessagePartUpdated
++  | EventMessagePartProgress
+   | EventMessagePartRemoved
+   | EventSessionNextAgentSwitched
+   | EventSessionNextModelSwitched
+@@ -815,6 +816,15 @@ export type GlobalEvent = {
+           time: number
+         }
+       }
++    | {
++        id: string
++        type: "message.part.progress"
++        properties: {
++          sessionID: string
++          part: ToolPart
++          time: number
++        }
++      }
+     | {
+         id: string
+         type: "message.part.removed"
+@@ -6259,6 +6269,18 @@ export type EventMessagePartUpdated = {
+   }
+ }
+ 
++// 进度快照与 PartUpdated 同构，但由发布端 1s 节流且不落盘；
++// 消费端必须与 PartUpdated 共享同一 merge/terminal 规则。
++export type EventMessagePartProgress = {
++  id: string
++  type: "message.part.progress"
++  properties: {
++    sessionID: string
++    part: ToolPart
++    time: number
++  }
++}
++
+ export type EventMessagePartRemoved = {
+   id: string
+   type: "message.part.removed"
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index 168c5d6d5..094a87eb7 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -189,12 +189,10 @@ export const {
      let pendingPartDeltaTimer: Timer | undefined
+     // #237：stream timing apply/drop 诊断——与 SDK receive 阶段配对
      const loggedPartDeltaApplications = new Set<string>()
 -    // 缓冲因 part 尚未到达而被 drop 的 delta，按 partID 索引。
 -    // daemon 的 message.part.updated 是 fire-and-forget（void Effect.runPromise），
 -    // 而 message.part.delta 是 await（yield* bus.publish）。当 delta 先于
 -    // part.updated 到达时，store 中没有对应 part，delta 会被 drop。
+-    // delta 是 bus-only（不写 DB），被 drop 后永久丢失——子会话进入前
+-    // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
 +    // 缓冲因本地 part 尚未加载而被 drop 的 delta，按 partID 索引。
 +    // 进入已在 streaming 的 Session 或并发 HTTP sync 时，本地 store 可能尚无
 +    // 对应 part；delta 是 bus-only，若直接 drop 就无法从 SQLite replay。
-     // delta 是 bus-only（不写 DB），被 drop 后永久丢失——子会话进入前
-     // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
++    // 缓冲后在 part.updated 创建 part 时 replay。
      const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
-@@ -280,11 +279,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+ 
+     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
+@@ -320,12 +318,9 @@ export const {
        }
      }
  
@@ -238,13 +1277,14 @@ index 4e3cf3cd3c9cd32080fcee4cbdad1fe26035c6ec..1e951ab6c3d8b73d9001bd5f050bb138
 -    // Effect.runPromise），而 message.part.delta 通过 yield* await 发送。
 -    // 当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta 之后
 -    // 才到达时，或 session.sync 从 DB 读到 streaming 期间的空文本快照时，
+-    // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
 +    // 单调合并守卫：防止 pending 阶段或 HTTP sync 的短快照覆盖本地长流式文本。
 +    // 当 Session 首次加载、切换或 reconnect 时，HTTP snapshot 与 live BusEvent
 +    // 可以独立到达；不带 time.end 的短文本不能回退本地已拼接内容。
-     // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
      // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
      function mergeLivePart(existing: Part | undefined, next: Part) {
-@@ -305,8 +302,27 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       if (!existing) return next
+@@ -345,8 +340,27 @@ export const {
        }
        if (next.type === "tool") {
          if (existing.type !== "tool") return next
@@ -273,1195 +1313,76 @@ index 4e3cf3cd3c9cd32080fcee4cbdad1fe26035c6ec..1e951ab6c3d8b73d9001bd5f050bb138
          if (next.state.status !== "pending" || existing.state.status !== "pending") return next
          if (existing.state.raw.length <= next.state.raw.length) return next
          return { ...next, state: { ...next.state, raw: existing.state.raw } }
-@@ -729,7 +745,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -742,7 +756,10 @@ export const {
            }
            break
          }
 -        case "message.part.updated": {
 +        case "message.part.updated":
++        // progress 与 PartUpdated 共享同一 merge owner：终端支配与 bash version
++        // 排序在 mergeLivePart 内统一裁决，避免双通道各写各的。
 +        case "message.part.progress": {
+           // #98：隐藏 part 从 TUI store 删除
            const part = event.properties.part
            if ((part as Record<string, unknown>).hidden) {
-             const parts = store.part[part.messageID]
-diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
-index 52c44cbd6412772ae21a580278c3a7be7dc6343b..0282602429b09edd5b3d45e1dfc7a7cf6fa7a61b 100644
---- a/packages/opencode/src/session/llm.ts
-+++ b/packages/opencode/src/session/llm.ts
-@@ -2,7 +2,7 @@ import { Provider } from "@/provider/provider"
- import * as Log from "@opencode-ai/core/util/log"
- import { Context, Effect, Layer, Record } from "effect"
- import * as Stream from "effect/Stream"
--import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
-+import { APICallError, streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
- import { mergeDeep } from "remeda"
- import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
- import { ProviderTransform } from "@/provider/transform"
-@@ -79,16 +79,14 @@ const live: Layer.Layer<
-     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
-       const l = log
-         .clone()
--        .tag("providerID", input.model.providerID)
--        .tag("modelID", input.model.id)
--        .tag("session.id", input.sessionID)
-+        // 这些合法标识没有 schema 长度上限；在 observability owner 限制 bytes，避免 prefix 绕过整行预算。
-+        .tag("providerID", utf8Prefix(input.model.providerID, 128))
-+        .tag("modelID", utf8Prefix(input.model.id, 256))
-+        .tag("session.id", utf8Prefix(input.sessionID, 128))
-         .tag("small", (input.small ?? false).toString())
--        .tag("agent", input.agent.name)
--        .tag("mode", input.agent.mode)
--      l.info("stream", {
--        modelID: input.model.id,
--        providerID: input.model.providerID,
--      })
-+        .tag("agent", utf8Prefix(input.agent.name, 128))
-+        .tag("mode", utf8Prefix(input.agent.mode, 32))
-+      l.info("stream")
- 
-       const [language, cfg, item, info] = yield* Effect.all(
-         [
-@@ -357,18 +355,15 @@ const live: Layer.Layer<
-         : undefined
- 
-       return streamText({
--        onError(error) {
-+        onError(event) {
-           l.error("stream error", {
--            error,
-+            error: streamErrorSummary(event.error),
-           })
-         },
-         async experimental_repairToolCall(failed) {
-           const lower = failed.toolCall.toolName.toLowerCase()
-           if (lower !== failed.toolCall.toolName && sortedTools[lower]) {
--            l.info("repairing tool call", {
--              tool: failed.toolCall.toolName,
--              repaired: lower,
--            })
-+            l.info("repairing tool call")
-             return {
-               ...failed.toolCall,
-               toolName: lower,
-@@ -477,6 +472,27 @@ export const defaultLayer = Layer.suspend(() =>
-   ),
- )
- 
-+function streamErrorSummary(error: unknown) {
-+  // provider-controlled message/URL/body/cause 都不得落盘；原始 error 仍由 fullStream 交给 processor。
-+  if (!APICallError.isInstance(error)) return { name: "UnknownError", message: "Provider stream failed" }
-+  return {
-+    name: "APICallError",
-+    message: "Provider API call failed",
-+    statusCode: error.statusCode,
-+    isRetryable: error.isRetryable,
-+    responseBytes: error.responseBody === undefined ? undefined : Buffer.byteLength(error.responseBody, "utf8"),
-+  }
-+}
-+
-+function utf8Prefix(value: string, bytes: number) {
-+  const buffer = Buffer.from(value)
-+  if (buffer.length <= bytes) return value
-+  return buffer
-+    .subarray(0, bytes)
-+    .toString("utf8")
-+    .replace(/\uFFFD+$/, "")
-+}
-+
- function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
-   const disabled = Permission.disabled(
-     Object.keys(input.tools),
-diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 6e86abc50ee1b9ca168fc3de664aed2c563cebbc..478217a9298cb469a2adfdb00f9b4a3fb63b1405 100644
---- a/packages/opencode/src/session/message-v2.ts
-+++ b/packages/opencode/src/session/message-v2.ts
-@@ -639,6 +639,14 @@ const PartUpdatedEventSchema = Schema.Struct({
-   time: NonNegativeInt,
- })
- 
-+// live contract 只允许 ToolPart replace snapshot；放宽为 Part 会暗示 text/delta
-+// producer 也能绕过 SyncEvent，而这些 producer 没有版本或恢复语义。
-+const PartProgressEventSchema = Schema.Struct({
-+  sessionID: SessionID,
-+  part: ToolPart,
-+  time: NonNegativeInt,
-+})
-+
- const PartRemovedEventSchema = Schema.Struct({
-   sessionID: SessionID,
-   messageID: MessageID,
-@@ -664,6 +672,9 @@ export const Event = {
-     aggregate: "sessionID",
-     schema: PartUpdatedEventSchema,
-   }),
-+  // progress 是 replace 型 running Tool snapshot；它刻意不是 SyncEvent，
-+  // 只有 1 秒 durable checkpoint 才能进入 SQLite 和重连恢复路径。
-+  PartProgress: BusEvent.define("message.part.progress", PartProgressEventSchema),
-   PartDelta: BusEvent.define(
-     "message.part.delta",
-     Schema.Struct({
-diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 267bc5ecd64d59f68f4af73e86dcccec3b5b2dee..becdef946145fd69cf5dd60c8f47e7d0e8931fcd 100644
---- a/packages/opencode/src/session/processor.ts
-+++ b/packages/opencode/src/session/processor.ts
-@@ -63,6 +63,7 @@ export interface Handle {
-   readonly updateToolCall: (
-     toolCallID: string,
-     update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
-+    delivery?: "durable" | "ephemeral",
-   ) => Effect.Effect<MessageV2.ToolPart | undefined>
-   readonly completeToolCall: (
-     toolCallID: string,
-@@ -232,10 +233,16 @@ export const layer = Layer.effect(
-       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
-         toolCallID: string,
-         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
-+        delivery: "durable" | "ephemeral" = "durable",
-       ) {
-         const match = yield* readToolCall(toolCallID)
-         if (!match) return
--        const part = yield* session.updatePart(update(match.part))
-+        const next = update(match.part)
-+        // delivery 只选择同一 next snapshot 的传输合同，不能重新执行 updater；
-+        // 否则有副作用的 metadata merge 会在 live/durable 分支产生不同 Part。
-+        // 缺省 durable 保持所有既有 Tool 调用语义；只有显式 ephemeral 的
-+        // shell progress 绕过 SQLite，并且仍复用同一个 Part updater。
-+        const part = yield* delivery === "ephemeral" ? session.publishPartProgress(next) : session.updatePart(next)
-         ctx.toolcalls[toolCallID] = {
-           ...match.call,
-           partID: part.id,
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 714d4316c25c4629cac0cce156aeb36f18f80c3f..b43bba1ab59fa16a0fe578d27437ff3cd9c948c9 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -38,6 +38,7 @@ import { SessionRequestUsage } from "./request-usage"
- import { NamedError } from "@opencode-ai/core/util/error"
- import { SessionProcessor } from "./processor"
- import { Tool } from "@/tool/tool"
-+import { ToolProgress } from "@/tool/progress"
- import { Permission } from "@/permission"
- import { SessionStatus } from "./status"
- import { LLM } from "./llm"
-@@ -930,7 +931,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 time: { start: match.state.status === "running" ? match.state.time.start : Date.now() },
-               },
-             }
--          }),
-+          }, val.delivery),
-         ask: (req) =>
-           permission
-             .ask({
-@@ -1417,6 +1418,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 status: "running",
-                 time: { start: started },
-                 input: { command: input.command },
-+                // direct shell 与 AI ShellTool 使用同一 legacy-compatible version 基线。
-+                metadata: { output: "", description: "", progressVersion: 0 },
-               },
-             }
-             yield* sessions.updatePart(part)
-@@ -1495,13 +1498,31 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 forceKillAfter: "3 seconds",
-               })
-               const handle = yield* spawner.spawn(cmd)
-+              // coordinator 与 child stream 共用这个 scoped lifetime；scope close 会先
-+              // flush trailing running snapshot，外层 finish 随后才提交 terminal Part。
-+              const progress = yield* ToolProgress.make({
-+                live: (metadata) => {
-+                  if (part.state.status !== "running") return Effect.void
-+                  return sessions.publishPartProgress({
-+                    ...part,
-+                    state: { ...part.state, metadata },
-+                  })
-+                },
-+                durable: (metadata) => {
-+                  if (part.state.status !== "running") return Effect.void
-+                  return sessions.updatePart({
-+                    ...part,
-+                    state: { ...part.state, metadata },
-+                  }).pipe(Effect.asVoid)
-+                },
-+              })
-               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
-                 Effect.gen(function* () {
-                   output += chunk
--                  if (part.state.status === "running") {
--                    part.state.metadata = { output, description: "" }
--                    yield* sessions.updatePart(part)
--                  }
-+                  if (part.state.status !== "running") return
-+                  // direct shell 的 snapshot 是完整 raw 累计输出；coordinator 只负责
-+                  // cadence/version，不解释 TerminalDisplay 或改变最终 output。
-+                  yield* progress.update({ output, description: "" })
-                 }),
-               )
-               yield* handle.exitCode
-diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index ff2330c2ff72d61d3de91fb13fd30148a4bd3d6f..8ad9cfcc339ef7d3652f2b8d6b8cbbdd8ffee2cd 100644
---- a/packages/opencode/src/session/session.ts
-+++ b/packages/opencode/src/session/session.ts
-@@ -545,6 +545,7 @@ export interface Interface {
-     partID: PartID
-   }) => Effect.Effect<MessageV2.Part | undefined>
-   readonly updatePart: <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
-+  readonly publishPartProgress: <T extends MessageV2.ToolPart>(part: T) => Effect.Effect<T>
-   readonly updatePartDelta: (input: {
-     sessionID: SessionID
-     messageID: MessageID
-@@ -690,6 +691,20 @@ export const layer: Layer.Layer<
-         return part
-       }).pipe(Effect.withSpan("Session.updatePart"))
- 
-+    const publishPartProgress = <T extends MessageV2.ToolPart>(part: T): Effect.Effect<T> =>
-+      Effect.gen(function* () {
-+        // structuredClone 隔离并发 consumer 对 snapshot 的修改；返回原 Part 则保持
-+        // processor registry 与 durable updatePart 相同的调用合同。
-+        // live snapshot 只进入现有 Project Bus/GlobalBus，不触碰 projector、
-+        // EventSequence 或 SQLite；durable owner 仍然只有 updatePart。
-+        yield* bus.publish(MessageV2.Event.PartProgress, {
-+          sessionID: part.sessionID,
-+          part: structuredClone(part),
-+          time: Date.now(),
-+        })
-+        return part
-+      }).pipe(Effect.withSpan("Session.publishPartProgress"))
-+
-     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
-       const row = Database.use((db) =>
-         db
-@@ -915,6 +930,7 @@ export const layer: Layer.Layer<
-       removeMessage,
-       removePart,
-       updatePart,
-+      publishPartProgress,
-       getPart,
-       updatePartDelta,
-       findMessage,
-diff --git a/packages/opencode/src/sync/index.ts b/packages/opencode/src/sync/index.ts
-index 98d3fabf1bfe640e1745f8b8c9ab1a54a789bf3f..c1256a91b7dd7da7be6429b36609a4c41af99dc3 100644
---- a/packages/opencode/src/sync/index.ts
-+++ b/packages/opencode/src/sync/index.ts
-@@ -113,13 +113,17 @@ export const layer = Layer.effect(Service)(
-             workspace: yield* InstanceState.workspaceID,
-           }
-         : undefined
--      process(def, event, {
-+      const optionsNext = {
-         bus,
-         publish,
-         context,
-         ownerID: options?.ownerID,
-         experimentalWorkspaces: flags.experimentalWorkspaces,
--      })
-+      }
-+      // 只有 projector 实际接受的 event 才能在 commit 后发布；否则 consumer 会看到
-+      // 一个数据库中不存在的状态，replay 也无法恢复同一顺序。
-+      const projected = Database.transaction((tx) => projectEvent(tx, def, event, optionsNext))
-+      if (projected) yield* publishEvent(def, event, optionsNext)
-     })
- 
-     const replayAll: Interface["replayAll"] = Effect.fn("SyncEvent.replayAll")(function* (events, options) {
-@@ -164,7 +168,7 @@ export const layer = Layer.effect(Service)(
-       // Note that this is an "immediate" transaction which is critical.
-       // We need to make sure we can safely read and write with nothing
-       // else changing the data from under us
--      Database.transaction(
-+      const result = Database.transaction(
-         (tx) => {
-           const id = EventID.ascending()
-           const row = tx
-@@ -175,12 +179,14 @@ export const layer = Layer.effect(Service)(
-           const seq = row?.seq != null ? row.seq + 1 : 0
- 
-           const event = { id, seq, aggregateID: agg, data }
--          process(def, event, { bus, publish, context, experimentalWorkspaces: flags.experimentalWorkspaces })
-+          const optionsNext = { bus, publish, context, experimentalWorkspaces: flags.experimentalWorkspaces }
-+          return { event, projected: projectEvent(tx, def, event, optionsNext), options: optionsNext }
-         },
-         {
-           behavior: "immediate",
-         },
-       )
-+      if (result.projected) yield* publishEvent(def, result.event, result.options)
-     })
- 
-     const remove: Interface["remove"] = Effect.fn("SyncEvent.remove")(function* (aggregateID) {
-@@ -303,7 +309,8 @@ function register(def: Definition) {
-   registry.set(versionedType(def.type, def.version), def)
- }
- 
--function process<Def extends Definition>(
-+function projectEvent<Def extends Definition>(
-+  tx: Database.TxOrDb,
-   def: Def,
-   event: Event<Def>,
-   options: {
-@@ -313,7 +320,7 @@ function process<Def extends Definition>(
-     ownerID?: string
-     experimentalWorkspaces: boolean
-   },
--) {
-+): boolean {
-   if (projectors == null) {
-     throw new Error("No projectors available. Call `SyncEvent.init` to install projectors")
-   }
-@@ -321,71 +328,71 @@ function process<Def extends Definition>(
-   const projector = projectors.get(versionedType(def.type, def.version))
-   if (!projector) {
-     if (!def.type.includes("next")) throw new Error(`Projector not found for event: ${def.type}`)
--    return
-+    return false
-   }
- 
--  Database.transaction((tx) => {
--    projector(tx, event.data, event)
--
--    if (options.experimentalWorkspaces) {
--      tx.insert(EventSequenceTable)
--        .values({
--          aggregate_id: event.aggregateID,
--          seq: event.seq,
--          owner_id: options?.ownerID,
--        })
--        .onConflictDoUpdate({
--          target: EventSequenceTable.aggregate_id,
--          set: { seq: event.seq },
--        })
--        .run()
--      tx.insert(EventTable)
--        .values({
--          id: event.id,
--          seq: event.seq,
--          aggregate_id: event.aggregateID,
--          type: versionedType(def.type, def.version),
--          data: event.data as Record<string, unknown>,
--        })
--        .run()
--    }
--
--    Database.effect(() => {
--      if (options?.publish) {
--        const context = options.context
--        if (!context?.instance) {
--          throw new Error("SyncEvent.process: publish requires instance context")
--        }
--        const instance = context.instance
--
--        const result = convertEvent(def.type, event.data)
--        const publish = (data: unknown) =>
--          Effect.runPromise(
--            attachWith(options.bus.publish(def, data as Properties<Def>, { id: event.id }), {
--              // [local-smark] Fallback to local instance/workspace context for daemon multi-instance
--              instance: options.context?.instance ?? instance,
--              workspace: options.context?.workspace ?? context.workspace,
--            }),
--          )
--        if (result instanceof Promise) {
--          void result.then(publish)
--        } else {
--          void publish(result)
--        }
-+  projector(tx, event.data, event)
- 
--        GlobalBus.emit("event", {
--          directory: instance.directory,
--          project: instance.project.id,
--          workspace: context.workspace,
--          payload: {
--            type: "sync",
--            syncEvent: {
--              type: versionedType(def.type, def.version),
--              ...event,
--            },
--          },
--        })
--      }
-+  if (options.experimentalWorkspaces) {
-+    tx.insert(EventSequenceTable)
-+      .values({
-+        aggregate_id: event.aggregateID,
-+        seq: event.seq,
-+        owner_id: options.ownerID,
-+      })
-+      .onConflictDoUpdate({
-+        target: EventSequenceTable.aggregate_id,
-+        set: { seq: event.seq },
-+      })
-+      .run()
-+    tx.insert(EventTable)
-+      .values({
-+        id: event.id,
-+        seq: event.seq,
-+        aggregate_id: event.aggregateID,
-+        type: versionedType(def.type, def.version),
-+        data: event.data as Record<string, unknown>,
-+      })
-+      .run()
-+  }
-+  return true
-+}
-+
-+function publishEvent<Def extends Definition>(
-+  def: Def,
-+  event: Event<Def>,
-+  options: {
-+    bus: ProjectBus.Interface
-+    publish: boolean
-+    context?: PublishContext
-+  },
-+) {
-+  if (!options.publish) return Effect.void
-+  return Effect.gen(function* () {
-+    const context = options.context
-+    if (!context?.instance) throw new Error("SyncEvent.publishEvent: publish requires instance context")
-+
-+    // transaction 已经提交；这里等待的是 convertEvent 与 Bus/GlobalBus 入队，
-+    // 不是 subscriber 的网络或业务执行，因此不会把慢 consumer 放进 SQLite writer。
-+    const data = yield* Effect.promise(() => Promise.resolve(convertEvent(def.type, event.data)))
-+    yield* attachWith(options.bus.publish(def, data as Properties<Def>, { id: event.id }), {
-+      instance: context.instance,
-+      workspace: context.workspace,
-+    })
-+
-+    // sync envelope 必须排在 typed Project Bus publication 之后；调用方只有在两种
-+    // transport 都已同步入队后才可继续提交同一 Part 的 terminal event。
-+    GlobalBus.emit("event", {
-+      directory: context.instance.directory,
-+      project: context.instance.project.id,
-+      workspace: context.workspace,
-+      payload: {
-+        type: "sync",
-+        syncEvent: {
-+          type: versionedType(def.type, def.version),
-+          ...event,
-+        },
-+      },
-     })
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+index e131b4cfd..d59eb96c0 100644
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -474,6 +474,52 @@ describe("tui sync", () => {
+     }
    })
- }
-diff --git a/packages/opencode/src/tool/progress.ts b/packages/opencode/src/tool/progress.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..c75100b144dbe078e6ea9f9ffc82d101c8d2955c
---- /dev/null
-+++ b/packages/opencode/src/tool/progress.ts
-@@ -0,0 +1,113 @@
-+import { Clock, Effect, Fiber, Queue } from "effect"
-+import type * as Scope from "effect/Scope"
+ 
++  test("keeps shell progress monotonic across legacy session sync snapshots", async () => {
++    await using tmp = await tmpdir()
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const message = assistantMessage()
++    const legacy = runningShellPart("legacy")
++    const { app, emit, sync } = await mount((url) => {
++      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
++      if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [legacy] }])
++      if (url.pathname === "/session/ses_1/todo") return json([])
++      if (url.pathname === "/session/ses_1/diff") return json([])
++    }, tmp.path)
 +
-+const LIVE_INTERVAL_MS = 50
-+const DURABLE_INTERVAL_MS = 1_000
++    try {
++      emit(messageEvent(message))
++      // 缺失版本的旧 SQLite running Part 归一化为 v0；本地无该 Part 时必须接受，
++      // 否则升级后的 client 无法恢复最近 durable display。
++      emit(partEvent(legacy))
++      await wait(() => sync.data.part.msg_1?.[0]?.type === "tool")
++      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "legacy" } } })
 +
-+type Versioned<M extends Record<string, unknown>> = M & { progressVersion: number }
-+
-+export type Interface<M extends Record<string, unknown>> = {
-+  update(metadata: M): Effect.Effect<void>
-+  close(): Effect.Effect<void>
-+}
-+
-+export function make<M extends Record<string, unknown>>(input: {
-+  live(metadata: Versioned<M>): Effect.Effect<void>
-+  durable(metadata: Versioned<M>): Effect.Effect<void>
-+}): Effect.Effect<Interface<M>, never, Scope.Scope> {
-+  return Effect.gen(function* () {
-+    let latest: Versioned<M> | undefined
-+    let version = 0
-+    let closed = false
-+
-+    // 两个 delivery state 只拥有 cadence marker；snapshot 与 progressVersion 仍由 latest 唯一持有，
-+    // 因此 durable I/O 可以独立等待，而不会复制 producer 状态算法或阻塞 live worker。
-+    const live = {
-+      wake: yield* Queue.sliding<void>(1),
-+      interval: LIVE_INTERVAL_MS,
-+      deliver: input.live,
-+      version: 0,
-+      last: 0,
-+    }
-+    const durable = {
-+      wake: yield* Queue.sliding<void>(1),
-+      interval: DURABLE_INTERVAL_MS,
-+      deliver: input.durable,
-+      version: 0,
-+      last: 0,
-+    }
-+
-+    const start = (delivery: typeof live) =>
-+      Effect.forever(
-+        // sliding queue 只表示“有新版本”；真正发送前重读 latest，慢 worker 不会补发中间 chunk。
-+        // last 记录 delivery 开始时刻，使耗时 adapter 不会缩短相邻 cadence 的最小间隔。
-+        Queue.take(delivery.wake).pipe(
-+          Effect.andThen(
-+            Effect.gen(function* () {
-+              while (true) {
-+                const current = latest
-+                if (!current || current.progressVersion <= delivery.version) return
-+                const now = yield* Clock.currentTimeMillis
-+                const delay = delivery.version === 0 ? 0 : delivery.last + delivery.interval - now
-+                if (delay > 0) yield* Effect.sleep(delay)
-+
-+                yield* Effect.gen(function* () {
-+                  const next = latest
-+                  if (!next || next.progressVersion <= delivery.version) return
-+                  const time = yield* Clock.currentTimeMillis
-+                  if (delivery.version > 0 && time - delivery.last < delivery.interval) return
-+                  yield* delivery.deliver(next)
-+                  // adapter 返回才确认 version；不可中断区防止 close 重复已提交的 durable write。
-+                  delivery.version = next.progressVersion
-+                  delivery.last = time
-+                }).pipe(Effect.uninterruptible)
-+              }
-+            }),
-+          ),
-+        ),
-+      ).pipe(Effect.forkScoped)
-+
-+    const liveWorker = yield* start(live)
-+    const durableWorker = yield* start(durable)
-+
-+    const flush = (delivery: typeof live) =>
-+      Effect.gen(function* () {
-+        // close 只补尚未确认的 latest；worker 已停止，所以 flush 后不会再出现旧 running event。
-+        // live 与 durable 分别确认同一 version，不能用另一 channel 的 marker 跳过必要 recovery 写入。
-+        const next = latest
-+        if (!next || next.progressVersion <= delivery.version) return
-+        yield* delivery.deliver(next)
-+        delivery.version = next.progressVersion
-+      }).pipe(Effect.uninterruptible)
-+
-+    const close = Effect.fnUntraced(function* () {
-+      if (closed) return
-+      closed = true
-+      // 同时 interrupt 可避免先停 live 再等待慢 durable；两个确认区结束后才由 close flush，
-+      // 所以返回以后不会再有 running snapshot 越过调用方写入的 terminal Part。
-+      yield* Effect.forEach([liveWorker, durableWorker], Fiber.interrupt, { concurrency: "unbounded" }).pipe(
-+        Effect.asVoid,
++      emit(progressEvent(runningShellPart("live", 1)))
++      await wait(
++        () =>
++          sync.data.part.msg_1?.[0]?.type === "tool" &&
++          sync.data.part.msg_1[0].state.status === "running" &&
++          sync.data.part.msg_1[0].state.metadata?.output === "live",
 +      )
-+      yield* flush(live)
-+      yield* flush(durable)
-+      yield* Effect.forEach([live.wake, durable.wake], Queue.shutdown, { concurrency: "unbounded" }).pipe(Effect.asVoid)
-+    })
++      // force sync 模拟 server.connected 后的真实 HTTP recovery，而不是只验证 SSE 顺序。
++      // 旧 v0 在 live v1 之后到达时必须保持最新显示，不能因 reconnect 重新闪回。
++      // 后到 HTTP legacy v0 不得覆盖 live v1；terminal 一旦到达，任何 running
++      // 快照都不得把界面恢复为执行中。
++      await sync.session.sync("ses_1", { force: true })
++      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "live" } } })
 +
-+    // Scope interruption、正常完成、abort 与 timeout 都执行同一幂等 close；调用方
-+    // 可以提前 close，但 scope finalizer 仍安全地兜住异常退出。
-+    yield* Effect.addFinalizer(close)
-+
-+    return {
-+      update: Effect.fnUntraced(function* (metadata) {
-+        if (closed) return
-+        version++
-+        latest = { ...metadata, progressVersion: version }
-+        yield* Queue.offer(live.wake, undefined).pipe(Effect.asVoid)
-+        yield* Queue.offer(durable.wake, undefined).pipe(Effect.asVoid)
-+      }),
-+      close,
++      emit(partEvent(completedShellPart("done")))
++      await wait(
++        () =>
++          sync.data.part.msg_1?.[0]?.type === "tool" && sync.data.part.msg_1[0].state.status === "completed",
++      )
++      await sync.session.sync("ses_1", { force: true })
++      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
++    } finally {
++      app.renderer.destroy()
 +    }
 +  })
-+}
 +
-+export * as ToolProgress from "./progress"
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 7f7f20b4f99edfd47c9c4617bd5c4827b7764a7b..080e808afdadcc4e2fa481ce56c915c42e908d12 100644
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -3,6 +3,7 @@ import { PositiveInt } from "@/util/schema"
- import os from "os"
- import { createWriteStream } from "node:fs"
- import * as Tool from "./tool"
-+import { ToolProgress } from "./progress"
- import path from "path"
- import * as Log from "@opencode-ai/core/util/log"
- import { containsPath, type InstanceContext } from "../project/instance-context"
-@@ -1098,72 +1099,70 @@ export const ShellTool = Tool.define(
-         metadata: {
-           output: "",
-           description: input.description,
-+          // version 0 是新 producer initial 与旧持久化 running Part 的共同基线。
-+          progressVersion: 0,
-         },
-       })
- 
-       const decoder = createAutoTextDecoder({ encoding: input.encoding })
-       const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
-       let displayed = false
--      const onChunk = (chunk: string) => {
--        if (!chunk) return Effect.void
--        const visible = preview(display.push(chunk))
--        displayed = true
--        const size = Buffer.byteLength(chunk, "utf-8")
--        list.push({ text: chunk, size })
--        used += size
--        while (used > keep && list.length > 1) {
--          const item = list.shift()
--          if (!item) break
--          // 这些 chunk 已经被内存窗口丢弃，最终不会进入模型可见输出。
--          // 诊断摘录只从隐藏输出生成，避免和 exit notice 或可见输出互相推断。
--          hiddenDiag.push(item.text)
--          used -= item.size
--          cut = true
--        }
--        if (file) {
--          sink?.write(chunk)
--        } else {
--          full += chunk
--          if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
--            return trunc.write(full).pipe(
--              Effect.andThen((next) =>
--                Effect.sync(() => {
--                  file = next
--                  cut = true
--                  sink = createWriteStream(next, { flags: "a" })
--                  full = ""
--                }),
--              ),
--              Effect.andThen(
--                ctx.metadata({
--                  metadata: {
--                    // `metadata.output` is the default live UI surface. Keep it
--                    // as a terminal display snapshot so CR progress and clear-line
--                    // redraws do not leak control bytes into TUI/OpenTUI, while the
--                    // raw chunks below still feed truncation and the model output.
--                    output: visible,
--                    description: input.description,
--                  },
--                }),
--              ),
--            )
--          }
--        }
--
--        return ctx.metadata({
--          metadata: {
--            // Same invariant as the truncated branch above: metadata is the
--            // default display channel, not the faithful model-return channel. An
--            // empty terminal screen after a clear-line/clear-screen sequence is a
--            // valid display state, so never fall back to the raw chunk preview here.
--            output: visible,
--            description: input.description,
--          },
--        })
--      }
-+      let lastVisible = ""
- 
-       const code: number | null = yield* Effect.scoped(
-         Effect.gen(function* () {
-+          // initial v0 已在 scope 外 durable 提交；这里的 worker 只协调真实变化，
-+          // scope 结束时必须完成 trailing flush 后才能返回 exit code 给 terminal owner。
-+          const progress = yield* ToolProgress.make({
-+            live: (metadata) => ctx.metadata({ metadata, delivery: "ephemeral" }),
-+            durable: (metadata) => ctx.metadata({ metadata, delivery: "durable" }),
-+          })
-+          const onChunk = (chunk: string) => {
-+            if (!chunk) return Effect.void
-+            const visible = preview(display.push(chunk))
-+            displayed = true
-+            const size = Buffer.byteLength(chunk, "utf-8")
-+            list.push({ text: chunk, size })
-+            used += size
-+            while (used > keep && list.length > 1) {
-+              const item = list.shift()
-+              if (!item) break
-+              // 这些 chunk 已经被内存窗口丢弃，最终不会进入模型可见输出。
-+              // 诊断摘录只从隐藏输出生成，避免和 exit notice 或可见输出互相推断。
-+              hiddenDiag.push(item.text)
-+              used -= item.size
-+              cut = true
-+            }
-+            const spill = file
-+              ? Effect.sync(() => sink?.write(chunk))
-+              : Effect.sync(() => {
-+                  full += chunk
-+                  return Buffer.byteLength(full, "utf-8") > limits.maxBytes
-+                }).pipe(
-+                  Effect.andThen((overflow) =>
-+                    overflow
-+                      ? trunc.write(full).pipe(
-+                          Effect.andThen((next) =>
-+                            Effect.sync(() => {
-+                              file = next
-+                              cut = true
-+                              sink = createWriteStream(next, { flags: "a" })
-+                              full = ""
-+                            }),
-+                          ),
-+                        )
-+                      : Effect.void,
-+                  ),
-+                )
-+            if (visible === lastVisible) return spill
-+            lastVisible = visible
-+            // metadata 是 replace 型终端快照；raw chunk 仍走原有内存/截断路径，
-+            // 所以 latest-wins 只减少 UI/SQLite 更新，不会丢失模型可见字节。
-+            return spill.pipe(
-+              Effect.andThen(progress.update({ output: visible, description: input.description })),
-+            )
-+          }
-+
-           yield* Effect.addFinalizer(closeSink)
-           const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
- 
-diff --git a/packages/opencode/src/tool/tool.ts b/packages/opencode/src/tool/tool.ts
-index a567d0f00c488312bf1efc778f67ee7b5033b42d..627986358475a5d5f5b1e9af351633bcd3bc0cc1 100644
---- a/packages/opencode/src/tool/tool.ts
-+++ b/packages/opencode/src/tool/tool.ts
-@@ -51,7 +51,7 @@ export type Context<M extends Metadata = Metadata> = {
-   callID?: string
-   extra?: { [key: string]: unknown }
-   messages: MessageV2.WithParts[]
--  metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
-+  metadata(input: { title?: string; metadata?: M; delivery?: "durable" | "ephemeral" }): Effect.Effect<void>
-   ask(input: Omit<Permission.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
- }
- 
-@@ -140,7 +140,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
-           )
-           const safeCtx = {
-             ...ctx,
--            metadata(input: { title?: string; metadata?: Metadata }) {
-+            // sanitizer 只能清理 metadata 内容，必须原样透传 delivery；否则 ephemeral
-+            // progress 会在 wrapper 边界退回缺省 durable 并重新触发 SQLite 写入。
-+            metadata(input: { title?: string; metadata?: Metadata; delivery?: "durable" | "ephemeral" }) {
-               const metadata = sanitizeMetadata(input.metadata)
-               return ctx.metadata(metadata === input.metadata ? input : { ...input, metadata })
-             },
-diff --git a/packages/opencode/test/acp/event-subscription.test.ts b/packages/opencode/test/acp/event-subscription.test.ts
-index a01680e30596317c39ba102e735b35e19610bf68..eb40358b3c2b257454b4c05b48acda52fb267c13 100644
---- a/packages/opencode/test/acp/event-subscription.test.ts
-+++ b/packages/opencode/test/acp/event-subscription.test.ts
-@@ -3,11 +3,15 @@ import { ACP } from "../../src/acp/agent"
- import type { AgentSideConnection } from "@agentclientprotocol/sdk"
- import type {
-   Event,
-+  EventMessagePartProgress,
-   EventMessagePartUpdated,
-   ToolStateCompleted,
-+  ToolStateError,
-   ToolStatePending,
-   ToolStateRunning,
- } from "@opencode-ai/sdk/v2"
-+import { Global } from "@opencode-ai/core/global"
-+import * as Log from "@opencode-ai/core/util/log"
- import { provideTestInstance, tmpdir } from "../fixture/fixture"
- 
- const pollUntil = async <T>(
-@@ -71,9 +75,15 @@ function toolEvent(
-     callID: string
-     tool: string
-     input: Record<string, unknown>
--  } & ({ status: "running"; metadata?: Record<string, unknown> } | { status: "pending"; raw: string }),
-+  } & (
-+    | { status: "running"; metadata?: Record<string, unknown> }
-+    | { status: "pending"; raw: string }
-+    | { status: "error"; error: string }
-+  ),
- ): GlobalEventEnvelope {
--  const state: ToolStatePending | ToolStateRunning =
-+  // error fixture 复用真实 PartUpdated wire shape，确保 failed terminal 走公开 ACP event seam。
-+  // 它不复制 production 状态机，只提供独立的终态输入和可观察 update。
-+  const state: ToolStatePending | ToolStateRunning | ToolStateError =
-     opts.status === "running"
-       ? {
-           status: "running",
-@@ -81,11 +91,18 @@ function toolEvent(
-           ...(opts.metadata && { metadata: opts.metadata }),
-           time: { start: Date.now() },
-         }
--      : {
--          status: "pending",
--          input: opts.input,
--          raw: opts.raw,
--        }
-+      : opts.status === "error"
-+        ? {
-+            status: "error",
-+            input: opts.input,
-+            error: opts.error,
-+            time: { start: Date.now() - 1, end: Date.now() },
-+          }
-+        : {
-+            status: "pending",
-+            input: opts.input,
-+            raw: opts.raw,
-+          }
-   const payload: EventMessagePartUpdated = {
-     id: `evt_${opts.callID}`,
-     type: "message.part.updated",
-@@ -106,7 +123,7 @@ function toolEvent(
-   return { directory: cwd, payload }
- }
- 
--function completedToolEvent(
-+function terminalToolEvent(
-   sessionId: string,
-   cwd: string,
-   opts: {
-@@ -146,6 +163,51 @@ function completedToolEvent(
-   return { directory: cwd, payload }
- }
- 
-+function progressToolEvent(
-+  sessionId: string,
-+  cwd: string,
-+  opts: {
-+    callID: string
-+    tool: string
-+    input: Record<string, unknown>
-+    metadata: Record<string, unknown>
-+  },
-+): GlobalEventEnvelope {
-+  // 只替换 event kind，保留 production PartUpdated 的完整 ToolPart wire shape。
-+  const payload = toolEvent(sessionId, cwd, { ...opts, status: "running" }).payload
-+  if (!payload || payload.type !== "message.part.updated" || payload.properties.part.type !== "tool")
-+    throw new Error("expected Tool Part event")
-+  return {
-+    directory: cwd,
-+    payload: {
-+      ...payload,
-+      type: "message.part.progress",
-+      properties: { ...payload.properties, part: payload.properties.part },
-+    } satisfies EventMessagePartProgress,
-+  }
-+}
-+
-+function shellTerminalEvent(
-+  sessionId: string,
-+  cwd: string,
-+  callID: string,
-+  status: "completed" | "error",
-+  input: Record<string, unknown>,
-+) {
-+  // 同一工厂让 live event 与 replay message 使用完全相同的 completed/error ToolPart。
-+  // 测试矩阵因此只改变真实入口，不会让 fixture shape 成为额外变量。
-+  if (status === "completed")
-+    return terminalToolEvent(sessionId, cwd, { callID, tool: "bash", input, output: "terminal" })
-+  return toolEvent(sessionId, cwd, { callID, tool: "bash", status, input, error: "terminal error" })
-+}
-+
-+function toolPart(event: GlobalEventEnvelope) {
-+  const payload = event.payload
-+  if (!payload || payload.type !== "message.part.updated" || payload.properties.part.type !== "tool")
-+    throw new Error("expected Tool Part event")
-+  return payload.properties.part
-+}
-+
- function createEventStream() {
-   const queue: GlobalEventEnvelope[] = []
-   const waiters: Array<(value: GlobalEventEnvelope | undefined) => void> = []
-@@ -628,95 +690,191 @@ describe("acp.agent event subscription", () => {
-     })
-   })
- 
--  test("streams running bash output snapshots and de-dupes identical snapshots", async () => {
--    await using tmp = await tmpdir()
--    await provideTestInstance({
--      directory: tmp.path,
--      fn: async () => {
--        const { agent, controller, sessionUpdates, stop } = createFakeAgent()
--        const cwd = "/tmp/opencode-acp-test"
--        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
--        const input = { command: "echo hello", description: "run command" }
-+  test("streams live shell progress and rejects stale durable snapshots", async () => {
-+    const previous = Global.Path.log
-+    await using logs = await tmpdir()
-+    Global.Path.log = logs.path
-+    await Log.init({ print: false, dev: false, level: "INFO" })
-+    try {
-+      await using tmp = await tmpdir()
-+      await provideTestInstance({
-+        directory: tmp.path,
-+        fn: async () => {
-+          const { agent, controller, sessionUpdates, stop, sdk } = createFakeAgent()
-+          const cwd = "/tmp/opencode-acp-test"
-+          const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
-+          const input = { command: "echo hello", description: "run command" }
-+          const marker = "ACP_PROGRESS_LOG_MARKER_7d1a"
-+
-+          for (const [output, progressVersion] of [
-+            ["a", 1],
-+            ["a", 2],
-+            [marker, 3],
-+          ] as const) {
-+            // 重复 a 只验证展示去重；唯一 marker 同时证明最新 snapshot 可穿过 live seam。
-+            controller.push(
-+              progressToolEvent(sessionId, cwd, {
-+                callID: "call_1",
-+                tool: "bash",
-+                input,
-+                metadata: { output, progressVersion },
-+              }),
-+            )
-+          }
-+          await pollUntil(
-+            () =>
-+              sessionUpdates
-+                .filter((u) => u.sessionId === sessionId)
-+                .filter((u) => isToolCallUpdate(u.update))
-+                .map((u) => inProgressText(u.update))
-+                .filter((t) => t === marker).length > 0,
-+            "final bash marker snapshot never arrived",
-+          )
- 
--        for (const output of ["a", "a", "ab"]) {
-+          // durable channel 可在较新 live 后完成；旧 version 即使 output 不同也不能让 ACP 展示回退。
-           controller.push(
-             toolEvent(sessionId, cwd, {
-               callID: "call_1",
-               tool: "bash",
-               status: "running",
-               input,
--              metadata: { output },
-+              metadata: { output: "stale", progressVersion: 2 },
-             }),
-           )
--        }
--        await pollUntil(
--          () =>
--            sessionUpdates
--              .filter((u) => u.sessionId === sessionId)
--              .filter((u) => isToolCallUpdate(u.update))
--              .map((u) => inProgressText(u.update))
--              .filter((t) => t === "ab").length > 0,
--          "final bash snapshot 'ab' never arrived",
--        )
--
--        const snapshots = sessionUpdates
--          .filter((u) => u.sessionId === sessionId)
--          .filter((u) => isToolCallUpdate(u.update))
--          .map((u) => inProgressText(u.update))
--
--        expect(snapshots).toEqual(["a", undefined, "ab"])
--        stop()
--      },
--    })
-+          // completed 走 live、error 走 replay，覆盖两个真实入口和两个 terminal shape；
-+          // late progress 使用更高 version，证明拒绝依据是 terminal dominance 而非 stale version。
-+          // 最后的 barrier 通过同一公开 event stream 确认所有 late events 已处理。
-+          const terminalCases = [
-+            { callID: "call_1", source: "live", status: "completed" },
-+            { callID: "call_replay_error", source: "replay", status: "error" },
-+          ] as const
-+          for (const item of terminalCases.filter((item) => item.source === "live")) {
-+            controller.push(shellTerminalEvent(sessionId, cwd, item.callID, item.status, input))
-+          }
-+          await pollUntil(
-+            () =>
-+              terminalCases
-+                .filter((item) => item.source === "live")
-+                .every((item) =>
-+                  sessionUpdates.some(
-+                    (u) =>
-+                      u.sessionId === sessionId && isToolCallUpdate(u.update) && u.update.toolCallId === item.callID,
-+                  ),
-+                ),
-+            "live terminal updates never arrived",
-+          )
-+          const replayParts = terminalCases
-+            .filter((item) => item.source === "replay")
-+            .map((item) => toolPart(shellTerminalEvent(sessionId, cwd, item.callID, item.status, input)))
-+          sdk.session.messages = async () => ({
-+            data: [{ info: { role: "assistant", sessionID: sessionId }, parts: replayParts }],
-+          })
-+          await agent.loadSession({ sessionId, cwd, mcpServers: [] } as any)
-+
-+          // 终态来自 live 和 replay 两个真实入口；每个 late running 都必须被同一个 marker 合同拒绝。
-+          for (const { callID } of terminalCases) {
-+            controller.push(
-+              progressToolEvent(sessionId, cwd, {
-+                callID,
-+                tool: "bash",
-+                input,
-+                metadata: { output: `late-${callID}`, progressVersion: 99 },
-+              }),
-+            )
-+          }
-+          controller.push(
-+            terminalToolEvent(sessionId, cwd, {
-+              callID: "call_barrier",
-+              tool: "bash",
-+              input,
-+              output: "barrier",
-+            }),
-+          )
-+          await pollUntil(
-+            () => completedToolUpdate(sessionUpdates, sessionId, "call_barrier"),
-+            "ACP barrier never arrived",
-+          )
-+          const snapshots = sessionUpdates
-+            .filter((u) => u.sessionId === sessionId)
-+            .map((u) => u.update)
-+            .filter(isToolCallUpdate)
-+            .filter((u) => u.status === "in_progress")
-+            .map(inProgressText)
-+
-+          // terminal 到达证明前面的 stale durable 已处理；断言只观察 ACP 用户可见更新序列。
-+          // 唯一 marker 模拟不断增长的 provider/tool output，能直接捕获完整 payload 落盘。
-+          // sentinel 在 progress 之后写入同一真实 file writer；读到它即证明前序日志已落盘，
-+          // 无需用固定 sleep 猜测异步 stream flush 时机。
-+          const sentinel = "ACP_PROGRESS_LOG_SENTINEL_7d1a"
-+          Log.create({ service: "acp-test" }).info(sentinel)
-+          const content = await pollUntil(async () => {
-+            const value = await Bun.file(Log.file())
-+              .text()
-+              .catch(() => "")
-+            return value.includes(sentinel) ? value : false
-+          }, "ACP log sentinel was never flushed")
-+          stop()
-+          expect(content).not.toContain(marker)
-+          expect(snapshots).toEqual(["a", undefined, marker])
-+        },
-+      })
-+    } finally {
-+      Global.Path.log = previous
-+      await Log.init({ print: false, dev: true, level: "DEBUG" })
-+    }
-   })
- 
--  test("emits synthetic pending before first running update for any tool", async () => {
-+  test("emits synthetic pending per session before first running update", async () => {
-     await using tmp = await tmpdir()
-     await provideTestInstance({
-       directory: tmp.path,
-       fn: async () => {
-         const { agent, controller, sessionUpdates, stop } = createFakeAgent()
-         const cwd = "/tmp/opencode-acp-test"
--        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
-+        const sessionA = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
-+        const sessionB = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
- 
-         controller.push(
--          toolEvent(sessionId, cwd, {
--            callID: "call_bash",
-+          progressToolEvent(sessionA, cwd, {
-+            callID: "call_shared",
-             tool: "bash",
--            status: "running",
-             input: { command: "echo hi", description: "run command" },
--            metadata: { output: "hi\n" },
-+            metadata: { output: "session-a", progressVersion: 2 },
-           }),
-         )
-         controller.push(
--          toolEvent(sessionId, cwd, {
-+          toolEvent(sessionA, cwd, {
-             callID: "call_read",
-             tool: "read",
-             status: "running",
-             input: { filePath: "/tmp/example.txt" },
-           }),
-         )
-+        // provider callID 只在 Session 内唯一；A 的较高版本不能压掉 B 的首帧，
-+        // synthetic pending 也必须在两个 Session 中各自出现一次。
-+        controller.push(
-+          progressToolEvent(sessionB, cwd, {
-+            callID: "call_shared",
-+            tool: "bash",
-+            input: { command: "echo hi", description: "run command" },
-+            metadata: { output: "session-b", progressVersion: 1 },
-+          }),
-+        )
-         await pollUntil(
-           () =>
--            sessionUpdates
--              .filter((u) => u.sessionId === sessionId)
--              .map((u) => u.update.sessionUpdate)
--              .filter((u) => u === "tool_call" || u === "tool_call_update").length >= 4,
--          "expected 4 tool_call/tool_call_update events",
-+            sessionUpdates.filter((u) => u.sessionId === sessionA).length >= 4 &&
-+            sessionUpdates.filter((u) => u.sessionId === sessionB).length >= 2,
-+          "per-session tool lifecycle updates never arrived",
-         )
- 
--        const types = sessionUpdates
--          .filter((u) => u.sessionId === sessionId)
--          .map((u) => u.update.sessionUpdate)
--          .filter((u) => u === "tool_call" || u === "tool_call_update")
--        expect(types).toEqual(["tool_call", "tool_call_update", "tool_call", "tool_call_update"])
--
--        const pendings = sessionUpdates.filter(
--          (u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call",
--        )
--        expect(pendings.every((p) => p.update.sessionUpdate === "tool_call" && p.update.status === "pending")).toBe(
--          true,
--        )
-+        const updates = (sessionId: string) =>
-+          sessionUpdates
-+            .filter((u) => u.sessionId === sessionId)
-+            .map((u) => u.update)
-+            .filter((u) => u.sessionUpdate === "tool_call" || isToolCallUpdate(u))
-+            .map((u) => (isToolCallUpdate(u) ? inProgressText(u) : u.status))
-+        expect(updates(sessionA)).toEqual(["pending", "session-a", "pending", undefined])
-+        expect(updates(sessionB)).toEqual(["pending", "session-b"])
-         stop()
-       },
-     })
-@@ -733,7 +891,7 @@ describe("acp.agent event subscription", () => {
-         const data = Buffer.from("image-data").toString("base64")
- 
-         controller.push(
--          completedToolEvent(sessionId, cwd, {
-+          terminalToolEvent(sessionId, cwd, {
-             callID: "call_image",
-             tool: "read",
-             input: { filePath: "/tmp/image.png" },
-@@ -849,7 +1007,7 @@ describe("acp.agent event subscription", () => {
-     })
-   })
- 
--  test("does not emit duplicate synthetic pending after replayed running tool", async () => {
-+  test("records replayed running version without duplicate synthetic pending", async () => {
-     await using tmp = await tmpdir()
-     await provideTestInstance({
-       directory: tmp.path,
-@@ -874,7 +1032,7 @@ describe("acp.agent event subscription", () => {
-                   state: {
-                     status: "running",
-                     input,
--                    metadata: { output: "hi\n" },
-+                    metadata: { output: "hi\n", progressVersion: 2 },
-                     time: { start: Date.now() },
-                   },
-                 },
-@@ -884,13 +1042,21 @@ describe("acp.agent event subscription", () => {
-         })
- 
-         await agent.loadSession({ sessionId, cwd, mcpServers: [] } as any)
-+        // replay 必须先登记 version；同版 live 帧应被拒绝，只有更高版本能继续展示。
-         controller.push(
--          toolEvent(sessionId, cwd, {
-+          progressToolEvent(sessionId, cwd, {
-             callID: "call_1",
-             tool: "bash",
--            status: "running",
-             input,
--            metadata: { output: "hi\nthere\n" },
-+            metadata: { output: "stale\n", progressVersion: 2 },
-+          }),
-+        )
-+        controller.push(
-+          progressToolEvent(sessionId, cwd, {
-+            callID: "call_1",
-+            tool: "bash",
-+            input,
-+            metadata: { output: "hi\nthere\n", progressVersion: 3 },
-           }),
-         )
-         await pollUntil(
-@@ -912,6 +1078,13 @@ describe("acp.agent event subscription", () => {
-           .filter((u) => u === "tool_call" || u === "tool_call_update")
- 
-         expect(types).toEqual(["tool_call", "tool_call_update", "tool_call_update"])
-+        expect(
-+          sessionUpdates
-+            .filter((u) => u.sessionId === sessionId)
-+            .map((u) => u.update)
-+            .filter(isToolCallUpdate)
-+            .map(inProgressText),
-+        ).toEqual(["hi\n", "hi\nthere\n"])
-         stop()
-       },
-     })
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index 3325fc097ca111d1845ab626c01bbc5b371c0ef9..90b5ec4da0f3062c199f08dff13c57d78fe6c475 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -138,6 +138,49 @@ function partEvent(part: Part): GlobalEvent {
+   // 验证 reasoning part 的 session.sync 快照路径：与 text 同构，
+   // delta 累积 "step two" 后强制重拉返回短快照 "step " — 必须保留本地长文本。
+   test("preserves streaming reasoning when a stale session sync snapshot arrives", async () => {
+@@ -623,6 +669,49 @@ function partEvent(part: Part): GlobalEvent {
    }
  }
  
@@ -1511,1837 +1432,3 @@ index 3325fc097ca111d1845ab626c01bbc5b371c0ef9..90b5ec4da0f3062c199f08dff13c57d7
  // 构造 text part 测试 fixture，模拟 text-start 阶段的初始状态（text 可为空或短文本）
  function textPart(id = "part_text", text = ""): Part {
    return {
-@@ -671,6 +714,55 @@ describe("tui sync", () => {
-     }
-   })
- 
-+  test("keeps shell progress monotonic across legacy session sync snapshots", async () => {
-+    const previous = Global.Path.state
-+    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
-+    await Bun.write(`${tmp.path}/kv.json`, "{}")
-+    const message = assistantMessage()
-+    const legacy = runningShellPart("legacy")
-+    const { app, emit, sync } = await mount((url) => {
-+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
-+      if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [legacy] }])
-+      if (url.pathname === "/session/ses_1/todo") return json([])
-+      if (url.pathname === "/session/ses_1/diff") return json([])
-+    })
-+
-+    try {
-+      emit(messageEvent(message))
-+      // 缺失版本的旧 SQLite running Part 归一化为 v0；本地无该 Part 时必须接受，
-+      // 否则升级后的 client 无法恢复最近 durable display。
-+      emit(partEvent(legacy))
-+      await wait(() => sync.data.part.msg_1?.[0]?.type === "tool")
-+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "legacy" } } })
-+
-+      emit(progressEvent(runningShellPart("live", 1)))
-+      await wait(
-+        () =>
-+          sync.data.part.msg_1?.[0]?.type === "tool" &&
-+          sync.data.part.msg_1[0].state.status === "running" &&
-+          sync.data.part.msg_1[0].state.metadata?.output === "live",
-+      )
-+      // force sync 模拟 server.connected 后的真实 HTTP recovery，而不是只验证 SSE 顺序。
-+      // 旧 v0 在 live v1 之后到达时必须保持最新显示，不能因 reconnect 重新闪回。
-+      // 后到 HTTP legacy v0 不得覆盖 live v1；terminal 一旦到达，任何 running
-+      // 快照都不得把界面恢复为执行中。
-+      await sync.session.sync("ses_1", { force: true })
-+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "live" } } })
-+
-+      emit(partEvent(completedShellPart("done")))
-+      await wait(
-+        () =>
-+          sync.data.part.msg_1?.[0]?.type === "tool" && sync.data.part.msg_1[0].state.status === "completed",
-+      )
-+      await sync.session.sync("ses_1", { force: true })
-+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
-+    } finally {
-+      app.renderer.destroy()
-+      Global.Path.state = previous
-+    }
-+  })
-+
-   // 复现核心竞态：daemon 的 message.part.updated 事件通过 fire-and-forget
-   // 发送（void Effect.runPromise），而 message.part.delta 通过 yield* await
-   // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta
-diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
-index 0b38cc02f29fa0fe8341c0ecdfa0e22f1000d052..93434b285841e2de063951ac1ede02edc87ed524 100644
---- a/packages/opencode/test/session/llm.test.ts
-+++ b/packages/opencode/test/session/llm.test.ts
-@@ -462,6 +462,91 @@ describe("session.llm.stream", () => {
-     })
-   })
- 
-+  test("bounds stream error logs without changing the error event", async () => {
-+    const server = state.server
-+    if (!server) throw new Error("Server not initialized")
-+    const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
-+    const providerID = "bounded-error-" + "p".repeat(3_000)
-+    const modelID = "gpt-" + "m".repeat(3_000)
-+    const request = waitRequest(
-+      "/chat/completions",
-+      new Response(JSON.stringify({ error: { message: requestMarker + "R".repeat(12_000) } }), {
-+        status: 500,
-+        headers: { "Content-Type": "application/json" },
-+      }),
-+    )
-+    await withInfoLog(async (logFile) => {
-+      await using tmp = await tmpdir({
-+        config: {
-+          enabled_providers: [providerID],
-+          provider: {
-+            [providerID]: {
-+              npm: "@ai-sdk/openai-compatible",
-+              name: "Bounded Error Provider",
-+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1` },
-+              models: { [modelID]: { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
-+            },
-+          },
-+        },
-+      })
-+
-+      await withTestInstance({
-+        directory: tmp.path,
-+        fn: async (ctx) => {
-+          const model = await getModel(ProviderID.make(providerID), ModelID.make(modelID), ctx)
-+          const sessionID = SessionID.make("session-bounded-stream-error")
-+          const agent = {
-+            name: "a".repeat(3_000),
-+            mode: "primary",
-+            options: {},
-+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
-+          } satisfies Agent.Info
-+          const events = await llm.runPromise((svc) =>
-+            svc
-+              .stream({
-+                user: {
-+                  id: MessageID.make("msg_user-bounded-stream-error"),
-+                  sessionID,
-+                  role: "user",
-+                  time: { created: Date.now() },
-+                  agent: agent.name,
-+                  model: { providerID: ProviderID.make(providerID), modelID: model.id },
-+                },
-+                sessionID,
-+                model,
-+                agent,
-+                system: ["You are a helpful assistant."],
-+                messages: [{ role: "user", content: requestMarker + "X".repeat(64_000) }],
-+                tools: {},
-+              })
-+              .pipe(
-+                Stream.runCollect,
-+                Effect.map((chunk) => [...chunk]),
-+                Effect.provideService(InstanceRef, ctx),
-+              ),
-+          )
-+          // runCollect 正常返回证明底层 Effect 没有被日志 callback 改成 failure；error event 仍单独可见。
-+          const event = events.find((item) => item.type === "error")
-+          if (!event || event.type !== "error") throw new Error("Provider error event was not preserved")
-+          // 日志丢弃敏感请求，但 event 保留原始 error，避免越权改变 processor 的分类输入。
-+          expect(JSON.stringify(event.error)).toContain("requestBodyValues")
-+          expect(JSON.stringify(event.error)).toContain(requestMarker)
-+        },
-+      })
-+
-+      await request
-+      const content = await readLogUntil(logFile, (text) => text.includes("stream error"))
-+      const lines = content.split("\n").filter((item) => item.includes("service=llm"))
-+      // 检查该隔离日志目录中的全部 LLM 行，防止 INFO extra 或 ERROR response echo 绕过边界。
-+      expect(lines.length).toBeGreaterThan(0)
-+      for (const line of lines) {
-+        expect(line).not.toContain("requestBodyValues")
-+        expect(line).not.toContain(requestMarker)
-+        expect(Buffer.byteLength(line + "\n", "utf8")).toBeLessThanOrEqual(8_192)
-+      }
-+    })
-+  })
-+
-   test("times out before delayed provider headers at the configured chunk boundary", async () => {
-     const server = state.server
-     if (!server) throw new Error("Server not initialized")
-diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 287add2dd8c2577ed787632987c12c883adda76e..13f685997a0924642876052c8194863d2bf72c28 100644
---- a/packages/opencode/test/session/prompt.test.ts
-+++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2826,6 +2826,52 @@ unix(
-   { git: true, config: cfg },
- )
- 
-+it.instance(
-+  "coalesces direct shell progress without changing final output",
-+  () =>
-+    Effect.gen(function* () {
-+      const { prompt, chat } = yield* boot()
-+      const bus = yield* Bus.Service
-+      const durable: MessageV2.ToolPart[] = []
-+      const live: MessageV2.ToolPart[] = []
-+      const dispose = yield* bus.subscribeAllCallback((event) => {
-+        if (event.type !== MessageV2.Event.PartUpdated.type && event.type !== "message.part.progress") return
-+        const part = (event.properties as { part?: MessageV2.Part }).part
-+        if (part?.type !== "tool" || part.sessionID !== chat.id || part.tool !== "bash") return
-+        if (event.type === MessageV2.Event.PartUpdated.type) durable.push(structuredClone(part))
-+        else live.push(structuredClone(part))
-+      })
-+      yield* Effect.addFinalizer(() => Effect.sync(dispose))
-+
-+      // 每次写入之间的真实 10ms 间隔让 child stream 产生持续 progress；测试只观察
-+      // 公开 Session 事件，不依赖 chunk 数、timer 或 coordinator 私有状态。
-+      const result = yield* prompt.shell({
-+        sessionID: chat.id,
-+        agent: "build",
-+        command:
-+          "bun -e \"for(let i=1;i<=40;i++){process.stdout.write('DIRECT_PROGRESS_'+i+'\\r');await Bun.sleep(10)}\"",
-+      })
-+      yield* pollWithTimeout(
-+        Effect.sync(() => durable.some((part) => part.state.status === "completed") || undefined),
-+        "timed out waiting for direct shell terminal event",
-+      )
-+
-+      // 40 个 CR 帧短于 durable 窗口，能在不改变 raw output 的前提下覆盖 leading/trailing budget。
-+      // 最后的 literal 检查保证 cadence 优化没有把 direct shell 的累积输出换成 TerminalDisplay。
-+      // 只有 running Part 属于重连 checkpoint 预算；completed 是权威终态，不能
-+      // 为了满足上限而从统计或生产路径中删除。
-+      const running = durable.filter((part) => part.state.status === "running")
-+      const tool = completedTool(result.parts)
-+      expect(running.length).toBeLessThanOrEqual(3)
-+      expect(running[0]?.state.status === "running" ? running[0].state.metadata?.progressVersion : undefined).toBe(0)
-+      expect(live.some((part) => part.state.status === "running")).toBe(true)
-+      expect(tool?.state.output).toContain("DIRECT_PROGRESS_1")
-+      expect(tool?.state.output).toContain("DIRECT_PROGRESS_40")
-+    }),
-+  { git: true, config: cfg },
-+  30_000,
-+)
-+
- unix(
-   "shell completes a fast command on the preferred shell",
-   () =>
-@@ -2993,7 +3039,8 @@ it.instance(
-       yield* waitForBusy(chat.id)
- 
-       const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
--      yield* Effect.sleep(50)
-+      // 只让 queued caller 进入 Run state，不用固定毫秒数猜测本机调度速度。
-+      yield* Effect.yieldNow
- 
-       expect(yield* llm.calls).toBe(0)
- 
-@@ -3008,8 +3055,7 @@ it.instance(
-       expect(yield* llm.calls).toBe(1)
-     }),
-   { git: true },
--  // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
--  10_000,
-+  shortSessionTimeout,
- )
- 
- it.instance(
-@@ -3032,7 +3078,8 @@ it.instance(
- 
-       const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-       const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
--      yield* Effect.sleep(50)
-+      // 两个 caller 在同一协作式调度轮次进入 Runner，避免 wall-clock readiness race。
-+      yield* Effect.yieldNow
- 
-       expect(yield* llm.calls).toBe(0)
- 
-@@ -3048,8 +3095,7 @@ it.instance(
-       expect(yield* llm.calls).toBe(1)
-     }),
-   { git: true },
--  // 该用例断言两个 loop 调用共享 shell 完成后的同一次结果；放宽预算不改变并发语义断言。
--  10_000,
-+  shortSessionTimeout,
- )
- 
- unix(
-diff --git a/packages/opencode/test/sync/index.test.ts b/packages/opencode/test/sync/index.test.ts
-index 2fbfc9b94ca4cdf1e2ccfb39366b4f1a46e095bb..5feeb8986ca76d7b6257e4b6c86a588845a38d55 100644
---- a/packages/opencode/test/sync/index.test.ts
-+++ b/packages/opencode/test/sync/index.test.ts
-@@ -1,6 +1,6 @@
- import { describe, expect, beforeEach, afterAll } from "bun:test"
- import { provideTmpdirInstance } from "../fixture/fixture"
--import { Effect, Layer, Schema } from "effect"
-+import { Effect, Fiber, Layer, Schema } from "effect"
- import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { Bus } from "../../src/bus"
- import { SyncEvent } from "../../src/sync"
-@@ -8,7 +8,7 @@ import { Database, eq } from "@/storage/db"
- import { EventSequenceTable, EventTable } from "../../src/sync/event.sql"
- import { MessageID } from "../../src/session/schema"
- import { initProjectors } from "../../src/server/projectors"
--import { testEffect } from "../lib/effect"
-+import { pollWithTimeout, testEffect } from "../lib/effect"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- 
- const it = testEffect(
-@@ -26,7 +26,7 @@ beforeEach(() => {
- })
- 
- describe("SyncEvent", () => {
--  function setup() {
-+  function setup(convertEvent?: Parameters<typeof SyncEvent.init>[0]["convertEvent"]) {
-     SyncEvent.reset()
- 
-     const Created = SyncEvent.define({
-@@ -44,6 +44,7 @@ describe("SyncEvent", () => {
- 
-     SyncEvent.init({
-       projectors: [SyncEvent.project(Created, () => {}), SyncEvent.project(Sent, () => {})],
-+      ...(convertEvent && { convertEvent }),
-     })
- 
-     return { Created, Sent }
-@@ -139,6 +140,54 @@ describe("SyncEvent", () => {
-         }),
-       ),
-     )
-+
-+    it.live(
-+      "awaits publication before allowing the next event",
-+      provideTmpdirInstance(() =>
-+        Effect.gen(function* () {
-+          const published: string[] = []
-+          let conversions = 0
-+          let markStarted = () => {}
-+          const firstConversionStarted = new Promise<void>((resolve) => {
-+            markStarted = resolve
-+          })
-+          const { Created } = setup((_type, data) => {
-+            conversions++
-+            if (conversions !== 1) return data
-+            markStarted()
-+            return new Promise((resolve) => setTimeout(() => resolve(data), 100))
-+          })
-+          // 延迟发生在公开 convertEvent seam；它能区分 awaited publication 与丢弃 Promise。
-+          // 第二次 run 复用同一 aggregate，验证顺序合同而不是单次事件是否可发布。
-+          const bus = yield* Bus.Service
-+          const dispose = yield* bus.subscribeAllCallback((event) => {
-+            if (event.type !== Created.type) return
-+            published.push((event.properties as { name: string }).name)
-+          })
-+          yield* Effect.addFinalizer(() => Effect.sync(dispose))
-+
-+          // 同一调用方的 terminal 必须排在 trailing running publication 之后；
-+          // 第一条公开转换受控延迟时，第二个 run 尚不允许开始。
-+          const sequence = yield* Effect.gen(function* () {
-+            yield* SyncEvent.use.run(Created, { id: "evt_order", name: "running" })
-+            yield* SyncEvent.use.run(Created, { id: "evt_order", name: "terminal" })
-+          }).pipe(Effect.forkChild)
-+
-+          yield* Effect.promise(() => firstConversionStarted)
-+          yield* Effect.yieldNow
-+          // 这里只检查公开 Effect 是否完成，不检查 private publisher 调用次数。
-+          // 旧 fire-and-forget 实现会提前完成并让 terminal 越过延迟的 running。
-+          const pending = sequence.pollUnsafe() === undefined
-+          yield* Fiber.join(sequence)
-+          yield* pollWithTimeout(
-+            Effect.sync(() => (published.length === 2 ? true : undefined)),
-+            "timed out waiting for ordered SyncEvent publications",
-+          )
-+          expect(pending).toBe(true)
-+          expect(published).toEqual(["running", "terminal"])
-+        }),
-+      ),
-+    )
-   })
- 
-   describe("replay", () => {
-diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 6c1d6734fcbf1892d3c401ec7c4b9fe4e83bca5e..081c76d704a7624d2d7763981451ef95161b9ab8 100644
---- a/packages/opencode/test/tool/shell.test.ts
-+++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1,6 +1,6 @@
- import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src/util/output-notice"
- import { describe, expect, test } from "bun:test"
--import { Cause, Effect, Exit, Layer } from "effect"
-+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
- import type * as Scope from "effect/Scope"
- import os from "os"
- import path from "path"
-@@ -23,6 +23,7 @@ import { Tool } from "@/tool/tool"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- import { PermissionReviewer } from "@/permission/reviewer/service"
- import { Permission as PermissionService } from "@/permission"
-+import { ToolProgress } from "@/tool/progress"
- 
- const shellLayer = Layer.mergeAll(
-   CrossSpawnSpawner.defaultLayer,
-@@ -225,6 +226,109 @@ describe("tool.shell", () => {
-     60_000,
-   )
- 
-+  it.live("coalesces shell progress without changing final output", () =>
-+    runIn(
-+      projectRoot,
-+      Effect.gen(function* () {
-+        const code =
-+          'for (let i = 1; i <= 40; i++) { process.stdout.write("\\rOPENCODE_DISK_WRITE_REPRO " + i + "/40"); await Bun.sleep(10) }'
-+        const command = PS.has(sh()) ? `& ${bin} -e ${evalarg(code)}` : `${bin} -e ${evalarg(code)}`
-+        // 该 literal 同时是 WAL feedback loop 的可识别输入和最终 output 的独立预期值。
-+        // 生产实现不能通过截断或丢弃 CR 帧来伪造较低 durable 计数。
-+        const updates: Array<{
-+          delivery?: "durable" | "ephemeral"
-+          metadata?: Record<string, unknown>
-+        }> = []
-+
-+        // 这里观察真实 Tool Context delivery，而不是 coordinator 调用次数：缺省 delivery
-+        // 本身就是 durable 合同，因此旧实现的每个 transport chunk 都会被准确计入。
-+        const result = yield* run(
-+          { command, description: "Render progress" },
-+          {
-+            ...ctx,
-+            metadata: (input) =>
-+              Effect.sync(() => {
-+                updates.push(input)
-+              }),
-+          },
-+        )
-+        const durable = updates.filter((item) => item.delivery !== "ephemeral")
-+
-+        // 短命令允许 initial、leading 与必要 trailing 三个 running durable 快照；
-+        // terminal result 不经过 metadata callback，不能混入该预算。
-+        expect(durable.length).toBeLessThanOrEqual(3)
-+        expect(updates.some((item) => item.delivery === "ephemeral")).toBe(true)
-+        expect(durable[0]?.metadata?.progressVersion).toBe(0)
-+        expect(result.metadata.output).toContain("OPENCODE_DISK_WRITE_REPRO 40/40")
-+        expect(result.output).toContain("OPENCODE_DISK_WRITE_REPRO 40/40")
-+      }),
-+    ),
-+  )
-+
-+  it.live("does not repeat a durable version when close overlaps publication", () =>
-+    Effect.gen(function* () {
-+      const first = yield* Deferred.make<void>()
-+      const second = yield* Deferred.make<void>()
-+      const release = yield* Deferred.make<void>()
-+      const versions: number[] = []
-+      const progress = yield* ToolProgress.make<{ output: string }>({
-+        live: () => Effect.void,
-+        durable: (metadata) =>
-+          Effect.gen(function* () {
-+            // 先记录版本再阻塞，模拟 SQLite 已提交但 publication 尚未返回的真实边界。
-+            versions.push(metadata.progressVersion)
-+            if (metadata.progressVersion === 1) yield* Deferred.succeed(first, undefined)
-+            if (metadata.progressVersion !== 2) return
-+            yield* Deferred.succeed(second, undefined)
-+            yield* Deferred.await(release)
-+          }),
-+      })
-+      yield* progress.update({ output: "a" })
-+      yield* Deferred.await(first).pipe(Effect.timeout("2 seconds"))
-+      yield* Effect.sleep("1100 millis")
-+      yield* progress.update({ output: "ab" })
-+      yield* Deferred.await(second).pipe(Effect.timeout("2 seconds"))
-+      // close 必须与第二次 publication 重叠；短暂窗口只放大已证实的生命周期竞态。
-+      const closing = yield* progress.close().pipe(Effect.forkScoped)
-+      yield* Effect.sleep("20 millis")
-+      yield* Deferred.succeed(release, undefined)
-+      yield* Fiber.join(closing)
-+      // 每个 version 对应一次 durable Part transaction，重复值就是额外磁盘写入。
-+      expect(versions).toEqual([1, 2])
-+    }),
-+  )
-+
-+  it.live("keeps live progress moving while durable publication is delayed", () =>
-+    Effect.gen(function* () {
-+      const durableStarted = yield* Deferred.make<void>()
-+      const liveTwo = yield* Deferred.make<void>()
-+      const release = yield* Deferred.make<void>()
-+      const progress = yield* ToolProgress.make<{ output: string }>({
-+        live: (metadata) =>
-+          metadata.progressVersion === 2 ? Deferred.succeed(liveTwo, undefined).pipe(Effect.asVoid) : Effect.void,
-+        durable: (metadata) =>
-+          metadata.progressVersion === 1
-+            ? Deferred.succeed(durableStarted, undefined).pipe(Effect.andThen(Deferred.await(release)))
-+            : Effect.void,
-+      })
-+
-+      yield* progress.update({ output: "a" })
-+      yield* Deferred.await(durableStarted).pipe(Effect.timeout("2 seconds"))
-+      // 这里只推进真实 50ms cadence；durableStarted 才是 worker 已到达阻塞 seam 的 readiness。
-+      yield* Effect.sleep("60 millis")
-+      yield* progress.update({ output: "ab" })
-+      yield* Deferred.await(liveTwo).pipe(
-+        Effect.timeoutOrElse({
-+          duration: "500 millis",
-+          orElse: () => Effect.fail(new Error("live v2 waited for delayed durable publication")),
-+        }),
-+        // red 或 green 都先释放 adapter，避免失败测试把 scope finalizer 留在 blocked close。
-+        Effect.ensuring(Deferred.succeed(release, undefined)),
-+      )
-+      yield* progress.close()
-+    }),
-+  )
-+
-   // 回归：cmd() 从 spawn 的 shell 选项改为显式 -c 参数后，
-   // 必须验证含引号、管道的命令仍被 shell 正确解析。
-   // 仅在非 Windows 平台运行：tr 和单引号语义是 POSIX shell 专属。
-diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index d876bb32402a58ee495bdd5ea88218d6bdfcc6f3..35f1551ce35f123573829cca1c08153d0689284d 100644
---- a/packages/sdk/js/src/v2/gen/types.gen.ts
-+++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -12,8 +12,11 @@ export type Event =
-   | EventServerConnected
-   | EventGlobalDisposed
-   | EventServerInstanceDisposed
-+  | EventFileEdited
-+  | EventFileWatcherUpdated
-   | EventLspClientDiagnostics
-   | EventLspUpdated
-+  | EventMessagePartProgress
-   | EventMessagePartDelta
-   | EventPermissionAsked
-   | EventPermissionReplied
-@@ -23,10 +26,31 @@ export type Event =
-   | EventPermissionReviewCircuitBroken1
-   | EventSessionDiff
-   | EventSessionError
-+  | EventQuestionAsked
-+  | EventQuestionReplied
-+  | EventQuestionRejected
-+  | EventTodoUpdated
-+  | EventSessionStatus
-+  | EventSessionIdle
-   | EventMcpToolsChanged
-   | EventMcpBrowserOpenFailed
-   | EventCommandExecuted
-   | EventProjectUpdated
-+  | EventSessionCompacted
-+  | EventSessionGoalUpdated
-+  | EventSessionGoalCleared
-+  | EventVcsBranchUpdated
-+  | EventWorkspaceReady
-+  | EventWorkspaceFailed
-+  | EventWorkspaceStatus
-+  | EventWorktreeReady
-+  | EventWorktreeFailed
-+  | EventPtyCreated
-+  | EventPtyUpdated
-+  | EventPtyExited
-+  | EventPtyDeleted
-+  | EventInstallationUpdated
-+  | EventInstallationUpdateAvailable
-   | EventMessageUpdated
-   | EventMessageRemoved
-   | EventMessagePartUpdated
-@@ -60,29 +84,6 @@ export type Event =
-   | EventSessionNextCompactionStarted
-   | EventSessionNextCompactionDelta
-   | EventSessionNextCompactionEnded
--  | EventFileEdited
--  | EventFileWatcherUpdated
--  | EventInstallationUpdated
--  | EventInstallationUpdateAvailable
--  | EventPtyCreated
--  | EventPtyUpdated
--  | EventPtyExited
--  | EventPtyDeleted
--  | EventQuestionAsked
--  | EventQuestionReplied
--  | EventQuestionRejected
--  | EventSessionStatus
--  | EventSessionIdle
--  | EventTodoUpdated
--  | EventSessionCompacted
--  | EventSessionGoalUpdated
--  | EventSessionGoalCleared
--  | EventVcsBranchUpdated
--  | EventWorktreeReady
--  | EventWorktreeFailed
--  | EventWorkspaceReady
--  | EventWorkspaceFailed
--  | EventWorkspaceStatus
-   | EventCatalogModelUpdated
- 
- export type OAuth = {
-@@ -165,6 +166,136 @@ export type EventTuiSessionSelect = {
-   }
- }
- 
-+export type ToolStatePending = {
-+  status: "pending"
-+  input: {
-+    [key: string]: unknown
-+  }
-+  raw: string
-+}
-+
-+export type ToolStateRunning = {
-+  status: "running"
-+  input: {
-+    [key: string]: unknown
-+  }
-+  title?: string
-+  metadata?: {
-+    [key: string]: unknown
-+  }
-+  time: {
-+    start: number
-+  }
-+}
-+
-+export type FilePartSourceText = {
-+  value: string
-+  start: number
-+  end: number
-+}
-+
-+export type FileSource = {
-+  text: FilePartSourceText
-+  type: "file"
-+  path: string
-+}
-+
-+export type Range = {
-+  start: {
-+    line: number
-+    character: number
-+  }
-+  end: {
-+    line: number
-+    character: number
-+  }
-+}
-+
-+export type SymbolSource = {
-+  text: FilePartSourceText
-+  type: "symbol"
-+  path: string
-+  range: Range
-+  name: string
-+  kind: number
-+}
-+
-+export type ResourceSource = {
-+  text: FilePartSourceText
-+  type: "resource"
-+  clientName: string
-+  uri: string
-+}
-+
-+export type FilePartSource = FileSource | SymbolSource | ResourceSource
-+
-+export type FilePart = {
-+  id: string
-+  sessionID: string
-+  messageID: string
-+  hidden?: {
-+    time: number
-+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-+  }
-+  type: "file"
-+  mime: string
-+  filename?: string
-+  url: string
-+  source?: FilePartSource
-+}
-+
-+export type ToolStateCompleted = {
-+  status: "completed"
-+  input: {
-+    [key: string]: unknown
-+  }
-+  output: string
-+  title: string
-+  metadata: {
-+    [key: string]: unknown
-+  }
-+  time: {
-+    start: number
-+    end: number
-+    compacted?: number
-+  }
-+  attachments?: Array<FilePart>
-+}
-+
-+export type ToolStateError = {
-+  status: "error"
-+  input: {
-+    [key: string]: unknown
-+  }
-+  error: string
-+  metadata?: {
-+    [key: string]: unknown
-+  }
-+  time: {
-+    start: number
-+    end: number
-+  }
-+}
-+
-+export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError
-+
-+export type ToolPart = {
-+  id: string
-+  sessionID: string
-+  messageID: string
-+  hidden?: {
-+    time: number
-+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-+  }
-+  type: "tool"
-+  callID: string
-+  tool: string
-+  state: ToolState
-+  metadata?: {
-+    [key: string]: unknown
-+  }
-+}
-+
- export type PermissionRequest = {
-   id: string
-   sessionID: string
-@@ -249,6 +380,99 @@ export type ApiError = {
-   }
- }
- 
-+export type QuestionOption = {
-+  /**
-+   * Display text (1-5 words, concise)
-+   */
-+  label: string
-+  /**
-+   * Explanation of choice
-+   */
-+  description: string
-+}
-+
-+export type QuestionInfo = {
-+  /**
-+   * Complete question
-+   */
-+  question: string
-+  /**
-+   * Very short label (max 30 chars)
-+   */
-+  header: string
-+  /**
-+   * Available choices
-+   */
-+  options: Array<QuestionOption>
-+  multiple?: boolean
-+  custom?: boolean
-+}
-+
-+export type QuestionTool = {
-+  messageID: string
-+  callID: string
-+}
-+
-+export type QuestionRequest = {
-+  id: string
-+  sessionID: string
-+  /**
-+   * Questions to ask
-+   */
-+  questions: Array<QuestionInfo>
-+  tool?: QuestionTool
-+}
-+
-+export type QuestionAnswer = Array<string>
-+
-+export type QuestionReplied = {
-+  sessionID: string
-+  requestID: string
-+  answers: Array<QuestionAnswer>
-+}
-+
-+export type QuestionRejected = {
-+  sessionID: string
-+  requestID: string
-+}
-+
-+export type Todo = {
-+  /**
-+   * Brief description of the task
-+   */
-+  content: string
-+  /**
-+   * Current status of the task: pending, in_progress, completed, cancelled
-+   */
-+  status: string
-+  /**
-+   * Priority level of the task: high, medium, low
-+   */
-+  priority: string
-+}
-+
-+export type SessionStatus =
-+  | {
-+      type: "idle"
-+    }
-+  | {
-+      type: "retry"
-+      attempt: number
-+      message: string
-+      action?: {
-+        reason: string
-+        provider: string
-+        title: string
-+        message: string
-+        label: string
-+        link?: string
-+      }
-+      next: number
-+    }
-+  | {
-+      type: "busy"
-+    }
-+
- export type Project = {
-   id: string
-   worktree: string
-@@ -273,6 +497,33 @@ export type Project = {
-   sandboxes: Array<string>
- }
- 
-+export type SessionGoal = {
-+  sessionID: string
-+  id: string
-+  objective: string
-+  status: "active" | "paused" | "complete" | "blocked"
-+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+  continueOnError: boolean
-+  generation: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+  reason?: string
-+  time: {
-+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+  }
-+}
-+
-+export type Pty = {
-+  id: string
-+  title: string
-+  command: string
-+  args: Array<string>
-+  cwd: string
-+  status: "running" | "exited"
-+  pid: number
-+}
-+
- export type OutputFormatText = {
-   type: "text"
- }
-@@ -367,133 +618,33 @@ export type AssistantMessage = {
-     instructions: number
-     skills: number
-     tools: number
--    messages: {
--      userText: number
--      assistantText: number
--      reasoning: number
--      toolInput: number
--      toolOutput: number
--      attachments: number
--      total: number
--    }
--    media?: {
--      rawChars: number
--      textChars: number
--      tokens: number
--      count: number
--      imageTokens: number
--      pdfTokens: number
--      otherTokens: number
--    }
--  }
--  structured?: unknown
--  variant?: string
--  finish?: string
--}
--
--export type Message = UserMessage | AssistantMessage
--
--export type TextPart = {
--  id: string
--  sessionID: string
--  messageID: string
--  hidden?: {
--    time: number
--    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
--  }
--  type: "text"
--  text: string
--  synthetic?: boolean
--  ignored?: boolean
--  time?: {
--    start: number
--    end?: number
--  }
--  metadata?: {
--    [key: string]: unknown
--  }
--}
--
--export type SubtaskPart = {
--  id: string
--  sessionID: string
--  messageID: string
--  hidden?: {
--    time: number
--    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
--  }
--  type: "subtask"
--  prompt: string
--  description: string
--  agent: string
--  model?: {
--    providerID: string
--    modelID: string
--  }
--  command?: string
--}
--
--export type ReasoningPart = {
--  id: string
--  sessionID: string
--  messageID: string
--  hidden?: {
--    time: number
--    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
--  }
--  type: "reasoning"
--  text: string
--  metadata?: {
--    [key: string]: unknown
--  }
--  time: {
--    start: number
--    end?: number
--  }
--}
--
--export type FilePartSourceText = {
--  value: string
--  start: number
--  end: number
--}
--
--export type FileSource = {
--  text: FilePartSourceText
--  type: "file"
--  path: string
--}
--
--export type Range = {
--  start: {
--    line: number
--    character: number
--  }
--  end: {
--    line: number
--    character: number
-+    messages: {
-+      userText: number
-+      assistantText: number
-+      reasoning: number
-+      toolInput: number
-+      toolOutput: number
-+      attachments: number
-+      total: number
-+    }
-+    media?: {
-+      rawChars: number
-+      textChars: number
-+      tokens: number
-+      count: number
-+      imageTokens: number
-+      pdfTokens: number
-+      otherTokens: number
-+    }
-   }
-+  structured?: unknown
-+  variant?: string
-+  finish?: string
- }
- 
--export type SymbolSource = {
--  text: FilePartSourceText
--  type: "symbol"
--  path: string
--  range: Range
--  name: string
--  kind: number
--}
--
--export type ResourceSource = {
--  text: FilePartSourceText
--  type: "resource"
--  clientName: string
--  uri: string
--}
--
--export type FilePartSource = FileSource | SymbolSource | ResourceSource
-+export type Message = UserMessage | AssistantMessage
- 
--export type FilePart = {
-+export type TextPart = {
-   id: string
-   sessionID: string
-   messageID: string
-@@ -501,71 +652,39 @@ export type FilePart = {
-     time: number
-     reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-   }
--  type: "file"
--  mime: string
--  filename?: string
--  url: string
--  source?: FilePartSource
--}
--
--export type ToolStatePending = {
--  status: "pending"
--  input: {
--    [key: string]: unknown
--  }
--  raw: string
--}
--
--export type ToolStateRunning = {
--  status: "running"
--  input: {
--    [key: string]: unknown
--  }
--  title?: string
--  metadata?: {
--    [key: string]: unknown
--  }
--  time: {
-+  type: "text"
-+  text: string
-+  synthetic?: boolean
-+  ignored?: boolean
-+  time?: {
-     start: number
-+    end?: number
-   }
--}
--
--export type ToolStateCompleted = {
--  status: "completed"
--  input: {
--    [key: string]: unknown
--  }
--  output: string
--  title: string
--  metadata: {
-+  metadata?: {
-     [key: string]: unknown
-   }
--  time: {
--    start: number
--    end: number
--    compacted?: number
--  }
--  attachments?: Array<FilePart>
- }
- 
--export type ToolStateError = {
--  status: "error"
--  input: {
--    [key: string]: unknown
--  }
--  error: string
--  metadata?: {
--    [key: string]: unknown
-+export type SubtaskPart = {
-+  id: string
-+  sessionID: string
-+  messageID: string
-+  hidden?: {
-+    time: number
-+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-   }
--  time: {
--    start: number
--    end: number
-+  type: "subtask"
-+  prompt: string
-+  description: string
-+  agent: string
-+  model?: {
-+    providerID: string
-+    modelID: string
-   }
-+  command?: string
- }
- 
--export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError
--
--export type ToolPart = {
-+export type ReasoningPart = {
-   id: string
-   sessionID: string
-   messageID: string
-@@ -573,13 +692,15 @@ export type ToolPart = {
-     time: number
-     reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-   }
--  type: "tool"
--  callID: string
--  tool: string
--  state: ToolState
-+  type: "reasoning"
-+  text: string
-   metadata?: {
-     [key: string]: unknown
-   }
-+  time: {
-+    start: number
-+    end?: number
-+  }
- }
- 
- export type StepStartPart = {
-@@ -821,133 +942,13 @@ export type Session = {
-   }
- }
- 
--export type Prompt = {
--  text: string
--  files?: Array<PromptFileAttachment>
--  agents?: Array<PromptAgentAttachment>
--  references?: Array<PromptReferenceAttachment>
--}
--
--export type Pty = {
--  id: string
--  title: string
--  command: string
--  args: Array<string>
--  cwd: string
--  status: "running" | "exited"
--  pid: number
--}
--
--export type QuestionOption = {
--  /**
--   * Display text (1-5 words, concise)
--   */
--  label: string
--  /**
--   * Explanation of choice
--   */
--  description: string
--}
--
--export type QuestionInfo = {
--  /**
--   * Complete question
--   */
--  question: string
--  /**
--   * Very short label (max 30 chars)
--   */
--  header: string
--  /**
--   * Available choices
--   */
--  options: Array<QuestionOption>
--  multiple?: boolean
--  custom?: boolean
--}
--
--export type QuestionTool = {
--  messageID: string
--  callID: string
--}
--
--export type QuestionRequest = {
--  id: string
--  sessionID: string
--  /**
--   * Questions to ask
--   */
--  questions: Array<QuestionInfo>
--  tool?: QuestionTool
--}
--
--export type QuestionAnswer = Array<string>
--
--export type QuestionReplied = {
--  sessionID: string
--  requestID: string
--  answers: Array<QuestionAnswer>
--}
--
--export type QuestionRejected = {
--  sessionID: string
--  requestID: string
--}
--
--export type SessionStatus =
--  | {
--      type: "idle"
--    }
--  | {
--      type: "retry"
--      attempt: number
--      message: string
--      action?: {
--        reason: string
--        provider: string
--        title: string
--        message: string
--        label: string
--        link?: string
--      }
--      next: number
--    }
--  | {
--      type: "busy"
--    }
--
--export type Todo = {
--  /**
--   * Brief description of the task
--   */
--  content: string
--  /**
--   * Current status of the task: pending, in_progress, completed, cancelled
--   */
--  status: string
--  /**
--   * Priority level of the task: high, medium, low
--   */
--  priority: string
--}
--
--export type SessionGoal = {
--  sessionID: string
--  id: string
--  objective: string
--  status: "active" | "paused" | "complete" | "blocked"
--  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--  continueOnError: boolean
--  generation: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--  reason?: string
--  time: {
--    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--  }
--}
--
-+export type Prompt = {
-+  text: string
-+  files?: Array<PromptFileAttachment>
-+  agents?: Array<PromptAgentAttachment>
-+  references?: Array<PromptReferenceAttachment>
-+}
-+
- export type GlobalEvent = {
-   directory: string
-   project?: string
-@@ -960,8 +961,11 @@ export type GlobalEvent = {
-     | EventServerConnected
-     | EventGlobalDisposed
-     | EventServerInstanceDisposed
-+    | EventFileEdited
-+    | EventFileWatcherUpdated
-     | EventLspClientDiagnostics
-     | EventLspUpdated
-+    | EventMessagePartProgress
-     | EventMessagePartDelta
-     | EventPermissionAsked
-     | EventPermissionReplied
-@@ -971,10 +975,31 @@ export type GlobalEvent = {
-     | EventPermissionReviewCircuitBroken
-     | EventSessionDiff
-     | EventSessionError
-+    | EventQuestionAsked
-+    | EventQuestionReplied
-+    | EventQuestionRejected
-+    | EventTodoUpdated
-+    | EventSessionStatus
-+    | EventSessionIdle
-     | EventMcpToolsChanged
-     | EventMcpBrowserOpenFailed
-     | EventCommandExecuted
-     | EventProjectUpdated
-+    | EventSessionCompacted
-+    | EventSessionGoalUpdated
-+    | EventSessionGoalCleared
-+    | EventVcsBranchUpdated
-+    | EventWorkspaceReady
-+    | EventWorkspaceFailed
-+    | EventWorkspaceStatus
-+    | EventWorktreeReady
-+    | EventWorktreeFailed
-+    | EventPtyCreated
-+    | EventPtyUpdated
-+    | EventPtyExited
-+    | EventPtyDeleted
-+    | EventInstallationUpdated
-+    | EventInstallationUpdateAvailable
-     | EventMessageUpdated
-     | EventMessageRemoved
-     | EventMessagePartUpdated
-@@ -1008,29 +1033,6 @@ export type GlobalEvent = {
-     | EventSessionNextCompactionStarted
-     | EventSessionNextCompactionDelta
-     | EventSessionNextCompactionEnded
--    | EventFileEdited
--    | EventFileWatcherUpdated
--    | EventInstallationUpdated
--    | EventInstallationUpdateAvailable
--    | EventPtyCreated
--    | EventPtyUpdated
--    | EventPtyExited
--    | EventPtyDeleted
--    | EventQuestionAsked
--    | EventQuestionReplied
--    | EventQuestionRejected
--    | EventSessionStatus
--    | EventSessionIdle
--    | EventTodoUpdated
--    | EventSessionCompacted
--    | EventSessionGoalUpdated
--    | EventSessionGoalCleared
--    | EventVcsBranchUpdated
--    | EventWorktreeReady
--    | EventWorktreeFailed
--    | EventWorkspaceReady
--    | EventWorkspaceFailed
--    | EventWorkspaceStatus
-     | EventCatalogModelUpdated
-     | SyncEventMessageUpdated
-     | SyncEventMessageRemoved
-@@ -2740,6 +2742,23 @@ export type EventServerInstanceDisposed = {
-   }
- }
- 
-+export type EventFileEdited = {
-+  id: string
-+  type: "file.edited"
-+  properties: {
-+    file: string
-+  }
-+}
-+
-+export type EventFileWatcherUpdated = {
-+  id: string
-+  type: "file.watcher.updated"
-+  properties: {
-+    file: string
-+    event: "add" | "change" | "unlink"
-+  }
-+}
-+
- export type EventLspClientDiagnostics = {
-   id: string
-   type: "lsp.client.diagnostics"
-@@ -2757,6 +2776,16 @@ export type EventLspUpdated = {
-   }
- }
- 
-+export type EventMessagePartProgress = {
-+  id: string
-+  type: "message.part.progress"
-+  properties: {
-+    sessionID: string
-+    part: ToolPart
-+    time: number
-+  }
-+}
-+
- export type EventMessagePartDelta = {
-   id: string
-   type: "message.part.delta"
-@@ -2811,83 +2840,251 @@ export type EventPermissionReviewStarted = {
-   }
- }
- 
--export type EventPermissionReviewFailed = {
-+export type EventPermissionReviewFailed = {
-+  id: string
-+  type: "permission.review.failed"
-+  properties: {
-+    sessionID: string
-+    reviewID: string
-+    reason: string
-+  }
-+}
-+
-+export type EventPermissionReviewCircuitBroken = {
-+  id: string
-+  type: "permission.review.circuit_broken"
-+  properties: {
-+    sessionID: string
-+    consecutive: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+    recent: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+  }
-+}
-+
-+export type EventSessionDiff = {
-+  id: string
-+  type: "session.diff"
-+  properties: {
-+    sessionID: string
-+    diff: Array<SnapshotFileDiff>
-+  }
-+}
-+
-+export type EventSessionError = {
-+  id: string
-+  type: "session.error"
-+  properties: {
-+    sessionID?: string
-+    error?:
-+      | ProviderAuthError
-+      | UnknownError
-+      | MessageOutputLengthError
-+      | MessageAbortedError
-+      | StructuredOutputError
-+      | ContextOverflowError
-+      | ApiError
-+  }
-+}
-+
-+export type EventQuestionAsked = {
-+  id: string
-+  type: "question.asked"
-+  properties: QuestionRequest
-+}
-+
-+export type EventQuestionReplied = {
-+  id: string
-+  type: "question.replied"
-+  properties: QuestionReplied
-+}
-+
-+export type EventQuestionRejected = {
-+  id: string
-+  type: "question.rejected"
-+  properties: QuestionRejected
-+}
-+
-+export type EventTodoUpdated = {
-+  id: string
-+  type: "todo.updated"
-+  properties: {
-+    sessionID: string
-+    todos: Array<Todo>
-+  }
-+}
-+
-+export type EventSessionStatus = {
-+  id: string
-+  type: "session.status"
-+  properties: {
-+    sessionID: string
-+    status: SessionStatus
-+  }
-+}
-+
-+export type EventSessionIdle = {
-+  id: string
-+  type: "session.idle"
-+  properties: {
-+    sessionID: string
-+  }
-+}
-+
-+export type EventMcpToolsChanged = {
-+  id: string
-+  type: "mcp.tools.changed"
-+  properties: {
-+    server: string
-+  }
-+}
-+
-+export type EventMcpBrowserOpenFailed = {
-+  id: string
-+  type: "mcp.browser.open.failed"
-+  properties: {
-+    mcpName: string
-+    url: string
-+  }
-+}
-+
-+export type EventCommandExecuted = {
-+  id: string
-+  type: "command.executed"
-+  properties: {
-+    name: string
-+    sessionID: string
-+    arguments: string
-+    messageID: string
-+  }
-+}
-+
-+export type EventProjectUpdated = {
-+  id: string
-+  type: "project.updated"
-+  properties: Project
-+}
-+
-+export type EventSessionCompacted = {
-+  id: string
-+  type: "session.compacted"
-+  properties: {
-+    sessionID: string
-+  }
-+}
-+
-+export type EventSessionGoalUpdated = {
-+  id: string
-+  type: "session.goal.updated"
-+  properties: {
-+    sessionID: string
-+    goal: SessionGoal
-+  }
-+}
-+
-+export type EventSessionGoalCleared = {
-+  id: string
-+  type: "session.goal.cleared"
-+  properties: {
-+    sessionID: string
-+  }
-+}
-+
-+export type EventVcsBranchUpdated = {
-+  id: string
-+  type: "vcs.branch.updated"
-+  properties: {
-+    branch?: string
-+  }
-+}
-+
-+export type EventWorkspaceReady = {
-+  id: string
-+  type: "workspace.ready"
-+  properties: {
-+    name: string
-+  }
-+}
-+
-+export type EventWorkspaceFailed = {
-+  id: string
-+  type: "workspace.failed"
-+  properties: {
-+    message: string
-+  }
-+}
-+
-+export type EventWorkspaceStatus = {
-+  id: string
-+  type: "workspace.status"
-+  properties: {
-+    workspaceID: string
-+    status: "connected" | "connecting" | "disconnected" | "error"
-+  }
-+}
-+
-+export type EventWorktreeReady = {
-   id: string
--  type: "permission.review.failed"
-+  type: "worktree.ready"
-   properties: {
--    sessionID: string
--    reviewID: string
--    reason: string
-+    name: string
-+    branch?: string
-   }
- }
- 
--export type EventPermissionReviewCircuitBroken = {
-+export type EventWorktreeFailed = {
-   id: string
--  type: "permission.review.circuit_broken"
-+  type: "worktree.failed"
-   properties: {
--    sessionID: string
--    consecutive: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
--    recent: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-+    message: string
-   }
- }
- 
--export type EventSessionDiff = {
-+export type EventPtyCreated = {
-   id: string
--  type: "session.diff"
-+  type: "pty.created"
-   properties: {
--    sessionID: string
--    diff: Array<SnapshotFileDiff>
-+    info: Pty
-   }
- }
- 
--export type EventSessionError = {
-+export type EventPtyUpdated = {
-   id: string
--  type: "session.error"
-+  type: "pty.updated"
-   properties: {
--    sessionID?: string
--    error?:
--      | ProviderAuthError
--      | UnknownError
--      | MessageOutputLengthError
--      | MessageAbortedError
--      | StructuredOutputError
--      | ContextOverflowError
--      | ApiError
-+    info: Pty
-   }
- }
- 
--export type EventMcpToolsChanged = {
-+export type EventPtyExited = {
-   id: string
--  type: "mcp.tools.changed"
-+  type: "pty.exited"
-   properties: {
--    server: string
-+    id: string
-+    exitCode: number
-   }
- }
- 
--export type EventMcpBrowserOpenFailed = {
-+export type EventPtyDeleted = {
-   id: string
--  type: "mcp.browser.open.failed"
-+  type: "pty.deleted"
-   properties: {
--    mcpName: string
--    url: string
-+    id: string
-   }
- }
- 
--export type EventCommandExecuted = {
-+export type EventInstallationUpdated = {
-   id: string
--  type: "command.executed"
-+  type: "installation.updated"
-   properties: {
--    name: string
--    sessionID: string
--    arguments: string
--    messageID: string
-+    version: string
-   }
- }
- 
--export type EventProjectUpdated = {
-+export type EventInstallationUpdateAvailable = {
-   id: string
--  type: "project.updated"
--  properties: Project
-+  type: "installation.update-available"
-+  properties: {
-+    version: string
-+  }
- }
- 
- export type EventMessageUpdated = {
-@@ -3336,191 +3533,6 @@ export type EventSessionNextCompactionEnded = {
-   }
- }
- 
--export type EventFileEdited = {
--  id: string
--  type: "file.edited"
--  properties: {
--    file: string
--  }
--}
--
--export type EventFileWatcherUpdated = {
--  id: string
--  type: "file.watcher.updated"
--  properties: {
--    file: string
--    event: "add" | "change" | "unlink"
--  }
--}
--
--export type EventInstallationUpdated = {
--  id: string
--  type: "installation.updated"
--  properties: {
--    version: string
--  }
--}
--
--export type EventInstallationUpdateAvailable = {
--  id: string
--  type: "installation.update-available"
--  properties: {
--    version: string
--  }
--}
--
--export type EventPtyCreated = {
--  id: string
--  type: "pty.created"
--  properties: {
--    info: Pty
--  }
--}
--
--export type EventPtyUpdated = {
--  id: string
--  type: "pty.updated"
--  properties: {
--    info: Pty
--  }
--}
--
--export type EventPtyExited = {
--  id: string
--  type: "pty.exited"
--  properties: {
--    id: string
--    exitCode: number
--  }
--}
--
--export type EventPtyDeleted = {
--  id: string
--  type: "pty.deleted"
--  properties: {
--    id: string
--  }
--}
--
--export type EventQuestionAsked = {
--  id: string
--  type: "question.asked"
--  properties: QuestionRequest
--}
--
--export type EventQuestionReplied = {
--  id: string
--  type: "question.replied"
--  properties: QuestionReplied
--}
--
--export type EventQuestionRejected = {
--  id: string
--  type: "question.rejected"
--  properties: QuestionRejected
--}
--
--export type EventSessionStatus = {
--  id: string
--  type: "session.status"
--  properties: {
--    sessionID: string
--    status: SessionStatus
--  }
--}
--
--export type EventSessionIdle = {
--  id: string
--  type: "session.idle"
--  properties: {
--    sessionID: string
--  }
--}
--
--export type EventTodoUpdated = {
--  id: string
--  type: "todo.updated"
--  properties: {
--    sessionID: string
--    todos: Array<Todo>
--  }
--}
--
--export type EventSessionCompacted = {
--  id: string
--  type: "session.compacted"
--  properties: {
--    sessionID: string
--  }
--}
--
--export type EventSessionGoalUpdated = {
--  id: string
--  type: "session.goal.updated"
--  properties: {
--    sessionID: string
--    goal: SessionGoal
--  }
--}
--
--export type EventSessionGoalCleared = {
--  id: string
--  type: "session.goal.cleared"
--  properties: {
--    sessionID: string
--  }
--}
--
--export type EventVcsBranchUpdated = {
--  id: string
--  type: "vcs.branch.updated"
--  properties: {
--    branch?: string
--  }
--}
--
--export type EventWorktreeReady = {
--  id: string
--  type: "worktree.ready"
--  properties: {
--    name: string
--    branch?: string
--  }
--}
--
--export type EventWorktreeFailed = {
--  id: string
--  type: "worktree.failed"
--  properties: {
--    message: string
--  }
--}
--
--export type EventWorkspaceReady = {
--  id: string
--  type: "workspace.ready"
--  properties: {
--    name: string
--  }
--}
--
--export type EventWorkspaceFailed = {
--  id: string
--  type: "workspace.failed"
--  properties: {
--    message: string
--  }
--}
--
--export type EventWorkspaceStatus = {
--  id: string
--  type: "workspace.status"
--  properties: {
--    workspaceID: string
--    status: "connected" | "connecting" | "disconnected" | "error"
--  }
--}
--
- export type ModelV2Info = {
-   id: string
-   apiID: string

@@ -194,10 +194,9 @@ index b2c9a8b4bc..3d5d1e85be 100644
 +++ b/packages/opencode/src/token/accounting.ts
 @@ -1,3 +1,4 @@
  // #193：token 域统一统计入口；#194 将填充完整实现
- // #193：从 TUI 包 re-export，保持现有消费端不中断
--export * from "@opencode-ai/tui/util/token-accounting"
-+// #194：相对路径
-+export * from "../../../tui/src/util/token-accounting"
+ // #193：TUI 包 exports map 未导出 ./util/token-accounting subpath，改用相对路径保持消费端不中断
++// #194：相对路径（#193 已修正，保留说明）
+ export * from "../../../tui/src/util/token-accounting"
 diff --git a/packages/opencode/src/token/estimate.ts b/packages/opencode/src/token/estimate.ts
 index 53baa6349f..4cd9fdb3e4 100644
 --- a/packages/opencode/src/token/estimate.ts
@@ -223,13 +222,13 @@ index 53baa6349f..4cd9fdb3e4 100644
 +  return { tokens: 0, rawChars: 0, textChars: 0, count: 0, imageTokens: 0, pdfTokens: 0, otherTokens: 0 }
 +}
 +
-+// #194：默认密度
++// #194：默认 4 chars/token 兼容历史 Token.estimate 口径，无学习样本时回退到该值
 +const DEFAULT_CHARS_PER_TOKEN = 4
-+// #194：密度下限
++// #194：密度下限 2 防极端小样本把 token 数估爆；上限 8 防高密度样本低估上下文占用
 +const MIN_CHARS_PER_TOKEN = 2
-+// #194：密度上限
++// #194：clamp 上下界与 TUI accounting 同口径，保证 daemon 与展示端估算一致
 +const MAX_CHARS_PER_TOKEN = 8
-+// #194：学习窗口
++// #194：学习窗口限 100k 字符，避免超长历史拖慢估算且让最近密度主导
 +const INPUT_CHARS_HISTORY_LIMIT = 100_000
 +
 +type HistoryModel = { providerID?: string; id?: string; modelID?: string }
@@ -238,31 +237,31 @@ index 53baa6349f..4cd9fdb3e4 100644
 +type LearnedInputRatio = { charsPerToken: number; source: "model-history" | "session-history" }
 +export type UploadInputEstimate = { inputTokens: number; textTokens: number; attachmentTokens: number; charsPerToken: number; source: "model-history" | "session-history" | "default" }
 +
-+// #194：纯文本估算
++// #194：estimateText 仅按字符数/密度换算，用于 tail/prune 等不依赖学习样本的场景
 +export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) { return Math.max(0, Math.round((input || "").length / charsPerToken)) }
 +
-+// #194：从历史学习
++// #194：learnInputCharsPerToken 用历史 step-finish 样本反推实际密度，避免固定 /4 失真
 +export function learnInputCharsPerToken(input: { messages: ReadonlyArray<HistoryMessage>; model?: HistoryModel }): LearnedInputRatio | undefined {
 +  const modelRatio = collectInputRatio(input.messages, input.model, true)
-+  // #194：同 model 优先
++  // #194：model-history 精确匹配当前模型时优先，session-history 是泛化回退
 +  if (modelRatio) return { charsPerToken: modelRatio, source: "model-history" }
-+  // #194：回退 session
++  // #194：session-history 接受任意模型样本，作为无同模型样本时的近似回退
 +  const sessionRatio = collectInputRatio(input.messages, input.model, false)
 +  if (sessionRatio) return { charsPerToken: sessionRatio, source: "session-history" }
 +  return undefined
 +}
 +
-+// #194：上传估算
++// #194：estimateUploadInput 汇总文本与附件 token，是 prompt/compaction 共用的唯一上传口径
 +export function estimateUploadInput(input: { text: string; attachments: AttachmentTokenEstimate; history: ReadonlyArray<HistoryMessage>; model?: HistoryModel }): UploadInputEstimate {
-+  // #194：学习密度
++  // #194：先尝试同 model 历史密度，无样本时回退到 4，保证估算始终有界
 +  const learned = learnInputCharsPerToken({ messages: input.history, model: input.model })
 +  const charsPerToken = learned?.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN
-+  // #194：文本估算
++  // #194：文本部分按学习密度换算，附件部分独立累加，两者互不稀释
 +  const textTokens = estimateText(input.text, charsPerToken)
 +  return { inputTokens: textTokens + input.attachments.tokens, textTokens, attachmentTokens: input.attachments.tokens, charsPerToken, source: learned?.source ?? "default" }
 +}
 +
-+// #194：钳制
++// #194：clampCharsPerToken 把学习结果限制在 2..8，防止单一样本把密度推到失真区间
 +function clampCharsPerToken(value: number) { return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value)) }
 +
 +function collectInputRatio(messages: ReadonlyArray<HistoryMessage>, model: HistoryModel | undefined, modelOnly: boolean) {
@@ -283,7 +282,7 @@ index 53baa6349f..4cd9fdb3e4 100644
 +  return clampCharsPerToken(historyInputChars / historyInputTokens)
 +}
 +
-+// #194：同 model 判定
++// #194：sameModel 只在 providerID 匹配时才算同模型样本，避免跨模型密度污染
 +function sameModel(message: HistoryMessage, model: HistoryModel | undefined) {
 +  // #194：无 provider 不算
 +  if (!model?.providerID) return false
@@ -292,9 +291,9 @@ index 53baa6349f..4cd9fdb3e4 100644
 +  return (message.info?.providerID ?? message.providerID) === model.providerID && (message.info?.modelID ?? message.modelID) === modelID
 +}
 +
-+// #194：step-finish 样本
++// #194：inputRatioSample 只取 step-finish 消息的输入样本，其他消息类型不参与密度学习
 +function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
-+  // #194：只从 step-finish
++  // #194：仅 step-finish 消息携带确认过的 input 字符/token，是密度学习的可信来源
 +  if (part.type !== "step-finish") return undefined
 +  const chars = part.inputChars
 +  if (!chars || chars < 100) return undefined
@@ -302,12 +301,12 @@ index 53baa6349f..4cd9fdb3e4 100644
 +  if (confirmedTokens <= 0) return undefined
 +  const media = part.inputBreakdown?.media
 +  if (media) {
-+    // #194：media 分开
++    // #194：media 附件按独立 token 计，不参与文本密度计算，避免图片压低估文本
 +    const textChars = Math.max(0, chars - media.rawChars + media.textChars)
 +    const textTokens = Math.max(0, confirmedTokens - media.tokens)
 +    return textChars > 0 && textTokens > 0 ? { chars: textChars, tokens: textTokens } : undefined
 +  }
-+  // #194：旧快照排除
++  // #194：旧附件样本缺乏媒体 token 元数据，整体排除防密度失真
 +  if ((part.inputBreakdown?.messages?.attachments ?? 0) > 0) return undefined
 +  return { chars, tokens: confirmedTokens }
 +}
@@ -330,7 +329,7 @@ index f7b6b825c8..310c3197dc 100644
 @@ -2,12 +2,15 @@
  // #175：单测锁定消毒、远程跳过与分项 token
  import { describe, expect, test } from "bun:test"
- // #193：测试随 estimate 迁移到 token 域
+ // #193：测试路径与 token/estimate.ts 对齐，避免生产与测试引用分裂
 -import { AttachmentToken } from "@/token/estimate"
 +// #194：改用 TokenEstimate
 +import { TokenEstimate } from "@/token/estimate"
@@ -402,4 +401,113 @@ index 5f59f52fc4..f364f45730 100644
 +  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
    // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
    const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
+ 
+diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
+index 395441599..3753f3ac8 100644
+--- a/packages/opencode/test/session/compaction.test.ts
++++ b/packages/opencode/test/session/compaction.test.ts
+@@ -9,7 +9,7 @@ import * as Stream from "effect/Stream"
+ import { Config } from "@/config/config"
+ import { LLM } from "../../src/session/llm"
+ import { SessionCompaction } from "../../src/session/compaction"
+-import { Token } from "@/util/token"
++import { TokenEstimate } from "@/token/estimate"
+ import { Plugin } from "../../src/plugin"
+ import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
+ import { Session as SessionNs } from "@/session/session"
+@@ -134,6 +134,22 @@ function createAssistantMessage(sessionID: SessionID, parentID: MessageID, root:
+     }),
+   )
+ }
++// #194：source 集成测试辅助——写入 step-finish 样本供学习密度
++function addStepFinish(sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) {
++  return SessionNs.Service.use((ssn) =>
++    ssn.updatePart({
++      id: PartID.ascending(),
++      messageID,
++      sessionID,
++      type: "step-finish",
++      reason: "stop",
++      cost: 0,
++      tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      inputChars,
++    }),
++  )
++}
++
+ 
+ function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID, root: string, text: string) {
+   return SessionNs.Service.use((ssn) =>
+@@ -864,6 +880,37 @@ describe("session.compaction.process", () => {
+     }),
+   )
+ 
++  // #194：compaction summary 的 pending input 估算必须用确认密度，而非 raw /4
++  it.instance(
++    "summary assistant pending input estimate uses confirmed upload density",
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const ssn = yield* SessionNs.Service
++      const session = yield* ssn.create({})
++      const historical = yield* createUserMessage(session.id, "historical context")
++      const historicalReply = yield* createAssistantMessage(session.id, historical.id, test.directory)
++      yield* addStepFinish(session.id, historicalReply.id, 80_000, 10_000)
++      const msg = yield* createUserMessage(session.id, "compact this session")
++      const msgs = yield* ssn.messages({ sessionID: session.id })
++
++      yield* SessionCompaction.use.process({
++        parentID: msg.id,
++        messages: msgs,
++        sessionID: session.id,
++        auto: false,
++      })
++
++      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
++        (item) => item.info.role === "assistant" && item.info.summary,
++      )
++
++      expect(summary?.info.role).toBe("assistant")
++      if (summary?.info.role !== "assistant") return
++      expect(summary.info.inputChars).toBeGreaterThan(0)
++      expect(summary.info.inputTokens).toBeLessThan(Math.round((summary.info.inputChars ?? 0) / 6))
++    }),
++  )
++
+   itCompaction.instance(
+     "marks summary message as errored on compact result",
+     Effect.gen(function* () {
+@@ -1524,19 +1571,19 @@ describe("session.compaction.process", () => {
+   )
+ })
+ 
+-describe("util.token.estimate", () => {
++describe("TokenEstimate.estimateText", () => {
+   test("estimates tokens from text (4 chars per token)", () => {
+     const text = "x".repeat(4000)
+-    expect(Token.estimate(text)).toBe(1000)
++    expect(TokenEstimate.estimateText(text)).toBe(1000)
+   })
+ 
+   test("estimates tokens from larger text", () => {
+     const text = "y".repeat(20_000)
+-    expect(Token.estimate(text)).toBe(5000)
++    expect(TokenEstimate.estimateText(text)).toBe(5000)
+   })
+ 
+   test("returns 0 for empty string", () => {
+-    expect(Token.estimate("")).toBe(0)
++    expect(TokenEstimate.estimateText("")).toBe(0)
+   })
+ })
+ 
+
+diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test/util/token-accounting.test.ts
+--- a/packages/tui/test/util/token-accounting.test.ts
++++ b/packages/tui/test/util/token-accounting.test.ts
+@@ -56,5 +56,5 @@
+     }
+     const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
+-    expect(acc.ratio.input).toBeGreaterThan(1)
++    expect(acc.ratio.input).toBe(8)
+   })
  

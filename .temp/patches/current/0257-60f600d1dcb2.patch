@@ -1,54 +1,46 @@
 From 60f600d1dcb2bb51379031e4d799cb38bc56fd46 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 15:25:09 +0800
-Subject: [PATCH] =?UTF-8?q?feat(compaction):=20=E4=BF=AE=E5=A4=8D=EF=BC=9A?=
- =?UTF-8?q?memento=20=E7=8E=B0=E5=9C=A8=E4=BB=8E=20rawHistory=20=E9=87=87?=
- =?UTF-8?q?=E9=9B=86=EF=BC=8C=E5=86=8D=E7=94=A8=E5=8E=9F=E6=9D=A5=E7=9A=84?=
- =?UTF-8?q?=2020%/20K=20=E9=A2=84=E7=AE=97=E6=88=AA=E6=96=AD=E3=80=82?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
+Subject: [PATCH] feat(compaction): 修复：memento 现在从 rawHistory 采集，再用原来的 20%/20K
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index d571b4fb16e9eb864fe2b5b9b9c9225f416dee48..a2f2ec13651514d3e1fcc7b02380f1d382778760 100644
+index e3c4c0786..433ee7ed5 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -179,6 +179,7 @@ function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; max
-   const result: NonNullable<MessageV2.CompactionPart["recent_user_messages"]> = []
+@@ -111,12 +111,16 @@ function collectRecentUserMessages(input: { messages: SessionV1.WithParts[]; max
+   // #256：从最新到最旧反向收集——预算有限时先保住最新指令；压缩标记消息本身不是用户指令。
    for (const msg of input.messages.toReversed()) {
      if (msg.info.role !== "user") continue
++    // #257：撤销/隐藏产生的消息一律不进 memento——它们不是有效的用户意图
 +    if (msg.info.hidden) continue
      if (msg.parts.some((part) => part.type === "compaction")) continue
-     // Preserve only explicit user-authored text. Synthetic editor/file context
-     // and ignored repair text are already represented elsewhere and replaying
-@@ -186,6 +187,7 @@ function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; max
+     // #256：只保留用户手写文本——synthetic 编辑器/文件上下文与 ignored 修复文本
+     // 已由其他通道表示，再进 memento 会把记忆变成又一个无界上下文源。
      const text = msg.parts
        .flatMap((part) => {
          if (part.type !== "text") return []
++        // #257：hidden part 同样排除——撤销粒度可到 part 级
 +        if (part.hidden) return []
          if (part.synthetic || part.ignored) return []
          const text = part.text.trim()
          return text ? [text] : []
-@@ -523,7 +525,12 @@ export const layer = Layer.effect(
-       const previousSummary = prior.at(-1)?.summary
+@@ -450,8 +454,11 @@ const layer = Layer.effect(
+       // #256：visibleHistory 与 select 共用——memento 从可见窗口收集，避免把 hidden 的
+       // 压缩标记/summary 对当作用户指令回放。
        const visibleHistory = history.filter((_, index) => !hidden.has(index))
++      // #257：memento 从 rawHistory 采集——filterCompacted 会移除已压缩 head，但那些
++      // 原始最近用户指令仍应有一次有界截断机会进入下次交接；hidden/synthetic/ignored/
++      // 压缩标记内容由 collectRecentUserMessages 内部排除。
        const recentUserMessages = collectRecentUserMessages({
 -        messages: visibleHistory,
-+        // Use raw history for the memento lane: filterCompacted intentionally
-+        // removes the summarized head after a completed compaction, but those raw
-+        // recent user instructions still need one bounded chance to be truncated
-+        // into the next handoff. collectRecentUserMessages keeps hidden,
-+        // synthetic, ignored, and compaction-marker content out of this replay.
 +        messages: rawHistory,
          maxTokens: preserveRecentUserBudget({ cfg, model, outputTokenMax: flags.outputTokenMax }),
        })
        const selected = yield* select({
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index e96aff55026e548f673975dd3d7c5f9bc9ad6751..ab24d4c32802627e122a86ec183dd5f6f3d767ac 100644
+index 633b4aeb7..d7f4ca5ea 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1272,7 +1272,57 @@ describe("session.compaction.process", () => {
+@@ -1253,7 +1253,60 @@ const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"))
    )
  
    itCompaction.instance(
@@ -68,6 +60,7 @@ index e96aff55026e548f673975dd3d7c5f9bc9ad6751..ab24d4c32802627e122a86ec183dd5f6
 +          `raw instruction before prior compaction ${"x".repeat(100_000)} end of raw instruction`,
 +        )
 +        yield* createSummaryCompaction(session.id)
++        // #257：第一次压缩后 raw 指令被 summary 覆盖——第二次压缩仍从 rawHistory 找回它
 +
 +        let msgs = yield* ssn.messages({ sessionID: session.id })
 +        let parent = msgs.at(-1)?.info.id
@@ -84,6 +77,7 @@ index e96aff55026e548f673975dd3d7c5f9bc9ad6751..ab24d4c32802627e122a86ec183dd5f6
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 +
 +        const compactionPart = yield* readCompactionPart(session.id)
++        // #257：readCompactionPart 读最近一次压缩边界——两次压缩后取第二次的 memento
 +        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
 +
 +        expect(recentUserMemento).toContain("latest request after prior compaction")
@@ -91,9 +85,10 @@ index e96aff55026e548f673975dd3d7c5f9bc9ad6751..ab24d4c32802627e122a86ec183dd5f6
 +        expect(recentUserMemento).toContain("truncated for compaction memento")
 +        expect(recentUserMemento).not.toContain("end of raw instruction")
 +        expect(TokenEstimate.estimateText(recentUserMemento)).toBeLessThanOrEqual(400)
++        // #257：10K 窗口 20% 预算——跨压缩截断仍须保持同一上限
 +      }).pipe(
 +        withCompaction({
-+          llm: stub.layer,
++          llm: stub.llmLayer,
 +          provider: ProviderTest.fake({ model: mementoModel }),
 +          config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }),
 +        }),
@@ -107,32 +102,39 @@ index e96aff55026e548f673975dd3d7c5f9bc9ad6751..ab24d4c32802627e122a86ec183dd5f6
      () => {
        const stub = llm()
        stub.push(reply("summary"))
-@@ -1297,6 +1347,19 @@ describe("session.compaction.process", () => {
+@@ -1278,6 +1328,21 @@ const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"))
            text: "ignored text should not be preserved",
            ignored: true,
          })
 +        yield* ssn.updatePart({
 +          id: PartID.ascending(),
 +          messageID: latest.id,
-+          sessionID: latest.sessionID,
++          sessionID: session.id,
 +          type: "text",
 +          text: "hidden text part should not be preserved",
 +          hidden: { time: Date.now(), reason: "undo" },
++        // #257：hidden 结构为 {time, reason}——撤销标记必须同时排除 part 与整条消息
 +        })
-+        const hidden = yield* createUserMessage(session.id, "hidden message should not be preserved")
++        const hiddenMsg = yield* createUserMessage(session.id, "hidden message should not be preserved")
 +        yield* ssn.updateMessage({
-+          ...hidden,
++          ...hiddenMsg,
++        // #257：对已创建消息二次更新打 hidden 标记——比创建时传参更接近真实撤销路径
 +          hidden: { time: Date.now(), reason: "undo" },
 +        })
          yield* ssn.updateMessage({
            id: MessageID.ascending(),
            role: "assistant",
-@@ -1327,6 +1390,8 @@ describe("session.compaction.process", () => {
+@@ -1306,10 +1369,11 @@ const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"))
+         const compactedContext = JSON.stringify(modelMessages)
+ 
          expect(compactedContext).toContain("real instruction")
+-        // #256：synthetic/ignored part 附加在同一消息上——过滤按 part 粒度生效
+-        // #256：synthetic/ignored 文本绝不能进入 memento——它们已被其他通道表示
++        // #257：synthetic/ignored/hidden 都按 part 粒度排除——hidden 消息整体跳过
          expect(compactedContext).not.toContain("synthetic editor context should not be preserved")
          expect(compactedContext).not.toContain("ignored text should not be preserved")
 +        expect(compactedContext).not.toContain("hidden text part should not be preserved")
 +        expect(compactedContext).not.toContain("hidden message should not be preserved")
-       }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
+       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
      },
      { git: true },

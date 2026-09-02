@@ -14,10 +14,67 @@ Content-Transfer-Encoding: 8bit
 重构为双向检查：达到 85% 时注入提示，降到 85% 以下时重置标志。
 无上限模型（usableTokens===0）时 else 分支也重置，确保从有限模型切到
 无限模型时标志正确清除。阈值从 80% 提高到 85% 减少过早提示。
-
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 4fe2f0702..6cad10e77 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1428,7 +1428,11 @@ const layer = Layer.effect(
+         const ctx = yield* InstanceState.context
+         let structured: unknown
+         let step = 0
+-        // #350：nearOverflow 提示只注入一次——首次达到 80% usable 时注入，compaction 后重置
++        // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
++        // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
++        // 使后续再次达到 85% 时可以重新提示。
++        // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
++        // 不会泄漏给 compaction 模型污染下一轮干净上下文。
+         let nearOverflowNotified = false
+         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+ 
+@@ -1722,16 +1726,31 @@ const layer = Layer.effect(
+               if (compacted === "stop") return "break" as const
+               return "continue" as const
+             }
+-            // #350：上下文接近溢出时注入一次 ephemeral 提示——不降低回复质量，不限制工具使用
+-            if (!nearOverflowNotified && !isLastStep) {
++            // [local-smark] 上下文接近溢出时的轻量提示：首次达到 85% usable 时注入一次。
++            // 当上下文降到 85% 以下时重置标志——模型切换（如从小模型切到大模型）后
++            // 上下文占比大幅下降，此时重置标志使后续再次达到 85% 时可以重新提示。
++            // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
++            // 不会泄漏给 compaction 模型。不限制工具使用、不退化回复质量。
++            if (!isLastStep) {
+               const usableTokens = usable({ cfg: yield* config.get(), model })
+-              // #350：80% 阈值——低于此模型有足够余量自我管理，高于此 compaction 迫近需提示防上下文丢失
+-              if (usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)) {
+-                messages.push({
+-                  role: "user" as const,
+-                  content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
+-                })
+-                nearOverflowNotified = true
++              // [local-smark] threshold=0 时（无上下文上限模型）永远不触发注入，
++              // 但 else 重置仍生效——从有限模型切到无限模型时标志正确重置
++              const threshold = usableTokens > 0 ? Math.floor(usableTokens * 0.85) : 0
++              if (usableTokens > 0 && estimatedInput >= threshold) {
++                if (!nearOverflowNotified) {
++                  messages.push({
++                    role: "user" as const,
++                    // [local-smark] 提示重点：避免大量内容进入上下文（大文件读取、
++                    // 宽范围 grep 等），而非缩短回复。不降低回复质量。
++                    // 任务仍在进行时忽略此提示，按用户指令正常执行。
++                    content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
++                  })
++                  nearOverflowNotified = true
++                }
++              } else {
++                // [local-smark] 上下文降到阈值以下（或无上限模型）：重置标志，
++                // 使后续再次达到 85% 时可以重新提示
++                nearOverflowNotified = false
+               }
+             }
+             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
 diff --git a/docs/p1-near-overflow-85-plan.md b/docs/p1-near-overflow-85-plan.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..b89b39dcfdf99e6bc65d1c9e112df785409ac903
+index 000000000..8be64e52c
 --- /dev/null
 +++ b/docs/p1-near-overflow-85-plan.md
 @@ -0,0 +1,83 @@
@@ -104,64 +161,4 @@ index 0000000000000000000000000000000000000000..b89b39dcfdf99e6bc65d1c9e112df785
 +| `src/session/prompt.ts` | +10 / -6 |
 +
 +无新增文件、无新增依赖、无测试变更（feature 无现有测试）。
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 15475b7b2503e648bbb92fa69523799299b0c8ed..f471f6a2a47ddc70a24404b33af341165827b24f 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -2088,8 +2088,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         const slog = elog.with({ sessionID })
-         let structured: unknown
-         let step = 0
--        // [local-smark] nearOverflow 提示只注入一次：首次达到 80% usable 时注入，
--        // compaction 后重置（下一轮 compaction 周期可再次提示）。
-+        // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
-+        // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
-+        // 使后续再次达到 85% 时可以重新提示。
-         // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
-         // 不会泄漏给 compaction 模型污染下一轮干净上下文。
-         let nearOverflowNotified = false
-@@ -2370,21 +2371,31 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-               if (compacted === "stop") return "break" as const
-               return "continue" as const
-             }
--            // [local-smark] 上下文接近溢出时的轻量提示：仅首次达到 80% usable 时注入一次。
-+            // [local-smark] 上下文接近溢出时的轻量提示：首次达到 85% usable 时注入一次。
-+            // 当上下文降到 85% 以下时重置标志——模型切换（如从小模型切到大模型）后
-+            // 上下文占比大幅下降，此时重置标志使后续再次达到 85% 时可以重新提示。
-             // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
--            // 不会泄漏给 compaction 模型。compaction 后标志重置，下一周期可再次提示。
--            // 不限制工具使用、不退化回复质量；任务仍在进行时模型应忽略并按用户指令执行。
--            if (!nearOverflowNotified && !isLastStep) {
-+            // 不会泄漏给 compaction 模型。不限制工具使用、不退化回复质量。
-+            if (!isLastStep) {
-               const usableTokens = usable({ cfg: yield* config.get(), model })
--              if (usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)) {
--                messages.push({
--                  role: "user" as const,
--                  // [local-smark] 提示重点：避免大量内容进入上下文（大文件读取、
--                  // 宽范围 grep 等），而非缩短回复。不降低回复质量。
--                  // 任务仍在进行时忽略此提示，按用户指令正常执行。
--                  content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
--                })
--                nearOverflowNotified = true
-+              // [local-smark] threshold=0 时（无上下文上限模型）永远不触发注入，
-+              // 但 else 重置仍生效——从有限模型切到无限模型时标志正确重置
-+              const threshold = usableTokens > 0 ? Math.floor(usableTokens * 0.85) : 0
-+              if (usableTokens > 0 && estimatedInput >= threshold) {
-+                if (!nearOverflowNotified) {
-+                  messages.push({
-+                    role: "user" as const,
-+                    // [local-smark] 提示重点：避免大量内容进入上下文（大文件读取、
-+                    // 宽范围 grep 等），而非缩短回复。不降低回复质量。
-+                    // 任务仍在进行时忽略此提示，按用户指令正常执行。
-+                    content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
-+                  })
-+                  nearOverflowNotified = true
-+                }
-+              } else {
-+                // [local-smark] 上下文降到阈值以下（或无上限模型）：重置标志，
-+                // 使后续再次达到 85% 时可以重新提示
-+                nearOverflowNotified = false
-               }
-             }
-             handle.message.tokens.input = estimatedInput
+\ No newline at end of file

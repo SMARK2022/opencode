@@ -1,50 +1,34 @@
 From 0b4c22d4a2d98339c49d155bac06d80b9f1c0d3a Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 18:01:54 +0800
-Subject: [PATCH] =?UTF-8?q?fix(auto-review):=20=E5=A4=8D=E7=94=A8=E8=81=8A?=
- =?UTF-8?q?=E5=A4=A9=20provider=20hook=EF=BC=8C=E5=85=BC=E5=AE=B9=20Codex?=
- =?UTF-8?q?=20=E5=AE=A1=E6=9F=A5=E8=AF=B7=E6=B1=82?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
+Subject: [PATCH] fix(auto-review): reuse chat provider hook for Codex review requests
 
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index d6edd7275895dcc7dc0bd575c7967f6b3da66314..3464ffd2a98cd044a1566dc6065ef0b77afb8ce2 100644
+index 3cb077223..64393fe8e 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -1,5 +1,6 @@
+@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
  import { Config } from "@/config/config"
  import { Auth } from "@/auth"
 +import { Plugin } from "@/plugin"
  import { Provider } from "@/provider/provider"
  import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
  import { ProviderTransform } from "@/provider/transform"
-@@ -88,6 +89,7 @@ export const layer = Layer.effect(
+@@ -102,6 +103,7 @@ export const layer = Layer.effect(
    Effect.gen(function* () {
      const config = yield* Config.Service
      const auth = yield* Auth.Service
 +    const plugin = yield* Plugin.Service
      const provider = yield* Provider.Service
-     const sessions = yield* Session.Service
-     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
-@@ -364,6 +366,43 @@ export const layer = Layer.effect(
-               : undefined
+     // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
+     const session = yield* Session.Service
+@@ -404,6 +406,32 @@ export const layer = Layer.effect(
              const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
+             // #250：仅 Codex 路径附加 instructions——普通 API key 保持 system message 原样，wire 形状不变
              const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
-+            // Reviewer requests intentionally stay outside the main SessionProcessor
-+            // pipeline, but provider compatibility still lives in the existing chat
-+            // hooks: Codex clears unsupported output caps there, GitHub Copilot
-+            // disables incompatible tool streaming there, and provider plugins may
-+            // add transport headers there. The synthetic message below satisfies the
-+            // hook shape without exposing reviewer prompt text, transcript evidence,
-+            // or planned tool arguments as plugin input; those remain inside the
-+            // bounded reviewer prompt because they are part of the permission
-+            // boundary, not general chat-extension data. The message id is also
-+            // deliberately fresh instead of a persisted child-session message id:
-+            // provider hooks may use the normal chat contract shape, but they must
-+            // not be handed a stable pointer that lets a general chat plugin fetch
-+            // or reinterpret the hidden reviewer prompt as user-authored context.
++            // #261：Reviewer 复用主聊天 provider hook——Codex 清理不支持的 output caps、Copilot 禁用不兼容的 tool streaming
++            // 合成消息不暴露 reviewer prompt 文本或证据——这些仍在有界 reviewer prompt 内
 +            const hookSessionID = persist?.sessionID ?? SessionID.descending()
 +            const hookMessage = {
 +              id: MessageID.ascending(),
@@ -53,7 +37,7 @@ index d6edd7275895dcc7dc0bd575c7967f6b3da66314..3464ffd2a98cd044a1566dc6065ef0b7
 +              time: { created: Date.now() },
 +              agent: "permission-reviewer",
 +              model: { providerID: model.providerID, modelID: model.id },
-+            } satisfies MessageV2.User
++            } satisfies User
 +            const hookInput = {
 +              sessionID: hookSessionID,
 +              agent: "permission-reviewer",
@@ -69,37 +53,39 @@ index d6edd7275895dcc7dc0bd575c7967f6b3da66314..3464ffd2a98cd044a1566dc6065ef0b7
 +              options,
 +            })
 +            const headers = yield* plugin.trigger("chat.headers", hookInput, { headers: {} })
+             // #209：wrapLanguageModel 注入 message 归一化中间件——reviewer 流与 SessionPrompt 共享同一 provider 适配层
              const result = streamText({
                model: wrapLanguageModel({
-                 model: language,
-@@ -399,8 +438,9 @@ export const layer = Layer.effect(
-               // though they can emit tool calls. The reviewer prompt requires this
-               // tool, and absence of the call still fails closed below.
+@@ -438,8 +466,10 @@ export const layer = Layer.effect(
+               },
+               // #209：Some OpenAI-compatible providers reject forced tool_choice——absence of the call still fails closed below
                maxRetries: 0,
 -              providerOptions: ProviderTransform.providerOptions(model, options),
 -              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
++              // #261：providerOptions 和 maxOutputTokens 现由 plugin hook 修改后的 params 提供
 +              providerOptions: ProviderTransform.providerOptions(model, params.options),
 +              maxOutputTokens: params.maxOutputTokens,
 +              headers: headers.headers,
                abortSignal: abort.signal,
              })
-             let assessment: Schema.Schema.Type<typeof Assessment> | undefined
-@@ -742,9 +782,12 @@ export const defaultLayer = Layer.suspend(() =>
+             // #209：assessment 可变——由 tool-call 事件设置，流结束时检查是否为空决定 fail-closed
+@@ -812,9 +842,13 @@ export const defaultLayer = Layer.suspend(() =>
    layer.pipe(
-     // reviewer 请求落点现在需要读取 auth，才能只在 OpenAI OAuth/Codex 路径把同一份
+     // #250：reviewer 请求落点现在需要读取 auth，才能只在 OpenAI OAuth/Codex 路径把同一份
      // 可信策略放进 Responses `instructions`；默认层必须随现有 config/provider 一起
 -    // 提供 Auth，否则生产默认 wiring 会缺少这个 provider 判定边界。
-+    // 提供 Auth。Reviewer 还要读取 Plugin，以便复用主聊天路径已有的 provider
++    // 提供 Auth。
++    // #261：Reviewer 还要读取 Plugin，以便复用主聊天路径已有的 provider
 +    // 兼容 hook；这保持 Codex/GitHub/Cloudflare 等请求形状修正在一个既有入口，
 +    // 避免隐藏 reviewer 流另起一套 provider 特例。
-     Layer.provide(Auth.defaultLayer),
-     Layer.provide(Config.defaultLayer),
-+    Layer.provide(Plugin.defaultLayer),
-     Layer.provide(Provider.defaultLayer),
+     Layer.provide(LayerNode.compile(Auth.node)),
+     Layer.provide(LayerNode.compile(Config.node)),
++    Layer.provide(LayerNode.compile(Plugin.node)),
+     Layer.provide(LayerNode.compile(Provider.node)),
    ),
  )
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
-index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd720fa61e 100644
+index 28dae7388..b4dc052fd 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
 @@ -4,6 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai"
@@ -107,36 +93,37 @@ index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd
  import { Config } from "../../src/config/config"
  import { PermissionReviewer } from "../../src/permission/reviewer/service"
 +import { Plugin } from "../../src/plugin"
- import { ModelID, ProviderID } from "../../src/provider/schema"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
  import { Session } from "../../src/session/session"
- import { testEffect } from "../lib/effect"
-@@ -27,11 +28,22 @@ const REVIEWER_ASSESSMENT = {
+@@ -28,12 +29,22 @@ const REVIEWER_ASSESSMENT = {
  
  type ReviewerRequestBody = {
    instructions?: unknown
++  // #261：捕获 max_output_tokens——验证 plugin hook 清理后该字段为 undefined
 +  max_output_tokens?: unknown
    input: Array<{ role?: unknown; content?: unknown }>
  }
  
++// #261：捕获完整请求——body + headers，验证 plugin hook 修改后的 wire 形状
 +type CapturedReviewerRequest = {
 +  body: ReviewerRequestBody
 +  headers: Headers
 +}
 +
- const OPENAI_PROVIDER_ID = ProviderID.make("openai")
- const CUSTOM_PROVIDER_ID = ProviderID.make("custom-openai")
-+// This header is a test sentinel, not a production contract. It proves the
-+// reviewer path sends its provider request through the existing chat.headers
-+// compatibility seam without asserting on implementation structure or hook names
-+// outside the observable HTTP request produced by the provider SDK.
+ // #250：openai 基类与 custom-openai 别名对照——验证 extends 别名不误判为 Codex
+ const OPENAI_PROVIDER_ID = ProviderV2.ID.make("openai")
+ const CUSTOM_PROVIDER_ID = ProviderV2.ID.make("custom-openai")
++// #261：测试哨兵 header——证明 reviewer 路径经过 chat.headers hook，非断言实现结构
 +const REVIEWER_HOOK_HEADER = "x-reviewer-hook"
+ // #250：reviewer 测试不触及会话持久化——空 mock 满足依赖注入即可
  const sessionLayer = Layer.mock(Session.Service)({})
  
- describe("permission reviewer service", () => {
-@@ -40,9 +52,15 @@ describe("permission reviewer service", () => {
+@@ -43,9 +54,16 @@ describe("permission reviewer service", () => {
    // OAuth 凭据本身不是 Codex 契约；这个 fixture 防止未来把条件误放宽成
    // “任意 OAuth provider 都移除 system message 并写 instructions”。
    const customOauthFixture = reviewerFixture(oauthAuth(), { requireInstructions: false, providerID: CUSTOM_PROVIDER_ID })
++  // #261：OAuth + plugin hook fixture——验证 reviewer 复用 chat.params/chat.headers hook
 +  const oauthHookFixture = reviewerFixture(oauthAuth(), {
 +    requireInstructions: true,
 +    rejectMaxOutputTokens: true,
@@ -147,13 +134,14 @@ index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd
    const customOauth = testEffect(customOauthFixture.layer)
 +  const oauthHook = testEffect(oauthHookFixture.layer)
  
+   // #250：OAuth 路径——策略指令进 instructions，shell 证据必须留在 user input 不可见提升
    oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
-     Effect.gen(function* () {
-@@ -90,13 +108,33 @@ describe("permission reviewer service", () => {
+@@ -96,13 +114,38 @@ describe("permission reviewer service", () => {
        expectPreservedShellEvidence(inputText(body))
      }),
    )
 +
++  // #261：验证 reviewer 路径经过 chat.params/chat.headers hook——max_output_tokens 被清理、header 被注入
 +  oauthHook.effect("applies chat provider hooks before sending OpenAI OAuth reviewer requests", () =>
 +    Effect.gen(function* () {
 +      const reviewer = yield* PermissionReviewer.Service
@@ -161,7 +149,9 @@ index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd
 +      const request = oauthHookFixture.requests[0]
 +
 +      expect(decision.action).toBe("allow")
++      // #261：plugin hook 清理 max_output_tokens 后应为 undefined
 +      expect(request.body.max_output_tokens).toBeUndefined()
++      // #261：chat.headers hook 注入的哨兵 header 应存在
 +      expect(request.headers.get(REVIEWER_HOOK_HEADER)).toBe("applied")
 +      expect(typeof request.body.instructions).toBe("string")
 +      expectPreservedShellEvidence(inputText(request.body))
@@ -171,35 +161,36 @@ index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd
  
  function reviewerFixture(
    authInfo: Auth.Info | undefined,
--  options: { requireInstructions: boolean; providerID?: ProviderID } = { requireInstructions: false },
+-  options: { requireInstructions: boolean; providerID?: ProviderV2.ID } = { requireInstructions: false },
++  // #261：扩展 options 支持 plugin 层和 rejectMaxOutputTokens
 +  options: {
 +    requireInstructions: boolean
-+    providerID?: ProviderID
++    providerID?: ProviderV2.ID
 +    rejectMaxOutputTokens?: boolean
 +    plugin?: Layer.Layer<Plugin.Service>
 +  } = { requireInstructions: false },
  ) {
    const bodies: ReviewerRequestBody[] = []
++  // #261：捕获完整请求以验证 headers
 +  const requests: CapturedReviewerRequest[] = []
    const model = reviewerModel(options.providerID ?? OPENAI_PROVIDER_ID)
    // Bun 的 fetch 类型带 preconnect；测试只需要拦截真实请求体，因此用空实现满足
    // provider SDK 类型契约，不改变请求/响应行为，也不引入额外网络能力。
-@@ -104,6 +142,7 @@ function reviewerFixture(
+@@ -110,6 +153,8 @@ function reviewerFixture(
      async (_input: RequestInfo | URL, init?: RequestInit) => {
        const body = JSON.parse(String(init?.body ?? "{}")) as ReviewerRequestBody
        bodies.push(body)
++      // #261：同时捕获 headers——验证 chat.headers hook 的修改
 +      requests.push({ body, headers: new Headers(init?.headers) })
  
        // Codex OAuth 后端的 observable 契约是顶层 instructions 必填；这里用同样的
        // 400 形态复现生产问题，确保修复不是靠放宽 reviewer 错误处理而是改变请求形状。
-@@ -113,6 +152,16 @@ function reviewerFixture(
+@@ -119,6 +164,14 @@ function reviewerFixture(
            headers: { "content-type": "application/json" },
          })
        }
-+      // Codex's ChatGPT-backed Responses endpoint rejects `max_output_tokens` even
-+      // though the public OpenAI Responses API accepts it. This fixture fails at
-+      // the same HTTP boundary as production so the regression test proves the
-+      // reviewer request shape, not a private helper or source-code branch.
++      // #261：Codex 后端拒绝 max_output_tokens——即使公共 OpenAI Responses API 接受该参数
++      // 这个 fixture 在同一 HTTP 边界复现生产问题，确保回归测试证明请求形状而非私有 helper
 +      if (options.rejectMaxOutputTokens && body.max_output_tokens !== undefined) {
 +        return new Response(JSON.stringify({ detail: "Unsupported parameter: max_output_tokens" }), {
 +          status: 400,
@@ -209,32 +200,31 @@ index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd
  
        return new Response(openAIReviewDecisionStream(), {
          status: 200,
-@@ -131,15 +180,43 @@ function reviewerFixture(
+@@ -137,15 +190,42 @@ function reviewerFixture(
  
    return {
      bodies,
++    // #261：返回 requests 供测试验证 headers
 +    requests,
      layer: PermissionReviewer.layer.pipe(
        Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
        Layer.provide(provider.layer),
        Layer.provide(authLayer(authInfo)),
++      // #261：提供 plugin 层——默认使用空 plugin，测试 fixture 可注入自定义 hook
 +      Layer.provide(options.plugin ?? pluginLayer()),
        Layer.provide(sessionLayer),
      ),
    }
  }
  
++// #261：测试用 plugin 层——模拟 chat.params/chat.headers hook 的修改行为
 +function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string } = {}) {
 +  return Layer.succeed(
 +    Plugin.Service,
 +    Plugin.Service.of({
 +      trigger: (name, _input, output) =>
 +        Effect.sync(() => {
-+          // The reviewer should reuse the same provider-compatibility hooks that
-+          // main chat uses, but this test hook deliberately changes only request
-+          // transport shape. It must not inspect or mutate reviewer prompt evidence,
-+          // because command details are a permission-boundary input rather than a
-+          // plugin contract.
++          // #261：hook 只修改请求传输形状，不检查或修改 reviewer prompt 证据
 +          if (name === "chat.params" && options.clearMaxOutputTokens && output && typeof output === "object") {
 +            ;(output as { maxOutputTokens?: number }).maxOutputTokens = undefined
 +          }
@@ -250,6 +240,6 @@ index 223aec693b8bc6bbec08759a3659ecc5a29c0a47..c5bb3f42868109a3cd4e44d75f2b47dd
 +  )
 +}
 +
- function reviewerModel(providerID: ProviderID) {
+ // #250：gpt-5 模型固定 provider/api——SSE 解析路径与生产一致
+ function reviewerModel(providerID: ProviderV2.ID) {
    return ProviderTest.model({
-     id: ModelID.make("gpt-5"),

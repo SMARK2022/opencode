@@ -1,23 +1,10 @@
 From f9a6e97e3c2bb6b29c72d127caa25fc3c2e9170e Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 19:02:51 +0800
-Subject: [PATCH] =?UTF-8?q?chore(vscode):=20=E5=AE=8C=E5=96=84=20IDE=20Bri?=
- =?UTF-8?q?dge=20=E6=96=87=E6=A1=A3=E4=B8=8E=20VSIX=20=E6=89=93=E5=8C=85?=
- =?UTF-8?q?=E6=B5=81=E7=A8=8B?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-- 更新 VS Code 扩展元数据，指向 SMARK 仓库并统一 VSIX 版本到 1.15.5
-
-- 重写扩展 README 与 VSIX 打包指南，明确手动打包、安装、工具名、限制和排障流程
-
-- 修正根 README 中 notebook 工具名称，并忽略 notebook output artifact cache
-
-- 新增动态 VSIX 打包脚本，避免手动打包文件名硬编码版本
+Subject: [PATCH] chore(vscode): improve IDE Bridge docs and VSIX packaging
 
 diff --git a/.gitignore b/.gitignore
-index 58b2b98f60ceffc18a16da917981818df903db65..f993a5c36bc1ddef03354efcc75a68c43e6b0b22 100644
+index 868e23c1a..dc14b095d 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -7,6 +7,7 @@ node_modules
@@ -29,29 +16,22 @@ index 58b2b98f60ceffc18a16da917981818df903db65..f993a5c36bc1ddef03354efcc75a68c4
  playground
  tmp
 diff --git a/README.md b/README.md
-index 14fbdb960e0d8ab7d5743ec3308e3fa32772a306..039841f0c884eaf9b42a03c18e8a4a899597b27f 100644
+index b5a4c8ddd..c20876aa1 100644
 --- a/README.md
 +++ b/README.md
-@@ -251,18 +251,22 @@ scoop bucket add extras && scoop install extras/opencode-desktop
- | ClaudeCode provider | 支持 API Key、Base URL 和动态鉴权模式 |
- | Cloudflare AI Gateway | 路由修复，非 Anthropic 模型默认关闭 tool streaming |
+@@ -97,6 +97,24 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
+ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+ ```
  
--### VSCode Notebook 集成
++
 +### VS Code Notebook 集成
- 
--使用 Notebook 工具前，请先安装 VSCode 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。该扩展负责在 VSCode/Jupyter Notebook 与 OpenCode CLI 之间建立 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
++
 +使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。该扩展版本 `1.15.5` 对应 SMARK CLI `1.15.5-smark` 及之后版本，负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
 +
 +扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 会按 workspace 与 notebook 路径自动选择匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 需要运行在能访问该 bridge 的同一侧环境。
- 
- | 工具 | 用途 |
- | --- | --- |
--| `notebook_summary` | 获取单元格 ID、类型、执行状态和输出摘要 |
--| `notebook_source` | 以分页虚拟文档读取 notebook 源码 |
--| `notebook_edit` | 插入、修改、删除单元格，支持精确字符串替换 |
--| `notebook_run` | 执行单个或范围内代码单元格，支持超时控制 |
--| `notebook_output` | 读取文本、图片、HTML、JSON 等单元格输出 |
--| `notebook_env` | 管理内核信息、配置、重启和保存 |
++
++| 工具 | 用途 |
++| --- | --- |
 +| `vscode_notebook_summary` | 获取 notebook cell 的稳定 `#VSC-*` ID、显示序号、类型、语言、执行状态、输出摘要、dirty 状态和 runtime 信息 |
 +| `vscode_notebook_source` | 以 1-based 全局虚拟行号分页读取 notebook 源码，返回内容默认限制在 16KB 内 |
 +| `vscode_notebook_edit` | 插入、修改、删除 cell，支持 `oldCode/newCode` 精确字符串替换，也支持 code/markdown 类型切换 |
@@ -60,30 +40,31 @@ index 14fbdb960e0d8ab7d5743ec3308e3fa32772a306..039841f0c884eaf9b42a03c18e8a4a89
 +| `vscode_notebook_env` | 查看 kernel/runtime，触发 kernel 选择，重启 kernel，或在用户明确要求时保存 notebook |
 +
 +推荐流程：先用 `vscode_notebook_summary` 获取当前 cell ID，再用 `vscode_notebook_source` 读取目标 cell，修改后用 `vscode_notebook_run` 验证，最后用 `vscode_notebook_output` 查看结果。不要把显示序号 `cN` 当成长期稳定引用；插入、删除或类型切换后应使用工具返回的新 `#VSC-*` ID 或重新 summary。
++
+ ### Agents
  
- ### 跨平台支持
- 
+ OpenCode includes two built-in agents you can switch between with the `Tab` key.
 diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
-index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71cac2ebaf7a 100644
+index 344cfe600..a4a0e52d9 100644
 --- a/docs/VSIX-Packaging.md
 +++ b/docs/VSIX-Packaging.md
-@@ -1,190 +1,179 @@
+@@ -1,223 +1,179 @@
+-<!-- #161：文档/安装路径与 1.17.26 协同升号；禁止回写 1.14/1.15 -->
+-<!-- #148：VSIX/文档与 opencode 1.17.26-smark 协同升号 -->
+-<!-- #148：发布包与 CLI 同号，禁止 1.14 字面量回写 -->
+-<!-- #141：本批仅协同升号，禁止回写 1.14.x -->
+-<!-- #141：发布元数据 +1 与 install 指纹一致 -->
+-<!-- #96 VSIX打包：可复现手册；注释均域匹配且互不重复 -->
 -# OpenCode IDE Bridge — VSIX Packaging Guide
 +# OpenCode IDE Bridge VSIX Packaging Guide
  
  ## Overview
+-<!-- 「Overview」：engines.vscode 过新会导致旧 IDE 拒绝安装 -->
  
 -Extension ID: `SMARK2022.opencode-ide-bridge`
 +This document describes how to build, inspect, install, and publish the SMARK OpenCode VS Code extension.
  
 -This VS Code extension provides an HTTP bridge server that connects the OpenCode CLI daemon to VS Code's notebook and workspace APIs. It runs on `127.0.0.1:<random port>` and requires Bearer token authentication for all tool endpoints except `/health`.
--
--## Prerequisites
--
--- Node.js >= 20.x
--- Bun >= 1.3.0 (at `C:\Users\Lenovo\.bun\bin\bun.exe` on Windows, or on `PATH` for other platforms)
--- VS Code CLI (`code`) on PATH
--- Dependencies installed: `bun install` from `sdks/vscode/`
 +| Field | Value |
 +| --- | --- |
 +| Extension ID | `SMARK2022.opencode-ide-bridge` |
@@ -93,24 +74,16 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +| CLI compatibility | `opencode 1.15.5-smark` or newer |
 +| Version source | `sdks/vscode/package.json` |
 +| VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
- 
--## Extension Metadata
++
 +The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code notebook and workspace APIs through authenticated localhost endpoints.
  
--| Field | Value |
--|-------|-------|
--| `name` | `opencode-ide-bridge` |
--| `displayName` | `OpenCode IDE Bridge` |
--| `publisher` | `SMARK2022` |
--| `version` | `1.15.3` |
--| `engines.vscode` | `^1.94.0` |
--| `main` | `./dist/extension.js` |
--| `license` | `MIT` |
--| `categories` | `Other` |
--| `homepage` | `https://github.com/anomalyco/opencode` |
-+## Prerequisites
+ ## Prerequisites
+-<!-- 「Prerequisites」：打包前 typecheck/package 再 vsce -->
  
--## Build & Package
+-- Node.js >= 20.x
+-- Bun >= 1.3.0 (at `C:\Users\Lenovo\.bun\bin\bun.exe` on Windows, or on `PATH` for other platforms)
+-- VS Code CLI (`code`) on PATH
+-- Dependencies installed: `bun install` from `sdks/vscode/`
 +- Node.js 20 or newer.
 +- Bun matching the repository `packageManager` field.
 +- VS Code CLI `code` on `PATH` if you want command-line install testing.
@@ -118,13 +91,34 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +- Marketplace publish access for publisher `SMARK2022` if publishing.
 +- Optional Open VSX token in `OPENVSX_TOKEN` if publishing to Open VSX.
  
--All commands run from `sdks/vscode/`.
+-## Extension Metadata
+-<!-- 「Extension Metadata」：publisher 与扩展 ID 前缀必须一致 -->
 +## Clean Build
  
+-| Field | Value |
+-|-------|-------|
+-| `name` | `opencode-ide-bridge` |
+-| `displayName` | `OpenCode IDE Bridge` |
+-| `publisher` | `SMARK2022` |
+-| `version` | `1.17.26` |
+-| `engines.vscode` | `^1.94.0` |
+-| `main` | `./dist/extension.js` |
+-| `license` | `MIT` |
+-| `categories` | `Other` |
+-| `homepage` | `https://github.com/anomalyco/opencode` |
+-
+-## Build & Package
+-<!-- 「Build & Package」：vsce 输出路径必须等于 install-extension 实参；推荐 dist/ 并 gitignore -->
+-
+-All commands run from `sdks/vscode/`.
+-
 -### 1. Type Check
-+Run all commands from `sdks/vscode`.
- 
+-<!-- 「1. Type Check」：.vscodeignore 排除 test/fixtures -->
+-
 -```powershell
+-<!-- powershell：仅 Windows 主机 -->
++Run all commands from `sdks/vscode`.
++
 +```bash
 +bun install
  bun run check-types
@@ -133,6 +127,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  ```
  
 -### 2. Lint
+-<!-- 「2. Lint」：打包前 lint/typecheck 失败不得继续 vsce -->
 +`bun run package` runs typecheck, lint, and a production esbuild bundle into `dist/extension.js`.
  
 -```powershell
@@ -141,6 +136,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +## Create A VSIX
  
 -### 3. Production Build (esbuild, minified, CJS, vscode external)
+-<!-- 「3. Production Build (esbuild, minified, CJS, vscode external)」：Show Running Extensions 确认激活 -->
 +Use the repository script:
  
 -```powershell
@@ -151,6 +147,10 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  
 -This runs `check-types && lint && node esbuild.js --production`.
 -
+-<!-- #110：Windows/Bun 下 vsce 嵌套 npm prepublish 会丢 PATH；package.json 已删除该 hook -->
+-<!-- #110：vsix 必须 npm exec + --no-dependencies + dist 输出 -->
+-<!-- #110：扩展版本与 CLI 1.17.26-smark 对齐 -->
+-<!-- #141：vsix 与 opencode 主版本同号协同升号 -->
 -This project intentionally does not define `vscode:prepublish`. `vsce package` runs that hook through an internal `npm run vscode:prepublish` child process. In some Windows/Bun terminal environments that nested child process can lose `npm` from `PATH`, producing:
 +The script builds first, then runs `@vscode/vsce package --no-dependencies` and writes:
  
@@ -164,10 +164,11 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  
 -Instead, run the build explicitly first (`bun run package`), then call `vsce package` with `--no-dependencies`.
 +The package intentionally avoids `vscode:prepublish`. `vsce` runs that hook through an internal `npm run vscode:prepublish` child process, which can fail in Windows/Bun environments when `npm` is not available in the nested process environment.
-+
+ 
 +## Inspect The VSIX
  
 -### 4. List VSIX Contents (preview)
+-<!-- 「4. List VSIX Contents (preview)」：预发布与正式版版本策略分离 -->
 +List packaged files before publishing:
  
 -```powershell
@@ -177,11 +178,12 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  ```
  
 -### 5. Package VSIX
+-<!-- 「5. Package VSIX」：生产 VSIX 默认不带 source map -->
 +The expected payload is compact:
  
 -```powershell
 -$env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
--npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix"
+-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.17.26.vsix"
 +```text
 +extension/
 +|-- LICENSE.txt
@@ -199,17 +201,19 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +Excluded files are controlled by `sdks/vscode/.vscodeignore`. Source files, test output, local dependencies, build scripts, TypeScript config, lint config, source maps, logs, and nested VSIX files are not packaged.
  
 -### One-Command Shortcut
-+## Install Locally
- 
+-<!-- 「One-Command Shortcut」：贡献点变更后同步 README 命令表 -->
+-
 -```powershell
 -bun run vsix
 -```
--
++## Install Locally
+ 
 -## VSIX Artifact Structure
+-<!-- 「VSIX Artifact Structure」：回滚：uninstall 后清缓存再装旧包 -->
 +After `bun run vsix`, install the generated file:
  
 -```
--dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix
+-dist/SMARK2022.opencode-ide-bridge-1.17.26.vsix
 -├─ [Content_Types].xml
 -├─ extension.vsixmanifest
 -└─ extension/
@@ -227,6 +231,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  ```
  
 -### Excluded from VSIX (`.vscodeignore`)
+-<!-- 「Excluded from VSIX (`.vscodeignore`)」：激活后应出现 bridge output channel -->
 +From the VS Code UI:
  
 -- `.vscode/`, `.vscode-test/`, `out/`, `node_modules/`, `src/`, `script/`
@@ -238,13 +243,15 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +4. Select `dist/SMARK2022.opencode-ide-bridge-<version>.vsix`.
  
 -## Installation
+-<!-- 「Installation」：--force 覆盖同 ID 不迁移设置；安装后 Reload Window -->
 +## Functional Smoke Test
  
 -### Local VSIX Install
+-<!-- 「Local VSIX Install」：scripts.vsix 的 dist 输出是安装契约 -->
 +After installing locally:
  
 -```powershell
--code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.15.3.vsix --force
+-code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.17.26.vsix --force
 -```
 +1. Open a workspace in VS Code.
 +2. Run `OpenCode: Show Bridge Log` and confirm the bridge is listening on `127.0.0.1`.
@@ -254,6 +261,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +6. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
  
 -### From VS Code UI
+-<!-- 「From VS Code UI」：扩展 ID 与 publisher SMARK2022 绑定 -->
 +## Security Checks
  
 -1. Open Extensions panel (`Ctrl+Shift+X`)
@@ -271,6 +279,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +| Save/edit permissions | CLI plugin still asks through OpenCode permission gates. |
  
 -## Security Model
+-<!-- 「Security Model」：本地 VSIX 无 marketplace 签名流程；勿写入真实 token -->
 +## Publishing
  
 -| Check | Status |
@@ -285,22 +294,24 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +The publish script packages from the current `package.json` version and publishes that exact VSIX.
  
 -## Publishing
+-<!-- 「Publishing」：勿把 node_modules 打进 VSIX -->
 +```bash
 +bun run script/publish
 +```
- 
--### Marketplace (VS Code)
++
 +Marketplace-only manual flow:
  
--1. Create publisher at [https://marketplace.visualstudio.com/manage](https://marketplace.visualstudio.com/manage)
--2. Create Azure DevOps PAT with `Marketplace: Manage` scope
--3. Login and publish:
+-### Marketplace (VS Code)
+-<!-- 「Marketplace (VS Code)」：打包机 Node major 与开发机对齐 -->
 +```bash
 +bun x @vscode/vsce login SMARK2022
 +bun run vsix
 +bun x @vscode/vsce publish --packagePath "dist/SMARK2022.opencode-ide-bridge-<version>.vsix"
 +```
-+
+ 
+-1. Create publisher at [https://marketplace.visualstudio.com/manage](https://marketplace.visualstudio.com/manage)
+-2. Create Azure DevOps PAT with `Marketplace: Manage` scope
+-3. Login and publish:
 +Open VSX manual flow:
  
 -```powershell
@@ -312,6 +323,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  ```
  
 -### Open VSX (optional, for VSCodium / Cursor / Gitpod)
+-<!-- 「Open VSX (optional, for VSCodium / Cursor / Gitpod)」：中文用户目录偶发兼容问题优先 ASCII 路径 -->
 +Do not publish before the CLI release and README compatibility statement are aligned.
  
 -1. Create account at [https://open-vsx.org](https://open-vsx.org)
@@ -321,11 +333,12 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
  
 -```powershell
 -npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
--npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.15.3.vsix -p <OPENVSX_TOKEN>
+-npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.17.26.vsix -p <OPENVSX_TOKEN>
 -```
 +Use `sdks/vscode/package.json` as the source of truth for the extension version. The current extension version is ordinary semver (`1.15.5`) so Marketplace tooling accepts it, while the README documents compatibility with the SMARK CLI release (`1.15.5-smark`).
  
 -## CLI Integration
+-<!-- 「CLI Integration」：源码归档/CLI 集成与 VSIX 安装路径策略不同，勿混用命令 -->
 +The helper `script/release` prints the next `vscode-v<version>` tag suggestion. It does not create or push tags. Create tags manually after the package version, README, packaging guide, and changelog are updated.
  
 -The OpenCode CLI auto-installs this extension via:
@@ -344,6 +357,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +Supported IDE commands are `code`, `code-insiders`, `windsurf`, `cursor`, and `codium`.
  
 -## Source Files (Not Packaged)
+-<!-- 「Source Files (Not Packaged)」：在 sdks/vscode 执行打包，勿在 monorepo 根误跑 vsce -->
 +## Source Layout
  
 -```
@@ -363,6 +377,7 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 -    ├── run.ts             Cell execution (single + range)
 -    ├── source.ts          Paginated virtual source text
 -    └── summary.ts         Notebook structure overview
+-```
 +|-- extension.ts           Entry point, lifecycle, terminal commands
 +|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
 +|-- bridge-registry.ts     Registry heartbeat and manifest writer
@@ -376,16 +391,22 @@ index df06f70ad42eaebde7783cb868214aa74a0c7f04..0ca69b152a3ba01548c351cbb8ee71ca
 +    |-- resolve.ts         File-path to notebook resolution
 +    |-- run.ts             Cell execution through VS Code/Jupyter
 +    `-- summary.ts         Notebook structure overview
- ```
++```
+\ No newline at end of file
 diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
-index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebcbeef4a34 100644
+index d3db8d476..c49568664 100644
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
-@@ -1,118 +1,237 @@
+@@ -1,111 +1,237 @@
+-<!-- #161：文档/安装路径与 1.17.27 协同升号；禁止回写 1.14/1.15 -->
+-<!-- #148：vscode 扩展与 CLI 1.17.27 协同升号 -->
+-<!-- #141：本批仅协同升号，禁止回写 1.14.x -->
 -# OpenCode IDE Bridge
 +# SMARK OpenCode IDE Bridge
  
--Local HTTP bridge extension for [OpenCode](https://opencode.ai) IDE. Connects the OpenCode CLI daemon to VS Code's notebook, Jupyter kernel, and workspace APIs over `127.0.0.1` with Bearer-token authentication.
+-<!-- #97：品牌升级为 IDE Bridge，与 package displayName 对齐 -->
+-<!-- #141：vsix 与 opencode 主版本同号协同升号 -->
+-Local HTTP bridge extension for [OpenCode](https://opencode.ai) IDE. Connects the OpenCode CLI daemon to VS Code's notebook, Jupyter kernel, and editor context APIs so the CLI can inspect and drive notebooks without remote LM tool proxies.
 +Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token.
  
 -Extension ID: `SMARK2022.opencode-ide-bridge`
@@ -414,7 +435,8 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
  
  ## Prerequisites
  
--This extension requires the [OpenCode CLI](https://opencode.ai) to be installed on your system. It starts a local bridge server on VS Code startup; the OpenCode CLI discovers the bridge via a file-based registry and uses it to read editor context and run notebook operations.
+-<!-- #97：CLI 与扩展版本需匹配，否则 registry 心跳协议可能不兼容 -->
+-This extension requires the [OpenCode CLI](https://opencode.ai) to be installed on your system. It starts a local bridge server on VS Code activation; the OpenCode CLI uses that bridge to read editor context and run notebook operations.
 +- Install the SMARK OpenCode CLI from https://github.com/SMARK2022/opencode/releases.
 +- Install this extension as `SMARK2022.opencode-ide-bridge`.
 +- For `.ipynb` work, install the VS Code Jupyter extension `ms-toolsai.jupyter`.
@@ -422,16 +444,25 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +- Run OpenCode from the same local environment as the VS Code extension host. Remote SSH, WSL, or container workspaces need the CLI on the same side as the bridge.
 +
 +## Quick Start
-+
+ 
+-## What This Extension Does
 +1. Open your project folder in VS Code.
 +2. Install this extension from Marketplace or from a local VSIX.
 +3. Run `Open or Focus OpenCode Terminal` from the command palette, or press `Ctrl+Esc` on Windows/Linux and `Cmd+Esc` on macOS.
 +4. Open a notebook in VS Code if you want notebook tools.
 +5. In OpenCode, ask it to inspect the notebook; it should call `vscode_notebook_summary` first.
-+
-+Example prompts:
  
--## What This Extension Does
+-| Capability | Description |
+-|------------|-------------|
+-| **Bridge Server** | Starts an HTTP server on `127.0.0.1:<random port>` on VS Code startup with Bearer-token authentication for all tool endpoints (except `/health`). |
+-| **Notebook Operations** | Exposes summary, source, run, edit, output, and env endpoints. The OpenCode CLI calls these to inspect and modify notebooks. |
+-| **Jupyter Kernel Management** | `/notebook/env` supports `info`, `configure`, `restart`, and `save`. |
+-| **Bridge Registry** | Writes a heartbeat manifest under the OpenCode IDE registry directory for CLI discovery. |
+-| **Terminal Integration** | Commands and keybindings to launch or focus an OpenCode terminal session. |
+-| **File Reference Insertion** | Sends `@relative/path#Lx-Ly` references into the OpenCode terminal. |
+-| **Context Sharing** | Publishes active text editor and notebook URIs in the bridge registry manifest. |
++Example prompts:
++
 +```text
 +Inspect this notebook and summarize the cells before making changes.
 +```
@@ -439,29 +470,21 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +```text
 +Run cells c3 through c5, then show me the output artifacts.
 +```
- 
--| Capability | Description |
--|------------|-------------|
--| **Bridge Server** | Starts an HTTP server on `127.0.0.1:<random port>` on VS Code startup with Bearer-token authentication for all tool endpoints. |
--| **Notebook Operations** | Exposes 7 endpoints: summary, source, run, edit, output, cell-output, env. The OpenCode CLI calls these to inspect and manipulate Jupyter notebooks directly inside VS Code. |
--| **Jupyter Kernel Management** | The `/notebook/env` endpoint supports `info`, `configure`, `restart`, and `save` operations — inspecting or restarting kernels without leaving the OpenCode session. |
--| **Bridge Registry** | Writes a heartbeat manifest to `~/.local/state/opencode/ide/<uuid>.json` every 5 seconds. The OpenCode CLI polls this registry to discover active bridges and their capabilities. |
--| **Terminal Integration** | Registers VS Code commands and keybindings to launch or focus an OpenCode terminal session, optionally forwarding the current file and selection. |
--| **File Reference Insertion** | Sends `@relative/path#Lx-Ly` references into the OpenCode terminal — either via the TUI append-prompt API when available, or as raw terminal text. |
--| **Context Sharing** | Publishes the active text editor and notebook URIs in the bridge registry manifest, so the OpenCode CLI always knows which file you're working on. |
++
 +```text
 +Change the selected setup cell to markdown without changing its source.
 +```
  
  ## Commands
  
+-<!-- #97：命令 title 必须与 package.json contributes.commands 一致 -->
  | Command ID | Title | Keybinding | Description |
 -|------------|-------|------------|-------------|
--| `opencode.openTerminal` | Open or Focus OpenCode Terminal | `Ctrl+Esc` | Focuses the existing OpenCode terminal, or creates one in a split view if none is running. |
--| `opencode.openNewTerminal` | Open New OpenCode Terminal | `Ctrl+Shift+Esc` | Always starts a new OpenCode terminal session in a split view. Also available via the editor toolbar button. |
--| `opencode.addFilepathToTerminal` | Insert File Reference into OpenCode | `Ctrl+Alt+K` | Sends an `@file#Lx-Ly` reference for the active editor into the OpenCode terminal. Uses the TUI append-prompt API when available. |
--| `opencode.showBridgeLog` | Show OpenCode Bridge Log | — | Opens the extension output channel to inspect bridge startup, request logs, and errors. |
--| `opencode.notebookBridgeTools` | OpenCode: Test Notebook Bridge Tools | — | Interactive command-palette tool for manually testing each notebook endpoint during development. |
+-| `opencode.openTerminal` | Open or Focus OpenCode Terminal | `Ctrl+Esc` | Focus existing OpenCode terminal, or create one in a split view. |
+-| `opencode.openNewTerminal` | Open New OpenCode Terminal | `Ctrl+Shift+Esc` | Always start a new OpenCode terminal session. |
+-| `opencode.addFilepathToTerminal` | Insert File Reference into OpenCode | `Ctrl+Alt+K` | Insert `@file#Lx-Ly` for the active editor selection. |
+-| `opencode.showBridgeLog` | Show OpenCode Bridge Log | — | Open the extension output channel. |
+-| `opencode.notebookBridgeTools` | OpenCode: Test Notebook Bridge Tools | — | Palette tool for manual notebook bridge operations. |
 +| --- | --- | --- | --- |
 +| `opencode.openTerminal` | Open or Focus OpenCode Terminal | `Ctrl+Esc` | Focuses an existing `opencode` terminal or creates one in a split view. |
 +| `opencode.openNewTerminal` | Open New OpenCode Terminal | `Ctrl+Shift+Esc` | Always creates a new `opencode` terminal. Also appears as the editor toolbar button. |
@@ -472,10 +495,10 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +On macOS, use `Cmd` instead of `Ctrl`, and `Option` instead of `Alt`.
 +
 +## Notebook Tools
++
++OpenCode registers these tools when the SMARK CLI loads its built-in VS Code bridge plugin. Use the exact names below when discussing or configuring permissions.
  
 -On macOS, replace `Ctrl` with `Cmd` and `Alt` with `Option`.
-+OpenCode registers these tools when the SMARK CLI loads its built-in VS Code bridge plugin. Use the exact names below when discussing or configuring permissions.
-+
 +| Tool | Purpose |
 +| --- | --- |
 +| `vscode_notebook_summary` | Inspect a notebook and return stable `#VSC-*` cell handles, display indexes, source ranges, execution state, outputs, dirty state, and runtime metadata. |
@@ -518,20 +541,35 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
  
  ## HTTP Endpoints
  
+-<!-- #97：HTTP 面是 CLI 契约；路径变更必须同步插件与文档 -->
+-<!-- #97：cell-output 为 output 兼容别名，须与 bridge 路由一致 -->
 -The bridge server exposes these endpoints on `http://127.0.0.1:<port>`:
 +The OpenCode CLI uses these bridge endpoints internally. Normal users should prefer OpenCode tools instead of calling the endpoints by hand.
  
  | Method | Path | Auth | Description |
 -|--------|------|------|-------------|
--| GET | `/health` | No | Liveness check. Returns `{ ok: true, service: "opencode-vscode-bridge" }`. |
--| GET | `/manifest` | Bearer | Returns the bridge manifest (port, capabilities, workspace folders, active file/notebook). |
--| POST | `/notebook/summary` | Bearer | Notebook structure overview: cell count, types, execution states, languages, output summaries. |
--| POST | `/notebook/source` | Bearer | Paginated virtual source text for a notebook with 1-based global line numbers. |
--| POST | `/notebook/run` | Bearer | Execute a single cell or range of cells by `#VSC-xxxx` cell ID. |
--| POST | `/notebook/edit` | Bearer | Insert, edit, or delete cells using string-matching (`oldCode`/`newCode`) to avoid index-shift bugs. |
--| POST | `/notebook/output` | Bearer | Export cell outputs as artifacts (images, HTML, JSON, or large text written to `.opencode/cache/notebook-outputs/`). |
--| POST | `/notebook/cell-output` | Bearer | Alias for `/notebook/output`. |
--| POST | `/notebook/env` | Bearer | Kernel/environment operations: `info` (probe kernel), `configure` (trigger kernel selection), `restart` (restart Jupyter kernel), `save` (persist notebook to disk). |
+-| `GET` | `/health` | none | Liveness check |
+-| `GET` | `/manifest` | Bearer | Bridge capability/manifest snapshot |
+-| `POST` | `/notebook/summary` | Bearer | Notebook structure, cells, execution state |
+-| `POST` | `/notebook/source` | Bearer | Virtual source document with pagination |
+-| `POST` | `/notebook/run` | Bearer | Run one cell or a cell-id range |
+-| `POST` | `/notebook/edit` | Bearer | Insert, delete, or replace cells |
+-| `POST` | `/notebook/output` | Bearer | Artifact-first cell output export |
+-| `POST` | `/notebook/cell-output` | Bearer | Alias of `/notebook/output` (compat) |
+-| `POST` | `/notebook/env` | Bearer | Environment ops: info / configure / restart / save |
+-
+-## Architecture
+-
+-<!-- #97：架构说明帮助排障，不改变运行时绑定 -->
+-```
+-VS Code Extension Host
+-  └─ bridge HTTP (127.0.0.1)
+-       ├─ notebook/* handlers
+-       ├─ registry heartbeat writer
+-       └─ terminal / file-reference commands
+-OpenCode CLI / daemon
+-  └─ polls registry, calls Bearer-protected endpoints
+-```
 +| --- | --- | --- | --- |
 +| `GET` | `/health` | No | Liveness check. |
 +| `GET` | `/manifest` | Bearer | Current bridge manifest with token redacted. |
@@ -545,15 +583,13 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
  
  ## Security Model
  
- | Check | Implementation |
--|-------|----------------|
--| Listens only on `127.0.0.1` | `BRIDGE_HOST = "127.0.0.1"`, no external network exposure |
--| `/health` is unauthenticated | Allows liveness probes without a token |
--| All tool endpoints require `Bearer <token>` | Header check: `Authorization === "Bearer ${token}"` |
--| Rejects cross-origin requests | Blocks any request with an `Origin` header |
--| Token is never logged | Output channel prints `<redacted>` |
--| Registry file permissions | Manifest written with mode `0o600`, directory `0o700` |
--| Token scoped per session | New random UUID token generated on each bridge start |
+-<!-- #97：安全模型仍限 127.0.0.1 + Bearer，品牌改名不改威胁模型 -->
+-- Listen only on `127.0.0.1`.
+-- `/health` is unauthenticated; all notebook endpoints require `Authorization: Bearer <token>`.
+-- Requests with an `Origin` header are rejected to block browser cross-site access.
+-- Bridge token is not printed to the VS Code output log.
+-- Registry file is local-only (permissions typically `0o600` where applicable).
++| Check | Implementation |
 +| --- | --- |
 +| Localhost only | The bridge binds to `127.0.0.1`, not an external interface. |
 +| Per-session token | A random token is generated every time the bridge starts. |
@@ -562,23 +598,15 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +| Token logging | Logs print `<redacted>` instead of the token. |
 +| Registry permissions | Registry directories use `0o700` and manifest files use `0o600` on non-Windows systems. |
 +| Write permissions | Notebook edits and notebook saves still go through OpenCode permission gates. |
- 
--## Local VSIX Install
++
 +## Output Artifacts
- 
--Build and package from the `sdks/vscode` directory:
++
 +Notebook outputs can be larger than a safe tool response. The bridge writes full artifacts under:
- 
--```powershell
--bun run check-types
--bun run lint
--bun run package
--npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.15.4.vsix"
++
 +```text
 +.opencode/cache/notebook-outputs/
- ```
- 
--Or use the bundled shortcut:
++```
++
 +Small text may be inlined in the tool response. Images, HTML, JSON, binary output, and large text are summarized with an artifact path. Projects that do not want these files tracked should ignore `.opencode/cache/`.
 +
 +## Limits And Important Behavior
@@ -591,38 +619,42 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +| Run ranges | Range execution is sequential and stops on the first failed or timed-out code cell. |
 +| Kernel configure | A selected kernel may not become active until the first code cell executes. `selected` is a valid configure result. |
 +| Save | `vscode_notebook_env` with `operation: "save"` should only be used after explicit user intent. |
-+
-+## Local VSIX Install
-+
+ 
+ ## Local VSIX Install
+ 
+-<!-- #97：安装路径与 package.scripts.vsix 的 dist 输出对齐 -->
+-Build and package from `sdks/vscode`:
 +From `sdks/vscode`:
  
 -```powershell
+-bun run check-types
+-bun run lint
+-bun run package
 +```bash
 +bun install
  bun run vsix
  ```
  
--The shortcut builds first, then packages directly into `dist/`. It intentionally does not use `vscode:prepublish`, because `vsce` runs that hook through an internal `npm run vscode:prepublish` child process, which can lose `npm` from `PATH` in some Windows/Bun terminal environments.
+-Install the generated package (path matches `scripts.vsix` output):
 +The VSIX is written to:
 +
 +```text
 +dist/SMARK2022.opencode-ide-bridge-<version>.vsix
 +```
- 
--Install:
++
 +Install it with:
  
 -```powershell
--code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.15.4.vsix --force
+-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.17.27.vsix --force
 +```bash
 +code --install-extension "dist/SMARK2022.opencode-ide-bridge-<version>.vsix" --force
  ```
  
--## Architecture
 +The `vsix` script builds first and then packages with `@vscode/vsce --no-dependencies`. The package intentionally avoids `vscode:prepublish`; nested `npm run vscode:prepublish` calls can fail in some Windows/Bun environments when `npm` is not on `PATH`.
 +
-+## Development
+ ## Development
  
+-<!-- #97：F5 开发宿主与正式 VSIX 安装路径不同，勿混用诊断步骤 -->
 +Run these commands from `sdks/vscode`:
 +
 +```bash
@@ -630,33 +662,21 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +bun run check-types
 +bun run lint
 +bun run package
- ```
++```
 +
 +For extension host debugging:
 +
-+1. Open `sdks/vscode` directly in VS Code.
+ 1. Open `sdks/vscode` directly in VS Code.
+-2. Run `bun install` inside `sdks/vscode`.
 +2. Run `bun install` in `sdks/vscode`.
-+3. Press `F5` to launch an extension development host.
+ 3. Press `F5` to launch an extension development host.
+-4. Use `Developer: Reload Window` after rebuilding.
 +4. Use `Developer: Reload Window` in the development host after rebuilding.
 +
 +## Source Layout
 +
 +```text
- VS Code Extension Host
--├── extension.ts           Activation, lifecycle, terminal management
--├── bridge.ts              HTTP server, routing, auth, per-filePath mutex
--├── bridge-registry.ts     File-based registry (heartbeat every 5s, manifest)
--├── util.ts                Shared helpers (JSON parsing, URI conversion, formatting)
--└── notebook/
--    ├── summary.ts         Notebook structure overview
--    ├── source.ts          Paginated virtual source text
--    ├── run.ts             Cell execution (single + range)
--    ├── edit.ts            Cell insert/edit/delete (string-matching edits)
--    ├── output.ts          Artifact-first cell output export
--    ├── env.ts             Kernel/environment operations (info/configure/restart/save)
--    ├── commands.ts        Interactive bridge testing command
--    ├── format.ts          Summary text formatting
--    └── resolve.ts         File-path to notebook document resolution
++VS Code Extension Host
 +|-- extension.ts           Activation, lifecycle, terminal commands
 +|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
 +|-- bridge-registry.ts     Registry heartbeat and manifest writer
@@ -671,12 +691,10 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +    |-- commands.ts        Interactive development test command
 +    |-- format.ts          Summary text and cell ID formatting
 +    `-- resolve.ts         Notebook and cell resolution
- ```
- 
--## Open Source
++```
++
 +## Troubleshooting
- 
--This extension is part of the [OpenCode](https://github.com/anomalyco/opencode) project, licensed under the MIT License. See [LICENSE](./LICENSE) for details.
++
 +| Symptom | What to check |
 +| --- | --- |
 +| `No live VS Code bridge found` | Ensure VS Code is open, this extension is enabled, and the workspace is open in VS Code. Run `Show OpenCode Bridge Log`. |
@@ -686,30 +704,24 @@ index 3bb9b83fbb5439e0820bd561dd511862e18cac80..1cdcb127f91b38276382a853d3875ebc
 +| Output artifacts are missing | Ensure a workspace folder is open; artifacts require `.opencode/cache/notebook-outputs/` under a workspace. |
 +| Typecheck fails locally | Run `bun install` inside `sdks/vscode`; this package is independent from the root workspace install. |
  
--## Development
+-## Open Source
 +## Source And License
  
--1. Open `sdks/vscode` directly in VS Code (do not open from the repository root).
--2. Run `bun install` inside `sdks/vscode`.
--3. Press `F5` to launch an extension development host.
--4. After rebuilding, use `Developer: Reload Window` in the development host to pick up changes.
--5. Run `bun run test` to execute the extension test suite.
+-<!-- #97：homepage 指向 anomalyco/opencode，与 package.json homepage 字段一致 -->
+-Maintained on the SMARK fork of OpenCode. Homepage: https://github.com/anomalyco/opencode
 +This extension is maintained in the SMARK OpenCode fork at https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode. It is based on OpenCode and remains MIT licensed. See [LICENSE](./LICENSE).
+\ No newline at end of file
 diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
-index 9e9d34834c307b20e1431811a85c6e4d6e73fa98..4ee951b500c6ab3088e98498216a2ad6d1c711a2 100644
+index d892a61d0..19f9e92ec 100644
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
-@@ -1,13 +1,17 @@
- {
-   "name": "opencode-ide-bridge",
-   "displayName": "OpenCode IDE Bridge",
--  "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
--  "version": "1.15.4",
-+  "description": "SMARK OpenCode IDE bridge for VS Code. Provides notebook operations, Jupyter kernel management, workspace context sharing, and terminal integration over a local authenticated bridge.",
-+  "version": "1.15.5",
-   "publisher": "SMARK2022",
+@@ -4,11 +4,15 @@
+   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
+   "version": "1.17.27",
+   "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3，目标已为 1.17.27 无需修改",
 -  "homepage": "https://github.com/anomalyco/opencode",
 +  "homepage": "https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode",
+   "publisher": "SMARK2022",
    "repository": {
      "type": "git",
 -    "url": "https://github.com/anomalyco/opencode"
@@ -721,31 +733,34 @@ index 9e9d34834c307b20e1431811a85c6e4d6e73fa98..4ee951b500c6ab3088e98498216a2ad6
    },
    "license": "MIT",
    "icon": "images/icon.png",
-@@ -100,7 +104,7 @@
+@@ -101,8 +105,7 @@
      ]
    },
    "scripts": {
--    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.15.4.vsix",
+-
+-    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.17.27.vsix",
 +    "vsix": "bun run package && bun ./script/vsix.ts",
      "compile": "bun run check-types && bun run lint && node esbuild.js",
      "watch:esbuild": "node esbuild.js --watch",
      "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
 diff --git a/sdks/vscode/script/vsix.ts b/sdks/vscode/script/vsix.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..42dc3b69f455d660b312482a57158e49a58c4cfa
+index 000000000..3a3c08b87
 --- /dev/null
 +++ b/sdks/vscode/script/vsix.ts
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,10 @@
 +#!/usr/bin/env bun
 +import { $ } from "bun"
 +import path from "node:path"
 +
++// #267：从 package.json 读取 publisher/name/version 生成 VSIX 文件名
 +const pkg = await Bun.file(path.join(import.meta.dir, "..", "package.json")).json()
++// #267：输出路径使用 pkg 字段避免版本硬编码
 +const output = path.join("dist", `${pkg.publisher}.${pkg.name}-${pkg.version}.vsix`)
 +
 +await $`bun x @vscode/vsce package --no-dependencies -o ${output}`
 diff --git a/sdks/vscode/tsconfig.json b/sdks/vscode/tsconfig.json
-index 710f9ede464c03f5db4e76f96d1ac30a3e493230..c39c673244b3e76c43ea87640c8fdfcc42ede0e5 100644
+index 710f9ede4..c39c67324 100644
 --- a/sdks/vscode/tsconfig.json
 +++ b/sdks/vscode/tsconfig.json
 @@ -12,5 +12,6 @@

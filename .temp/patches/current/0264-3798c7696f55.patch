@@ -1,20 +1,10 @@
 From 3798c7696f55e57c0ac141540e1cd5a17139c90b Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 18:42:53 +0800
-Subject: [PATCH] =?UTF-8?q?fix(auto-review):=20=E5=A4=B1=E8=B4=A5=E5=90=8E?=
- =?UTF-8?q?=E5=9B=9E=E9=80=80=E4=BA=BA=E5=B7=A5=E5=AE=A1=E6=89=B9?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-保留 reviewer 现有重试链路，重试耗尽、超时、不可用或 defect 后默认回到用户 ask，避免 provider internal error 直接中断权限流程。
-
-显式 auto_review.fallback=deny 继续保持 fail-closed，reviewer 明确 deny 和契约 guardrail 仍然不会降级为人工审批。
-
-补充 PermissionAuto 与 Permission.ask 行为级回归测试，并同步 reviewer boundary 文档说明。
+Subject: [PATCH] fix(auto-review): fallback to manual approval after failure
 
 diff --git a/docs/opencode-sandbox-windows-design.md b/docs/opencode-sandbox-windows-design.md
-index 2a49caf5da823eedc90c8873d42ef1d6a9ef79f1..a93b8454520d366ff70d7501fb4ab8d931970079 100644
+index 2a49caf5d..a93b84545 100644
 --- a/docs/opencode-sandbox-windows-design.md
 +++ b/docs/opencode-sandbox-windows-design.md
 @@ -200,8 +200,8 @@ for each requested pattern:
@@ -44,273 +34,209 @@ index 2a49caf5da823eedc90c8873d42ef1d6a9ef79f1..a93b8454520d366ff70d7501fb4ab8d9
  
  这层适合判断“是否允许尝试执行”，但不应负责生成 OS sandbox policy。
  
-diff --git a/packages/opencode/src/config/permission.ts b/packages/opencode/src/config/permission.ts
-index c851be06af3314000b4099255db48618437978f7..8678e58f2a8d4fc88895c70e2838be88b925dfc9 100644
---- a/packages/opencode/src/config/permission.ts
-+++ b/packages/opencode/src/config/permission.ts
-@@ -23,7 +23,7 @@ export const AutoReview = Schema.Struct({
-   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
+diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/config/permission.ts
+index 74d66ef41..de5053549 100644
+--- a/packages/core/src/v1/config/permission.ts
++++ b/packages/core/src/v1/config/permission.ts
+@@ -25,7 +25,7 @@ export const AutoReview = Schema.Struct({
    policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
+   // #196：fallback 控制 reviewer 失败时的行为：deny（默认）或回退到用户审批。
    fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
 -    description: "On reviewer failure, either fail closed or fall back to user approval. Defaults to deny.",
 +    description: "On reviewer failure after retry, either fail closed or fall back to user approval. Defaults to user.",
    }),
+   // #196：strict 为 true 时即使 precheck 判定 allow 也强制经过 reviewer。
    strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
-   max_consecutive_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker consecutive denial threshold." }),
 diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
-index 408bb5c6d42bdb3e2a96f0396312c598b5576474..1495ba025b299194bbb79f441eca44a932358439 100644
+index 7ad0e0039..835d9846c 100644
 --- a/packages/opencode/src/permission/auto.ts
 +++ b/packages/opencode/src/permission/auto.ts
-@@ -38,8 +38,8 @@ export interface ReviewInput {
+@@ -40,7 +40,8 @@ export interface ReviewInput {
+   readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
  }
  
- // The reviewer is injected rather than constructed here so the deterministic
--// router can be tested without provider/session layers and can fail closed when
--// the optional service is absent in smaller runtimes.
-+// router can be tested without provider/session layers. Missing reviewer wiring
-+// follows the same explicit fallback policy as runtime reviewer failures.
+-// #198：reviewer 通过注入而非构造——确定性路由可在无 provider/session 层时测试，且在小型运行时无 reviewer 时 fail closed
++// #198：reviewer 通过注入而非构造——确定性路由可在无 provider/session 层时测试。
++  // #264：缺失 reviewer wiring 时遵循与运行时 reviewer 失败相同的显式 fallback 策略
  export interface Reviewer {
    readonly review: (input: ReviewInput) => Effect.Effect<ReviewDecision, unknown>
  }
-@@ -51,7 +51,7 @@ export function evaluate(
+@@ -52,7 +53,7 @@ export function evaluate(
      metadata: Readonly<Record<string, unknown>>
-     tool?: { readonly messageID: MessageID; readonly callID: string }
+     tool?: { readonly messageID: string; readonly callID: string }
      strict?: boolean
 -    reviewerDisabled?: boolean
 +    reviewerFailureFallback?: "deny" | "user"
    },
    reviewer?: Reviewer,
-   onReviewStart?: (input: {
-@@ -61,7 +61,6 @@ export function evaluate(
- ) {
-   return Effect.gen(function* () {
-     const precheck = PermissionPrecheck.evaluate(input)
--    const isShell = input.permission === "bash"
-     // [local-smark] auto 四级预审路由开始
-     // safe/general/cautious/dangerous 是 LLM 负载边界：safe 和 general 默认
-     // 直接允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。
-@@ -80,19 +79,14 @@ export function evaluate(
+   // #208：onReviewStart 在 reviewer 调用前回调——发布 ReviewStarted 事件供 UI 展示进度
+@@ -82,15 +83,12 @@ export function evaluate(
  
-     // Cautious is the default auto review boundary: deterministic precheck found
-     // a visible risk that is neither harmless nor immediately forbidden, so a
--    // reviewer must explicitly return allow/deny. Native auto must not degrade
--    // back to a clickable user ask if reviewer wiring is missing; fail closed so
--    // sensitive shell output cannot be exposed by pressing Allow.
-+    // healthy reviewer must explicitly return allow/deny. Reviewer infrastructure
-+    // failure is different from a policy denial: by default it returns to the
-+    // existing user approval boundary, while fallback=deny preserves the stricter
-+    // fail-closed deployment mode for callers that require reviewer availability.
+     // #203：cautious 是 review 边界——确定性 precheck 发现可见风险但非立即禁止，reviewer 必须显式返回 allow/deny
+     // #203：原生 auto 不能在 reviewer 缺失时降级回可点击的用户 ask；fail closed 防止敏感 shell 输出因点 Allow 暴露
++    // #264：reviewer 基础设施失败不同于策略 deny：默认回到用户审批边界
 +    const fallbackToUser = input.reviewerFailureFallback !== "deny"
      if (!reviewer) {
--      // Explicit user-review configuration is stronger than the native auto
--      // fail-closed default. This preserves small/custom runtimes that construct
--      // Permission.layer without a reviewer service but intentionally keep user
--      // approval as the review boundary.
+-      // #203：显式 user reviewer 配置强于原生 auto fail-closed 默认——保留小型/自定义运行时
+-      // #203：无 reviewer service 但有意保留用户审批作为 review 边界的场景
 -      if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+-      // #225：metadata.agent 与 agent key 同为小写 auto——大小写敏感比较在此对齐
 -      if (input.metadata.agent === "auto") {
 -        return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
 -      }
 -      return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
++      // #264：无 reviewer 时默认回到用户 ask；fallback=deny 保留 terminal fail-closed
 +      if (fallbackToUser) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
 +      return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
      }
  
-     const reviewID = crypto.randomUUID()
-@@ -114,13 +108,17 @@ export function evaluate(
+     // #208：reviewID 在模型调用前 mint——进度 UI 和最终审计事件可引用同一逻辑审查即使模型超时或失败
+@@ -110,15 +108,14 @@ export function evaluate(
          reason: input.strict && precheck.level !== "cautious" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
        },
      }).pipe(
-+      // Some provider/SDK failures surface as Effect defects instead of typed
-+      // failures. Treat them as reviewer unavailability so the permission path can
-+      // still reach the normal user ask fallback after retry has been exhausted.
++      // #264：defect 不应绕过权限边界，视为 reviewer 不可用以达到 ask fallback
 +      Effect.catchDefect((defect) => Effect.fail(defect)),
        Effect.match({
          onFailure: (error) => {
 -          const tag = errorTag(error)
--          // Disabled/fallback are explicit service signals that return to the
--          // existing user approval path. All other failures, including provider
--          // errors, schema errors, and timeouts, fail closed below.
+-          // #198：Disabled/FallbackToUser 是显式服务信号，回退到用户审批；其他失败（provider 错误、schema 错误、超时）fail closed
+-          // #198：Disabled 表示服务未启用，FallbackToUser 表示配置了 fallback=user——两者都不代表危险，回退到用户审批
 -          if (tag === "PermissionReviewerDisabled" || tag === "PermissionReviewerFallbackToUser") {
-+          // Reviewer service tags and provider failures are all infrastructure
-+          // outcomes here. They can ask only under the default/user fallback;
-+          // fallback=deny keeps them terminal even if a custom reviewer emits the
-+          // explicit fallback tag by mistake.
++          // #264：所有 reviewer 服务和 provider 失败都是基础设施问题，非策略 deny
 +          if (fallbackToUser) {
              return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
            }
+-          // #198：其他失败 fail closed——超时/provider 错误/schema 错误时拒绝而非放行，防止不透明的 reviewer 故障打开安全缺口
            return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
+         },
+         onSuccess: (reviewed) => {
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
-index f03940be7cc803dbb8e0adb643365209ab196e42..eeb2aa28f7a28620d754ce86dc071310eafe1690 100644
+index 8e0b2a61a..587042ad0 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -252,6 +252,12 @@ export const layer = Layer.effect(
-         // or explicit fallback returns to the normal pending permission path.
-         const permissionConfig = config ? (yield* config.get()).permission : undefined
+@@ -119,6 +119,10 @@ const layer = Layer.effect(
+         // #199：strict 模式禁用 precheck fast-path allow，强制所有 auto 请求经过
+         // #199：reviewer；但 deny 仍由 precheck 保留，防止危险操作因 reviewer 缺失而放行。
          const strict = permissionConfig?.auto_review?.strict === true
 +        const reviewerDisabled = permissionConfig?.approvals_reviewer === "user"
-+        // Reviewer retry remains owned by PermissionReviewer/SessionRetry. This
-+        // flag only decides what happens after retry is exhausted or the reviewer
-+        // is unavailable: default back to the existing human ask boundary, while
-+        // explicit fallback=deny keeps the legacy fail-closed behavior.
++        // #264：reviewer 重试仍由 PermissionReviewer/SessionRetry 管理。此 flag 只决定重试耗尽后的行为：
++        // 默认回到人工 ask，fallback=deny 保留 fail-closed
 +        const reviewerFailureFallback = reviewerDisabled ? "user" : (permissionConfig?.auto_review?.fallback ?? "user")
-         // Auto review/cache must operate only on the patterns that matched an
-         // `auto` rule. The original request may also contain ask-controlled
-         // patterns; caching those before the user replies would turn a rejected
-@@ -266,8 +272,8 @@ export const layer = Layer.effect(
-           if (!needsAsk) return
-         } else {
+         // #199：autoRequest 只包含 auto 控制的 pattern。若缓存 ask 控制的 pattern，
+         // #199：用户回复前规则变更会使原本被拒绝的混合请求变成静默 allow。
+         const autoRequest = { ...request, patterns: autoPatterns }
+@@ -131,8 +135,9 @@ const layer = Layer.effect(
+           // #199：PermissionAuto.evaluate 按 precheck → fast-path allow → deny →
+           // #199：reviewer → fail-closed 顺序裁决；strict 模式禁用 fast-path 但保留 deny。
            const decision = yield* PermissionAuto.evaluate(
 -            { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
 -            reviewer,
 +            { ...autoRequest, strict, reviewerFailureFallback },
++            // #264：reviewerDisabled 时不传 reviewer，避免无效调用
 +            reviewerDisabled ? undefined : reviewer,
-             (review) =>
-               // This event is the user's visible boundary between deterministic
-               // precheck and model review. It intentionally carries only the
+             // #208：onReviewStart 发布 ReviewStarted 事件——确定性 precheck 到模型审查的可见边界
+             // #208：events.publish 而非 bus.publish——复用 EventV2Bridge 统一事件发布路径
+             // #208：事件仅携带 auto patterns 和 precheck rationale——不泄露隐藏 reviewer prompt
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 3464ffd2a98cd044a1566dc6065ef0b77afb8ce2..afdfd9f558bee8703a8c5b50573d028bdadd6821 100644
+index 64393fe8e..0985e882b 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -100,6 +100,7 @@ export const layer = Layer.effect(
-         const permission = cfg.permission
+@@ -118,6 +118,8 @@ export const layer = Layer.effect(
+         // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 auto 隐式启用
          if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
          const autoReview = permission?.auto_review
++        // #264：默认 fallback=user，fallback=deny 保留 fail-closed
 +        const fallbackToUser = autoReview?.fallback !== "deny"
  
          const run = Effect.gen(function* () {
            const request = new ReviewerRequest({
-@@ -111,7 +112,8 @@ export const layer = Layer.effect(
-           const model = autoReview?.model
-             ? // User-specified reviewer models use the same provider/model parser as
-               // normal agent config so aliases and provider validation stay in one
--              // place. A bad model fails closed unless fallback=user is configured.
-+              // place. A bad model follows the same reviewer-failure fallback as
-+              // provider/runtime errors instead of inventing a separate config path.
-               yield* provider.getModel(
-                 Provider.parseModel(autoReview.model).providerID,
-                 Provider.parseModel(autoReview.model).modelID,
-@@ -177,9 +179,10 @@ export const layer = Layer.effect(
-               runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
-             ),
-             Effect.timeoutOrElse({
--              // Timeout is a security boundary: if the reviewer cannot complete in
--              // time, the tool call must not execute unless explicit user fallback
--              // is configured below.
-+              // Timeout covers reviewer execution including its existing provider
-+              // retry loop. The tool still never executes from a timeout alone:
-+              // default fallback returns to user ask, while fallback=deny preserves
-+              // a terminal fail-closed result for stricter deployments.
-               duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
-               orElse: () => Effect.fail(new ReviewerTimedOut()),
-             }),
-@@ -198,27 +201,39 @@ export const layer = Layer.effect(
-           } satisfies PermissionAuto.ReviewDecision
-         })
+@@ -233,24 +235,28 @@ export const layer = Layer.effect(
  
-+        const handleReviewerFailure = (error: unknown) =>
-+          Effect.gen(function* () {
-+            yield* markToolReviewFailed(
-+              input,
-+              fallbackToUser && !(error instanceof ReviewerDisabled)
-+                ? "fallback_user"
-+                : error instanceof ReviewerTimedOut
-+                  ? "timed_out"
-+                  : "failed",
-+              errorMessage(error),
-+            ).pipe(
-+              // Parent tool metadata is audit/UI state only. If that write fails
-+              // while handling an already-failed reviewer, it must not create a
-+              // second failure mode that bypasses ask/fallback=deny resolution.
-+              Effect.catch(() => Effect.void),
-+              Effect.catchDefect(() => Effect.void),
-+            )
-+            // Reviewer failures reach this point only after the stream-level retry
-+            // policy has completed. Converting the default case to the explicit
-+            // fallback signal lets PermissionAuto reuse the ordinary ask path
-+            // without treating infrastructure errors as reviewer policy denials.
-+            if (fallbackToUser && !(error instanceof ReviewerDisabled)) {
-+              return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
-+            }
-+            return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
-+          })
-+
+         // #209：错误时标记工具审查失败——fallback=user 标记 fallback_user，超时标记 timed_out，其他标记 failed，使 UI 能展示失败原因
          return yield* run.pipe(
--          Effect.catch((error: unknown) =>
--            Effect.gen(function* () {
--              yield* markToolReviewFailed(
--                input,
++          // #264：defect 不应绕过权限边界，转为同一 post-retry 失败通道
++          Effect.catchDefect((defect) => Effect.fail(defect)),
+           Effect.catch((error: unknown) =>
+             Effect.gen(function* () {
+               yield* markToolReviewFailed(
+                 input,
 -                autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
--                  ? "fallback_user"
--                  : error instanceof ReviewerTimedOut
--                    ? "timed_out"
--                    : "failed",
--                errorMessage(error),
--              )
++                fallbackToUser && !(error instanceof ReviewerDisabled)
+                   ? "fallback_user"
+                   : error instanceof ReviewerTimedOut
+                     ? "timed_out"
+                     : "failed",
+                 errorMessage(error),
++              ).pipe(
++                // #264：父 tool metadata 是审计/UI 状态，写入失败不应创建第二个失败模式
++                Effect.catch(() => Effect.void),
++                Effect.catchDefect(() => Effect.void),
+               )
 -              // `fallback: "user"` is deliberately narrow: disabled reviewer already
 -              // means normal user routing, while all other failures become an explicit
 -              // fallback signal for PermissionAuto. Default behavior is fail-closed.
 -              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
--                return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
--              }
++              // #264：reviewer 失败默认转为显式 fallback 信号，让 PermissionAuto 复用普通 ask 路径
++              if (fallbackToUser && !(error instanceof ReviewerDisabled)) {
+                 return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
+               }
 -              return yield* Effect.fail(error)
--            }),
--          ),
-+          // Defects from provider SDKs or persistence callbacks should not bypass
-+          // the permission boundary. Convert them to the same post-retry failure
-+          // channel so fallback=user can ask and fallback=deny can fail closed.
-+          Effect.catchDefect((defect) => Effect.fail(defect)),
-+          Effect.catch(handleReviewerFailure),
++              return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
+             }),
+           ),
          )
-       })
- 
-@@ -703,8 +718,10 @@ export const layer = Layer.effect(
+@@ -762,6 +768,8 @@ export const layer = Layer.effect(
        }).pipe(
-         // Review display is best-effort: stale tool references can happen after
-         // cancellation, repair, or compaction, but losing that UI update must not
--        // convert an otherwise valid reviewer decision into a fail-closed deny.
-+        // convert an otherwise valid reviewer decision into deny or ask. Defects
-+        // are caught too because this path updates display metadata, not policy.
+         // #208：review 展示是 best-effort——过期工具引用不应将有效 reviewer 决策转为 fail-closed deny
          Effect.catch(() => Effect.void),
++        // #264：显示路径 defect 也应被捕获——避免 UI 更新失败降级有效 reviewer 决策
 +        Effect.catchDefect(() => Effect.void),
        )
      }
    }),
+@@ -937,6 +945,6 @@ function recordJsonFallbackDecision(
+ }
+ 
+ // #198/#250：node deps 包含 Config/Provider/Session/Auth——reviewer layer yield 四个 service，Session 不导入 Permission 故无循环依赖
+-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Auth.node] })
++export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Auth.node, Plugin.node] })
+ 
+ export * as PermissionReviewer from "./service"
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index 151ea1dd146b013943cab4b89992b5b9fed727de..ec4f9a9a16519d90a0bf01ab1b16d97d29bb86a2 100644
+index 3cc9af28c..67397c9ac 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -125,7 +125,7 @@ describe("permission auto routing", () => {
-     expect(starts[0].precheck).toMatchObject({ level: "cautious" })
+@@ -164,7 +164,7 @@ describe("permission auto routing", () => {
    })
  
+   // #208：验证 reviewer 失败时保留已 minted 的 reviewID
 -  test("keeps the started review id when reviewer execution fails closed", async () => {
 +  test("falls back to user approval after reviewer execution fails", async () => {
      let started: string | undefined
  
      await expect(
-@@ -143,7 +143,11 @@ describe("permission auto routing", () => {
+@@ -183,7 +183,9 @@ describe("permission auto routing", () => {
              }),
          ),
        ),
 -    ).resolves.toMatchObject({ action: "deny", source: "reviewer", reviewID: started })
 +    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
-+    // The review still starts before the provider call so UI/audit metadata can
-+    // show the failed hidden reviewer attempt, but operational failure must not
-+    // become an implicit deny unless the user explicitly configures that policy.
++    // #264：运营失败默认回到用户审批，非隐式 deny：review 仍会启动以便 UI/审计显示失败的隐藏 reviewer 尝试，但运营失败不应变成隐式 deny
 +    expect(started).toBeDefined()
    })
  
-   test("routes PowerShell user-profile credential reads to reviewer", async () => {
-@@ -481,7 +485,7 @@ describe("permission auto routing", () => {
-     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
-   })
+   // #203：PowerShell 用户目录凭据读取走 cautious → reviewer，防止 $env:USERPROFILE 展开绕过敏感路径检测
+@@ -502,7 +504,7 @@ describe("permission auto routing", () => {
  
+   // #225：测试 metadata.agent 用小写 auto，与 agent key 对齐
+   // #203：原生 auto reviewer 缺失时 fail closed——cautious 不降级为可点击 ask，防止点 Allow 暴露敏感 shell 输出
 -  test("fails closed for native auto when reviewer is not wired", async () => {
 +  test("falls back to existing approval path for native auto when reviewer is not wired", async () => {
      await expect(
        Effect.runPromise(
          PermissionAuto.evaluate({
-@@ -490,17 +494,17 @@ describe("permission auto routing", () => {
+@@ -511,7 +513,7 @@ describe("permission auto routing", () => {
            metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
          }),
        ),
@@ -318,11 +244,8 @@ index 151ea1dd146b013943cab4b89992b5b9fed727de..ec4f9a9a16519d90a0bf01ab1b16d97d
 +    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
    })
  
--  test("honors explicit user reviewer configuration for native auto", async () => {
-+  test("honors explicit user fallback for native auto", async () => {
-     await expect(
-       Effect.runPromise(
-         PermissionAuto.evaluate({
+   // #203：显式 user reviewer 配置强于原生 auto fail-closed——保留用户审批作为 review 边界
+@@ -522,7 +524,7 @@ describe("permission auto routing", () => {
            permission: "bash",
            patterns: ["git add ."],
            metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
@@ -331,10 +254,10 @@ index 151ea1dd146b013943cab4b89992b5b9fed727de..ec4f9a9a16519d90a0bf01ab1b16d97d
          }),
        ),
      ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
-@@ -537,12 +541,18 @@ describe("permission auto routing", () => {
-     expect(called).toBe(true)
+@@ -561,13 +563,20 @@ describe("permission auto routing", () => {
    })
  
+   // #198：验证 reviewer 失败路由——TimedOut fail closed 为 deny，FallbackToUser 回退到 ask
 -  test("reviewer failures fail closed unless they explicitly request user fallback", async () => {
 +  test("reviewer failures fall back to user approval by default", async () => {
      await expect(
@@ -344,19 +267,24 @@ index 151ea1dd146b013943cab4b89992b5b9fed727de..ec4f9a9a16519d90a0bf01ab1b16d97d
 -    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
 +
+ 
++    // #264：SDK defect 应被视为 reviewer 不可用而非绕过权限边界
 +    await expect(
 +      bash("git add .", {
 +        review: () => Effect.die(new Error("sdk defect")),
 +      }),
 +    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
- 
      await expect(
        bash("git add .", {
-@@ -551,6 +561,45 @@ describe("permission auto routing", () => {
-     ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+         review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }),
+@@ -576,6 +585,45 @@ describe("permission auto routing", () => {
    })
  
+   // #198：验证合约校验——critical+allow 和非低风险+allow+unknown authorization 均转为 deny
++  // #264：fallback=deny 时 reviewer 失败仍为 terminal fail-closed
++  // #264：fallback=deny 时 reviewer 失败仍为 terminal fail-closed
 +  test("reviewer failures fail closed when fallback deny is configured", async () => {
++    // #264：超时失败在 fallback=deny 下应拒绝
 +    const reviewer = {
 +      review: () => Effect.fail({ _tag: "PermissionReviewerTimedOut", message: "timed out" }),
 +    }
@@ -368,14 +296,13 @@ index 151ea1dd146b013943cab4b89992b5b9fed727de..ec4f9a9a16519d90a0bf01ab1b16d97d
 +            permission: "bash",
 +            patterns: ["git add ."],
 +            metadata: { command: "git add ." },
-+            // fallback=deny is the compatibility/safety escape hatch for users
-+            // who want reviewer infrastructure failures to remain terminal.
++            // #264：fallback=deny 是兼容/安全逃项，保留 terminal fail-closed
 +            reviewerFailureFallback: "deny",
 +          },
 +          reviewer,
 +        ),
 +      ),
-+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +
 +    await expect(
 +      Effect.runPromise(
@@ -384,82 +311,91 @@ index 151ea1dd146b013943cab4b89992b5b9fed727de..ec4f9a9a16519d90a0bf01ab1b16d97d
 +            permission: "bash",
 +            patterns: ["git add ."],
 +            metadata: { command: "git add ." },
-+            // The fallback tag is a transport signal, not user authorization. An
-+            // explicit fallback=deny caller must not be downgraded to ask by a
-+            // stale or custom reviewer implementation returning that tag.
++            // #264：fallback tag 是传输信号而非用户授权，fallback=deny 不应被降级
 +            reviewerFailureFallback: "deny",
 +          },
 +          { review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }) },
 +        ),
 +      ),
-+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +  })
 +
    test("reviewer contract contradictions fail closed", async () => {
      await expect(
        bash("git add .", {
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
-index 216f5ce897e9acc74eb126c019ff408ac6adae42..0073386d74a24eac00924ab2edbf081bccb76313 100644
+index 3a66c04b8..13ed4bfce 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -24,6 +24,7 @@ const env = Layer.mergeAll(
-   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
- )
+@@ -25,6 +25,7 @@ const env = AppNodeBuilder.build(
+ // #199：带确定性 reviewer 和真实 session cache 的独立 env，在不启动 provider model 的情况下
+ // #199：通过 Permission.ask 测试 auto 集成路径。
  let reviewedCalls = 0
 +let failingReviewedCalls = 0
  let nonDenialCalls = 0
- const reviewerLayer = Layer.succeed(
-   PermissionReviewer.Service,
-@@ -38,6 +39,19 @@ const reviewerLayer = Layer.succeed(
-           risk_level: "medium" as const,
-           user_authorization: "medium" as const,
-         }
-+    }),
-+  }),
-+)
-+const failingReviewerLayer = Layer.succeed(
-+  PermissionReviewer.Service,
-+  PermissionReviewer.Service.of({
-+    review: () =>
-+      Effect.gen(function* () {
-+        failingReviewedCalls++
-+        // This models a provider/server failure after any existing reviewer retry
-+        // policy has had its chance. The permission boundary should become the
-+        // normal pending user approval request, not an uncaught failure or auto deny.
-+        return yield* Effect.fail(new Error("internal server error"))
-       }),
-   }),
+ const reviewedEnv = AppNodeBuilder.build(
+   LayerNode.group([
+@@ -77,8 +78,67 @@ const circuitEnv = AppNodeBuilder.build(
+   LayerNode.group([PermissionCircuitBreaker.node, Config.node, CrossSpawnSpawner.node, InstanceStore.node]),
+   [[InstanceStore.bootstrapNode, noopBootstrap]],
  )
-@@ -62,6 +76,27 @@ const reviewedEnv = Layer.mergeAll(
-   CrossSpawnSpawner.defaultLayer,
-   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
- )
-+const failingReviewedEnv = Layer.mergeAll(
-+  Permission.layer.pipe(
-+    Layer.provide(bus),
-+    Layer.provide(PermissionSessionCache.layer),
-+    Layer.provide(failingReviewerLayer),
-+  ),
-+  bus,
-+  CrossSpawnSpawner.defaultLayer,
-+  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
++// #264：失败 reviewer 环境——无 Config，默认 fallback=user
++const failingReviewedEnv = AppNodeBuilder.build(
++  LayerNode.group([
++    Permission.node,
++    PermissionReviewer.node,
++    PermissionSessionCache.node,
++    EventV2Bridge.node,
++    CrossSpawnSpawner.node,
++    InstanceStore.node,
++  ]),
++  [
++    [InstanceStore.bootstrapNode, noopBootstrap],
++    [
++      PermissionReviewer.node,
++      Layer.succeed(
++        PermissionReviewer.Service,
++        PermissionReviewer.Service.of({
++          review: () =>
++            Effect.gen(function* () {
++              failingReviewedCalls++
++              // #264：模拟 provider 内部错误，验证权限回到用户审批
++              return yield* Effect.fail(new Error("internal server error"))
++            }),
++        }),
++      ),
++    ],
++  ],
 +)
-+const failingReviewedConfigEnv = Layer.mergeAll(
-+  Permission.layer.pipe(
-+    Layer.provide(bus),
-+    Layer.provide(Config.defaultLayer),
-+    Layer.provide(PermissionSessionCache.layer),
-+    Layer.provide(failingReviewerLayer),
-+  ),
-+  bus,
-+  CrossSpawnSpawner.defaultLayer,
-+  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
++// #264：失败 reviewer + Config 环境——测试 fallback=deny
++const failingReviewedConfigEnv = AppNodeBuilder.build(
++  LayerNode.group([
++    Permission.node,
++    PermissionReviewer.node,
++    PermissionSessionCache.node,
++    Config.node,
++    EventV2Bridge.node,
++    CrossSpawnSpawner.node,
++    InstanceStore.node,
++  ]),
++  [
++    [InstanceStore.bootstrapNode, noopBootstrap],
++    [
++      PermissionReviewer.node,
++      Layer.succeed(
++        PermissionReviewer.Service,
++        PermissionReviewer.Service.of({
++          review: () =>
++            Effect.gen(function* () {
++              failingReviewedCalls++
++              // #264：同上，fallback=deny 时应保持 fail-closed
++              return yield* Effect.fail(new Error("internal server error"))
++            }),
++        }),
++      ),
++    ],
++  ],
 +)
- // Circuit tests need Config.defaultLayer because thresholds are read at decision
- // time from the active project config, not captured when the service is created.
- const circuitEnv = Layer.mergeAll(
-@@ -72,6 +107,8 @@ const circuitEnv = Layer.mergeAll(
- )
  const it = testEffect(env)
  const reviewed = testEffect(reviewedEnv)
 +const failingReviewed = testEffect(failingReviewedEnv)
@@ -467,10 +403,11 @@ index 216f5ce897e9acc74eb126c019ff408ac6adae42..0073386d74a24eac00924ab2edbf081b
  const circuit = testEffect(circuitEnv)
  
  const rejectAll = (message?: string) =>
-@@ -921,6 +958,65 @@ reviewed.instance(
-   { git: true },
- )
+@@ -952,6 +1012,67 @@ reviewed.instance(
  
+ // #199：验证 command 变化使缓存失效——不同命令的风险不同，不能复用旧裁决。
+ // #199：验证 command 字段参与缓存键规范化，cwd/shell 相同但命令不同仍失效。
++// #264：验证 reviewer 失败后回到待审批用户请求
 +failingReviewed.instance(
 +  "ask - reviewer failures fall back to pending user approval",
 +  () =>
@@ -497,6 +434,7 @@ index 216f5ce897e9acc74eb126c019ff408ac6adae42..0073386d74a24eac00924ab2edbf081b
 +  { git: true },
 +)
 +
++// #264：验证 fallback=deny 保留 terminal fail-closed
 +failingReviewedConfig.instance(
 +  "ask - fallback deny preserves fail-closed reviewer failures",
 +  () =>
@@ -513,9 +451,8 @@ index 216f5ce897e9acc74eb126c019ff408ac6adae42..0073386d74a24eac00924ab2edbf081b
 +        }),
 +      )
 +
-+      // Explicit fallback=deny keeps the pre-existing fail-closed contract for
-+      // environments where reviewer availability is required before execution.
-+      expect(err).toBeInstanceOf(Permission.AutoDeniedError)
++      // #264：fallback=deny 保留 fail-closed，reviewer 不可用时终竭拒绝
++      expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
 +      expect(yield* list()).toHaveLength(0)
 +      expect(failingReviewedCalls).toBe(1)
 +    }),
@@ -523,6 +460,7 @@ index 216f5ce897e9acc74eb126c019ff408ac6adae42..0073386d74a24eac00924ab2edbf081b
 +    git: true,
 +    config: {
 +      permission: {
++        // #264：显式 fallback=deny 配置
 +        approvals_reviewer: "auto_review",
 +        auto_review: { fallback: "deny" },
 +      },

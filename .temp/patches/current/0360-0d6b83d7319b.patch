@@ -15,12 +15,11 @@ footer 从 session title 提取 agent 名的正则 /@(\w+) subagent/ 中 \w
 
 [\w-]+ 是 \w+ 的超集,general/explore 等无连字符 agent 名行为不变;
 title 不含 (@... subagent) 时回退为 Subagent 的既有行为保持不变。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index 812414957d0b38c5639bdc0de5f630eaf729deae..8bc2b206b5d8846bad8b5a9060d307920fb79a2d 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -22,7 +22,9 @@ export function SubagentFooter() {
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+index 6e091ce4c..d4e13b642 100644
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -21,7 +21,9 @@ export function SubagentFooter() {
    const subagentInfo = createMemo(() => {
      const s = session()
      if (!s) return { label: "Subagent", index: 0, total: 0 }
@@ -31,23 +30,3 @@ index 812414957d0b38c5639bdc0de5f630eaf729deae..8bc2b206b5d8846bad8b5a9060d30792
      const label = agentMatch ? Locale.titlecase(agentMatch[1]) : "Subagent"
  
      if (!s.parentID) return { label, index: 0, total: 0 }
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 5fc1c5612379033ebab06551a5e151055c9b9aec..f0ecd8883185a579a120f88e40929adfa286d918 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -70,7 +70,14 @@ test("non-shell auto review status opens the reviewer child session", async () =
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-       await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
- 
--      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-+      // 导航进入 reviewer 子会话后,SubagentFooter 从 title 提取 agent 名显示。
-+      // 修复前: \w+ 不匹配连字符 → label 回退 "Subagent" → 此断言失败
-+      // 修复后: [\w-]+ 匹配 "permission-reviewer" → label "Permission-Reviewer"
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("reviewer child visible")),
-+      )
-+      // 行为级断言: footer 必须显示完整 agent 名,不能因连字符回退为泛化 "Subagent"
-+      expect(frame.some((line) => line.includes("Permission-Reviewer"))).toBe(true)
-     },
-     {},
-     {},

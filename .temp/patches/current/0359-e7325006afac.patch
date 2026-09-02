@@ -20,29 +20,11 @@ prompt-voice-recorder: drainBufferedFrames 阈值系数从 0.75 调至 0.9
 尾部 queued 帧。28ms 阈值留出 23ms 余量，同时仍低于 32ms 帧周期
 可正确区分 live read。调度抖动只会膨胀测量值不会缩短，4ms 间隙
 不可被闭合。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-index dc4d5c734a6a07f068feb6ad03e54048c9b74950..b6c187c2d2190b821edc9ae03bf2e779e265161d 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-@@ -44,7 +44,11 @@ const VOICE_RECORDER_DEVICE_INDEX = -1
- // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
- const VOICE_RECORDER_BUFFERED_FRAMES = 250
- // queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
--const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.75))
-+// macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
-+// 导致 drainBufferedFrames 误判缓冲耗尽而提前终止（丢失尾部 queued 帧）。
-+// 0.9 系数给出 28ms 阈值：queued read（~5ms）留 23ms 余量，live read（~32ms 帧周期）仍可正确区分。
-+// 28ms 距 32ms 仅 4ms，但调度抖动只会膨胀测量值、不会缩短，因此 4ms 间隙不可被抖动闭合。
-+const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
- // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
- const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
- 
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 8610b7450c560d032d1bb0cca1d531b183b8ae4a..820a466c0379c9c33e6deccb9e958978c349acab 100644
+index 727890808..dc2ade9f3 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -447,8 +447,13 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
+@@ -491,8 +491,13 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
      )
    }
  
@@ -58,25 +40,11 @@ index 8610b7450c560d032d1bb0cca1d531b183b8ae4a..820a466c0379c9c33e6deccb9e958978
      cwd,
      env,
      stdin: "ignore",
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-index e34e56c6fe1950440db9b2ca604a23c00e2d4d00..2e3449438de88e4d612e27237624494c2d698288 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-@@ -173,6 +173,9 @@ describe("prompt voice recorder", () => {
-   // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
-   // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
-   // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
-+  // macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
-+  // 导致 drainBufferedFrames 误判缓冲耗尽而提前终止。
-+  // 生产代码的 DRAIN_BLOCKED_READ_MS 阈值需留出足够余量（28ms = 0.9×32ms）。
-   test("writes audio buffered during a stalled TUI tick before stopping", async () => {
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
- 
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index acff649d05871b85f343371ac78810ec3042ab99..b55e8478b26c6c4854fd1113282bf1b91f380ccf 100644
+index ee196aa64..5ecf8547d 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -214,6 +214,27 @@ describe("tool.shell", () => {
+@@ -227,6 +227,26 @@ describe("tool.shell", () => {
      60_000,
    )
  
@@ -91,7 +59,6 @@ index acff649d05871b85f343371ac78810ec3042ab99..b55e8478b26c6c4854fd1113282bf1b9
 +          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
 +          const result = yield* run({
 +            command: "echo 'hello world' | tr a-z A-Z",
-+            description: "Echo with quotes and pipe",
 +          })
 +          expect(result.metadata.exit).toBe(0)
 +          expect(result.metadata.output).toContain("HELLO WORLD")
@@ -104,3 +71,34 @@ index acff649d05871b85f343371ac78810ec3042ab99..b55e8478b26c6c4854fd1113282bf1b9
    it.live("falls back from terminal-only configured shell", () =>
      Effect.gen(function* () {
        const tmp = yield* tmpdirScoped({ config: { shell: "fish" } })
+diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
+index c8ba831ad..00b702d3e 100644
+--- a/packages/tui/src/prompt-voice-recorder.ts
++++ b/packages/tui/src/prompt-voice-recorder.ts
+@@ -44,7 +44,11 @@ const VOICE_RECORDER_DEVICE_INDEX = -1
+ // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
+ const VOICE_RECORDER_BUFFERED_FRAMES = 250
+ // queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
+-const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.75))
++// macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
++// 导致 drainBufferedFrames 误判缓冲耗尽而提前终止（丢失尾部 queued 帧）。
++// 0.9 系数给出 28ms 阈值：queued read（~5ms）留 23ms 余量，live read（~32ms 帧周期）仍可正确区分。
++// 28ms 距 32ms 仅 4ms，但调度抖动只会膨胀测量值、不会缩短，因此 4ms 间隙不可被抖动闭合。
++const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
+ // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
+ const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
+ 
+diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
+index 48a01e8fe..c8bfe3281 100644
+--- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
+@@ -173,6 +173,9 @@ describe("prompt voice recorder", () => {
+   // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
+   // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
+   // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
++  // macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
++  // 导致 drainBufferedFrames 误判缓冲耗尽而提前终止。
++  // 生产代码的 DRAIN_BLOCKED_READ_MS 阈值需留出足够余量（28ms = 0.9×32ms）。
+   test("writes audio buffered during a stalled TUI tick before stopping", async () => {
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+ 

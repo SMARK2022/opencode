@@ -595,16 +595,13 @@ index fc9a52797c1d93e76563f7e5dbd981f5a125c867..b4bbe1ddd61d6b69af9f0364de6c4e84
        - name: Checkout repository
          uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 diff --git a/.gitignore b/.gitignore
-index 3efc98ba147be9b8c022f9624320747e78765ada..58b2b98f60ceffc18a16da917981818df903db65 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -29,6 +29,6 @@ opencode-dev
+@@ -31,6 +31,7 @@ opencode-dev
  UPCOMING_CHANGELOG.md
  logs/
  *.bun-build
 +**/.artifacts/
  tsconfig.tsbuildinfo
--archived/
--.temp/
-\ No newline at end of file
-+.temp/
+ # #176：物化/scratch 目录不入 VCS
+ .temp/

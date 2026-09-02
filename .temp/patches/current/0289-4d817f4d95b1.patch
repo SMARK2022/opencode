@@ -1,36 +1,53 @@
 From 4d817f4d95b13550fdcebfb90205ecfda6b48ee7 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Wed, 10 Jun 2026 02:36:05 +0800
-Subject: [PATCH] =?UTF-8?q?feat(shell):=20=E5=A2=9E=E5=BC=BA=E6=89=A7?=
- =?UTF-8?q?=E8=A1=8C=E9=80=9A=E7=9F=A5=EF=BC=8C=E5=A4=84=E7=90=86=E7=A9=BA?=
- =?UTF-8?q?=E8=BE=93=E5=87=BA=E5=92=8C=E9=80=80=E5=87=BA=E7=A0=81=EF=BC=8C?=
- =?UTF-8?q?=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B=E4=BF=A1=E6=81=AF=E5=9B=9E?=
- =?UTF-8?q?=E6=94=BE?=
+Subject: [PATCH] feat(shell): enhance execution notice for empty output and exit code
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+index f27b9a57a4b33dd9c1686d767b3746a7f69c83a1..e69fa6f2f69c28e4b365e2edd4e2d5b3f9a4d2c1 100644
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -14,8 +14,12 @@
+ type ExecutionNotice = {
+-  severity: "warning"
+-  reason: "timeout" | "user_abort"
++  // #289：execution notice 是 shell 输出里给模型看的执行状态，不是完整 metadata 回放。
++  // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
++  severity: "info" | "warning" | "error"
++  reason: "timeout" | "user_abort" | "exit"
+   timeout_ms?: number
++  // #289：exit_code 在 reason 为 exit 时必填，携带原始进程退出码供审计
++  exit_code?: number
+ }
+ 
+ // #282：属性值只允许标量——notice 永不做嵌套，模型无需解析复合结构
+ type Notice = Record<string, string | number | undefined>
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index cc500f4fd31042acae515ed33f763fef09895221..5dafb9b2c8fddbb4c5924c2c4337b701c8cdc2c8 100644
+index e4b83d268..2489abcab 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -991,8 +991,8 @@ export const ShellTool = Tool.define(
+@@ -1075,8 +1075,9 @@
          file = yield* trunc.write(normalized)
        }
  
 -      let output = end.text
 -      if (!output) output = "(no output)"
++      // #289：空输出检测前移，exit notice 依赖此标志决定是否追加退出码
 +      const emptyOutput = end.text.length === 0
 +      let output = emptyOutput ? "(no output)" : end.text
  
        if (cut && file) {
-         output =
-@@ -1016,6 +1016,23 @@ export const ShellTool = Tool.define(
-         output += "\n\n" + appendix
-       }
- 
-+      // metadata.exit 已经保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
+         // #282：shown 描述实际展示段（tail 方向），total 描述完整原文
+@@ -1094,6 +1095,23 @@
+       // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
+       const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+       if (appendix) output += "\n\n" + appendix
++      // #289：metadata.exit 已保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
 +      // 空输出和缺少诊断摘要的失败输出会让后续模型误判命令状态，所以只追加退出码 notice。
 +      // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
 +      const exitNotice =
@@ -50,30 +67,11 @@ index cc500f4fd31042acae515ed33f763fef09895221..5dafb9b2c8fddbb4c5924c2c4337b701
        if (meta.length > 0) {
          output += "\n\n" + meta.join("\n")
        }
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
-index ceaa0e48bd9e19378fa0de168e53eabbc01626a7..b88bd0eece8ba0035c8ebbd64c3c648ac092af56 100644
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
-@@ -11,9 +11,12 @@ type OutputTruncatedNotice = {
- }
- 
- type ExecutionNotice = {
--  severity: "warning"
--  reason: "timeout" | "user_abort"
-+  // execution notice 是 shell 输出里给模型看的执行状态，不是完整 metadata 回放。
-+  // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
-+  severity: "info" | "warning" | "error"
-+  reason: "timeout" | "user_abort" | "exit"
-   timeout_ms?: number
-+  exit_code?: number
- }
- 
- type Notice = Record<string, string | number | undefined>
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf13f96be80 100644
+index ccf2e36dd..0b02c5013 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1771,6 +1771,7 @@ describe("tool.shell abort", () => {
+@@ -1399,6 +1399,7 @@
            )
            expect(res.output).toContain("before")
            expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
@@ -81,26 +79,28 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
            expect(collected.length).toBeGreaterThan(0)
          }),
        ),
-@@ -1792,6 +1793,7 @@ describe("tool.shell abort", () => {
+@@ -1418,6 +1419,8 @@
            expect(result.output).toContain(
              '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
            )
 +          expect(result.output).not.toContain('reason="exit"')
++          // #289：abort/timeout notice 不带 exit reason——中止不是进程自身退出，防止状态混淆
          }),
        ),
      15_000,
-@@ -1844,6 +1846,103 @@ describe("tool.shell abort", () => {
+@@ -1471,6 +1473,107 @@
      ),
    )
  
++  
 +  it.live("reports exit notice for empty successful output", () =>
++  // #289：空输出成功（exit 0）仍需 notice——模型无法从空输出推断命令是否真的执行成功
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const command = `${bin} -e ${evalarg("process.exit(0)")}`
 +        const result = yield* run({
 +          command: PS.has(sh()) ? `& ${command}` : command,
-+          description: "Empty successful command",
 +        })
 +
 +        expect(result.metadata.exit).toBe(0)
@@ -113,13 +113,14 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
 +  )
 +
 +  it.live("reports exit notice for empty failed output", () =>
++  // #289：空输出失败必须携带退出码，模型才能区分静默失败与结果丢失
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const command = `${bin} -e ${evalarg("process.exit(42)")}`
++        // #289：退出码 42 覆盖非 1 的任意错误码路径，验证 exit_code 原样透传
 +        const result = yield* run({
 +          command: PS.has(sh()) ? `& ${command}` : command,
-+          description: "Empty failed command",
 +        })
 +
 +        expect(result.metadata.exit).toBe(42)
@@ -132,13 +133,13 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
 +  )
 +
 +  it.live("reports exit notice for non-empty failed output without diagnostics", () =>
++  // #289：非空但无诊断摘录的失败靠 exit notice 兜底，避免模型误读为成功产物
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const command = `${bin} -e ${evalarg('console.log("plain output"); process.exit(7)')}`
 +        const result = yield* run({
 +          command: PS.has(sh()) ? `& ${command}` : command,
-+          description: "Non-empty failed command",
 +        })
 +
 +        expect(result.metadata.exit).toBe(7)
@@ -151,6 +152,7 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
 +  )
 +
 +  it.live("omits exit notice when diagnostics already explain non-empty failure", () =>
++  // #289：已有高信号摘录时不重复 exit notice，同一失败只提示一次
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
@@ -161,12 +163,13 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
 +          "process.exit(9)",
 +        ].join(";")
 +        const command = `${bin} -e ${evalarg(script)}`
++        // #289：诊断场景脚本较慢（2.1s 等待根因行）且触发截断，15s 超时留足余量
 +        const result = yield* run({
 +          command: PS.has(sh()) ? `& ${command}` : command,
-+          description: "Diagnostic failed command",
 +        })
 +
 +        expect(result.metadata.exit).toBe(9)
++        // #289：metadata.exit 仍记录真实退出码；模型可见输出里才省略 notice
 +        expect(result.output).toContain("<bash_high_signal_excerpt>")
 +        expect(result.output).not.toContain('reason="exit"')
 +      }),
@@ -175,12 +178,12 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
 +  )
 +
 +  it.live("omits exit notice for non-empty successful output", () =>
++  // #289：非空成功是正常路径，零噪音不加 notice
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const result = yield* run({
 +          command: `echo ok`,
-+          description: "Non-empty successful command",
 +        })
 +
 +        expect(result.metadata.exit).toBe(0)
@@ -193,3 +196,5 @@ index b15d056eb28388375d02f76b4353f623c2c38d42..b8553d3633ec95106a45050b35b12bf1
    it.live("streams metadata updates progressively", () =>
      runIn(
        projectRoot,
+
+

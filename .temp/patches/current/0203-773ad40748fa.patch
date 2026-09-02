@@ -349,26 +349,25 @@ index d6dc3ee..fe8f982 100644
    "set-content",
    "add-content",
    "copy-item",
-@@ -332,6 +333,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+@@ -329,6 +331,10 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+       always: globs,
+       metadata: {
++        action_kind: "shell",
+         command: input.command,
++        cwd: input.cwd,
++        shell: input.shell,
++        agent: ctx.agent,
+         directories,
+         patterns: globs,
+       },
+@@ -347,6 +353,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+     metadata: {
+       action_kind: "shell",
        command: input.command,
        cwd: input.cwd,
        shell: input.shell,
 +      agent: ctx.agent,
-         directories,
-         patterns: globs,
-       },
-@@ -344,7 +346,11 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
-     patterns: Array.from(scan.patterns),
-     always: Array.from(scan.always),
-     metadata: {
-+      action_kind: "shell",
-       command: input.command,
-+      cwd: input.cwd,
-+      shell: input.shell,
-+      agent: ctx.agent,
      },
-   })
- })
 diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
 index 7d5b704..ba711ff 100644
 --- a/packages/opencode/test/agent/agent.test.ts

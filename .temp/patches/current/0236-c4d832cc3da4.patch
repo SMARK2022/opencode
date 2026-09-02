@@ -11,73 +11,33 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/cli/cmd/stats/data.ts b/packages/opencode/src/cli/cmd/stats/data.ts
-index 3ced4fa62944bc6ee741c015784dcd4a4e57a4ee..9cdf57d552937fab7b9715b5ad032f55e4fc66c3 100644
---- a/packages/opencode/src/cli/cmd/stats/data.ts
-+++ b/packages/opencode/src/cli/cmd/stats/data.ts
-@@ -536,27 +536,33 @@ const statusCounts = (status: string, requests: number) => ({
- const stepInputTokens = (part: MessageV2.StepFinishPart) => part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
- 
- const componentsFromStep = (part: MessageV2.StepFinishPart) => {
--  if (!part.inputBreakdown || !part.inputChars) return emptyComponents()
--  const inputTokens = stepInputTokens(part)
-+  const inputChars = finiteStat(part.inputChars)
-+  if (!part.inputBreakdown || inputChars <= 0) return emptyComponents()
-+  const inputTokens = finiteStat(stepInputTokens(part))
-   const media = part.inputBreakdown.media
--  const attachmentTokens = media?.tokens
-+  const attachmentTokens = Number.isFinite(media?.tokens) ? media?.tokens : undefined
-   const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
--  const textChars = media ? Math.max(1, part.inputChars - media.rawChars + media.textChars) : part.inputChars
--  const alloc = (chars: number) => Math.round((chars / textChars) * textTokens)
-+  const textChars = media ? Math.max(1, inputChars - finiteStat(media.rawChars) + finiteStat(media.textChars)) : inputChars
-+  // Local 1.15.3 rows can have `inputBreakdown.messages` persisted as `{}`.
-+  // Missing counters mean "unknown contribution", not invalid stats; keep every
-+  // derived component finite so tool charts never receive NaN coordinates.
-+  const alloc = (chars?: number) => Math.round((finiteStat(chars) / textChars) * textTokens)
-   return {
-     system: alloc(part.inputBreakdown.system),
-     instructions: alloc(part.inputBreakdown.instructions),
-     skills: alloc(part.inputBreakdown.skills),
-     toolSchemas: alloc(part.inputBreakdown.tools),
--    userMessages: alloc(part.inputBreakdown.messages.userText),
--    assistantText: alloc(part.inputBreakdown.messages.assistantText),
--    reasoning: alloc(part.inputBreakdown.messages.reasoning),
--    toolCalls: alloc(part.inputBreakdown.messages.toolInput),
--    toolResults: alloc(part.inputBreakdown.messages.toolOutput),
--    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages.attachments),
-+    userMessages: alloc(part.inputBreakdown.messages?.userText),
-+    assistantText: alloc(part.inputBreakdown.messages?.assistantText),
-+    reasoning: alloc(part.inputBreakdown.messages?.reasoning),
-+    toolCalls: alloc(part.inputBreakdown.messages?.toolInput),
-+    toolResults: alloc(part.inputBreakdown.messages?.toolOutput),
-+    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages?.attachments),
-   } satisfies InputComponentTotals
- }
- 
-+const finiteStat = (value: number | undefined) => typeof value === "number" && Number.isFinite(value) ? value : 0
-+
- const componentsFromAssistant = (message: MessageV2.WithParts | undefined) => {
-   const components = emptyComponents()
-   for (const part of message?.parts ?? []) {
 diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/test/cli/stats-data.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b6345d810
 --- /dev/null
 +++ b/packages/opencode/test/cli/stats-data.test.ts
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,167 @@
 +import { afterEach, beforeEach, describe, expect } from "bun:test"
-+import { Effect } from "effect"
-+import { aggregateStats } from "@/cli/cmd/stats/data"
-+import { renderBreakdown } from "@/cli/cmd/stats/render"
++import { Effect, Layer } from "effect"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { eq } from "drizzle-orm"
++// #236：aggregateStats 聚合 session+part 数据计算工具归因统计
++import { aggregateStats } from "@/cli/cmd/stats-data"
++// #236：renderBreakdown 渲染统计报告——验证 Tool context tokens 文案
++import { renderBreakdown } from "@/cli/cmd/stats-render"
++// #236：Session.Service 提供 create/updateMessage/updatePart 接口
 +import { Session } from "@/session/session"
 +import { MessageID, PartID } from "@/session/schema"
-+import { ModelID, ProviderID } from "@/provider/schema"
-+import { Database } from "@/storage/db"
++import { Database } from "@opencode-ai/core/database/database"
++import { PartTable } from "@opencode-ai/core/session/sql"
++// #236：resetDatabase 清理全局 DB 文件——确保每个用例从干净状态开始
 +import { resetDatabase } from "../fixture/db"
 +import { testEffect } from "../lib/effect"
++// #236：source 路径 stats/data.ts 在目标扁平化为 stats-data.ts——import 适配
++import { httpApiLayer } from "../server/httpapi-layer"
 +
-+const it = testEffect(Session.defaultLayer)
++// #236：目标无 Session.defaultLayer——用 LayerNode + httpApiLayer 组合
++// #236：httpApiLayer 提供 InstanceRef/Config 等 Session 依赖
++const it = testEffect(Layer.mergeAll(LayerNode.compile(LayerNode.group([Session.node, Database.node])), httpApiLayer))
 +
 +beforeEach(async () => {
 +  await resetDatabase()
@@ -96,7 +56,8 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +      sessionID: info.id,
 +      role: "user",
 +      agent: "build",
-+      model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
++      // #236：目标 schema 用 ProviderV2/ModelV2 brand——测试用裸字符串 + as never 绕过类型检查
++      model: { providerID: "test", modelID: "test" } as never,
 +      time: { created: Date.now() },
 +    })
 +    const assistant = yield* session.updateMessage({
@@ -104,8 +65,8 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +      sessionID: info.id,
 +      role: "assistant",
 +      parentID: user.id,
-+      modelID: ModelID.make("test"),
-+      providerID: ProviderID.make("test"),
++      modelID: "test" as never,
++      providerID: "test" as never,
 +      mode: "build",
 +      agent: "build",
 +      path: { cwd: "/tmp/project", root: "/tmp/project" },
@@ -114,7 +75,9 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +      time: { created: Date.now(), completed: Date.now() },
 +    })
 +    const now = Date.now()
++    // #236：step-finish part 的 ID 提前生成——legacy 改写需要引用它
 +    const stepPartID = PartID.ascending()
++    // #236：step-finish 数据含完整 inputBreakdown——tools=10 用于工具上下文归因计算
 +    const stepData = {
 +      type: "step-finish" as const,
 +      reason: "stop",
@@ -138,6 +101,7 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +      },
 +    }
 +
++    // #236：tool part 播种——bash 工具调用 completed 状态，output 2 字符
 +    yield* session.updatePart({
 +      id: PartID.ascending(),
 +      sessionID: info.id,
@@ -154,24 +118,31 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +        time: { start: now, end: now },
 +      },
 +    })
++    // #236：step-finish part 播种——inputBreakdown 的 tools=10 + messages.toolInput=30 + toolOutput=20
 +    yield* session.updatePart({ id: stepPartID, sessionID: info.id, messageID: assistant.id, ...stepData })
 +
 +    if (input.legacyEmptyMessages) {
-+      // Some 1.15.3 local rows persisted the `messages` object without the per-category counters.
-+      // Mutating the stored JSON keeps this test at the stats boundary: current writes remain schema-shaped,
-+      // while reads must stay compatible with historical rows copied from user databases.
-+      yield* Effect.sync(() =>
-+        Database.Client().$client.run("update part set data = ? where id = ?", [
-+          JSON.stringify({ ...stepData, inputBreakdown: { ...stepData.inputBreakdown, messages: {} } }),
-+          stepPartID,
-+        ]),
-+      )
++      // #236：legacy 场景模拟——1.15.3 历史行的 messages 为空 {}，不含 per-category 计数
++      // #236：直接 Drizzle update 模拟历史行——比原生 SQL 更安全且与目标 schema 一致
++      const { db } = yield* Database.Service
++      yield* db
++        .update(PartTable)
++        // #236：messages 改为 {} 后其余 inputBreakdown 字段保留——测试目标对 legacy 行的兼容性
++        .set({
++          data: { ...stepData, inputBreakdown: { ...stepData.inputBreakdown, messages: {} } } as never,
++        })
++        .where(eq(PartTable.id, stepPartID))
++        .run()
++        // #236：orDie 保证 DB 写入失败时测试硬失败而非吞错
++        .pipe(Effect.orDie)
 +    }
 +
++    // #236：aggregateStats 从 session+part 数据计算工具归因统计
 +    return yield* aggregateStats()
 +  })
 +
 +describe("stats data", () => {
++  // #236：验证完整 breakdown 时 contextTokens=50（toolInput 30 + toolOutput 20）
 +  it.instance("attributes tool context tokens from complete input breakdowns", () =>
 +    Effect.gen(function* () {
 +      const report = yield* seedToolBreakdownReport()
@@ -190,6 +161,7 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +    }),
 +  )
 +
++  // #236：验证 legacy 空 messages 时 contextTokens=0 且 toolSeries 为空——不产生 NaN
 +  it.instance("keeps tool breakdown finite for legacy empty message breakdowns", () =>
 +    Effect.gen(function* () {
 +      const report = yield* seedToolBreakdownReport({ legacyEmptyMessages: true })
@@ -204,7 +176,9 @@ index 0000000000000000000000000000000000000000..bfdfa56d5910baa762a84bd2bba8da3b
 +        },
 +      ])
 +      expect(report.toolUsage.every((tool) => Number.isFinite(tool.contextTokens))).toBe(true)
++      // #236：contextTokens=0 的事件被 filter 掉——toolSeries 为空数组
 +      expect(report.toolSeries).toEqual([])
++      // #236：渲染 legacy 报告不抛错——NaN 安全性验证
 +      expect(() => renderBreakdown(report, { color: "never", by: "tool" })).not.toThrow()
 +    }),
 +  )

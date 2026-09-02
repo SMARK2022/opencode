@@ -436,10 +436,10 @@ index 0000000000000000000000000000000000000000..098642af09dfd3ae5a9d8d94f3d860db
 +- ✅ 修正现有测试推理（走回退路径非 diff 路径）
 +- ✅ `fileEnd` 变更记入文档
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 705b2a2c34cafefa54a584fcb78ef4c096a8e69b..e25b7632bb2b77fc97d43d59511218010bc02ba7 100644
+index 72436ae8f..43b1ae263 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -7,7 +7,8 @@ import * as path from "path"
+@@ -7,7 +7,8 @@
  import { Effect, Schema, Semaphore } from "effect"
  import * as Tool from "./tool"
  import { LSP } from "@/lsp/lsp"
@@ -447,23 +447,24 @@ index 705b2a2c34cafefa54a584fcb78ef4c096a8e69b..e25b7632bb2b77fc97d43d5951121801
 +import { createTwoFilesPatch, diffLines, diffChars } from "diff"
 +import type { Change } from "diff"
  import DESCRIPTION from "./edit.txt"
- import { File } from "../file"
- import { FileWatcher } from "../file/watcher"
-@@ -741,10 +742,117 @@ function findClosestMatch(content: string, oldString: string): { line: number; e
+ import { FileSystem } from "@opencode-ai/core/filesystem"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+@@ -744,11 +745,117 @@
      }
    }
    if (bestLine < 0 || bestScore < 0.3) return undefined
+-  // #348：摘录前后各扩展 1~3 行，限制 500 字符避免上下文膨胀
 -  const start = Math.max(0, bestLine - 1)
 -  const end = Math.min(contentLines.length, bestLine + 4)
 -  const excerpt = contentLines.slice(start, end).join("\n").slice(0, 500)
 -  return { line: start + 1, excerpt }
-+  // [local-smark] 窗口按 oldString 行数缩放：确保 fileExcerpt 覆盖 oldString 对应区域
++  // #354：窗口按 oldString 行数缩放——确保 fileExcerpt 覆盖 oldString 对应区域
 +  const oldLineCount = oldLines.length
 +  const fileStart = Math.max(0, bestLine - 1)
 +  const fileEnd = Math.min(contentLines.length, bestLine + oldLineCount + 2)
 +  const fileExcerpt = contentLines.slice(fileStart, fileEnd).join("\n")
-+  // [local-smark] 优先用字符级 diff（信息密度高，只显示差异部分）；
-+  // 回退时用 head+tail excerpt（前 200 + 后 200 字符），确保末尾内容可见
++  // #354：优先用字符级 diff（信息密度高，只显示差异部分）；
++  // #354：回退时用 head+tail excerpt（前 200 + 后 200 字符），确保末尾内容可见
 +  const diffExcerpt = formatClosestMatchDiff(oldString, fileExcerpt, fileStart + 1, 500)
 +  const excerpt = diffExcerpt || (() => {
 +    const full = fileExcerpt
@@ -472,9 +473,9 @@ index 705b2a2c34cafefa54a584fcb78ef4c096a8e69b..e25b7632bb2b77fc97d43d5951121801
 +  return { line: fileStart + 1, excerpt }
 +}
 +
-+// [local-smark] 字符级 diff：diffLines 定位差异行，diffChars 显示字符级差异。
-+// 解决长行场景下 .slice(0,500) 截断导致 ]; vs }; 不可见的问题。
-+// diffLines 的 change.value 可含多行，用 oneChangePerToken 确保每个 change 一行。
++// #354：字符级 diff——diffLines 定位差异行，diffChars 显示字符级差异。
++// #354：解决长行场景下 .slice(0,500) 截断导致 ]; vs }; 不可见的问题。
++// #354：diffLines 的 change.value 可含多行，用 oneChangePerToken 确保每个 change 一行。
 +function formatClosestMatchDiff(
 +  oldString: string,
 +  fileExcerpt: string,
@@ -494,9 +495,9 @@ index 705b2a2c34cafefa54a584fcb78ef4c096a8e69b..e25b7632bb2b77fc97d43d5951121801
 +    else if (c.added) addedLines += lineCount
 +    else unchangedLines += lineCount
 +  }
-+  // [local-smark] 差异行比例：用 max(removed, added) 代表不匹配的行位置数，
-+  // 而非 removed+added（一个不匹配产生 1 removed + 1 added = 2，会膨胀比例）。
-+  // 总行数用 max(old, file) 行数，避免短 oldString 对长 fileExcerpt 时比例失真。
++  // #354：差异行比例用 max(removed, added) 代表不匹配的行位置数，
++  // #354：而非 removed+added（一个不匹配产生 1 removed + 1 added = 2，会膨胀比例）。
++  // #354：总行数用 max(old, file) 行数，避免短 oldString 对长 fileExcerpt 时比例失真。
 +  const diffLineCount = Math.max(removedLines, addedLines)
 +  const totalLineCount = Math.max(removedLines, addedLines) + unchangedLines
 +  // 差异行 > 60% → 结构严重错位，回退 head+tail excerpt
@@ -532,14 +533,14 @@ index 705b2a2c34cafefa54a584fcb78ef4c096a8e69b..e25b7632bb2b77fc97d43d5951121801
 +    }
 +  }
 +  if (parts.length === 0) return ""
-+  // [local-smark] 截断标记：预算耗尽时告知模型还有更多差异
++  // #354：截断标记——预算耗尽时告知模型还有更多差异
 +  if (omitted > 0) parts.push(`...(+${omitted} more diff lines)`)
 +  return parts.join("\n")
 +}
 +
-+// [local-smark] 格式化单行字符级 diff：只输出变化点前后 30 字符的 context。
-+// 例：行末 }; vs ]; → line 41: "    };" → "    ];"
-+// 对 900 字符长行：只显示末尾 30 字符 + 差异，不显示公共前缀。
++// #354：格式化单行字符级 diff——只输出变化点前后 30 字符的 context。
++// #354：例：行末 }; vs ]; → line 41: "    };" → "    ];"
++// #354：对 900 字符长行：只显示末尾 30 字符 + 差异，不显示公共前缀。
 +function formatCharDiffLine(lineNum: number, oldLine: string, newLine: string): string | undefined {
 +  const charDiff: Change[] = diffChars(oldLine, newLine)
 +  // 找到第一个变化位置
@@ -570,45 +571,43 @@ index 705b2a2c34cafefa54a584fcb78ef4c096a8e69b..e25b7632bb2b77fc97d43d5951121801
 +  return `line ${lineNum}: "${truncate(ctx + oldPart + suffix, 80)}" → "${truncate(ctx + newPart + suffix, 80)}"`
  }
  
- // 计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估
+ // #348：计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 0324d3efd27706e44ca0851d3819786dc5e2d0bc..1f2dd15c730f58e0b784866d8aeed51e50395191 100644
+index a155e947f..90220ca61 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -17,6 +17,7 @@ import { readOutline, readOutlineCached, type Outline } from "./read-outline"
- import { Reference } from "@/reference/reference"
+@@ -14,6 +14,7 @@
  import { Image } from "@/image/image"
  import { PartID } from "@/session/schema"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
 +import { mergeRanges } from "@/util/range"
  
- const DEFAULT_READ_LIMIT = 200
- const MAX_BYTES = 16 * 1024
-@@ -26,9 +27,10 @@ const MAX_LINE_LENGTH = 2000
- const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+ // 默认 400 行：与 notebook source limit 对齐，压低单次工具输出
+ // #142：默认 200 行，配合 range/outline 做定点读取
+@@ -35,7 +36,10 @@
  const OVERLAP_MIN_LINES = 20
+ // #142：重叠占比阈值
  const OVERLAP_MIN_RATIO = 0.3
--// [local-smark] 高重叠 suppress 阈值：当已可见读取与当前请求的重叠率 >= 80% 时，
--// 直接返回 stub（而非仅 note），避免大量部分重叠的重复读取。
--// 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
-+// [local-smark] 高重叠 suppress 阈值：80% 时 suppress。
-+// 当已可见读取与当前请求的重叠率 >= 80% 时，返回 stub 引导模型读取新内容。
-+// 但如果实际内容比 stub 文案还短（< 300 字符），直接返回内容 + 短 notice，
-+// 不 suppress（stub 文案约 300 字符，短读取可能只有几十字符）。
+-// #350：高重叠 suppress 阈值——重叠率 >= 80% 时直接返回 stub 而非仅 note
++// #354：高重叠 suppress 阈值：80% 时 suppress。
++// #354：当已可见读取与当前请求的重叠率 >= 80% 时，返回 stub 引导模型读取新内容。
++// #354：但如果实际内容比 stub 文案还短（< 300 字符），直接返回内容 + 短 notice，
++// #354：不 suppress（stub 文案约 300 字符，短读取可能只有几十字符）。
  const OVERLAP_SUPPRESS_RATIO = 0.8
  
- // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
-@@ -254,6 +256,35 @@ function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
-   return `${best.start}-${best.end}`
+ 
+@@ -301,6 +305,35 @@
+   return overlaps.map((item) => `${item.start}-${item.end}`).join(",")
  }
  
-+// [local-smark] 计算请求范围内未被任何同版本已可见读取覆盖的行区间。
-+// 复用 mergeRanges（src/util/range.ts）合并已覆盖区间后再做减法。
-+// 正确性红线：必须做同版本 filter（size+modifiedMs）——collectVisibleReads
-+// 不做版本过滤，findOverlapNote/findReadStub 各自过滤。此处也必须过滤，
-+// 否则会减算旧版本区间，错误地告诉模型"这些行没读过"。
++// #354：计算请求范围内未被任何同版本已可见读取覆盖的行区间。
++// #354：复用 mergeRanges（src/util/range.ts）合并已覆盖区间后再做减法。
++// #354：正确性红线：必须做同版本 filter（size+modifiedMs）——collectVisibleReads
++// #354：不做版本过滤，findOverlapNote/findReadStub 各自过滤。此处也必须过滤，
++// #354：否则会减算旧版本区间，错误地告诉模型"这些行没读过"。
 +function computeUnreadRanges(
-+  visibleReads: ReadMetadata[],
-+  current: ReadMetadata,
++  visibleReads: ReadRangeMeta[],
++  current: ReadRangeMeta,
 +): Array<{ start: number; end: number }> {
 +  // 收集同版本 visible reads 的区间
 +  const covered = visibleReads
@@ -630,33 +629,42 @@ index 0324d3efd27706e44ca0851d3819786dc5e2d0bc..1f2dd15c730f58e0b784866d8aeed51e
 +  return unread
 +}
 +
- function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
-   return file.raw
-     .map((line, i) => {
-@@ -291,7 +322,8 @@ function renderReadOutput(input: {
+ // #142：渲染 content 行
+ function renderContentLines(raw: string[], offset: number) {
+   return raw
+@@ -342,7 +375,8 @@
      output.push("</outline>")
    }
- 
--  if (input.overlap) output.push(`<note type="overlap" ranges="${input.overlap}" />`)
-+  // [local-smark] overlap note 包含已可见范围 + 引导避免不必要的重复读取
-+  if (input.overlap) output.push(`<note type="overlap" ranges="${input.overlap}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`)
-   output.push("<content>", input.content, "</content>")
-   if (input.more) output.push(`<more offset="${input.more.offset}" reason="${input.more.reason}" />`)
-   return output.join("\n")
-@@ -707,43 +739,54 @@ export const ReadTool = Tool.define(
+   // #142：部分重叠仍返回内容，附加 note
+-  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)
++  // #354：overlap note 包含已可见范围 + 引导避免不必要的重复读取
++  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`)
+   // #142：content 包裹可见行（#145 决定是否 escape 行文本）
+   output.push("<content>")
+   output.push(renderContentLines(input.raw, input.start))
+@@ -932,42 +966,60 @@
+         }
        }
  
-       // [local-smark] 高重叠 suppress：当已可见读取与当前请求的重叠率 >= 80% 时，
--      // 直接返回 stub 而非仅 note。这减少了大量部分重叠的重复读取（如偏移微调的重复读）。
-+      // 返回 stub 而非仅 note。引导式文案告诉模型哪些行是新的、如何精确读取，
-+      // 而非绝对禁止 "do NOT re-read"。内容 < 300 字符时不 suppress（见下方检查）。
-       // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
--      // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
+-      // #350：高重叠 suppress——重叠率 >= 80% 时直接返回 stub，避免大量部分重叠的重复读取。
+-      // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
++      // #354：高重叠 suppress——重叠率 >= 80% 时返回 stub 而非仅 note。引导式文案告诉模型
++      // #354：哪些行是新的、如何精确读取，而非绝对禁止 "do NOT re-read"。
++      // #354：内容 < 300 字符时不 suppress（见下方检查）。仍走 size+modifiedMs 同版本门控。
        const overlapRange = findOverlapNote(visibleReads, current)
        if (overlapRange) {
--        // 计算实际重叠比例
-         const [overlapStart, overlapEnd] = overlapRange.split("-").map(Number)
-         const overlapLines = overlapEnd - overlapStart + 1
+-        const [overlapStart, overlapEnd] = overlapRange.split("-").map(Number)
+-        const overlapLines = overlapEnd - overlapStart + 1
++        // #354：状态 0353 的 findOverlapNote 返回逗号连接的多区间（"1-100,150-200"）——
++        // #354：取最大的单区间计算重叠比率（与原始 best-single-range 语义一致；
++        // #354：引导式文案仍由 computeUnreadRanges 用全部同版本区间计算）。
++        const intervals = overlapRange.split(",").map((range) => {
++          const [s, e] = range.split("-").map(Number)
++          return { start: s, end: e, lines: e - s + 1 }
++        })
++        const best = intervals.reduce((largest, item) => (item.lines > largest.lines ? item : largest))
++        const overlapLines = best.lines
+         // #350：Math.max 防止单行读取（end===start）时除零导致比率为 Infinity
          const requestedLines = Math.max(1, end - start + 1)
          if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) {
 -          const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
@@ -667,7 +675,7 @@ index 0324d3efd27706e44ca0851d3819786dc5e2d0bc..1f2dd15c730f58e0b784866d8aeed51e
 -            ? "No unread lines remain (end of file reached); use grep to locate symbols."
 -            : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
 -          const message = `Lines ${start}-${end} have ${Math.round((overlapLines / requestedLines) * 100)}% overlap with visible read ${overlapRange} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
--          const output = [
+-          const suppressOutput = [
 -            `<path>${escapeXmlText(filepath)}</path>`,
 -            `<type>file</type>`,
 -            `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
@@ -678,21 +686,20 @@ index 0324d3efd27706e44ca0851d3819786dc5e2d0bc..1f2dd15c730f58e0b784866d8aeed51e
 -          ].join("\n")
 -          return {
 -            title,
--            output,
+-            output: suppressOutput,
 -            metadata: readToolMetadata({
--              preview: output,
+-              preview: suppressOutput,
 -              truncated: false,
 -              loaded: [] as string[],
 -              read,
 -            }),
-+          // [local-smark] 如果实际内容比 stub 文案还短，直接返回内容 + 短 notice，
-+          // 不 suppress——stub 文案约 300 字符，短读取（如 5 行）内容可能只有几十字符。
-+          // 此时 suppress 反而浪费上下文预算，不如直接返回内容。
++          // #354：如果实际内容比 stub 文案还短，直接返回内容 + 短 notice，不 suppress——
++          // #354：stub 文案约 300 字符，短读取（如 5 行）内容可能只有几十字符。
++          // #354：此时 suppress 反而浪费上下文预算，不如直接返回内容。
 +          const contentLength = file.raw.join("\n").length
 +          if (contentLength >= 300) {
 +            const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
-+            // [local-smark] 引导式文案：告诉模型已可见的范围、未读的新行、
-+            // 不要用命令行工具重读、使用上下文中的内容或读取不同范围
++            // #354：引导式文案：告诉模型已可见的范围、未读的新行、如何精确读取新内容
 +            const unread = computeUnreadRanges(visibleReads, current)
 +            const message = unread.length === 0
 +              ? `Lines ${start}-${end} fully covered by visible reads (same version, file unchanged); no new content to read. ` +
@@ -702,7 +709,7 @@ index 0324d3efd27706e44ca0851d3819786dc5e2d0bc..1f2dd15c730f58e0b784866d8aeed51e
 +                `Avoid re-reading this range unnecessarily — use the content from your previous read. ` +
 +                `New unread lines: ${unread.map((r) => `${r.start}-${r.end}`).join(", ")}. ` +
 +                `Read offset=${unread[0]!.start} limit=${unread[0]!.end - unread[0]!.start + 1} for just the new content.`
-+            const output = [
++            const suppressOutput = [
 +              `<path>${escapeXmlText(filepath)}</path>`,
 +              `<type>file</type>`,
 +              `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
@@ -713,25 +720,24 @@ index 0324d3efd27706e44ca0851d3819786dc5e2d0bc..1f2dd15c730f58e0b784866d8aeed51e
 +            ].join("\n")
 +            return {
 +              title,
-+              output,
++              output: suppressOutput,
 +              metadata: readToolMetadata({
-+                preview: output,
++                preview: suppressOutput,
 +                truncated: false,
 +                loaded: [] as string[],
 +                read,
 +              }),
 +            }
            }
-+          // [local-smark] contentLength < 300：不 suppress，fall through 到正常 read
-+          // 正常 read 会带 overlap note（见 renderReadOutput 中的 overlap 渲染）
++          // #354：contentLength < 300 时不 suppress，fall through 到正常 read（带 overlap note）
          }
        }
  
 diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
-index 948fe8f0613cea7c1a827b300a9219cbf51a0ebf..972ca30b0b7e13ccd541995ac85ccf21e5a86564 100644
+index 34f1a67ea..775e3da43 100644
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt
-@@ -9,7 +9,7 @@ Usage:
+@@ -9,7 +9,7 @@
  - Use the grep tool to find specific content in large files or files with long lines.
  - If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.
  - Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents "foo\n", you will receive "1: foo\n". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.
@@ -741,31 +747,32 @@ index 948fe8f0613cea7c1a827b300a9219cbf51a0ebf..972ca30b0b7e13ccd541995ac85ccf21
  - Call this tool in parallel when you know there are multiple files you want to read.
  - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index a65f472575708a8c9476aa69c91468dab88fd6d5..4df7f8bc137828a059daf72a0acd512dcc01aee7 100644
+index 0102403cd..1c5ff48e8 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -44,8 +44,8 @@ export function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[]
+@@ -41,8 +41,8 @@
        const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
        const filePath = typeof m.path === "string" ? m.path : ""
        if (!filePath) continue
 -      // stub: true 表示 read 被完全抑制（如 high overlap suppress），跳过；
 -      // stub: "high_overlap_visible" 保留——它记录了文件已被读过的事实
-+      // [local-smark] stub: true 表示 read 被抑制（same range / covered range / high overlap），
-+      // 这些 read 没有实际内容输出，不纳入 parent context 的文件列表。
++      // #354：stub: true 表示 read 被抑制（same range / covered range / high overlap），
++      // #354：这些 read 没有实际内容输出，不纳入 parent context 的文件列表。
        if (m.stub === true) continue
        const start = typeof m.start === "number" ? m.start : 0
        const end = typeof m.end === "number" ? m.end : 0
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index d694cb24e8d156562e6d33d3ab8f1c6d8b5844f3..5e3806b8aa662e59526469381c6dbefbcba1d782 100644
+index 65673df35..8fe590dbf 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -255,6 +255,49 @@ describe("tool.edit", () => {
+@@ -693,5 +693,48 @@
+         expect(error.message).toContain("actual content")
        }),
      )
- 
-+    // [local-smark] 字符级 diff 测试：2 行 oldString，第 1 行精确匹配，
-+    // 第 2 行单字符不同（0 vs 1）。BlockAnchorReplacer 需 ≥3 行才触发，故 edit 失败。
-+    // 差异比例 50% < 60% → 走 diff 路径，error 应显示字符级差异。
++
++    // #354：字符级 diff 测试：2 行 oldString，第 1 行精确匹配，
++    // #354：第 2 行单字符不同（0 vs 1）。BlockAnchorReplacer 需 ≥3 行才触发，故 edit 失败。
++    // #354：差异比例 50% < 60% → 走 diff 路径，error 应显示字符级差异。
 +    it.instance("closest match shows character-level diff for single-char mismatch", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -786,8 +793,8 @@ index d694cb24e8d156562e6d33d3ab8f1c6d8b5844f3..5e3806b8aa662e59526469381c6dbefb
 +      }),
 +    )
 +
-+    // [local-smark] 回退策略测试：oldString 与文件结构严重错位（>60% 行不同）
-+    // → 回退 head+tail excerpt 而非 diff（避免噪声）
++    // #354：回退策略测试：oldString 与文件结构严重错位（>60% 行不同）
++    // #354：→ 回退 head+tail excerpt 而非 diff（避免噪声）
 +    it.instance("falls back to excerpt when oldString structure mismatches file", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -805,42 +812,61 @@ index d694cb24e8d156562e6d33d3ab8f1c6d8b5844f3..5e3806b8aa662e59526469381c6dbefb
 +        expect(error.message).toContain("public class Foo")
 +      }),
 +    )
-+
-     // [local-smark] 当文件在当前 session 中从未被 read 或 write 过时，
-     // edit 应拒绝执行并提示先 read，避免 oldString 基于过期/假设内容匹配失败。
-     // 显式使用 ctx（messages 为空）模拟"从未读过"的场景。
+   })
+ })
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2..18984bcc7573cdf1f423b7f8de921b1f92ccd1b1 100644
+index 56d5bac1d..79c111b02 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -868,7 +868,8 @@ describe("tool.read visible context", () => {
-       const first = yield* exec(dir, firstInput)
-       const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
- 
--      expect(second.output).toContain('<note type="overlap" ranges="150-199" />')
-+        expect(second.output).toContain('<note type="overlap" ranges="150-199"')
-+        expect(second.output).toContain("avoid re-reading this range unnecessarily")
+@@ -1038,6 +1038,8 @@
+       // #142：部分重叠不 stub，应有全文 + overlap note
        expect(second.output).toContain("<content>")
-       expect(second.output).toContain("150: line150")
-       expect(second.output).toContain("249: line249")
-@@ -893,6 +894,125 @@ describe("tool.read visible context", () => {
-       expect(third.output).not.toContain("<stub")
+       expect(second.output).toContain('<note type="overlap"')
++      // #354：note 新增引导式文案——已可见范围无需重复读取
++      expect(second.output).toContain("avoid re-reading this range unnecessarily")
+       expect(second.output).not.toContain('status="stub_')
+       expect(second.metadata.read?.stub).toBe(false)
+     }),
+@@ -1154,6 +1156,147 @@
+       expect(items.join("\n").length).toBeLessThanOrEqual(640)
      }),
    )
 +
-+  // [local-smark] 80% overlap suppress 测试：阈值设为 80%，
-+  // 80%+ 重叠且内容足够长时 suppress（返回 stub + 引导式文案）。
-+  it.live("suppresses at 80% overlap with guided message pointing to unread lines", () =>
++  // #354：构造"已可见 read"消息——把某次 run 结果作为上下文中的可见读取注入下次请求
++  // #354：（形状与上文各测试内联消息一致，供本家 5 个新测试复用）
++  const readMsg = (input: Tool.InferParameters<typeof ReadTool>, result: { output: string; metadata: unknown }) =>
++    ({
++      info: { role: "assistant", id: "a1" },
++      parts: [
++        {
++          type: "tool",
++          tool: "read",
++          callID: "c1",
++          state: {
++            status: "completed",
++            time: { start: 1, end: Date.now() + 1000 },
++            input,
++            output: result.output,
++            title: "t",
++            metadata: result.metadata,
++          },
++        } as any,
++      ],
++    } as any)
++
++  // #354：80% overlap suppress 测试：阈值保持 80%，80%+ 重叠且内容足够长时
++  // #354：suppress（返回 stub + 引导式文案，指向未读新行）
++  it.instance("suppresses at 80% overlap with guided message pointing to unread lines", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "suppress80.txt")
++      const test = yield* TestInstance
++      const filePath = path.join(test.directory, "suppress80.txt")
 +      // 200 行文件，请求 1-200，已读 1-160（80% 重叠）
 +      yield* put(filePath, Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n"))
 +      const firstInput = { filePath, offset: 1, limit: 160 }
 +      const secondInput = { filePath, offset: 1, limit: 200 }
 +
-+      const first = yield* exec(dir, firstInput)
-+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
++      const first = yield* run(firstInput)
++      const second = yield* run(secondInput, { ...ctx, messages: [readMsg(firstInput, first)] })
 +
 +      // suppress 触发：返回 stub 而非内容（内容 > 300 字符）
 +      expect(second.output).toContain('<stub status="stub_high_overlap_visible"')
@@ -856,18 +882,18 @@ index 06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2..18984bcc7573cdf1f423b7f8de921b1f
 +    }),
 +  )
 +
-+  // [local-smark] 79% overlap 不 suppress：阈值以下仍返回完整内容 + note
-+  it.live("does not suppress at 79% overlap, returns content with note", () =>
++  // #354：79% overlap 不 suppress：阈值以下仍返回完整内容 + note
++  it.instance("does not suppress at 79% overlap, returns content with note", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "nosuppress79.txt")
++      const test = yield* TestInstance
++      const filePath = path.join(test.directory, "nosuppress79.txt")
 +      // 200 行文件，请求 1-200，已读 1-158（79% 重叠 < 80%）
 +      yield* put(filePath, Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n"))
 +      const firstInput = { filePath, offset: 1, limit: 158 }
 +      const secondInput = { filePath, offset: 1, limit: 200 }
 +
-+      const first = yield* exec(dir, firstInput)
-+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
++      const first = yield* run(firstInput)
++      const second = yield* run(secondInput, { ...ctx, messages: [readMsg(firstInput, first)] })
 +
 +      // 不 suppress：返回 content 而非 stub
 +      expect(second.output).toContain("<content>")
@@ -875,20 +901,19 @@ index 06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2..18984bcc7573cdf1f423b7f8de921b1f
 +    }),
 +  )
 +
-+  // [local-smark] 短读取不 suppress：80% 重叠但内容 < 300 字符，
-+  // 直接返回内容（stub 文案比内容还长时 suppress 无意义）。
-+  // 注意：findOverlapNote 需 >= 20 行重叠才触发，5 行文件不会进入 suppress 分支。
-+  it.live("does not suppress short read even at 80% overlap, returns content", () =>
++  // #354：短读取不 suppress：80% 重叠但内容 < 300 字符，直接返回内容
++  // #354：（stub 文案比内容还长时 suppress 无意义）
++  it.instance("does not suppress short read even at 80% overlap, returns content", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "shortread.txt")
-+      // 5 行文件，请求 1-5，已读 1-4（80% 重叠，但内容仅 ~35 字符 < 300）
++      const test = yield* TestInstance
++      const filePath = path.join(test.directory, "shortread.txt")
++      // 5 行文件，请求 1-5，已读 1-4（80% 重叠，但内容仅 ~23 字符 < 300）
 +      yield* put(filePath, "one\ntwo\nthree\nfour\nfive")
 +      const firstInput = { filePath, offset: 1, limit: 4 }
 +      const secondInput = { filePath, offset: 1, limit: 5 }
 +
-+      const first = yield* exec(dir, firstInput)
-+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
++      const first = yield* run(firstInput)
++      const second = yield* run(secondInput, { ...ctx, messages: [readMsg(firstInput, first)] })
 +
 +      // 不 suppress：返回 content 而非 stub
 +      expect(second.output).toContain("<content>")
@@ -897,20 +922,20 @@ index 06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2..18984bcc7573cdf1f423b7f8de921b1f
 +    }),
 +  )
 +
-+  // [local-smark] 中等长度短读取不 suppress：25 行重叠（>= 20 行门控），
-+  // 但内容 < 300 字符 → suppress 分支判断 contentLength < 300 → 不 suppress
-+  it.live("does not suppress medium-short read under 300 chars even at 80% overlap", () =>
++  // #354：中等长度短读取不 suppress：25 行重叠（>= 20 行门控），
++  // #354：但内容 < 300 字符 → 进入 suppress 分支后判断 contentLength < 300 → 不 suppress
++  it.instance("does not suppress medium-short read under 300 chars even at 80% overlap", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "mediumshort.txt")
-+      // 25 行文件，每行 ~5 字符，请求 1-25，已读 1-20（80% 重叠，>= 20 行门控通过）
-+      // 内容约 125 字符 < 300 → 不 suppress
++      const test = yield* TestInstance
++      const filePath = path.join(test.directory, "mediumshort.txt")
++      // 25 行文件，每行 ~2-3 字符，请求 1-25，已读 1-20（80% 重叠，>= 20 行门控通过）
++      // 内容约 74 字符 < 300 → 不 suppress
 +      yield* put(filePath, Array.from({ length: 25 }, (_, i) => `l${i + 1}`).join("\n"))
 +      const firstInput = { filePath, offset: 1, limit: 20 }
 +      const secondInput = { filePath, offset: 1, limit: 25 }
 +
-+      const first = yield* exec(dir, firstInput)
-+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
++      const first = yield* run(firstInput)
++      const second = yield* run(secondInput, { ...ctx, messages: [readMsg(firstInput, first)] })
 +
 +      // 不 suppress：返回 content + overlap note（内容 < 300 字符）
 +      expect(second.output).toContain("<content>")
@@ -921,31 +946,32 @@ index 06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2..18984bcc7573cdf1f423b7f8de921b1f
 +    }),
 +  )
 +
-+  // [local-smark] 多区间联合全覆盖：已读 1-160 + 161-200，请求 1-200
-+  // computeUnreadRanges 应返回空，文案说 "no new content"
-+  it.live("guided message says no new content when multiple reads fully cover request", () =>
++  // #354：多区间联合全覆盖：已读 1-160 + 161-200，请求 1-200
++  // #354：最大单区间重叠 = 1-160（80% ≥ 阈值）→ suppress；
++  // #354：computeUnreadRanges 对全部同版本区间求并集 → 空 → 文案说 "no new content"
++  it.instance("guided message says no new content when multiple reads fully cover request", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "fullcover.txt")
++      const test = yield* TestInstance
++      const filePath = path.join(test.directory, "fullcover.txt")
 +      yield* put(filePath, Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n"))
 +      const input1 = { filePath, offset: 1, limit: 160 }
 +      const input2 = { filePath, offset: 161, limit: 40 }
 +      const inputAll = { filePath, offset: 1, limit: 200 }
 +
-+      const first = yield* exec(dir, input1)
-+      const second = yield* exec(dir, input2)
++      const first = yield* run(input1)
++      const second = yield* run(input2)
 +      // 两个 read 的 messages 都传入，模拟上下文中已有两个区间
-+      const third = yield* exec(dir, inputAll, {
++      const third = yield* run(inputAll, {
 +        ...ctx,
-+        messages: [readMessage(input1, first), readMessage(input2, second)],
++        messages: [readMsg(input1, first), readMsg(input2, second)],
 +      })
 +
-+      // 80% overlap（1-160 是 best 单区间 = 80%）→ suppress
++      // 80% overlap（最大单区间 1-160 = 80%）→ suppress
 +      expect(third.output).toContain('<stub status="stub_high_overlap_visible"')
 +      // 多区间联合全覆盖 → "no new content"
 +      expect(third.output).toContain("no new content")
 +    }),
 +  )
  })
- 
- describe("tool.read outline", () => {
+ describe("tool.read XML preserve channels", () => {
+   // #145：目录条目保留原文

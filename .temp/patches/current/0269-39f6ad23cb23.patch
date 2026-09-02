@@ -1,171 +1,65 @@
 From 39f6ad23cb232388c6c0d87c370cc4ff5fc41266 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 21:01:01 +0800
-Subject: [PATCH] =?UTF-8?q?fix(session):=20=E4=BF=AE=E5=A4=8D=E8=AF=B7?=
- =?UTF-8?q?=E6=B1=82=E4=BD=BF=E7=94=A8=E8=AE=B0=E5=BD=95=E7=9A=84=E8=8E=B7?=
- =?UTF-8?q?=E5=8F=96=E9=80=BB=E8=BE=91=EF=BC=8C=E7=A1=AE=E4=BF=9D=E4=B8=8D?=
- =?UTF-8?q?=E5=AD=98=E5=9C=A8=E6=97=B6=E8=BF=94=E5=9B=9E404=E9=94=99?=
- =?UTF-8?q?=E8=AF=AF=20feat(slots):=20=E6=B7=BB=E5=8A=A0dispose=E6=96=B9?=
- =?UTF-8?q?=E6=B3=95=E4=BB=A5=E6=B8=85=E7=90=86Slot=E8=A7=86=E5=9B=BE?=
- =?UTF-8?q?=EF=BC=8C=E9=81=BF=E5=85=8D=E6=B8=B2=E6=9F=93=E6=97=A7=E4=B8=8A?=
- =?UTF-8?q?=E4=B8=8B=E6=96=87=20refactor(test):=20=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B=EF=BC=8C=E7=A1=AE=E4=BF=9D?=
- =?UTF-8?q?=E6=A8=A1=E5=9E=8B=E6=9C=8D=E5=8A=A1=E5=99=A8=E7=9A=84=E6=AD=A3?=
- =?UTF-8?q?=E7=A1=AE=E6=80=A7=E5=92=8C=E7=A8=B3=E5=AE=9A=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
+Subject: [PATCH] fix(session): request usage 404 + slots dispose + test fixes
 
 diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/core/test/effect/cross-spawn-spawner.test.ts
-index ebe9930dd56a61beff0c68d05630c0a19e3325c3..35021d0083ba72351d953b1842767995c0126b91 100644
+index fc4e3db6a..733374ff1 100644
 --- a/packages/core/test/effect/cross-spawn-spawner.test.ts
 +++ b/packages/core/test/effect/cross-spawn-spawner.test.ts
-@@ -111,10 +111,12 @@ describe("cross-spawn spawner", () => {
+@@ -112,7 +112,10 @@ describe("cross-spawn spawner", () => {
              ChildProcess.make(process.execPath, ["-e", "process.stdout.write(process.cwd())"], { cwd: tmp.path }),
            ),
          )
--        // On macOS, /var is a symlink to /private/var, so the child process
--        // reports the realpath. Compare resolved paths for cross-platform correctness.
-+        // macOS can report /private/var for /var, and Windows runners can report
-+        // an 8.3 short path such as RUNNER~1. Normalize both sides through the
-+        // filesystem so this test asserts the spawned cwd, not its display form.
-         const expected = yield* Effect.promise(() => fs.realpath(tmp.path))
--        expect(out).toBe(expected)
+-        expect(yield* Effect.promise(() => fs.realpath(out))).toBe(yield* Effect.promise(() => fs.realpath(tmp.path)))
++        // #269：macOS 可报 /private/var，Windows runner 可报 8.3 短路径：同时 realpath 两侧并 normalize
++        const expected = yield* Effect.promise(() => fs.realpath(tmp.path))
 +        const actual = yield* Effect.promise(() => fs.realpath(out))
 +        expect(path.normalize(actual)).toBe(path.normalize(expected))
        }),
      )
  
-diff --git a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-index 4d836e474be8476efcbcb4d12b3fd507abf73e2f..1a125b487e79002165c4a19aee4ffc0b37de23ab 100644
---- a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-+++ b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-@@ -1039,16 +1039,19 @@ export async function installPlugin(spec: string, options?: { global?: boolean }
+diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src/plugin/tui/runtime.ts
+index 801598c78..3330a6f31 100644
+--- a/packages/opencode/src/plugin/tui/runtime.ts
++++ b/packages/opencode/src/plugin/tui/runtime.ts
+@@ -1029,11 +1029,13 @@ export async function installPlugin(spec: string, options?: { global?: boolean }
  
  export async function dispose() {
    const task = loaded
++  // #269：在 await 前捕获 state，避免 await 期间新 init() 设置 runtime 后被误清空
 +  const state = runtime
    loaded = undefined
    dir = ""
-   if (task) await task
+   if (task) await task.catch((error) => fail("failed to finish loading tui plugins during disposal", { error }))
 -  const state = runtime
 -  runtime = undefined
-+  // dispose() 允许旧 load 完成后再清理；期间新的 init() 可能已经建立下一轮 runtime。
-+  // 只有全局 runtime 仍指向本轮 state 时才清空，避免旧 dispose 误停新实例。
++  // #269：只有 runtime 仍指向本轮 state 时才清空
 +  if (runtime === state) runtime = undefined
    if (!state) return
    const queue = [...state.plugins].reverse()
    for (const plugin of queue) {
-     await deactivatePluginEntry(state, plugin, false)
-   }
-+  state.slots.dispose()
-   state.dispose?.()
- }
- 
-@@ -1091,8 +1094,10 @@ async function load(input: { api: Api; config: TuiConfig.Resolved; dispose?: ()
-       })
-     }
- 
--    // [local-smark] Non-blocking external plugin loading for daemon multi-instance
--    // Activate built-in plugins first, then load external plugins asynchronously
-+    // Activate built-ins first, then finish external plugin resolution before
-+    // init() resolves. The TUI can render with built-ins while loading, but tests
-+    // and callers that await init() need a stable plugin lifecycle boundary so
-+    // temporary plugin files are not cleaned up before imports and disposers run.
-     applyInitialPluginEnabledState(next, config)
-     for (const plugin of next.plugins) {
-       if (!plugin.enabled) continue
-@@ -1103,17 +1108,13 @@ async function load(input: { api: Api; config: TuiConfig.Resolved; dispose?: ()
-       await activatePluginEntry(next, plugin, false)
-     }
- 
--    void (async () => {
--      const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
--      const added = await addExternalPluginEntries(next, ready)
--      applyInitialPluginEnabledState(next, config)
--      for (const plugin of added.plugins) {
--        if (!plugin.enabled) continue
--        await activatePluginEntry(next, plugin, false)
--      }
--    })().catch((error) => {
--      fail("failed to load external tui plugins", { directory: cwd, error })
--    })
-+    const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
-+    const added = await addExternalPluginEntries(next, ready)
-+    applyInitialPluginEnabledState(next, config)
-+    for (const plugin of added.plugins) {
-+      if (!plugin.enabled) continue
-+      await activatePluginEntry(next, plugin, false)
-+    }
-   } catch (error) {
-     fail("failed to load tui plugins", { directory: cwd, error })
-   }
-diff --git a/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx b/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx
-index 085f6994bf87c9d3dd69243297819558edb12879..d597c8345a0b0ccb9e5cdf76f37ee092003d2981 100644
---- a/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx
-@@ -13,6 +13,7 @@ export type HostSlots = {
-     (plugin: HostSlotPlugin): () => void
-     <Slots extends Record<string, object>>(plugin: HostSlotPlugin<Slots>): () => void
-   }
-+  dispose: () => void
- }
- 
- function empty<Name extends string>(_props: TuiSlotProps<Name>) {
-@@ -51,10 +52,17 @@ export function setupSlots(api: HostPluginApi): HostSlots {
- 
-   const slot = createSlot<RuntimeSlotMap, TuiSlotContext>(reg)
-   view = (props) => slot(props)
-+  const current = view
-   return {
-     register(plugin: HostSlotPlugin) {
-       if (!isHostSlotPlugin(plugin)) return () => {}
-       return reg.register(plugin)
-     },
-+    dispose() {
-+      // TUI 插件 runtime 是单例，Slot 视图同样是模块级全局入口。
-+      // dispose 后必须恢复 no-op，否则后续未初始化 runtime 的测试/实例会继续渲染上一轮
-+      // slot registry 的 fallback children，改变会话布局并泄漏上一轮 renderer 上下文。
-+      if (view === current) view = empty
-+    },
-   }
- }
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 00ccf4b8a8f8c6d4758649eaeb00ca69d2d76a29..8a5bdf41b064d843d8c736c0e20c44147cba3deb 100644
+index 57234a67d..23e871453 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -416,9 +416,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-     }) {
-       yield* requireSession(ctx.params.sessionID)
-       const usage = yield* SessionRequestUsage.Service
--      return yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
-+      const result = yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
-         Effect.mapError(() => new HttpApiError.NotFound({})),
-       )
-+      if (!result) return yield* new HttpApiError.NotFound({})
-+      return result
-     })
- 
-     const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: {
-@@ -426,6 +428,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-     }) {
-       yield* requireSession(ctx.params.sessionID)
-       const usage = yield* SessionRequestUsage.Service
-+      // assistant 明细属于具体 request_usage 记录；先确认父请求存在，
-+      // 避免缺失 request 被误解释成“存在但 assistant 为空”的成功列表。
-+      const result = yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
-+        Effect.mapError(() => new HttpApiError.NotFound({})),
-+      )
-+      if (!result) return yield* new HttpApiError.NotFound({})
-       return yield* usage.assistants({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
-         Effect.mapError(() => new HttpApiError.NotFound({})),
-       )
+@@ -487,6 +487,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+   // 助手用量明细：返回请求下所有助手消息的 token 分布
+   const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx) {
+     yield* requireSession(ctx.params.sessionID)
++    // #269：先确认父请求存在，避免缺失 request 被误解释为“存在但 assistant 为空”
++    const result = yield* usageSvc.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
++      Effect.mapError(() => new HttpApiError.NotFound({})),
++    )
++    if (!result) return yield* new HttpApiError.NotFound({})
+     const rows = yield* usageSvc.assistants({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID })
+     return rows.map(mapAssistant)
+   })
 diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
-index a94d29c24c2de8f10bac701fdac13a98e3fbaa84..51f676cbff0a989e5bb2aa7a6b94b50300d1c698 100644
+index caccfd51e..12d16b4b6 100644
 --- a/packages/opencode/test/permission/reviewer-prompt.test.ts
 +++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
-@@ -70,7 +70,7 @@ describe("permission reviewer prompt", () => {
+@@ -79,7 +79,7 @@ describe("permission reviewer prompt", () => {
      expect(prompt).toContain("# User Authorization Scoring")
      expect(prompt).toContain("# Base Risk Taxonomy")
      expect(prompt).toContain("Deny pushes unless the user explicitly asks for push.")
@@ -174,311 +68,106 @@ index a94d29c24c2de8f10bac701fdac13a98e3fbaa84..51f676cbff0a989e5bb2aa7a6b94b503
      expect(prompt).toContain('"risk_level": "low" | "medium" | "high" | "critical"')
      expect(prompt).toContain('"outcome": "allow" | "deny"')
    })
-diff --git a/packages/opencode/test/plugin/github-copilot-models.test.ts b/packages/opencode/test/plugin/github-copilot-models.test.ts
-index 939247f09b4eda7f2c85ed9e636d63956c9ae1a8..b9f3500feb8159775fa55b600cd7464a7d7f80d1 100644
---- a/packages/opencode/test/plugin/github-copilot-models.test.ts
-+++ b/packages/opencode/test/plugin/github-copilot-models.test.ts
-@@ -8,59 +8,63 @@ afterEach(() => {
-   globalThis.fetch = originalFetch
- })
- 
-+async function withModelsServer<T>(body: unknown, fn: (baseURL: string) => Promise<T>) {
-+  const server = Bun.serve({
-+    port: 0,
-+    fetch() {
-+      return Response.json(body)
-+    },
-+  })
-+  try {
-+    return await fn(server.url.origin)
-+  } finally {
-+    server.stop(true)
-+  }
-+}
+diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
+index 9d7643cb3..57999a0e3 100644
+--- a/packages/opencode/test/server/httpapi-session.test.ts
++++ b/packages/opencode/test/server/httpapi-session.test.ts
+@@ -1087,4 +1087,60 @@ describe("session HttpApi", () => {
+       }),
+     { git: true, config: { formatter: false, lsp: false } },
+   )
 +
- test("preserves temperature support from existing provider models", async () => {
--  globalThis.fetch = mock(() =>
--    Promise.resolve(
--      new Response(
--        JSON.stringify({
--          data: [
--            {
--              model_picker_enabled: true,
--              id: "gpt-4o",
--              name: "GPT-4o",
--              version: "gpt-4o-2024-05-13",
--              capabilities: {
--                family: "gpt",
--                limits: {
--                  max_context_window_tokens: 64000,
--                  max_output_tokens: 16384,
--                  max_prompt_tokens: 64000,
--                },
--                supports: {
--                  streaming: true,
--                  tool_calls: true,
--                },
--              },
-+  const models = await withModelsServer(
-+    {
-+      data: [
-+        {
-+          model_picker_enabled: true,
-+          id: "gpt-4o",
-+          name: "GPT-4o",
-+          version: "gpt-4o-2024-05-13",
-+          capabilities: {
-+            family: "gpt",
-+            limits: {
-+              max_context_window_tokens: 64000,
-+              max_output_tokens: 16384,
-+              max_prompt_tokens: 64000,
-             },
--            {
--              model_picker_enabled: true,
--              id: "brand-new",
--              name: "Brand New",
--              version: "brand-new-2026-04-01",
--              capabilities: {
--                family: "test",
--                limits: {
--                  max_context_window_tokens: 32000,
--                  max_output_tokens: 8192,
--                  max_prompt_tokens: 32000,
--                },
--                supports: {
--                  streaming: true,
--                  tool_calls: false,
--                },
--              },
-+            supports: {
-+              streaming: true,
-+              tool_calls: true,
-             },
--          ],
--        }),
--        { status: 200 },
--      ),
--    ),
--  ) as unknown as typeof fetch
--
--  const models = await CopilotModels.get(
--    "https://api.githubcopilot.com",
--    {},
--    {
-+          },
-+        },
-+        {
-+          model_picker_enabled: true,
-+          id: "brand-new",
-+          name: "Brand New",
-+          version: "brand-new-2026-04-01",
-+          capabilities: {
-+            family: "test",
-+            limits: {
-+              max_context_window_tokens: 32000,
-+              max_output_tokens: 8192,
-+              max_prompt_tokens: 32000,
-+            },
-+            supports: {
-+              streaming: true,
-+              tool_calls: false,
-+            },
-+          },
-+        },
-+      ],
-+    },
-+    (baseURL) => CopilotModels.get(baseURL, {}, {
-       "gpt-4o": {
-         id: "gpt-4o",
-         providerID: "github-copilot",
-@@ -110,7 +114,7 @@ test("preserves temperature support from existing provider models", async () =>
-         variants: {},
-         status: "active",
-       },
--    },
-+    }),
-   )
- 
-   expect(models["gpt-4o"].capabilities.temperature).toBe(true)
-@@ -118,42 +122,32 @@ test("preserves temperature support from existing provider models", async () =>
++  // #269：验证 request_usage 端点在新会话和缺失请求下的行为
++  it.live("returns empty list for new session request_usage", () =>
++    Effect.gen(function* () {
++      const llm = yield* TestLLMServer
++      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
++      const session = yield* createSession({ title: "Request usage session" }).pipe(
++        provideInstanceEffect(directory),
++      )
++      const headers = { "x-opencode-directory": directory }
++      // #269：新会话应有 0 行 request usage
++      const body = yield* requestJson<{ data: unknown[] }>(
++        pathFor("/session/:sessionID/request_usage", { sessionID: session.id }),
++        { headers },
++      )
++      expect(body.data.length).toBe(0)
++    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
++  )
++
++  // #269：缺失的 requestID 应返回 404，而非空成功
++  it.live("returns 404 for missing request_usage get", () =>
++    Effect.gen(function* () {
++      const llm = yield* TestLLMServer
++      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
++      const session = yield* createSession({ title: "Missing request usage session" }).pipe(
++        provideInstanceEffect(directory),
++      )
++      const headers = { "x-opencode-directory": directory }
++      const missingID = "msg_httpapi_missing"
++      const response = yield* request(
++        pathFor("/session/:sessionID/request_usage/:requestID", { sessionID: session.id, requestID: missingID }),
++        { headers },
++      )
++      // #269：父请求不存在时必须 404
++      expect(response.status).toBe(404)
++    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
++  )
++
++  // #269：缺失父请求时 assistants 端点也应 404
++  it.live("returns 404 for missing request_usage assistants", () =>
++    Effect.gen(function* () {
++      const llm = yield* TestLLMServer
++      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
++      const session = yield* createSession({ title: "Missing assistant usage session" }).pipe(
++        provideInstanceEffect(directory),
++      )
++      const headers = { "x-opencode-directory": directory }
++      const missingID = "msg_httpapi_missing"
++      const response = yield* request(
++        pathFor("/session/:sessionID/request_usage/:requestID/assistant", { sessionID: session.id, requestID: missingID }),
++        { headers },
++      )
++      // #269：父请求不存在时 assistants 也必须 404
++      expect(response.status).toBe(404)
++    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
++  )
  })
- 
- test("clears existing variants so refreshed models calculate provider-specific variants", async () => {
--  globalThis.fetch = mock(() =>
--    Promise.resolve(
--      new Response(
--        JSON.stringify({
--          data: [
--            {
--              model_picker_enabled: true,
--              id: "claude-opus-4.7",
--              name: "Claude Opus 4.7",
--              version: "claude-opus-4.7-2026-04-16",
--              supported_endpoints: ["/v1/messages"],
--              capabilities: {
--                family: "claude-opus",
--                limits: {
--                  max_context_window_tokens: 144000,
--                  max_output_tokens: 64000,
--                  max_prompt_tokens: 128000,
--                },
--                supports: {
--                  adaptive_thinking: true,
--                  streaming: true,
--                  tool_calls: true,
--                },
--              },
--            },
--          ],
--        }),
--        { status: 200 },
--      ),
--    ),
--  ) as unknown as typeof fetch
--
--  const models = await CopilotModels.get(
--    "https://api.githubcopilot.com",
--    {},
-+  const models = await withModelsServer(
-     {
-+      data: [
-+        {
-+          model_picker_enabled: true,
-+          id: "claude-opus-4.7",
-+          name: "Claude Opus 4.7",
-+          version: "claude-opus-4.7-2026-04-16",
-+          supported_endpoints: ["/v1/messages"],
-+          capabilities: {
-+            family: "claude-opus",
-+            limits: {
-+              max_context_window_tokens: 144000,
-+              max_output_tokens: 64000,
-+              max_prompt_tokens: 128000,
-+            },
-+            supports: {
-+              adaptive_thinking: true,
-+              streaming: true,
-+              tool_calls: true,
-+            },
-+          },
-+        },
-+      ],
-+    },
-+    (baseURL) => CopilotModels.get(baseURL, {}, {
-       "claude-opus-4.7": {
-         id: "claude-opus-4.7",
-         providerID: "github-copilot",
-@@ -208,7 +202,7 @@ test("clears existing variants so refreshed models calculate provider-specific v
-         },
-         status: "active",
-       },
--    },
-+    }),
-   )
- 
-   expect(models["claude-opus-4.7"].api.npm).toBe("@ai-sdk/anthropic")
-diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
-index 9b62201d43aed2a17ff50e1b48f239e0807624e5..c05a44f9c6a6045c88aaf4dfac86d7875b60ddbd 100644
---- a/packages/opencode/test/server/httpapi-exercise/index.ts
-+++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -878,6 +878,39 @@ const scenarios: Scenario[] = [
-     .json(200, (body, ctx) => {
-       check(stable(body) === stable(ctx.state.todos), "todos should match seeded state")
-     }),
-+  http.protected
-+    .get("/session/{sessionID}/request_usage", "session.request_usage.list")
-+    .seeded((ctx) => ctx.session({ title: "Request usage session" }))
-+    .at((ctx) => ({
-+      path: route("/session/{sessionID}/request_usage", { sessionID: ctx.state.id }),
-+      headers: ctx.headers(),
-+    }))
-+    .json(200, (body) => {
-+      array(body)
-+      check(body.length === 0, "new session should have no request usage rows")
-+    }),
-+  http.protected
-+    .get("/session/{sessionID}/request_usage/{requestID}", "session.request_usage.get.missing")
-+    .seeded((ctx) => ctx.session({ title: "Missing request usage session" }))
-+    .at((ctx) => ({
-+      path: route("/session/{sessionID}/request_usage/{requestID}", {
-+        sessionID: ctx.state.id,
-+        requestID: "msg_httpapi_missing",
-+      }),
-+      headers: ctx.headers(),
-+    }))
-+    .status(404),
-+  http.protected
-+    .get("/session/{sessionID}/request_usage/{requestID}/assistant", "session.request_usage.assistants.missing")
-+    .seeded((ctx) => ctx.session({ title: "Missing assistant usage session" }))
-+    .at((ctx) => ({
-+      path: route("/session/{sessionID}/request_usage/{requestID}/assistant", {
-+        sessionID: ctx.state.id,
-+        requestID: "msg_httpapi_missing",
-+      }),
-+      headers: ctx.headers(),
-+    }))
-+    .status(404),
-   http.protected
-     .get("/session/{sessionID}/diff", "session.diff")
-     .seeded((ctx) => ctx.session({ title: "Diff session" }))
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index 9699d34968d7d92e9ccae2bcd6905bd923ae0e3e..800025f1b1285ae0874a3a64ed4d7e309cbdec91 100644
+index fef1719cc..0e8eba978 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -1627,7 +1627,7 @@ describe("session.message-v2.latest", () => {
+@@ -1633,7 +1633,7 @@ describe("session.message-v2.latest", () => {
      expect(state.tasks).toEqual([])
    })
  
 -  test("a fresh compaction-user newer than the latest summary surfaces in tasks", () => {
 +  test("a fresh compaction-user newer than the latest summary is not replayed as a task", () => {
-     const newCompactionUser: MessageV2.WithParts = {
+     const newCompactionUser: SessionV1.WithParts = {
        info: userInfo(NEW_COMPACTION_USER),
        parts: [
-@@ -1650,8 +1650,7 @@ describe("session.message-v2.latest", () => {
+@@ -1656,8 +1656,8 @@ describe("session.message-v2.latest", () => {
  
      expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
      expect(state.user?.id).toBe(NEW_COMPACTION_USER)
 -    expect(state.tasks).toHaveLength(1)
 -    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
++    // #269：compaction 不再是可重放 task（#242），期望空列表
 +    expect(state.tasks).toEqual([])
    })
  })
  
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index a3de60b7ef96819a0b12dc6cf24253936671601c..129de06a95d0e2b1d20af0fedf273e1608e21719 100644
+index 1b21986a8..9f9807e83 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -998,7 +998,10 @@ it.instance(
+@@ -1544,7 +1544,8 @@ it.instance(
    "auto permission reviewer fails closed after one malformed protocol retry",
    () =>
      Effect.gen(function* () {
 -      const { llm } = yield* useServerConfig(providerCfg)
-+      const { llm } = yield* useServerConfig((url) => ({
-+        ...providerCfg(url),
-+        permission: { auto_review: { fallback: "deny" } },
-+      }))
++      // #269：审查器失败后必须确定性拒绝，默认 fallback 为 user 会走 ask 而非 deny
++      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), permission: { auto_review: { fallback: "deny" } } }))
        const permissions = yield* Permission.Service
        const sessions = yield* Session.Service
        const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
-diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
-index b5bd2e9e5c4709d98313af4cdc94d7291a0a876b..beb16475550386670c84bf0c0492c78b3e30ffcd 100644
---- a/packages/opencode/test/tool/task.test.ts
-+++ b/packages/opencode/test/tool/task.test.ts
-@@ -16,6 +16,7 @@ import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
- import { Truncate } from "@/tool/truncate"
- import { ToolRegistry } from "@/tool/registry"
- import { RuntimeFlags } from "@/effect/runtime-flags"
-+import { Permission } from "@/permission"
- import { disposeAllInstances } from "../fixture/fixture"
- import { testEffect } from "../lib/effect"
- 
-@@ -486,7 +487,7 @@ describe("tool.task", () => {
- 
-         const child = yield* sessions.get(result.metadata.sessionId)
-         expect(child.parentID).toBe(chat.id)
--        expect(child.permission).toContainEqual({ permission: "external_directory", pattern: "*", action: "ask" })
-+        expect(Permission.evaluate("external_directory", "/tmp/outside", child.permission ?? []).action).toBe("ask")
-         expect(child.permission).toContainEqual({ permission: "todowrite", pattern: "*", action: "deny" })
-         expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "allow" })
-         expect(child.permission).toContainEqual({ permission: "read", pattern: "*", action: "allow" })

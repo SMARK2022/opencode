@@ -14,10 +14,9 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/docs/opencode-sandbox-windows-design.md b/docs/opencode-sandbox-windows-design.md
-index f6a440db885ad7672e6ec978a7fb05a23494a86b..2a49caf5da823eedc90c8873d42ef1d6a9ef79f1 100644
 --- a/docs/opencode-sandbox-windows-design.md
 +++ b/docs/opencode-sandbox-windows-design.md
-@@ -139,7 +139,7 @@ read/task/notebook 等其他 build-like 权限暂不因此扩大到 auto。
+@@ -139,7 +139,7 @@
  +--------------------------------------------------------------------------------+
  ```
  
@@ -26,7 +25,7 @@ index f6a440db885ad7672e6ec978a7fb05a23494a86b..2a49caf5da823eedc90c8873d42ef1d6
  
  关键 metadata：
  
-@@ -192,13 +192,13 @@ for each requested pattern:
+@@ -192,13 +192,13 @@
                |                          |                           |
                v                          v                           v
  +-----------------------------+ +--------------------------+ +--------------------+
@@ -42,7 +41,7 @@ index f6a440db885ad7672e6ec978a7fb05a23494a86b..2a49caf5da823eedc90c8873d42ef1d6
  |  -> reviewer if available                                                       |
  |  -> ask only when reviewer disabled by config or fallback=user                  |
  |  -> deny when reviewer unavailable for native auto agent                        |
-@@ -209,12 +209,12 @@ for each requested pattern:
+@@ -209,12 +209,12 @@
  
  ```text
  safe       known read-only shell command
@@ -58,58 +57,60 @@ index f6a440db885ad7672e6ec978a7fb05a23494a86b..2a49caf5da823eedc90c8873d42ef1d6
  ### Reviewer boundary
  
 diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
-index eaaedb21a952aef9a3bea4e491612a7f42aee6bb..408bb5c6d42bdb3e2a96f0396312c598b5576474 100644
 --- a/packages/opencode/src/permission/auto.ts
 +++ b/packages/opencode/src/permission/auto.ts
-@@ -62,32 +62,18 @@ export function evaluate(
+@@ -64,32 +64,19 @@
    return Effect.gen(function* () {
+     // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
      const precheck = PermissionPrecheck.evaluate(input)
-     const isShell = input.permission === "bash"
+-    const isShell = input.permission === "bash"
 -    const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
+-    // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据——仅凭路径不构成授权上下文
 -    const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
-     // [local-smark] auto 四级预审路由开始
--    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
--    // shell general 也直接允许，避免 auto shell 回到人工确认；非 shell general
--    // 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是用户
--    // 显式配置的例外，用来保留原本“低风险也审”的能力。
-+    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 和 general 默认
-+    // 直接允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。
-+    // strict 是用户显式配置的例外，用来保留原本“低风险也审”的能力。
+-    // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 auto shell
+-    // #203：回到人工确认；非 shell general 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝
+-    // #203：strict 是用户显式配置的例外，保留原本"低风险也审"的能力
++    // #232：shell-origin 与 tool-origin external_directory 不再单独分支——统一由
++    // #232：precheck 的 externalDirectoryEffect 提升为 cautious 或保持 dangerous deny。
++    // #232：safe/general/cautious/dangerous 是 LLM 负载边界——safe 和 general 默认直接
++    // #232：允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是
++    // #232：用户显式配置的例外，用来保留原本"低风险也审"的能力。
      if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
 -    if (isShellExternalDirectory) {
--      // shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性
--      // 预审，不能再单独调用 reviewer；否则一次 bash 操作会在 external_directory
--      // 和 bash 两个权限点重复消耗 LLM。非 dangerous 情况放行给后续 bash auto。
+-      // #203：shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性预审，
+-      // #203：不能再单独调用 reviewer；否则一次 bash 会在 external_directory 和 bash 两个权限点
+-      // #203：重复消耗 LLM。非 dangerous 情况放行给后续 bash auto
 -      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
 -    }
 -    if (input.permission === "external_directory" && !isToolExternalDirectory) {
--      // 无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
--      // auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
--      // metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断。
+-      // #210：无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
+-      // #210：auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
+-      // #210：metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断
 -      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
 -    }
      if (precheck.level === "safe" && !input.strict) {
        return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
      }
 -    if (precheck.level === "general" && isShell && !input.strict) {
--      // 当前开发测试期要求 auto shell 不弹人工确认：无法精确判定但未命中
--      // dangerous/cautious 的命令先放行；非 shell general 继续走 reviewer。
+-      // #203：开发测试期要求 auto shell 不弹人工确认：未命中 dangerous/cautious 的命令先放行；
+-      // #203：非 shell general 继续走 reviewer
 +    if (precheck.level === "general" && !input.strict) {
-+      // general 是“未知但未命中 cautious/dangerous”的确定性 allow 边界；reviewer
-+      // 只承接 cautious。这样普通 edit/add/update 和未知 shell 不会消耗 LLM 或
-+      // 回到可点击 ask，真正敏感的 delete/external-directory 会先被 precheck 提升。
++      // #232：general 是"未知但未命中 cautious/dangerous"的确定性 allow 边界；reviewer
++      // #232：只承接 cautious。这样普通 edit/add/update 和未知 shell 不会消耗 LLM 或
++      // #232：回到可点击 ask，真正敏感的 delete/external-directory 会先被 precheck 提升。
        return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
      }
-     // [local-smark] auto 四级预审路由结束
-@@ -163,28 +149,6 @@ function errorTag(error: unknown) {
+ 
+@@ -157,31 +144,9 @@
    return error && typeof error === "object" && "_tag" in error && typeof error._tag === "string" ? error._tag : undefined
  }
  
+-// #210：tool-origin 证据校验——action_kind 是 caller 可控 metadata，需同时携带已知 tool 及其 operation/payload，
+-// #210：仅凭路径的请求仍回退人工审批，防止 reviewer 替路径授权后续读写内容
 -function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
--  // action_kind alone is caller-controlled metadata; require a known tool and
--  // its operation payload so path-only requests still fall back to user approval.
 -  if (metadata.action_kind !== "tool") return false
 -  if (metadata.tool === "read") return metadata.operation === "read"
+-  // #210：write 需 content 字符串证据——空内容写入与路径型请求不可区分时不授权，content 存在才让 reviewer 判断写入意图
 -  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
 -  if (metadata.tool === "edit") {
 -    return (
@@ -119,6 +120,7 @@ index eaaedb21a952aef9a3bea4e491612a7f42aee6bb..408bb5c6d42bdb3e2a96f0396312c598
 -    )
 -  }
 -  if (metadata.tool === "apply_patch") {
+-    // #210：apply_patch 需匹配 hunk.type（add/update/delete/move）并携带 patchText 证据
 -    return (
 -      (metadata.operation === "add" || metadata.operation === "update" || metadata.operation === "delete" || metadata.operation === "move") &&
 -      typeof metadata.patchText === "string"
@@ -127,20 +129,23 @@ index eaaedb21a952aef9a3bea4e491612a7f42aee6bb..408bb5c6d42bdb3e2a96f0396312c598
 -  return false
 -}
 -
+ // #198：提取错误消息——provider/model 错误在 deny reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
++// #232：tool-origin 证据校验整体移除——external_directory 边界统一 cautious，
++// #232：不再需要逐工具 operation/payload 证据判定是否进入 reviewer。
  function errorMessage(error: unknown) {
-   // Provider/model errors are intentionally surfaced in the deny reason for
-   // diagnostics; the safe user-facing AutoDeniedError still prevents retry
+   if (error instanceof Error) return error.message
+   if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 2374ce34cbd67258baf9ed5eb3df1429861711ba..a13d6fabd962f347336c9eb64867da10a79fedae 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -305,22 +305,14 @@ export function evaluate(input: {
+@@ -206,20 +206,42 @@
    patterns: readonly string[]
    metadata: Readonly<Record<string, unknown>>
  }): Decision {
 +  const externalDirectory = externalDirectoryEffect(input)
 +  if (externalDirectory) return externalDirectory
    const fileEffect = structuredFileEffect(input)
+     // #230：结构化文件效果优先于通用规则——delete 是不可逆效果，必须谨慎处理
    if (fileEffect) return fileEffect
  
 -  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具默认回退到
@@ -148,24 +153,19 @@ index 2374ce34cbd67258baf9ed5eb3df1429861711ba..a13d6fabd962f347336c9eb64867da10
 -  // 已经把最终文件效果作为权限 metadata 暴露出来，删除这种不可逆效果必须在
 -  // auto reviewer 边界前被提升为 cautious，而不是留作普通 non-shell general。
 -  if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
--    // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
--    // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
--    // ask，从而绕开 Auto agent 的 bash auto 路由。
--    return evaluateShell(
--      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
--      0,
--    )
+-    // #230：apply_patch 项目外删除——external_directory preflight 后仍须谨慎
+-    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 -  }
-+  // bash and external_directory carry enough context for deterministic precheck.
-+  // Other permissions default to general allow unless a structured boundary above
-+  // promoted them to cautious first, such as workspace delete metadata.
++  // #232：bash 与所有 external_directory 边界携带足够上下文做确定性预审；其他权限
++  // #232：默认回到 general allow，除非上方的结构化边界（如 workspace delete metadata）
++  // #232：先把它们提升到 cautious。
    if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
-   return evaluateShell(
-     typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-@@ -328,6 +320,32 @@ export function evaluate(input: {
-   )
- }
- 
+   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
++}
++
++// #232：external_directory 边界统一为 cautious review seam——shell 发起的访问复用同一条
++// #232：命令的确定性预审，dangerous payload 仍 deterministic deny；其他外部路径（含
++// #232：glob/grep/lsp/repo_overview 等只读工具）不再需要逐工具证据即可进入 reviewer。
 +function externalDirectoryEffect(input: {
 +  permission: string
 +  patterns: readonly string[]
@@ -178,24 +178,18 @@ index 2374ce34cbd67258baf9ed5eb3df1429861711ba..a13d6fabd962f347336c9eb64867da10
 +      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
 +      0,
 +    )
-+    // external_directory access is normally reviewable, but an already-critical
-+    // shell payload must remain deterministic deny. Otherwise a command like
-+    // `rm -rf /` would become reviewer/user approved merely because it also
-+    // crosses the external-directory gate.
++    // #232：已经确定性的危险 shell 载荷必须在 external_directory 门禁保持 deny——
++    // #232：否则 rm -rf / 仅因同时跨越外部路径边界就会变成 reviewer 可审批。
 +    if (shell.level === "dangerous") return shell
 +  }
 +
-+  // This exact reason names the cautious seam for external path boundaries. It is
-+  // intentionally independent of per-tool evidence so read-only tools such as
-+  // glob/grep/lsp/repo_overview do not fall back to a clickable ask just because
-+  // they lack write-style operation payloads.
++  // #232：该 reason 命名外部路径边界的 cautious seam；刻意不依赖逐工具证据，
++  // #232：使 glob/grep/lsp/repo_overview 等只读工具不因缺少写类载荷退回可点击 ask。
 +  return { level: "cautious", reason: "external directory access requires auto review" }
-+}
-+
+ }
+ 
  function structuredFileEffect(input: {
-   permission: string
-   metadata: Readonly<Record<string, unknown>>
-@@ -341,19 +359,8 @@ function structuredFileEffect(input: {
+@@ -237,20 +259,8 @@
      Array.isArray(input.metadata.files) &&
      input.metadata.files.some((item) => fileEffectType(item) === "delete")
    ) {
@@ -211,36 +205,44 @@ index 2374ce34cbd67258baf9ed5eb3df1429861711ba..a13d6fabd962f347336c9eb64867da10
 -    input.metadata.tool === "apply_patch" &&
 -    input.metadata.operation === "delete" &&
 -    typeof input.metadata.patchText === "string"
+-    // #230：要求 patchText 存在——仅凭 operation 名不足以下删除结论
 -  ) {
-+    // This exact reason labels the delete-specific cautious seam for reviewer
-+    // audit; ordinary updates must not share it.
++    // #232：该 reason 命名 delete 专属的 cautious seam 供 reviewer 审计——普通 update
++    // #232：不得共享它；apply_patch 项目外删除统一由 externalDirectoryEffect 覆盖。
      return { level: "cautious", reason: "file deletion requires explicit approval" }
    }
  }
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index fac4d9748305a9eb35eb3806db0fa02ce7a40d4c..2bad7cd7b69316b64741bd438435b04a38fcd209 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -348,8 +348,8 @@ const ask = Effect.fn("ShellTool.ask")(function* (
+@@ -346,6 +346,9 @@
+       permission: "external_directory",
        patterns: globs,
        always: globs,
-       // Auto 模式下，项目外路径访问不能先退回普通 ask；把同一次 shell
--      // 命令证据传给 permission 层，让 external_directory 能做 deterministic
--      // 预审，真正的 reviewer/user 决策仍由后续 bash 权限单点处理。
-+      // 命令证据传给 permission 层，让 dangerous payload 在 external_directory
-+      // 门禁 deterministic deny，其他外部路径则进入同一条 cautious review 边界。
++      // #232：项目外路径访问不能先退回普通 ask；把同一次 shell 命令证据传给 permission
++      // #232：层，让 dangerous payload 在 external_directory 门禁 deterministic deny，
++      // #232：其他外部路径则进入同一条 cautious review 边界。
        metadata: {
          action_kind: "shell",
-         command: metadata.command,
+         command: input.command,
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9fed727de 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -14,7 +14,11 @@ const bash = (command: string, reviewer?: PermissionAuto.Reviewer) =>
+@@ -20,7 +20,6 @@
+                 // see cautious, not generic non-shell uncertainty, so policy can
+                 // distinguish irreversible filesystem effects from ordinary edits.
+                 expect(input.precheck.level).toBe("cautious")
+-                expect(input.precheck.reason).toBe("file deletion requires explicit approval")
+                 return {
+                   action: "allow" as const,
+                   reason: "reviewer approved explicit file deletion",
+@@ -51,14 +50,18 @@
      ),
    )
  
+-// #203：shell-origin external_directory 辅助——复用同一条 shell 命令证据做确定性预审
 -const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Reviewer) =>
++// #232：shell-origin external_directory 辅助——复用同一条 shell 命令证据做确定性预审
 +const shellExternalDirectory = (
 +  command: string,
 +  reviewer?: PermissionAuto.Reviewer,
@@ -249,23 +251,42 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
    Effect.runPromise(
      PermissionAuto.evaluate(
        {
-@@ -25,6 +29,7 @@ const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Revie
-           command,
-           cwd: process.cwd(),
-           shell: process.platform === "win32" ? "powershell" : "bash",
-+          ...metadata,
-         },
+         permission: "external_directory",
+         patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+-        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash" },
++        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash", ...metadata },
        },
        reviewer,
-@@ -195,31 +200,68 @@ describe("permission auto routing", () => {
+     ),
+@@ -242,29 +245,68 @@
      expect(called).toBe(true)
    })
  
+-  // #203：shell-origin external_directory 复用命令证据——safe 放行，cautious 也放行给 bash auto，dangerous 拒绝
 -  test("uses shell evidence for external directory auto routing", async () => {
--    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({
--      action: "allow",
--      source: "precheck",
--    })
+-    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
+-
+-    let called = false
+-    await expect(
+-      shellExternalDirectory("cat ~/.aws/credentials", {
+-        review: () =>
+-          Effect.sync(() => {
+-            called = true
+-            return {
+-              action: "deny" as const,
+-              reason: "reviewer rejected sensitive external read",
+-              reviewID: "review_external_shell",
+-              risk_level: "high" as const,
+-              user_authorization: "unknown" as const,
+-            }
+-          }),
+-      }),
+-    ).resolves.toMatchObject({ action: "allow", source: "precheck" })
+-    expect(called).toBe(false)
+-
+-    await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
++  // #232：native auto 的每个 external_directory 边界都是 cautious review seam——纯路径只读
++  // #232：工具（glob/grep 等）无需逐工具 metadata 即可进入 reviewer，避免退回可点击 ask
 +  test("routes native auto external directory requests to cautious reviewer", async () => {
 +    let safeCalled = false
 +    await expect(
@@ -283,9 +304,7 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
 +            review: (input) =>
 +              Effect.sync(() => {
 +                safeCalled = true
-+                // Native auto treats every external-directory boundary as the
-+                // cautious review seam. Path-only read tools such as glob/grep do
-+                // not need per-tool metadata just to avoid a clickable user ask.
++                // #232：path-only 只读工具到达 reviewer 时预审层级必须是 cautious
 +                expect(input.precheck.level).toBe("cautious")
 +                return {
 +                  action: "allow" as const,
@@ -300,58 +319,49 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
 +      ),
 +    ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
 +    expect(safeCalled).toBe(true)
- 
-     let called = false
-     await expect(
--      shellExternalDirectory("cat ~/.aws/credentials", {
--        review: () =>
++
++    let called = false
++    await expect(
 +      shellExternalDirectory(
 +        "git status --porcelain",
 +        {
-+        review: (input) =>
-           Effect.sync(() => {
-             called = true
-+            expect(input.precheck.level).toBe("cautious")
-             return {
--              action: "deny" as const,
--              reason: "reviewer rejected sensitive external read",
--              reviewID: "review_external_shell",
--              risk_level: "high" as const,
--              user_authorization: "unknown" as const,
-+              action: "allow" as const,
-+              reason: `reviewer approved ${input.precheck.level} shell external directory access`,
-+              reviewID: "review_external_shell_safe",
-+              risk_level: "medium" as const,
-+              user_authorization: "medium" as const,
-             }
-           }),
--      }),
--    ).resolves.toMatchObject({ action: "allow", source: "precheck" })
--    expect(called).toBe(false)
++          review: (input) =>
++            Effect.sync(() => {
++              called = true
++              expect(input.precheck.level).toBe("cautious")
++              return {
++                action: "allow" as const,
++                reason: `reviewer approved ${input.precheck.level} shell external directory access`,
++                reviewID: "review_external_shell_safe",
++                risk_level: "medium" as const,
++                user_authorization: "medium" as const,
++              }
++            }),
 +        },
 +        { agent: "auto" },
 +      ),
 +    ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
 +    expect(called).toBe(true)
- 
--    await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
++
 +    await expect(shellExternalDirectory("rm -rf /", undefined, { agent: "auto" })).resolves.toMatchObject({
 +      action: "deny",
 +      source: "precheck",
 +    })
    })
  
-   test("routes tool-origin external directory auto decisions to reviewer", async () => {
-@@ -256,7 +298,7 @@ describe("permission auto routing", () => {
+   // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据，路由到 reviewer
+@@ -303,8 +345,8 @@
      expect(called).toBe(true)
    })
  
+-  // #210：仅 filepath 无 tool 证据——回退人工审批，reviewer 不被调用
 -  test("keeps external directory requests without tool evidence on the user approval path", async () => {
++  // #232：仅 filepath 无 tool 证据——仍进入 cautious reviewer 边界，reviewer 决定拒绝
 +  test("routes external directory requests without tool evidence to reviewer", async () => {
      let called = false
      await expect(
        Effect.runPromise(
-@@ -274,7 +316,7 @@ describe("permission auto routing", () => {
+@@ -322,7 +364,7 @@
                  called = true
                  return {
                    action: "deny" as const,
@@ -360,16 +370,21 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
                    reviewID: "review_external_directory_without_evidence",
                    risk_level: "high" as const,
                    user_authorization: "unknown" as const,
-@@ -283,11 +325,45 @@ describe("permission auto routing", () => {
+@@ -331,12 +373,48 @@
            },
          ),
        ),
 -    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
 -    expect(called).toBe(false)
+-  })
+-
+-  // #210：action_kind=tool 但缺 tool/operation——证据不全，仍回退人工审批
+-  test("keeps malformed tool-origin external directory requests on the user approval path", async () => {
 +    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +    expect(called).toBe(true)
 +  })
 +
++  // #232：action_kind=tool 但缺 tool/operation——证据畸形仍进入 reviewer，由 reviewer 拒绝
 +  test("routes native auto malformed external directory evidence to reviewer", async () => {
 +    let called = false
 +    await expect(
@@ -402,14 +417,15 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
 +      ),
 +    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +    expect(called).toBe(true)
-   })
- 
--  test("keeps malformed tool-origin external directory requests on the user approval path", async () => {
++  })
++
++  // #232：action_kind=tool 但缺 tool/operation——证据不全，仍回退人工审批
++  // #232：断言翻转：畸形工具证据不再走可点击 ask，reviewer 拒绝才闭合请求
 +  test("routes malformed tool-origin external directory requests to reviewer", async () => {
      let called = false
      await expect(
        Effect.runPromise(
-@@ -306,7 +382,7 @@ describe("permission auto routing", () => {
+@@ -355,7 +433,7 @@
                  called = true
                  return {
                    action: "deny" as const,
@@ -418,26 +434,32 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
                    reviewID: "review_malformed_tool_external_directory",
                    risk_level: "high" as const,
                    user_authorization: "unknown" as const,
-@@ -315,11 +391,11 @@ describe("permission auto routing", () => {
+@@ -364,12 +442,12 @@
            },
          ),
        ),
 -    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
 -    expect(called).toBe(false)
+-  })
+-
+-  // #203：开发期 shell general 直接 allow——auto shell 不弹人工确认；未命中 dangerous/cautious 的命令先放行
+-  test("allows shell general decisions during development without reviewer load", async () => {
 +    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +    expect(called).toBe(true)
-   })
- 
--  test("allows shell general decisions during development without reviewer load", async () => {
++  })
++
++  // #232：general 是确定性 allow 边界——未知 shell 与普通 edit/add/update 不消耗 reviewer
 +  test("allows general decisions without reviewer load", async () => {
      let called = false
      await expect(
        bash("unknown-tool --maybe-read", {
-@@ -337,6 +413,32 @@ describe("permission auto routing", () => {
+@@ -387,6 +465,34 @@
        }),
      ).resolves.toMatchObject({ action: "allow", source: "precheck" })
      expect(called).toBe(false)
 +
++    // #232：普通 edit 的 diff 是结构化 metadata 但非删除——general 确定性 allow，
++    // #232：与 shell general 同一条路径，reviewer 不被调用。
 +    await expect(
 +      Effect.runPromise(
 +        PermissionAuto.evaluate(
@@ -465,16 +487,8 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
 +    expect(called).toBe(false)
    })
  
-   test("routes structured workspace deletes to reviewer as cautious", async () => {
-@@ -360,7 +462,6 @@ describe("permission auto routing", () => {
-                 // see cautious, not generic non-shell uncertainty, so policy can
-                 // distinguish irreversible filesystem effects from ordinary edits.
-                 expect(input.precheck.level).toBe("cautious")
--                expect(input.precheck.reason).toBe("file deletion requires explicit approval")
-                 return {
-                   action: "allow" as const,
-                   reason: "reviewer approved explicit file deletion",
-@@ -421,7 +522,6 @@ describe("permission auto routing", () => {
+   // #198：验证无 reviewer 时回退到 ask——保持原有用户审批路径，source 标记为 reviewer_unavailable
+@@ -439,7 +545,6 @@
                Effect.sync(() => {
                  called = true
                  expect(input.precheck.level).toBe("safe")
@@ -483,42 +497,39 @@ index d1b515503f8e4afc929f4d5eebbff90425b31c84..151ea1dd146b013943cab4b89992b5b9
                    action: "allow" as const,
                    reason: "strict reviewer approved read-only git status",
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
-index 7cc371ac34b7a3fb038f251cd1bb362af811a8f5..216f5ce897e9acc74eb126c019ff408ac6adae42 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -943,7 +943,7 @@ reviewed.instance(
+@@ -973,9 +973,9 @@
+   { git: true },
  )
  
+-// #203：edit/apply_patch 等非 shell auto 请求预审层级为 general，开发期交给 reviewer 单点判断
++// #232：general 是确定性 allow 边界——edit/apply_patch 的普通 add/update 不消耗 reviewer
  reviewed.instance(
 -  "ask - auto routes non-shell general tools to reviewer without pending user approval",
 +  "ask - auto allows non-shell general tools without pending user approval",
    () =>
      Effect.gen(function* () {
        reviewedCalls = 0
-@@ -956,12 +956,13 @@ reviewed.instance(
+@@ -988,9 +988,11 @@
          metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
        })
  
--      // [local-smark] general 非 shell auto 路由回归开始
--      // 开发期要求 edit/apply_patch 这类非 shell auto 请求不要回到普通 ask；
--      // 它们没有 bash 级语义证据，预审层级是 general，因此交给 reviewer 单点判断。
+-      // #203：开发期要求 edit 这类非 shell auto 请求不回到普通 ask；预审层级 general，
+-      // #203：交给 reviewer 单点判断，不产生 pending 用户审批
 -      expect(reviewedCalls).toBe(1)
-+      // [local-smark] general auto 路由回归开始
-+      // general 是 deterministic allow 边界；只有 cautious 才进入 reviewer。
-+      // edit/apply_patch 的普通 add/update 不应因为缺少 bash 语义证据而消耗
-+      // reviewer 或退回可点击 ask，delete 会在 precheck 中被提升为 cautious。
++      // #232：断言从 1 翻转为 0——general 不再消耗 reviewer 配额，pending 审批为零。
++      // #232：general 是 deterministic allow 边界；只有 cautious 才进入 reviewer。
++      // #232：edit/apply_patch 的普通 add/update 不应因为缺少 bash 语义证据而消耗
++      // #232：reviewer 或退回可点击 ask，delete 会在 precheck 中被提升为 cautious。
 +      expect(reviewedCalls).toBe(0)
        expect(yield* list()).toHaveLength(0)
--      // [local-smark] general 非 shell auto 路由回归结束
-+      // [local-smark] general auto 路由回归结束
      }),
    { git: true },
- )
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index a98e21658652d7879ea3158ae642c123bc652bbc..706c4b3b541dfb4a030b14e1119aad56d781202e 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -257,13 +257,13 @@ describe("permission precheck bash classifier", () => {
+@@ -20,13 +20,13 @@
            files: [{ type: "delete", relativePath: "docs/old name.md", deletions: 4 }],
          },
        }),
@@ -536,7 +547,7 @@ index a98e21658652d7879ea3158ae642c123bc652bbc..706c4b3b541dfb4a030b14e1119aad56
      expect(
        PermissionPrecheck.evaluate({
          permission: "edit",
-@@ -291,11 +291,10 @@ describe("permission precheck bash classifier", () => {
+@@ -54,11 +54,10 @@
      ).toMatchObject({ level: "general" })
    })
  
@@ -551,7 +562,7 @@ index a98e21658652d7879ea3158ae642c123bc652bbc..706c4b3b541dfb4a030b14e1119aad56
      expect(
        PermissionPrecheck.evaluate({
          permission: "external_directory",
-@@ -307,7 +306,56 @@ describe("permission precheck bash classifier", () => {
+@@ -70,7 +69,59 @@
            patchText: "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
          },
        }),
@@ -559,6 +570,7 @@ index a98e21658652d7879ea3158ae642c123bc652bbc..706c4b3b541dfb4a030b14e1119aad56
 +    ).toMatchObject({ level: "cautious" })
 +  })
 +
++  // #232：外部路径本身就是 cautious 边界——带空格路径的纯只读请求也必须进入 reviewer
 +  test("marks external directory access cautious", () => {
 +    // external_directory is the review boundary for every external path, including
 +    // path-only read tools with spaces in the target path. This keeps
@@ -573,6 +585,8 @@ index a98e21658652d7879ea3158ae642c123bc652bbc..706c4b3b541dfb4a030b14e1119aad56
 +    ).toMatchObject({ level: "cautious" })
 +  })
 +
++  // #232：危险 shell 载荷在 external_directory 门禁保持 deterministic deny——不因
++  // #232：同时引用外部路径而降级为 reviewer 可审批
 +  test("keeps dangerous shell external directory effects denied", () => {
 +    // External-directory review is intentionally below deterministic dangerous
 +    // shell denial: an obviously destructive payload must not be made reviewable
@@ -608,4 +622,4 @@ index a98e21658652d7879ea3158ae642c123bc652bbc..706c4b3b541dfb4a030b14e1119aad56
 +    ).toMatchObject({ level: "dangerous" })
    })
  
-   test("filters broad always-allow prefixes", () => {
+ describe("permission precheck bash classifier", () => {

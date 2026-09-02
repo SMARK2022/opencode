@@ -11,7 +11,6 @@ Content-Transfer-Encoding: 8bit
 展开态 body 缺少命令与输出之间的空行分隔，与折叠预览不一致。移除内联文字标签，改用无条件 marginTop 空行，上下文模式靠标题标签和背景色区分。
 
 避免展开/折叠切换时间距消失的回归。
-
 diff --git a/docs/plans/tui-bash-command-output-spacing.md b/docs/plans/tui-bash-command-output-spacing.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..817381463e34dbd25b49a5ee5693fce8af82eca6
@@ -547,43 +546,58 @@ index 0000000000000000000000000000000000000000..817381463e34dbd25b49a5ee5693fce8
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 61c33c1167ef9bd1ac85accd056d88d5b7709c60..b606d11295970132166f6b55e76db5db194af1b0 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -2714,11 +2714,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index ab8b1eef2..852078a5d 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2959,15 +2959,12 @@ function Shell(props: ToolProps) {
+           preview={
+             shellCanCollapse() && !showContextOutput() ? (
+               // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
+-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
++              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, "", previewText(output(), 10)].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
+             ) : undefined
+           }
          >
-           <box>
-             <text fg={theme.text}>$ {props.input.command}</text>
+           <box gap={1}>
+             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
 -            <Show when={showContextOutput()}>
 -              <text fg={theme.info}>Model context output</text>
 -            </Show>
-+            {/* 上下文输出模式的内联文字标签已移除：标题 · returned to model 和背景色
-+                已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}
-             <Show when={output()}>
--              <text fg={theme.text}>{output()}</text>
-+              <box marginTop={1}>
-+                <text fg={theme.text}>{output()}</text>
-+              </box>
+               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
              </Show>
-           </box>
-         </BlockTool>
-diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-index 2995cb72879d57c271c22bd8612f9b129f993bd9..adf05dff03face55649cf97debf0bed7c7223063 100644
---- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-@@ -150,8 +150,12 @@ describe("Session route integration points", () => {
-       expect(sessionSource).toContain("onRightClick={contextOutputAvailable")
-     })
- 
--    test("Shell shows 'Model context output' label", () => {
--      expect(sessionSource).toContain("Model context output")
-+    test("Shell does not show 'Model context output' inline label", () => {
-+      expect(shellSource).not.toContain("Model context output")
-+    })
+             <Show when={output()}>
+diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+new file mode 100644
+index 000000000..8e054a99a
+--- /dev/null
++++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import path from "path"
 +
-+    test("Shell body has marginTop spacing between command and output", () => {
-+      expect(shellSource).toContain("marginTop={1}")
-     })
-   })
- 
++// #449 语义：bash 展开输出的命令与输出之间统一空行分隔，且不再有内联
++// "Model context output" 标签——标题的 · returned to model 与上下文背景色已足够区分。
++const sessionSource = readFileSync(
++  path.join(import.meta.dir, "../../../src/routes/session/index.tsx"),
++  "utf8",
++)
++
++describe("Session Shell output spacing", () => {
++  test("Shell does not show 'Model context output' inline label", () => {
++    expect(sessionSource).not.toContain("Model context output")
++  })
++
++  test("Shell body keeps consistent command/output spacing", () => {
++    // 目标 Shell 容器使用 gap={1} 提供与折叠预览一致的空行分隔；
++    // 源实现的 marginTop={1} 由这一容器级 gap 等价承担。
++    const shellStart = sessionSource.indexOf("function Shell(props: ToolProps)")
++    expect(shellStart).toBeGreaterThan(-1)
++    const shellBody = sessionSource.slice(shellStart, shellStart + 6000)
++    expect(shellBody).toContain("gap={1}")
++    // 折叠预览的 join 数组必须显式承载空行元素，filter 只剔除 undefined 不剔除空串。
++    expect(shellBody).toContain(`"", previewText(output(), 10)]`)
++  })
++})
+\ No newline at end of file
