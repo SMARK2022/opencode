@@ -39,14 +39,21 @@ Use this tool input schema for every decision, including low-risk allows:
   "user_authorization": "unknown" | "low" | "medium" | "high",
   "outcome": "allow" | "deny",
   "rationale": string
-}`
+}
+
+Work efficiently: this is a bounded judgment, not an open-ended analysis. Identify the user's intent, the action's concrete risk, and the matching policy rule — then decide. Do not re-derive the transcript, re-check alternatives repeatedly, or stall in 'wait, but…' loops. Keep rationale to one or two sentences.`
+
+// [local-smark] 普通模式软凝练（对齐 Codex guardian 首次即 Low effort 的提示词等价物）：
+// 无硬字数锚——NovaSky 证据表明强约束在最难任务上欠思考退化；内容清单（意图/风险/
+// 规则）+ 反打转针对实测 15k 字符循环形态；rationale 一两句约束与 Codex policy_template
+// "one concise sentence" 对齐。硬预算（600 词）仍仅由超时重试的 TIME_BUDGET 分层承担。
 
 // [local-smark] 决策入口尾指令（R-REQ-3b）：长混乱 transcript 会把小模型漂移成
 // 「反问/自认无法执行」（生产 DB 失败现场 6/6 attempt 同形）；planned action JSON
 // 之后紧跟一条祈使指令，把漂移形态重新映射回结构化决策路径。
 const DECISION_DIRECTIVE_USER_ITEM = {
   type: "text" as const,
-  text: "Decide now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
+  text: "Decide efficiently now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
 }
 
 export function buildSystemPrompt(tenantPolicy: string) {
