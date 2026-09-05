@@ -86,6 +86,14 @@ describe("permission reviewer prompt", () => {
     expect(prompt).toContain("Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.")
     expect(prompt).toContain('"risk_level": "low" | "medium" | "high" | "critical"')
     expect(prompt).toContain('"outcome": "allow" | "deny"')
+    // 两协议的普通首轮都有软引导，不能提前混入超时才生效的字数提示。
+    for (const protocol of ["json", "tool"] as const) {
+      const text = PermissionReviewerPrompt.buildSystemPrompt("", protocol)
+      expect(text).toContain("Work efficiently: this is a bounded judgment")
+      expect(text).toContain("Keep rationale to one or two sentences.")
+      expect(text).not.toContain("Time advisory")
+      expect(text).not.toContain("600 words")
+    }
   })
 
   // #198：验证用户提示词包含哨兵分隔标记——transcript、retry reason、planned action JSON 均有明确边界
@@ -141,6 +149,7 @@ describe("permission reviewer prompt", () => {
     // 指令项必须是最后一项：planned action（含 APPROVAL REQUEST END）在其前一项
     expect(items[items.length - 2]!.text).toContain(">>> APPROVAL REQUEST END")
     expect(last).toContain("permission_review_decision")
+    expect(last).toContain("Decide efficiently now")
     expect(last).toContain("insufficient evidence")
     expect(last).toContain("do not ask questions")
 
