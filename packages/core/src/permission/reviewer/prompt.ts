@@ -43,7 +43,11 @@ Use this ${protocol === "tool" ? "tool input" : "JSON"} schema for every decisio
   "user_authorization": "unknown" | "low" | "medium" | "high",
   "outcome": "allow" | "deny",
   "rationale": string
-}`
+}
+
+Work efficiently: this is a bounded judgment, not an open-ended analysis. Identify the user's intent, the action's concrete risk, and the matching policy rule — then decide. Do not re-derive the transcript, re-check alternatives repeatedly, or stall in 'wait, but…' loops. Keep rationale to one or two sentences.`
+
+// 普通首轮只给软凝练引导，600词时间提示仍仅由超时补试追加，不新增provider硬限。
 
 // #198：模板替换而非拼接——保证策略在模板的正确位置，而非附加在末尾可能被忽略
 export function buildSystemPrompt(tenantPolicy: string, protocol: "json" | "tool" = "tool") {
@@ -73,7 +77,7 @@ export function buildUserPromptItems(
     // 尾指令紧跟planned action，重申裁判角色但不改变证据或扩张授权；JSON路径保留自己的协议。
     {
       type: "text",
-      text: `Decide now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
+      text: `Decide efficiently now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
     },
   ]
 }

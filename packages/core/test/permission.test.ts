@@ -558,7 +558,7 @@ describe("PermissionV2", () => {
     expect(reviewRequests).toHaveLength(1)
     expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.make("required"))
     expect(JSON.stringify(reviewRequests[0]?.system)).toContain("You are the judge")
-    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide now and submit exactly one permission_review_decision call.")
+    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide efficiently now and submit exactly one permission_review_decision call.")
     expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
     expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
