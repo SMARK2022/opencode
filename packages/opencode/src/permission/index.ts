@@ -181,7 +181,8 @@ const layer = Layer.effect(
                   rationale: decision.reason,
                 })
               }
-              if (cache) yield* cache.put(autoRequest, "allow")
+              // dangerous批准逐次重审；事件照常发布，cautious仍可写原有会话缓存。
+              if (cache && decision.precheckLevel !== "dangerous") yield* cache.put(autoRequest, "allow")
             }
             if (!needsAsk) return
           }

@@ -255,7 +255,8 @@ const layer = Layer.effect(
       }
       if (decision.action === "ask") return { effect: "ask" as const, rules: all }
       record(false)
-      if (decision.source === "reviewer" && !toolExternal) known.add(key)
+      // 原生缓存同样排除dangerous，保留toolExternal逐次审查和cautious缓存。
+      if (decision.source === "reviewer" && !toolExternal && decision.precheckLevel !== "dangerous") known.add(key)
       // 自动批准不覆盖请求中另一个仍为 ask 的资源。
       return { effect, rules: all }
     })

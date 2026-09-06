@@ -4,7 +4,7 @@ import { PermissionPrecheck } from "./precheck"
 // #202：自动决策类型——allow/ask/deny 三态，source 追踪决策来源（precheck 或 reviewer）
 // #202：ask 的 source 扩展为 precheck | reviewer_unavailable：general 层级在 strict 关闭时直接回退用户审批
 export type Decision =
-  | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
+  | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string; precheckLevel?: PermissionPrecheck.Level }
   | { action: "ask"; reason: string; source: "precheck" | "reviewer_unavailable" }
   | { action: "deny"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
 
@@ -65,12 +65,9 @@ export function evaluate(
   return Effect.gen(function* () {
     // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
     const precheck = PermissionPrecheck.evaluate(input)
-    // #232：shell-origin 与 tool-origin external_directory 不再单独分支——统一由
-    // #232：precheck 的 externalDirectoryEffect 提升为 cautious 或保持 dangerous deny。
-    // #232：safe/general/cautious/dangerous 是 LLM 负载边界——safe 和 general 默认直接
-    // #232：允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是
-    // #232：用户显式配置的例外，用来保留原本"低风险也审"的能力。
-    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    // 五级路由：forbidden终审拒绝；cautious/dangerous进入既有reviewer及失败回退。
+    // safe/general默认直过，strict仍保留低风险也审的用户配置，不新增权限执行owner。
+    if (precheck.level === "forbidden") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
     if (precheck.level === "safe" && !input.strict) {
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
@@ -130,6 +127,8 @@ export function evaluate(
             reason: reviewed.reason,
             source: "reviewer",
             reviewID: reviewed.reviewID,
+            // 两代消费点据实际层级禁止缓存dangerous批准，不能把一次授权放大到后续同形请求。
+            ...(reviewed.action === "allow" ? { precheckLevel: precheck.level } : {}),
           } satisfies Decision
         },
       }),
