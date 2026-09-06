@@ -3,7 +3,7 @@ import { PermissionPrecheck } from "./precheck"
 import type { MessageID, SessionID } from "@/session/schema"
 
 export type Decision =
-  | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
+  | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string; precheckLevel?: PermissionPrecheck.Level }
   | { action: "ask"; reason: string; source: "precheck" | "reviewer_unavailable" }
   | { action: "deny"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
 
@@ -61,11 +61,12 @@ export function evaluate(
 ) {
   return Effect.gen(function* () {
     const precheck = PermissionPrecheck.evaluate(input)
-    // [local-smark] auto 四级预审路由开始
-    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 和 general 默认
-    // 直接允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。
+    // [local-smark] auto 五级预审路由开始（R2 五级拆分）
+    // safe/general/cautious/dangerous/forbidden 是 LLM 负载边界：safe 和 general
+    // 默认直接允许；cautious 与 dangerous（可授权高风险）进入 reviewer/user
+    // fallback；forbidden（不可逆灾难）终审拒绝，reviewer 不可见、授权不可放行。
     // strict 是用户显式配置的例外，用来保留原本“低风险也审”的能力。
-    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    if (precheck.level === "forbidden") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
     if (precheck.level === "safe" && !input.strict) {
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
@@ -134,6 +135,9 @@ export function evaluate(
             reason: reviewed.reason,
             source: "reviewer",
             reviewID: reviewed.reviewID,
+            // [local-smark] 缓存门数据通道（R2）：allow 携带 precheck 层级，
+            // index 侧据此拒绝对 dangerous 写会话缓存（每条独立重审）
+            ...(reviewed.action === "allow" ? { precheckLevel: precheck.level } : {}),
           } satisfies Decision
         },
       }),

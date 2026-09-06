@@ -314,7 +314,10 @@ export const layer = Layer.effect(
                   rationale: decision.reason,
                 })
               }
-              if (cache) yield* cache.put(autoRequest, "allow")
+              // [local-smark] 缓存门（R2 五级拆分，用户决策）：dangerous 级的
+              // reviewer allow 不写会话缓存——高风险命令每条独立重审，防止一次
+              // 授权静默放大到后续同形命令；cautious 缓存行为不变。
+              if (cache && decision.precheckLevel !== "dangerous") yield* cache.put(autoRequest, "allow")
             }
             if (!needsAsk) return
           }

@@ -21,7 +21,10 @@
 //   • dangerous 结果短路，不继续后续阶段
 // ============================================================
 
-export const LEVELS = ["safe", "general", "cautious", "dangerous"] as const
+// [local-smark] 五级词汇（R2 计划）：dangerous 与 forbidden 拆分——dangerous 是
+// 可授权高风险（进 reviewer，显式授权可 allow）；forbidden 是终审拒绝
+// （不可逆灾难，任何授权不可放行）。maxRisk 依赖本数组顺序作为严重度序。
+export const LEVELS = ["safe", "general", "cautious", "dangerous", "forbidden"] as const
 export type Level = (typeof LEVELS)[number]
 export type Decision = { level: Level; reason: string }
 
@@ -75,12 +78,14 @@ const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", 
 // PowerShell 工作树覆写/截断：与删除不同族，但同样不可 auto 直过。
 const FILE_WRITE_COMMANDS = new Set(["clear-content", "set-content", "out-file"])
 
-// 系统级破坏性命令：执行即造成不可逆损害，直接判定 dangerous。
-const SYSTEM_DESTRUCTIVE_COMMANDS = new Set([
-  "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs",
-  "fdisk", "parted", "wipefs",
-  "shutdown", "reboot", "halt", "poweroff",
-])
+// [local-smark] 磁盘格式化/分区族 → forbidden：盘上数据不可逆（用户决策：格式化等
+// 磁盘操作归 Forbidden）。mkfs 不走封闭集合：`mkfs` / `mkfs.*` 前缀族判定
+// （R2 GAP-1：vfat/ntfs/exfat/f2fs/msdos 等变体曾因枚举缺失而 general 直通）。
+const DISK_FORMAT_COMMANDS = new Set(["fdisk", "parted", "wipefs"])
+
+// [local-smark] 关机/重启族 → dangerous：可逆（重新开机），归 dangerous 进
+// reviewer，显式用户授权可 allow（用户决策，R2 五级拆分）。
+const SHUTDOWN_COMMANDS = new Set(["shutdown", "reboot", "halt", "poweroff"])
 
 // 用户/组账号管理命令：修改系统用户数据库，需要显式审批。
 const USER_ACCOUNT_COMMANDS = new Set([
@@ -99,8 +104,9 @@ const PROCESS_TERMINATION_COMMANDS = new Set(["kill", "pkill", "killall", "stop-
 // 第三部分：敏感路径模式
 // ============================================================
 
-// SSH 私钥文件名模式
-const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
+// SSH 私钥文件名模式：`(?![.\w-]*\.pub\b)` 排除公钥后缀（公钥是公开物）；
+// `.backup` 等其它后缀变体仍按敏感处理（R2 W4）。
+const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?(?![.\w-]*\.pub\b)`
 
 // Windows 家目录下的敏感路径
 const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
@@ -171,11 +177,8 @@ const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(
   "i",
 )
 
-// 凭据文件通过 scp/rsync/sftp 远程传输
-const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(
-  String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,
-  "i",
-)
+// 凭据文件通过 scp/rsync/sftp 远程传输：由 W4 方向感知 helper 取代（R2）；
+// 出向（本地敏感路径作源）才 dangerous，入向/认证键/.pub 不命中。
 
 // PowerShell 保护根目录递归删除。仅检查 -Recurse，不要求 -Force：
 // 与 token 层（classifyTokens 的 remove-item/ri 分支）对齐，且确保被 sudo 等包装器
@@ -213,7 +216,11 @@ const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unx
 const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:(?:~|\$HOME)[\\/]|\/(?:home\/[^\/|;]+|root|Users\/[^\/|;]+)[\\/]|[A-Za-z]:[\\/]Users[\\/][^\\/|;]+[\\/])?\.ssh[\\/]authorized_keys/i
 
 // sudoers 直写（特权升级）
-const RE_D_SUDOERS_WRITE = /(?:>>?\s*["']?\/etc\/sudoers|\bvisudo\b)/i
+const RE_D_SUDOERS_WRITE = /(?:>>?\s*["']?\/etc\/sudoers|\bvisudo\b|\btee\b[^|;]*\/etc\/sudoers)/i
+
+// [local-smark] cp/mv/install 的 sudoers 目的位（R2 GAP-2）：sudoers 路径须紧邻
+// 段尾（$、;、| 或行尾前空白）才判定为写入目的；源位（sudoers 后还有其它路径）不命中。
+const RE_D_SUDOERS_COPY_DEST = /\b(?:cp|mv|install)\b[^|;]*\s(?:["']?)\/etc\/sudoers(?:\.d)?(?:\/[^\s|;]*)?["']?(?=\s*(?:$|[|;]))/i
 
 // setuid/setgid 位设置（raw 层覆盖不可 token 化的场景）
 const RE_D_CHMOD_SETUID = /\bchmod\b[^|;]*\b[ug]\+s\b/i
@@ -341,15 +348,15 @@ function bashEffect(input: {
 
   // 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据风险取 max。
   // inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的源码证据，
-  // 只能提高风险，不能降低：dangerous source 在任何 gate 都被 deterministic deny。
+  // 只能提高风险，不能降低：forbidden/dangerous source 在任何 gate 都不可被弱化。
   const raw = shellEvidenceRisk(command, input.metadata)
   if (!patternCommand.trim() || patternCommand === command) return raw
 
   // Shell metadata is the raw audit/reviewer evidence, while permission patterns
   // are canonical rule keys that may omit POSIX leading environment assignments.
   // Auto precheck must consider both views and keep the higher risk so raw
-  // dangerous payloads cannot be weakened, and env assignments cannot downgrade a
-  // canonical `git push --force` pattern from cautious to general.
+  // forbidden/dangerous payloads cannot be weakened, and env assignments cannot
+  // downgrade a canonical `git push --force` pattern from cautious to general.
   return maxRisk(raw, evaluateShell(patternCommand, 0))
 }
 
@@ -389,10 +396,11 @@ function externalDirectoryEffect(input: {
       input.metadata,
     )
     // external_directory access is normally reviewable, but an already-critical
-    // shell payload must remain deterministic deny. Otherwise a command like
-    // `rm -rf /` would become reviewer/user approved merely because it also
-    // crosses the external-directory gate.
-    if (shell.level === "dangerous") return shell
+    // shell payload must remain deterministic deny (forbidden) or keep its stronger
+    // dangerous signal into review. Otherwise a command like `rm -rf /` would
+    // become reviewer/user approved merely because it also crosses the
+    // external-directory gate.
+    if (shell.level === "forbidden" || shell.level === "dangerous") return shell
   }
 
   // This exact reason names the cautious seam for external path boundaries. It is
@@ -447,6 +455,9 @@ function evaluateShell(command: string, depth: number): Decision {
 
   // raw 扫描在 token 分割之前运行，这样隐藏在命令替换、重定向、包装器字符串
   // 或无效语法后面的危险载荷仍然会被阻止而不是被降级为通用提示。
+  // forbidden（不可逆灾难）先于 dangerous（可授权高风险）短路。
+  const forbidden = forbiddenRaw(command)
+  if (forbidden) return { level: "forbidden", reason: forbidden }
   const danger = dangerousRaw(command)
   if (danger) return { level: "dangerous", reason: danger }
   const caution = cautiousRaw(command)
@@ -454,9 +465,12 @@ function evaluateShell(command: string, depth: number): Decision {
 
   // 包装器载荷提取：在完整命令可能因重定向或不支持的分隔符而不透明时，
   // 扫描未引用的命令段以发现可见的包装器载荷。
+  // [local-smark] R2 实现审计 B-01：此处必须含 forbidden——否则
+  // `bash -c 'mkfs.vfat …' > log` 的 token 独有 forbidden 载荷被丢弃，
+  // 重定向致整段 opaque 后回退 general 直通 auto-allow（安全回归实测）。
   for (const wrapped of rawWrapperScripts(command)) {
     const decision = evaluateShell(wrapped, depth + 1)
-    if (decision.level === "dangerous" || decision.level === "cautious") return decision
+    if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
   }
 
   // 结构解析：将命令分割为独立子命令并逐个分析。splitCommands 对未建模语法按段
@@ -468,6 +482,9 @@ function evaluateShell(command: string, depth: number): Decision {
   // 段的审查信号。无任何可分析段（整条 opaque）时回退 general，等价旧行为。
   if (opaque) decisions.push({ level: "general", reason: "opaque shell segment requires explicit approval" })
   if (decisions.length === 0) return { level: "general", reason: "opaque shell command requires explicit approval" }
+  // 段合并保序：forbidden > dangerous > cautious（R2 五级拆分）
+  const forbiddenHit = decisions.find((item) => item.level === "forbidden")
+  if (forbiddenHit) return forbiddenHit
   const dangerous = decisions.find((item) => item.level === "dangerous")
   if (dangerous) return dangerous
   const cautious = decisions.find((item) => item.level === "cautious")
@@ -487,8 +504,8 @@ function evaluateCommand(command: string, depth: number): Decision {
   if (unwrapped.action === "script") {
     const decision = evaluateShell(unwrapped.script, depth + 1)
     // 包装器载荷分层传播：包装器本身不能变成 safe，因为未来同一前缀可能
-    // 承载任意脚本；但如果可见脚本是 cautious/dangerous，保留更高风险层级。
-    if (decision.level === "dangerous" || decision.level === "cautious") return decision
+    // 承载任意脚本；可见脚本为 cautious/dangerous/forbidden 时保留更高风险层级。
+    if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
     return { level: "general", reason: unwrapped.reason }
   }
   if (unwrapped.action === "ask") return { level: "general", reason: unwrapped.reason }
@@ -499,8 +516,8 @@ function evaluateCommand(command: string, depth: number): Decision {
     if (remote.script) {
       const decision = evaluateShell(remote.script, depth + 1)
       // SSH/WSL 跨越本机信任边界：安全的远程只读命令仍是 general；可见的远程
-      // 破坏性动作保留 cautious/dangerous。
-      if (decision.level === "dangerous" || decision.level === "cautious") return decision
+      // 破坏性动作保留 cautious/dangerous/forbidden。
+      if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
     }
     return { level: "general", reason: remote.reason }
   }
@@ -559,7 +576,9 @@ function normalizeForRawScan(command: string): string {
     .trim()
 }
 
-function dangerousRaw(command: string): string | undefined {
+// [local-smark] forbiddenRaw：不可逆灾难族（R2 五级拆分）——保护根删除、驱动器
+// 格式化、解释器内保护根删除、反弹 shell、全进程终止。终审拒绝，任何授权不可放行。
+function forbiddenRaw(command: string): string | undefined {
   const normalized = normalizeForRawScan(command)
 
   // ---- 保护根目录递归删除 ----
@@ -572,27 +591,10 @@ function dangerousRaw(command: string): string | undefined {
   }
   if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
 
-  // ---- 远程下载管道执行 ----
-  if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
-    return "remote download piped to interpreter; review the script locally before running safe commands"
-  if (RE_D_PS_DOWNLOAD_EXEC.test(normalized))
-    return "remote PowerShell download executed as code; review the script locally before running safe commands"
-
-  // ---- 解码/混淆载荷管道执行 ----
-  // base64 -d | sh、openssl enc -d | sh、xxd -r | sh 等：载荷不可见，必须阻止
-  if (RE_D_DECODE_PIPE_INTERPRETER.test(normalized))
-    return "decoded/decompressed payload piped to interpreter"
-
   // ---- Windows 破坏性操作 ----
   if (RE_D_WINDOWS_FORMAT.test(normalized)) return "Windows drive format"
   // Windows 保护递归删除：同段 token 谓词（禁整串子串共现误报）
   if (windowsProtectedDeleteInCommand(normalized)) return "Windows protected directory delete"
-
-  // ---- 凭据外传 ----
-  // 敏感文件读取管道到网络传输是 dangerous；单独的敏感读取在 cautiousRaw 处理
-  if (RE_D_CREDENTIAL_PIPE_NETWORK.test(normalized)) return "credential read piped to network transfer"
-  if (RE_D_CREDENTIAL_UPLOAD_FLAG.test(normalized)) return "credential file sent with network transfer"
-  if (RE_D_CREDENTIAL_REMOTE_TRANSFER.test(normalized)) return "credential file sent with remote transfer"
 
   // ---- PowerShell 保护根目录递归删除 ----
   if (RE_D_PS_RECURSIVE_DELETE_ROOT.test(normalized)) return "critical PowerShell recursive delete"
@@ -606,14 +608,85 @@ function dangerousRaw(command: string): string | undefined {
   // ---- 反弹 shell ----
   if (RE_D_REVERSE_SHELL.test(normalized)) return "reverse shell pattern"
 
-  // sudoers 修改授予特权升级
+  // ---- 全进程终止 ----
+  // mass kill 全族统一 forbidden（R1 审计 B-01）：向全部进程发信号与 rm -rf / 同级不可逆
+  if (RE_D_KILL_ALL.test(normalized)) return "mass process kill"
+}
+
+// [local-smark] dangerousRaw：可授权高风险族（R2 五级拆分）——凭据外传、远程下载
+// 管道执行、解码管道、sudoers/setuid 提权面。进 reviewer，显式用户授权可 allow。
+function dangerousRaw(command: string): string | undefined {
+  const normalized = normalizeForRawScan(command)
+
+  // ---- 远程下载管道执行 ----
+  if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
+    return "remote download piped to interpreter; review the script locally before running safe commands"
+  if (RE_D_PS_DOWNLOAD_EXEC.test(normalized))
+    return "remote PowerShell download executed as code; review the script locally before running safe commands"
+
+  // ---- 解码/混淆载荷管道执行 ----
+  // base64 -d | sh、openssl enc -d | sh、xxd -r | sh 等：载荷不可见，须 reviewer 审
+  if (RE_D_DECODE_PIPE_INTERPRETER.test(normalized))
+    return "decoded/decompressed payload piped to interpreter"
+
+  // ---- 凭据外传 ----
+  // 敏感文件读取管道到网络传输；单独的敏感读取在 cautiousRaw 处理
+  if (RE_D_CREDENTIAL_PIPE_NETWORK.test(normalized)) return "credential read piped to network transfer"
+  if (RE_D_CREDENTIAL_UPLOAD_FLAG.test(normalized)) return "credential file sent with network transfer"
+  // scp/rsync/sftp 仅出向才 dangerous（R2 W4 方向感知）：入向拉取、-i 认证键、
+  // .pub 公钥不命中，落 token 层既有 cautious
+  if (RE_REMOTE_TRANSFER_TOOL.test(normalized) && credentialOutboundTransfer(normalized))
+    return "credential file sent with remote transfer"
+
+  // ---- sudoers 提权面 ----
   if (RE_D_SUDOERS_WRITE.test(normalized)) return "sudoers modification grants privilege escalation"
+  // cp/mv/install 目的位写入 sudoers：sudoers 路径位于段尾（$ / ; / | 前）→ dangerous。
+  // 必须在 raw 层拦：cautiousRaw 的 RAW_FILE_MOVE 会把 `sudo mv ... /etc/sudoers.d/x`
+  // 抢先降为 cautious（R2 GAP-2 实测）。源位形式（sudoers 在前）不匹配。
+  if (RE_D_SUDOERS_COPY_DEST.test(normalized)) return "sudoers modification grants privilege escalation"
 
   // ---- 特权升级 ----
   if (RE_D_CHMOD_SETUID.test(normalized)) return "setuid/setgid bit creates privilege escalation surface"
+}
 
-  // ---- 全进程终止 ----
-  if (RE_D_KILL_ALL.test(normalized)) return "mass process kill"
+// scp/rsync/sftp 工具词（W4 方向感知入口）
+const RE_REMOTE_TRANSFER_TOOL = /\b(?:scp|rsync|sftp)\b/i
+
+// 远端操作数近似（W4）：`user@host:path`、`[ipv6]:path`、≥3 字符裸/点分主机名
+// `host:path`（含 example.com 形态）；单字母盘符 `F:\x` 不匹配（避免 Windows 本地路径误判为远端）。
+const RE_REMOTE_OPERAND = /^(?:[^\s"@]+@[^\s:"]+:|\[[0-9a-fA-F:]+\]:|[A-Za-z][A-Za-z0-9.-]{2,}:)/
+
+// [local-smark] W4 出向判定：剥除 -i / -o IdentityFile 身份参数后，若存在远端
+// 操作数且首个远端操作数之前出现敏感本地路径（非 .pub 后缀）则视为出向外传。
+// 判错方向为 cautious（fail 方向偏严），与既有 token 层 remote transfer 审查衔接。
+function credentialOutboundTransfer(normalized: string): boolean {
+  const stripped = normalized
+    .replace(/(?:\s|^)-i\s+\S+/g, " ")
+    .replace(/(?:\s|^)-o\s+IdentityFile(?:=|\s)\S+/g, " ")
+    .replace(/(?:\s|^)-oIdentityFile=\S+/g, " ")
+  const tokens = stripped.split(/\s+/).filter(Boolean)
+  let firstRemote = -1
+  for (let i = 0; i < tokens.length; i++) {
+    if (RE_REMOTE_OPERAND.test(tokens[i]!.replace(/^["']+|["']+$/g, ""))) {
+      firstRemote = i
+      break
+    }
+  }
+  // 无远端操作数则不是凭据外传（token 层另有 cautious 审查）
+  if (firstRemote === -1) return false
+  // [local-smark] R2 实现审计 B-02：必须用非锚定包含语义（与旧
+  // RE_D_CREDENTIAL_REMOTE_TRANSFER 一致）：`/home/alice/.env`、`keys/id_rsa` 等
+  // 带路径前缀的敏感文件同样算出向载荷；锚定全 token 匹配会把它们静默降为
+  // cautious 并重新进入会话缓存（授权放大）。.pub 拒绝仍在前置过滤。
+  const sensitive = new RegExp(SENSITIVE_PATH_ARGUMENT_PATTERN, "i")
+  return tokens
+    .slice(0, firstRemote)
+    .some((token) => {
+      const bare = token.replace(/^["']+|["']+$/g, "")
+      // .pub 公钥非秘密（R2 B-03 双机制：覆盖 .ssh 路径/Windows 家目录/裸名三分支）
+      if (/\.pub$/i.test(bare)) return false
+      return sensitive.test(bare)
+    })
 }
 
 function cautiousRaw(command: string): string | undefined {
@@ -1089,21 +1162,32 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   // 暴露给 shell 输出和模型上下文，从 safe/general 提升为 cautious。
   if (readsSensitivePath(tokens)) return { level: "cautious", reason: "sensitive file read requires explicit approval" }
 
+  // [local-smark] sudoers 方向判定（R2 GAP-2）：cp/mv/install 的目的操作数位
+  // （最后一个路径实参）指向 sudoers 路径 → dangerous 提权写入；sudoers 仅作
+  // 源（读方向）→ cautious 敏感读取。必须先于通用文件删除/移动分支：
+  // 否则 mv 被 FILE_MOVE_COMMANDS 抢先降为 cautious（R2 实测发现）。
+  if ((cmd === "cp" || cmd === "mv" || cmd === "install") && tokens.some((item) => item.startsWith("/etc/sudoers"))) {
+    const lastPath = tokens.at(-1)
+    if (lastPath && lastPath.startsWith("/etc/sudoers"))
+      return { level: "dangerous", reason: "sudoers modification grants privilege escalation" }
+    return { level: "cautious", reason: "sensitive system file read requires explicit approval" }
+  }
+
   // ---- 文件删除 ----
-  // rm -r 保护根 → dangerous；rm -r 普通路径 → cautious；其他删除 → cautious
+  // rm -r 保护根 → forbidden；rm -r 普通路径 → cautious；其他删除 → cautious
   if (cmd === "rm" && hasRecursiveDeleteFlags(tokens.slice(1))) {
     if (tokens.slice(1).some(protectedDeleteTarget))
-      return { level: "dangerous", reason: "critical recursive delete" }
+      return { level: "forbidden", reason: "critical recursive delete" }
     return { level: "cautious", reason: "recursive delete requires explicit approval" }
   }
   if ((cmd === "remove-item" || cmd === "ri") && tokens.some((item) => item.toLowerCase() === "-recurse")) {
     if (tokens.slice(1).some(protectedDeleteTarget))
-      return { level: "dangerous", reason: "critical PowerShell recursive delete" }
+      return { level: "forbidden", reason: "critical PowerShell recursive delete" }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
   // 与 rm 对称：del/rd/rmdir 保护根递归删除走同一 Windows 谓词，不降到 cautious
   if (windowsProtectedRecursiveDelete(tokens))
-    return { level: "dangerous", reason: "Windows protected directory delete" }
+    return { level: "forbidden", reason: "Windows protected directory delete" }
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   if (findDeletesFile(tokens))
@@ -1123,11 +1207,18 @@ function classifyTokens(tokens: string[]): Decision | undefined {
 
   // ---- 原始磁盘写入 ----
   if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
-    return { level: "dangerous", reason: "raw disk write" }
+    return { level: "forbidden", reason: "raw disk write" }
 
-  // ---- 系统破坏性命令 ----
-  if (SYSTEM_DESTRUCTIVE_COMMANDS.has(cmd))
-    return { level: "dangerous", reason: "system destructive command" }
+  // ---- 磁盘格式化/分区（R2 五级拆分 + GAP-1）----
+  // mkfs 前缀族覆盖全部文件系统变体（vfat/ntfs/exfat/f2fs/msdos/...），
+  // 避免封闭集合枚举漏项；盘上数据不可逆 → forbidden（用户决策）
+  if (cmd === "mkfs" || cmd.startsWith("mkfs.") || DISK_FORMAT_COMMANDS.has(cmd))
+    return { level: "forbidden", reason: "disk formatting or partition table destruction is irreversible" }
+
+  // ---- 关机/重启族（R2 五级拆分）----
+  // 可逆（重新开机），归 dangerous 进 reviewer：显式用户授权可 allow
+  if (SHUTDOWN_COMMANDS.has(cmd))
+    return { level: "dangerous", reason: "system shutdown or reboot requires explicit user authorization" }
 
   // ---- Git 操作 ----
   // Git 子命令的分类较复杂，委托给专项分类器
@@ -1179,22 +1270,24 @@ function classifyTokens(tokens: string[]): Decision | undefined {
 
   // ---- 服务管理 ----
   if (cmd === "systemctl") {
+    // mask 可逆（unmask 即恢复），归 dangerous 进 reviewer；旧注释“永久阻止”不准确
     if (tokens[1] === "mask")
-      return { level: "dangerous", reason: "service mask permanently prevents startup" }
+      return { level: "dangerous", reason: "service mask alters system service policy" }
     if (["stop", "disable", "enable", "start", "restart"].includes(tokens[1]))
       return { level: "cautious", reason: "service state change requires explicit approval" }
   }
 
   // ---- 进程终止 ----
   // [local-smark] 危险前置保序（:718 kill -9 -1 契约）：killall5 唯一语义即向
-  // 全部进程发信号（sysvinit-utils/busybox）无条件 dangerous；kill 的 -1 必须
-  // 处于尾操作数位（POSIX `kill -<signum> <pid>` 中信号位 -1 如 `kill -1 1234`
-  // 是单进程 SIGHUP，属 cautious 档）；-l 只读豁免对齐 crontab -l 先例（flags
-  // 全为 -l 且有实参，容忍非 flag 实参：kill -l / kill -l 9 仅列信号名）。
+  // 全部进程发信号（sysvinit-utils/busybox）无条件 forbidden（R2 五级拆分：
+  // 与 rm -rf / 同级不可逆）；kill 的 -1 必须处于尾操作数位（POSIX
+  // `kill -<signum> <pid>` 中信号位 -1 如 `kill -1 1234` 是单进程 SIGHUP，
+  // 属 cautious 档）；-l 只读豁免对齐 crontab -l 先例（flags 全为 -l 且有实参，
+  // 容忍非 flag 实参：kill -l / kill -l 9 仅列信号名）。
   if (cmd === "killall5")
-    return { level: "dangerous", reason: "mass process kill" }
+    return { level: "forbidden", reason: "mass process kill" }
   if (cmd === "kill" && tokens.at(-1) === "-1" && !tokens.slice(1).includes("-l"))
-    return { level: "dangerous", reason: "mass process kill" }
+    return { level: "forbidden", reason: "mass process kill" }
   if (PROCESS_TERMINATION_COMMANDS.has(cmd)) {
     const args = tokens.slice(1)
     const flags = args.filter((item) => item.startsWith("-"))
