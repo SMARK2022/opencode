@@ -163,10 +163,10 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   const defaultVoiceTranscriber =
     // 这里读取 opencode MCP 配置而不是 tui.json，复用用户已经安装好的 ChatGPT browser-agent 载体。
     (yield* TuiConfigHost.loadMcpVoiceTranscriber([
-      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
-      ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
-      ...projectOpencodeFiles,
-      ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
+      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode").map(file => ({ file, scope: "user" as const })),
+      ...(Flag.OPENCODE_CONFIG ? [{ file: Flag.OPENCODE_CONFIG, scope: "user" as const }] : []),
+      ...projectOpencodeFiles.map(file => ({ file, scope: "project" as const })),
+      ...dirs.flatMap(dir => ConfigPaths.fileInDirectory(dir, "opencode").map(file => ({ file, scope: (dir === Flag.OPENCODE_CONFIG_DIR ? "user" : "project") as "user" | "project" }))),
     ], ctx.directory)) ?? TuiConfigHost.DefaultVoiceTranscriber
 
   const result = TuiConfig.resolve(
