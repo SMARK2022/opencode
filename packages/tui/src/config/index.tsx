@@ -4,6 +4,8 @@ import { createBindingLookup } from "@opentui/keymap/extras"
 import { Schema } from "effect"
 import { createContext, type JSX, useContext } from "solid-js"
 import { TuiKeybind } from "./keybind"
+// type-only：Resolved.voice 的 transcriber 是 argv|chatgpt-direct 联合，但 schema 解析本身不依赖运行时模块。
+import type { VoiceTranscriber } from "../prompt-voice-input"
 
 export const AttentionSoundName = Schema.Literals([
   "default",
@@ -87,7 +89,7 @@ export const Info = Schema.Struct({
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
-export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | "mouse" | "cursor"> & {
+export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | "mouse" | "cursor" | "voice"> & {
   attention: {
     enabled: boolean
     notifications: boolean
@@ -103,6 +105,9 @@ export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | 
     style: "block" | "underline" | "line" | "default"
     blinking: boolean
   }
+  // 解析后的 transcriber 是 argv|chatgpt-direct 联合：用户显式配置只能是 argv（schema 限制），
+  // direct 变体仅由 MCP 推导产生并内嵌回退 argv。保持可选以兼容不关心语音的测试 fixture。
+  voice?: { transcriber?: VoiceTranscriber }
 }
 
 export const ResolveOptions = Schema.Struct({
@@ -110,7 +115,11 @@ export const ResolveOptions = Schema.Struct({
 })
 export type ResolveOptions = Schema.Schema.Type<typeof ResolveOptions>
 
-export function resolve(input: Info, options: ResolveOptions): Resolved {
+export function resolve(
+  // 入参放宽 voice 为联合：MCP 推导在 opencode 配置层产出 direct 变体后才传入 resolve，schema 本身仍只接受 argv。
+  input: Omit<Info, "voice"> & { voice?: { transcriber?: VoiceTranscriber } },
+  options: ResolveOptions,
+): Resolved {
   const keybinds: TuiKeybind.KeybindOverrides = { ...input.keybinds }
   if (process.platform === "darwin") {
     // 两个host均在合并完成后进入这里；只补缺省值，显式none/false/空绑定数组不能被F8重新打开。

@@ -1,6 +1,7 @@
 import spawn from "cross-spawn"
 import { which } from "@opencode-ai/core/util/which"
 import path from "path"
+import { takeVoiceAuthNotice, transcribeDirect, type VoiceAuthRuntime } from "./util/voice-auth"
 
 export const VOICE_FILE_PLACEHOLDER = "{file}"
 // 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
@@ -9,10 +10,22 @@ export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
 // 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
 export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
 
-export type VoiceTranscriber = {
-  command: string
-  args?: readonly string[]
+export type VoiceTranscriberDirect = {
+  type: "chatgpt-direct"
+  // auth 节点所在的 opencode 配置文件绝对路径与 mcp 键名；由 TuiConfig 推导时固定。
+  config: string
+  key: string
+  // 收割与浏览器回退共用的 agent CLI 入口：interpreter 是 MCP argv[0]（或 node），script 是 chatgpt.js 绝对路径。
+  interpreter: string
+  script: string
+  // "user"（全局 config 目录 / OPENCODE_CONFIG / OPENCODE_CONFIG_DIR）可写回；"project" 仅进程内存。
+  scope: "user" | "project"
+  // 与旧 MCP 推导公式完全一致的 transcribe-file argv，供直连失败后的用户批准回退使用。
+  transcriber: { command: string; args: string[] }
 }
+
+// argv 成员带 type?: undefined 使 TS 可判别联合：用户显式配置不带 type，direct 变体必带字面量。
+export type VoiceTranscriber = { type?: undefined; command: string; args?: readonly string[] } | VoiceTranscriberDirect
 
 export type VoiceInputStatus =
   | { type: "idle" }
@@ -98,6 +111,9 @@ export function createVoiceInputController(input: {
           if (stopGeneration !== generation) return
           // 空白文本由 transcribeVoiceFile 当错误处理；这里仍 trim 一次，保护自定义测试转写器和未来调用者。
           if (text.trim()) input.insertText(text)
+          // 605：voice-auth 的一次性提示（project 作用域不落盘/写回降级）借错误 toast 通道漏出，不阻断已成功的转写。
+          const notice = takeVoiceAuthNotice()
+          if (notice) input.onError?.(notice)
         } catch (error) {
           if (stopGeneration !== generation) return
           input.onError?.(error instanceof Error ? error.message : String(error))
@@ -156,25 +172,46 @@ export async function transcribeVoiceFile(input: {
   file: string
   transcriber: VoiceTranscriber
   timeout?: number
-  // 外部 signal 让 controller 的 cancel/abort 能真正中断 Process.run。
+  // 外部 signal 让 controller 的 cancel/abort 能真正中断转写（如空音频导致浏览器 hang）。
   signal?: AbortSignal
+  // 605：调用方可注入直连运行时；生产路径缺省使用 voice-auth 的真实网络实现。
+  directRuntime?: Partial<VoiceAuthRuntime>
 }) {
-  const command = input.transcriber.command.trim()
+  if (input.transcriber.type === "chatgpt-direct") {
+    // 预检失败（解释器/脚本缺失）直接抛错，不进入回退：配置残缺不是直连失败，
+    // 回退必须留给“凭据/网络层面的真实失败”，否则缺失配置会被静默降级成浏览器路径。
+    await validateVoiceTranscriber(input.transcriber)
+    try {
+      // 605：直连是主路径：凭据 ensure→POST→401 刷新重试在 voice-auth 内闭环。
+      return await transcribeDirect(input.file, input.transcriber, { runtime: input.directRuntime, signal: input.signal })
+    } catch (error) {
+      // 605：用户取消必须原样上抛：取消不是直连失败，回落浏览器会把已放弃的音频重新转写一遍。
+      if (input.signal?.aborted) throw error
+      // 605：用户批准的回退：直连（含收割）失败后回落同一 MCP 条目推导的 transcribe-file 浏览器页面 argv。
+      return await transcribeArgv(input.file, input.transcriber.transcriber, input)
+    }
+  }
+  return transcribeArgv(input.file, { command: input.transcriber.command, args: input.transcriber.args }, input)
+}
+
+async function transcribeArgv(file: string, transcriber: { command: string; args?: readonly string[] }, input: { timeout?: number; signal?: AbortSignal }) {
+  // 605：argv 合同与旧 transcribeVoiceFile 逐字一致：direct 回退与用户显式配置共用同一条 spawn 路径。
+  const command = transcriber.command.trim()
   // command 允许用户配置时带空格，但进入 spawn 前必须归一成真正 argv[0]。
   if (!command) throw new Error("Voice transcriber command is empty")
-  const args = input.transcriber.args ?? []
+  const args = transcriber.args ?? []
   if (!args.some((arg) => arg.includes(VOICE_FILE_PLACEHOLDER))) {
       // 没有占位符时转写器无法拿到本次录音文件，继续执行只会制造假成功。
       throw new Error(`Voice transcriber args must include ${VOICE_FILE_PLACEHOLDER}`)
   }
-  await validateVoiceTranscriber({ ...input.transcriber, command })
+  await validateVoiceTranscriber({ command, args })
 
   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
   // AbortSignal.any 合并外部取消信号和兜底超时；任一触发都终止 transcriber CLI。
   // transcriber拥有的daemon/browser自行维护生命周期，取消不得连带递归终止后代。
   const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
-  const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
+  const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, file))], {
     abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
   })
   // stderr 优先展示外部转写器自己的诊断；没有 stderr 时才落回退出码。
@@ -187,13 +224,20 @@ export async function transcribeVoiceFile(input: {
 }
 
 async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
+  if (transcriber.type === "chatgpt-direct") {
+    // 605：direct 变体的收割与回退共用 agent CLI：解释器与脚本都必须在录音前存在。
+    if (!(await commandExists(transcriber.interpreter))) {
+      throw new Error(`Voice transcriber command not found: ${transcriber.interpreter}. Configure tui.voice.transcriber or enable a local ChatGPT MCP server.`)
+    }
+    if (!(await Bun.file(transcriber.script).exists())) {
+      throw new Error(`Voice transcriber script not found: ${transcriber.script}`)
+    }
+    return
+  }
   const command = transcriber.command.trim()
   if (!command) throw new Error("Voice transcriber command is empty")
   // 这里只验证 argv[0] 是否存在，不解析 args，确保不会提前触发 shell 语义或环境变量展开。
-  const commandExists =
-    Boolean(which(command)) ||
-    ((path.isAbsolute(command) || command.includes("/") || command.includes("\\")) && (await Bun.file(command).exists()))
-  if (!commandExists) {
+  if (!(await commandExists(command))) {
     // 这里仅检查 argv[0] 是否可执行，不解释 args、不走 shell；缺失时在录音前失败，避免用户说完后才看到 spawn ENOENT。
     throw new Error(
       `Voice transcriber command not found: ${command}. Configure tui.voice.transcriber or enable a local ChatGPT MCP server.`,
@@ -210,6 +254,14 @@ async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
     // MCP 推导出的默认转写器形如 `node <agent-dir>/chatgpt.js ...`；脚本缺失时也要在录音前失败。
     throw new Error(`Voice transcriber script not found: ${script}`)
   }
+}
+
+// 605：argv[0] 存在性判定的共用助手——direct 分支的 interpreter 与 argv 分支的 command 共用。
+async function commandExists(command: string) {
+  return (
+    Boolean(which(command)) ||
+    ((path.isAbsolute(command) || command.includes("/") || command.includes("\\")) && (await Bun.file(command).exists()))
+  )
 }
 
 // voice 提示是否在 footer 显示：仅当配置了转写器且 prompt 框足够宽时露出。
