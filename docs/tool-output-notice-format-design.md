@@ -208,7 +208,7 @@ message: Command exceeded timeout. Retry with a larger timeout only if it is exp
 - 使用 ASCII：`x`、`->`，不要使用 `×`、`→`。
 - 能用行数就用 `L`，能用字节就用 `B/KB/MB`。
 - hash 只在原文恢复、去重或审计有帮助时出现。
-- prefix/suffix 默认不出现；只有高熵内容需要帮助识别时才出现。
+- prefix/suffix 默认不出现；定向偏离（用户授权，2026-09-06）：高熵内容以 `head=` 保留行首 7 字符，脱敏标记同理保留原值首 7 字符（仅原值 ≥16 字符时，防短凭据泄露大半）；字节单位用原始 `${bytes}B`（不做 KB 换算，避免第二套格式化实现）。
 - marker 应短于被替换内容，否则不应替换。
 
 ## 推荐 type 集合
@@ -432,12 +432,10 @@ total="12438L"
 | `...output truncated...` + `Full output saved to:` | `<opencode_notice type="output_truncated" ... />` |
 | `The tool call succeeded but the output was truncated...` | `<opencode_notice type="output_truncated" source="tool" ... />` |
 | `<shell_metadata>` | `<opencode_notice type="execution" source="shell" ... />` |
-| `<bash_high_signal_excerpt>` | `<opencode_excerpt type="shell_high_signal" ... />` |
-| `<pytest_summary>` | `<opencode_notice type="command_summary" source="pytest" ... />` |
-| `<docker_build_summary>` | `<opencode_notice type="command_summary" source="docker" ... />` |
-| `<docker_failed_step>` | 普通正文，前置 docker command_summary notice |
-| `<tsc_diagnostics_summary>` | `<opencode_notice type="command_summary" source="tsc" ... />` |
-| `<high-entropy ...>` | `[..., high-entropy ...]` 内联 marker |
+| `<bash_high_signal_excerpt>` | `<opencode_excerpt type="shell_high_signal" ... />`（已完成） |
+| `<pytest_summary>` / `<docker_build_summary>` / `<docker_failed_step>` / `<tsc_diagnostics_summary>` | 适配器为死代码已删除（零调用方，2026-09-06）；`command_summary` 类型保留备用，暂无生产者 |
+| `<high-entropy ...>` | `[..., high-entropy ...]` 内联 marker（已完成，含 `head=` 头部） |
+| `<REDACTED_API-KEY>` / `<REDACTED_CREDENTIAL>` 等 | `[redacted api-key]` 等特定值型 + `password=[redacted]` 键值型（保留键名；原值 ≥16 字符保留首 7 字符头，如 `sk-abcd…[redacted api-key]`；已完成） |
 | `... [same line repeated ...]` | `[... same line Nx]` |
 | `... [previous N lines repeated ...]` | `[... repeated block Nx, XL->YL]` |
 | `[Tool output truncated for compaction: omitted N chars]` | `[... compaction truncated N chars]` 或 `opencode_notice` |
@@ -456,39 +454,7 @@ total="12438L"
 
 ## 实施顺序建议
 
-第一阶段只做截断提示，因为它最影响用户和模型理解，也最容易保持最小修改面。
-
-目标：
-
-```text
-Truncate.output -> <opencode_notice type="output_truncated" source="tool" ... />
-Shell tail truncation -> <opencode_notice type="output_truncated" source="shell" ... />
-```
-
-同时保留现有 metadata：`truncated`、`outputPath`、compression stats。
-
-第二阶段处理 shell execution metadata：
-
-```text
-<shell_metadata> -> <opencode_notice type="execution" source="shell" ... />
-```
-
-第三阶段处理 bash-compress 内联 marker：
-
-```text
-terminal progress collapsed -> [... progress ...]
-same line repeated -> [... same line ...]
-repeated block -> [... repeated block ...]
-high entropy -> [... high-entropy ...]
-```
-
-第四阶段处理 command adapters：
-
-```text
-pytest/docker/tsc/npm summaries -> <opencode_notice type="command_summary" source="..." ... />
-```
-
-第五阶段处理 compaction marker。
+阶段一（截断）、二（execution）、三（bash-compress 内联 marker）、五（compaction marker）已全部落地；阶段四（命令适配器 notice 化）取消——适配器为死代码已删除（零调用方）。标记图例已进入 shell 工具描述（compressionGuidance），向模型声明 harness 标记族与省略语义。
 
 ## 测试要求
 

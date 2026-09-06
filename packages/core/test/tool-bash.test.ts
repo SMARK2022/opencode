@@ -214,6 +214,7 @@ describe("BashTool", () => {
             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.output")
             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.command")
             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.cwd")
+            expect(definitions[0]?.description).toContain("Short harness markers")
             expect(yield* toolDefinitions(registry, [{ action: "bash", resource: "*", effect: "deny" }])).toEqual([])
             // 真实 settlement 接纳说明字段，但授权与进程仍只收到原始 pwd 命令。
             expect(yield* settleTool(registry, call({ command: "pwd", description: "Shows the current working directory" }))).toEqual({
@@ -889,20 +890,21 @@ describe("BashTool", () => {
         expect(snapshot.truncatedFrames).toBe(1)
         expect(snapshot.contexts.flatMap((context) => context.lines).every((line) => line.text.length < 4200)).toBe(true)
         expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain("diagnostic sampling omitted")
-        // 无其他变换命中且收益被拒绝时，凭据掩码仍必须提交。
+        // 正文独立过200B闸门；收益被拒绝也保留脱敏，短正文边界由source纯用例单独锁定。
         const secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
-        const sensitive = `error: ${secret}`
+        const padding = "\n" + "context ".repeat(30) + "boundary"
+        const sensitive = `error: ${secret}${padding}`
         const masked = compressVisibleOutput(sensitive, { enabled: true, minSavedBytes: 100000 })
-        expect(masked.text).toBe("error: <REDACTED_API-KEY>")
-        expect(masked.stats).toMatchObject({ applied: false, secretsRedacted: 1 })
+        expect(masked.text).toBe("error: sk-abcd…[redacted api-key]" + padding)
+        expect(masked.stats).toMatchObject({ applied: true, secretsRedacted: 1 })
         expect(masked.stats.compressedBytes).toBe(Buffer.byteLength(masked.text))
         expect(compressVisibleOutput(sensitive, { enabled: false }).text).toBe(sensitive)
         // 普通跨LF凭据在正文、snapshot与附录都必须缺席，原文只由已有capture归档。
         const credential = "abcdefghijklmnop"
-        const crossline = `password:\n${credential} ERROR: rejected`
+        const crossline = `password:\n${credential} ERROR: rejected${padding}`
         const crossMasked = compressVisibleOutput(crossline)
-        expect(crossMasked.text).toBe("\n<REDACTED_CREDENTIAL> ERROR: rejected")
-        expect(crossMasked.stats).toMatchObject({ applied: false, secretsRedacted: 1, originalBytes: Buffer.byteLength(crossline), compressedBytes: Buffer.byteLength(crossMasked.text) })
+        expect(crossMasked.text).toContain("password:\nabcdefg…[redacted] ERROR: rejected")
+        expect(crossMasked.stats).toMatchObject({ applied: true, secretsRedacted: 1, originalBytes: Buffer.byteLength(crossline), compressedBytes: Buffer.byteLength(crossMasked.text) })
         expect(crossMasked.stats.savedBytes).toBe(Buffer.byteLength(crossline) - Buffer.byteLength(crossMasked.text))
         expect(compressVisibleOutput(crossline, { enabled: false }).text).toBe(crossline)
         const crossDiagnostic = new BashDiagnosticCollector()
@@ -912,7 +914,7 @@ describe("BashTool", () => {
         const crossSnapshot = crossDiagnostic.snapshot()
         expect(JSON.stringify(crossSnapshot)).not.toContain(credential)
         const crossAppendix = renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1 })
-        expect(crossAppendix).toContain("> 2 | <REDACTED_CREDENTIAL> ERROR: rejected")
+        expect(crossAppendix).toContain("> 2 | abcdefg…[redacted] ERROR: rejected")
         expect(crossAppendix).not.toContain(credential)
         // 隐藏快照直接渲染，显式可见窗口仍沿用相同掩码去重。
         expect(renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toBe(crossAppendix)
@@ -924,8 +926,8 @@ describe("BashTool", () => {
           outside.push(`${credential} ERROR: rejected`)
           outside.end()
           expect(JSON.stringify(outside.snapshot())).not.toContain(credential)
-          expect(compressVisibleOutput(`${label}\n${credential} ERROR: rejected`).text).not.toContain(credential)
-          expect(renderDiagnosticAppendix(outside.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain("<REDACTED_CREDENTIAL> ERROR: rejected")
+          expect(compressVisibleOutput(`${label}\n${credential} ERROR: rejected${padding}`).text).not.toContain(credential)
+          expect(renderDiagnosticAppendix(outside.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain("abcdefg…[redacted] ERROR: rejected")
         }
         // 非秘密字段与首个短值终止续接，不能把随后无标签的普通输出误作凭据。
         const cleared = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
@@ -946,15 +948,15 @@ describe("BashTool", () => {
         expect(early.firstErrorContexts[0]?.centerLine).toBe(3)
         expect(burst.snapshot()).toEqual(early)
         const excerpt = renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: "" })
-        expect(excerpt).toContain("root cause")
-        expect(excerpt).toContain("<REDACTED_API-KEY>")
+        expect(excerpt).toContain("root_cause")
+        expect(excerpt).toContain("sk-abcd…[redacted api-key]")
         expect(excerpt).not.toContain(secret)
         // 末中心可见不代表first/recent整块可见；全部掩码中心可见时不重复附录。
         const latestVisible = renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: "error: burst-12" })
-        expect(latestVisible).toContain("error: burst-1 <REDACTED_API-KEY>")
+        expect(latestVisible).toContain("error: burst-1 sk-abcd…[redacted api-key]")
         expect(latestVisible).toContain("error: burst-2")
         expect(latestVisible).toContain("> 8 | error: burst-8")
-        expect(renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: burstRaw.replace(secret, "<REDACTED_API-KEY>") })).toBe("")
+        expect(renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: burstRaw.replace(secret, "sk-abcd…[redacted api-key]") })).toBe("")
         // 三条邻接错误与末帧无LF精确复现V1 tail只剩C的输入，oracle直接指定A/B。
         const adjacent = new BashDiagnosticCollector()
         const adjacentRaw = "error: root A\nerror: follow B\nerror: end C"
@@ -963,7 +965,7 @@ describe("BashTool", () => {
         const roots = renderDiagnosticAppendix(adjacent.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "error: end C" })
         expect(roots).toContain("> 1 | error: root A")
         expect(roots).toContain("> 2 | error: follow B")
-        expect(roots).toContain("(root cause)")
+        expect(roots).toContain("root_cause")
         expect(renderDiagnosticAppendix(adjacent.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: adjacentRaw })).toBe("")
         // snapshot 样例也已掩码，未经过 renderer 的调用方没有原文秘密副本。
         expect(JSON.stringify(early)).not.toContain(secret)
@@ -977,29 +979,29 @@ describe("BashTool", () => {
         // 可见性比较使用同一掩码，不能因 raw 与正文不同而重复附录。
         expect(renderDiagnosticAppendix(one.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: masked.text })).toBe("")
         const entropy = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(16)
-        expect(compressVisibleOutput(entropy).text).toContain("high-entropy base64 omitted: 1024 bytes")
+        expect(compressVisibleOutput(entropy).text).toContain("high-entropy base64 1024B")
         expect(compressVisibleOutput(entropy).stats.highEntropyLines).toBe(1)
         // CLIXML 解码仍走同一入口，覆盖脱敏、禁用、低收益与后续重复压缩。
-        const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">_x001B_[31merror: _x0073_k-abcdefghijklmnopqrstuvwxyz012345_x001B_[0m_x000D__x000A_</S><S S="Error">_x4E2D__x6587__x000D__x000A_</S></Objs>'
+        const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">_x001B_[31merror: _x0073_k-abcdefghijklmnopqrstuvwxyz012345_x001B_[0m_x000D__x000A_</S><S S="Error">_x4E2D__x6587__x000D__x000A_</S></Objs>'.replace("</Objs>", `<S S="Output">${padding}</S></Objs>`)
         const decoded = compressVisibleOutput(clixml)
-        expect(decoded.text).toBe("<high-entropy powershell-clixml>error: <REDACTED_API-KEY>\n中文</high-entropy>")
-        expect(decoded.stats).toMatchObject({ applied: true, highEntropyLines: 1, secretsRedacted: 1, originalBytes: Buffer.byteLength(clixml), compressedBytes: Buffer.byteLength(decoded.text) })
+        expect(decoded.text).toContain("error: sk-abcd…[redacted api-key]\n中文")
+        expect(decoded.stats).toMatchObject({ applied: true, highEntropyLines: 0, secretsRedacted: 1, originalBytes: Buffer.byteLength(clixml), compressedBytes: Buffer.byteLength(decoded.text) })
         expect(decoded.stats.savedBytes).toBe(Buffer.byteLength(clixml) - Buffer.byteLength(decoded.text))
         expect(decoded.stats.savingRatio).toBe(decoded.stats.savedBytes / Buffer.byteLength(clixml))
-        expect(compressVisibleOutput(clixml, { enabled: false })).toMatchObject({ text: clixml, stats: { applied: false, highEntropyLines: 0, secretsRedacted: 0 } })
-        expect(compressVisibleOutput(clixml, { minSavedBytes: 100000 })).toEqual(decoded)
-        // 普通正文只省两个字节，解码不应受默认50%压缩收益门槛阻断。
+        expect(compressVisibleOutput(clixml, { enabled: false })).toMatchObject({ text: `error: ${secret}\n中文\n${padding}`, stats: { applied: false, highEntropyLines: 0, secretsRedacted: 0 } })
+        expect(compressVisibleOutput(clixml, { minSavedBytes: 100000 }).text).toBe(`error: sk-abcd…[redacted api-key]\n中文\n${padding}`)
+        // 纯解码独立于50%收益门槛，不冒充压缩或高熵省略。
         const ordinary = Array.from({ length: 20 }, (_, i) => `ordinary output row ${i}: task completed successfully`).join("\n")
         const ordinaryClixml = `<Objs Version="1.1.0.1"><S S="Output">${ordinary}</S></Objs>`
         const ordinaryDecoded = compressVisibleOutput(ordinaryClixml)
-        expect(ordinaryDecoded.text).toBe(`<high-entropy powershell-clixml>${ordinary}</high-entropy>`)
-        expect(ordinaryDecoded.stats).toMatchObject({ applied: true, highEntropyLines: 1, secretsRedacted: 0 })
-        expect(ordinaryDecoded.stats.savedBytes).toBe(2)
-        expect(ordinaryDecoded.stats.savingRatio).toBe(2 / Buffer.byteLength(ordinaryClixml))
+        expect(ordinaryDecoded.text).toBe(ordinary)
+        expect(ordinaryDecoded.stats).toMatchObject({ applied: false, highEntropyLines: 0, secretsRedacted: 0 })
+        expect(ordinaryDecoded.stats.savedBytes).toBe(Buffer.byteLength(ordinaryClixml) - Buffer.byteLength(ordinary))
+        expect(ordinaryDecoded.stats.savingRatio).toBe(ordinaryDecoded.stats.savedBytes / Buffer.byteLength(ordinaryClixml))
         const clixmlRun = `<Objs><S S="Output">${"repeatable ordinary output_x000D__x000A_".repeat(20)}</S></Objs>`
         const repeatedClixml = compressVisibleOutput(clixmlRun)
-        expect(repeatedClixml.stats).toMatchObject({ applied: true, highEntropyLines: 1, repeatedLineGroups: 1 })
-        expect(repeatedClixml.text).toContain("high-entropy powershell-clixml")
+        expect(repeatedClixml.stats).toMatchObject({ applied: true, highEntropyLines: 0, repeatedLineGroups: 1 })
+        expect(repeatedClixml.text).toContain("[... same line 20x]")
         const template = Array.from({ length: 20 }, (_, i) => `12:00:${String(i).padStart(2, "0")} worker completed a substantial ordinary task`).join("\n")
         expect(compressVisibleOutput(template).stats.templateGroups).toBe(1)
         expect(compressVisibleOutput(template, { templateNormalizationLevel: "off" }).stats.templateGroups).toBe(0)
@@ -1012,17 +1014,17 @@ describe("BashTool", () => {
         privateKey.end()
         expect(JSON.stringify(privateKey.snapshot())).not.toContain("hidden-private-body")
         expect(privateKey.snapshot().fatalContexts[0]?.priority).toBe("fatal")
-        expect(compressVisibleOutput("#".repeat(500)).text).toContain("[bar ")
+        expect(compressVisibleOutput("#".repeat(500)).text).toContain("[... bar ")
         const list = Array.from({ length: 100 }, (_, i) => `item-${i}-with-long-name`).join(", ")
-        expect(compressVisibleOutput(list).text).toContain("... (94 more)")
+        expect(compressVisibleOutput(list).text).toContain("[... 94 more]")
         // CSI 清行之后保留终态，未达阈值/收益的编辑则原样通过。
         const terminal = Array.from({ length: 10 }, () => "working ".repeat(20) + "\r\x1b[2Kdone").join("\n")
-        expect(compressVisibleOutput(terminal).text).toContain("terminal progress collapsed")
+        expect(compressVisibleOutput(terminal).text).toContain("[... progress")
         expect(compressVisibleOutput(terminal, { minSavedBytes: 100000 }).text).toBe(terminal)
         // 归一化新拼出的秘密必须被掩码；独立oracle固定最终密钥与实际UTF-8统计。
         const decoratedSecret = ("noise ".repeat(100) + "\r\x1b[2K").repeat(4) + "sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345"
         const canonical = compressVisibleOutput(decoratedSecret)
-        expect(canonical.text).toContain("<REDACTED_API-KEY>")
+        expect(canonical.text).toContain("sk-abcd…[redacted api-key]")
         expect(canonical.text).not.toContain(secret)
         expect(canonical.stats).toMatchObject({ applied: true, carriageReturnGroups: 1, secretsRedacted: 1 })
         expect(canonical.stats.originalBytes).toBe(Buffer.byteLength(decoratedSecret))
@@ -1030,15 +1032,15 @@ describe("BashTool", () => {
         expect(canonical.stats.savedBytes).toBe(Buffer.byteLength(decoratedSecret) - Buffer.byteLength(canonical.text))
         // 未采用VT或未知CSI保留格式，canonical匹配仍能遮住ANSI分隔的原始凭据。
         expect(compressVisibleOutput(decoratedSecret, { minSavedBytes: 100000 }).text).not.toContain("abcdefghijklmnopqrstuvwxyz012345")
-        const unsupported = "\x1b[99qerror: sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345"
-        expect(compressVisibleOutput(unsupported).text).toBe("\x1b[99qerror: <REDACTED_API-KEY>")
+        const unsupported = "\x1b[99qerror: sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345" + padding
+        expect(compressVisibleOutput(unsupported, { minSavedBytes: 100000 }).text).toBe("\x1b[99qerror: sk-abcd…[redacted api-key]" + padding)
         const decoratedDiagnostic = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
         decoratedDiagnostic.push("error: sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345\n")
         decoratedDiagnostic.end()
         const maskedAppendix = renderDiagnosticAppendix(decoratedDiagnostic.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "" })
-        expect(maskedAppendix).toContain("<REDACTED_API-KEY>")
+        expect(maskedAppendix).toContain("sk-abcd…[redacted api-key]")
         expect(maskedAppendix).not.toContain("abcdefghijklmnopqrstuvwxyz012345")
-        expect(renderDiagnosticAppendix(decoratedDiagnostic.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "error: <REDACTED_API-KEY>" })).toBe("")
+        expect(renderDiagnosticAppendix(decoratedDiagnostic.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "error: sk-abcd…[redacted api-key]" })).toBe("")
         const unhealthy = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
         unhealthy.push("no errors\n0 failed\nall tests passed\nTS1234 compile problem\nENOENT missing\npanic with 0 errors\n")
         unhealthy.end()
@@ -1055,23 +1057,25 @@ describe("BashTool", () => {
           ["pytest", "--- Captured stdout call ---\n" + Array.from({ length: 80 }, (_, i) => `captured ${i} ${"detail ".repeat(10)}`).join("\n"), "lines of captured output omitted"],
           ["docker build .", docker, "docker_build_summary"],
           ["tsc", Array.from({ length: 40 }, (_, i) => `file-${i}.ts(1,1): error TS1234: ${"detail ".repeat(10)}`).join("\n"), "tsc_diagnostics_summary"],
-          ["redaction-only", sensitive, "<REDACTED_API-KEY>"],
-          ["terminal-redaction", decoratedSecret, "<REDACTED_API-KEY>"],
-          ["crossline-redaction", crossline, "<REDACTED_CREDENTIAL>"],
+          ["redaction-only", sensitive, "sk-abcd…[redacted api-key]"],
+          ["terminal-redaction", decoratedSecret, "sk-abcd…[redacted api-key]"],
+          ["crossline-redaction", crossline, "abcdefg…[redacted]"],
           ["clixml-low-savings", ordinaryClixml, plainClixml ? ordinary : ordinaryDecoded.text],
-          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', plainClixml ? "ordinary" : "<high-entropy powershell-clixml>ordinary</high-entropy>"],
+          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "ordinary"],
         ]) {
-          // 禁用适配器或收益拒绝仍走同一入口，不用私有适配函数作为测试 oracle。
-          if (!command.startsWith("clixml-") && command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
-            expect(compressVisibleOutput(output, { enableCommandAdapters: false }, command).text).not.toContain(marker)
-            expect(compressVisibleOutput(output, { minSavedBytes: 100000 }, command).text).toBe(output)
+          // 四种专用摘要按source退休；仍通过真实registry验证普通正文、单次执行与归档。
+          const retired = ["npm install", "pytest", "docker build .", "tsc"].includes(command)
+          if (retired) {
+            expect(compressVisibleOutput(output).text).not.toContain(marker)
+            expect(compressVisibleOutput(output, { minSavedBytes: 100000 }).text).toBe(output)
           }
           reset()
           result = { ...result, output: Buffer.from(output) }
           yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
             const settled = yield* settleTool(registry, call({ command }))
             const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
-            expect(text).toContain(marker)
+            if (retired) expect(text).not.toContain(marker)
+            else expect(text).toContain(marker)
             expect(text).not.toContain(secret)
             if (command === "crossline-redaction") expect(text).not.toContain(credential)
             expect(runs).toHaveLength(1)
@@ -1080,21 +1084,22 @@ describe("BashTool", () => {
             expect(runs[0]?.spawnShell).toBe(false)
             if (Shell.ps(Shell.acceptable())) expect(Buffer.from(runs[0]?.args?.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
             else expect(runs[0]?.args).toEqual(Shell.name(Shell.acceptable()) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command])
-            if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
+            if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
             if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
-            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: plainClixml ? { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: 8, compressionCompressedBytes: 8, compressionSavedBytes: 0 } : { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
+            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: plainClixml ? 8 : 39, compressionCompressedBytes: 8, compressionSavedBytes: 0 } })
             if (command === "docker build .") {
-              // 不用adapter计算预期值，直接指定步骤摘要与失败详情的归属。
-              expect(text).toContain("#2 compile: FAILED")
-              expect(text).toContain("#3 package: DONE")
+              // 撤专用汇总后保留原失败编号与正文，不再合成步骤状态。
+              expect(text).toContain("#2 [compile]")
+              expect(text).toContain("#3 DONE")
               expect(text).not.toContain("#3 package: FAILED")
-              expect(text).toContain('<docker_failed_step step="#2">\n#2 [compile]\n#2 0.2 DETAILS2\n#2 ERROR: compile failed\n</docker_failed_step>')
-              expect(text).not.toContain('<docker_failed_step step="#3">')
-              expect(settled.output?.structured).toMatchObject({ compression: { compressed: true } })
+              expect(text).toContain("#2 0.2 DETAILS2")
+              expect(text).toContain("#2 ERROR: compile failed")
+              expect(text).not.toContain("<docker_failed_step")
             }
             const retained = settled.outputPaths?.[0]
-            if (!retained) throw new Error("expected retained raw output")
-            expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(output)
+            // 未改变呈现可不落盘；一旦压缩/解码改变呈现，原文必须可逐字恢复。
+            if (retained) expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(output)
+            else expect(text).toContain(output)
             expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
           }))
         }
@@ -1125,7 +1130,7 @@ describe("BashTool", () => {
         const lateBlock = "甲".repeat(100) + "\n" + "乙".repeat(100) + "\n"
         const mixed = alternating + "boundary\n" + lateBlock.repeat(1000)
         const late = compressVisibleOutput(mixed, { enabled: true, minSavedBytes: 300000 })
-        expect(late.text).toBe(alternating + "boundary\n" + lateBlock.trimEnd() + "\n... [previous 2 lines repeated 999 more times]\n")
+        expect(late.text).toBe(alternating + "boundary\n" + lateBlock.trimEnd() + "\n[... repeated block 1000x, 2000L->2L]\n")
         expect(late.stats).toMatchObject({ applied: true, repeatedBlockGroups: 1, repeatedLineGroups: 0 })
         // UTF-8 与区间末尾 LF 的计量必须和实际输出吻合，不借字符数近似收益。
         expect(late.stats.originalBytes).toBe(Buffer.byteLength(mixed))
@@ -1143,8 +1148,8 @@ describe("BashTool", () => {
         const ansi = "\x1b[31m" + "a".repeat(400) + "\x1b[0m"
         expect(compressVisibleOutput(ansi).text).toBe(ansi)
         // 短成功命令不追加错误邻域，但采样遗漏仍可见；已可见的中心帧也不重复附录。
-        expect(renderDiagnosticAppendix(snapshot, { durationMs: 1, exitCode: 0, visibleOutput: "" })).not.toContain("bash_high_signal_excerpt")
-        expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "error: split diagnostic" })).not.toContain("bash_high_signal_excerpt")
+        expect(renderDiagnosticAppendix(snapshot, { durationMs: 1, exitCode: 0, visibleOutput: "" })).not.toContain("opencode_excerpt")
+        expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "error: split diagnostic" })).not.toContain("opencode_excerpt")
         expect(compressed.stats.repeatedLineGroups).toBe(1)
         expect(compressed.stats.compressedBytes).toBe(Buffer.byteLength(compressed.text))
         // 三种覆盖都经过 Core Bash、AppProcess 和 registry/store，不能只测试纯转换器。
@@ -1152,6 +1157,7 @@ describe("BashTool", () => {
           reset()
           const command = `${executable} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(400))"`
           yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+            expect((yield* toolDefinitions(registry))[0]?.description.includes("Short harness markers")).toBe(mode !== "config")
             const settled = yield* settleTool(registry, call({ command, ...(mode === "parameter" ? { compress_output: false } : {}) }))
             expect(settled.output?.structured).toMatchObject({ compression: { compressed: mode === "default" }, truncated: false })
             const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
@@ -1245,7 +1251,7 @@ describe("BashTool", () => {
           const settled = yield* settleTool(registry, call({ command: "diagnostic-budget", compress_output: false }))
           const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
           expect(text).toContain("error: UNIQUE-MIDDLE-FAILURE")
-          expect(text).toContain("bash_high_signal_excerpt")
+          expect(text).toContain("opencode_excerpt")
           expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
           expect(text.split("\n").length).toBeLessThanOrEqual(ToolOutputStore.MAX_LINES)
           expect(settled.output?.structured).toMatchObject({ diagnosticErrorLikeLines: 1, durationMs: 3000 })
