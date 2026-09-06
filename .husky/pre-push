@@ -32,3 +32,36 @@ if (process.versions.bun !== expectedBunVersion) {
 }
 '
 bun typecheck
+
+# 子模块指针可达性校验：父仓库推送前，指针必须已存在于子模块远端分支历史。
+# 合同：指针 == 远端 tip 直接放行；非 tip 时在本地子模块仓库 fetch 后做祖先校验；
+# 两者都不满足则拒绝——否则 CI 的 submodule checkout 会报 not our ref（2026-09-06 事故）。
+submodule_status=0
+for submodule_path in $(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | cut -d' ' -f2-); do
+  submodule_section=$(git config -f .gitmodules --get-regexp "^submodule\..*\.path$" | awk -v p="$submodule_path" '$2 == p {sub(/\.path$/, "", $1); print $1}')
+  submodule_branch=$(git config -f .gitmodules --get "$submodule_section.branch")
+  submodule_url=$(git config -f .gitmodules --get "$submodule_section.url")
+  # 只校验声明了跟踪 branch 的子模块（与 CI 的 shallow submodule checkout 合同一致）。
+  [ -n "$submodule_branch" ] || continue
+  submodule_pointer=$(git ls-tree HEAD -- "$submodule_path" | awk '{print $3}')
+  [ -n "$submodule_pointer" ] || continue
+  submodule_tip=$(git ls-remote "$submodule_url" "refs/heads/$submodule_branch" 2>/dev/null | awk '{print $1}')
+  if [ -z "$submodule_tip" ]; then
+    echo "submodule-check FAILED: $submodule_path 的跟踪分支 $submodule_branch 在 $submodule_url 上不存在" >&2
+    submodule_status=1
+    continue
+  fi
+  if [ "$submodule_pointer" = "$submodule_tip" ]; then
+    echo "submodule-check: $submodule_path -> $submodule_branch@$submodule_pointer (tip)"
+    continue
+  fi
+  if [ -e "$submodule_path/.git" ] \
+    && git -C "$submodule_path" fetch origin "$submodule_branch" --quiet 2>/dev/null \
+    && git -C "$submodule_path" merge-base --is-ancestor "$submodule_pointer" "origin/$submodule_branch" 2>/dev/null; then
+    echo "submodule-check: $submodule_path -> $submodule_branch@$submodule_pointer (reachable; tip is $submodule_tip)"
+    continue
+  fi
+  echo "submodule-check FAILED: $submodule_path 指针 $submodule_pointer 不在 $submodule_url 的 $submodule_branch 历史中；请先推送子模块再推送父仓库" >&2
+  submodule_status=1
+done
+exit $submodule_status
