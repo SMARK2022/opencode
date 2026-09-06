@@ -372,6 +372,34 @@ describe("tool.shell", () => {
       )
     }),
   )
+
+  // [INV-04] 图例是给模型的防退守契约：声明标记由 harness 插入（命令未打印）、
+  // 首现/错误行保留、省略是有意的，避免模型把标记当异常排查或因此关闭压缩。
+  it.live("tool description documents harness compression markers", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const bash = yield* initShell()
+        expect(bash.description).toContain("Short harness markers")
+        expect(bash.description).toContain("the command did not print them")
+        expect(bash.description).toContain("[... same line Nx]")
+        expect(bash.description).toContain("[redacted ...]")
+      }),
+    ),
+  )
+
+  it.live("omits marker legend when bash compression is disabled", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped({ config: { tool_output: { bash_compression: false } } })
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const bash = yield* initShell()
+          expect(bash.description).not.toContain("Short harness markers")
+        }),
+      )
+    }),
+  )
 })
 
 describe("tool.shell permissions", () => {
@@ -2318,7 +2346,8 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(9)
-        expect(result.output).toContain("<bash_high_signal_excerpt>")
+        expect(result.output).toContain('<opencode_excerpt type="shell_high_signal"')
+        expect(result.output).toContain("fatal: hidden root cause")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
         )
@@ -2345,8 +2374,8 @@ describe("tool.shell abort", () => {
         expect(result.metadata.exit).toBe(9)
         expect(result.output).toContain("fatal: visible root cause")
         // 诊断摘录只来自最终输出隐藏掉的文本；可见 fatal 行本身不需要再复制到
-        // <bash_high_signal_excerpt>，但执行状态 notice 仍然独立保留 exit code。
-        expect(result.output).not.toContain("<bash_high_signal_excerpt>")
+        // <opencode_excerpt>，但执行状态 notice 仍然独立保留 exit code。
+        expect(result.output).not.toContain("<opencode_excerpt")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
         )

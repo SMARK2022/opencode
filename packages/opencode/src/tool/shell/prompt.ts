@@ -285,8 +285,6 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits) 
       intro: selected.intro,
       os: platform,
       shell: name,
-      shellGuidance: "",
-      compressionGuidance: "",
       tmp: Global.Path.tmp,
       workdirSection: selected.workdirSection,
       commandSection: selected.commandSection,

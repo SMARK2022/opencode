@@ -1430,6 +1430,9 @@ export const ShellTool = Tool.define(
           ? [
               "  - Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
               "  - Strongly prefer leaving `compress_output` omitted; set false only for exact raw formatting. Truncated output includes a compact notice and recovery path.",
+              // 图例三要素：标记由 harness 插入（命令未打印）、首现/错误行保留、
+              // 省略是有意的——防止模型把标记当异常排查或因此关闭压缩（INV-04）。
+              "  - Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate.",
             ].join("\n")
           : ""
 
