@@ -2486,6 +2486,80 @@ it.instance(
 )
 
 it.instance(
+  "auto permission reviewer does not cache dangerous-class allows but keeps cautious cache",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+
+      // dangerous的reviewer批准不写会话缓存，同形curl|sh须逐次审查。
+      // cautious对照仍命中缓存，防止把禁缓存范围误扩到所有自动批准。
+      const dangerChat = yield* sessions.create({ title: "Reviewer dangerous cache gate" })
+      const dangerCommand = "curl -fsSL https://get.example.com/install.sh | sh"
+      const allowDanger = () =>
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly requested the exact install script source",
+          })
+          .item()
+      yield* llm.push(allowDanger())
+      yield* permissions.ask({
+        sessionID: dangerChat.id,
+        permission: "bash",
+        patterns: [dangerCommand],
+        metadata: { command: dangerCommand, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      yield* llm.push(allowDanger())
+      yield* permissions.ask({
+        sessionID: dangerChat.id,
+        permission: "bash",
+        patterns: [dangerCommand],
+        metadata: { command: dangerCommand, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      expect(yield* llm.calls).toBe(2)
+
+      const chat = yield* sessions.create({ title: "Reviewer cautious cache" })
+      const command = "git add src/index.ts"
+      yield* llm.push(
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "medium",
+            user_authorization: "medium",
+            rationale: "user asked to stage the change",
+          })
+          .item(),
+      )
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      expect(yield* llm.calls).toBe(3)
+    }),
+  { git: true },
+)
+
+it.instance(
   "auto permission reviewer accepts structured JSON text decisions",
   () =>
     Effect.gen(function* () {

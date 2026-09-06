@@ -79,7 +79,9 @@ const ReviewStarted = define({
     permission: Schema.String,
     patterns: Schema.Array(Schema.String),
     precheck: Schema.Struct({
-      level: Schema.Literals(["safe", "general", "cautious", "dangerous"]),
+      // 五级拆分与Core LEVELS同步内联，保持Schema不反向依赖Core的包方向；
+      // 两处词汇必须同步演进，新增级别时同步修改。
+      level: Schema.Literals(["safe", "general", "cautious", "dangerous", "forbidden"]),
       reason: Schema.String,
     }),
   },
