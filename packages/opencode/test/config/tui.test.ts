@@ -499,10 +499,8 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
       expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(
         process.platform === "darwin" ? "f8" : "alt+v",
       )
-      // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
-      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
-      // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
-      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
+      // 默认转写器保持轻量 CLI 形态（无 MCP 配置时的兑底），`{file}` 保留在 argv 里按字面量替换。
+      expect(config.voice?.transcriber).toEqual({ command: "chatgpt-browser-agent", args: ["transcribe-file", "--file", "{file}", "--json"] })
       expect(
         config.keybinds.gather("plugins.dialog", ["dialog.plugins.install"]).map((binding) => binding.cmd),
       ).toEqual(["dialog.plugins.install"])
@@ -558,14 +556,14 @@ it.instance("loads voice transcriber command from tui config", () =>
       })
 
       const config = yield* getTuiConfig(test.directory)
-      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
-      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
+      // 用户显式配置永远是 argv 形态（schema 限制）；配置层只保留 command/args，不解释 shell。
+      expect(config.voice?.transcriber).toEqual({ command: "chatgpt-browser-agent", args: ["transcribe-file", "--file", "{file}", "--json"] })
     }),
   ),
 )
 
 // 这个用例覆盖推荐路径：从本地 ChatGPT MCP 配置推导同目录 chatgpt.js。
-// 复用 MCP 的安装位置，但返回的是普通 CLI transcriber，不新增 MCP tool 或 HTTP surface。
+// 有实体配置文件时产出 chatgpt-direct 变体（auth 节点可写回该文件），内嵌与旧公式一致的回退 argv。
 // agentDir 带空格，用来锁定路径 join/resolve 不会因为 shell 拆分而失效。
 // chatgpt.js 必须存在才启用默认转写器，避免用户录音后才遇到脚本缺失错误。
 it.instance("infers the default voice transcriber from the local ChatGPT MCP command", () =>
@@ -587,14 +585,17 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
       })
 
       const config = yield* getTuiConfig(test.directory)
-      expect(config.voice?.transcriber?.command).toBe(process.execPath)
-      expect(config.voice?.transcriber?.args).toEqual([
-        path.join(agentDir, "chatgpt.js"),
-        "transcribe-file",
-        "--file",
-        "{file}",
-        "--json",
-      ])
+      // instance 目录的 opencode.json 是 project 级来源：direct 可用但凭据不写回。
+      // toEqual 整体锁定变体形状：config/key/scope 任一漂移都会让 auth 节点写错位置。
+      expect(config.voice?.transcriber).toEqual({
+        type: "chatgpt-direct",
+        config: path.join(test.directory, "opencode.json"),
+        key: "chatgpt",
+        interpreter: process.execPath,
+        script: path.join(agentDir, "chatgpt.js"),
+        scope: "project",
+        transcriber: { command: process.execPath, args: [path.join(agentDir, "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] },
+      })
     }),
   ),
 )
@@ -621,14 +622,16 @@ it.instance("infers voice transcriber when MCP command runs mcp-server.js direct
       })
 
       const config = yield* getTuiConfig(test.directory)
-      expect(config.voice?.transcriber?.command).toBe("node")
-      expect(config.voice?.transcriber?.args).toEqual([
-        path.join(agentDir, "chatgpt.js"),
-        "transcribe-file",
-        "--file",
-        "{file}",
-        "--json",
-      ])
+      // shebang 形态无显式解释器：direct 变体的 interpreter 回退到 node，回退 argv 同步使用 node。
+      expect(config.voice?.transcriber).toEqual({
+        type: "chatgpt-direct",
+        config: path.join(test.directory, "opencode.json"),
+        key: "chatgpt",
+        interpreter: "node",
+        script: path.join(agentDir, "chatgpt.js"),
+        scope: "project",
+        transcriber: { command: "node", args: [path.join(agentDir, "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] },
+      })
     }),
   ),
 )
@@ -660,7 +663,37 @@ it.instance("does not infer the voice transcriber from unrelated local MCP serve
       })
 
       const config = yield* getTuiConfig(test.directory)
-      expect(config.voice?.transcriber?.args?.[0]).toBe(path.join(chatgptDir, "chatgpt.js"))
+      const transcriber = config.voice?.transcriber
+      expect(transcriber?.type).toBe("chatgpt-direct")
+      // 只有 key/name 明确指向 ChatGPT 的 local server 才是语音后端：脚本路径必须来自 chatgpt 目录。
+      expect(transcriber?.type === "chatgpt-direct" ? transcriber.script : undefined).toBe(path.join(chatgptDir, "chatgpt.js"))
+    }),
+  ),
+)
+
+// OPENCODE_CONFIG_CONTENT 没有可写回的实体文件：推导保留旧 argv 形态（配置源域的合法分支），
+// 不产出 auth 节点无所依附的 direct 变体；env 在用例内设置并在 finally 恢复，避免泄漏到其它用例。
+it.instance("keeps the legacy argv form for content-only config sources", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* AppFileSystem.Service
+      const test = yield* TestInstance
+      const agentDir = path.join(test.directory, "tools", "chatgpt-agent")
+      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
+      const previous = process.env.OPENCODE_CONFIG_CONTENT
+      process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+        mcp: { chatgpt: { type: "local", command: [process.execPath, path.join(agentDir, "mcp-server.js")] } },
+      })
+      try {
+        const config = yield* getTuiConfig(test.directory)
+        expect(config.voice?.transcriber).toEqual({
+          command: process.execPath,
+          args: [path.join(agentDir, "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
+        })
+      } finally {
+        if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT
+        else process.env.OPENCODE_CONFIG_CONTENT = previous
+      }
     }),
   ),
 )

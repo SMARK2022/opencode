@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "path"
 import { createRoot, createSignal } from "solid-js"
 import { tmpdir } from "../../fixture/fixture"
@@ -11,7 +12,10 @@ import {
   voiceHintVisible,
   type VoiceRecorderHandle,
   type VoiceTranscriber,
+  type VoiceTranscriberDirect,
 } from "../../../src/cli/cmd/tui/prompt-voice-input"
+import type { VoiceAuthRuntime } from "../../../src/cli/cmd/tui/util/voice-auth"
+import { readVoiceAuth } from "../../../src/cli/cmd/tui/util/voice-auth"
 import { createRefreshClock } from "../../../src/cli/cmd/tui/util/signal"
 
 const nodeJson = (script: string): VoiceTranscriber => ({
@@ -891,5 +895,138 @@ describe("prompt voice input", () => {
       }
     },
     240_000,
+  )
+
+  // ── chatgpt-direct 变体：直连主路径 + 用户批准的 argv 回退 ──
+
+  function directFixture(tmp: { path: string }, fallbackScript: string): VoiceTranscriberDirect {
+    // project 作用域避免测试凭据写回磁盘；收割路径由注入的 directRuntime 控制。
+    const script = path.join(tmp.path, "agent-chatgpt.js")
+    return {
+      type: "chatgpt-direct",
+      config: path.join(tmp.path, "opencode.json"),
+      key: "chatgpt",
+      interpreter: process.execPath,
+      script,
+      scope: "project",
+      transcriber: { command: process.execPath, args: [fallbackScript, "{file}"] },
+    }
+  }
+
+  // slice 9：direct 变体在录音前预检 script 存在性，缺失时给出指向 MCP 配置的明确错误；
+  // 预检必须在任何 spawn 之前，错误文案指向配置来源而不是运行时 ENOENT。
+  test("rejects a chatgpt-direct transcriber whose agent script is missing", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(path.join(tmp.path, "voice.wav"), "RIFF....WAVE")
+    const direct = directFixture(tmp, path.join(tmp.path, "unused.cjs"))
+    await expect(transcribeVoiceFile({ file: path.join(tmp.path, "voice.wav"), transcriber: direct })).rejects.toThrow(/script not found/)
+  })
+
+  // slice 1：直连失败（如 Cloudflare 403 或收割不可用）后回退内嵌 argv，仍返回浏览器页面路径的转写文本；
+  // 回退成功不吞直连诊断：直连错误只影响本次请求的路径选择。
+  test("falls back to the embedded argv transcriber when the direct path fails", async () => {
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(file, "RIFF....WAVE")
+    const direct = directFixture(tmp, path.join(tmp.path, "noop"))
+    await Bun.write(direct.script, "")
+    const fallback = path.join(tmp.path, "fallback.cjs")
+    await Bun.write(fallback, "process.stdout.write(JSON.stringify({ text: 'fallback browser text' }))")
+    // 直连 403 与收割不可用同时注入：两级失败都压到同一回退口，覆盖最坏链路。
+    direct.transcriber = { command: process.execPath, args: [fallback, "{file}"] }
+    const text = await transcribeVoiceFile({
+      file,
+      transcriber: direct,
+      directRuntime: {
+        directFetch: async () => new Response("{}", { status: 403 }),
+        harvest: async () => {
+          throw new Error("harvest unavailable")
+        },
+      },
+    })
+    expect(text).toBe("fallback browser text")
+  })
+
+  // slice 2：直连成功时内嵌 argv 不得被调用（marker 文件是 argv 被调用的磁盘证据）。project 作用域产生的一次性提示经 onError 排出。
+  // 该断言锁定"直连是主路径"：成功场景回落浏览器会浪费整段 daemon 生命周期。
+  test("uses the direct path without spawning the fallback argv", async () => {
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(file, "RIFF....WAVE")
+    const marker = path.join(tmp.path, "argv-invoked")
+    const argvProbe = path.join(tmp.path, "probe.cjs")
+    await Bun.write(argvProbe, `require('fs').writeFileSync(${JSON.stringify(marker)}, '1')`)
+    const direct = directFixture(tmp, argvProbe)
+    await Bun.write(direct.script, "")
+    const text = await transcribeVoiceFile({
+      file,
+      transcriber: direct,
+      directRuntime: {
+        harvest: async () => ({
+          access_token: "tok",
+          token_expires_at: 0,
+          fetched_at: "2026-09-06T00:00:00Z",
+          cookies: {},
+        }),
+        directFetch: async () => new Response(JSON.stringify({ text: "direct text" }), { status: 200 }),
+      } as Partial<VoiceAuthRuntime>,
+    })
+    expect(text).toBe("direct text")
+    expect(await Bun.file(marker).exists()).toBe(false)
+  })
+
+  // 门禁 E2E（slice 12）：真实 profile 收割→直连转写→auth 节点写回，跨平台（无 darwin 音频工具依赖）。
+  // 运行：CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "direct harvest"
+  voiceE2E(
+    "harvests real credentials and transcribes directly without the browser page path",
+    async () => {
+      if (!process.env.CHATGPT_BROWSER_USER_DATA_DIR) {
+        throw new Error("voice E2E requires CHATGPT_BROWSER_USER_DATA_DIR for a logged-in agent profile")
+      }
+      const agent = path.resolve(import.meta.dir, "../../../../../thirdparty/chatgpt-browser-agent")
+      const script = path.join(agent, "chatgpt.js")
+      const source = path.join(agent, "test-voice-hello.wav")
+      const root = path.join(os.tmpdir(), "opencode", "voice")
+      const state = path.join(root, `direct-e2e-state-${process.pid}`)
+      const previousState = process.env.CHATGPT_STATE_DIR
+      // daemon state 隔离（同 darwin E2E 模式）：profile 复用登录，state/token/日志按 PID 分离。
+      process.env.CHATGPT_STATE_DIR = state
+      const wav = path.join(root, `direct-e2e-${process.pid}.wav`)
+      const config = path.join(root, `direct-e2e-config-${process.pid}.json`)
+      await fs.mkdir(root, { recursive: true })
+      await fs.copyFile(source, wav)
+      await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", script] } } }))
+      const direct: VoiceTranscriberDirect = {
+        type: "chatgpt-direct",
+        config,
+        key: "chatgpt",
+        interpreter: "node",
+        script,
+        scope: "user",
+        transcriber: { command: "node", args: [script, "transcribe-file", "--file", "{file}", "--json"] },
+      }
+      try {
+        const text = await transcribeVoiceFile({ file: wav, transcriber: direct })
+        const lowered = text.toLowerCase()
+        // markers 与 darwin 五分钟 E2E 独立：hello/world 只能来自真实直连响应体。
+        if (!lowered.includes("hello") || !lowered.includes("world")) throw new Error(`direct E2E markers missing: ${text.slice(0, 120)}`)
+        // 收割结果必须落在用户级 auth 节点（token + cookie 齐备），供下次请求零浏览器复用。
+        const authNode = await readVoiceAuth(config, "chatgpt")
+        if (!authNode?.access_token) throw new Error("direct E2E did not persist the harvested auth node")
+        if (Object.keys(authNode.cookies).length === 0) throw new Error("direct E2E auth node has no cookies")
+        expect(lowered).toContain("hello")
+        expect(lowered).toContain("world")
+      } finally {
+        // 隔离 daemon 用真实 CLI ownership 收敛；删除顺序与 darwin E2E 一致（先停进程再删 state）。
+        const stop = Bun.spawn(["node", script, "--stop"], { cwd: agent, env: process.env, stdout: "ignore", stderr: "ignore", windowsHide: true })
+        await stop.exited
+        await fs.rm(state, { recursive: true, force: true })
+        await fs.rm(wav, { force: true })
+        await fs.rm(config, { force: true })
+        if (previousState === undefined) delete process.env.CHATGPT_STATE_DIR
+        else process.env.CHATGPT_STATE_DIR = previousState
+      }
+    },
+    300_000,
   )
 })
