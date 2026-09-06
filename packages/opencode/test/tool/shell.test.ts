@@ -463,6 +463,34 @@ describe("tool.shell", () => {
       )
     }),
   )
+
+  // [INV-04] 图例是给模型的防退守契约：声明标记由 harness 插入（命令未打印）、
+  // 首现/错误行保留、省略是有意的，避免模型把标记当异常排查或因此关闭压缩。
+  it.live("tool description documents harness compression markers", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const bash = yield* initBash()
+        expect(bash.description).toContain("Short harness markers")
+        expect(bash.description).toContain("the command did not print them")
+        expect(bash.description).toContain("[... same line Nx]")
+        expect(bash.description).toContain("[redacted ...]")
+      }),
+    ),
+  )
+
+  it.live("omits marker legend when bash compression is disabled", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped({ config: { tool_output: { bash_compression: false } } })
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const bash = yield* initBash()
+          expect(bash.description).not.toContain("Short harness markers")
+        }),
+      )
+    }),
+  )
 })
 
 it.live("guards Windows command heads without rejecting literal arguments", () => Effect.gen(function* () {
@@ -2233,7 +2261,8 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(9)
-        expect(result.output).toContain("<bash_high_signal_excerpt>")
+        expect(result.output).toContain('<opencode_excerpt type="shell_high_signal"')
+        expect(result.output).toContain("fatal: hidden root cause")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
         )
@@ -2259,7 +2288,7 @@ describe("tool.shell abort", () => {
         expect(result.metadata.exit).toBe(9)
         expect(result.output).toContain("fatal: visible root cause")
         // 可见 fatal 不进入隐藏摘录，失败退出码仍需独立回放。
-        expect(result.output).not.toContain("<bash_high_signal_excerpt>")
+        expect(result.output).not.toContain("<opencode_excerpt")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
         )
@@ -2445,23 +2474,26 @@ describe("tool.shell truncation", () => {
         expect(compacted.output).toContain(retained)
         const fs = yield* FSUtil.Service
         expect(yield* fs.readFileString(retained)).toBe("a".repeat(1000))
-        // 真实 V1 caller 的短输出没有其它压缩命中，也必须脱敏并保留未修改 raw。
+        // 真实调用跨过本项200B边界后验证脱敏，不以扩大短正文职责来迎合旧夹具。
         const secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
-        const redacted = yield* run({ command: `echo ${secret}` })
-        expect(redacted.output).toContain("<REDACTED_API-KEY>")
+        const payload = `${secret}\n${Array.from({ length: 40 }, (_, index) => `context-${index}`).join(" ")}`
+        const secretCommand = `${bin} -e ${evalarg(`process.stdout.write(${JSON.stringify(payload)})`)}`
+        const redacted = yield* run({ command: PS.has(sh()) ? `& ${secretCommand}` : secretCommand })
+        expect(redacted.output).toContain("sk-abcd…[redacted api-key]")
         expect(redacted.output).not.toContain(secret)
-        expect(redacted.metadata).toMatchObject({ compressed: false, compressionSecretsRedacted: 1 })
+        expect(redacted.metadata).toMatchObject({ compressed: true, compressionSecretsRedacted: 1 })
         const rawPath = redacted.metadata.outputPath
         if (typeof rawPath !== "string") throw new Error("expected redacted raw output")
         expect(redacted.output).toContain(rawPath)
         expect(yield* fs.readFileString(rawPath)).toContain(secret)
-        // 短CLIXML净增长时不标记压缩，但实际V1调用仍须返回解码正文和可读raw。
+        // PowerShell先解码再计压缩字节；其他shell由压缩器解码，两者都保留原始归档。
         const clixml = '<Objs><S S="Output">ordinary</S></Objs>'
         const program = `process.stdout.write(String.fromCharCode(${Array.from(clixml, (char) => char.charCodeAt(0)).join(",")}))`
         const command = `${bin} -e ${evalarg(program)}`
         const decoded = yield* run({ command: PS.has(sh()) ? `& ${command}` : command })
-        expect(decoded.output).toContain("<high-entropy powershell-clixml>ordinary</high-entropy>")
-        expect(decoded.metadata).toMatchObject({ compressed: false, compressionOriginalBytes: 39, compressionCompressedBytes: 55 })
+        expect(decoded.output).toContain("ordinary")
+        expect(decoded.output).not.toContain("high-entropy")
+        expect(decoded.metadata).toMatchObject({ compressed: false, compressionOriginalBytes: process.platform === "win32" && PS.has(sh()) ? 8 : Buffer.byteLength(clixml), compressionCompressedBytes: 8 })
         const clixmlPath = decoded.metadata.outputPath
         if (typeof clixmlPath !== "string") throw new Error("expected decoded raw output")
         expect(decoded.output).toContain(clixmlPath)

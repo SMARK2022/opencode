@@ -688,8 +688,8 @@ export const ShellTool = Tool.define(
       // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
       // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
-      // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
-      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
+      // 压缩器不再依赖command，执行与授权仍使用未改动原文。
+      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
       // 列表类命令保留开头，验证日志保留末尾；环境变量前缀不参与命令分类。
       let cmdForMatch = input.command.trim()
       while (true) {
@@ -824,6 +824,8 @@ export const ShellTool = Tool.define(
           ? [
               "Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
               "Strongly prefer leaving `compress_output` omitted; set false only for exact raw formatting. Truncated output includes a compact notice and recovery path.",
+              // 图例声明标记由harness插入且省略有意，避免为排查标记而关闭压缩。
+              "Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate.",
             ].join(" ")
           : ""
         yield* Effect.logInfo("shell tool using shell", { shell })

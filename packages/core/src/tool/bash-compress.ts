@@ -17,7 +17,7 @@
 
 // 配置只影响模型呈现，不能改变进程执行、授权或原始日志的写盘内容。
 export type CompressionConfig = {
-  // 单次 false 必须绕过所有折叠策略；诊断采样仍独立运行以观察窗口外错误。
+  // false跳过压缩和正文脱敏；CLIXML仍先纯解码，诊断采样独立观察窗口外错误。
   enabled: boolean
 
   /**
@@ -71,8 +71,6 @@ export type CompressionConfig = {
   minTemplateRepeats: number
   // off 保留精确文本；aggressive 的路径和数字归一化必须显式启用。
   templateNormalizationLevel: string
-  // 适配器只改呈现，不改变 command 的执行或授权资源。
-  enableCommandAdapters: boolean
 
   /**
    * 诊断信息提取设置。
@@ -103,7 +101,7 @@ export type CompressionStats = {
   // 脱敏不是收益命中，零压缩时也需要独立报告与原文恢复。
   secretsRedacted: number
 
-  applied: boolean             // 是否真正应用了任何压缩（即节省了空间）
+  applied: boolean             // 脱敏命中或有收益的压缩已提交，不再只表示净节省。
 }
 
 // 文本与统计同一次计算返回，避免调用者重复压缩导致比例和实际输出不一致。
@@ -206,7 +204,6 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   maxWhitespaceRatio: Number(process.env.OPENCODE_BASH_MAX_WHITESPACE_RATIO ?? 0.1),
   minTemplateRepeats: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_TEMPLATE_REPEATS ?? 3),
   templateNormalizationLevel: process.env.OPENCODE_BASH_TEMPLATE_NORMALIZATION ?? "safe",
-  enableCommandAdapters: process.env.OPENCODE_BASH_ENABLE_COMMAND_ADAPTERS !== "0",
 
   // 两秒门槛避免短命令把同一错误再附录一次，采样损失提示不受此门槛隐藏。
   diagnosticMinRuntimeMs: Number(process.env.OPENCODE_BASH_DIAGNOSTIC_MIN_RUNTIME_MS ?? 2000),
@@ -242,6 +239,11 @@ const INFRA_ERROR_RE = /\b(?:ENOENT|EACCES|ECONNREFUSED|EADDRINUSE|timeout|permi
 // 健康词只能过滤弱信号，分级判断仍优先检查真实编译与基础设施错误。
 const HEALTHY_INDICATOR_RE = /\b(?:no\s+errors?|without\s+errors?|0\s+failed|failed\s*=\s*0|errors?\s*:\s*0|warnings?\s*:\s*0|no\s+vulnerabilities\s+found|found\s+0\s+vulnerabilities|all\s+tests?\s+passed?|\d+\s+passed?,\s+0\s+failed|build\s+successful|compilation\s+successful|no\s+issues?\s+found)\b/i
 // 完整值与跨帧续接共用源字段定义，不增加其它秘密类别或另一套识别语法。
+// 长值保留七字符识别头；短于16字符不保留，避免短凭据大部分仍可见。
+const SECRET_HEAD_CHARS = 7
+const SECRET_HEAD_MIN_LENGTH = 16
+const secretHead = (value: string) => value.length >= SECRET_HEAD_MIN_LENGTH ? `${value.slice(0, SECRET_HEAD_CHARS)}…` : ""
+
 const CREDENTIAL_FIELD = String.raw`\b(?:password|passwd|pwd|secret|token|key|api[_-]?key)`
 const CREDENTIAL_LABEL = `${CREDENTIAL_FIELD}\\s*[:=]`
 
@@ -265,19 +267,24 @@ function redactSecrets(text: string) {
     [/\bAKIA[0-9A-Z]{16}\b/g, "aws-access-key"],
     [/\bgh[ps]_[A-Za-z0-9]{36,}\b/g, "github-token"],
     // 单词边界避免 monkey 等普通字段误匹配；保留源八字符凭据门槛。
-    [new RegExp(`${CREDENTIAL_LABEL}\\s*['"]?([^'"\\s]{8,})['"]?`, "gi"), "credential"],
+    [new RegExp(`(${CREDENTIAL_FIELD})(\\s*[:=]\\s*)(["']?)([^"'\\s]{8,})["']?`, "gi"), "credential"],
   ] as const
-  const matches = patterns.flatMap(([regex, name]) => [...visible.matchAll(regex)].map((match) => ({
-    start: positions[match.index], end: positions[match.index + match[0].length - 1] + 1, name,
-  }))).sort((a, b) => a.start - b.start || b.end - a.end)
+  const matches = patterns.flatMap(([regex, name]) => [...visible.matchAll(regex)].map((match) => {
+    const start = positions[match.index]
+    const end = positions[match.index + match[0].length - 1] + 1
+    // 开引号与键名保留原ANSI格式；秘密区间仍由同一映射定位，不能退回简化正则替换。
+    const prefix = name === "credential" ? text.slice(start, positions[match.index + match[1].length + match[2].length + match[3].length]) : ""
+    const value = name === "credential" ? match[4] : match[0]
+    const breaks = name === "credential" ? "" : text.slice(start, end).match(/\r\n|\r|\n/g)?.join("") ?? ""
+    return { start, end, replacement: `${prefix}${breaks}${secretHead(value)}[redacted${name === "credential" ? "" : ` ${name}`}]` }
+  })).sort((a, b) => a.start - b.start || b.end - a.end)
   const parts: string[] = []
   let cursor = 0
   // 重叠模式只提交一次掩码，计数对应真实替换，不重复计算同一凭据。
   for (const match of matches) {
     if (match.start < cursor) continue
-    // 保留被掩码范围的分帧边界，标签跨LF时掩码落在值帧，正文与诊断可见性一致。
-    const breaks = text.slice(match.start, match.end).match(/\r\n|\r|\n/g)?.join("") ?? ""
-    parts.push(text.slice(cursor, match.start), breaks + `<REDACTED_${match.name.toUpperCase()}>`)
+    // replacement已保留字段前缀和完整PEM分帧边界，重叠仍只提交一次。
+    parts.push(text.slice(cursor, match.start), match.replacement)
     cursor = match.end
     redacted++
   }
@@ -285,138 +292,6 @@ function redactSecrets(text: string) {
   // 仅携带无值字段及可选分隔符，源允许字段与冒号间跨空白帧，状态不累积空白或值。
   const continuation = new RegExp(`${CREDENTIAL_FIELD}(?:\\s*[:=])?\\s*$`, "i").exec(visible)?.[0].replace(/\s/g, "") ?? ""
   return { text: parts.join(""), redacted, continuation }
-}
-
-export interface CommandAdapter {
-  detect(command: string): boolean
-  postCompress?(output: string, config: CompressionConfig): string
-}
-// 只描述呈现上下文，不引入进程句柄、原文路径或 Store 依赖。
-export type CommandAdapterContext = { command: string; exitCode: number | null; durationMs: number }
-
-class NpmPnpmAdapter implements CommandAdapter {
-  detect(command: string): boolean {
-    return /^(npm|pnpm|yarn)\s+(i|install|ci|add)\b/.test(command)
-  }
-
-  postCompress(output: string, config: CompressionConfig): string {
-    const lines = output.split("\n")
-    const start = lines.findIndex((line) => /found \d+ vulnerabilities/.test(line))
-    const end = lines.findIndex((line, i) => i > start && line.trim() === "")
-    // 只折叠已闭合 banner，窗口末尾缺边界时保留详细建议。
-    if (start >= 0 && end > start && !lines.slice(start + 1, end).some(isErrorLike))
-      lines.splice(start, end - start, "... [npm audit summary collapsed]", lines[start])
-    const grouped = new Map<string, number>()
-    for (const line of lines) {
-      const match = /WARN.*peer dep.*?(\S+)/i.exec(line)
-      if (match) grouped.set(match[1], (grouped.get(match[1]) ?? 0) + 1)
-    }
-    // 没有可解析包名的 warning 不能被过滤成空摘要。
-    if ([...grouped.values()].reduce((sum, count) => sum + count, 0) < 3) return lines.join("\n")
-    return [...lines.filter((line) => !/WARN.*peer dep.*?(\S+)/i.test(line)),
-      "... [peer dependency warnings grouped]:",
-      ...[...grouped].map(([pkg, count]) => `  - ${pkg} (${count}x)`)].join("\n")
-  }
-}
-
-class PytestAdapter implements CommandAdapter {
-  detect(command: string): boolean {
-    return /^pytest\b/.test(command)
-  }
-
-  postCompress(output: string, config: CompressionConfig): string {
-    const lines = output.split("\n")
-    const start = lines.findIndex((line) => /^=+ short test summary/i.test(line))
-    // 截断窗口没有完整结尾时不假造失败列表，原 summary 仍原样保留。
-    const end = lines.findIndex((line, i) => i > start && /^=+/.test(line))
-    const failed = start >= 0 && end > start ? lines.slice(start, end).filter((line) => /^FAILED/i.test(line)) : []
-    // 摘要用于定位失败测试，只有另有折叠净收益时才由调用方提交。
-    if (failed.length) lines.unshift(`<pytest_summary>\nfailed=${failed.length}\n${failed.map((line) => `- ${line.replace(/^FAILED\s+/i, "")}`).join("\n")}\n</pytest_summary>`, "")
-    for (let i = 0; i < lines.length; i++) {
-      if (!/^-+ Captured (stdout|stderr) call -+$/i.test(lines[i])) continue
-      let end = i + 1
-      while (end < lines.length && !/^=+/.test(lines[end]) && !/^-+ Captured/i.test(lines[end])) end++
-      const count = end - i - 1
-      // 首尾各十行保留来源；隐藏中段错误由流式诊断附录恢复。
-      if (count > 50) {
-        lines.splice(i + 11, count - 20, `... [${count - 20} lines of captured output omitted]`)
-        i += 21
-      }
-    }
-    return lines.join("\n")
-  }
-}
-
-class DockerAdapter implements CommandAdapter {
-  detect(command: string): boolean {
-    return /^docker\s+(build|buildx)\b/.test(command)
-  }
-
-  postCompress(output: string, config: CompressionConfig): string {
-    const steps = new Map<string, { num: string; name: string; status: string; lines: string[] }>()
-    const prefix: string[] = []
-    for (const line of output.split("\n")) {
-      const match = /^#(\d+)(?:\s|$)/.exec(line)
-      // 无编号输出没有可证明的步骤归属，保留原文而非挂到最后的header。
-      if (!match) { prefix.push(line); continue }
-      const header = /^#\d+ \[(.+?)\]/.exec(line)
-      // BuildKit并发日志按实际编号索引，header与状态交错不会改变归属。
-      const step = steps.get(match[1]) ?? { num: match[1], name: header?.[1] ?? `step #${match[1]}`, status: "RUNNING", lines: new Array<string>() }
-      if (header) step.name = header[1]
-      steps.set(match[1], step)
-      step.lines.push(line)
-      // ERROR 终态不能被后续 DONE 覆盖；失败步骤全部保留而非只留第一个。
-      if (/ERROR/i.test(line)) step.status = "FAILED"
-      if (step.status !== "FAILED" && /DONE|CACHED/i.test(line)) step.status = /CACHED/i.test(line) ? "CACHED" : "DONE"
-    }
-    if (!steps.size) return output
-    const ordered = [...steps.values()]
-    return [...prefix, "<docker_build_summary>", ...ordered.map((step) => `#${step.num} ${step.name}: ${step.status}`),
-      "</docker_build_summary>", ...ordered.filter((step) => step.status === "FAILED" || step.status === "RUNNING").flatMap((step) =>
-        [`<docker_failed_step step="#${step.num}">`, ...step.lines, "</docker_failed_step>"])].join("\n")
-  }
-}
-
-class TypeScriptAdapter implements CommandAdapter {
-  detect(command: string): boolean {
-    return /^(tsc|npx tsc|bun tsc)\b/.test(command)
-  }
-
-  postCompress(output: string, config: CompressionConfig): string {
-    const groups = new Map<string, string[]>()
-    for (const line of output.split("\n")) {
-      const match = /^(.+?)\((\d+),(\d+)\): error (TS\d+):/.exec(line)
-      if (!match) continue
-      const group = groups.get(match[4]) ?? []
-      group.push(line)
-      groups.set(match[4], group)
-    }
-    if (!groups.size) return output
-    // 不同错误码各自保留三例，不能让一个高频错误挤掉其它类型。
-    const kept = new Set([...groups.values()].flatMap((lines) => lines.slice(0, 3)))
-    // 只省去成功解析的后续实例，未知格式的诊断不能被错误码过滤吞掉。
-    const filtered = output.split("\n").filter((line) => !/^(.+?)\((\d+),(\d+)\): error (TS\d+):/.test(line) || kept.has(line))
-    return `<tsc_diagnostics_summary>\n${[...groups].map(([code, lines]) => `${code} x ${lines.length}`).join(", ")}\nfirst errors shown below (${kept.size} instances)\n</tsc_diagnostics_summary>\n${filtered.join("\n")}`
-  }
-}
-
-// 沿用源适配器类与注册顺序，实际 command 和收益门槛仍由调用处控制。
-const COMMAND_ADAPTERS: CommandAdapter[] = [
-  new NpmPnpmAdapter(),
-  new PytestAdapter(),
-  new DockerAdapter(),
-  new TypeScriptAdapter(),
-]
-
-export function detectCommandAdapter(command: string) {
-  // 只识别源支持的命令头，不猜测复杂 shell 字符串内的子命令。
-  return COMMAND_ADAPTERS.find((adapter) => adapter.detect(command.trim()))
-}
-export function applyCommandAdapter(command: string, output: string, config: CompressionConfig) {
-  if (!config.enabled || !config.enableCommandAdapters) return output
-  const candidate = detectCommandAdapter(command)?.postCompress?.(output, config) ?? output
-  // 摘要也必须满足相同绝对与比例收益，不能靠适配器绕开 no-apply。
-  return scoreReplacement(output, candidate, config).profitable ? candidate : output
 }
 
 function simpleHash(text: string) {
@@ -453,7 +328,7 @@ function compressTemplateRuns(lines: string[], config: CompressionConfig) {
     let j = i + 1
     while (j < lines.length && templates[j] === templates[i]) j++
     const run = lines.slice(i, j)
-    const replacement = [`... [template repeated ${j - i} times: ${quotePattern(templates[i], 60)}]`, `    first: ${lines[i]}`, `    last:  ${lines[j - 1]}`]
+    const replacement = [`[... template repeated ${j - i}x]`, `    first: ${lines[i]}`, `    last:  ${lines[j - 1]}`]
     // 检查整段而非首行；中间的诊断不能因模板相似被删去。
     if (j - i >= config.minTemplateRepeats && templates[i] !== lines[i] && !run.some((line) => /error|failed|assert|exception/i.test(line) || isErrorLike(line)) && scoreReplacement(run.join("\n"), replacement.join("\n"), config).profitable) {
       out.push(...replacement)
@@ -484,8 +359,8 @@ function compressHighEntropyLines(lines: string[], config: CompressionConfig) {
       : /^[A-Za-z0-9+/]+=*$/.test(line.trim()) ? "base64"
       : /^<Objs\b/.test(line.trim()) ? "powershell-clixml"
       : /^[{\[].*[}\]]$/.test(line.trim()) && line.length > 1000 ? "minified-json" : "unknown"
-    // 首尾及哈希只读取已脱敏正文，不从 raw 重新截取样例。
-    const replacement = `<high-entropy ${type} omitted: ${byteLen(line)} bytes, hash=${simpleHash(line)}, prefix=${JSON.stringify(line.slice(0, 20) + "...")}, suffix=${JSON.stringify("..." + line.slice(-20))}>`
+    // 指纹与七字符识别头仍只读取已脱敏正文，不从raw取样，也不保留尾部。
+    const replacement = `[... high-entropy ${type} ${byteLen(line)}B hash=${simpleHash(line)} head=${line.slice(0, 7)}]`
     // 首尾样例与标签本身也计费，净增长摘要继续原样通过。
     if (!scoreReplacement(line, replacement, config).profitable) return line
     groups++
@@ -499,7 +374,7 @@ function compressProgressBars(line: string, config: CompressionConfig) {
   for (const regex of [/([=\-#█▓▒░])\1{20,}/, /(\.)\1{20,}/, /([▁▂▃▄▅▆▇█])\1{10,}/]) {
     const match = regex.exec(line)
     if (!match) continue
-    const replacement = `[bar ${match[0].length}x${quotePattern(match[1])}]`
+    const replacement = `[... bar ${match[0].length}x]`
     if (scoreReplacement(match[0], replacement, config).profitable) return { line: line.replace(match[0], replacement), applied: true }
   }
   return { line, applied: false }
@@ -508,7 +383,7 @@ function compressLongLists(line: string, config: CompressionConfig) {
   const items = line.split(/,\s*/)
   if (items.length < 10 || byteLen(line) < 200) return { line, applied: false }
   // 保留首尾各三项和省略数量，完整中段仍可从同一 raw archive 恢复。
-  const replacement = [...items.slice(0, 3), `... (${items.length - 6} more)`, ...items.slice(-3)].join(", ")
+  const replacement = [...items.slice(0, 3), `[... ${items.length - 6} more]`, ...items.slice(-3)].join(", ")
   return scoreReplacement(line, replacement, config).profitable ? { line: replacement, applied: true } : { line, applied: false }
 }
 
@@ -720,7 +595,7 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig) {
   if (!terminal.processChunk(text)) return { text, groups: 0 }
   const frames = terminal.getFrameCount()
   const stable = terminal.getStableOutput()
-  const replacement = `... [terminal progress collapsed: ${frames} frames]\n${stable}`
+  const replacement = `[... progress ${frames} frames->final]\n${stable}`
   return frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable) && scoreReplacement(text, replacement, config).profitable
     ? { text: replacement, groups: 1 } : { text, groups: 0 }
 }
@@ -873,7 +748,7 @@ function collapseCarriageReturns(text: string, config: CompressionConfig): { tex
     const last = frames[frames.length - 1] ?? ""
     // 原始输出另行保留，模型在需要中间帧时必须能读取完整日志。
     // 插入一条说明，告诉 LLM 这里折叠了多少帧
-    const replacement = `... [carriage-return progress updates collapsed: ${frames.length - 1} frames]\n${last}`
+    const replacement = `[... progress ${frames.length - 1} frames->final]\n${last}`
     
     // 检查这个替换操作是否划算（有些短帧折叠后可能反而体积变大）
     const score = scoreReplacement(line, replacement, config)
@@ -926,7 +801,7 @@ function findRepeatedBlockAt(lines: string[], start: number, config: Compression
     // 替换内容：只留第一遍块，然后加上总结语
     const replacementLines = [
       ...block,
-      `... [previous ${width} lines repeated ${repeats - 1} more times]`,
+      `[... repeated block ${repeats}x, ${width * repeats}L->${width}L]`,
     ]
 
     // 评估是否划算
@@ -1001,7 +876,7 @@ function compressSameLines(lines: string[], config: CompressionConfig): { lines:
     // 如果达到了阈值且不是纯空白行
     if (count >= config.minSameLineRepeats && !isBlankLine(line)) {
       const originalLines = lines.slice(i, j)
-      const replacementLines = [line, `... [same line repeated ${count - 1} more times]`]
+      const replacementLines = [line, `[... same line ${count}x]`]
       const score = scoreReplacement(serializeLines(originalLines), serializeLines(replacementLines), config)
 
       // 只有省下了足够字节才应用
@@ -1073,7 +948,7 @@ function compressInlineLine(line: string, config: CompressionConfig): { line: st
       if (byteLen(original) < config.minInlineRunBytes) continue
 
       // 替换文案，明确指出是什么模式重复了多少次
-      const replacement = `[repeated ${quotePattern(pattern)} ×${repeats}]`
+      const replacement = `[... repeated ${quotePattern(pattern)} x${repeats}]`
       const score = scoreReplacement(original, replacement, config)
       if (!score.profitable) continue
 
@@ -1115,7 +990,7 @@ function compressWholeLineRepeat(line: string, config: CompressionConfig): { lin
       break
     }
     if (!ok) continue
-    const replacement = `[repeated ${quotePattern(pattern)} ×${repeats}]`
+    const replacement = `[... repeated ${quotePattern(pattern)} x${repeats}]`
     const score = scoreReplacement(line, replacement, config)
     if (score.profitable) return { line: replacement, applied: true }
   }
@@ -1194,15 +1069,14 @@ const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
  * CLIXML is PowerShell's XML-based error/info serialization format that usually
  * starts with `#< CLIXML` and wraps visible text inside `<Objs>...<S ...>...`.
  *
- * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
- * if the input is recognized CLIXML, or null otherwise.
+ * 纯解码不加包装；与normalize共用plain实现，不把解码伪称高熵省略。
  */
 function transformPowerShellClixml(text: string) {
   // #129：按块替换纯 CLIXML，混合 stdout 块保持原样
   // #129：整段扫描所有 CLIXML 块并替换
   let changed = false
   const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
-    const decoded = decodePowerShellClixmlBlock(block)
+    const decoded = decodePowerShellClixmlPlain(block)
     // #129：非纯块返回原文
     if (!decoded) return block
     changed = true
@@ -1211,15 +1085,6 @@ function transformPowerShellClixml(text: string) {
   // #129：无变更返回 null 让压缩走默认路径
   // 合法 CLIXML 的解码不受压缩收益支配，短消息同样保留可见正文。
   return changed ? next : null
-}
-
-// #129：单块 CLIXML → high-entropy 包装纯文本
-// #130：compress 仍走包装，normalize 走 plain
-function decodePowerShellClixmlBlock(block: string): string | null {
-  // #130：压缩路径包装；normalize 走 plain
-  const plain = decodePowerShellClixmlPlain(block)
-  if (!plain) return null
-  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
 }
 
 // #130：纯文本 CLIXML 解码（无 high-entropy 包装）
@@ -1321,14 +1186,16 @@ function clixmlDecodeHexEscapes(value: string) {
 /**
  * 主入口：压缩传入的可见文本，返回压缩后的文本以及详细的统计信息
  */
-export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
+export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>): CompressResult {
   const config = configOf(configInput)
+  // 纯解码先于开关和长度闸门，disabled/短文本保留source明确接受的正文脱敏边界。
+  const source = transformPowerShellClixml(text) ?? text
   const originalBytes = byteLen(text)
 
   const emptyStats: CompressionStats = {
     // 绕过时仍报告窗口原始大小，调用者无需为禁用路径另建统计算法。
     originalBytes,
-    compressedBytes: originalBytes,
+    compressedBytes: byteLen(source),
     savedBytes: 0,
     savingRatio: 0,
     carriageReturnGroups: 0,
@@ -1341,17 +1208,15 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     applied: false,
   }
 
-  // 源 opt-out 保持逐字原样；启用后脱敏不受长度预筛或压缩收益支配。
-  if (!config.enabled) return { text, stats: emptyStats }
-  // VT可能把ANSI分隔的片段重组成密钥；规范化完成后只执行一次canonical脱敏。
-  // CLIXML 解码属于呈现规范化，收益门槛只约束后续可选压缩。
-  const clixml = transformPowerShellClixml(text)
-  const cr = collapseCarriageReturns(clixml ?? text, config)
+  // 闸门只看解码文本，短输出按接受的压缩/脱敏绑定策略返回；不伪造解码压缩收益。
+  if (!config.enabled || !shouldCompressOutput(source)) return { text: source, stats: emptyStats }
+  // 保留VT后唯一canonical脱敏，归一后才拼成的凭据也由同一出口处理。
+  const cr = collapseCarriageReturns(source, config)
   const redaction = redactSecrets(cr.text)
   const redactedBytes = byteLen(redaction.text)
-  // 短终态仍报告已提交的VT收益，独立脱敏不会被后续noapply回退撤销。
-  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, highEntropyLines: clixml ? 1 : 0,
-    applied: (clixml !== null || cr.groups > 0) && redactedBytes < originalBytes,
+  // 脱敏本身算已提交；后续长度/收益拒绝也不能退回未掩码正文。
+  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, highEntropyLines: 0,
+    applied: redaction.redacted > 0 || cr.groups > 0 && redactedBytes < originalBytes,
     compressedBytes: redactedBytes, savedBytes: originalBytes - redactedBytes,
     savingRatio: originalBytes ? (originalBytes - redactedBytes) / originalBytes : 0, secretsRedacted: redaction.redacted }
   if (!shouldCompressOutput(redaction.text)) return { text: redaction.text, stats: redactedStats }
@@ -1376,8 +1241,8 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
   const inline = compressInlinePatterns(lines, config)
   lines = inline.lines
 
-  // 四个适配器由真实调用 command 选择，纯转换不创建任何执行或存储 owner。
-  const compressed = applyCommandAdapter(command, lines.join("\n"), config)
+  // source显式撤除命令专用摘要，普通压缩与原始归档继续由现有主管线承担。
+  const compressed = lines.join("\n")
   const compressedBytes = byteLen(compressed)
   // 最终重新按编码字节计量，不能把多个局部收益简单相加作为总比例。
   const savedBytes = originalBytes - compressedBytes
@@ -1394,11 +1259,12 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     repeatedLineGroups: same.groups,
     inlinePatternGroups: inline.groups,
     templateGroups: template.groups,
-    highEntropyLines: highEntropy.groups + (clixml ? 1 : 0),
+    highEntropyLines: highEntropy.groups,
     secretsRedacted: redaction.redacted,
     applied:
-      compressedBytes < originalBytes &&
-      (clixml !== null || cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0 || compressed !== lines.join("\n")),
+      redaction.redacted > 0 ||
+      (compressedBytes < originalBytes &&
+        (cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0)),
   }
 
   return {
@@ -1595,7 +1461,7 @@ export class BashDiagnosticCollector {
     const redaction = this.config.enabled ? redactSecrets(prefix + normalized) : { text: normalized, continuation: "" }
     // 一个短前缀覆盖标签落在prev邻域外的值帧，不积累空白或另建上下文队列。
     this.pendingCredential = redaction.continuation ? redaction.continuation + "\n" : ""
-    const record: LineRecord = { no: this.lineNo + 1, text: (privateKey ? "<REDACTED_PRIVATE-KEY>"
+    const record: LineRecord = { no: this.lineNo + 1, text: (privateKey ? "[redacted private-key]"
       : prefix ? redaction.text.slice(redaction.text.indexOf("\n") + 1) : redaction.text) + (this.frameDiscarded > 0 ? " [diagnostic frame sampled]" : "") }
 
     const stillActive: ActiveContext[] = []
@@ -1739,18 +1605,17 @@ function contextAlreadyVisible(ctx: DiagnosticContext, visibleOutput: string, co
   })
 }
 
-// 将错误上下文集合格式化为字符串，方便追加到最后的 Bash 输出中
+// 摘录行号仍是被丢弃原始流的帧身份，不冒充可见窗口或磁盘LF行号。
 function renderDiagnosticContexts(contexts: DiagnosticContext[], config: CompressionConfig) {
   const out: string[] = []
-  out.push("<bash_high_signal_excerpt>")
-  out.push("Error contexts not fully visible above:")
+  out.push("Error contexts omitted from the visible output:")
 
   for (const ctx of contexts) {
     const first = ctx.lines[0]?.no ?? ctx.centerLine
     const last = ctx.lines[ctx.lines.length - 1]?.no ?? ctx.centerLine
     out.push("")
     // 根因与 fatal 标签说明保留理由，不把诊断帧号冒充磁盘 LF 行号。
-    out.push(`[L${first}-L${last}]${ctx.priority === "first" ? " (root cause)" : ctx.priority === "fatal" ? " (fatal)" : ""}`)
+    out.push(`[L${first}-L${last}]${ctx.priority === "first" ? " root_cause" : ctx.priority === "fatal" ? " fatal" : ""}`)
     // L 表示诊断帧序号；含 CR 的原始文件不能据此当作 LF 行范围直接定位。
 
     for (const line of ctx.lines) {
@@ -1762,7 +1627,6 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
     }
   }
 
-  out.push("</bash_high_signal_excerpt>")
   return out.join("\n")
 }
 
@@ -1818,7 +1682,10 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
 
   // 拼接筛选后有效的报错上下文
   if (hiddenContexts.length > 0) {
-    parts.push(renderDiagnosticContexts(hiddenContexts, config))
+    // header只计实际隐藏中心，timeout/abort不输出exit；采样遗漏仍独立呈现。
+    const exitAttr = options.exitCode !== null ? ` exit="${options.exitCode}"` : ""
+    const header = `<opencode_excerpt type="shell_high_signal"${exitAttr} contexts="${hiddenContexts.length}" errors="${snapshot.errorLikeLines}" warnings="${snapshot.warningLikeLines}" />`
+    parts.push(header, renderDiagnosticContexts(hiddenContexts, config))
   }
 
   return parts.join("\n\n")
@@ -1841,7 +1708,7 @@ export function bashCompressionMetadata(stats: CompressionStats) {
     compressionInlinePatternGroups: stats.inlinePatternGroups,
     compressionTemplateGroups: stats.templateGroups,
     compressionHighEntropyLines: stats.highEntropyLines,
-    // compressed 仍只表示净压缩，独立计数驱动脱敏后的 raw 保留。
+    // compressed包含已提交脱敏；独立计数与呈现差异继续驱动原文保留。
     compressionSecretsRedacted: stats.secretsRedacted,
   }
 }

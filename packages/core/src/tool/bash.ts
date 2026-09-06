@@ -151,6 +151,8 @@ const layer = Layer.effectDiscard(
     const outputStore = yield* ToolOutputStore.Service
     const permission = yield* PermissionV2.Service
     const registry = yield* SystemContextRegistry.Service
+    // 图例服从同一用户配置，只在启用呈现压缩时向模型解释harness标记。
+    const compressionEnabled = Object.assign({}, ...(yield* config.entries()).flatMap((entry) => entry.type === "document" ? [entry.info] : [])).tool_output?.bash_compression ?? true
     // Shell source 随实际执行配置刷新；持久快照比较和更新仍由 Session Context Epoch 处理。
     const shellContext = SystemContext.make({
       key: SystemContext.Key.make("core/shell"),
@@ -172,7 +174,8 @@ const layer = Layer.effectDiscard(
           // Shell副作用无法由参数穷举，按source显式声明ambient而非名称猜测。
           worktree: "ambient",
           // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.` +
+            (compressionEnabled ? " Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate." : ""),
           input: Input,
           output: Output,
           structured: StructuredOutput,
@@ -376,8 +379,8 @@ const layer = Layer.effectDiscard(
               const command = input.command.trim().toLowerCase()
               const verification = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(command) || /^node\s+--check(\s|$)/.test(command) || /^python\s+-m\s+py_compile(\s|$)/.test(command) || /^tsc\s+--noemit(\s|$)/.test(command)
               const hasErrors = verification && ((result !== undefined && result.exitCode !== 0) || /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output))
-              // 传真实调用 command，不使用描述或重新解析执行命令。
-              const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
+              // 与V1复用无命令适配器的呈现入口，原始command只用于执行/授权。
+              const compressed = compressVisibleOutput(normalized, { enabled })
               // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
               const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "", config: { enabled } })
               const projected = [compressed.text, emptyTimeout, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings, executionNotice })
