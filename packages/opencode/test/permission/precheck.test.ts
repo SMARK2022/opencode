@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import * as nodePath from "node:path"
 import { PermissionPrecheck } from "../../src/permission/precheck"
 
 const bash = (command: string) =>
@@ -1079,6 +1080,70 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git --no-pager status").level).toBe("safe")
     // --no-pager branch -D:旧代码因 tokens[1]="--no-pager" 漏判 branch,修复后正确 cautious
     expect(bash("git --no-pager branch -D foo")).toMatchObject({ level: "cautious" })
+  })
+
+  // [local-smark] R1 git -C 语义二分:inside 按 membership 豁免,outside/注入提升,
+  // 双命中 reason 每条规则一行(用户原文「两行」);无 cwd 元数据时保守 outside。
+  // 基址必须 resolve 锚定成平台绝对路径:POSIX 下硬编码 "F:/..." 是相对路径，
+  // 会被 resolve 前缀 process.cwd() 导致全部误判 outside(实现审计 B-01，CI 红测)。
+  test("classifies git -C by working-directory membership with full reason signals", () => {
+    const cwd = nodePath.resolve(nodePath.sep + "work" + nodePath.sep + "repo")
+    // 命令内路径用正斜杠形式：tokenize 的 POSIX 转义会剥反斜杠使 win32 绝对
+    // 路径退化为盘符相对剥损形态，这里让 prefix 判定独立受测；剥损形态另测。
+    const outside = nodePath.resolve(cwd, "..", "other").replace(/\\/g, "/")
+    const bashIn = (command: string) =>
+      PermissionPrecheck.evaluate({ permission: "bash", patterns: [command], metadata: { command, cwd } })
+
+    // 双信号:outside + 状态变更,效应类在前、每条规则独占一行
+    expect(bashIn(`git -C ${outside} commit -m "docs"`)).toMatchObject({
+      level: "cautious",
+      reason: "git state-changing command requires explicit approval\ngit -C redirects outside the working directory",
+    })
+    // inside 只读:与无 flag 同构 → safe(零 reviewer 负担)
+    expect(bashIn("git -C . status").level).toBe("safe")
+    expect(bashIn("git -C src status").level).toBe("safe")
+    expect(bashIn("git -C src/../src status").level).toBe("safe")
+    // outside / 变量不可解析 / 无 cwd 元数据:保守提升 cautious 并携带信号
+    expect(bashIn("git -C .. status").reason).toContain("outside the working directory")
+    expect(bashIn('git -C "$REPO" status').reason).toContain("outside the working directory")
+    expect(bash("git -C /other status").reason).toContain("outside the working directory")
+    // inside + 状态变更:仅子命令 reason(无 redirect 附加)
+    expect(bashIn('git -C src commit -m "x"')).toMatchObject({
+      level: "cautious",
+      reason: "git state-changing command requires explicit approval",
+    })
+    // 注入族永不豁免(即使目标 inside)
+    expect(bashIn("git -c core.hooksPath=/tmp/h status").reason).toContain("injects configuration or binary path")
+    expect(bashIn("git --git-dir=.git status").reason).toContain("injects configuration or binary path")
+    expect(bashIn("git --exec-path status").reason).toContain("injects configuration or binary path")
+    // 附着短形式按同一 membership 归类(闭合 -Cdir 今日 safe 直过绕过)
+    expect(bashIn("git -Csrc status").level).toBe("safe")
+    expect(bashIn("git -C.. status").reason).toContain("outside the working directory")
+    // 盘符相对路径与 tokenize 剥损形态(未加单引号的 Windows 反斜杠路径被 POSIX
+    // 转义剥成 F:ab)静态不可证 inside → 保守 outside(实现审计 B-01 返工补)
+    expect(bashIn("git -C F:rel status").reason).toContain("outside the working directory")
+    expect(bashIn(String.raw`git -C F:\work\other status`).reason).toContain("outside the working directory")
+    // 反斜杠相对路径剥损(..\other → ..other 会挂回 cwd 内误判 inside)同样
+    // 保守 outside——剥损事实由 tokenize 的 per-token 标记暴露(实现审计 B-01r2)
+    expect(bashIn(String.raw`git -C ..\other status`).reason).toContain("outside the working directory")
+    expect(bashIn(String.raw`git -C ..\.. status`).reason).toContain("outside the working directory")
+    expect(bashIn(String.raw`git -C ..\other commit -m x`).reason).toContain(
+      "git state-changing command requires explicit approval\ngit -C redirects outside the working directory",
+    )
+    // 对照组：正斜杠形式走真实 prefix 判定；单引号内反斜杠是字面量不剥损，
+    // 走真实 membership（cwd 本身即 inside，两平台确定性 safe）
+    expect(bashIn("git -C ../other status").reason).toContain("outside the working directory")
+    expect(bashIn(`git -C '${cwd}' status`).level).toBe("safe")
+    // 高风险组合信号保留
+    expect(bashIn(`git -C ${outside} reset --hard`).reason).toContain("destructive git reset")
+    // 链式段合并:同层全量去重聚合,每条规则一行
+    expect(bashIn(`git -C ${outside} pull; git -C ${outside} add f && git -C ${outside} commit -m y`).reason).toBe(
+      "git state-changing command requires explicit approval\ngit -C redirects outside the working directory",
+    )
+    // win32 文件系统大小写不敏感:折叠比较仅在本平台断言,防 POSIX 红测
+    if (process.platform === "win32") {
+      expect(bashIn(`git -C ${cwd.toUpperCase().replace(/\\/g, "/")} status`).level).toBe("safe")
+    }
   })
 
   test("keeps cautious classification when shell metadata has environment assignments", () => {

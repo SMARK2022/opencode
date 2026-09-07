@@ -1,6 +1,8 @@
 // ============================================================
 // precheck.ts — shell 命令静态启发式预分类器
 // ============================================================
+
+import * as nodePath from "node:path"
 //
 // 设计哲学：fail-closed（失败保守）。任何无法理解的语法、动态展开、
 // 编码混淆都降级为 general 或更高风险层级，绝不猜测为 safe。
@@ -343,13 +345,17 @@ function bashEffect(input: {
   metadata: Readonly<Record<string, unknown>>
 }) {
   const command = typeof input.metadata.command === "string" ? input.metadata.command : undefined
+  // [local-smark] R1：cwd 是 git -C membership 判定的基准。bash tool 的审批请求
+  // metadata 必带 cwd；缺失时（pattern 直评路径等）向下传 undefined，
+  // classifyGit 按 fail-closed 保守判 outside。
+  const cwd = typeof input.metadata.cwd === "string" ? input.metadata.cwd : undefined
   const patternCommand = input.patterns.join(" && ")
-  if (!command) return evaluateShell(patternCommand, 0)
+  if (!command) return evaluateShell(patternCommand, 0, cwd)
 
   // 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据风险取 max。
   // inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的源码证据，
   // 只能提高风险，不能降低：forbidden/dangerous source 在任何 gate 都不可被弱化。
-  const raw = shellEvidenceRisk(command, input.metadata)
+  const raw = shellEvidenceRisk(command, input.metadata, cwd)
   if (!patternCommand.trim() || patternCommand === command) return raw
 
   // Shell metadata is the raw audit/reviewer evidence, while permission patterns
@@ -357,7 +363,7 @@ function bashEffect(input: {
   // Auto precheck must consider both views and keep the higher risk so raw
   // forbidden/dangerous payloads cannot be weakened, and env assignments cannot
   // downgrade a canonical `git push --force` pattern from cautious to general.
-  return maxRisk(raw, evaluateShell(patternCommand, 0))
+  return maxRisk(raw, evaluateShell(patternCommand, 0, cwd))
 }
 
 // inline_scripts 附加证据风险计算：在原命令风险之上单调叠加每个字符串 source
@@ -365,16 +371,16 @@ function bashEffect(input: {
 // inline_scripts 包含 Python 源码而非 shell 命令，因此除了 evaluateShell 的常规
 // 危险模式外，还需检查 RE_C_PYTHON_FILE_REMOVE_CALL：该模式在正常 token 级检查
 // 中需要 python -c 前缀才能命中，但 inline_scripts 的源码没有该前缀。
-function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>): Decision {
+function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>, cwd?: string): Decision {
   const scripts = Array.isArray(metadata.inline_scripts)
     ? metadata.inline_scripts.filter((item): item is string => typeof item === "string")
     : []
   return scripts.reduce((risk, script) => {
     const scriptRisk = RE_C_PYTHON_FILE_REMOVE_CALL.test(script)
-      ? maxRisk(evaluateShell(script, 0), { level: "cautious", reason: "Python file deletion requires explicit approval" })
-      : evaluateShell(script, 0)
+      ? maxRisk(evaluateShell(script, 0, cwd), { level: "cautious", reason: "Python file deletion requires explicit approval" })
+      : evaluateShell(script, 0, cwd)
     return maxRisk(risk, scriptRisk)
-  }, evaluateShell(command, 0))
+  }, evaluateShell(command, 0, cwd))
 }
 
 function maxRisk(left: Decision, right: Decision) {
@@ -447,7 +453,7 @@ export function canAlwaysAllowPrefix(tokens: string[]) {
 // 第九部分：核心流程
 // ============================================================
 
-function evaluateShell(command: string, depth: number): Decision {
+function evaluateShell(command: string, depth: number, cwd?: string): Decision {
   // 递归仅跟踪提取为纯文本的包装器载荷。深度上限防止恶意或格式错误的嵌套
   // 包装器消耗时间，同时保留失败安全行为：general/用户审批而非 safe。
   if (depth > 4) return { level: "general", reason: "nested shell wrapper requires explicit approval" }
@@ -469,7 +475,7 @@ function evaluateShell(command: string, depth: number): Decision {
   // `bash -c 'mkfs.vfat …' > log` 的 token 独有 forbidden 载荷被丢弃，
   // 重定向致整段 opaque 后回退 general 直通 auto-allow（安全回归实测）。
   for (const wrapped of rawWrapperScripts(command)) {
-    const decision = evaluateShell(wrapped, depth + 1)
+    const decision = evaluateShell(wrapped, depth + 1, cwd)
     if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
   }
 
@@ -477,32 +483,37 @@ function evaluateShell(command: string, depth: number): Decision {
   // 降级为 opaque(general) 而非整条丢弃，故一个 bail 字符不会藏掉同条命令里
   // 其它干净段的 cautious/dangerous（修 `scp; echo $HOME` / `scp 2>&1` 类绕过）。
   const { segments, opaque } = splitCommands(command)
-  const decisions = segments.map((item) => evaluateCommand(item, depth))
+  const decisions = segments.map((item) => evaluateCommand(item, depth, cwd))
   // opaque 段以 general 参与 max 聚合：既不允许整条降为 safe，也保留干净 cautious
   // 段的审查信号。无任何可分析段（整条 opaque）时回退 general，等价旧行为。
   if (opaque) decisions.push({ level: "general", reason: "opaque shell segment requires explicit approval" })
   if (decisions.length === 0) return { level: "general", reason: "opaque shell command requires explicit approval" }
-  // 段合并保序：forbidden > dangerous > cautious（R2 五级拆分）
-  const forbiddenHit = decisions.find((item) => item.level === "forbidden")
-  if (forbiddenHit) return forbiddenHit
-  const dangerous = decisions.find((item) => item.level === "dangerous")
-  if (dangerous) return dangerous
-  const cautious = decisions.find((item) => item.level === "cautious")
-  if (cautious) return cautious
+  // [local-smark] R1 段合并：同层全量收集去重保序后才拼 reason（用户需求：
+  // 「等直到所有的cautious待检项检出之后进行reason的附加」），不再 find(first)
+  // 丢信号；每条命中规则独占一行，层级优先序 forbidden > dangerous > cautious
+  // 不变，safe/general 收尾行为不变。
+  const aggregate = (level: "forbidden" | "dangerous" | "cautious"): Decision | undefined => {
+    const hits = decisions.filter((item) => item.level === level)
+    if (hits.length === 0) return undefined
+    return { level, reason: [...new Set(hits.map((item) => item.reason))].join("\n") }
+  }
+  const escalated = aggregate("forbidden") ?? aggregate("dangerous") ?? aggregate("cautious")
+  if (escalated) return escalated
   if (decisions.every((item) => item.level === "safe"))
     return { level: "safe", reason: "known read-only shell command" }
   return decisions.find((item) => item.level === "general") ?? { level: "general", reason: "unknown shell command" }
 }
 
-function evaluateCommand(command: string, depth: number): Decision {
-  const tokens = tokenize(command)
-  if (!tokens) return { level: "general", reason: "unable to tokenize shell command" }
+function evaluateCommand(command: string, depth: number, cwd?: string): Decision {
+  const tokenized = tokenizeRich(command)
+  if (!tokenized) return { level: "general", reason: "unable to tokenize shell command" }
+  const { tokens, stripped } = tokenized
   if (tokens.length === 0) return { level: "general", reason: "empty shell command requires explicit approval" }
 
   // 包装器展开：提取内层脚本递归检查
   const unwrapped = unwrap(tokens)
   if (unwrapped.action === "script") {
-    const decision = evaluateShell(unwrapped.script, depth + 1)
+    const decision = evaluateShell(unwrapped.script, depth + 1, cwd)
     // 包装器载荷分层传播：包装器本身不能变成 safe，因为未来同一前缀可能
     // 承载任意脚本；可见脚本为 cautious/dangerous/forbidden 时保留更高风险层级。
     if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
@@ -514,7 +525,7 @@ function evaluateCommand(command: string, depth: number): Decision {
   const remote = remoteWrapper(tokens)
   if (remote.action === "remote") {
     if (remote.script) {
-      const decision = evaluateShell(remote.script, depth + 1)
+      const decision = evaluateShell(remote.script, depth + 1, cwd)
       // SSH/WSL 跨越本机信任边界：安全的远程只读命令仍是 general；可见的远程
       // 破坏性动作保留 cautious/dangerous/forbidden。
       if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
@@ -523,9 +534,9 @@ function evaluateCommand(command: string, depth: number): Decision {
   }
 
   // token 层启发式分类：按威胁类别逐项检查
-  const risk = classifyTokens(tokens)
+  const risk = classifyTokens(tokens, cwd, stripped)
   if (risk) return risk
-  if (safeTokens(tokens)) return { level: "safe", reason: "known read-only shell command" }
+  if (safeTokens(tokens, cwd, stripped)) return { level: "safe", reason: "known read-only shell command" }
 
   // 未知前缀穿透启发式：tokens[0] 不命中任何已知 cmd 分支时，RAW_FILE_DELETE
   // 等需 `;`/`&`/`\n` 起点的 raw 正则看不到空格后的内层 rm 等，token 层也
@@ -538,13 +549,13 @@ function evaluateCommand(command: string, depth: number): Decision {
   // raw 路径受 env 排除保持 general，maxRisk 取 pattern 的 cautious 及其 reason，
   // 避免剥头路径产生不同 reason 改写既有断言（如 L704 force push reason）。
   if (tokens.length > 1 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
-    const stripped = classifyTokens(tokens.slice(1))
-    if (stripped?.level === "cautious") {
+    const strippedPrefix = classifyTokens(tokens.slice(1), cwd, stripped.slice(1))
+    if (strippedPrefix?.level === "cautious") {
       const inner = normalizeCommandName(tokens[1])
       return {
         level: "cautious",
         // 审计线索：透传被未知前缀遮蔽的内层命令名和原始 reason
-        reason: `unknown wrapper prefix shadows ${inner}; ${stripped.reason}`,
+        reason: `unknown wrapper prefix shadows ${inner}; ${strippedPrefix.reason}`,
       }
     }
   }
@@ -931,16 +942,27 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
 }
 
 function tokenize(command: string) {
+  return tokenizeRich(command)?.tokens
+}
+
+// [local-smark] R1 实现审计 B-01r2：tokenize 的 POSIX 反斜杠转义会剥掉未加
+// 单引号的反斜杠（..\other → ..other），剥损事实只存在于本解析循环——
+// 以 per-token 标记暴露给 -C membership 消费者：目标 token 经历过剥损即
+// 无法与字面量区分，一律保守 outside（多审不漏审），镜像盘符相对剥损 guard。
+function tokenizeRich(command: string): { tokens: string[]; stripped: boolean[] } | undefined {
   // token 化有意小于完整的 shell 解析器。它保留带引号的空格和转义字符
   // 用于类路径参数，但格式错误的引号或悬挂的转义会强制提示而不是修复输入。
   const out: string[] = []
+  const stripped: boolean[] = []
   let current = ""
   let quote = ""
   let escaped = false
+  let tokenStripped = false
 
   for (const char of command) {
     if (escaped) {
       current += char
+      tokenStripped = true
       escaped = false
       continue
     }
@@ -961,7 +983,11 @@ function tokenize(command: string) {
       continue
     }
     if (/\s/.test(char)) {
-      if (current) out.push(current)
+      if (current) {
+        out.push(current)
+        stripped.push(tokenStripped)
+        tokenStripped = false
+      }
       current = ""
       continue
     }
@@ -969,8 +995,11 @@ function tokenize(command: string) {
   }
 
   if (quote || escaped) return
-  if (current) out.push(current)
-  return out
+  if (current) {
+    out.push(current)
+    stripped.push(tokenStripped)
+  }
+  return { tokens: out, stripped }
 }
 
 // ============================================================
@@ -1154,7 +1183,7 @@ function wslScript(tokens: string[]) {
 // 这是预分类器的主要分类引擎。按威胁类别组织，对每个命令使用结构化的
 // 参数谓词进行判断，优先于正则匹配，提供更精确的语义理解。
 
-function classifyTokens(tokens: string[]): Decision | undefined {
+function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): Decision | undefined {
   const cmd = normalizeCommandName(tokens[0])
 
   // ---- 跨命令：敏感路径读取 ----
@@ -1222,7 +1251,7 @@ function classifyTokens(tokens: string[]): Decision | undefined {
 
   // ---- Git 操作 ----
   // Git 子命令的分类较复杂，委托给专项分类器
-  if (cmd === "git") return classifyGit(tokens)
+  if (cmd === "git") return classifyGit(tokens, cwd, stripped)
 
   // ---- 系统 patch 应用 ----
   // GNU/BSD patch 改工作树；仅 help/version/裸命令保持 general，避免无载荷噪声。
@@ -1390,28 +1419,89 @@ function pythonRemovesFile(tokens: string[]) {
   return RE_C_PYTHON_FILE_REMOVE_CALL.test(tokens[tokens.findIndex((item) => item === "-c") + 1] ?? "")
 }
 
-// git 全局 flag 中可重定向执行上下文的 flag。这些 flag 可将 git 操作指向
-// 其他仓库(-C/--git-dir/--work-tree)、注入配置(-c/--config-env)或替换
-// helper 二进制路径(--exec-path)。与 gitSafe 共用,消除重复。
-const GIT_UNSAFE_GLOBAL = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"])
+// [local-smark] R1 语义二分：-C 只是 cwd 重定向，按目标目录 membership 豁免；
+// 注入族(-c/--config-env/--git-dir/--work-tree/--exec-path)可重定向仓库、
+// 注入配置(hooksPath)或替换 git 辅助二进制，永不豁免。与 gitSafe 共用，
+// 消除重复。
+const GIT_INJECTION_GLOBAL = new Set(["-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"])
+
+// 判定单个 token 属于哪类 git 全局 flag。=附着长形式与短选项附着形式
+// (-Cdir/-cconf=v)都在此处归一化，闭合旧实现只做精确集合匹配时
+// `git -Cdir status` 落入安全 boolean 分支被跳过的直通绕过。
+function gitFlagKind(t: string): "redirect" | "injection" | "safe" {
+  const flag = t.includes("=") ? t.slice(0, t.indexOf("=")) : t
+  if (t === "-C" || /^-C.+/.test(t)) return "redirect"
+  if (GIT_INJECTION_GLOBAL.has(flag) || /^-c.+/.test(t)) return "injection"
+  return "safe"
+}
+
+// -C 的目标目录：裸形式取下一 token，附着形式(-Cdir/-C=dir)自含并剥去引导 =。
+function gitRedirectTarget(t: string, next: string | undefined) {
+  return t.length > 2 ? t.slice(2).replace(/^=/, "") : next
+}
+
+// [local-smark] R1 membership 纯词法判定（无 I/O，precheck 同步契约）：
+// 相对实参以 cwd 为基 resolve+normalize；$VAR/通配/~ 静态不可解析时保守判
+// outside（fail-closed，与 opaque→general 同哲学）。win32 文件系统大小写
+// 不敏感→折叠比较；POSIX 严格字节。symlink 逃逸为已接受残留（plan §20）。
+function redirectsInsideCwd(target: string | undefined, cwd: string | undefined) {
+  if (!cwd || !target || /[$*?~]/.test(target)) return false
+  // 盘符冒号后无分隔符（F:foo / 裸 F:）是 win32 盘符相对路径：它随该盘的
+  // remembered cwd 漂移，无法静态证明 inside；且 tokenize 的 POSIX 反斜杠转义
+  // 会把未加单引号的 Windows 路径 F:\a\b 剥成 F:ab，恰好落入此形态——一律
+  // 保守 outside，剥损只会导致多审不会导致漏审。
+  if (/^[A-Za-z]:(?:$|[^\\/])/.test(target)) return false
+  const abs = nodePath.normalize(nodePath.resolve(cwd, target))
+  const base = nodePath.normalize(cwd)
+  if (process.platform === "win32") {
+    const a = abs.toLowerCase()
+    const c = base.toLowerCase()
+    return a === c || a.startsWith(c + nodePath.sep)
+  }
+  return abs === base || abs.startsWith(base + nodePath.sep)
+}
 
 // ---- Git 子命令专项分类器 ----
 // Git 操作复杂且有多个风险层级，需要细化的启发式判断。
-function classifyGit(tokens: string[]): Decision | undefined {
-  // 单遍遍历:跳过全局 flag 找到真正的子命令,同时检测 unsafe global flag。
-  // unsafe global(-C/-c/--git-dir 等)可重定向 git 到其他仓库或注入配置
-  // (如 core.hooksPath),即使子命令本身只读(如 status),跨仓库操作仍需审查。
-  // 支持 flag=value 形式(如 --git-dir=/path)和裸 flag 形式(如 -C /path)。
+function classifyGit(tokens: string[], cwd?: string, stripped?: boolean[]): Decision | undefined {
+  // 单遍扫描全局 flag：不再早返回，记录全部命中信号后继续定位子命令，
+  // 保证子命令分类不被 flag 遮蔽（R1 根因修复）。
+  const reasons: string[] = []
   let i = 1
   while (i < tokens.length && tokens[i].startsWith("-")) {
-    const flag = tokens[i].includes("=") ? tokens[i].slice(0, tokens[i].indexOf("=")) : tokens[i]
-    if (GIT_UNSAFE_GLOBAL.has(flag))
-      return { level: "cautious", reason: "git global flag redirects execution context" }
+    const t = tokens[i]
+    const kind = gitFlagKind(t)
+    if (kind === "redirect") {
+      // 目标 token 若经历过 tokenize 的反斜杠剥损（..\other → ..other）则
+      // 与字面量不可区分且真目标可能位于 cwd 之外——保守 outside（B-01r2）。
+      const mangled = t.length > 2 ? stripped?.[i] === true : stripped?.[i + 1] === true
+      if (mangled || !redirectsInsideCwd(gitRedirectTarget(t, tokens[i + 1]), cwd))
+        reasons.push("git -C redirects outside the working directory")
+      i += t.length > 2 ? 1 : 2
+      continue
+    }
+    if (kind === "injection") {
+      reasons.push("git global flag injects configuration or binary path")
+      // 自含形式(=附着/短选项附着)只跳 1；裸注入 flag 消费一个实参跳 2；
+      // --exec-path 裸形是可选参（print-and-exit 不消费子命令位）例外跳 1。
+      i += t.includes("=") || t.length > 2 || t === "--exec-path" ? 1 : 2
+      continue
+    }
     // 安全的 boolean flag(--no-pager/--paginate 等)不消费参数,直接跳过。
-    // 极少数吃参数的全局 flag(如 --namespace)不在 GIT_UNSAFE_GLOBAL 中,
+    // 极少数吃参数的全局 flag(如 --namespace)不在注入集合中,
     // 会将参数误当作子命令;但这些 flag 极少使用且命令仍落入 general(非 safe)。
     i++
   }
+  const subDecision = classifyGitSubcommand(tokens, i)
+  // 合并规则（R1）：flag 信号为空（-C inside 或无 flag）→与无 flag 完全同构，
+  // 保证无 flag reason 字节不变与 inside 只读零负担；双信号命中时效应类在前、
+  // 每条规则独占一行（用户原文「两行」）。
+  if (reasons.length === 0) return subDecision
+  if (subDecision) return { level: subDecision.level, reason: [subDecision.reason, ...reasons].join("\n") }
+  return { level: "cautious", reason: reasons.join("\n") }
+}
+
+function classifyGitSubcommand(tokens: string[], i: number): Decision | undefined {
   const sub = tokens[i]
   if (!sub) return undefined
 
@@ -1469,7 +1559,7 @@ function classifyGit(tokens: string[]): Decision | undefined {
 // 第十五部分：safe 层判定
 // ============================================================
 
-function safeTokens(tokens: string[]) {
+function safeTokens(tokens: string[], cwd?: string, stripped?: boolean[]) {
   // safe 命令必须是直接的、本地的、只读的。敏感路径读取在命令特定检查
   // 之前排除，这样 `cat .env` 会提示即使 `cat README.md` 是安全的文件读取。
   const cmd = normalizeCommandName(tokens[0])
@@ -1481,7 +1571,7 @@ function safeTokens(tokens: string[]) {
   if (cmd === "find")
     return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
   if (cmd === "sed") return tokens.length <= 4 && tokens[1] === "-n" && /^\d+(?:,\d+)?p$/.test(tokens[2] ?? "")
-  if (cmd === "git") return gitSafe(tokens)
+  if (cmd === "git") return gitSafe(tokens, cwd, stripped)
   // 包管理器只读子命令
   if (["npm", "pnpm", "yarn"].includes(cmd))
     return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
@@ -1490,22 +1580,38 @@ function safeTokens(tokens: string[]) {
   return versionSafe(tokens)
 }
 
-function gitSafe(tokens: string[]) {
-  // 只有只读的 git 子命令是 safe。更改配置、工作树或执行路径的全局标志
-  // 被拒绝，因为它们可以将安全子命令重定向到另一个仓库或辅助程序。
-  // 防御性冗余:主路径已在 classifyGit 拦截 unsafe global flag;
-  // 保留此检查防止未来 classifyGit 改动引入绕过。
+function gitSafe(tokens: string[], cwd?: string, stripped?: boolean[]) {
+  // 只有只读的 git 子命令是 safe。-C 经 membership 豁免（与 classifyGit 同
+  // 语义，防御层一致性）；注入族仍拒绝，因为它们可以将安全子命令重定向到
+  // 另一个仓库或辅助程序。防御性冗余:主路径已在 classifyGit 处理全局 flag;
+  // 保留此检查防止未来 classifyGit 改动引入绕过。redirect 的实参一并跳过，
+  // 避免把 -C 的目标目录误当子命令。
   const unsafeReadFlag = new Set(["--ext-diff", "--textconv"])
   const safe = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame"])
   let subcommand: string | undefined
-  for (let i = 1; i < tokens.length; i++) {
-    if (GIT_UNSAFE_GLOBAL.has(tokens[i]) || Array.from(GIT_UNSAFE_GLOBAL).some((item) => tokens[i].startsWith(item + "=")))
-      return false
-    if (unsafeReadFlag.has(tokens[i])) return false
-    if (tokens[i] === "remote") return tokens[i + 1] === "-v"
-    if (tokens[i] === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
-    if (tokens[i] === "branch") return gitBranchSafe(tokens.slice(i + 1))
-    if (!tokens[i].startsWith("-") && !subcommand) subcommand = tokens[i]
+  let i = 1
+  while (i < tokens.length) {
+    const t = tokens[i]
+    if (t.startsWith("-")) {
+      const kind = gitFlagKind(t)
+      if (kind === "redirect") {
+        // 剥损标记与 classifyGit 同判定（防御层一致性，B-01r2）：被剥损的
+        // 目标不可证 inside，一律拒绝 safe。
+        const mangled = t.length > 2 ? stripped?.[i] === true : stripped?.[i + 1] === true
+        if (mangled || !redirectsInsideCwd(gitRedirectTarget(t, tokens[i + 1]), cwd)) return false
+        i += t.length > 2 ? 1 : 2
+        continue
+      }
+      if (kind === "injection") return false
+      if (unsafeReadFlag.has(t)) return false
+      i++
+      continue
+    }
+    if (t === "remote") return tokens[i + 1] === "-v"
+    if (t === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
+    if (t === "branch") return gitBranchSafe(tokens.slice(i + 1))
+    if (!subcommand) subcommand = t
+    i++
   }
   return subcommand ? safe.has(subcommand) : false
 }
