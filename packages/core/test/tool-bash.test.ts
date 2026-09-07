@@ -1015,7 +1015,8 @@ describe("BashTool", () => {
         expect(JSON.stringify(privateKey.snapshot())).not.toContain("hidden-private-body")
         expect(privateKey.snapshot().fatalContexts[0]?.priority).toBe("fatal")
         expect(compressVisibleOutput("#".repeat(500)).text).toContain("[... bar ")
-        const list = Array.from({ length: 100 }, (_, i) => `item-${i}-with-long-name`).join(", ")
+        // 原生消费者同样只折叠真重复；保持100项与首尾/省略计数验证，不放宽收益门槛。
+        const list = [...Array.from({ length: 97 }, () => "item-with-long-name"), "tail-one", "tail-two", "tail-three"].join(", ")
         expect(compressVisibleOutput(list).text).toContain("[... 94 more]")
         // CSI 清行之后保留终态，未达阈值/收益的编辑则原样通过。
         const terminal = Array.from({ length: 10 }, () => "working ".repeat(20) + "\r\x1b[2Kdone").join("\n")
