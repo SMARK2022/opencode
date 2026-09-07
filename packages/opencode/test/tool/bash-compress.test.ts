@@ -241,23 +241,57 @@ describe("tool.bash-compress", () => {
   })
 
   test("high-entropy marker uses compact dialect", () => {
-    const blob = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(10)
+    // repeat(17)=1088 字符/字节一致，熵 6.0>4.5：阈值 1024 后仍需 ≥1024 才省略
+    const blob = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(17)
 
     const result = compressVisibleOutput(blob)
 
     // head= 行首 7 字符（R2 可识别性要求）：base64 表以 ABCDEFG 开头
-    expect(result.text).toMatch(/^\[\.\.\. high-entropy base64 640B hash=[0-9a-f]{8} head=ABCDEFG\]$/)
+    expect(result.text).toMatch(/^\[\.\.\. high-entropy base64 1088B hash=[0-9a-f]{8} head=ABCDEFG\]$/)
+  })
+
+  // [INV-02/本任务] 512-1023 字符中行保护锁：阈值 1024 前该行被整体省略
+  // 且不可恢复（URL/token 密集 JSON 同类误压已实测）。fixture 用确定性伪随机
+  // 构造，避免周期性文本被 inline 真重复规则正确压缩（那属于 INV-03 正向域）。
+  test("keeps 896-char base64 lines below the 1024-char high-entropy threshold", () => {
+    // xorshift32（乘法 LCG 在 JS 里会溢出 2^53 退化）
+    let s = 123456789
+    const blob = Array.from(
+      { length: 896 },
+      () => {
+        s ^= s << 13
+        s ^= s >>> 17
+        s ^= s << 5
+        return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[(s >>> 0) % 64]
+      },
+    ).join("")
+
+    const result = compressVisibleOutput(blob)
+
+    expect(result.text).toBe(blob)
+  })
+
+  // [INV-01/本任务] 用户现场回归锁：numpy 分析打印的 tuple 列表（52 个逗号伪项，
+  // 唯一占比 59.6%）是高信息结构化数据，长列表折叠会毁掉 12/13 条记录。
+  // 唯一占比守卫（≥25% 直通）后必须原样返回。
+  test("keeps structured tuple-list lines intact under the unique-ratio guard", () => {
+    const seq =
+      "seq [('AP10', 0.19188188016414642, 0, 1607), ('AP11', 0.18971781432628632, 0, 1607), ('AP12', 0.21857687830924988, 0, 1607), ('AP13', 0.20850607752799988, 0, 1607), ('AP14', 0.18821373581886292, 0, 1607), ('MPM10', 0.2304181307554245, 0, 1571), ('MPM11', 0.22825674712657928, 0, 1571), ('MPM12', 0.26590460538864136, 0, 1571), ('MPM13', 0.17674346268177032, 0, 1571), ('MPM14', 0.1687895655632019, 0, 1571), ('SB11', 0.16373328864574432, 0, 1676), ('SB13', 0.2032642960548401, 0, 1676), ('SM1', 0.1746259480714798, 0, 895)]"
+
+    const result = compressVisibleOutput(seq)
+
+    expect(result.text).toBe(seq)
   })
 
   test("long list marker uses compact dialect", () => {
-    // 25 项（248B）：fixture 须独立满足 shouldCompressOutput ≥200B 闸门（N-02）
-    const items = Array.from({ length: 25 }, (_, i) => `item-${String(i).padStart(3, "0")}`)
+    // 60 项真重复（57 ok + 3 err，唯一占比 6.7%<25%）：fixture 须独立满足
+    // shouldCompressOutput ≥200B 闸门，且守卫后仅真重复列表可折叠
+    const items = [...Array.from({ length: 57 }, () => "ok"), "err1", "err2", "err3"]
 
     const result = compressVisibleOutput(items.join(", "))
 
-    expect(result.text).toContain("[... 19 more]")
-    expect(result.text).toContain("item-000")
-    expect(result.text).toContain("item-024")
+    expect(result.text).toContain("[... 54 more]")
+    expect(result.text).toContain("err3")
   })
 
   test("progress bar marker uses compact dialect", () => {

@@ -202,8 +202,9 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   // 至少 4 次回车更新才折叠
   minCarriageReturnFrames: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_CR_FRAMES ?? 4),
 
-  // 高熵长行压缩配置
-  minHighEntropyLineLength: Number(process.env.OPENCODE_BASH_MIN_HIGH_ENTROPY_LINE_LENGTH ?? 512),
+  // 高熵长行压缩配置：1024 字符（line.length 口径）——512 会误压 URL/token
+  // 密集 JSON 等中价值行（512-1023 实测解除误压，≥1024 编码 blob 仍覆盖，用户决定）
+  minHighEntropyLineLength: Number(process.env.OPENCODE_BASH_MIN_HIGH_ENTROPY_LINE_LENGTH ?? 1024),
   minEntropy: Number(process.env.OPENCODE_BASH_MIN_ENTROPY ?? 4.5),
   maxWhitespaceRatio: Number(process.env.OPENCODE_BASH_MAX_WHITESPACE_RATIO ?? 0.1),
   
@@ -1168,6 +1169,14 @@ function compressLongLists(line: string, config: CompressionConfig): { line: str
   // 检测逗号分隔的长列表
   const items = line.split(/,\s*/)
   if (items.length < 10) return { line, applied: false }
+
+  // 唯一项占比守卫：≥25% 视为结构化高信息数据（tuple/dict/JSON 的逗号是记录内
+  // 分隔符，现场 52 伪项 59.6% 唯一被误折叠）；<25%（≥75% 项互为重复）才是本
+  // 规则目标的真重复列表，照旧折叠。非逗号分隔（空格/;/|/，）本就不触发。
+  const LONG_LIST_MAX_UNIQUE_RATIO = 0.25
+  if (new Set(items).size / items.length >= LONG_LIST_MAX_UNIQUE_RATIO) {
+    return { line, applied: false }
+  }
   
   const totalBytes = byteLen(line)
   if (totalBytes < 200) return { line, applied: false }
