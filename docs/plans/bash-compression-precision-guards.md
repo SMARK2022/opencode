@@ -1,0 +1,291 @@
+# Canonical Implementation Plan: Bash 压缩精准化守卫（长列表重复性 + 高熵阈值 1024）
+
+> Status: verified
+>
+> Revision: R1
+>
+> Approved revision: R1
+>
+> Audit mode: full-scope
+>
+> Requirement source: 用户会话需求（原文见 §1）
+>
+> Implementation allowed: yes
+>
+> Last updated: 2026-09-06
+
+本文件是本任务的唯一实施规范。聊天摘要、被取代修订和 builder 自述不构成实施授权。
+
+## 1. Verbatim Requirement
+
+> 优化并修改现有的opencode的压缩逻辑：① minHighEntropyLineLength 512→1024（默认值一行）② 守卫 ~6 行  当前的压缩逻辑出现了不该有的不精确的行内压缩以及高熵压缩，因此需要适当优化；同时需要确保修改后的内容更加精准而不是纯粹的放弃某些压缩路径；生产代码修改文件数不超过4个，生产代码修改行数不超过400行，同时需要避免最终要进行commit的代码出现红测，无论是陈旧红测还是新的红测，即测试有陈旧问题请优化测试，否则优化生产代码逻辑
+
+方案要素（本会话中用户逐项确认）：
+
+1. 长列表守卫：**"应当以重复性守卫，唯一项占比大于等于25%则跳过"**（用户原文）；插入 `compressLongLists`。
+2. 高熵阈值：**"不如这个相应的内容可以将阈值调整到1K，也就是1024字符，不要512B了"**（用户原文）。
+3. 影响面实验已由用户验收（14 形态矩阵 + 高熵阈值模拟，见 §4/§8）。
+
+## 2. Explicit Non-Goals
+
+- 不删除任何压缩路径：真重复列表（唯一占比 <25%）与 ≥1024 字符编码 blob 的压缩收益必须保留（用户："更加精准而不是纯粹的放弃某些压缩路径"）。
+- 不扩展长列表规则的分隔符支持（`;` `|` `，` 空格等本就不触发，扩展只增大误压面）。
+- 不修两项已记录的后续项：>1024 字符单行 XML 的 unknown 型误压、纯小写 hex 熵上限低于阈值导致 hex-dump 分支不可达（均已在会话中向用户报告并获默认留待后续）。
+- 不动其余 8 条压缩规则、标记方言、`[... N more]`/`[... high-entropy ...]` 文案、shell 图例（shell.ts 本 GOAL 不改）。
+- 不改 `OPENCODE_BASH_MIN_HIGH_ENTROPY_LINE_LENGTH` env 语义（仅默认值 512→1024；已设 env 的用户行为不变）。
+
+## 3. Repository Context
+
+| Source | 约束 |
+| --- | --- |
+| `.opencode/policy/first-principles-engineering.md` | 单一权威路径、定点修复、15% 中文注释门禁 |
+| `docs/tool-output-notice-format-design.md` | 内联 marker 契约（本任务不改格式，只加守卫/调阈值） |
+| `docs/plans/bash-output-compression-marker-unification.md` | 前置任务（a3da0d2fc0）已统一方言；本任务在其之上 |
+| `packages/opencode/AGENTS.md` | 测试从包目录跑；`bun typecheck` |
+| 根/测试 `AGENTS.md` | bun:test；live 测试模式 |
+
+## 4. Files and Evidence Read
+
+| Evidence | Relevance | Class |
+| --- | --- | --- |
+| `packages/opencode/src/tool/bash-compress.ts`（当前=a3da0d2fc0 版，1891 行；锚点 :206 阈值默认、:991 `isHighEntropyLine` 字符判定、:1170-1176 `compressLongLists`） | 两个修改点 | observed |
+| `packages/opencode/test/tool/bash-compress.test.ts`（当前；`high-entropy marker uses compact dialect` 用 640B blob、`long list marker uses compact dialect` 用 25 项全唯一 fixture——两处在本任务后必红，属陈旧需更新） | 陈旧测试面 | observed |
+| `D:\Temp\opencode\probe-final-matrix.ts` 运行结果 | 守卫 14 形态矩阵（14/14 正确）+ 高熵阈值 1024 模拟影响面（config 覆盖，未动生产） | observed |
+| `D:\Temp\opencode\probe-highentropy.ts` / `probe-highentropy2.ts` 运行结果 | 高熵误压证据：URL 643B/hash-JSON 981B/minified-JS 582B 被省略；XML 1079B 在 1024 后仍省略（残留，Non-goal）；base64 1200B 仍省略 | observed |
+| 用户现场输出（会话内） | `seq [... 52 伪项 ...]` 被折叠为 `[... 46 more]`，唯一占比 59.6% | observed |
+| git log：bash-compress.ts 自 a3da0d2fc0 后无改动；工作树两目标文件干净 | 无漂移 | observed |
+
+## 5. Current Behavior
+
+```text
+行内压缩第 2 关 compressLongLists（:1168-1185）：
+  line.split(/,\s*/) 项数 ≥10 且 行 ≥200B 且 替换盈利
+  → 无任何重复性证据 → 折叠为 前3 + [... N more] + 后3
+高熵省略 compressHighEntropyLines / isHighEntropyLine（:991 起）：
+  line.length ≥ 512（字符）且 熵 >4.5 且 空白 <10% 且 盈利
+  → 整行省略为 [... high-entropy type NB hash=... head=7字符]
+```
+
+## 6. Supported Input Domain and Reachability
+
+| 输入 | Producer | 路径 | 分类 |
+| --- | --- | --- | --- |
+| 逗号密集结构化行（tuple/dict/JSON 对象/数组，项全唯一或高差异） | Python/R 等数据分析打印 | compressLongLists | observed（用户现场） |
+| 真重复扁平列表（≥75% 项互为重复） | 状态枚举、重复输出 | compressLongLists | observed（矩阵） |
+| 512-1024 字符中高熵行（URL/token 密集 JSON/minified JS） | API 调试、长查询串 | compressHighEntropyLines | observed（误压证据） |
+| ≥1024 字符编码 blob（base64/data-uri） | 文件/图像载荷打印 | compressHighEntropyLines | observed（应压目标） |
+| 非逗号分隔（空格/分号/竖线/中文逗号） | — | 规则不触发 | observed（矩阵） |
+
+## 7. Required Invariants
+
+| ID | Invariant | Evidence | Existing test |
+| --- | --- | --- | --- |
+| INV-01 | compressLongLists 增加唯一项占比守卫：`new Set(items).size / items.length >= 0.25` → 直通原行；<25% 照旧折叠（前3/标记/后3、盈利闸不变） | 用户原文（§1 要素 1）+ 14 形态矩阵 | 无（本任务补：现场负向锁 + 真重复回归锁） |
+| INV-02 | `minHighEntropyLineLength` 默认 512→1024（`line.length` 字符口径不变；env 覆盖语义不变） | 用户原文（§1 要素 2）+ 阈值模拟实验 | 陈旧：640B blob 用例需换 ≥1024 fixture |
+| INV-03 | 精准不放弃：真重复列表（矩阵 ok×60、同 tuple×13、75%重复+异常）与 ≥1024 blob（base64 1200B 实测）在修改后仍压缩 | 用户原文（"不是纯粹的放弃"）+ 矩阵 | 本任务补双向锁 |
+| INV-04 | 无红测终态：两处陈旧测试更新，其余全部套件保持绿 | 用户原文 | §18 全量回归 |
+| INV-05 | 范围守卫：其余 8 条规则、方言、图例、metadata 不变 | §2 | 既有测试全量 |
+
+## 8. First Divergence and Root Cause
+
+| Invariant | First divergence | Owner | Proof |
+| --- | --- | --- | --- |
+| INV-01 | `compressLongLists`（:1170 起）谓词仅查项数与字节，无重复性证据 → 结构化行 52 伪项被折叠 | compressLongLists | 用户现场 seq 行（59.6% 唯一）被压为 `[... 46 more]`；矩阵 4 类结构化全中招 |
+| INV-02 | `DEFAULT_COMPRESSION_CONFIG.minHighEntropyLineLength`（:206）默认 512 → 512-1023 字符高价值行（URL/token-JSON/JS）被整体省略 | 该常量 + isHighEntropyLine 消费 | 阈值模拟（config 覆盖）实测：改 1024 后 3 类误压解除 |
+
+反馈环路（red-capable，经真实 seam）：§16 T1（seq 现场行 → `not.toContain("[... ")`，bash-compress.ts:1167-1185 无唯一性维度，现红）与 T3（900 字符 base64 → 保留，:206 馈送 512 至 :991，现红）；探针 `D:\Temp\opencode\probe-final-matrix.ts` 为补充证据（实验 1=高熵阈值影响面，走真实 seam+config 覆盖；实验 2=守卫谓词算术推演，非生产回路——N-01 记录修正）。症状=seq 行首3/尾3 残缺。终态判据：T1/T3 绿 + T2/T4（真重复与 ≥1024 blob 仍压）绿。
+
+## 9. Responsibility and Seam
+
+| Concern | Owner | 理由 |
+| --- | --- | --- |
+| 长列表重复性判定 | compressLongLists（该规则唯一生产点） | 守卫属于规则自身谓词，非调用方补偿 |
+| 高熵阈值默认值 | DEFAULT_COMPRESSION_CONFIG 常量 | isHighEntropyLine 既有消费点，仅改默认 |
+
+## 10. Single Approved Primary-Path Design
+
+两处定点修改（同一文件、无新路径、无配置面扩张）：
+
+```text
+① bash-compress.ts:206  `?? 512` → `?? 1024`（注释同步：1024 字符口径）
+② compressLongLists（:1170 items 检查后）插入：
+   // 唯一项占比守卫：占比 ≥25% 视为结构化高信息数据直通；<25%（≥75% 项互为
+   // 重复）才是本规则目标。防 tuple/dict/JSON 伪项折叠（现场 52 伪项 59.6% 唯一）。
+   const LONG_LIST_MAX_UNIQUE_RATIO = 0.25
+   if (new Set(items).size / items.length >= LONG_LIST_MAX_UNIQUE_RATIO) {
+     return { line, applied: false }
+   }
+```
+
+为何是根因修复：两处均直接改判定谓词的第一分歧点（缺重复性证据 / 阈值过低），无下游补偿、无新分支语义、无 fallback。守卫不影响 scoreReplacement 与前3/后3策略（对 <25% 场景零行为变化）。
+
+## 11. Secondary and Replacement Path Inventory
+
+| Path | 分类 | Produces success? | Disposition |
+| --- | --- | --- | --- |
+| compressLongLists 守卫后 <25% 分支 | primary-contract branch（原契约收窄到真重复域） | yes（原有） | preserve |
+| 守卫后 ≥25% 直通 | contracted pass-through（非适用输入原样返回） | no | preserve |
+| 高熵 ≥1024 省略 | primary（既有） | yes | preserve |
+| 高熵 512-1023 保留 | 阈值域收窄（用户钦定） | no | preserve |
+
+新增 alternate success path：0。诊断面：0%。
+
+## 12. Workaround Deletion and Replacement
+
+无既有 workaround 可删（前置任务的方言统一已完成；本任务为谓词精化）。Not applicable——本任务是新的精化而非替代。
+
+## 13. Forward Traceability
+
+| Requirement/Invariant | Production path | File/change | Behavioral test |
+| --- | --- | --- | --- |
+| INV-01 | compressLongLists 守卫 | bash-compress.ts +7 | T1（seq 现场行原样保留，red）；T2（真重复 60 项仍折叠，回归） |
+| INV-02 | 阈值默认 1024 | bash-compress.ts ±1 | T3（900B 保留，red）；T4（1100B 省略含 head=，回归）；陈旧 640B 用例更新为 ≥1024 |
+| INV-03 | 守卫/阈值域收窄后收益保留 | 同上 | T2+T4（双向锁） |
+| INV-04 | 陈旧测试更新 | bash-compress.test.ts | §18 全量绿 |
+| INV-05 | 无生产改动 | 无 | 既有套件全绿 |
+
+## 14. Reverse Traceability
+
+| Concept | Req ID | Evidence | 现有逻辑为何不能承载 |
+| --- | --- | --- | --- |
+| 唯一项占比守卫（0.25 常量） | INV-01 | 用户钦定 + 矩阵 14/14 | 现谓词无重复性维度 |
+| 阈值 1024 | INV-02 | 用户钦定 + 影响面实验 | 现 512 覆盖中价值行 |
+| 设计文档两处注记 | INV-05 文档一致性 | 前置任务先例 | 文档高熵段未述阈值/长列表守卫（N-04：grep 无 512 字面），注记为补充性一致性工作 |
+
+## 15. File-Level Change Plan
+
+| File | Add/modify/delete | Responsibility | Line delta |
+| --- | --- | --- | --- |
+| `packages/opencode/src/tool/bash-compress.ts` | modify | 阈值默认 + 守卫 + 注释 | +8 / −2 |
+| `packages/opencode/test/tool/bash-compress.test.ts` | modify | 更新 2 处陈旧用例 + 新增 T1/T3 负向锁与 T2/T4 正向锁 | +55 / −8 |
+| `docs/tool-output-notice-format-design.md` | modify | 内联 marker 规则注记阈值 1024 与重复性守卫（N-02 修正：实际 +2/−0） | +2 / −0 |
+
+生产 1 文件 +8/−2（预算 ≤4 文件、≤400 行，余量充足）。
+
+## 16. TDD Behavior Slices
+
+Seam：`compressVisibleOutput` 公开导出（唯一改动面）。
+
+| Order | Red behavior | 现状失败原因 | Minimal green | Regression |
+| --- | --- | --- | --- | --- |
+| 1 | T1: 用户 seq 现场行（52 伪项 59.6% 唯一）→ 断言原样保留（`not.toContain("[... ")` 且含 `('SM1'`） | 现被折叠 | 守卫生效 | 结构化数据保护锁 |
+| 2 | T3: 900 字符 base64 行 + 上下文 → 断言保留原文 | 现被省略（≥512） | 阈值 1024 | 中行保护锁 |
+| 3 | 陈旧更新 a: `high-entropy marker uses compact dialect` fixture 640→1088（repeat(17)，64×17=1088 字符/字节一致，熵 6.0>4.5），期望 regex 同步 `1088B`（N-02 修正：原记 1040 为笔误） | 改阈值后 640 不再压（陈旧红） | fixture 更新 | 方言锁延续 |
+| 4 | 陈旧更新 b: `long list marker uses compact dialect` fixture 25 项全唯一 → 60 项真重复（57 "ok" + 3 err）→ `[... 54 more]` | 守卫后全唯一不再压（陈旧红） | fixture 更新 | 真重复压缩锁 |
+| 5 | T2: 57 ok + 3 err 60 项 → `[... 54 more]`（与切片 4 合并） | — | — | INV-03 |
+| 6 | T4: ≥1024 base64 → `[... high-entropy base64 NB hash=8位 head=7字符]` | — | — | INV-03 |
+| 7 | 回归: 两测试文件全量 + compaction.test.ts + typecheck（本 GOAL 文件零错） | — | — | INV-04/05 |
+
+期望值全部独立字面量；T1 fixture 直接采用用户现场行（真实回归锁）。
+
+## 17. Chinese Comment Budget
+
+| Metric | Estimate | Method |
+| --- | --- | --- |
+| E | ≈75 | 生产 +8−2 取 8；测试净 +47；合计 ~75（排注释） |
+| C | ≥12 | `ceil(75×0.15)=12` |
+
+注释点：守卫常量（0.25 语义与现场证据）、阈值行（1024 字符口径与用户决定）、T1/T3 测试意图（现场回归锁/中行保护锁）。
+
+## 18. Verification
+
+| Command | Working directory | Evidence |
+| --- | --- | --- |
+| `bun test test/tool/bash-compress.test.ts` | packages/opencode | 全绿含 T1-T4 |
+| `bun test test/tool/shell.test.ts` | packages/opencode | INV-05（图例/摘录/live 全量） |
+| `bun test test/session/compaction.test.ts` | packages/opencode | INV-05 |
+| `bun typecheck` | packages/opencode | 本 GOAL 文件零错（他人 voice/TUI 既有红不在此列，见前置任务记录） |
+| `bun run D:\Temp\opencode\probe-final-matrix.ts` | D:\Temp\opencode | 补充证据（N-01 修正：实验 1=阈值影响面真实 seam；实验 2=守卫谓词算术）；权威验证以测试套件为准 |
+
+## 19. Diff Budget
+
+| Metric | Estimate | Justification |
+| --- | --- | --- |
+| Files added / deleted | 0 | — |
+| Files modified | 3（生产 1 + 测试 1 + 文档 1） | 预算 ≤4 生产 |
+| Production lines | +8 / −2 | 定点谓词修改 |
+| Test lines | +55 / −8 | 2 陈旧 + 4 新锁 |
+| Generated | 0 | — |
+
+## 20. Real Risks and Open Decisions
+
+### Real risks
+- >1024 字符单行 XML 仍被高熵省略（unknown 型）——已向用户报告，用户选择仅调阈值（Non-goal，后续项）。
+- 纯小写 hex（sha256 串）熵上限 4.0 < 4.5 仍不压、hex-dump 分支维持不可达——同上，后续项。
+- 512-1023 字符 base64 blob 不再省略（收益损失）——影响面实验已示用户并获接受（JWT 由脱敏先行兜底）。
+
+### Open Decisions Requiring the User
+无（两项决定均已用户钦定并引用于 §1）。
+
+### Rejected Speculation
+- 为 unknown 型加保留/type-gate（用户明确选择仅调阈值，引用见 §1 要素 2）。
+- 扩展长列表分隔符支持（无需求，扩面增险）。
+- 将守卫做成 config/env 可调（无需求证据，避免配置面扩张）。
+
+## 21. Audit Contract
+
+审计者必须：读本文件与 §1 原文；从仓库证据重建行为；builder 摘要视为不可信；full-scope；每个 blocking finding 附证据；检查 under/over-design、根因、fallback、ownership、测试、15% 注释计划；生产 ≤4 文件、≤400 行、无红测为用户硬约束。
+
+## 22. Plan Audit Record
+
+| Round | Audited revision | Full scope? | Blocking | Non-blocking | Result | Invocation |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R1 | yes | 无 | N-01 §8/§18 探针被误标为 INV-01 生产反馈环路（实验 2 为本地谓词推演）；权威红/绿回路为 T1/T3（真实 seam，审计者已验红能力）；N-02 元数据漂移（1891 应为 1856 行、640→1040 应为 1088、T1 夹具需钉入测试）；N-03 E 估算漂移（§13+7 vs §15+8、E≈75 vs 推导 55-63，均在保守方向）；N-04 §14 文档理由引用不存在的 512 字面（文档高熵段未述阈值，注记为补充性工作） | **No blocking findings. APPROVE**（R1，full scope；N-01..N-04 为记录修正，不清空 approval） | task ses_f85ab0562ffetbYPHd0KMir1AI |
+
+## 23. Implementation Evidence
+
+（实施后填写。）
+
+### Actual Files and Diff
+
+| File | +/- | 说明 |
+| --- | --- | --- |
+| `packages/opencode/src/tool/bash-compress.ts` | +11 / −2 | 阈值默认 1024（含 2 行注释）+ 守卫（5 行代码 + 3 行注释） |
+| `packages/opencode/test/tool/bash-compress.test.ts` | +41 / −7 | 2 处陈旧 fixture 更新 + T1/T3 新锁（含 xorshift fixture） |
+| `docs/tool-output-notice-format-design.md` | +2 / −0 | 阈值 1024 与守卫两行注记 |
+
+生产 1 文件 +11/−2（预算 ≤4 文件/≤400 行，余量极大）。
+
+### Red-Green Test Evidence
+
+- 红（实施前，对未改生产代码）：**恰好 T1（seq 现场行 `toBe(seq)`）与 T3（896 字符 base64 `toBe(blob)`）两个新测试失败**（22 pass / 1+1）；两处陈旧更新的回归锁（1088B 高熵、60 项真重复）在改动前后均绿（属回归锁非 red 用例，与 §16 划分一致）。
+- 绿（实施后）：bash-compress.test.ts **23 pass / 0 fail**。
+- 实施中修正（均属 fixture 构造，非生产问题）：① T3 原 fixture 为 64 字符表 ×14 周期文本，被 inline 真重复规则正确压缩（顺带验证 INV-03 正向域仍在工作）——改用确定性伪随机；② LCG 乘法在 JS 溢出 2^53 退化 → 换 xorshift32；③ 一次运算优先级笔误（`s >>> 0 % 64`）即修。
+
+### Verification Commands and Results
+
+| Command | wd | Result |
+| --- | --- | --- |
+| `bun test test/tool/bash-compress.test.ts` | packages/opencode | 23 pass / 0 fail |
+| `bun test test/tool/shell.test.ts` | packages/opencode | 204 pass / 0 fail（162s，live） |
+| `bun test test/session/compaction.test.ts` | packages/opencode | 72 pass / 0 fail |
+| `bun typecheck` | packages/opencode | 本 GOAL 文件零错误（过滤复验；他人 voice/TUI 既有红不在此列） |
+| `bun run D:\Temp\opencode\probe-final-matrix.ts` | D:\Temp\opencode | 实验 1 复跑（生产已改，两列均为新默认）：600/639/981/582 字符中行保留 ✓、1200B blob 仍省略 ✓、XML 1077B 仍省略（Non-goal 残留，符合预期） |
+
+### Original Feedback-Loop Result
+
+权威回路（N-01 修正后的 T1/T3 真实 seam）：T1 `expect(result.text).toBe(seq)` 绿（守卫生效，用户现场行原样保留）；T3 `toBe(blob)` 绿（中行保留）；T2/T4 回归锁绿（60 项真重复仍折叠 `[... 54 more]`、1088B blob 仍省略含 `head=ABCDEFG`）——INV-01/02/03 全部达成。
+
+### Actual Secondary and Replacement Path Inventory
+
+守卫后 <25% 分支=primary-contract 收窄（行为与旧完全一致）；≥25% 直通=contracted pass-through；高熵 ≥1024 省略=primary 既有；512-1023 保留=阈值域收窄（用户钦定）。新增 alternate success path = 0；诊断面 0%。
+
+### Chinese Comment Calculation
+
+| Metric | Actual | Exclusions and evidence |
+| --- | --- | --- |
+| E | ≈28（审计者逐行重算；本表原记 ≈38 为保守高估） | 生产 5（1 改值 + 4 守卫代码）；测试 23（2 方言改 + 13 T3 + 5 T1 + 3 long-list） |
+| C | 15（审计者重算；原记 16） | 生产 5 + 测试 10，均邻决策点 |
+| C/E | ≈0.54 | ≥0.15 ✓ |
+| Required min C | ≥6 | `ceil(38×0.15)=6`；实际 16 ✓ |
+
+### Remaining Unverified Items
+
+- >1024 字符单行 XML 的 unknown 型误压与纯小写 hex 不压（hex-dump 分支不可达）为 Non-goal 已记录残留，待后续任务。
+- 探针实验 2（守卫谓词算术）为本地推演非生产回路（N-01）；权威验证以 T1-T4 为准。
+
+## 24. Implementation Audit Record
+
+| Round | Plan revision | Full scope? | Blocking | Non-blocking | Result | Invocation |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R1 | yes | 无 | N-01 §23 E/C 重算：E=28/C=15/C比≈0.54（原记 38/16 为保守高估，均在门槛上方）；N-02 §15 文档行增量 +2/−1 应为 +2/−0；N-03 §23 红相运行为 builder 历史，审计者已对 HEAD 源独立重现等效红/绿回路（T1/T3 HEAD 红、新源绿，全部四套件亲测 23/72/204 全绿 + typecheck exit 0） | **No blocking findings. APPROVE**（R1 实现审计，full scope；双向精准验证：60 项真重复两版均折叠、1088B blob 两版均省略；用户硬约束逐项独立核实） | task ses_f8598689cffe3B2I0XVFWWfGmk |

@@ -209,6 +209,8 @@ message: Command exceeded timeout. Retry with a larger timeout only if it is exp
 - 能用行数就用 `L`，能用字节就用 `B/KB/MB`。
 - hash 只在原文恢复、去重或审计有帮助时出现。
 - prefix/suffix 默认不出现；定向偏离（用户授权，2026-09-06）：高熵内容以 `head=` 保留行首 7 字符，脱敏标记同理保留原值首 7 字符（仅原值 ≥16 字符时，防短凭据泄露大半）；字节单位用原始 `${bytes}B`（不做 KB 换算，避免第二套格式化实现）。
+- 高熵省略阈值 1024 字符（2026-09-06，用户决定）：512-1023 的 URL/token 密集 JSON 等中价值行保留，≥1024 编码 blob 仍省略。
+- 长列表折叠 `[... N more]` 仅适用于唯一项占比 <25% 的真重复列表（2026-09-06）：逗号密集的结构化数据（tuple/dict/JSON）直通。
 - marker 应短于被替换内容，否则不应替换。
 
 ## 推荐 type 集合
