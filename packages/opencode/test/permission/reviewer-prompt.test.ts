@@ -146,6 +146,28 @@ describe("permission reviewer prompt", () => {
     expect(items.map((item) => item.text).join("\n")).toContain(">>> APPROVAL REQUEST END")
   })
 
+  // [local-smark] R1 多规则命中呈现框架:precheck 信号不再是单一 "Retry reason",
+  // 而是逐条列出的 matched rules + 按最严格命中规则审计的指引。
+  test("frames precheck signals as matched rules with strictest-rule guidance", () => {
+    const items = PermissionReviewerPrompt.buildUserPromptItems(
+      { entries: [{ role: "user", text: "Please inspect the repo." }], truncated: false },
+      new ReviewerRequest({
+        permission: "bash",
+        patterns: ["git -C /other commit"],
+        metadata: { command: "git -C /other commit" },
+        precheck: {
+          level: "cautious",
+          reason: "git state-changing command requires explicit approval\ngit -C redirects outside the working directory",
+        },
+      }),
+      "git state-changing command requires explicit approval\ngit -C redirects outside the working directory",
+    )
+    const joined = items.map((item) => item.text).join("\n")
+    expect(joined).toContain("Precheck matched rules (adjudicate at the strictest matched rule):")
+    expect(joined).toContain("redirects outside the working directory")
+    expect(joined).not.toContain("Retry reason:")
+  })
+
   // 596 R-REQ-3 双落点：user 尾部（planned action 之后）的决策入口指令是
   // 小模型权重最高处；system 契约同步声明 judge 角色与「信息不足→结构化
   // deny/unknown」，把实测漂移形态（反问、自认无法执行）映射为合法决策。
