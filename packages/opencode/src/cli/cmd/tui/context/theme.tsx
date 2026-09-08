@@ -435,8 +435,8 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
       renderer.setBackgroundColor(values().background)
     })
 
-    const syntax = createMemo(() => generateSyntax(values()))
-    const subtleSyntax = createMemo(() => generateSubtleSyntax(values()))
+    const syntax = createSyntaxStyleMemo(() => generateSyntax(values()))
+    const subtleSyntax = createSyntaxStyleMemo(() => generateSubtleSyntax(values()))
 
     return {
       theme: new Proxy(values(), {
@@ -483,6 +483,28 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     }
   },
 })
+
+function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
+  const renderer = useRenderer()
+  let current: SyntaxStyle | undefined
+
+  onCleanup(() => {
+    const style = current
+    current = undefined
+    // 最后一份样式不经 replacement；idle 边界避免销毁仍被当前帧使用的共享 owner。
+    // CliRenderer.idle() 在 renderer destroy 时 resolve 且不 reject，销毁安排不会悬挂。
+    if (style) void renderer.idle().then(() => style.destroy())
+  })
+
+  return createMemo(() => {
+    const previous = current
+    current = factory()
+    // factory 成功后才替换 current，失败时旧 style 仍是唯一有效 owner。
+    // previous 与 cleanup 处理的对象不相交，无需幂等 Set：每次 replacement 销毁上一份旧值，cleanup 只销毁最后一份。
+    if (previous) void renderer.idle().then(() => previous.destroy())
+    return current
+  })
+}
 
 async function getCustomThemes() {
   const directories = [

@@ -9,8 +9,9 @@ if (!raw) {
 }
 
 const ver = raw.replace(/^v/, "")
-// 只有已经发布并完成attestation的版本才能进入映射；拒绝任意拼接URL，避免写出不可安装lockfile。
-if (ver !== "0.4.3-smark.1") {
+// 维护入口只校验 smark release 形状；版本真相是 root package.json catalog 与已发布 release，不是本脚本的白名单。
+// 形状校验仍拒绝任意拼接 URL，避免写出不可安装 lockfile。
+if (!/^\d+\.\d+\.\d+-smark\.\d+$/.test(ver)) {
   console.error(`Unsupported OpenTUI release: ${ver}`)
   process.exit(1)
 }

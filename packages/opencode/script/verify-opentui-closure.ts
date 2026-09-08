@@ -5,7 +5,21 @@ import path from "node:path"
 import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
 
 const root = path.resolve(import.meta.dir, "../../..")
-const version = "0.4.3-smark.10"
+// 版本唯一信源是 root package.json catalog；验证器不得维护第二份版本常量，避免升级时信源漂移。
+const catalog = ((await Bun.file(path.join(root, "package.json")).json()) as {
+  workspaces?: { catalog?: Record<string, string> }
+}).workspaces?.catalog
+const opentuiVersions = ["@opentui/core", "@opentui/keymap", "@opentui/solid"].map((name) => catalog?.[name])
+// 三个 framework 包必须共享同一版本；catalog 分裂意味着 lock 与 installed 已无法形成单一 ABI 闭包。
+if (!catalog || opentuiVersions.some((item) => typeof item !== "string") || new Set(opentuiVersions).size !== 1) {
+  throw new Error(`root package.json catalog does not declare a single OpenTUI version: ${opentuiVersions.join(", ")}`)
+}
+const version = opentuiVersions[0] as string
+// solid-js 期望版本同样从 catalog 读取，与 OpenTUI 版本共用同一升级信源。
+const solidVersion = catalog["solid-js"]
+if (typeof solidVersion !== "string") {
+  throw new Error("root package.json catalog does not declare solid-js")
+}
 const tag = `v${version}`
 const repository = "https://github.com/SMARK2022/opentui"
 const release = `${repository}/releases/download/${tag}`
@@ -87,8 +101,8 @@ const solidVersions = new Map(
   ),
 )
 // realpath唯一和version唯一是两个独立条件；相同版本的两份Solid仍会分裂响应式owner。
-// OpenTUI Solid/keymap精确要求1.9.12；任意嵌套1.9.10都会让响应式owner和renderer运行在不同runtime。
-if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) => item !== "1.9.12")) {
+// Solid 版本与 OpenTUI 版本同属 catalog 声明；嵌套旧版会让响应式owner和renderer运行在不同runtime。
+if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) => item !== solidVersion)) {
   throw new Error(
     `solid-js closure mismatch: ${solidRoots.map((item) => `${item}@${solidVersions.get(item)}`).join(", ")}`,
   )
