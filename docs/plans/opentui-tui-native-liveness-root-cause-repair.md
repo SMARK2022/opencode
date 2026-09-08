@@ -291,7 +291,9 @@ R18 实现审计 round 2 verdict（原样记录）：`Release verdict: APPROVE �
 
 **替代路径清单**：无。退休唯一路径=destroySelf（两入口汇聚于 `Renderable.destroy():1573`）；Theme 退休唯一路径=memo 内 idle 边界；版本真相唯一信源=root catalog。无新增 catch/fallback/diagnostic。
 
-**未验证项**：installed runtime 的 --pressure liveness harness 需 §6.7 artifact adoption（发布 .11 + 更新 catalog/overrides/lock/provenance）后重跑；该阶段需用户授权 push，当前保持源码侧 green + installed 侧 red 的诚实状态。
+**未验证项**：已全部关闭。§6.7 artifact adoption 完成：smark.11 release（0f64a76e）全绿发布后，installed runtime 重跑三种 harness 模式——`--pressure --native-trigger` 20000/20000 迭代完成、无 allocation error（.10 时在 16378 迭代处 `Failed to create SyntaxStyle` 且 `exits=0` 卡死）；`--pressure` 与 baseline 均 `caught:1, exits:1, visible:true`（边界捕获与退出路径保持有效）。
+
+**交付采纳证据（round 3）**：release v0.4.3-smark.11 工作流全绿（Validate 10s → Build&Pack 10m4s → Verify 4-OS → Publish 12s）；父仓采纳 diff = root package.json（catalog 3 值 + 11 overrides）、bun.lock、opentui-source-revision.json（gitlink/releaseCommit=0f64a76e）、thirdparty/opentui gitlink；closure verifier `--source-revision-authorized` 绿（11 包、单 solid owner、native sha256 校验通过）。注意：upgrade 脚本会向带 overrides 字段的嵌套 manifest 写入覆盖项，与 .10 采纳形态（仅 root）不符，已手动回退 packages/core 与 packages/opencode 的嵌套 overrides——脚本此行为不在本 GOAL 范围，留作后续观察项。
 
 **CI 红测预检（commit 前，用户要求）**：CI 历史两次红测根因=(1) smark.8 lockfile 冻结漂移（本地 `bun install --frozen-lockfile` 实测无漂移）；(2) smark.7 markdown fg/bg 用例（本地 6 pass）。本地按 build-native.yml 逐步复跑：全量 core JS 套件 5040 用例初跑 1 fail——三个生命周期用例的全局绝对基线断言在 167 文件同进程下被跨文件异步销毁污染（Expected 315 / Received 309），改为本用例新增 key 集合断言后 5040 pass / 0 fail；`test:native`（zig）与 keymap 18 个 solid-hooks 用例在 clean HEAD 同样失败（Windows 环境既有问题，CI 为 macOS 且 .10 全绿）；`test:dist` 需 Node 26.3.0（CI 由 setup-node 安装，本地未装）；solid 262 pass。该断言修复在实现审计之后发生，触发实现审计 round 2。
 
