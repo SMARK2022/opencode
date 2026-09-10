@@ -188,10 +188,10 @@ async function verifyOpenTuiClosure() {
   const solidOwners = await Promise.all([...consumers, await packageRoot("@opentui/solid"), await packageRoot("@opentui/keymap")].map(from => packageRoot("solid-js", from)))
   const solid = await Bun.file(path.join(solidOwners[0], "package.json")).json()
   if (new Set(solidOwners).size !== 1 || solid.version !== manifest.workspaces.catalog["solid-js"]) throw new Error("solid-js closure mismatch")
-  const declared = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()
-  // index身份是已选源码，声明不能用任意clean目录自证；发布commit另由远端annotated tag证明。
+  // 源码身份取父仓索引，版本及发布tag只取root catalog，不再读取手写清单。
+  // 完整annotated/peeled远端证据仍独立核对，声明不能冒充授权。
   const gitlink = (await $`git ls-files --stage -- thirdparty/opentui`.cwd(root).quiet().text()).trim().split(/\s+/)[1]
-  if (declared.schema !== 1 || declared.releaseTag !== tag || !/^[0-9a-f]{40}$/.test(declared.sourceGitlink) || !/^[0-9a-f]{40}$/.test(declared.releaseCommit) || gitlink !== declared.sourceGitlink) throw new Error("invalid OpenTUI source revision authorization")
+  if (!gitlink || !/^[0-9a-f]{40}$/.test(gitlink)) throw new Error("thirdparty/opentui gitlink is missing or invalid")
   const ref = `refs/tags/${tag}`
   // 完整ref与peeled ref缺一不可，不能把lightweight tag或同名branch当作发布授权。
   const output = await $`git ls-remote --tags ${repository} ${ref} ${`${ref}^{}`}`.cwd(root).quiet().text()
@@ -199,7 +199,7 @@ async function verifyOpenTuiClosure() {
     const [commit, name] = line.trim().split(/\s+/, 2)
     return [name, commit] as const
   }))
-  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== declared.releaseCommit) throw new Error(`OpenTUI ${tag} is not annotated at the authorized release commit`)
+  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== gitlink) throw new Error(`OpenTUI ${tag} is not annotated at gitlink ${gitlink}`)
 }
 
 async function sha256(file: string) {
@@ -214,8 +214,17 @@ async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name
   const nativeRoot = await packageRoot(nativeName)
   const nativeManifest = await Bun.file(path.join(nativeRoot, "package.json")).json()
   const coreManifest = await Bun.file(path.join(await packageRoot("@opentui/core"), "package.json")).json()
-  // 声明的源码身份与实际包/产物证据分开记录，不以 gitlink 代替安装或远端 tag 授权验证。
-  const declaredSource = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()
+  // 声明从root catalog与父仓索引派生，消除随版本手工同步的第二信源。
+  const root = path.resolve(dir, "../..")
+  const version = (await Bun.file(path.join(root, "package.json")).json()).workspaces.catalog["@opentui/core"]
+  // Nix源码归档不携带.git：缺席的源码身份不作声明，安装与产物证据仍照常验证。
+  const hasGit = fs.existsSync(path.join(root, ".git"))
+  const sourceGitlink = hasGit
+    ? (await $`git ls-files --stage -- thirdparty/opentui`.cwd(root).text()).trim().split(/\s+/)[1]
+    : undefined
+  if (hasGit && !sourceGitlink) throw new Error("thirdparty/opentui gitlink is missing")
+  // 同形releaseCommit仍是声明，不替代下方安装/native证据或远端tag授权验证。
+  const declaredSource = { schema: 1, sourceGitlink, releaseTag: `v${version}`, releaseCommit: sourceGitlink }
   // target 名、manifest 约束和 native 文件必须同时一致；只记录解析到的包名会掩盖 Bun 选错 ABI 的情况。
   if (
     nativeManifest.name !== nativeName ||

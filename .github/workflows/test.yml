@@ -193,8 +193,9 @@ jobs:
 
   opentui-required:
     # #489：consumer 回归与 typecheck 必须同一 job 执行，避免不同安装图互相掩盖 peer 漂移。
-    # 目标谱系以 registry 0.4.5 承载 OpenTUI，无 smark.1 closure 校验面，测试直接钉住用户可见 seam。
     # 版本名不写死：gate 钉住的是 user-visible seam 行为，OpenTUI 版本由 catalog 决策单独管理。
+    # 构建声明从root catalog派生，checkout另采索引gitlink；不再维护随版本过期的手写清单。
+    # 声明、实际安装及远端tag授权是不同证据；consumer回归不能互相冒充这些事实。
     name: 必过 OpenTUI consumer gate
     runs-on: ubuntu-latest
     timeout-minutes: 45
