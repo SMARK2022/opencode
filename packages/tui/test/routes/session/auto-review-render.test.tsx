@@ -854,9 +854,58 @@ test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)("chro
   })
 })
 
+test("lazy session epilogue keeps final ledger without per-delta registration", async () => {
+  for (const scenario of ["partial", "empty", "daemon"] as const) {
+    const captured: { value?: string | (() => string | undefined); registrations: number; exits: number; reason?: unknown } = { registrations: 0, exits: 0 }
+    const messageID = "msg_exit_lazy"
+    const info: AssistantMessage = { id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop", time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }
+    const finish = { id: "part_exit_finish", sessionID, messageID, type: "step-finish" as const, reason: "stop", cost: 0.001, tokens: info.tokens }
+    const messages = scenario === "empty" ? [] : [{ info, parts: [finish] }]
+    // 不在setter内执行producer；五次真实Sync更新必须各自可见，避免批处理掩盖急重算。
+    // 账本故意大于窗口内统计，同时覆盖部分历史、空历史及daemon字符串覆盖。
+    await withRenderedReview(messages, async (app, _route, emit, _commands, sync) => {
+      const producer = captured.value
+      if (typeof producer !== "function") throw new Error("expected lazy Session epilogue")
+      const baseline = captured.registrations
+      if (scenario !== "empty") {
+        for (let i = 0; i < 5; i++) {
+          const output = 971 + i
+          emit({ directory, project: "proj_test", payload: { id: `evt_exit_${i}`, type: "message.part.updated", properties: { sessionID, part: { ...finish, tokens: { ...finish.tokens, output } }, time: 4 + i } } })
+          await waitForReviewFrame(app, async () => {
+            const part = sync.data.part[messageID]?.find((item) => item.id === finish.id)
+            if (part?.type === "step-finish" && part.tokens.output === output) return true
+            await Bun.sleep(0)
+            return false
+          }, { maxPasses: 300 })
+          expect(captured.registrations).toBe(baseline)
+        }
+      }
+      if (scenario === "daemon") {
+        emit({ directory, project: "proj_test", payload: { id: "evt_exit_daemon", type: "global.disposed", properties: { reason: "daemon-stop" } } })
+        await waitForReviewFrame(app, async () => captured.exits === 1, { maxPasses: 300 })
+        expect(captured.value).toBe("opencode daemon stopped.")
+        expect(captured.reason).toBeUndefined()
+        app.renderer.destroy()
+        expect(captured.value).toBe("opencode daemon stopped.")
+        return
+      }
+      app.renderer.destroy()
+      expect(captured.registrations).toBe(baseline)
+      const summary = producer()
+      expect(summary).toContain("Review render")
+      expect(summary).toContain(sessionID)
+      expect(summary).toContain("↑ 12.3K ↓ 1.0K · $0.01")
+    }, {}, {}, {}, {
+      totals: { cost: 0.01, tokens: { input: 12300, output: 970, reasoning: 30, cache: { read: 100, write: 50 } } },
+      onEpilogue: (value) => { captured.value = value; captured.registrations++ },
+      onExit: (reason) => { captured.reason = reason; captured.exits++ },
+    })
+  }
+})
+
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
-  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"], commands: OpenTuiKeymap) => Promise<void>,
+  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"], commands: OpenTuiKeymap, sync: ReturnType<typeof useSync>) => Promise<void>,
   dimensions: { width?: number; height?: number } = {},
   children: Record<string, () => typeof messages> = {},
   kv: Record<string, unknown> = {},
@@ -864,6 +913,9 @@ async function withRenderedReview(
     revert?: { messageID: string }
     onRequest?: (url: URL, request?: Request, init?: RequestInit) => void | Promise<void>
     clipboard?: ClipboardService
+    totals?: { cost: number; tokens: AssistantMessage["tokens"] }
+    onEpilogue?: (value?: string | (() => string | undefined)) => void
+    onExit?: (reason?: unknown) => void
   } = {},
 ) {
   await using tmp = await tmpdir()
@@ -872,6 +924,7 @@ async function withRenderedReview(
     id: sessionID, slug: "review-render", projectID: "proj_test", directory,
     version: "1", title: "Review render", time: { created: 1, updated: 3 },
     ...(options.revert ? { revert: options.revert } : {}),
+    ...options.totals,
   }
   const events = createEventSource()
   // 默认审查子会话和Task子会话共用按ID分发的真实响应形状。
@@ -892,8 +945,8 @@ async function withRenderedReview(
     if (url.pathname.startsWith("/session/")) return json([])
   }, events)
   const messageIDs = messages.map((message) => message.info.id)
-  const observed: { route?: ReturnType<typeof useRoute>; commands?: OpenTuiKeymap; syncReady: boolean } = { syncReady: false }
-  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} onKeymap={(keymap) => { observed.commands = keymap }} clipboard={options.clipboard} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
+  const observed: { route?: ReturnType<typeof useRoute>; commands?: OpenTuiKeymap; sync?: ReturnType<typeof useSync>; syncReady: boolean } = { syncReady: false }
+  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} onKeymap={(keymap) => { observed.commands = keymap }} clipboard={options.clipboard} messageIDs={messageIDs} onSyncReady={(sync) => { observed.sync = sync; observed.syncReady = true }} onEpilogue={options.onEpilogue} onExit={options.onExit} />, {
     width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen", useThread: false,
   })
   try {
@@ -906,8 +959,8 @@ async function withRenderedReview(
       await new Promise((resolve) => process.nextTick(resolve))
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    if (!observed.route || !observed.commands) throw new Error("review route and commands were not mounted")
-    await run(app, observed.route, events.emit, observed.commands)
+    if (!observed.route || !observed.commands || !observed.sync) throw new Error("review route, commands and Sync were not mounted")
+    await run(app, observed.route, events.emit, observed.commands, observed.sync)
   } finally {
     app.renderer.destroy()
   }
@@ -918,10 +971,12 @@ function ReviewHarness(props: {
   fetch: typeof globalThis.fetch
   events: ReturnType<typeof createEventSource>["source"]
   messageIDs: string[]
-  onSyncReady: () => void
+  onSyncReady: (sync: ReturnType<typeof useSync>) => void
   observe: (route: ReturnType<typeof useRoute>) => void
   onKeymap: (keymap: OpenTuiKeymap) => void
   clipboard?: ClipboardService
+  onEpilogue?: (value?: string | (() => string | undefined)) => void
+  onExit?: (reason?: unknown) => void
 }) {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
@@ -932,7 +987,7 @@ function ReviewHarness(props: {
   return (
     <TestTuiContexts paths={{ state: props.state }}>
       <OpencodeKeymapProvider keymap={keymap}>
-        <ArgsProvider><ExitProvider exit={() => {}}><EpilogueProvider set={() => {}}>
+        <ArgsProvider><ExitProvider exit={props.onExit ?? (() => {})}><EpilogueProvider set={props.onEpilogue ?? (() => {})}>
           <ClipboardProvider value={props.clipboard ?? {}}><KVProvider><ToastProvider>
             <RouteProvider initialRoute={{ type: "session", sessionID }}><TuiConfigProvider config={config}>
               <PluginRuntimeProvider value={runtime}>
@@ -954,7 +1009,7 @@ function ReviewHarness(props: {
   )
 }
 
-function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void; messageIDs: string[]; onSyncReady: () => void }) {
+function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void; messageIDs: string[]; onSyncReady: (sync: ReturnType<typeof useSync>) => void }) {
   const sync = useSync()
   props.observe(useRoute())
   let fired = false
@@ -964,7 +1019,7 @@ function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => v
     const infos = sync.data.message[sessionID]
     if (!infos || props.messageIDs.some((id) => !infos.some((info) => info.id === id) || sync.data.part[id] === undefined)) return
     fired = true
-    props.onSyncReady()
+    props.onSyncReady(sync)
   })
   return <Session />
 }
