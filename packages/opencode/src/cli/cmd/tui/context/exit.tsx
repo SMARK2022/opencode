@@ -8,9 +8,13 @@ import { onCleanup } from "solid-js"
 const log = Log.create({ service: "tui" })
 export const ExitSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
 
+// 退出消息允许惰性 producer：退出快照只需退出这一刻的最终态，不该随每个 part delta 全量重算。
+// 字符串与函数两种形态并存，兼容既有 `set("...")` 调用（sync.tsx 的 daemon stopped 等）。
+type ExitMessage = string | (() => string | undefined)
+
 type Exit = ((reason?: unknown) => Promise<void>) & {
   message: {
-    set: (value?: string) => () => void
+    set: (value?: ExitMessage) => () => void
     clear: () => void
     get: () => string | undefined
   }
@@ -20,10 +24,10 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
   name: "Exit",
   init: (input: { onBeforeExit?: () => Promise<void>; onExit?: () => Promise<void> }) => {
     const renderer = useRenderer()
-    let message: string | undefined
+    let message: ExitMessage | undefined
     let task: Promise<void> | undefined
     const store = {
-      set: (value?: string) => {
+      set: (value?: ExitMessage) => {
         const prev = message
         message = value
         return () => {
@@ -33,7 +37,8 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
       clear: () => {
         message = undefined
       },
-      get: () => message,
+      // get 在退出路径被调用；惰性 producer 此刻才求值，保证读到的是退出时的最终快照。
+      get: () => (typeof message === "function" ? message() : message),
     }
     const exit: Exit = Object.assign(
       (reason?: unknown) => {

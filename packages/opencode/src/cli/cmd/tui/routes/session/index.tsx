@@ -231,9 +231,6 @@ export function Session() {
   // Sync 数组已是 chronology 投影：路由决策统一用位置索引 + exact ID，
   // 不再用 Message ID 字典序猜测时间顺序。
   const messagePositions = createMemo(() => new Map(messages().map((message, index) => [message.id, index] as const)))
-  // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
-  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
-  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
@@ -483,19 +480,21 @@ export function Session() {
 
   const exit = useExit()
 
-  createEffect(() => {
-    const usage = sessionUsage().session
-    // ExitProvider 只负责销毁 renderer 和发射已存文本；Session route 在这里保留最终统计快照。
-    // effect 依赖 messages/parts 的 accounting memo，确保用户退出前 stored message 已反映最新快照。
-    // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
-    // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
-    return exit.message.set(
-      formatSessionExitMessage({
+  // exit 快照只在退出那一刻被 exit() 读取，所以挂载时注册一个惰性 producer 即可：
+  // 不在每个 part delta 上让 tokenAccounting 对全部消息做 O(总数) 重算（eager memo 会订阅 part store 随 delta 重算）。
+  // 数值口径与现状一致——退出时由同一 tokenAccounting 对最终 messages/parts 求值。
+  // 不加 onCleanup restore：现状 message 在 route 卸载后仍保留，离开会话回 home 再退出仍打印该会话统计。
+  onMount(() => {
+    exit.message.set(() => {
+      // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
+      // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
+      const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? []).session
+      return formatSessionExitMessage({
         title: session()?.title ?? "",
         sessionID: session()?.id,
         usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
-      }),
-    )
+      })
+    })
   })
 
   // Helper: Find next visible message boundary in direction

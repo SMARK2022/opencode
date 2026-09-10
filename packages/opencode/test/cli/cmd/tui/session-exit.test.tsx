@@ -75,6 +75,63 @@ test("keeps empty Session stdout free of a zero Stats row", async () => {
   expect(output).toContain("Continue")
 })
 
+test("exit snapshot is lazy: part deltas do not re-register the exit message", async () => {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+
+  const user = userMessage("msg_user")
+  const assistant = assistantMessage("msg_assistant", user.id)
+  const calls = createFetch((url) => {
+    if (url.pathname === "/session") return json([sessionInfo({})])
+    if (url.pathname === `/session/${sessionID}`) return json(sessionInfo({}))
+    if (url.pathname === `/session/${sessionID}/message`)
+      return json([
+        { info: user, parts: [] },
+        {
+          info: assistant,
+          parts: [textPart("part_text", assistant.id, "hello"), stepFinishPart("part_finish", assistant.id)],
+        },
+      ])
+    return undefined
+  })
+  const events = createEventSource()
+  let exitRef: ReturnType<typeof useExit> | undefined
+  // 探测 exit.message.set 的注册次数：eager 重算会在每个 part delta 重新 set，lazy 只在挂载时 set 一次。
+  let setCount = 0
+  const app = await testRender(
+    () => <SessionHarness fetch={calls.fetch} events={events.source} bindExit={(e) => (exitRef = e)} onSetRegister={() => setCount++} />,
+    { width: 80, height: 16, footerHeight: 0 },
+  )
+  try {
+    await waitForExitMessage(app, () => exitRef, "Fix parser bug")
+    // 加载稳定后记录基线注册次数。
+    const baseline = setCount
+    for (let i = 0; i < 5; i++) {
+      // 每个 delta 改变 step-finish 的 token 数 => sessionUsage 的计算值必变，eager memo 必重算
+      const finish = stepFinishPart("part_finish", assistant.id)
+      events.emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: `evt_${i}`,
+          type: "message.part.updated",
+          properties: { part: { ...finish, tokens: { ...finish.tokens, output: 970 + i + 1 } } },
+        },
+      } as any)
+      await app.renderOnce()
+      // 让出微任务/时任务确保 Solid effect 队列冲刷，避免多个 delta 的 effect 重算被批在一起而低估 eager 重算次数。
+      await Bun.sleep(0)
+    }
+    // INV-02：lazy 快照下 delta 不应再触发 exit message 的重注册（重算 tokenAccounting）。
+    expect(setCount).toBe(baseline)
+  } finally {
+    app.renderer.destroy()
+    Global.Path.state = previous
+  }
+})
+
 async function captureExitOutput(
   messages: Array<AssistantMessage | SDKUserMessage>,
   parts: Record<string, Part[]>,
@@ -128,6 +185,7 @@ function SessionHarness(props: {
   fetch: typeof globalThis.fetch
   events: ReturnType<typeof createEventSource>["source"]
   bindExit: (exit: ReturnType<typeof useExit>) => void
+  onSetRegister?: () => void
 }) {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
@@ -138,7 +196,7 @@ function SessionHarness(props: {
     <OpencodeKeymapProvider keymap={keymap}>
       <ArgsProvider>
         <ExitProvider>
-          <ExitCapture bind={props.bindExit}>
+          <ExitCapture bind={props.bindExit} onSetRegister={props.onSetRegister}>
             <KVProvider>
               <ToastProvider>
                 <RouteProvider initialRoute={{ type: "session", sessionID }}>
@@ -183,8 +241,18 @@ function SessionHarness(props: {
   )
 }
 
-function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; children: JSX.Element }) {
-  props.bind(useExit())
+function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; onSetRegister?: () => void; children: JSX.Element }) {
+  const exit = useExit()
+  props.bind(exit)
+  // 探测 exit.message.set 注册次数：在 Session 挂载前包住 set，且只包一次（ExitCapture 随挂载渲染一次）。
+  if (props.onSetRegister) {
+    const onSetRegister = props.onSetRegister
+    const orig = exit.message.set
+    exit.message.set = (value: any) => {
+      onSetRegister()
+      return orig(value)
+    }
+  }
   return props.children
 }
 
