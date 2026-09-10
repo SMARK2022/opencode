@@ -2,7 +2,7 @@
 
 import fs from "node:fs/promises"
 import path from "node:path"
-import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
+import { verifyRemoteAnnotatedTagCommit } from "./opentui-provenance"
 
 const root = path.resolve(import.meta.dir, "../../..")
 // 版本唯一信源是 root package.json catalog；验证器不得维护第二份版本常量，避免升级时信源漂移。
@@ -23,11 +23,11 @@ if (typeof solidVersion !== "string") {
 const tag = `v${version}`
 const repository = "https://github.com/SMARK2022/opentui"
 const release = `${repository}/releases/download/${tag}`
-const sourceRevisionAuthorized = process.argv.includes("--source-revision-authorized")
-// CI在source gitlink更新后必须显式选择此模式，避免release-only校验把新源码误判为伪造发布物。
 // 版本、tag和release根必须由同一个常量派生，避免验证器自己拼出跨版本的成功路径。
 // URL来源是public fork的immutable release，不接受registry或临时workflow artifact。
 // 这条约束保护OpenCode安装图和submodule provenance之间的可追溯关系。
+// 源码/发布身份一律从 package.json catalog（版本→tag）+ git（gitlink + 远端 tag）派生，
+// 不读任何手写清单——清单曾是第二信源，需随每次 release 手工同步，过期即误判。
 const assets = {
   "@opentui/core": "opentui-core",
   "@opentui/keymap": "opentui-keymap",
@@ -112,26 +112,13 @@ if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) =>
 // 校验阶段读取index，允许在父commit前审计即将提交的source pin；CI中index与HEAD一致。
 const gitlink = (await git(["ls-files", "--stage", "--", "thirdparty/opentui"], root)).trim().split(/\s+/)[1]
 if (!gitlink) throw new Error("thirdparty/opentui gitlink is missing")
-const sourceManifest = sourceRevisionAuthorized
-  ? ((await Bun.file(path.join(import.meta.dir, "opentui-source-revision.json")).json()) as OpenTuiSourceRevisionManifest)
-  : undefined
 const nestedHead = (await git(["-C", "thirdparty/opentui", "rev-parse", "HEAD"], root)).trim()
 const nestedStatus = (await git(["-C", "thirdparty/opentui", "status", "--porcelain"], root)).trim()
-if (sourceManifest) {
-  // manifest同时固定source和旧release身份；只验证其中一项会允许ABI与源码错配。
-  if (sourceManifest.schema !== 1 || sourceManifest.releaseTag !== tag || !/^[0-9a-f]{40}$/.test(sourceManifest.releaseCommit)) {
-    throw new Error("invalid OpenTUI source revision manifest")
-  }
-  verifySourceRevisionAuthorization({ parentGitlink: gitlink, nestedHead, nestedStatus, manifest: sourceManifest })
-  // source revision and release identity are independent: the source pin must not replace the immutable tag proof.
-  await verifyRemoteAnnotatedTagCommit({ repository, tag: sourceManifest.releaseTag, cwd: root, expectedCommit: sourceManifest.releaseCommit })
-} else {
-  // remote tag证明发布身份，nested HEAD/status另证本次构建源码；两项证据不能互相替代。
-  await verifyRemoteAnnotatedTagCommit({ repository, tag, cwd: root, expectedCommit: gitlink })
-  // 初始化后的submodule必须可直接审计同一source；dirty或停在workflow branch tip都不能冒充gitlink证据。
-  if (nestedHead !== gitlink || nestedStatus) {
-    throw new Error(`initialized OpenTUI submodule is not clean at gitlink: head=${nestedHead} status=${nestedStatus}`)
-  }
+// remote tag证明发布身份，nested HEAD/status另证本次构建源码；两项证据不能互相替代。
+await verifyRemoteAnnotatedTagCommit({ repository, tag, cwd: root, expectedCommit: gitlink })
+// 初始化后的submodule必须可直接审计同一source；dirty或停在workflow branch tip都不能冒充gitlink证据。
+if (nestedHead !== gitlink || nestedStatus) {
+  throw new Error(`initialized OpenTUI submodule is not clean at gitlink: head=${nestedHead} status=${nestedStatus}`)
 }
 
 // native hash只针对当前宿主实际解析到的target计算，不能用其他平台的cross-build报告替代。
@@ -161,7 +148,6 @@ console.log(
     version,
     tag,
     gitlink,
-    sourceRevisionAuthorized,
     packages: packageRoots.length,
     solid: { version: solidVersions.get(solidRoots[0]), realpath: solidRoots[0] },
     native: { name: nativeName, file: nativeFile, sha256: nativeHash },

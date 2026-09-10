@@ -188,8 +188,9 @@ jobs:
 
       - name: Verify immutable OpenTUI closure
         # 先锁定source/release/runtime身份，再运行任何可通过缓存误导的应用测试。
+        # 身份一律从 root package.json catalog + git gitlink/远端 tag 派生，不再读手写清单。
         working-directory: packages/opencode
-        run: bun run script/verify-opentui-closure.ts --source-revision-authorized
+        run: bun run script/verify-opentui-closure.ts
 
       - name: Run OpenTUI consumer regressions
         # 这些测试覆盖Goal CJK、DialogPrompt factory和v2 error的用户可见seam。
