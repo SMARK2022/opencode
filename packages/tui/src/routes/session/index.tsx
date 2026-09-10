@@ -267,28 +267,25 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-  // Session 账本独立于分页；退出摘要复用已有 projection，不能仅累计窗口内的消息。
-  // 此处只消费 session 汇总，不为退出文本另建 request 或 Message/Part owner。
-  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, { session: session(), last: undefined, parts: [] }))
   // 保留粘底信号供既有跟随逻辑使用，离底浏览不再关闭视口裁剪。
   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
   // 恒定裁剪限制屏外遍历；用户滚动和显式导航仍由 scrollbox 处理。
   const viewportCulling = createMemo(() =>
     shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
   )
-  // #490：epilogue effect 依赖 messages/parts 的 accounting memo，确保退出前已反映最新统计快照。
-  createEffect(() => {
-    const title = Locale.truncate(session()?.title ?? "", 50)
-    const usage = sessionUsage().session
-    setEpilogue(
-      sessionEpilogue({
-        title,
+  // 退出快照只注册producer，不再随part delta全量重算而饿死deferred-destroy。
+  // 路由卸载不清空最后会话摘要；输出合并reasoning、排除cache的口径保持不变。
+  onMount(() =>
+    setEpilogue(() => {
+      // 退出时仍消费durable session投影，不能因历史分页变少而丢失tokens或cost。
+      const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, { session: session(), last: undefined, parts: [] }).session
+      return sessionEpilogue({
+        title: Locale.truncate(session()?.title ?? "", 50),
         sessionID: session()?.id,
         usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
-      }),
-    )
-  })
-  onCleanup(() => setEpilogue())
+      })
+    }),
+  )
 
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID

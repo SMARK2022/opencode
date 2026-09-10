@@ -234,7 +234,7 @@ function errorMessage(error: unknown) {
 
 export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   const global = yield* Global.Service
-  const exit = { epilogue: undefined as string | undefined, reason: undefined as unknown }
+  const exit = { epilogue: undefined as string | (() => string | undefined) | undefined, reason: undefined as unknown }
   const result = yield* Effect.scoped(
     Effect.gen(function* () {
       const renderer = yield* Effect.acquireRelease(
@@ -436,7 +436,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         if (process.platform !== "win32") process.kill(process.pid, "SIGWINCH")
       })
       yield* Deferred.await(shutdown)
-      return { epilogue: exit.epilogue, reason: exit.reason }
+      // R19 惰性求值边界：producer 只在此处（退出时）调用——流式 part delta 期间零 tokenAccounting 重算。
+      return { epilogue: typeof exit.epilogue === "function" ? exit.epilogue() : exit.epilogue, reason: exit.reason }
     }),
   )
   yield* Effect.sync(() => {
