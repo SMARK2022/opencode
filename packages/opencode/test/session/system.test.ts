@@ -12,6 +12,11 @@ import { Git } from "../../src/git"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { InstanceState } from "../../src/effect/instance-state"
 import { testEffect } from "../lib/effect"
+import PROMPT_ASTRA from "../../../core/src/system-context/prompt/gpt-astra.txt"
+import PROMPT_GPT from "../../../core/src/system-context/prompt/gpt.txt"
+import PROMPT_CODEX from "../../../core/src/system-context/prompt/codex.txt"
+import PROMPT_BEAST from "../../../core/src/system-context/prompt/beast.txt"
+import PROMPT_ANTHROPIC from "../../../core/src/system-context/prompt/anthropic.txt"
 
 const skills: Skill.Info[] = [
   {
@@ -88,6 +93,20 @@ const it = testEffect(
 )
 
 describe("session.system", () => {
+  // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
+  test.each([
+    ["gpt-6-astra", PROMPT_ASTRA],
+    ["gpt-6", PROMPT_ASTRA],
+    ["gpt-6-codex", PROMPT_ASTRA],
+    ["gpt-5.6-luna", PROMPT_GPT],
+    ["gpt-5.4-codex", PROMPT_CODEX],
+    ["gpt-4.1", PROMPT_BEAST],
+    ["claude-sonnet-4", PROMPT_ANTHROPIC],
+  ])("selects the provider prompt for %s", (id, expected) => {
+    // 展示别名与API id分开，模板不能误按展示名选择；fixture沿用现有Muse测试形式。
+    expect(SystemPrompt.provider({ id: "display-alias", api: { id } } as Provider.Model)).toEqual([expected])
+  })
+
   it.instance("retains the directory Git snapshot after the worktree changes", () => Effect.gen(function* () {
     const prompt = yield* SystemPrompt.Service
     const git = yield* Git.Service

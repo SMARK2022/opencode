@@ -53,7 +53,8 @@ describe("tool parameters", () => {
       const operate = schema.properties?.operate
       if (!operate || typeof operate !== "object") throw new Error("expected Goal operate property schema")
       expect(operate.enum).toEqual(["read", "complete", "blocked", "active"])
-      expect(operate.description).toContain("two consecutive eligible Goal turns")
+      // A17：wire 描述改用“第二次连续调用”计数语义，与 goal.test 三 carrier 断言同源。
+      expect(operate.description).toContain("a second consecutive call")
       expect(operate.description).toContain("same trimmed reason")
       // #517：blocked 首轮 BFS 复核指引进入 wire description。
       expect(operate.description).toContain("re-check relevant evidence breadth-first")
