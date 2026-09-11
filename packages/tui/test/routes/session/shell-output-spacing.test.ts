@@ -62,7 +62,9 @@ describe("Session Shell output spacing", () => {
     const start = sessionSource.indexOf("function BlockTool(")
     const end = sessionSource.indexOf("function Shell(")
     const blockToolSource = sessionSource.slice(start, end)
-    expect(blockToolSource).toContain("const collapsed = createMemo(() => props.preview !== undefined)")
+    // 存在性检查与挂载共用一次getter求值，不能要求恢复已修复的重复构树路径。
+    expect(blockToolSource).toContain("const previewTree = createMemo(() => props.preview)")
+    expect(blockToolSource).toContain("const collapsed = createMemo(() => previewTree() !== undefined)")
     expect(blockToolSource).toContain("createSignal(!collapsed())")
     expect(blockToolSource).not.toContain("setCanCollapse")
   })

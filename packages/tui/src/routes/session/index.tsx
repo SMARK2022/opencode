@@ -2807,8 +2807,10 @@ export function BlockTool(props: {
     return theme.backgroundPanel
   })
   // 外层拥有展开状态；保存预览节点，使它暂时缺席时不会销毁后再挂载。
-  const collapsed = createMemo(() => props.preview !== undefined)
-  const preview = createMemo<JSX.Element>((previous) => props.preview ?? previous)
+  // getter会创建renderable；存在性、挂载和提示必须复用同一次求值，不能留下弃用树。
+  const previewTree = createMemo(() => props.preview)
+  const collapsed = createMemo(() => previewTree() !== undefined)
+  const preview = createMemo<JSX.Element>((previous) => previewTree() ?? previous)
   const [bodyMounted, setBodyMounted] = createSignal(!collapsed())
   // 正文首次展开才挂载，此后仅隐藏，保留diff等renderable的内部状态。
   createEffect(() => {
@@ -2870,7 +2872,7 @@ export function BlockTool(props: {
           {props.children}
         </box>
       </Show>
-      <Show when={props.preview}>
+      <Show when={previewTree()}>
         <text fg={theme.textMuted}>Click to expand</text>
       </Show>
       <Show when={error()}>
