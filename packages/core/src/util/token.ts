@@ -3,7 +3,7 @@ export * as Token from "./token"
 import type { SessionMessage } from "@opencode-ai/schema/session-message"
 import { AttachmentToken } from "./attachment-token"
 
-export type SystemSection = { readonly kind: "instructions" | "skills"; readonly text: string }
+export type SystemSection = { readonly kind: "system" | "instructions" | "skills"; readonly text: string }
 type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages" | "media"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
 type Node = {
   bucket: Bucket
@@ -123,11 +123,12 @@ export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChar
       if (!binary) media.rawChars += chars - 2
     }
     if (parent?.media) media.rawChars += prefix + chars
-    if (section === "system" && typeof scalar === "string" && sections) {
+    if ((section === "system" || section === "messages" && bucket === "userText") && typeof scalar === "string" && sections) {
       // 仅匹配服务端 source 真正渲染的片段；插件删除或改写的文本不会凭本地文件重新补回。
       const spans = sections.flatMap((item) => {
         const found: Array<{ start: number; end: number; kind: SystemSection["kind"]; text: string }> = []
-        if (!item.text) return found
+        // user历史仅接受明确的系统reminder归属，不能把普通用户文字认作指令或skill。
+        if (!item.text || section !== "system" && item.kind !== "system") return found
         for (let start = scalar.indexOf(item.text); start >= 0; start = scalar.indexOf(item.text, start + item.text.length))
           found.push({ start, end: start + item.text.length, kind: item.kind, text: item.text })
         return found
@@ -142,7 +143,9 @@ export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChar
         attributed += size
         end = span.end
       }
-      counts.system += prefix + chars - attributed
+      // 只转移匹配的转义后正文；原消息结构和未匹配字符仍留user桶，实际body总长不变。
+      if (section === "system") counts.system += prefix + chars - attributed
+      else counts.messages.userText += prefix + chars - attributed
     } else if (bucket === "system" || bucket === "instructions" || bucket === "skills" || bucket === "tools") {
       counts[bucket] += prefix + chars
     } else {

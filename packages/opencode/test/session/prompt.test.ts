@@ -8,7 +8,7 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import { NodeFileSystem } from "@effect/platform-node"
 // #517：progress gate 等价目录探测用 symlink 构造 canonical 等价搜索路径
 import { symlink } from "fs/promises"
@@ -41,7 +41,8 @@ import { Image } from "../../src/image/image"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
-import { MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionContextEpoch } from "../../src/session/context-epoch"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -849,6 +850,89 @@ const useServerConfig = Effect.fn("test.useServerConfig")(function* (config: (ur
   yield* writeConfig(dir, config(llm.url))
   return { dir, llm }
 })
+
+const seedGitContext = (sessionID: SessionID, git: string) => Effect.gen(function* () {
+  // 只控制Git采集边界；真实environment、epoch读写及prompt装配都继续执行生产路径。
+  return yield* SessionContextEpoch.prepare({ sessionID, history: { boundary: "null", messageIDs: [] },
+    now: yield* DateTime.nowAsDate, captureGit: Effect.succeed(git) })
+})
+const rewindContextDate = (sessionID: SessionID) => Effect.gen(function* () {
+  const database = yield* Database.Service
+  yield* Database.withSync(database, db => {
+    const row = db.select({ epoch: SessionTable.context_epoch }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
+    const stored = Schema.decodeUnknownSync(SessionContextEpoch.Stored)(row?.epoch)
+    db.update(SessionTable).set({ context_epoch: { ...stored,
+      snapshot: { ...stored.snapshot, "core/date": { value: "Thu Jan 01 1970" } } } }).where(eq(SessionTable.id, sessionID)).run()
+  })
+})
+const contextTurn = (sessionID: SessionID, text: string) => Effect.gen(function* () {
+  const llm = yield* TestLLMServer
+  const prompt = yield* SessionPrompt.Service
+  yield* llm.text(`reply ${text}`)
+  return yield* prompt.prompt({ sessionID, agent: "build", parts: [{ type: "text", text }] })
+})
+
+it.instance("session context: real requests freeze Git and replay a persisted date exactly once", () => Effect.gen(function* () {
+  const { dir, llm } = yield* useServerConfig(providerCfg)
+  const sessions = yield* Session.Service
+  const chat = yield* sessions.create({ title: "Context epoch" })
+  yield* seedGitContext(chat.id, "Current branch: before\nStatus: clean")
+  yield* contextTurn(chat.id, "first")
+  const initial = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+  const baselineDate = /Today's date: ([A-Za-z]{3} [A-Za-z]{3} \d{2} \d{4})/.exec(initial)?.[1]
+  expect(baselineDate).toBeDefined()
+  yield* writeText(path.join(dir, "dirty-marker.txt"), "dirty")
+  yield* contextTurn(chat.id, "second")
+  const second = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+  expect(second).toContain("Current branch: before")
+  expect(second).not.toContain("dirty-marker.txt")
+  expect(second).toContain(`Today's date: ${baselineDate}`)
+  yield* rewindContextDate(chat.id)
+  yield* contextTurn(chat.id, "third")
+  const third = (yield* llm.inputs).at(-1)?.messages
+  if (!Array.isArray(third)) throw new Error("expected provider messages array")
+  expect(JSON.stringify(third)).toContain(`Today's date: ${baselineDate}`)
+  expect(JSON.stringify(third).split("Today's date is now:").length - 1).toBe(1)
+  expect(third?.at(-1)?.role).toBe("user")
+  expect(JSON.stringify(third?.at(-1)?.content)).toContain("Today's date is now:")
+  yield* contextTurn(chat.id, "fourth")
+  expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages).split("Today's date is now:").length - 1).toBe(1)
+}))
+
+it.instance("session context: actual fork starts without inheriting the parent's epoch", () => Effect.gen(function* () {
+  const { llm } = yield* useServerConfig(providerCfg)
+  const sessions = yield* Session.Service
+  const chat = yield* sessions.create({ title: "Fork context" })
+  yield* seedGitContext(chat.id, "Current branch: before")
+  yield* contextTurn(chat.id, "origin")
+  const forked = yield* sessions.fork({ sessionID: chat.id })
+  const database = yield* Database.Service
+  expect(yield* Database.withSync(database, db => db.select({ epoch: SessionTable.context_epoch })
+    .from(SessionTable).where(eq(SessionTable.id, forked.id)).get())).toEqual({ epoch: null })
+  yield* seedGitContext(forked.id, "Current branch: after-fork")
+  yield* contextTurn(forked.id, "fork turn")
+  expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages)).toContain("Current branch: after-fork")
+  yield* contextTurn(chat.id, "origin turn")
+  const parent = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+  expect(parent).toContain("Current branch: before")
+  expect(parent).not.toContain("Current branch: after-fork")
+}))
+
+it.instance("session context: completed compaction rebuilds dates without recapturing Git", () => Effect.gen(function* () {
+  const { llm } = yield* useServerConfig(providerCfg)
+  const prompt = yield* SessionPrompt.Service
+  const sessions = yield* Session.Service
+  const chat = yield* sessions.create({ title: "Compaction context" })
+  yield* seedGitContext(chat.id, "Current branch: before")
+  yield* contextTurn(chat.id, "first")
+  yield* rewindContextDate(chat.id)
+  yield* llm.text("context compacted summary")
+  yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+  yield* contextTurn(chat.id, "after compact")
+  const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+  expect(body).toContain("Current branch: before")
+  expect(body).not.toContain("Today's date is now:")
+}))
 
 // Wait for a session's runner to enter a busy state. SessionStatus is flipped
 // inside Runner.startShell's serialized transition, so cancel can't no-op once

@@ -32,6 +32,8 @@ export type Unavailable = typeof unavailable
 export interface Source<A> {
   readonly key: Key
   readonly codec: Schema.Codec<A, Schema.Json, never, never>
+  // Session来源已有持久值时不再观察；日期等动态来源继续沿用原刷新语义。
+  readonly lifetime?: "session"
   readonly load: Effect.Effect<A | Unavailable>
   readonly baseline: (current: A) => string
   readonly update: (previous: A, current: A) => string
@@ -98,7 +100,7 @@ export class DuplicateKeyError extends Schema.TaggedErrorClass<DuplicateKeyError
 
 interface PackedSource {
   readonly key: Key
-  readonly load: Effect.Effect<Loaded | Unavailable>
+  readonly load: (previous?: SourceSnapshot) => Effect.Effect<Loaded | Unavailable>
 }
 
 interface Loaded {
@@ -139,7 +141,9 @@ export function make<A>(source: Source<A>): SystemContext {
   return context([
     {
       key: source.key,
-      load: source.load.pipe(
+      load: (previous) => (source.lifetime === "session" && previous
+        ? Schema.decodeUnknownEffect(source.codec)(previous.value).pipe(Effect.orDie)
+        : source.load).pipe(
         Effect.map((value) => {
           if (isUnavailable(value)) return value
           const snapshot = (): SourceSnapshot => ({
@@ -179,11 +183,11 @@ export function combine(values: ReadonlyArray<SystemContext>): SystemContext {
   return context(sources)
 }
 
-const observe = (value: SystemContext) =>
+const observe = (value: SystemContext, previous?: Snapshot) =>
   Effect.forEach(
     value[ContextTypeId],
     (source) =>
-      source.load.pipe(
+      source.load(previous && getSnapshot(previous, source.key)).pipe(
         Effect.map(
           (result): Entry =>
             result === unavailable
@@ -218,7 +222,7 @@ function initializeObservation(entries: ReadonlyArray<Entry>, emitted?: (key: Ke
 
 /** Reconciles current source values with one active generation. */
 export function reconcile(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReconcileResult> {
-  return observe(value).pipe(
+  return observe(value, previous).pipe(
     Effect.map((entries): ReconcileResult => {
       const result = reconcileObservation(entries, previous, rendered)
       if (result._tag === "Unchanged" || result._tag === "Updated") return result
@@ -287,7 +291,7 @@ function reconcileObservation(
 
 /** Creates a complete replacement generation or blocks while admitted context is unavailable. */
 export function replace(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReplacementResult> {
-  return observe(value).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
+  return observe(value, previous).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
 }
 
 function replaceObservation(entries: ReadonlyArray<Entry>, previous: Snapshot, rendered?: (key: Key, text: string) => void): ReplacementResult {

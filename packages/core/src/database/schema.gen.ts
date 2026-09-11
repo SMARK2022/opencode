@@ -283,6 +283,7 @@ export default {
           \`summary_init_dirty\` integer DEFAULT 0 NOT NULL,
           \`summary_seed\` text,
           \`metadata\` text,
+          \`context_epoch\` text,
           \`cost\` real DEFAULT 0 NOT NULL,
           \`tokens_input\` integer DEFAULT 0 NOT NULL,
           \`tokens_output\` integer DEFAULT 0 NOT NULL,

@@ -59,6 +59,20 @@ test("one serializer accounts for lowered messages, tools, source sections and J
   const absent = Token.estimateRequest({ system: "default system" }, [], sections)
   expect(absent.inputBreakdown?.instructions).toBe(0)
   expect(absent.inputBreakdown?.skills).toBe(0)
+  // wrapped日期以user角色传输，归因只转移一次，转义、总长和估算输入必须守恒。
+  const reminder = "<system-reminder>\nToday's date is now: \"next\"\\date\n</system-reminder>"
+  const messages = { messages: [{ role: "user", content: "actual user" }, { role: "user", content: reminder }] }
+  const ordinary = Token.estimateRequest(messages, [], [])
+  const attributed = Token.estimateRequest(messages, [], [{ kind: "system", text: reminder }, { kind: "system", text: reminder }])
+  const size = JSON.stringify(reminder).length - 2
+  expect(attributed.bodyChars).toBe(ordinary.bodyChars)
+  expect(attributed.input).toBe(ordinary.input)
+  expect(attributed.inputBreakdown?.system).toBe((ordinary.inputBreakdown?.system ?? 0) + size)
+  expect(attributed.inputBreakdown?.messages.userText).toBe((ordinary.inputBreakdown?.messages.userText ?? 0) - size)
+  expect(attributed.inputBreakdown?.messages.total).toBe(attributed.inputBreakdown?.messages.userText)
+  // 无实际载荷的声明和普通instructions提示不能窃取真实user正文。
+  expect(Token.estimateRequest(messages, [], [{ kind: "system", text: "absent" }, { kind: "instructions", text: "actual user" }]).inputBreakdown)
+    .toEqual(ordinary.inputBreakdown)
 })
 
 test("Chat, Responses and SDK bodies use the same estimator without reparsing schemas", () => {

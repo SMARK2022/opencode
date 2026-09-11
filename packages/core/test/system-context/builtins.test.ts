@@ -156,7 +156,7 @@ const plainIt = testEffect(AppNodeBuilder.build(builtInsNode, [
   [AppProcess.node, noGit], [Global.node, Global.layerWith({ config: "/global" })],
 ]).pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_DISABLE_GIT: false })))))
 
-gitIt.effect("retains the Location Git snapshot through refresh and replacement", () => Effect.gen(function* () {
+gitIt.effect("freezes admitted Git while new Sessions sample the same Location independently", () => Effect.gen(function* () {
   yield* TestClock.setTime(timestamp)
   const registry = yield* SystemContextRegistry.Service
   const first = yield* SystemContext.initialize(yield* registry.load())
@@ -170,8 +170,9 @@ gitIt.effect("retains the Location Git snapshot through refresh and replacement"
   // 超限状态必须有显式提示，不能静默伪装成完整状态。
   expect(first.baseline).toContain("truncated because it exceeds 2k characters")
   const second = yield* SystemContext.initialize(yield* registry.load())
-  // 同目录重复初始化沿用源补丁的缓存，不增加跨会话身份管理。
-  expect(second.baseline).toBe(first.baseline)
+  // 新initialize代表另一Session，必须独立采样，而不是复用Location缓存。
+  expect(second.baseline).toContain(" M file with spaces-2")
+  expect(second.baseline).not.toBe(first.baseline)
   // JSON 往返模拟 epoch 的持久化，避免测试依赖某个内存对象引用。
   const persisted = Schema.decodeUnknownSync(SystemContext.Snapshot)(JSON.parse(JSON.stringify(first.snapshot)))
   expect(yield* SystemContext.reconcile(yield* registry.load(), persisted)).toEqual({ _tag: "Unchanged" })
@@ -180,8 +181,8 @@ gitIt.effect("retains the Location Git snapshot through refresh and replacement"
     _tag: "ReplacementReady", generation: { baseline: first.baseline },
   })
   const third = yield* SystemContext.initialize(yield* registry.load())
-  // 重复观察不启动新的 Git 采样，其他动态上下文仍由各自 Source 管理。
-  expect(third.baseline).toBe(first.baseline)
+  // reconcile/replacement未重采Git，第三个新Session才观察到第三份状态。
+  expect(third.baseline).toContain(" M file with spaces-3")
 }))
 plainIt.effect("keeps non-repository context without invoking Git", () => Effect.gen(function* () {
   const registry = yield* SystemContextRegistry.Service

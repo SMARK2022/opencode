@@ -1,5 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Context, Effect, Layer } from "effect"
+import { Context, DateTime, Effect, Layer } from "effect"
 
 import { InstanceState } from "@/effect/instance-state"
 
@@ -20,6 +20,10 @@ import os from "node:os"
 import { Shell } from "@opencode-ai/core/shell"
 import { Config } from "@/config/config"
 import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
+import { Database } from "@opencode-ai/core/database/database"
+import { NotFoundError } from "@/storage/storage"
+import { SessionContextEpoch } from "./context-epoch"
+import type { SessionID } from "./schema"
 
 // 只限制状态字段，保留分支和最近提交，避免大型工作树挤占模型上下文。
 const MAX_STATUS_CHARS = 2000
@@ -29,8 +33,18 @@ export function provider(model: Provider.Model) {
   return [SessionPrompts.provider(model.api.id, model.providerID)]
 }
 
+export interface EnvironmentInput {
+  readonly sessionID: SessionID
+  readonly model: Provider.Model
+  readonly history: SessionContextEpoch.History
+}
+export interface EnvironmentResult {
+  readonly system: string[]
+  readonly updates: readonly SessionContextEpoch.Update[]
+}
+
 export interface Interface {
-  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
+  readonly environment: (input: EnvironmentInput) => Effect.Effect<EnvironmentResult, NotFoundError>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
 }
@@ -46,27 +60,21 @@ const layer = Layer.effect(
     const git = yield* Git.Service
     const flags = yield* RuntimeFlags.Service
     const config = yield* Config.Service
+    const database = yield* Database.Service
 
-    // 沿用源补丁的目录级缓存，工具改变工作树后仍返回首次采集的状态。
-    const gitContextCache = new Map<string, string>()
+    // Git只描述采集；首次冻结与重启恢复由Session私有epoch持有。
 
     const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
       const ctx = yield* InstanceState.context
       const cwd = ctx.directory
-      const cached = gitContextCache.get(cwd)
-      if (cached) return cached
 
       // 禁用分支先于所有 Git 调用，确保关闭选项不会泄露用户名或工作树状态。
       if (flags.disableGit) {
-        const result = `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
-        gitContextCache.set(cwd, result)
-        return result
+        return `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
       }
       // 非仓库无需探测父目录，保持 Instance 已解析的项目归属。
       if (ctx.project.vcs !== "git") {
-        const result = "Is directory a git repo: no"
-        gitContextCache.set(cwd, result)
-        return result
+        return "Is directory a git repo: no"
       }
 
       // 五个字段互相独立，保留源补丁并行采集以避免串行进程启动延迟。
@@ -109,16 +117,17 @@ const layer = Layer.effect(
         `Status:\n${truncatedStatus || "(clean)"}`,
         `Recent commits:\n${log || "(no commits)"}`,
       ]
-      const result = lines.join("\n")
-      gitContextCache.set(cwd, result)
-      return result
+      return lines.join("\n")
     })
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (input: EnvironmentInput) {
         const ctx = yield* InstanceState.context
-        // Effect.fn 返回函数，必须调用后再 yield*，不能直接执行函数值。
-        const gitContext = yield* getGitContext()
+        const model = input.model
+        const epoch = yield* SessionContextEpoch.prepare({
+          sessionID: input.sessionID, history: input.history,
+          now: yield* DateTime.nowAsDate, captureGit: getGitContext(),
+        }).pipe(Effect.provideService(Database.Service, database))
         // 与 ShellTool 使用同一个实际选择器，Windows 的 pwsh/cmd 不能被 SHELL 猜测替代。
         const shell = Shell.acceptable((yield* config.get()).shell)
         const cutoff = SystemContextBuiltIns.knowledgeCutoff(model.api.id)
@@ -133,19 +142,20 @@ const layer = Layer.effect(
             `  Working directory: ${ctx.directory}`,
             `  Workspace root folder: ${ctx.worktree}`,
             // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
-            ...gitContext.split("\n").map((line) => `  ${line}`),
+            ...epoch.snapshot["smark/git"].value.split("\n").map((line) => `  ${line}`),
             `  Platform: ${process.platform}`,
             // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
             // 沿用上方 cfg.shell 的真实选择，共用说明不能重新猜测环境变量。
             ...Shell.guidance(shell, process.platform).split("\n").map((line) => `  ${line}`),
             `  OS Version: ${os.type()} ${os.release()}`,
             ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-            `  Today's date: ${new Date().toDateString()}`,
+            // baseline保留初始日期；比较snapshot推进到今天也不能改写旧前缀。
+            `  ${epoch.baseline.slice(epoch.snapshot["smark/git"].value.length + 1)}`,
             // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
             ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
             `</env>`,
           ].join("\n")
-        return [
+        return { system: [
           references.length === 0
             ? undefined
             : [
@@ -167,7 +177,7 @@ const layer = Layer.effect(
           SystemContextBuiltIns.ACTION_GUIDANCE,
           SystemContextBuiltIns.OUTPUT_GUIDANCE,
           environment,
-        ].filter((part): part is string => part !== undefined)
+        ].filter((part): part is string => part !== undefined), updates: epoch.updates }
       }),
 
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
@@ -215,7 +225,7 @@ export const node = LayerNode.make({
   service: Service,
   layer: layer,
   // Git 与开关沿用既有依赖图，不引入会话事件订阅。
-  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node],
+  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node, Database.node],
 })
 
 export * as SystemPrompt from "./system"

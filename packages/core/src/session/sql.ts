@@ -156,6 +156,8 @@ export const SessionTable = sqliteTable(
     // #0500：seed 仅在无 ref 状态暂存不可重建前缀，正常读取会重新压入 payload。
     summary_seed: text({ mode: "json" }).$type<{ cursor: string; diffs: Snapshot.LegacyFileDiff[] }>(),
     metadata: text({ mode: "json" }).$type<Record<string, unknown>>(),
+    // V1私有epoch不进入公开Session映射；V2继续使用既有session_context_epoch表。
+    context_epoch: text({ mode: "json" }).$type<unknown>(),
     cost: real().notNull().default(0),
     tokens_input: integer().notNull().default(0),
     tokens_output: integer().notNull().default(0),
