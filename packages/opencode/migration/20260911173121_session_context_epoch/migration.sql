@@ -1,0 +1,1 @@
+ALTER TABLE `session` ADD `context_epoch` text;

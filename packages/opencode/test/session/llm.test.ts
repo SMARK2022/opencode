@@ -1898,6 +1898,106 @@ describe("session.llm.stream", () => {
     })
   })
 
+  // 日期更新以 user reminder 落在历史中部；Anthropic 只允许开头的 system 块，该防护防止投影回退为 system 角色。
+  test("session context: date reminder rides mid-history as a user message on the anthropic wire", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+    // 用真实模型 fixture 走完整 provider 解析链；捏造模型 id 会在路由前就被拒绝，测不到 wire 行为。
+    const source = await loadFixture("anthropic", "claude-opus-4-6")
+    const model = source.model
+    const chunks = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg-context-reminder",
+          model: model.id,
+          usage: { input_tokens: 3, cache_creation_input_tokens: null, cache_read_input_tokens: null },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null, container: null },
+        usage: { input_tokens: 3, output_tokens: 2, cache_creation_input_tokens: null, cache_read_input_tokens: null },
+      },
+      { type: "message_stop" },
+    ]
+    const request = waitRequest("/messages", createEventResponse(chunks))
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://opencode.ai/config.json",
+            enabled_providers: ["anthropic"],
+            provider: {
+              anthropic: {
+                name: "Anthropic",
+                env: ["ANTHROPIC_API_KEY"],
+                npm: "@ai-sdk/anthropic",
+                api: "https://api.anthropic.com/v1",
+                models: { [model.id]: configModel(model) },
+                options: { apiKey: "test-anthropic-key", baseURL: `${server.url.origin}/v1` },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await withTestInstance({
+      directory: tmp.path,
+      fn: async (ctx) => {
+        const resolved = await getModel(ProviderID.make("anthropic"), ModelID.make(model.id), ctx)
+        const sessionID = SessionID.make("session-test-context-reminder")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-context-reminder"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make("anthropic"), modelID: resolved.id, variant: "max" },
+        } satisfies MessageV2.User
+
+        await drain(
+          {
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            // 两段 system 与生产的缓存分段结构一致；reminder 不得合并进其中任何一段。
+            system: ["baseline prefix", "second system part"],
+            messages: [
+              { role: "user", content: "first turn" },
+              { role: "assistant", content: "answer" },
+              { role: "user", content: "<system-reminder>\nToday's date is now: Sat Sep 12 2026\n</system-reminder>" },
+              { role: "user", content: "current turn" },
+            ],
+            tools: {},
+          },
+          ctx,
+        )
+
+        const capture = await request
+        // 请求成功本身即证明没有触发中途 system 消息的 UnsupportedFunctionalityError。
+        // 不做整块 body 的 toStrictEqual：cache_control 等装饰字段随缓存策略演进，该防护只锁角色与内容。
+        expect(JSON.stringify(capture.body.system)).toContain("baseline prefix")
+        expect(JSON.stringify(capture.body.messages)).toContain("Today's date is now: Sat Sep 12 2026")
+      },
+    })
+  })
+
   test("sends Google API payload for Gemini models", async () => {
     const server = state.server
     if (!server) {

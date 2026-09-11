@@ -16,6 +16,7 @@ import { SessionGoal } from "./goal"
 import { Bus } from "../bus"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "./system"
+import { SessionContextEpoch } from "./context-epoch"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -2533,6 +2534,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       messages: MessageV2.WithParts[]
       model: Provider.Model
       systemText: string
+      contextReminders: string
     }) {
       const sanitized = sanitizeDecideMessages(input.messages)
       const limit = usable({ cfg: yield* config.get(), model: input.model })
@@ -2554,8 +2556,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // built, so it must use the same upload estimator as the normal prompt
         // path; otherwise long cached/tool-heavy contexts can be selected against
         // the legacy /4 fallback and overflow unexpectedly.
+        // 日期 reminder 无论候选裁剪到哪里都恰好投影一次；估算必须带上同一份文本。
         const ratio = TokenEstimate.estimateUploadInput({
-          text: [input.systemText, messageEstimate.text].join("\n"),
+          text: [input.systemText, input.contextReminders, messageEstimate.text].filter(Boolean).join("\n"),
           attachments: messageEstimate.attachments,
           history: candidate,
           model: input.model,
@@ -2983,24 +2986,62 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             msgs = MessageV2.visible(msgs)
 
             const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
+            // canonical 窗口与 proof 在 reminder/plugin 改写之前取得；环境代际只认这个持久边界。
+            const epochHistory = { boundary: proof.boundary, messageIDs: canonical.map((message) => message.info.id) }
             const [skills, env, instructions, mcpInstr] = yield* Effect.all([
               decide ? Effect.succeed(undefined) : sys.skills(agent),
-              sys.environment(model, registeredTools),
+              // Session 在 runLoop 进行中已被 sessions.get 确认存在；此处 NotFound 属缺陷路径，沿用邻居的 orDie。
+              sys.environment({ sessionID, model, registeredTools, history: epochHistory }).pipe(Effect.orDie),
               instruction.system().pipe(Effect.orDie),
               decide ? Effect.succeed(undefined) : sys.mcpInstructions(),
             ])
-            const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(mcpInstr ? [mcpInstr] : [])]
+            const system = [...env.system, ...instructions, ...(skills ? [skills] : []), ...(mcpInstr ? [mcpInstr] : [])]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const baseSystemText = (agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n")
-            const envText = env.join("\n")
+            const envText = env.system.join("\n")
             const instructionsText = [...instructions, ...(lastUser.system ? [lastUser.system] : [])].join("\n")
             const skillsText = skills ?? ""
             const mcpText = mcpInstr ?? ""
             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
-            const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
-            const modelMsgs = decide
-              ? yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+            // 持久化的日期更新统一投影为 user reminder：Anthropic 不允许历史中部出现 system 消息。
+            // 该投影只做 wire 适配，不写入 MessageTable，也不改变 lastUser/Goal 归属。
+            // 复用排队用户消息已有的 system-reminder 包装约定，模型侧不需要新的提示词语义。
+            const reminderMessage = (text: string): ModelMessage => ({
+              role: "user",
+              content: `<system-reminder>\n${text}\n</system-reminder>`,
+            })
+            // 无更新时为空串；decide 估算通过 filter(Boolean) 排除它，不产生额外 token 计数。
+            const remindersText = env.updates.map((update) => reminderMessage(update.message.text).content as string).join("\n")
+            const requestMsgs = decide
+              ? yield* selectDecideMessages({ messages: msgs, model, systemText, contextReminders: remindersText })
+              : msgs
+            // 三个槽位分别承载“锚点后/后继前/窗口末尾”；数组追加顺序保留同日多次更新的时间递进。
+            const remindersBefore = new Map<MessageID, ModelMessage[]>()
+            const remindersAfter = new Map<MessageID, ModelMessage[]>()
+            const remindersEnd: ModelMessage[] = []
+            // canonicalIDs 是 decide 前的完整窗口，retainedIDs 是 decide 后实际发送的子集；两者都必须参与定位。
+            for (const projected of SessionContextEpoch.projectUpdates({
+              updates: env.updates,
+              canonicalIDs: epochHistory.messageIDs,
+              retainedIDs: new Set(requestMsgs.map((message) => message.info.id)),
+            })) {
+              const message = reminderMessage(projected.text)
+              if (projected.placement.type === "before") {
+                remindersBefore.set(projected.placement.id, [...(remindersBefore.get(projected.placement.id) ?? []), message])
+                continue
+              }
+              if (projected.placement.type === "after") {
+                remindersAfter.set(projected.placement.id, [...(remindersAfter.get(projected.placement.id) ?? []), message])
+                continue
+              }
+              remindersEnd.push(message)
+            }
+            // 每个 canonical Message 先转成完整块（含 tool-result/media 伴随消息），
+            // 日期 reminder 只能落在块的边界上，不能插进 tool_call/tool_result 之间。
+            // decide 分支同样逐消息转换：只有保持 MessageID→块的对齐，reminder 才能插到正确边界。
+            const blocks = decide
+              ? yield* MessageV2.toModelMessageChunksEffect(requestMsgs, model)
               : yield* Effect.gen(function* () {
                   const stable = requestMsgs.slice(0, conversionDirty)
                   // stable chunks 只来自本轮 admitted canonical IDs，不从 working clone 写回。
@@ -3012,13 +3053,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   }
                   // working rewrite 只能使 suffix 变脏；canonical prefix 继续复用唯一 entry 的已转换块。
                   return [
-                    // prefix flatten 保持 canonical Message 顺序；suffix 仍走原完整 converter。
-                    ...stable.flatMap((message) => messageEntry.chunks.get(message.info.id) ?? []),
+                    ...stable.map((message) => messageEntry.chunks.get(message.info.id) ?? []),
                     ...(conversionDirty < requestMsgs.length
-                      ? yield* MessageV2.toModelMessagesEffect(requestMsgs.slice(conversionDirty), model)
+                      ? yield* MessageV2.toModelMessageChunksEffect(requestMsgs.slice(conversionDirty), model)
                       : []),
                   ]
                 })
+            // blocks 与 requestMsgs 同序同长；reminder 合并不改写任何块的内容，稳定前缀的缓存块原样复用。
+            const modelMsgs = requestMsgs.flatMap((message, index) => [
+              ...(remindersBefore.get(message.info.id) ?? []),
+              ...(blocks[index] ?? []),
+              ...(remindersAfter.get(message.info.id) ?? []),
+            ])
+            // end 槽位在 MAX_STEPS 之前：步骤上限提示仍是请求的最后一条，与既有语义一致。
+            modelMsgs.push(...remindersEnd)
             const messages = [
               ...modelMsgs,
               ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : []),
@@ -3083,7 +3131,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
             }
             const inputBreakdown = {
-              system: baseSystemText.length + envText.length + mcpText.length,
+              // 日期更新在语义上属于系统上下文而非真实用户输入；字符归入 system 桶，且全局只计一次。
+              system: baseSystemText.length + envText.length + mcpText.length + remindersText.length,
               instructions: instructionsText.length,
               skills: (skillsText as string).length,
               tools: toolsText.length,

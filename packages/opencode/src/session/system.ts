@@ -1,7 +1,10 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, DateTime, Effect, Layer } from "effect"
 import { type as osType, release as osRelease } from "os"
 
 import { InstanceState } from "@/effect/instance-state"
+import { NotFoundError } from "@/storage/storage"
+import { SessionContextEpoch } from "./context-epoch"
+import type { MessageID, SessionID } from "./schema"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -49,7 +52,7 @@ export function provider(model: Provider.Model) {
   return [PROMPT_DEFAULT]
 }
 
-export function toolUsageSection(registeredTools: string[]) {
+export function toolUsageSection(registeredTools: readonly string[]) {
   if (registeredTools.length === 0) {
     return [
       "# WITHOUT any tools",
@@ -170,8 +173,22 @@ export function skillsSection(list: Skill.Info[]) {
   ].join("\n")
 }
 
+export interface EnvironmentInput {
+  readonly sessionID: SessionID
+  readonly model: Provider.Model
+  readonly registeredTools: readonly string[]
+  // history 是调用方在插件改写前捕获的窗口证明：boundary 标识代际，messageIDs 供锚点失效检测。
+  readonly history: { readonly boundary: string; readonly messageIDs: readonly MessageID[] }
+}
+
+export interface EnvironmentResult {
+  readonly system: string[]
+  // updates 只是持久记录；投影到 wire 的位决策由调用方（prompt 组装）负责。
+  readonly updates: readonly SessionContextEpoch.Update[]
+}
+
 export interface Interface {
-  readonly environment: (model: Provider.Model, registeredTools: string[]) => Effect.Effect<string[]>
+  readonly environment: (input: EnvironmentInput) => Effect.Effect<EnvironmentResult, NotFoundError>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcpInstructions: () => Effect.Effect<string | undefined>
 }
@@ -183,10 +200,6 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const git = yield* Git.Service
-
-    // 该缓存是会话级快照，按 cwd 作为键。
-    // 为保持“快照语义”，会话内不主动失效。
-    const gitContextCache = new Map<string, string>()
 
     const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
       const actualShell = Shell.acceptable()
@@ -237,22 +250,16 @@ export const layer = Layer.effect(
       return null
     }
 
+    // Git 快照的持久化与 Session 归属由 SessionContextEpoch 负责；这里只描述一次采集行为。
     const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* (ctx: InstanceContext) {
       const cwd = ctx.directory
-      const cached = gitContextCache.get(cwd)
-      if (cached) return cached
-
       const project = ctx.project
       // 允许关闭详细 git 上下文，但仍保留是否为 git 仓库的信息。
       if (Flag.OPENCODE_DISABLE_GIT) {
-        const result = `Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`
-        gitContextCache.set(cwd, result)
-        return result
+        return `Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`
       }
       if (project.vcs !== "git") {
-        const result = "Is directory a git repo: no"
-        gitContextCache.set(cwd, result)
-        return result
+        return "Is directory a git repo: no"
       }
 
       // 并行采集 git 字段，降低组装 system prompt 的延迟。
@@ -287,15 +294,19 @@ export const layer = Layer.effect(
         `Status:\n${truncatedStatus || "(clean)"}`,
         `Recent commits:\n${log || "(no commits)"}`,
       ]
-      const result = lines.join("\n")
-      gitContextCache.set(cwd, result)
-      return result
+      return lines.join("\n")
     })
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, registeredTools: string[]) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (input: EnvironmentInput) {
         const ctx = yield* InstanceState.context
-        const gitContext = yield* getGitContext(ctx)
+        const model = input.model
+        const epoch = yield* SessionContextEpoch.prepare({
+          sessionID: input.sessionID,
+          history: input.history,
+          now: yield* DateTime.nowAsDate,
+          captureGit: getGitContext(ctx),
+        })
         const { shellNotes, osVersion } = yield* getEnvExtras()
         const isWorktree = ctx.worktree !== ctx.directory
         const cutoff = getKnowledgeCutoff(model.api.id)
@@ -306,23 +317,29 @@ export const layer = Layer.effect(
           `  Working directory: ${ctx.directory}`,
           `  Workspace root folder: ${ctx.worktree}`,
           // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
-          ...gitContext.split("\n").map((line) => `  ${line}`),
+          ...epoch.snapshot["smark/git"].value.split("\n").map((line) => `  ${line}`),
           `  Platform: ${process.platform}`,
           ...shellNotes.map((line) => `  ${line}`),
           `  OS Version: ${osVersion}`,
           ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-          `  Today's date: ${new Date().toDateString()}`,
+          // 目录、平台、模型、worktree 等行保持每轮实时渲染：这些反映当前进程能力，不属于会话快照。
+          // baseline 以 git 快照开头、日期行结尾；切掉 git 前缀得到初始日期文本。
+          // snapshot 里的日期是比较状态，跨日后会推进，不能用于渲染开头。
+          `  ${epoch.baseline.slice(epoch.snapshot["smark/git"].value.length + 1)}`,
           ...(isWorktree ? [
             `  This is a git worktree — run ALL commands from this directory.`,
             `  Do NOT cd to the original repository root.`,
           ] : []),
           `</env>`,
         ]
-        return [
-          toolUsageSection(registeredTools),
-          ...staticSections(),
-          envLines.join("\n"),
-        ]
+        return {
+          system: [
+            toolUsageSection(input.registeredTools),
+            ...staticSections(),
+            envLines.join("\n"),
+          ],
+          updates: epoch.updates,
+        }
       }),
 
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {

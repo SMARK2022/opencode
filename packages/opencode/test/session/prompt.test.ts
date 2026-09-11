@@ -24,7 +24,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
-import { SessionMessageTable } from "../../src/session/session.sql"
+import { SessionMessageTable, SessionTable } from "../../src/session/session.sql"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -5834,4 +5834,112 @@ it.instance(
     }),
   { git: true },
   60_000,
+)
+
+// ===== session context epoch 集成测试 =====
+// 覆盖实际 provider 请求：Git 快照冻结、跨日更新追加投影、compaction 代际重建、fork 独立采集。
+
+// 回拨持久化的日期比较状态，等价于该 Session 在过去某天初始化、今天首次恢复。
+// 这是公开表结构上的状态布置，不是对私有实现的调用。
+const rewindContextDate = (sessionID: SessionID, date: string) =>
+  Database.use((db) => {
+    const row = db
+      .select({ epoch: SessionTable.context_epoch })
+      .from(SessionTable)
+      .where(Database.eq(SessionTable.id, sessionID))
+      .get()
+    if (!row?.epoch) throw new Error("expected persisted context epoch")
+    db.update(SessionTable)
+      .set({ context_epoch: { ...row.epoch, snapshot: { ...row.epoch.snapshot, "core/date": { value: date } } } })
+      .where(Database.eq(SessionTable.id, sessionID))
+      .run()
+  })
+
+it.instance(
+  "session context: freezes the git snapshot and replays a persisted date update in the provider request",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Context epoch" })
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "first" }] })
+      // inputs 包含 title 生成等旁路请求；at(-1) 始终指向刚完成的这次主请求。
+      const firstBody = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      // 从真实 wire 请求中提取初始日期，后续断言都对照这个独立观察值而非实现内部状态。
+      const baselineDate = /Today's date: ([A-Za-z]{3} [A-Za-z]{3} \d{2} \d{4})/.exec(firstBody)?.[1]
+      expect(baselineDate).toBeDefined()
+
+      // 工作区随后变脏；快照已持久化，下一请求的前缀不得重新采集。
+      yield* writeText(path.join(dir, "dirty-marker.txt"), "dirty")
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "second" }] })
+      const secondBody = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      expect(secondBody).not.toContain("dirty-marker.txt")
+      // Git 与日期是前缀的两个独立维度；同日同快照时必须双双逐字稳定。
+      expect(secondBody).toContain(`Today's date: ${baselineDate}`)
+
+      // 等价于跨日后恢复：前缀日期不变，新日期以一条 user reminder 追加在当前 turn 末尾。
+      rewindContextDate(chat.id, "Thu Jan 01 1970")
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "third" }] })
+      const messages = (yield* llm.inputs).at(-1)?.messages as Array<{ role: string; content: unknown }>
+      const thirdBody = JSON.stringify(messages)
+      // 初始日期留在前缀（未重写），同一天只允许一条日期更新出现在 wire 上。
+      expect(thirdBody).toContain(`Today's date: ${baselineDate}`)
+      expect(thirdBody.split("Today's date is now:").length - 1).toBe(1)
+      // 更新追加在当前 turn 的末尾：锚点是刚持久化的用户消息，投影落其后端。
+      const last = messages.at(-1)
+      expect(last?.role).toBe("user")
+      expect(JSON.stringify(last?.content)).toContain("Today's date is now:")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "session context: a fork collects its own git snapshot while the source session keeps its own",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Fork context" })
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "origin" }] })
+      // marker 在源 Session 首次请求之后、fork 之前写入：fork 的首次快照应当看到它，源则不应看到。
+      yield* writeText(path.join(dir, "fork-marker.txt"), "dirty")
+      // fork 是新 Session 行（context_epoch 为 NULL），首次请求独立采集当前 Git 状态。
+      const forked = yield* sessions.fork({ sessionID: chat.id })
+      yield* prompt.prompt({ sessionID: forked.id, agent: "build", parts: [{ type: "text", text: "fork turn" }] })
+      const forkBody = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      expect(forkBody).toContain("fork-marker.txt")
+      // 原 Session 再走一轮：两个同目录 Session 的快照互不污染。
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "origin turn" }] })
+      const originBody = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      expect(originBody).not.toContain("fork-marker.txt")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "session context: completed compaction rebuilds the date generation without losing the git snapshot",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Compaction context" })
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "first" }] })
+      const firstBody = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      const branchLine = /Current branch: [^"\\]+/.exec(firstBody)?.[0]
+      expect(branchLine).toBeDefined()
+      if (!branchLine) throw new Error("branch line missing from baseline request")
+
+      // 先回拨日期再压缩：保证压缩完成时旧代同时带有日期差，验证 boundary 变化优先于追加。
+      rewindContextDate(chat.id, "Thu Jan 01 1970")
+      yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref })
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "after compact" }] })
+      const nextBody = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      // 压缩后 Git 分支行逐字保留；日期代已重建为今天，不回放压缩前的旧更新。
+      expect(nextBody).toContain(branchLine)
+      expect(nextBody).not.toContain("Today's date is now:")
+    }),
+  { git: true },
 )

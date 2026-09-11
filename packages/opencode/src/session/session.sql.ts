@@ -7,6 +7,7 @@ import type { Permission } from "../permission"
 import type { ProjectID } from "../project/schema"
 import type { SessionID, MessageID, PartID } from "./schema"
 import type { WorkspaceID } from "../control-plane/schema"
+import type { SessionContextEpoch } from "./context-epoch"
 import { Timestamps } from "../storage/schema.sql"
 
 type PartData<T extends MessageV2.Part = MessageV2.Part> = T extends unknown
@@ -149,6 +150,9 @@ export const SessionTable = sqliteTable(
       providerID: string
       variant?: string
     }>(),
+    // context_epoch 归属 Session 生命周期：Git/日期上下文随行保留与删除；
+    // fork/新建 Session 保持 NULL，首次请求独立初始化。值 schema 由 SessionContextEpoch.Stored 拥有。
+    context_epoch: text({ mode: "json" }).$type<SessionContextEpoch.Stored>(),
     ...Timestamps,
     time_compacting: integer(),
     time_archived: integer(),
