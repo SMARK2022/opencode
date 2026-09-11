@@ -8,6 +8,7 @@ import PROMPT_DEFAULT from "./prompt/default.txt"
 import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_GPT from "./prompt/gpt.txt"
+import PROMPT_ASTRA from "./prompt/gpt-astra.txt"
 import PROMPT_KIMI from "./prompt/kimi.txt"
 import PROMPT_MINIMAX from "./prompt/minimax.txt"
 import PROMPT_DEEPSEEK from "./prompt/deepseek.txt"
@@ -30,6 +31,8 @@ export function provider(model: Provider.Model) {
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
     return [PROMPT_BEAST]
   if (model.api.id.includes("gpt")) {
+    // 与上游保持路由优先级：GPT-6（含 Codex 名称）使用本地 Astra 模板。
+    if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
     if (model.api.id.includes("codex")) {
       return [PROMPT_CODEX]
     }
@@ -103,8 +106,10 @@ export function toolUsageSection(registeredTools: string[]) {
 
 export const actionCareSection = `# Executing actions with care
 Carefully consider the reversibility and blast radius of actions before proceeding:
-- Local, reversible actions (editing files, running tests, reading code): proceed freely.
-- Actions that are hard to reverse or affect shared state: confirm with the user first.
+- Local, reversible actions within the user's request (editing files, running tests, reading code): proceed freely. Complete already-authorized preparation before requesting approval for the dependent action.
+- Actions that are hard to reverse or affect shared state: confirm with the user first, unless a verbatim user message has already authorized this action and target.
+- If optional clarification remains unanswered, continue using the available evidence and your best judgment.
+- If required input or approval is pending or denied, continue other authorized work on the current request that does not depend on it. Do not treat silence as approval or bypass a refusal.
 
 
 Actions that typically require user confirmation before proceeding:
@@ -126,9 +131,10 @@ You may be working in a dirty worktree with user or other-agent changes.
 export const verificationSection = `# Verification
 Before reporting a coding task complete, verify the change when feasible.
 Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
-If you cannot verify, state that plainly and explain the blocker.`
+If you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.`
 
 export const contextContinuitySection = `# Context continuity
+Treat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.
 The conversation may be compacted or resumed from a summary when context gets long.
 After compaction, resume from the summary and current messages rather than restarting from scratch.
 Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.

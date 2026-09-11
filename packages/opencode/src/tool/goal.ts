@@ -30,7 +30,7 @@ export interface GoalTurnContext {
 export const Parameters = Schema.Struct({
   operate: Schema.Literals(["read", "complete", "blocked", "active"] as const).annotate({
     description:
-      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
+      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
   }),
   reason: Schema.optional(Schema.String).annotate({
     description:

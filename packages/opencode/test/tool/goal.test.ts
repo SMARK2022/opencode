@@ -227,7 +227,7 @@ it.instance(
       // runtime result、wire description 和 continuation prompt 是三个独立 carrier，
       // 测试必须同时保护，避免模型在不同可见面收到互相矛盾的 blocked contract。
       // goal.txt 是模型调用工具前的另一可见面，不能与首次 Tool result 使用不同 contract。
-      expect(def.description).toContain("two consecutive eligible Goal turns")
+      expect(def.description).toContain("a second consecutive call")
       expect(def.description).toContain("same trimmed reason")
       expect(def.description).toContain("keeps the Goal active")
       expect(def.description).toContain("viable path")

@@ -53,7 +53,7 @@ describe("tool parameters", () => {
       const operate = schema.properties?.operate
       if (!operate || typeof operate !== "object") throw new Error("expected Goal operate property schema")
       expect(operate.enum).toEqual(["read", "complete", "blocked", "active"])
-      expect(operate.description).toContain("two consecutive eligible Goal turns")
+      expect(operate.description).toContain("a second consecutive call")
       expect(operate.description).toContain("same trimmed reason")
       expect(operate.description).toContain("re-check relevant evidence breadth-first")
       expect(operate.description).toContain("viable path")
