@@ -78,8 +78,9 @@
 # 直接安装 (支持版本指定)
 curl -fsSL https://opencode.ai/install | bash
 
-# 指定版本安装
-OPENCODE_VERSION=1.19.17 curl -fsSL https://opencode.ai/install | bash
+# 固定SMARK CLI版本，与packages/opencode/package.json保持一致
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
+  bash -s -- --version 1.19.17-smark
 
 # 软件包管理器
 npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn

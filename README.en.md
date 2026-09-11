@@ -55,6 +55,10 @@
 # YOLO
 curl -fsSL https://opencode.ai/install | bash
 
+# 固定SMARK CLI版本，与packages/opencode/package.json保持一致
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
+  bash -s -- --version 1.19.17-smark
+
 # Package managers
 npm i -g opencode-ai@latest        # or bun/pnpm/yarn
 scoop install opencode             # Windows
