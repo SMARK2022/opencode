@@ -193,8 +193,6 @@ const builtIns = Layer.effectDiscard(
         "</git>",
       ].join("\n")
     })
-    // 目录级首次采样与源补丁一致；缓存仅随既有 Location 层存活，不扩展通用 Source 协议。
-    const snapshot = yield* Effect.cached(gitContext())
     const environment = [
       "<env>",
       `  Working directory: ${location.directory}`,
@@ -230,8 +228,9 @@ const builtIns = Layer.effectDiscard(
       ...(disableGit || location.vcs?.type !== "git" ? [] : [SystemContext.make({
         key: SystemContext.Key.make("core/git"),
         codec: Schema.toCodecJson(Schema.String),
-        // cached 返回延迟执行的 Effect，禁用或非仓库分支不会触发 Git。
-        load: snapshot,
+        // 冻结归Session已保存的snapshot，不让同Location的新Session继承旧采样。
+        lifetime: "session",
+        load: gitContext(),
         baseline: (text) => text,
         update: (_previous, text) => text,
       })]),

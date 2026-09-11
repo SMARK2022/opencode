@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Layer } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Skill } from "../../src/skill"
@@ -12,6 +12,14 @@ import { Git } from "../../src/git"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { InstanceState } from "../../src/effect/instance-state"
 import { testEffect } from "../lib/effect"
+import { Database } from "@opencode-ai/core/database/database"
+import { Project } from "@opencode-ai/core/project"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { SessionContextEpoch } from "../../src/session/context-epoch"
+import { MessageID, SessionID } from "../../src/session/schema"
+import { adjust, setTime } from "effect/testing/TestClock"
 import PROMPT_ASTRA from "../../../core/src/system-context/prompt/gpt-astra.txt"
 import PROMPT_GPT from "../../../core/src/system-context/prompt/gpt.txt"
 import PROMPT_CODEX from "../../../core/src/system-context/prompt/codex.txt"
@@ -52,7 +60,7 @@ const build: Agent.Info = {
 }
 
 const it = testEffect(
-  LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node]), [
+  LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node, Database.node]), [
     [RuntimeFlags.node, RuntimeFlags.layer({ disableGit: false })],
     [
       MCP.node,
@@ -92,6 +100,22 @@ const it = testEffect(
   ]),
 )
 
+// 复用真实Core连接布置私有持久行，不启动应用或复刻Session业务实现。
+const seedContextSession = Effect.fn("test.seedContextSession")(function* (sessionID: SessionID, directory: string) {
+  const database = yield* Database.Service
+  yield* Database.withSync(database, db => {
+    db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make(directory), sandboxes: [] }).onConflictDoNothing().run()
+    db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: sessionID,
+      directory, title: "context", version: "test", time_updated: 1234 }).run()
+  })
+})
+const contextHistory = { boundary: "null", messageIDs: [MessageID.make("msg_context_seed")] }
+const contextIt = testEffect(LayerNode.compile(Database.node))
+const prepareContext = (sessionID: SessionID, git: string, history = contextHistory) => Effect.gen(function* () {
+  return yield* SessionContextEpoch.prepare({ sessionID, history, now: yield* DateTime.nowAsDate,
+    captureGit: Effect.succeed(git) })
+})
+
 describe("session.system", () => {
   // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
   test.each([
@@ -107,21 +131,28 @@ describe("session.system", () => {
     expect(SystemPrompt.provider({ id: "display-alias", api: { id } } as Provider.Model)).toEqual([expected])
   })
 
-  it.instance("retains the directory Git snapshot after the worktree changes", () => Effect.gen(function* () {
+  it.instance("retains the Session Git snapshot after the worktree changes", () => Effect.gen(function* () {
     const prompt = yield* SystemPrompt.Service
     const git = yield* Git.Service
     const ctx = yield* InstanceState.context
     const model = { providerID: "test", api: { id: "test" } } as Provider.Model
-    const initial = yield* prompt.environment(model)
+    const sessionID = SessionID.make("ses_system_git")
+    yield* seedContextSession(sessionID, ctx.directory)
+    const input = { sessionID, model, history: contextHistory }
+    const initial = yield* prompt.environment(input)
     const changed = yield* git.run(["checkout", "-b", "snapshot-next"], { cwd: ctx.directory })
     expect(changed.exitCode).toBe(0)
-    // 使用真实 Git 改变工作树，再验证源补丁的目录缓存而非新的 Session 生命周期。
+    // 真实工作树变化不改写Session已保存的快照，不能依赖目录级内存缓存。
     expect((yield* git.branch(ctx.directory))).toBe("snapshot-next")
-    expect(yield* prompt.environment(model)).toEqual(initial)
+    expect(yield* prompt.environment(input)).toEqual(initial)
   }), { git: true })
   it.instance("does not inject private Git fields into non-repository environments", () => Effect.gen(function* () {
     const prompt = yield* SystemPrompt.Service
-    const text = (yield* prompt.environment({ providerID: "test", api: { id: "test" } } as Provider.Model)).join("\n")
+    const ctx = yield* InstanceState.context
+    const sessionID = SessionID.make("ses_system_plain")
+    yield* seedContextSession(sessionID, ctx.directory)
+    const text = (yield* prompt.environment({ sessionID, history: contextHistory,
+      model: { providerID: "test", api: { id: "test" } } as Provider.Model })).system.join("\n")
     // 检查真实 environment producer，稳定指引先于包含模型身份的环境尾块。
     expect(text.indexOf("# Doing tasks")).toBeGreaterThanOrEqual(0)
     expect(text.indexOf("You are powered by")).toBeGreaterThan(text.indexOf("# Doing tasks"))
@@ -210,4 +241,66 @@ describe("session.system", () => {
       )
     }),
   )
+  contextIt.effect("session context: persists Git across fresh preparations and isolates Sessions", () => Effect.gen(function* () {
+    const directory = "/context"
+    const firstID = SessionID.make("ses_context_a")
+    const secondID = SessionID.make("ses_context_b")
+    yield* seedContextSession(firstID, directory)
+    yield* seedContextSession(secondID, directory)
+    const first = yield* prepareContext(firstID, "before.ts")
+    expect((yield* prepareContext(firstID, "after.ts")).baseline).toBe(first.baseline)
+    expect((yield* prepareContext(secondID, "after.ts")).baseline).toContain("after.ts")
+    expect((yield* prepareContext(firstID, "later.ts")).baseline).toBe(first.baseline)
+  }))
+  contextIt.effect("session context: appends one durable date update without rewriting baseline", () => Effect.gen(function* () {
+    yield* setTime(Date.parse("2026-09-11T12:00:00Z"))
+    const id = SessionID.make("ses_context_date")
+    yield* seedContextSession(id, "/context")
+    const first = yield* prepareContext(id, "before.ts")
+    expect(first.updates).toEqual([])
+    yield* adjust(25 * 60 * 60 * 1000)
+    const next = yield* prepareContext(id, "after.ts")
+    expect(next.baseline).toBe(first.baseline)
+    expect(next.updates).toHaveLength(1)
+    expect(next.updates[0]?.message.text).toContain("Today's date is now:")
+    expect((yield* prepareContext(id, "later.ts")).updates).toEqual(next.updates)
+    // epoch写入不得改变Session排序时间，亦不能泄漏到公开metadata。
+    const database = yield* Database.Service
+    expect(yield* Database.withSync(database, db => db.select({ updated: SessionTable.time_updated,
+      metadata: SessionTable.metadata }).from(SessionTable).get())).toEqual({ updated: 1234, metadata: null })
+  }))
+  contextIt.effect("session context: hidden update anchor retires dates while preserving Git", () => Effect.gen(function* () {
+    const id = SessionID.make("ses_context_undo")
+    yield* seedContextSession(id, "/context")
+    const first = yield* prepareContext(id, "before.ts")
+    yield* adjust(25 * 60 * 60 * 1000)
+    expect((yield* prepareContext(id, "after.ts")).updates).toHaveLength(1)
+    const rebuilt = yield* prepareContext(id, "later.ts", { boundary: "null", messageIDs: [MessageID.make("msg_other")] })
+    expect(rebuilt.updates).toEqual([])
+    expect(rebuilt.baseline).not.toBe(first.baseline)
+    expect(rebuilt.snapshot["smark/git"].value).toBe("before.ts")
+  }))
+  contextIt.effect("session context: compaction replaces date generation but keeps Session Git", () => Effect.gen(function* () {
+    const id = SessionID.make("ses_context_compact")
+    yield* seedContextSession(id, "/context")
+    const first = yield* prepareContext(id, "before.ts")
+    yield* adjust(25 * 60 * 60 * 1000)
+    expect((yield* prepareContext(id, "after.ts")).updates).toHaveLength(1)
+    const compacted = yield* prepareContext(id, "later.ts", { boundary: "completed-compaction", messageIDs: [MessageID.make("msg_tail")] })
+    expect(compacted.updates).toEqual([])
+    expect(compacted.baseline).not.toBe(first.baseline)
+    expect(compacted.snapshot["smark/git"].value).toBe("before.ts")
+  }))
+  test("session context: update placement preserves after, before-successor and end slots", () => {
+    const a = MessageID.make("msg_a")
+    const b = MessageID.make("msg_b")
+    const update: SessionContextEpoch.Update = { after_message_id: a,
+      message: { id: MessageID.make("msg_update"), type: "system", time: { created: 1 }, text: "date" } }
+    expect(SessionContextEpoch.projectUpdates({ updates: [update], canonicalIDs: [a, b], retainedIDs: new Set([a]) }))
+      .toEqual([{ placement: { type: "after", id: a }, text: "date" }])
+    expect(SessionContextEpoch.projectUpdates({ updates: [update], canonicalIDs: [a, b], retainedIDs: new Set([b]) }))
+      .toEqual([{ placement: { type: "before", id: b }, text: "date" }])
+    expect(SessionContextEpoch.projectUpdates({ updates: [update], canonicalIDs: [a], retainedIDs: new Set() }))
+      .toEqual([{ placement: { type: "end" }, text: "date" }])
+  })
 })

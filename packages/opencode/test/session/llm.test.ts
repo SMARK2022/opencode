@@ -2747,12 +2747,15 @@ describe("session.llm.stream", () => {
         ] as any[]
 
         const modelMessages = yield* Effect.promise(() => MessageV2.toModelMessages(input as any, resolved))
+        // 原tool配对断言不变；追加历史assistant后接user reminder，验证Anthropic真实wire适配。
+        const reminder = "<system-reminder>\nToday's date is now: Sat Sep 12 2026\n</system-reminder>"
+        modelMessages.push({ role: "assistant", content: "prior answer" }, { role: "user", content: reminder }, { role: "user", content: "current turn" })
         yield* drain({
           user,
           sessionID,
           model: resolved,
           agent,
-          system: [],
+          system: ["baseline prefix", "second system part"],
           messages: modelMessages,
           tools: {
             read: tool({
@@ -2773,6 +2776,8 @@ describe("session.llm.stream", () => {
 
         expect(capture.url.pathname.endsWith("/messages")).toBe(true)
         const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+        expect(JSON.stringify(body.system)).toContain("baseline prefix")
+        expect(messages.some(message => message.role === "user" && message.content.some(part => part.type === "text" && part.text === reminder))).toBe(true)
         expect(messages[0]?.role).toBe("user")
         expect(messages[0]?.content[0]).toMatchObject({
           type: "text",

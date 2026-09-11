@@ -11,7 +11,7 @@ import { SessionHistory } from "./history"
 import { SessionInput } from "./input"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
-import { SessionContextEpochTable } from "./sql"
+import { SessionContextEpochTable, SessionMessageTable } from "./sql"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -19,6 +19,8 @@ type DatabaseService = Database.Interface["db"]
 const State = Schema.Struct({
   sources: SystemContext.Snapshot,
   sections: Schema.Array(Schema.Struct({ kind: Schema.Literals(["instructions", "skills"]), text: Schema.String })),
+  // rewind严格删除后缀；最后一次更新仍在即可证明此前更新没有被删。
+  anchor: Schema.optional(SessionMessage.ID),
 })
 export type State = typeof State.Type
 
@@ -76,10 +78,13 @@ const prepareOnce = Effect.fnUntraced(function* (
   const snapshot = Option.isSome(decoded) ? decoded.value : {
     sources: yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
       Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
-    ), sections: [],
+    ), sections: [], anchor: undefined,
   }
   const replacementSeq = compaction !== undefined && compaction.seq > stored.baseline_seq ? compaction.seq : undefined
-  const result = replacementSeq
+  // 查原始投影而非已裁剪的模型历史；正常compaction过滤不等于用户删除更新。
+  const missingAnchor = snapshot.anchor && !(yield* db.select({ id: SessionMessageTable.id })
+    .from(SessionMessageTable).where(eq(SessionMessageTable.id, snapshot.anchor)).get().pipe(Effect.orDie))
+  const result = replacementSeq !== undefined || missingAnchor
     ? yield* SystemContext.replace(value, snapshot.sources, capture(sections))
     : yield* SystemContext.reconcile(value, snapshot.sources, capture(sections))
   // 不可用来源继续保守复用原 baseline/证明，估算不能偷读当前文件生成替代正文。
@@ -94,10 +99,11 @@ const prepareOnce = Effect.fnUntraced(function* (
   }
 
   // 旧 baseline 与此前更新仍会发送；source 变更/删除不抹掉它们已经渲染的字符归属。
-  const state = { sources: result.snapshot, sections: [...snapshot.sections, ...sections] }
+  const messageID = SessionMessage.ID.create()
+  const state = { sources: result.snapshot, sections: [...snapshot.sections, ...sections], anchor: messageID }
   yield* events.publish(
     SessionEvent.ContextUpdated,
-    { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: result.text },
+    { sessionID, messageID, timestamp: yield* DateTime.now, text: result.text },
     { commit: () => advance(db, sessionID, state).pipe(Effect.orDie) },
   )
   return { baseline: stored.baseline, baselineSeq: stored.baseline_seq, sections: state.sections }

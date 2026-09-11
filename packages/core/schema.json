@@ -2029,6 +2029,16 @@
       "table": "session"
     },
     {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "context_epoch",
+      "entityType": "columns",
+      "table": "session"
+    },
+    {
       "type": "real",
       "notNull": true,
       "autoincrement": false,

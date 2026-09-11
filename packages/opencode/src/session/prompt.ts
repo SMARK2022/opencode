@@ -54,6 +54,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { GOAL_BLOCKED_PENDING_TRANSITION, type GoalTurnContext } from "@/tool/goal"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionContextEpoch } from "./context-epoch"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { eq } from "drizzle-orm"
@@ -1523,6 +1524,7 @@ const layer = Layer.effect(
       messages: SessionV1.WithParts[]
       model: Provider.Model
       systemText: string
+      contextReminders: string
     }) {
       const sanitized = sanitizeDecideMessages(input.messages)
       const limit = usable({ cfg: yield* config.get(), model: input.model })
@@ -1545,7 +1547,8 @@ const layer = Layer.effect(
         const decideEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
         const ratio =
           TokenEstimate.estimateUploadInput({
-            text: [input.systemText, decideEstimate.text].join("\n"),
+            // 裁剪后的reminder仍出现一次，预算候选必须计入同一份实际包装文本。
+            text: [input.systemText, input.contextReminders, decideEstimate.text].filter(Boolean).join("\n"),
             attachments: decideEstimate.attachments,
             history: candidate,
             model: input.model,
@@ -2015,14 +2018,16 @@ const layer = Layer.effect(
             msgs = MessageV2.visible(msgs)
 
             // decide 跳过 skills/MCP 指令，只保留 env + instructions
+            // canonical在插件改写前已捕获，epoch不把临时wire裁剪当作持久历史删除。
+            const epochHistory = { boundary: proof.boundary, messageIDs: canonical.map(message => message.info.id) }
             const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
               decide ? Effect.succeed(undefined) : sys.skills(agent),
-              sys.environment(model),
+              sys.environment({ sessionID, model, history: epochHistory }).pipe(Effect.orDie),
               instruction.system().pipe(Effect.orDie),
               decide ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
             ])
             const system = [
-              ...env,
+              ...env.system,
               ...instructions,
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
@@ -2031,11 +2036,30 @@ const layer = Layer.effect(
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             // 只选择发送窗口，原始历史和 prepared 统计仍由各自 owner 管理。
             const systemText = [(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n"), ...system, lastUser.system ?? ""].join("\n")
+            // Anthropic不接纳历史中部system消息；只在wire投影为user reminder，不修改真实用户身份。
+            const reminderMessage = (text: string) => ({ role: "user", content: `<system-reminder>\n${text}\n</system-reminder>` } satisfies ModelMessage)
+            const contextReminders = env.updates.map(update => reminderMessage(update.message.text).content)
             const requestMsgs = decide
-              ? yield* selectDecideMessages({ messages: msgs, model, systemText })
+              ? yield* selectDecideMessages({ messages: msgs, model, systemText, contextReminders: contextReminders.join("\n") })
               : msgs
-            const modelMsgs = decide
-              ? yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+            const before = new Map<MessageID, ModelMessage[]>()
+            const after = new Map<MessageID, ModelMessage[]>()
+            const end: ModelMessage[] = []
+            for (const projected of SessionContextEpoch.projectUpdates({ updates: env.updates,
+              canonicalIDs: epochHistory.messageIDs, retainedIDs: new Set(requestMsgs.map(message => message.info.id)) })) {
+              const message = reminderMessage(projected.text)
+              if (projected.placement.type === "before") {
+                before.set(projected.placement.id, [...(before.get(projected.placement.id) ?? []), message])
+                continue
+              }
+              if (projected.placement.type === "after") {
+                after.set(projected.placement.id, [...(after.get(projected.placement.id) ?? []), message])
+                continue
+              }
+              end.push(message)
+            }
+            const blocks = decide
+              ? yield* MessageV2.toModelMessageChunksEffect(requestMsgs, model)
               : yield* Effect.gen(function* () {
                   // #557：stable prefix 只用本轮 admitted canonical IDs 的已转换块，不从 working clone 写回。
                   const stable = requestMsgs.slice(0, conversionDirty)
@@ -2048,12 +2072,17 @@ const layer = Layer.effect(
                   }
                   // working rewrite 只能使 suffix 变脏；canonical prefix 继续复用唯一 entry 的已转换块。
                   return [
-                    ...stable.flatMap((message) => messageEntry.chunks.get(message.info.id) ?? []),
+                    ...stable.map((message) => messageEntry.chunks.get(message.info.id) ?? []),
                     ...(conversionDirty < requestMsgs.length
-                      ? yield* MessageV2.toModelMessagesEffect(requestMsgs.slice(conversionDirty), model)
+                      ? yield* MessageV2.toModelMessageChunksEffect(requestMsgs.slice(conversionDirty), model)
                       : []),
                   ]
                 })
+            // 按完整转换块插入，不能拆开tool-call/result；稳定块继续复用原缓存。
+            const modelMsgs = requestMsgs.flatMap((message, index) => [
+              ...(before.get(message.info.id) ?? []), ...(blocks[index] ?? []), ...(after.get(message.info.id) ?? []),
+            ])
+            modelMsgs.push(...end)
             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
             if (!isLastStep) {
               const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
@@ -2084,6 +2113,8 @@ const layer = Layer.effect(
               parentSessionID: session.parentID,
               // 只交付已有 source 的原文归属；字符与 token 仍在唯一 prepared 回调计算。
               inputSections: [
+                // 交付单条实际包装文本，由唯一prepared估算器从userText转入system，不另加字符总数。
+                ...contextReminders.map(text => ({ kind: "system" as const, text })),
                 ...instructions.map(text => ({ kind: "instructions" as const, text })),
                 ...(lastUser.system ? [{ kind: "instructions" as const, text: lastUser.system }] : []),
                 ...(skills ? [{ kind: "skills" as const, text: skills }] : []),
