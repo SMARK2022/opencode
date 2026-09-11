@@ -2786,7 +2786,12 @@ function BlockTool(props: {
   })
   const [expanded, setExpanded] = createSignal(false)
   const collapsed = createMemo(() => collapsible() && !expanded())
-  const hasPreview = createMemo(() => props.preview !== undefined)
+  // preview 树只能构造一次并复用：Solid 的 JSX prop 是 getter，每次访问 props.preview
+  // 都会立即执行整段 JSX（含 <diff> → new DiffRenderable，占多个 native handle）。
+  // 若仅为存在性检查访问一次、挂载时再访问一次，第一次构造的子树会被直接丢弃——
+  // 从未插入渲染树也从未销毁，在超长会话中累积耗尽 native handle 注册表（65535）。
+  const previewTree = createMemo(() => props.preview)
+  const hasPreview = createMemo(() => previewTree() !== undefined)
   // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
   // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
   // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
@@ -2846,7 +2851,7 @@ function BlockTool(props: {
       {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
       <Show when={hasPreview()}>
         <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
-          {props.preview}
+          {previewTree()}
         </box>
       </Show>
       {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，

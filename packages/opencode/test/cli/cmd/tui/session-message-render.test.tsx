@@ -38,6 +38,7 @@ import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
 import { useCommandPalette } from "../../../../src/cli/cmd/tui/context/command-palette"
 import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
+import { Renderable } from "@opentui/core"
 
 // 剪贴板 mock：命令级回绕回归需要观察 copy 副作用，而不是真的写入系统剪贴板。
 // 本文件 serial 运行，模块级 override 不会与其他文件的 clipboard 用例交叉。
@@ -3281,6 +3282,62 @@ test("completed apply_patch without auto review keeps per-file blocks only", asy
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched src/a.ts")))
       expect(frame.some((line) => line.includes("% Patch"))).toBe(false)
       expect(frame.some((line) => line.includes("auto review"))).toBe(false)
+    },
+  )
+})
+
+test("apply_patch preview card mounts without leaking discarded preview tree", async () => {
+  // renderablesByNumber 是进程级全局注册表，同文件前序用例可能留有历史节点；
+  // 只检查本用例期间新建的 renderable（快照之后的 num），隔离串行套件污染。
+  const before = new Set((Renderable as any).renderablesByNumber.keys() as Iterable<number>)
+  await withRenderedSession(
+    [assistantMessage("msg_patch_preview_leak", 1)],
+    {
+      msg_patch_preview_leak: [
+        completedToolPart(
+          "part_patch_preview_leak",
+          "msg_patch_preview_leak",
+          "apply_patch",
+          { patchText: "*** Begin Patch\n*** End Patch" },
+          {
+            files: [
+              {
+                filePath: "src/a.ts",
+                relativePath: "src/a.ts",
+                type: "update",
+                patch: ["--- src/a.ts", "+++ src/a.ts", "@@", "-old", "+new"].join("\n"),
+                additions: 1,
+                deletions: 1,
+              },
+            ],
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched src/a.ts")))
+      // 先让 deferred destroy 排干，避免把正常的待销毁节点误判为泄漏。
+      for (let i = 0; i < 10; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        await app.renderOnce()
+      }
+      // BlockTool 的 preview 存在性检查不得构造并丢弃第二棵 preview 子树：
+      // 每个存活 renderable（renderablesByNumber 在销毁时移除）向上走 parent 链
+      // 都必须能到达 root；链顶悬空即为“创建后从未插入树”的永久泄漏，
+      // 这是超长会话 native handle 注册表（65535）耗尽的根因。
+      const root = (app as any).renderer.root
+      const detached: string[] = []
+      for (const [num, renderable] of (Renderable as any).renderablesByNumber as Map<number, any>) {
+        if (before.has(num)) continue
+        let cur = renderable
+        let depth = 0
+        while (cur.parent && depth < 100) {
+          cur = cur.parent
+          depth++
+        }
+        if (cur !== root) detached.push(`${renderable.constructor?.name}#${renderable.id}`)
+      }
+      expect(detached).toEqual([])
     },
   )
 })
