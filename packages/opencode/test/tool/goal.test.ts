@@ -191,10 +191,12 @@ it.instance(
       expect(r1.output.length).toBeLessThan(2000)
       // #517：runtime result、wire description 和 continuation prompt 是三个独立 carrier，
       // 测试必须同时保护，避免模型在不同可见面收到互相矛盾的 blocked contract。
-      expect(def.description).toContain("two consecutive eligible Goal turns")
+      expect(def.description).toContain("a second consecutive call")
       expect(def.description).toContain("same trimmed reason")
       expect(def.description).toContain("keeps the Goal active")
       expect(def.description).toContain("viable path")
+      // A17 只改写了 wire 描述（tool/goal.ts Parameters）的计数措辞；def.description 是 goal.txt
+      // 载体（import DESCRIPTION），其 BFS 检查面枚举句仍在——两个 carrier 都要锁，防止任一面漂移。
       expect(def.description).toContain("adjacent producers/consumers/tests/configuration")
 
       // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。

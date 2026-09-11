@@ -301,11 +301,13 @@ describe("BashTool", () => {
               "- Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.",
               "- Write a concise commit message that matches the repo style.",
               "- Do not use interactive `-i` or create empty commits unless explicitly requested.",
-              "- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.", "",
+              "- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.",
+              "- While preparing the commit, avoid unrelated exploration; reads, tests, and tracking needed for this commit and its hook fixes are fine.", "",
               "# GitHub",
               "- Only push or create PRs when explicitly requested by the user.",
               "- Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.",
               "- Review all commits included in the PR, not just the latest commit.",
+              "- Create the PR when instructed; if it needs a branch or push that isn't yet authorized, ask for that specifically.",
               "- Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.",
             ].join("\n"))
             // description 不再承载第二份政策；调用权仍来自 PermissionV2，提示文本不能授予执行权限。

@@ -3,7 +3,7 @@ Performs string replacements in files. Supports one or more disjoint edits in a 
 Usage:
 - You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- If need, ALWAYS prefer editing existing files in the codebase. NEVER write new files unless the user explicitly requires them.
 - Prefer one call with multiple entries in `edits[]` for disjoint regions in the same file instead of multiple edit calls.
 - Each `edits[].oldString` is matched against the original file snapshot, not after earlier edits in the same call. Do not emit overlapping or nested edits; merge nearby changes into one edit.
 - Keep each `oldString` as small as possible while still unique. Do not pad with large unchanged regions.

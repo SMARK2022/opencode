@@ -73,8 +73,9 @@ const layer = Layer.effectDiscard(
           Tool.make({
             // 单文件归属仍由成功结果中的target/diff声明。
             worktree: "declared",
+            // 创建许可属于模型可见约束，不另增一套执行期授权owner。
             description:
-              "Write content to one file. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
+              "Write content to one file. Always prefer editing existing files; never create new files unless the user explicitly requires them. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
             input: Input,
             output: Output,
             toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],

@@ -84,6 +84,9 @@ import PROMPT_CODEX from "../src/system-context/prompt/codex.txt"
 import PROMPT_META from "../src/system-context/prompt/meta.txt"
 import PROMPT_TRINITY from "../src/system-context/prompt/trinity.txt"
 import PROMPT_KIMI from "../src/system-context/prompt/kimi.txt"
+import PROMPT_ASTRA from "../src/system-context/prompt/gpt-astra.txt"
+import PROMPT_GPT from "../src/system-context/prompt/gpt.txt"
+import PROMPT_BEAST from "../src/system-context/prompt/beast.txt"
 import { TaskTool } from "@opencode-ai/core/tool/task"
 import { BackgroundJob } from "@opencode-ai/core/background-job"
 import { Global } from "@opencode-ai/core/global"
@@ -2097,6 +2100,14 @@ describe("SessionRunnerLLM", () => {
         ["deepseek-v4", "gateway", PROMPT_DEEPSEEK],
         ["claude-opus-4-6", "anthropic", PROMPT_ANTHROPIC],
         ["gpt-5-codex", "openai", PROMPT_CODEX],
+        // 源七组API-id也经过真实Native请求，不能只验证V1 selector或遗漏独立正文。
+        ["gpt-6-astra", "openai", PROMPT_ASTRA],
+        ["gpt-6", "openai", PROMPT_ASTRA],
+        ["gpt-6-codex", "openai", PROMPT_ASTRA],
+        ["gpt-5.6-luna", "openai", PROMPT_GPT],
+        ["gpt-5.4-codex", "openai", PROMPT_CODEX],
+        ["gpt-4.1", "openai", PROMPT_BEAST],
+        ["claude-sonnet-4", "anthropic", PROMPT_ANTHROPIC],
         ["muse-deepseek", "meta", PROMPT_META.replaceAll("{{MODEL_NAME}}", "Muse Spark")],
         ["trinity-deepseek", "gateway", PROMPT_TRINITY],
         ["other-model", "moonshotai", PROMPT_KIMI],
@@ -2112,7 +2123,8 @@ describe("SessionRunnerLLM", () => {
         expect(parts.filter((part) => part === "Initial context")).toHaveLength(1)
         // 正文逐字比较独立资产，不能用生产selector同时生成期望来隐藏选错族。
         expect(parts).toEqual([expectedToolGuidance, prompt, "Initial context",
-          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
+          // 新增Sonnet样本仍须保留既有知识截止元数据，不能把路由断言变成身份信息裁剪。
+          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : id === "claude-sonnet-4" ? "\nKnowledge cutoff: January 2025" : ""}`])
         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
         expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
         expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
