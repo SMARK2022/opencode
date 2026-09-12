@@ -15,6 +15,9 @@ import { Tool } from "./tool"
 import { Tools } from "./tools"
 import { Format } from "../format"
 import { normalizeLineEndings } from "../util/line-ending"
+import { Location } from "../location"
+import { SessionStore } from "../session/store"
+import { scanFileTouchHistory, formatStalenessNote } from "./edit-feedback"
 
 export const name = "apply_patch"
 
@@ -76,6 +79,8 @@ const layer = Layer.effectDiscard(
     const fs = yield* FSUtil.Service
     const permission = yield* PermissionV2.Service
     const format = yield* Format.Service
+    const sessions = yield* SessionStore.Service
+    const location = yield* Location.Service
 
     yield* tools
       .register({
@@ -84,8 +89,11 @@ const layer = Layer.effectDiscard(
             // 多文件和部分应用继续沿原结果合同聚合，不放宽恢复边界。
             worktree: "declared",
             // 保留原批量与错误契约；新文件边界只补在已有description可见面。
-            description:
+            description: [
               "Apply one patch containing add, update, delete, and move file operations. Create a new file only when the user explicitly requires it. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
+              "- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.",
+              "- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.",
+            ].join("\n"),
             input: Input,
             output: Output,
             toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],
@@ -177,6 +185,8 @@ const layer = Layer.effectDiscard(
                   return [{ ...entry, hunk: { ...entry.hunk, chunks: combined } }]
                 })
                 // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
+                // 读取本Session同一正式历史，失败文件与Edit共享时效事实格式。
+                const history = yield* sessions.context(context.sessionID)
                 const errors: string[] = []
                 const prepared: Prepared[] = []
                 const expected = new Map<string, { target: LocationMutation.Target; content: Uint8Array | undefined }>()
@@ -230,7 +240,7 @@ const layer = Layer.effectDiscard(
                     failed.add(target.canonical)
                     const index = prepared.findIndex(change => change.target.canonical === target.canonical)
                     if (index !== -1) prepared.splice(index, 1)
-                    errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
+                    errors.push((error instanceof ToolFailure ? error.message : fail(hunk.path).message) + formatStalenessNote(scanFileTouchHistory(history, target.canonical, location.directory)))
                     return Effect.void
                   }))
                 }
@@ -302,7 +312,7 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/apply-patch",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
 })
 
 function patchFile(change: Prepared, rendered?: RenderedFileDiff): typeof FileDiff.Info.Type {

@@ -1,7 +1,7 @@
 export * as Patch from "./patch"
 
 import { convertToLineEnding, detectLineEnding, splitLines } from "./util/line-ending"
-import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./patch-match"
+import { closestWindow, formatAmbiguityHint, lineOffset, locateContext, locateExact, nextLineOffset, uniqueExtensionHint, type AmbiguityCandidates } from "./patch-match"
 
 export type Hunk =
   | { readonly type: "add"; readonly path: string; readonly contents: string }
@@ -152,7 +152,10 @@ function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArra
     }
     const result = locateExact(originalLines, chunk.oldLines, searchFrom, chunk.endOfFile, terminated)
     if (result.type === "ambiguous")
-      throw new Error(`Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`)
+      throw new Error(withAmbiguityAdvice(
+        `Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`,
+        originalLines, chunk.oldLines, result.candidates, searchFrom, terminated,
+      ))
     if (result.type === "not-found")
       throw new Error(withCandidate(`Failed to find expected lines in ${path}.`, persistedText, chunk.oldLines.join("\n")))
     const span =
@@ -185,6 +188,27 @@ function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArra
   for (const insertion of insertions) lines.push(...insertion)
   return lines
 }
+// 失败诊断只消费唯一性owner携带的候选，并用相同cursor/行尾语义核验扩展，不能另建成功matcher。
+function withAmbiguityAdvice(
+  message: string,
+  originalLines: string[],
+  oldLines: ReadonlyArray<string>,
+  candidates: AmbiguityCandidates | undefined,
+  cursorOffset: number,
+  terminated: boolean,
+) {
+  if (!candidates || candidates.lines.length === 0) return message
+  // old block本身是整行域输入；展示数量仍用完整枚举总数，不把封顶列表冒充全部候选。
+  const hint = uniqueExtensionHint(
+    originalLines,
+    candidates.lines,
+    oldLines.length,
+    (extended) => locateExact(originalLines, extended, cursorOffset, false, terminated).type === "found",
+    true,
+  )
+  return message + formatAmbiguityHint(hint && { ...hint, total: candidates.total })
+}
+
 
 function formatLineReplacement(newLines: ReadonlyArray<string>, span: { start: number; end: number }, originalText: string, terminated: boolean) {
   if (newLines.length === 0) return ""

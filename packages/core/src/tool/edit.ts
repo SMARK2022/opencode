@@ -22,6 +22,7 @@ import { ToolRegistry } from "./registry"
 import { ToolOutputStore } from "../tool-output-store"
 import { closestMatch } from "./edit-excerpt"
 import { EditApply } from "./edit-apply"
+import { scanFileTouchHistory, formatMismatchHistory } from "./edit-feedback"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 import { Format } from "../format"
@@ -123,15 +124,16 @@ const layer = Layer.effectDiscard(
               "Performs string replacements in files. Supports one or more disjoint edits in a single call. Relative paths resolve within the active Location; external absolute paths require external_directory approval before edit approval.",
               "",
               "Usage:",
-              "- You must use your Read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.",
+              "- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. Bash output does not count: it may be compressed or transformed, so it cannot serve as an exact editing basis.",
               "- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.",
               "- If need, ALWAYS prefer editing existing files in the codebase. NEVER write new files unless the user explicitly requires them.",
               "- Prefer one call with multiple entries in edits[] for disjoint regions in the same file instead of multiple edit calls.",
               "- Each edits[].oldString is matched against the original file snapshot, not after earlier edits in the same call. Do not emit overlapping or nested edits; merge nearby changes into one edit.",
               "- Keep each oldString as small as possible while still unique. Do not pad with large unchanged regions.",
               "- Matching tries exact unique literal first, then a conservative normalized form (trailing line whitespace and common unicode quote/dash/space variants). Uniqueness and replaceAll both count under that same normalized-aware domain (e.g. ASCII hyphen and en-dash siblings count as multiples).",
+              "- ALWAYS transcribe `oldString` from your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct it from an older read alone.",
               "- Indent/tab differences and escape artifacts still fail; re-read and copy exact text.",
-              "- The edit will FAIL if oldString is found multiple times without replaceAll. Provide more surrounding context to make it unique or set replaceAll on that edit item.",
+              "- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context (more than 3 lines) to make it unique or set `replaceAll` on that edit item.",
               "- Use replaceAll on an edit item to rename a string across the file.",
               "- Use Write to create or overwrite files; edits[].oldString must not be empty.",
               "- If both edits and legacy top-level oldString/newString are sent, edits wins when non-empty.",
@@ -180,7 +182,9 @@ const layer = Layer.effectDiscard(
                   return process.platform === "win32" ? resolved.toLowerCase() : resolved
                 }
                 const filePath = path.resolve(location.directory, input.path)
-                const hasTouched = (yield* unableToEdit(sessions.context(context.sessionID))).some(message =>
+                // 复用同一实际可见历史供失败反馈，不新增路径缓存或第二次历史读取。
+                const history = yield* unableToEdit(sessions.context(context.sessionID))
+                const hasTouched = history.some(message =>
                   message.type === "assistant" && message.content.some(part => {
                     if (part.type !== "tool" || part.state.status !== "completed") return false
                     if (part.name !== "read" && part.name !== "write" && part.name !== "edit") return false
@@ -238,7 +242,8 @@ const layer = Layer.effectDiscard(
                     if (!probe) return new ToolFailure({ message })
                     const closest = closestMatch(source.text, convertToLineEnding(probe.oldString, ending))
                     return new ToolFailure({
-                      message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+                      message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
+                        formatMismatchHistory(scanFileTouchHistory(history, target.canonical, location.directory)),
                     })
                   },
                 })

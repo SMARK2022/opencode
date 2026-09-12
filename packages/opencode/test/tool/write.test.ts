@@ -15,6 +15,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { feedbackFormat, feedbackLsp } from "../fixture/edit-feedback"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-write-session"),
@@ -123,7 +124,37 @@ const run = Effect.fn("WriteToolTest.run")(function* (
   return yield* tool.execute(args, next)
 })
 
+// 同一真实Write入口分别配“不格式化”和受控formatter，两个分支都不构建真实LSP服务。
+const itFeedback = testEffect(LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, CrossSpawnSpawner.node, Truncate.node, Agent.node]), [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]]))
+const itFeedbackFormatted = testEffect(LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, mockFormatNode, CrossSpawnSpawner.node, Truncate.node, Agent.node]), [[LSP.node, feedbackLsp]]))
+
 describe("tool.write", () => {
+  // INV-06/G04：formatter 实际改变内容时，output 必须回显「提交内容→最终落盘」的
+  // 差异段并置 formattedChanged；未改变时 output 与 metadata 逐字节保持现状（常态零成本）。
+  describe("formatter feedback", () => {
+    itFeedbackFormatted.instance("echoes the formatted delta when auto-format changes the content", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "fmt.txt")
+        const result = yield* run({ filePath: filepath, content: "hello" })
+
+        expect(result.output).toContain("Formatted changes")
+        expect((result.metadata as Record<string, unknown>).formattedChanged).toBe(true)
+      }),
+    )
+
+    itFeedback.instance("keeps output and metadata unchanged when no formatter adjustment happens", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "plain.txt")
+        const result = yield* run({ filePath: filepath, content: "hello" })
+
+        expect(result.output).not.toContain("Formatted changes")
+        expect((result.metadata as Record<string, unknown>).formattedChanged).toBeUndefined()
+      }),
+    )
+  })
+
   describe("new file creation", () => {
     it.instance("writes content to new file", () =>
       Effect.gen(function* () {

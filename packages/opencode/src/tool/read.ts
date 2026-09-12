@@ -139,6 +139,8 @@ function findUnexpandedFileInContext(
 // unchanged; purely CLI-facing uses must now send numbers rather than strings.
 
 import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub, computeUnreadRanges } from "@opencode-ai/core/tool/read-presentation"
+// 导出既有共享身份规则，失败反馈不能重新定义Windows路径规范化。
+export { canonicalReadPath } from "@opencode-ai/core/tool/read-presentation"
 
 // V1 保留自己的消息适配，范围证明和模型呈现与原生读取共用。
 function readToolMetadata(input: Metadata) {
@@ -154,17 +156,33 @@ function modifiedMsOf(stat: { mtime: Option.Option<Date> }) {
 }
 
 // 可见性仍取自本次会话实际历史，不能以路径缓存代替正文证明。
+// 「内容仍在模型上下文中可见」的 part 级判定是本模块的单一协议：completed、
+// 未 compacted、非 stub、metadata.read 合法。collectVisibleReads 与 edit 失败诊断
+// （INV-04/05）都必须经此判定，复制条件会让两侧对同一历史给出不同答案。
+export function visibleReadMeta(part: {
+  type?: string
+  tool?: string
+  state?: { status?: string; time?: { start?: number; end?: number; compacted?: number }; metadata?: { read?: unknown } }
+}): ReadRangeMeta | undefined {
+  if (part.type !== "tool" || part.tool !== "read") return undefined
+  if (part.state?.status !== "completed" || part.state?.time?.compacted !== undefined) return undefined
+  // 元数据是可见性唯一协议；展示XML改变时不应让已压缩或非空零行读取变成可见正文。
+  const meta = part.state?.metadata?.read
+  if (!isReadRangeMeta(meta) || meta.stub) return undefined
+  if (meta.returned === 0 && meta.size > 0) return undefined
+  return meta
+}
+
 function collectVisibleReads(messages: Array<{ info: { role: string }; parts: any[] }>, canonicalPath: string) {
   const reads: ReadRangeMeta[] = []
+  // 逆序扫描：同一文件多次可见读取时，下游区间合并只需关心最新版本；
+  // 新→旧遍历让首个命中即可携带最新 size/fp，避免额外排序 pass。
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg.info.role !== "assistant") continue
     for (const part of msg.parts) {
-      if (part.type !== "tool" || part.tool !== "read") continue
-      if (part.state.status !== "completed" || part.state.time.compacted !== undefined) continue
-      const meta = (part.state.metadata as { read?: unknown } | undefined)?.read
-      if (!isReadRangeMeta(meta) || meta.stub) continue
-      if (meta.returned === 0 && meta.size > 0) continue
+      const meta = visibleReadMeta(part)
+      if (!meta) continue
       if (meta.canonicalPath !== canonicalPath) continue
       reads.push(meta)
     }

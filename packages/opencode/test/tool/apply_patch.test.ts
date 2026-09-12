@@ -17,7 +17,12 @@ import { Agent } from "../../src/agent/agent"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Truncate } from "@/tool/truncate"
 import { TestInstance } from "../fixture/fixture"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import { canonicalReadPath } from "../../src/tool/read"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import type { Context } from "../../src/tool/tool"
+import { feedbackFormat, feedbackLsp } from "../fixture/edit-feedback"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(
@@ -44,6 +49,11 @@ const itLineEndingFormatted = testEffect(
     [Format.node, lineEndingFormatLayer],
   ]),
 )
+
+// 新反馈切片只用真实工具/隔离文件及受控服务；构建层就替换LSP，不靠扩展名或环境开关避开进程。
+const feedbackGroup = LayerNode.group([LSP.node, FSUtil.node, Format.node, EventV2Bridge.node, Truncate.node, Agent.node])
+const itFeedback = testEffect(LayerNode.compile(feedbackGroup, [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]]))
+const itFeedbackFormatted = testEffect(LayerNode.compile(feedbackGroup, [[LSP.node, feedbackLsp], [Format.node, lineEndingFormatLayer]]))
 
 const baseCtx = {
   sessionID: SessionID.make("ses_test"),
@@ -74,7 +84,7 @@ type AskInput = {
   }
 }
 
-type ToolCtx = typeof baseCtx & {
+type ToolCtx = Omit<Context, "ask"> & {
   ask: (input: AskInput) => Effect.Effect<void>
 }
 
@@ -284,6 +294,175 @@ describe("tool.apply_patch freeform", () => {
       }
 
       expect(yield* readText(target)).toBe("target one target\n")
+    }),
+  )
+
+  // 歧义失败的合同（INV-03）：候选行号由唯一性判定 owner（locateExact）产出，
+  // 扩展建议必须经同域核验后才展示；文本不得泄露 old block 内容（上行既有契约）。
+  itFeedback.instance("reports candidate lines and verified unique extension on ambiguity", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "dupblocks.txt")
+      yield* writeText(target, "alpha\nshared one\nshared two\nbeta\nshared one\nshared two\ngamma\n")
+
+      const patchText =
+        "*** Begin Patch\n*** Update File: dupblocks.txt\n@@\n-shared one\n-shared two\n+changed\n*** End Patch"
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("Found multiple matches")
+        expect(error.message).toContain("lines 2, 5")
+        expect(error.message).toContain("1 more line(s) above")
+        expect(error.message).not.toContain("shared one")
+      }
+
+      expect(yield* readText(target)).toBe("alpha\nshared one\nshared two\nbeta\nshared one\nshared two\ngamma\n")
+    }),
+  )
+
+  // INV-04 时效事实：自写晚于自读时，全失败错误必须点明时效并指向作用后结果。
+  // 与 edit 侧同一判定与文案（scanFileTouchHistory 共享 seam）。
+  itFeedback.instance("notes own-write-after-read staleness on all-hunks failure", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "stale.txt")
+      yield* writeText(target, "current content\n")
+
+      const messageID = MessageID.make("msg_history")
+      const history: ToolCtx = {
+        ...ctx,
+        messages: [
+          {
+            info: {
+              id: messageID,
+              role: "assistant",
+              sessionID: ctx.sessionID,
+              parentID: ctx.messageID,
+              agent: "build",
+              mode: "build",
+              path: { cwd: ".", root: "." },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              modelID: ModelV2.ID.make("test"),
+              providerID: ProviderV2.ID.make("test"),
+              time: { created: 0 },
+            },
+            parts: [
+              {
+                id: PartID.make("prt_h0"),
+                messageID,
+                sessionID: ctx.sessionID,
+                type: "tool",
+                tool: "read",
+                callID: "call_h0",
+                state: {
+                  status: "completed",
+                  input: { filePath: target },
+                  output: "old",
+                  title: "Read",
+                  // 生产上 completed read 必带 metadata.read（可见性协议只认它，
+                  // 不认裸 input.filePath），fixture 缺省补全单行区间。
+                  metadata: {
+                    read: {
+                      type: "file",
+                      path: target,
+                      canonicalPath: canonicalReadPath(target),
+                      size: 1,
+                      modified: "",
+                      modifiedMs: 1,
+                      fp: "fp",
+                      start: 1,
+                      end: 1,
+                      total: 1, totalExact: true,
+                      returned: 1,
+                      stub: false,
+                    },
+                  },
+                  time: { start: 0, end: 1 },
+                },
+              },
+              {
+                id: PartID.make("prt_h1"),
+                messageID,
+                sessionID: ctx.sessionID,
+                type: "tool",
+                tool: "write",
+                callID: "call_h1",
+                state: {
+                  status: "completed",
+                  input: { filePath: target, content: "current content\n" },
+                  output: "ok",
+                  title: "Write",
+                  metadata: {},
+                  time: { start: 2, end: 3 },
+                },
+              },
+            ],
+          },
+        ],
+      }
+
+      const patchText = "*** Begin Patch\n*** Update File: stale.txt\n@@\n-missing line\n+changed\n*** End Patch"
+      const exit = yield* execute({ patchText }, history).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("modified by your own write after your last read")
+        expect(error.message).toContain("Use the result returned by that call")
+      }
+    }),
+  )
+
+  // INV-07/H02：成功 output 必须携带 post-formatter 的 Changed 段，metadata.diff 与其一致；
+  // 模型需要一个「落盘真值」错点对凑陈旧（G01），formatter 前 diff 会在 formatter 改动后说谎。
+  itFeedback.instance("echoes the post-formatter diff in output and metadata", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx, calls } = makeCtx()
+      const target = path.join(test.directory, "echo.txt")
+      yield* writeText(target, "alpha\nomega\n")
+
+      const patchText = "*** Begin Patch\n*** Update File: echo.txt\n@@\n-alpha\n+beta\n*** End Patch"
+      const result = yield* execute({ patchText }, ctx)
+
+      expect(result.output).toContain("\n\nChanged:")
+      expect(result.output).toContain("+beta")
+      expect(result.metadata.diff).toContain("+beta")
+      expect(result.metadata.diff).toBe(result.metadata.files[0].patch)
+      // permission 预览 diff 保持 proposal 语义（审批看到的是提案）。
+      expect(calls[0].metadata.diff).toContain("+beta")
+    }),
+  )
+
+  itFeedbackFormatted.instance("reflects formatter results in the echoed diff and metadata.diff", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "fmt.txt")
+      yield* writeText(target, "alpha\n")
+
+      const patchText = "*** Begin Patch\n*** Update File: fmt.txt\n@@\n-alpha\n+new\n*** End Patch"
+      const result = yield* execute({ patchText }, ctx)
+
+      // formatter 把 new 改写为 formatted：回显与 metadata 必须反映落盘真值。
+      expect(result.output).toContain("+formatted")
+      expect(result.metadata.diff).toContain("+formatted")
+      expect(result.metadata.diff).not.toContain("+new")
+    }),
+  )
+
+  // INV-10：description 必须携带陈旧转写禁令与 more-than-3-lines 诱导。文案即合同。
+  itFeedback.instance("description carries staleness and context-size guidance", () =>
+    Effect.gen(function* () {
+      const info = yield* ApplyPatchTool
+      const tool = yield* info.init()
+      expect(tool.description).toContain("latest read")
+      expect(tool.description).toContain("more than 3 lines")
     }),
   )
 
