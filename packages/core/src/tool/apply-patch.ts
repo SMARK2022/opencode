@@ -31,6 +31,7 @@ export const Applied = Schema.Struct({
   type: Schema.Literals(["add", "update", "delete"]),
   resource: Schema.String,
   target: Schema.String,
+  rewrite: Schema.optional(Schema.Boolean),
 })
 
 export const Output = Schema.Struct({
@@ -53,6 +54,9 @@ export const toModelOutput = (output: Output) =>
     "```",
     // 批次最终 diff 与诊断状态独立，不用不可用提示替代真实改动。
     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+    ...(output.applied.some((item) => item.rewrite)
+      ? ["\nNote: a *** Delete File + *** Add File pair on the same path was applied as an in-place rewrite; the delete was redundant. Use *** Add File alone to rewrite a file."]
+      : []),
     ...(output.errors?.length ? [`\nFailed to update ${output.errors.length} file(s):`, ...output.errors] : []),
   ].join("\n")
 
@@ -61,6 +65,7 @@ type Prepared =
       readonly target: LocationMutation.Target
       readonly before: string
       readonly after: string
+      readonly rewrite?: boolean
     })
   | (Extract<Patch.Hunk, { readonly type: "update" }> & {
       readonly target: LocationMutation.Target
@@ -93,6 +98,7 @@ const layer = Layer.effectDiscard(
               "Apply one patch containing add, update, delete, and move file operations. Create a new file only when the user explicitly requires it. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
               "- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.",
               "- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.",
+              "- To fully rewrite an existing file, use *** Add File alone with the complete new content — it overwrites in place. A *** Delete File + *** Add File pair on the same path is treated as the rewrite; the Delete is redundant.",
             ].join("\n"),
             input: Input,
             output: Output,
@@ -119,7 +125,7 @@ const layer = Layer.effectDiscard(
                 })
                 if (hunks.length === 0) return yield* new ToolFailure({ message: "patch rejected: empty patch" })
 
-                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target }> = []
+                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target; readonly rewrite?: boolean }> = []
                 for (const hunk of hunks) {
                   const target = yield* mutation.resolve({ path: hunk.path, kind: "file" })
                   const destination = hunk.type === "update" && hunk.movePath
@@ -140,14 +146,23 @@ const layer = Layer.effectDiscard(
                   if (group.some(other => other.destination && other.destination.canonical !== destination.canonical)) return yield* fail(item.hunk.path)
                   destinations.set(destination.canonical, item.target.canonical)
                 }
+                // 完整ownership检查后归一化canonical组；Move两端约束和批准前零正文读取保持。
+                const normalized: typeof targets = []
                 for (const group of groups.values()) {
-                  const rewrite = group.length === 2 && group[0].hunk.type === "delete" && group[1].hunk.type === "add"
-                  if (group.length > 1 && !rewrite && group.some(item => item.hunk.type !== "update")) return yield* fail(group[0].hunk.path)
+                  const [first, second] = group
+                  if (group.length === 2 && first.hunk.type === "delete" && second.hunk.type === "add") {
+                    normalized.push({ ...second, target: first.target, rewrite: true })
+                    continue
+                  }
+                  if (group.length > 1 && group.some(entry => entry.hunk.type !== "update")) {
+                    return yield* new ToolFailure({ message: `Conflicting operations for ${first.hunk.path}` })
+                  }
+                  normalized.push(...group)
                 }
 
                 // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
                 const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] | "move" }>()
-                for (const { hunk, target, destination } of targets) {
+                for (const { hunk, target, destination } of normalized) {
                   // Move目的地有独立授权边界，不能用源路径审批代替。
                   for (const entry of [{ target, operation: hunk.type }, ...(destination ? [{ target: destination, operation: "move" as const }] : [])]) {
                     const external = entry.target.externalDirectory
@@ -166,8 +181,8 @@ const layer = Layer.effectDiscard(
                 yield* permission.assert({
                   action: "edit",
                   // 审批前仅传解析计划；不读取目标来填充diff或伪造删除行数。
-                  metadata: { files: targets.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
-                  resources: [...new Set(targets.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
+                  metadata: { files: normalized.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
+                  resources: [...new Set(normalized.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
                   save: ["*"],
                   sessionID: context.sessionID,
                   agent: context.agent,
@@ -176,7 +191,7 @@ const layer = Layer.effectDiscard(
 
                 // 既有groups已拒绝冲突操作；仅合并update，保留mixed Delete/Add及跨文件顺序。
                 const updates = new Map<string, Patch.UpdateFileChunk[]>()
-                const grouped = targets.flatMap((entry): typeof targets => {
+                const grouped = normalized.flatMap((entry): typeof targets => {
                   if (entry.hunk.type !== "update") return [entry]
                   const chunks = updates.get(entry.target.canonical)
                   if (chunks) { chunks.push(...entry.hunk.chunks); return [] }
@@ -191,7 +206,7 @@ const layer = Layer.effectDiscard(
                 const prepared: Prepared[] = []
                 const expected = new Map<string, { target: LocationMutation.Target; content: Uint8Array | undefined }>()
                 const failed = new Set<string>()
-                for (const { hunk, target } of grouped) {
+                for (const { hunk, target, rewrite } of grouped) {
                   if (failed.has(target.canonical)) continue
                   yield* Effect.gen(function* () {
                     // Move可在后entry才声明，两端仍沿原始完整targets授权并从既有group取最终目的地。
@@ -202,6 +217,7 @@ const layer = Layer.effectDiscard(
                       prepared.push({
                         ...hunk,
                         target,
+                        ...(rewrite ? { rewrite: true } : {}),
                         before: "",
                         after:
                           hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`,
@@ -262,7 +278,7 @@ const layer = Layer.effectDiscard(
                               : `${change.contents}\n`,
                           format: format.file,
                         })
-                        applied.push({ type: change.type, resource: result.resource, target: result.target })
+                        applied.push({ type: change.type, resource: result.resource, target: result.target, ...(change.rewrite ? { rewrite: true } : {}) })
                         // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
                         patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }, result.rendered), status: result.existed ? "modified" : "added" })
                         return

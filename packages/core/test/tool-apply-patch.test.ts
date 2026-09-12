@@ -449,6 +449,54 @@ describe("ApplyPatchTool", () => {
     ),
   )
 
+  it.live("collapses exact canonical delete/add pairs without a remove or Add overwrite regression", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        const target = path.join(tmp.path, "rewrite.txt")
+        // remove若被调用就产生不可伪装成成功的defect；正常覆写必须只提交条件写。
+        failRemoveTarget = "rewrite.txt"
+        return Effect.promise(() => fs.writeFile(target, "old line one\nold line two\n")).pipe(
+          Effect.andThen(withTool(tmp.path, (registry) => Effect.gen(function* () {
+            const result = yield* settleTool(registry, call([
+              "*** Begin Patch",
+              "*** Delete File: rewrite.txt",
+              "*** Add File: side.txt",
+              "+side",
+              "*** Add File: ./rewrite.txt",
+              "+replacement",
+              "*** End Patch",
+            ].join("\n")))
+            // 其他文件操作夹在两条之间也不能拆散canonical意图；批准前不读文件正文。
+            expect(assertions[0]?.metadata?.files).toEqual([
+              { type: "add", relativePath: "rewrite.txt" },
+              { type: "add", relativePath: "side.txt" },
+            ])
+            expect(readsBeforeEditApproval).toBe(0)
+            expect(result.output?.structured).toMatchObject({
+              applied: [{ type: "add", resource: "rewrite.txt", rewrite: true }, { type: "add", resource: "side.txt" }],
+              files: [{ patch: expect.stringContaining("-old line one"), additions: 1, deletions: 2 }, { file: "side.txt", additions: 1, deletions: 0 }],
+            })
+            expect(result.result).toMatchObject({ type: "text", value: expect.stringContaining("the delete was redundant. Use *** Add File alone") })
+            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
+            for (const patchText of [
+              "*** Begin Patch\n*** Add File: rewrite.txt\n+wrong\n*** Delete File: rewrite.txt\n*** End Patch",
+              "*** Begin Patch\n*** Delete File: rewrite.txt\n*** Add File: rewrite.txt\n+wrong\n*** Update File: rewrite.txt\n@@\n-replacement\n+wrong\n*** End Patch",
+            ]) {
+              assertions.length = 0
+              const rejected = yield* executeTool(registry, call(patchText))
+              expect(rejected).toMatchObject({ type: "error", value: expect.stringContaining("Conflicting operations") })
+              expect(assertions).toEqual([])
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
+            }
+          }))),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("replaces an existing Add target and supports Delete then Add rewrites", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -468,8 +516,9 @@ describe("ApplyPatchTool", () => {
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
                 const rewrite = yield* settleTool(registry, call("*** Begin Patch\n*** Delete File: existing.txt\n*** Add File: existing.txt\n+complete rewrite\n*** End Patch", "rewrite"))
                 const output = Schema.decodeUnknownSync(ApplyPatchTool.Output)(rewrite.output?.structured)
-                expect(output.applied).toMatchObject([{ type: "delete", resource: "existing.txt" }, { type: "add", resource: "existing.txt" }])
-                expect(output.files).toMatchObject([{ status: "deleted", additions: 0, deletions: 1 }, { status: "added", additions: 1, deletions: 0 }])
+                expect(output.applied).toMatchObject([{ type: "add", resource: "existing.txt", rewrite: true }])
+                expect(output.files).toMatchObject([{ status: "modified", additions: 1, deletions: 1 }])
+                expect(output.files[0]?.patch).toContain("-replacement")
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("complete rewrite\n")
                 expect(readsBeforeEditApproval).toBe(0)
               }),
