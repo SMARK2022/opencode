@@ -8,6 +8,8 @@ import { Bus } from "../bus"
 import { File } from "../file"
 import { FileWatcher } from "../file/watcher"
 import { Format } from "../format"
+import { boundDiff } from "./file-diff"
+import { Truncate } from "./truncate"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { InstanceState } from "@/effect/instance-state"
 import { renderFileDiff } from "./file-diff"
@@ -30,6 +32,7 @@ export const WriteTool = Tool.define(
     const fs = yield* AppFileSystem.Service
     const bus = yield* Bus.Service
     const format = yield* Format.Service
+    const truncate = yield* Truncate.Service
 
     return {
       description: DESCRIPTION,
@@ -159,6 +162,26 @@ export const WriteTool = Tool.define(
           })
 
           let output = "Wrote file successfully."
+          // INV-06/G04：formatter 实际改变内容时，回显「提交内容→最终落盘」的差异段，
+          // 否则模型记忆中的写入与磁盘真值分叉（后续 edit 凭意图文本构造 oldString 必败）。
+          // 未改变时本段整体缺席（常态零成本：新建文件的 full diff 与提交内容重复，不回显）。
+          if (formattedContent !== undefined) {
+            const delta = renderFileDiff(
+              filepath,
+              normalizeLineEndings(contentNew),
+              normalizeLineEndings(formattedContent),
+            ).patch
+            const limits = yield* truncate.limits()
+            const bounded = boundDiff(delta, {
+              maxLines: Math.max(0, limits.maxLines - 10),
+              maxBytes: Math.max(0, limits.maxBytes - 2048),
+            })
+            output += `\n\nFormatted changes (auto-format adjusted the file):\n${bounded.text}`
+            if (bounded.omitted > 0) {
+              const artifact = yield* truncate.write(delta)
+              output += `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
+            }
+          }
           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
           const beforeDiagnostics = yield* lsp.diagnostics()
@@ -202,6 +225,9 @@ export const WriteTool = Tool.define(
               // _formattedContent 由 processor 的 completeToolCall 消费：
               // 覆盖 state.input.content 后从此 metadata 中 strip，不持久化
               ...(formattedContent !== undefined ? { _formattedContent: formattedContent } : {}),
+              // formattedChanged 持久化（_formattedContent 会被 strip，历史上无法观测
+              // formatter 命中率）；只作事实标记，不参与后续判定。
+              ...(formattedContent !== undefined ? { formattedChanged: true } : {}),
             },
             output,
           }

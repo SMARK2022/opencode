@@ -3,7 +3,7 @@ import { createHash } from "crypto"
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { renderFileDiff } from "./file-diff"
+import { boundDiff, renderFileDiff } from "./file-diff"
 import DESCRIPTION from "./edit.txt"
 import { File } from "../file"
 import { FileWatcher } from "../file/watcher"
@@ -17,6 +17,9 @@ import * as Bom from "@/util/bom"
 import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
 import { closestWindow } from "@/patch/match"
 import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+import { canonicalReadPath, visibleReadMeta } from "./read"
+import { mergeRanges } from "@/util/range"
+import type { MessageV2 } from "../session/message-v2"
 import * as Mutation from "./file-mutation-coordinator"
 import * as Truncate from "./truncate"
 
@@ -85,6 +88,97 @@ export function prepareEditArguments(input: unknown): unknown {
   delete args.newString
   delete args.replaceAll
   return args
+}
+
+// 文件触碰历史（INV-04/05/09 的共享判定源）：edit 与 apply_patch 的失败诊断必须
+// 消费同一份扫描结果，禁止两个工具各自实现导致判定漂移。只扫描 completed 工具 part；
+// 时间戳取 state.time.end（completed 时刻），不取 start。
+export type FileTouchHistory = {
+  lastReadEnd: number
+  lastWriteEnd: number
+  lastWriteTool: string
+  readRanges: Array<{ start: number; end: number }>
+  sameNameRead?: string
+}
+
+export function scanFileTouchHistory(messages: MessageV2.WithParts[], filePath: string): FileTouchHistory {
+  // 与门禁同一身份规则（execute 内 resolveForCompare）：win32 大小写不敏感。
+  const resolveForCompare = (p: string) => {
+    const r = path.resolve(p)
+    return process.platform === "win32" ? r.toLowerCase() : r
+  }
+  const targetKey = resolveForCompare(filePath)
+  const targetName = path.basename(filePath).toLowerCase()
+  const canonical = canonicalReadPath(filePath)
+  const history: FileTouchHistory = { lastReadEnd: -1, lastWriteEnd: -1, lastWriteTool: "", readRanges: [] }
+
+  for (const msg of messages) {
+    if (msg.info.role !== "assistant") continue
+    for (const part of msg.parts) {
+      if (part.type !== "tool" || part.state.status !== "completed") continue
+      const end = part.state.time.end
+      const input = part.state.input as Record<string, unknown> | undefined
+      if (part.tool === "read") {
+        // 已读事实只认 read.ts 的可见性协议（visibleReadMeta：completed、未 compacted、
+        // 非 stub、metadata.read 合法）——已压缩的读取内容不在模型上下文中，计入会把
+        // 「不可见」说成「已读」，在本任务修复的一致性域内自相矛盾。
+        const meta = visibleReadMeta(part)
+        if (!meta) continue
+        if (meta.canonicalPath === canonical) {
+          history.readRanges.push({ start: meta.start, end: meta.end })
+          history.lastReadEnd = Math.max(history.lastReadEnd, end)
+          continue
+        }
+        // 同名异路径提醒只看 read：它是模型实际可见内容的来源；write/edit 目标即身份。
+        if (path.basename(meta.path).toLowerCase() === targetName) history.sameNameRead = meta.path
+        continue
+      }
+      if (part.tool === "edit" || part.tool === "write") {
+        if (typeof input?.filePath === "string" && resolveForCompare(input.filePath) === targetKey && end > history.lastWriteEnd) {
+          history.lastWriteEnd = end
+          history.lastWriteTool = part.tool
+        }
+        continue
+      }
+      if (part.tool === "apply_patch") {
+        // 文件身份取自 metadata.files（提交后的权威列表）；缺失元数据的旧 part 不猜 patchText。
+        const files = part.state.metadata?.files
+        if (!Array.isArray(files)) continue
+        const touched = files.some(
+          (file) =>
+            typeof (file as { filePath?: unknown }).filePath === "string" &&
+            resolveForCompare((file as { filePath: string }).filePath) === targetKey,
+        )
+        if (touched && end > history.lastWriteEnd) {
+          history.lastWriteEnd = end
+          history.lastWriteTool = part.tool
+        }
+      }
+    }
+  }
+  return history
+}
+
+// 时效事实句（INV-04）：只陈述「最后写入晚于最后读取」的先后事实并指向作用后结果，
+// 不诱导 re-read（用户决策）。apply_patch 与 edit 共用同一文案。
+export function formatStalenessNote(history: FileTouchHistory) {
+  if (history.lastWriteEnd <= 0 || history.lastWriteEnd <= history.lastReadEnd) return ""
+  return history.lastReadEnd > 0
+    ? `\n\nThis file was modified by your own ${history.lastWriteTool} after your last read. Use the result returned by that call (its diff or formatted-changes section) as the current content.`
+    : `\n\nThis file was last modified by your own ${history.lastWriteTool} in this session and has not been read since.`
+}
+
+function mismatchHistoryNotes(messages: MessageV2.WithParts[], filePath: string) {
+  const history = scanFileTouchHistory(messages, filePath)
+  let notes = formatStalenessNote(history)
+  if (history.readRanges.length > 0) {
+    const merged = mergeRanges(history.readRanges)
+    notes += `\n\nLines of this file you have read in this session: ${merged.map((range) => `${range.start}-${range.end}`).join(", ")}.`
+  }
+  if (history.sameNameRead) {
+    notes += `\n\nYou previously read a different file with the same name: ${history.sameNameRead}.`
+  }
+  return notes
 }
 
 function isCreate(edits: EditReplacement[]) {
@@ -282,7 +376,8 @@ export const EditTool = Tool.define(
                   message +
                     (closest
                       ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
-                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
+                    mismatchHistoryNotes(ctx.messages, filePath),
                 )
               }
               throw error
@@ -405,20 +500,19 @@ export const EditTool = Tool.define(
             output += `\n\nChanged:`
             consumedBytes += Buffer.byteLength("\n\nChanged:", "utf-8")
             consumedLines += 3
-            const diffLinesArr = diff.split("\n")
-            let omitted = 0
-            for (const line of diffLinesArr) {
-              const size = Buffer.byteLength(line, "utf-8") + 1
-              if (consumedLines >= diffBudgetLines || consumedBytes + size > diffBudgetBytes) {
-                omitted++
-                continue
-              }
-              output += `\n${line}`
-              consumedBytes += size
-              consumedLines++
+            // INV-08/C01：连续前缀裁剪由 boundDiff 统一持有——展示段是真实 diff 的
+            // 逐字节前缀，省略计数等于真实剩余行数；不得恢复逐行跳塞（中间出洞）。
+            const bounded = boundDiff(diff, { maxLines: diffBudgetLines, maxBytes: diffBudgetBytes })
+            if (bounded.text.length > 0) {
+              output += `\n${bounded.text}`
+              consumedBytes += Buffer.byteLength(bounded.text, "utf-8") + 1
+              consumedLines += bounded.text.split("\n").length
             }
-            if (omitted > 0) {
-              const marker = `\n… (${omitted} more lines omitted)`
+            if (bounded.omitted > 0) {
+              // 超预算兜底：完整 diff 落 truncation 工件文件（与 bash 输出同模式），
+              // 模型可按需 read 取回全文，裁切不再意味着丢失。
+              const artifact = yield* truncate.write(diff)
+              const marker = `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
               output += marker
               consumedBytes += Buffer.byteLength(marker, "utf-8")
               consumedLines++

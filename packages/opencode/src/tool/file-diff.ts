@@ -27,6 +27,22 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
 
 export type RenderedFileDiff = { patch: string; additions: number; deletions: number }
 
+// 连续前缀裁剪（INV-08；C01 教训）：text 永远是 patch 的逐字节前缀，omitted 等于真实
+// 剩余行数。旧 edit.ts 内联循环用 continue 跳过超放行、后续短行仍进入，展示中间出洞
+// 却把「只裁尾部」的印象留给模型——这里只许切一刀，长行处即整体截止。
+export function boundDiff(patch: string, budget: { maxLines: number; maxBytes: number }) {
+  const lines = patch.split("\n")
+  let bytes = 0
+  let kept = 0
+  while (kept < lines.length && kept < budget.maxLines) {
+    const size = Buffer.byteLength(lines[kept], "utf-8") + (kept > 0 ? 1 : 0)
+    if (bytes + size > budget.maxBytes) break
+    bytes += size
+    kept++
+  }
+  return { text: lines.slice(0, kept).join("\n"), omitted: lines.length - kept }
+}
+
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 function isBinaryText(text: string) {
@@ -96,8 +112,40 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
   }
 }
 
+// 行多重集对称差 |old\\new| + |new\\old| 是行级编辑距离 D 的下界：只在单侧出现的每个
+// 行实例都必须被删除/插入，任何编辑脚本都受其约束。行尾差异（CRLF/尾换行空 token）
+// 会让下界偏松（strip 后一致性更粗、所需编辑更少），永不偏紧——因此对称差严格大于
+// MAX_DIFF_EDIT_LINES 时，jsdiff 探测（diff.js 同步循环按 editLength 递增穷举到 K+1）
+// 必然中止，直接走 rewriteMarker 与探测中止的决策逐字节一致。
+// 动机实测：jsdiff 中止路径自身是 O(K²) 且每步分配路径对象（事故 fixture 纯探测
+// ~1280ms），慢机器上会越过性能回归测试的 1000ms 预算；本过滤是 O(N) 哈希计数。
+function exceedsEditBudgetByLineMultiset(oldText: string, newText: string) {
+  // 分词对齐 jsdiff 行分词的 strip 形态：split("\n") 后去尾部空 token（尾换行产生），
+  // 行尾 \r 归入行内容（strip 只让一致性更粗，保持下界方向安全）。
+  const counts = new Map<string, number>()
+  let excess = 0
+  const consume = (text: string, sign: 1 | -1) => {
+    const lines = text.split("\n")
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+    for (const line of lines) {
+      const next = (counts.get(line) ?? 0) + sign
+      counts.set(line, next)
+      // excess 只跟踪 |count| 的增量变化，避免最后再一次全表求和。
+      excess += Math.abs(next) - Math.abs(next - sign)
+    }
+  }
+  consume(oldText, 1)
+  consume(newText, -1)
+  return excess > MAX_DIFF_EDIT_LINES
+}
+
 export function renderFileDiff(filePath: string, oldText: string, newText: string): RenderedFileDiff {
   if (isBinaryText(oldText) || isBinaryText(newText)) return binaryMarker(filePath, oldText, newText)
+  // INV-11：下界严格大于预算时探测必然中止，跳过的不是「可能成功」的路径。
+  if (exceedsEditBudgetByLineMultiset(oldText, newText)) {
+    const { oldMid, newMid } = trimCommonLines(oldText, newText)
+    return rewriteMarker(filePath, oldMid, newMid, oldText, newText)
+  }
   // 门B（R2）：带预算的真实计算取代中段体积猜测。探测即主路径计算本身（jsdiff 原生
   // maxEditLength，预算耗尽同步返回 undefined），不是失败后备路径。
   const probe = diffLines(oldText, newText, { maxEditLength: MAX_DIFF_EDIT_LINES })

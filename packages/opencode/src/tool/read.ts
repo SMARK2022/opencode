@@ -170,7 +170,9 @@ function resolveReadPath(input: string, directory: string) {
   return AppFileSystem.normalizePath(path.resolve(directory, input))
 }
 
-function canonicalReadPath(filepath: string) {
+// canonicalPath 协议与可见读取收集是 read metadata 的唯一权威判定；edit 失败诊断
+// （INV-04/05/09）复用同一判定，禁止调用方另写路径规范化导致两侧漂移。
+export function canonicalReadPath(filepath: string) {
   const normalized = AppFileSystem.normalizePath(filepath).replaceAll("\\", "/")
   return process.platform === "win32" ? normalized.toLowerCase() : normalized
 }
@@ -202,21 +204,29 @@ function isReadMetadata(input: unknown): input is ReadMetadata {
   )
 }
 
+// 「内容仍在模型上下文中可见」的 part 级判定是本模块的单一协议：completed、
+// 未 compacted、非 stub、metadata.read 合法。collectVisibleReads 与 edit 失败诊断
+// （INV-04/05）都必须经此判定，复制条件会让两侧对同一历史给出不同答案。
+export function visibleReadMeta(part: MessageV2.ToolPart): ReadMetadata | undefined {
+  if (part.tool !== "read") return undefined
+  if (part.state.status !== "completed") return undefined
+  if (part.state.time.compacted) return undefined
+  // Use metadata rather than parsing XML so the visible-context decision
+  // stays stable even if the human-facing formatting changes later.
+  const meta = part.state.metadata?.read
+  if (!isReadMetadata(meta)) return undefined
+  if (meta.stub) return undefined
+  return meta
+}
+
 function collectVisibleReads(messages: MessageV2.WithParts[], canonicalPath: string) {
   const reads: ReadMetadata[] = []
   for (const msg of messages) {
     if (msg.info.role !== "assistant") continue
     for (const part of msg.parts) {
       if (part.type !== "tool") continue
-      if (part.tool !== "read") continue
-      if (part.state.status !== "completed") continue
-      if (part.state.time.compacted) continue
-
-      // Use metadata rather than parsing XML so the visible-context decision
-      // stays stable even if the human-facing formatting changes later.
-      const meta = part.state.metadata?.read
-      if (!isReadMetadata(meta)) continue
-      if (meta.stub) continue
+      const meta = visibleReadMeta(part)
+      if (!meta) continue
       if (meta.canonicalPath !== canonicalPath) continue
       reads.push(meta)
     }

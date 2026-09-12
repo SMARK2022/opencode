@@ -4,7 +4,8 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Log from "@opencode-ai/core/util/log"
 import * as Bom from "../util/bom"
 import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
-import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./match"
+import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset, type AmbiguityCandidates } from "./match"
+import { formatAmbiguityHint, uniqueExtensionHint } from "../tool/edit-apply"
 
 const log = Log.create({ service: "patch" })
 
@@ -376,7 +377,14 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
     const result = locateExact(originalLines, chunk.old_lines, searchFrom, chunk.is_end_of_file, terminated)
     if (result.type === "ambiguous") {
       throw new Error(
-        `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
+        withAmbiguityAdvice(
+          `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
+          originalLines,
+          chunk.old_lines,
+          result.candidates,
+          searchFrom,
+          terminated,
+        ),
       )
     }
     if (result.type === "not-found") {
@@ -432,6 +440,30 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
   // 按 patch 顺序追加 pure insertion，与 delete-all + insert 组合共享 EOF 语义。
   for (const insertion of insertions) lines.push(...insertion)
   return lines
+}
+
+// 歧义失败合同（INV-03）：候选行号来自 locateExact 载荷（唯一性 owner 产出）；
+// 扩展建议经同域核验——同一 locateExact、同一 cursorOffset（change_context 收窄后的
+// 合格域），核验失败的建议不得展示，否则模型按错误建议重试只会再失败一次。
+function withAmbiguityAdvice(
+  message: string,
+  originalLines: string[],
+  oldLines: string[],
+  candidates: AmbiguityCandidates | undefined,
+  cursorOffset: number,
+  terminated: boolean,
+) {
+  if (!candidates || candidates.lines.length === 0) return message
+  // old block 是整行域输入，lineAligned 恒成立。
+  const hint = uniqueExtensionHint(
+    originalLines,
+    candidates.lines,
+    oldLines.length,
+    (extended) => locateExact(originalLines, extended, cursorOffset, false, terminated).type === "found",
+    true,
+  )
+  // total 以 owner 的完整枚举为准：载荷 lines 有封顶，不能只报截断后的数量。
+  return message + formatAmbiguityHint(hint && { ...hint, total: candidates.total })
 }
 
 function formatLineReplacement(

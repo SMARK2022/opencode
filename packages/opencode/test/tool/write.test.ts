@@ -109,6 +109,32 @@ const run = Effect.fn("WriteToolTest.run")(function* (
 })
 
 describe("tool.write", () => {
+  // INV-06/G04：formatter 实际改变内容时，output 必须回显「提交内容→最终落盘」的
+  // 差异段并置 formattedChanged；未改变时 output 与 metadata 逐字节保持现状（常态零成本）。
+  describe("formatter feedback", () => {
+    itFormatted.instance("echoes the formatted delta when auto-format changes the content", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "fmt.txt")
+        const result = yield* run({ filePath: filepath, content: "hello" })
+
+        expect(result.output).toContain("Formatted changes")
+        expect((result.metadata as Record<string, unknown>).formattedChanged).toBe(true)
+      }),
+    )
+
+    it.instance("keeps output and metadata unchanged when no formatter adjustment happens", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "plain.txt")
+        const result = yield* run({ filePath: filepath, content: "hello" })
+
+        expect(result.output).not.toContain("Formatted changes")
+        expect((result.metadata as Record<string, unknown>).formattedChanged).toBeUndefined()
+      }),
+    )
+  })
+
   describe("new file creation", () => {
     it.instance("writes content to new file", () =>
       Effect.gen(function* () {

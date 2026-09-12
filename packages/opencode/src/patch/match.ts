@@ -1,5 +1,5 @@
 import { diffChars } from "diff"
-import { normalizeForMatch } from "../tool/edit-apply"
+import { AMBIGUITY_MAX_CANDIDATES, normalizeForMatch } from "../tool/edit-apply"
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 
@@ -7,10 +7,15 @@ export type ExactLocation =
   | { kind: "line"; startLine: number; endLine: number }
   | { kind: "substring"; startOffset: number; endOffset: number }
 
+// 歧义载荷（INV-03）：候选行号（0-based）必须由唯一性判定 owner 随结果携带——
+// 抛出点拿不到多层候选域（exact/normalized whole-line、substring、unsafeNormalized），
+// 自行重扫要么构成第二 matcher，要么用更弱域给出与真实唯一性矛盾的建议。
+export type AmbiguityCandidates = { lines: number[]; total: number }
+
 export type ExactResult =
   | { type: "found"; location: ExactLocation }
   | { type: "not-found" }
-  | { type: "ambiguous" }
+  | { type: "ambiguous"; candidates?: AmbiguityCandidates }
 
 // 行起点统一从当前 working lines 推导，避免前一次替换后继续使用失效的原始坐标。
 // index 等于行数时表示逻辑文本末尾，供删除和 replacement 后的 cursor 使用。
@@ -47,6 +52,35 @@ export function locateExact(
   for (const line of lines) {
     starts.push(offset)
     offset += line.length + 1
+  }
+
+  // 偏移→行号（0-based）：starts 是全行起点升序数组，取最后一个 ≤ offset 的下标。
+  const lineOfOffset = (rawOffset: number) => {
+    let low = 0
+    let high = starts.length
+    while (low < high) {
+      const middle = (low + high) >>> 1
+      if (starts[middle] <= rawOffset) low = middle + 1
+      else high = middle
+    }
+    return low - 1
+  }
+
+  // 歧义载荷只描述唯一性判定已枚举的候选；unsafeNormalized（无 raw span 的归一化
+  // 命中）经 normalizedOwnerStart 归到行号，仍是模型需要绕开的真实重复位置。
+  const ambiguityCandidates = (
+    entries: Array<{ location: ExactLocation }>,
+    unsafeRawOffsets: number[],
+  ): AmbiguityCandidates => {
+    const found = new Set<number>()
+    for (const entry of entries) {
+      found.add(entry.location.kind === "line" ? entry.location.startLine : lineOfOffset(entry.location.startOffset))
+    }
+    for (const raw of unsafeRawOffsets) {
+      if (Number.isFinite(raw)) found.add(lineOfOffset(raw))
+    }
+    const sorted = [...found].sort((a, b) => a - b)
+    return { lines: sorted.slice(0, AMBIGUITY_MAX_CANDIDATES), total: sorted.length }
   }
   // cursor 落在一行内部时该行已被部分消费，whole-line 分支只能从下一个完整行起点继续。
   const firstEligibleLine = starts.findIndex((offset) => offset >= cursorOffset)
@@ -88,7 +122,7 @@ export function locateExact(
 
   // proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
   if (exactLineByOffset.size > 0) {
-    if (lineCandidates.length > 1) return { type: "ambiguous" }
+    if (lineCandidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(lineCandidates, []) }
     return { type: "found", location: lineCandidates[0].location }
   }
 
@@ -111,7 +145,8 @@ export function locateExact(
 
   const normalized = normalizedRawView(text)
   const normalizedLiteral = normalizeForMatch(literal)
-  let unsafeNormalized = 0
+  // unsafe 命中没有可写 raw span，但歧义载荷仍需其行号，故收集 ownerStart 而非只计数。
+  const unsafeNormalizedOffsets: number[] = []
   if (normalized && normalizedLiteral.length > 0) {
     for (
       let start = normalized.text.indexOf(normalizedLiteral);
@@ -125,7 +160,7 @@ export function locateExact(
       const ownerStart = rawStart ?? normalizedOwnerStart(normalized.owners, start)
       if (ownerStart < cursorOffset) continue
       if (rawStart === undefined || rawEnd === undefined || hasInternalGap(normalized.gaps, start, end)) {
-        unsafeNormalized++
+        unsafeNormalizedOffsets.push(ownerStart)
         continue
       }
       // whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
@@ -139,9 +174,11 @@ export function locateExact(
   }
 
   // unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
-  if (candidates.length + unsafeNormalized > 1) return { type: "ambiguous" }
-  if (unsafeNormalized > 0) return { type: "not-found" }
-  if (candidates.length > 1) return { type: "ambiguous" }
+  if (candidates.length + unsafeNormalizedOffsets.length > 1) {
+    return { type: "ambiguous", candidates: ambiguityCandidates(candidates, unsafeNormalizedOffsets) }
+  }
+  if (unsafeNormalizedOffsets.length > 0) return { type: "not-found" }
+  if (candidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(candidates, []) }
   if (candidates.length === 0) return { type: "not-found" }
   return { type: "found", location: candidates[0].location }
 }

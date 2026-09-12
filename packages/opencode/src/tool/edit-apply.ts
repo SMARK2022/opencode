@@ -169,6 +169,152 @@ export function applyReplacementsPreservingUnchangedLines(
   return result
 }
 
+// ---- 歧义失败诊断（INV-03）----
+// 以下逻辑只服务失败文本，永不进入成功替换域（模块不变量 8）。
+// 候选行号让模型不必为定位重复段再跑一次 grep；最小唯一扩展直接回答
+// 「oldString 再带多少上下文行才唯一」，避免模型盲目试探。
+
+// 诊断预算：候选与扩展都封顶，全部计算是 indexOf/行比较的线性扫描，
+// 不启动第二 matcher，也不引入超时状态机。match.ts 的歧义载荷复用同一上限。
+export const AMBIGUITY_MAX_CANDIDATES = 8
+const AMBIGUITY_MAX_EXTENSION = 10
+
+// 偏移→行号（0-based）。候选偏移天然升序，双指针一次划过不同行起点的重复扫描。
+function offsetsToLines(starts: number[], offsets: number[]) {
+  const lines: number[] = []
+  let cursor = 0
+  for (const offset of offsets) {
+    while (cursor + 1 < starts.length && starts[cursor + 1] <= offset) cursor++
+    lines.push(cursor)
+  }
+  return lines
+}
+
+/**
+ * 最小唯一扩展提示：对同一行的多个候选去重后，逐对比较候选块的向上/向下公共上下文，
+ * 取「比最长公共上下文再多一行」作为该候选该方向的去歧成本，全局取最便宜者。
+ * 扩展模式必然包含原块，其命中只能是原候选之一，因此行域两两比较在数学上完备；
+ * 但 mid-line 候选与 normalized 域可能破坏行级推理，所以最终建议必须经调用方注入的
+ * 同域唯一性核验（verifyUnique）后才允许展示——核验不过则只给候选行号。
+ */
+export function uniqueExtensionHint(
+  lines: string[],
+  candidateStartLines: number[],
+  patternLineCount: number,
+  verifyUnique: (extended: string[]) => boolean,
+  lineAligned: boolean,
+): { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined {
+  const distinct = [...new Set(candidateStartLines)].sort((a, b) => a - b)
+  if (distinct.length === 0) return undefined
+  const shown = distinct.slice(0, AMBIGUITY_MAX_CANDIDATES).map((line) => line + 1)
+
+  // 扩展建议的语义是「多带 N 个完整行」，只在块行对齐且候选确在多行上时才有意义：
+  // 同行重复（distinct=1 但多次出现）或 mid-line 块都无法用整行扩展表达，直接降级为只报行号。
+  if (!lineAligned || distinct.length < 2) return { lines: shown, total: distinct.length }
+
+  let best: { direction: "above" | "below"; count: number; start: number } | undefined
+  for (const start of distinct) {
+    const end = start + patternLineCount - 1
+    let up = 0
+    let down = 0
+    for (const other of distinct) {
+      if (other === start) continue
+      const otherEnd = other + patternLineCount - 1
+      let shared = 0
+      while (
+        shared < AMBIGUITY_MAX_EXTENSION &&
+        start - 1 - shared >= 0 &&
+        other - 1 - shared >= 0 &&
+        lines[start - 1 - shared] === lines[other - 1 - shared]
+      ) {
+        shared++
+      }
+      up = Math.max(up, shared + 1)
+      shared = 0
+      while (
+        shared < AMBIGUITY_MAX_EXTENSION &&
+        end + 1 + shared < lines.length &&
+        otherEnd + 1 + shared < lines.length &&
+        lines[end + 1 + shared] === lines[otherEnd + 1 + shared]
+      ) {
+        shared++
+      }
+      down = Math.max(down, shared + 1)
+    }
+    // 超出文件边界或预算的方向不可能去歧，不参与择优。
+    if (up <= AMBIGUITY_MAX_EXTENSION && start - up >= 0 && (!best || up < best.count)) {
+      best = { direction: "above", count: up, start }
+    }
+    if (down <= AMBIGUITY_MAX_EXTENSION && end + down < lines.length && (!best || down < best.count)) {
+      best = { direction: "below", count: down, start }
+    }
+  }
+
+  if (best) {
+    const extended =
+      best.direction === "above"
+        ? lines.slice(best.start - best.count, best.start + patternLineCount)
+        : lines.slice(best.start, best.start + patternLineCount + best.count)
+    // 核验与抛出点的唯一性判定同域；核验失败的建议会变成模型的下一次失败，必须丢弃。
+    if (!verifyUnique(extended)) best = undefined
+  }
+
+  return {
+    lines: shown,
+    total: distinct.length,
+    ...(best ? { extension: { direction: best.direction, count: best.count } } : {}),
+  }
+}
+
+// 歧义文案尾部是 edit 与 apply_patch 的共享合同（同一措辞、同一格式），
+// 禁止两处各自拼装导致漂移。hint.lines 已是 1-based 展示行号。
+export function formatAmbiguityHint(
+  hint: { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined,
+) {
+  if (!hint) return ""
+  const listing =
+    hint.total === 1
+      ? `line ${hint.lines[0]}`
+      : `lines ${hint.lines.join(", ")}${hint.total > hint.lines.length ? `, … (${hint.total} total)` : ""}`
+  const advice = hint.extension
+    ? ` Including ${hint.extension.count} more line(s) ${hint.extension.direction} makes the match unique.`
+    : ""
+  return `\n\nMatches at ${listing}.${advice}`
+}
+
+// 失败错误尾部：候选行号 + 经同域核验的最小唯一扩展。
+// 候选枚举与抛出点的唯一性计数同域（usedNormalized 决定字面/归一化），
+// 禁止用另一域的重扫结果做建议——域分歧的建议会让模型重试再失败。
+function ambiguitySuffix(base: string, oldString: string, usedNormalized: boolean) {
+  const probe = usedNormalized ? normalizeForMatch(oldString) : oldString
+  if (probe.length === 0) return ""
+  // 与 countOccurrences/exactLiteralCount 同构的非重叠步进枚举。
+  const offsets: number[] = []
+  let from = 0
+  while (true) {
+    const index = base.indexOf(probe, from)
+    if (index === -1) break
+    offsets.push(index)
+    from = index + probe.length
+  }
+  if (offsets.length === 0) return ""
+  // replacementBase 与原文行结构一致（normalizeForMatch 不改行数），行号对模型即文件行号。
+  const starts: number[] = [0]
+  for (let i = 0; i < base.length; i++) if (base[i] === "\n") starts.push(i + 1)
+  const candidateLines = offsetsToLines(starts, offsets)
+  // 行对齐校验：扩展语义按整行表达，mid-line 块（如行内单词重复）不满足前提，
+  // 必须降级为只报候选行号，否则「0 行扩展」会把整行吞进建议而说谎。
+  const lineAligned = offsets.every((offset) => {
+    const end = offset + probe.length
+    return (offset === 0 || base[offset - 1] === "\n") && (end === base.length || base[end] === "\n")
+  })
+  const hint = uniqueExtensionHint(base.split("\n"), candidateLines, probe.split("\n").length, (extended) => {
+    const text = extended.join("\n")
+    return (usedNormalized ? countOccurrences(base, text) : exactLiteralCount(base, text)) === 1
+  }, lineAligned)
+  return formatAmbiguityHint(hint)
+}
+
 // progressive locate：先字面 exact，失败才进封闭 normalize；不使用打分/closest 成功。
 export function findMatch(content: string, oldString: string) {
   const exactIndex = content.indexOf(oldString)
@@ -453,12 +599,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       ? countOccurrences(replacementBase, edit.oldString)
       : exactLiteralCount(replacementBase, edit.oldString)
     if (occurrences > 1 && edit.replaceAll !== true) {
-      throw new EditApplyError(
+      const message =
         edits.length === 1
           ? `Found multiple matches for oldString. Provide more surrounding context to make the match unique.`
-          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`,
-        i,
-      )
+          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`
+      throw new EditApplyError(message + ambiguitySuffix(replacementBase, edit.oldString, usedNormalized), i)
     }
 
     const ranges = usedNormalized

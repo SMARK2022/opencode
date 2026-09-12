@@ -7,7 +7,9 @@ import { FileWatcher } from "../file/watcher"
 import { InstanceState } from "@/effect/instance-state"
 import { Patch } from "../patch"
 import { assertExternalDirectoryEffect } from "./external-directory"
-import { renderFileDiff } from "./file-diff"
+import { boundDiff, renderFileDiff } from "./file-diff"
+import { formatStalenessNote, scanFileTouchHistory } from "./edit"
+import { Truncate } from "./truncate"
 import { LSP } from "@/lsp/lsp"
 // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
 import type * as LSPClient from "@/lsp/client"
@@ -47,6 +49,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
   instance: InstanceContext,
   afs: AppFileSystem.Interface,
 ) {
+  // diff 头统一用 worktree 相对路径（正斜杠）：output 在 win32 有不许含反斜杠的合同测试；
+  // 相对路径同时是 UI/SummaryCache 的既有展示形态，proposal 与 result 共用同一渲染。
+  const displayPath = path.relative(instance.worktree, group.filePath).replaceAll("\\", "/")
   const first = group.hunks[0]
   switch (first.type) {
     case "add": {
@@ -62,7 +67,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
       const next = Bom.split(newContent)
       // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
-      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
+      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
       // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
       return {
         filePath: group.filePath,
@@ -107,7 +112,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
       }
       // 元数据 diff 走唯一有界 seam；正常路径产物与旧实现逐字节一致（INV-02）。
-      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
+      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
       const expected = [snapshot]
       if (movePath) {
         // move destination 也是 proposal 的 expected state，不能只锁 source。
@@ -138,7 +143,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
       const source = Bom.split(Mutation.decode(snapshot))
       // delete 的全量语义保留：中小文件仍记录全文行 diff；只有二进制/超限中段换标记表示。
-      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(source.text), "")
+      const rendered = renderFileDiff(displayPath, normalizeLineEndings(source.text), "")
       // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
       return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: rendered.patch, additions: rendered.additions, deletions: rendered.deletions, bom: source.bom, expected: [snapshot] }
     }
@@ -204,6 +209,7 @@ export const ApplyPatchTool = Tool.define(
     const afs = yield* AppFileSystem.Service
     const format = yield* Format.Service
     const bus = yield* Bus.Service
+    const truncate = yield* Truncate.Service
 
     const run = Effect.fn("ApplyPatchTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -263,7 +269,10 @@ export const ApplyPatchTool = Tool.define(
         const exit = yield* Effect.exit(processHunkGroup(group, instance, afs))
         if (Exit.isFailure(exit)) {
           const err = Cause.squash(exit.cause)
-          hunkErrors.push(`${group.filePath}: ${err instanceof Error ? err.message : String(err)}`)
+          // INV-04：失败文件行附时效事实（自写晚于自读）。判定与 edit 侧共享同一 seam，
+          // 同一文件在同一会话历史下两工具必须给出一致的事实句。
+          const stale = formatStalenessNote(scanFileTouchHistory(ctx.messages, group.filePath))
+          hunkErrors.push(`${group.filePath}: ${err instanceof Error ? err.message : String(err)}${stale}`)
           continue
         }
         const change = exit.value
@@ -305,6 +314,9 @@ export const ApplyPatchTool = Tool.define(
       // Apply the changes
       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
       const editedFiles: string[] = []
+      // INV-07：commit 锁内逐文件记录最终落盘内容，供 commit 后重算 post-formatter diff。
+      // delete 无最终内容不记录；未 formatter 的文件沿用 proposal newContent（两者本就一致）。
+      const finalContents = new Map<string, string>()
       const expected = fileChanges.flatMap((change) => change.expected)
       // 所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
 
@@ -345,6 +357,7 @@ export const ApplyPatchTool = Tool.define(
             }
 
             if (edited) {
+              let finalText = change.newContent
               if (yield* format.file(edited)) {
                 const formattedText = yield* Bom.syncFile(afs, edited, change.bom)
                 // FileChange.ending 来自同一 proposal/source；formatter 只拥有文本变化，不接管 existing EOL。
@@ -356,7 +369,9 @@ export const ApplyPatchTool = Tool.define(
                 if (restoredText !== formattedText) {
                   yield* afs.writeWithDirs(edited, Bom.join(restoredText, change.bom))
                 }
+                finalText = restoredText
               }
+              finalContents.set(edited, finalText)
               editedFiles.push(edited)
             }
           }
@@ -448,11 +463,52 @@ export const ApplyPatchTool = Tool.define(
         }
       }
 
+      // INV-07/H02：result 的 diff/files 必须对齐 commit 后的落盘真值（post-formatter）；
+      // permission 预览用的 proposal diff（files/totalDiff）保持 formatter 前语义不变——
+      // 审批看到提案、模型看到落盘，两处职责不合并。
+      const resultFiles = fileChanges.map((change) => {
+        const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
+        const finalText = edited ? finalContents.get(edited) : undefined
+        const unchanged = finalText === undefined || normalizeLineEndings(finalText) === normalizeLineEndings(change.newContent)
+        // proposal diff 已在 processHunkGroup 用相对路径渲染；未变化的文件直接复用，
+        // formatter 改写过的文件以同一相对路径重算（post-formatter 真值）。
+        const relativePath = path.relative(instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/")
+        const rendered = unchanged
+          ? { patch: change.diff, additions: change.additions, deletions: change.deletions }
+          : renderFileDiff(relativePath, normalizeLineEndings(change.oldContent), normalizeLineEndings(finalText))
+        return {
+          filePath: change.filePath,
+          relativePath,
+          type: change.type,
+          patch: rendered.patch,
+          additions: rendered.additions,
+          deletions: rendered.deletions,
+          movePath: change.movePath,
+        }
+      })
+      const resultDiff = resultFiles.map((file) => file.patch).join("\n")
+
+      // title 保持今日全部既有段落（成功行+文件列表+失败/LSP 段），不含新增 Changed 段。
+      const title = output
+      // Changed 段给模型「落盘真值」锚点（G01 链式陈旧的对冲）；连续前缀裁剪由 boundDiff 持有。
+      const limits = yield* truncate.limits()
+      const bounded = boundDiff(resultDiff, {
+        maxLines: Math.max(0, limits.maxLines - 10),
+        maxBytes: Math.max(0, limits.maxBytes - 2048),
+      })
+      if (bounded.text.length > 0) {
+        output += `\n\nChanged:\n${bounded.text}`
+      }
+      if (bounded.omitted > 0) {
+        const artifact = yield* truncate.write(resultDiff)
+        output += `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
+      }
+
       return {
-        title: output,
+        title,
         metadata: {
-          diff: totalDiff,
-          files,
+          diff: resultDiff,
+          files: resultFiles,
           // [local-smark] metadata.diagnostics 存储新错误数组 + diagnosticSummary 聚合摘要
           diagnostics: diagMetadata,
           // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突。

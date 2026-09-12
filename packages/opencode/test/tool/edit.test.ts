@@ -17,6 +17,8 @@ import * as Tool from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
 import { FileWatcher } from "../../src/file/watcher"
 import { closestWindow } from "@/patch/match"
+import { canonicalReadPath } from "../../src/tool/read"
+import { renderFileDiff } from "@/tool/file-diff"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-edit-session"),
@@ -102,6 +104,25 @@ const itTruncated = testEffect(
     Layer.mock(Truncate.Service, {
       limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
       output: (text: string) => Effect.succeed({ content: text, truncated: false }),
+      // C01 工件兜底路径：超预算 diff 会调 write，mock 必须提供而不是抛 UnimplementedError。
+      write: () => Effect.succeed("<artifact>"),
+    }),
+    Agent.defaultLayer,
+  ),
+)
+
+// [local-smark] 中档预算层：diff 预算（limits−2048B/10行 保留额）落在「部分可显示」
+// 区间，C01 前缀测试才能区分连续前缀与跳行截断；itTruncated 的 1024B 会裁到 0 行。
+const itMidBudget = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Format.defaultLayer,
+    Bus.layer,
+    Layer.mock(Truncate.Service, {
+      limits: () => Effect.succeed({ maxLines: 100, maxBytes: 4096 }),
+      output: (text: string) => Effect.succeed({ content: text, truncated: false }),
+      write: () => Effect.succeed("<artifact>"),
     }),
     Agent.defaultLayer,
   ),
@@ -170,12 +191,101 @@ type EditTestArgs =
       replaceAll?: boolean
     }
 
+// 多 part 历史 fixture（INV-04/05/09 共享）：state.time.end 是时效判定的时间源；
+// readRange 走 metadata.read 才能进入 collectVisibleReads 的可见性协议（生产同构）。
+type HistoryEntry = {
+  tool: "read" | "edit" | "write" | "apply_patch"
+  end: number
+  file?: string
+  readRange?: { start: number; end: number }
+  // compacted 会话压缩标记：可见性协议（visibleReadMeta）必须将其排除
+  compacted?: boolean
+}
+
+function ctxWithHistory(filePath: string, entries: HistoryEntry[]): Tool.Context {
+  const messageID = MessageID.make("msg_history")
+  const parts = entries.map((entry, index) => {
+    const file = entry.file ?? filePath
+    const input =
+      entry.tool === "apply_patch" ? { patchText: `*** Update File: ${file}` } : { filePath: file }
+    // 生产上每个 completed read 都携带 metadata.read；fixture 缺省补一个单行区间，
+    // 只有携带 metadata 的 read 才能进入可见性协议（无 metadata 的历史形态不算可见读取）。
+    const readRange = entry.readRange ?? { start: 1, end: 1 }
+    const metadata =
+      entry.tool === "read"
+        ? {
+            read: {
+              type: "file",
+              path: file,
+              canonicalPath: canonicalReadPath(file),
+              size: 1,
+              modified: "",
+              modifiedMs: 1,
+              fp: "fp",
+              start: readRange.start,
+              end: readRange.end,
+              total: readRange.end,
+              returned: readRange.end - readRange.start + 1,
+              stub: false,
+            },
+          }
+        : {}
+    return {
+      id: PartID.make(`prt_history_${index}`),
+      messageID,
+      sessionID: ctx.sessionID,
+      type: "tool" as const,
+      tool: entry.tool,
+      callID: `call_history_${index}`,
+      state: {
+        status: "completed" as const,
+        input,
+        output: "ok",
+        title: entry.tool,
+        metadata,
+        time: { start: entry.end - 1, end: entry.end, ...(entry.compacted ? { compacted: entry.end } : {}) },
+      },
+    } satisfies MessageV2.ToolPart
+  })
+  return {
+    ...ctx,
+    messages: [
+      {
+        info: {
+          id: messageID,
+          role: "assistant",
+          sessionID: ctx.sessionID,
+          parentID: ctx.messageID,
+          agent: "build",
+          mode: "build",
+          path: { cwd: ".", root: "." },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelID.make("test"),
+          providerID: ProviderID.make("test"),
+          time: { created: 0 },
+        } satisfies MessageV2.Assistant,
+        parts,
+      } satisfies MessageV2.WithParts,
+    ],
+  }
+}
+
 function isCreateArgs(args: EditTestArgs) {
   if ("edits" in args && Array.isArray(args.edits) && args.edits.length > 0) {
     return args.edits.length === 1 && args.edits[0]?.oldString === ""
   }
   return "oldString" in args && args.oldString === ""
 }
+
+const failWith = Effect.fn("EditToolTest.failWith")(function* (args: EditTestArgs, context: Tool.Context) {
+  const exit = yield* run(args, context).pipe(Effect.exit)
+  if (Exit.isFailure(exit)) {
+    const err = Cause.squash(exit.cause)
+    return err instanceof Error ? err : new Error(String(err))
+  }
+  throw new Error("expected edit to fail")
+})
 
 const run = Effect.fn("EditToolTest.run")(function* (args: EditTestArgs, next?: Tool.Context) {
   const tool = yield* init()
@@ -1151,6 +1261,169 @@ describe("tool.edit", () => {
 
         expect(error.message).toContain("Found multiple matches")
         expect(yield* load(filepath)).toBe("foo bar foo")
+      }),
+    )
+
+    // 歧义诊断的用户可观察合同：候选行号 + 最小唯一扩展建议（INV-03）。
+    // 该断言锁死失败文本的信息量，不断言内部枚举实现。
+    it.instance("reports candidate lines and minimal unique extension on ambiguity", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "ambiguous.txt")
+        yield* put(filepath, "alpha\nshared A\nshared B\nbeta\nshared A\nshared B\ngamma")
+
+        const error = yield* fail({ filePath: filepath, oldString: "shared A\nshared B", newString: "changed" })
+
+        expect(error.message).toContain("Found multiple matches")
+        expect(error.message).toContain("lines 2, 5")
+        expect(error.message).toContain("1 more line(s) above")
+        expect(yield* load(filepath)).toBe("alpha\nshared A\nshared B\nbeta\nshared A\nshared B\ngamma")
+      }),
+    )
+
+    // 同一行内重复无法通过行扩展去歧：此时只给候选行号，不得给出会再次失败的扩展建议。
+    it.instance("degrades to candidate lines when line extension cannot disambiguate", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "sameline.txt")
+        yield* put(filepath, "foo bar foo")
+
+        const error = yield* fail({ filePath: filepath, oldString: "foo", newString: "qux" })
+
+        expect(error.message).toContain("Found multiple matches")
+        expect(error.message).toContain("line 1")
+        expect(error.message).not.toContain("makes the match unique")
+      }),
+    )
+
+    // INV-04 时效事实：自写晚于自读时，失败错误必须点明时效并指向作用后结果；
+    // 文案不得诱导 re-read（用户决策）。控制组证明无陈旧时句子不出现。
+    it.instance("notes own-write-after-read staleness on mismatch failure", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "stale.txt")
+        yield* put(filepath, "changed by earlier edit")
+        const context = ctxWithHistory(filepath, [
+          { tool: "read", end: 1 },
+          { tool: "edit", end: 3 },
+        ])
+
+        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
+
+        expect(error.message).toContain("modified by your own edit after your last read")
+        // 新增事实句自身不得携带 re-read 祈使（INV-02）；既有 closest 回退文案不属于本合同。
+        expect(error.message).toContain("Use the result returned by that call")
+        expect(error.message).not.toContain("re-read")
+      }),
+    )
+
+    it.instance("omits staleness note when the last read is newer than the last write", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "fresh.txt")
+        yield* put(filepath, "current content")
+        const context = ctxWithHistory(filepath, [
+          { tool: "edit", end: 3 },
+          { tool: "read", end: 5 },
+        ])
+
+        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
+
+        expect(error.message).not.toContain("modified by your own")
+      }),
+    )
+
+    // INV-05 已读区间：融合同 canonicalPath 的全部可见 read metadata，只陈述事实。
+    it.instance("lists previously read line ranges on mismatch failure", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "paged.txt")
+        yield* put(filepath, "line\n".repeat(600))
+        const context = ctxWithHistory(filepath, [
+          { tool: "read", end: 1, readRange: { start: 120, end: 260 } },
+          { tool: "read", end: 2, readRange: { start: 250, end: 400 } },
+        ])
+
+        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
+
+        expect(error.message).toContain("120-400")
+      }),
+    )
+
+    // 已压缩读取的内容不在模型上下文中（可见性协议）：不得计入已读区间与时效判定。
+    it.instance("does not count compacted reads as visible history", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "compacted.txt")
+        yield* put(filepath, "changed by earlier edit")
+        const context = ctxWithHistory(filepath, [
+          { tool: "read", end: 1, compacted: true, readRange: { start: 5, end: 40 } },
+          { tool: "edit", end: 3 },
+        ])
+
+        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
+
+        expect(error.message).toContain("has not been read since")
+        expect(error.message).not.toContain("5-40")
+      }),
+    )
+
+    // INV-09 同名异路径提醒：存在同 basename 异路径已读文件时提示一次。
+    it.instance("notes a same-named read from a different path on mismatch failure", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const original = path.join(test.directory, "original", "x.patch")
+        const current = path.join(test.directory, "current", "x.patch")
+        yield* put(current, "actual current content")
+        const context = ctxWithHistory(current, [
+          { tool: "read", file: original, end: 1 },
+          { tool: "read", end: 2 },
+        ])
+
+        const error = yield* failWith({ filePath: current, oldString: "missing text", newString: "x" }, context)
+
+        expect(error.message).toContain("different file with the same name")
+        expect(error.message).toContain(original)
+      }),
+    )
+
+    // INV-08/C01：Changed 段截断必须是真实 diff 的连续前缀 + 显式省略计数；
+    // 旧实现逐行跳塞（continue）会让展示中间出现不可见的洞，却报「只裁尾部」。
+    itMidBudget.instance("truncates the Changed diff as a strict prefix with an omission count", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "budget.txt")
+        // 夹具刻意在 del 段中部放一条 1300B 长行：旧跳行实现跳过它后继续收后面的
+        // 短行（展示中间出洞仍报「只裁尾部」），连续前缀实现必须在长行处一次性截止。
+        const before = Array.from({ length: 60 }, (_, i) =>
+          i === 20 ? `line ${i} ${"x".repeat(1300)}` : `line ${i} ${"x".repeat(24)}`,
+        ).join("\n")
+        const after = Array.from({ length: 60 }, (_, i) => `line ${i} ${"y".repeat(12)}`).join("\n")
+        yield* put(filepath, before)
+
+        const context = ctxWithHistory(filepath, [{ tool: "read", end: 1 }])
+        const result = yield* run(
+          { filePath: filepath, edits: [{ oldString: before, newString: after }] },
+          context,
+        )
+
+        const full = renderFileDiff(filepath, before, after).patch
+        const shown = result.output.split("\n\nChanged:\n")[1]?.split("\n… (")[0] ?? ""
+        // 前缀性质：展示段必须是完整 diff 的逐字节前缀（旧跳行实现必然违反）。
+        expect(full.startsWith(shown)).toBe(true)
+        expect(result.output).toMatch(/… \(\d+ more lines omitted/)
+        expect(shown.length).toBeGreaterThan(0)
+      }),
+    )
+
+    // INV-10：工具 description 必须携带三条用户可观察合同——陈旧转写禁令、
+    // 门禁不认可 bash 输出、歧义条目的 more-than-3-lines 诱导。文案即合同。
+    it.instance("description carries staleness, bash-gate, and context-size guidance", () =>
+      Effect.gen(function* () {
+        const tool = yield* init()
+        expect(tool.description).toContain("latest read")
+        expect(tool.description).toContain("Bash output")
+        expect(tool.description).toContain("more than 3 lines")
       }),
     )
 
