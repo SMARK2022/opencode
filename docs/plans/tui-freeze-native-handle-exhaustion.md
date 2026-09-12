@@ -389,3 +389,126 @@ const hasPreview = createMemo(() => previewTree() !== undefined)
 **次要/替代路径清单**：无。无 fallback、无接口变化、无新增生产概念。
 
 **未决/未验证项**：`zz-repro-freeze.test.tsx`（调查脚本）按惯例应移至 `.temp/Testing\`，但移动被权限预检拦截（需要用户显式授权文件移动）；该文件不进 commit（untracked，commit 用 `--only` 显式路径排除），待用户确认后清理。dialog-select 的同模式 JSX 存在性检查为低频对话框路径，按审计结论不扩 scope。
+
+## 10. 后续独立问题：全局中文持续缺字（调查中）
+
+本节不属于前述 revision 3 的实施授权或 verified 结论。尚未确认现场触发源，不宣称新问题已修复。用户确认二进制包含此前修复；本轮未运行或替换生产 OpenCode 二进制，未修改生产代码。
+
+后续纠正：用户强调是部分中文缺失；本节 OSC 66 全部吞字实验不满足该完整症状，不能作为现场主结论。§11 已通过实际组件树复现部分中文缺失，优先依据 §11。
+
+### 10.1 现象与证据边界
+
+用户报告运行一段时间后，历史消息、纯文本、GOAL 和 Session 侧栏同时出现缺字；ASCII 多数正常，中文部分呈空白。Ctrl+P 重绘不恢复，resize 后仍缺字但缺失位置改变。不能将此直接归为 Markdown、高亮或 renderable 耗尽。
+
+此前新鲜画布测试及 200 次滑窗后的字符探针没有发现缺字，但存在测试边界：`core/src/testing/test-renderer.ts:227-230` 的 `captureCharFrame()` 直接读取 native 画布，并未解释发送给终端的 ANSI；`:367-374` 默认使用 memory output。设置 `useThread: true` 不能证明覆盖了真实终端输出。此前“因此证明渐进式缓存腐化”的判断证据不足，撤回。
+
+### 10.2 新实证：迟到 CPR 导致输出协议被错误切换
+
+实验脚本 `.temp/Testing/garbled-render.test.tsx` 使用真实 `CliRenderer`、`TextRenderable`、stdin 事件路由和 native output feed，将 ANSI 输入 `@xterm/headless` 后与内存画布比较。终端模拟器未实现 OSC 66；这用于验证不支持该协议的终端，不等同于直接捕获用户 Windows Terminal。
+
+命令（cwd `.temp/Testing`）：`bun test garbled-render.test.tsx --test-name-pattern "late CPR"`。等待真实启动探测超时 5.2 秒，再通过 stdin 注入完整光标位置报告 `ESC[1;80R`；初次复现和扩展重绘复测均出现 red。扩展复测耗时约 5.7 秒：
+
+| 阶段 | capabilityTimeoutId | explicit_width | 内存画布 | 终端画面 |
+|---|---|---|---|---|
+| 超时后、未注入 | null | false | A中文B | A中文B |
+| 注入 ESC[1;80R | null | true | A中文B | AB |
+| 再注入 ESC[1;1R | null | true | A中文B | AB |
+| 强制完整重绘 | null | true | A中文B | AB |
+| resize 40→32 | null | true | A中文B | AB |
+
+确认的传导链（以下路径均相对 `thirdparty/opentui/packages/core/src`）：
+
+1. `lib/terminal-capability-detection.ts:26-32` 把第一行、非 1 列的 CPR 认作宽度能力响应，未核实对应的查询。
+2. `renderer.ts:3205-3223,3332-3336` 允许这种响应绕过已结束的探测窗口，进入 native 能力解析并请求重绘。
+3. `zig/terminal.zig:1110-1122` 捕获启动光标位置后仍继续执行能力判断；任何 row=1、col>=2 的报告都会打开 `explicit_width`，col>=3 还会打开 `scaled_text`。后续 col=1 不复位。
+4. `zig/renderer.zig:1434-1464` 将 grapheme 文本改为 OSC 66 输出，ASCII 仍直接输出；不支持 OSC 66 的终端忽略其中中文。内存画布依然更新为完整字符，后续差量比较也无法发现屏幕缺字。
+5. 强制重绘和 resize 继续使用同一错误能力，不能恢复。独立 Explore 复核得到相同结果，task `ses_f6e0d2896ffefdMIDjfMmwYDIa`。
+
+### 10.3 尚未闭合的现场证据
+
+正常协议对照：`bun test garbled-render.test.tsx --test-name-pattern "ANSI CJK"` 使用固定 seed=731 的 500 个混合中英文样本及 6 个固定平移样本，按输入原文与终端实际字符比较，506 帧通过（14 秒）。中途以内存读取为 oracle 的版本出现“内存读出空行、终端实际正确”的实验失败；因此改用单行原文作为独立期望，不把该中间失败当作用户缺字的复现。该对照未注入能力响应。
+
+- 实验确认一个可导致持久缺字的生产缺陷，尚未证明用户现场收到了对应 CPR，或当时 `explicit_width` 已翻转。
+- 尚未完整复现“部分中文保留，resize 改变缺失位置”的具体分布；不能把全部缺字的最小实验直接视为截图的完整复现。
+- 在 `C:/Users/Lenovo/.local/share/opencode/log/*.log` 检索未找到现场终端输入、OSC 66 或能力变化记录。搜索命中的相关关键词主要是本次调查命令的 permission 日志，不能当作现场证据。
+- 源码中的启动查询确会发送 CPR 请求（`zig/terminal.zig:304-328`），但尚无证据说明为何在用户长运行时刻发生。需要故障实例的输入报告、能力快照或实际输出字节才能闭合此环；不以猜测“长会话导致晚回复”替代证据。
+
+### 10.4 修复方向与实验清理
+
+已确认缺陷应在能力协商的生产端修：区分启动光标位置与宽度探针回复，并由有效探针生命周期约束能力提升，避免无关 CPR 改写全局输出协议。不能简单屏蔽所有能力变化，也不能通过反复重绘、重建组件或 catch 丢弃错误处理。具体方案须在后续 plan 阶段确定，当前没有实施授权变更。
+
+按用户已授权的脚本移动要求，包内 `zz-repro-freeze.test.tsx` 已移至 `.temp/Testing/zz-repro-freeze-threaded.test.tsx`，保留另一个已有非线程实验文件，不删除历史脚本。包外 context 初始化错误的原因未证实，不能继续把“双模块实例”当成事实。新 ANSI 实验直接在 `.temp/Testing` 运行，未产生正式测试目录中的新红测；实验 red 保留用于记录未修复缺陷。
+
+## 11. 部分中文缺失：裁剪拒绝泄漏 GraphemePool 槽位（已复现，未实施）
+
+### 11.1 用户纠正与结论
+
+用户最新要求：必须解释部分中文消失、其他中文及 ASCII 保留，不能用全部中文消失替代；全面检查当前新版 TUI 的日志。本轮只读生产代码，实验在 `.temp/Testing`，未运行或替换生产二进制。
+
+确认的生产缺陷：宽字符在分配字形 ID 后，因跨 scissor 右边界被整字拒绝，刚分配的槽位既未交给 buffer tracker，也未释放。反复绘制同一个被裁字符即可填满进程共享 GraphemePool 的 class 0，随后普通 TextRenderable 会保留已经 intern 的中文字、跳过无法新分配的中文字，ASCII 不受该池分配限制。它与先前 Renderable 生命周期/65535 native handle 问题是不同的资源池。
+
+### 11.2 最小复现与精确阈值
+
+脚本 `.temp/Testing/garbled-render.test.tsx`。每个实验必须单独启动 Bun 进程，以隔离故意耗尽的全局池。cwd `.temp/Testing`：
+
+| 命令/环境 | 结果 |
+|---|---|
+| `CJK_DRAWS=65533`，`bun test garbled-render.test.tsx --test-name-pattern "clipped CJK"` | PASS，`中试文ABC` 完整 |
+| `CJK_DRAWS=65534`，同命令 | RED，`中  文ABC`，只缺 `试`，ASCII 完整 |
+| `CJK_DRAWS=100000 CJK_CLIP_WIDTH=2`，同命令 | PASS，整字可容纳时 10 万次绘制不耗尽 |
+| `bun test garbled-render.test.tsx --test-name-pattern "real clipped"` | RED，真实 Box/Text 组件树令另一处普通 TextRenderable 输出 `中  文ABC` |
+
+PowerShell 设置环境使用 `$env:CJK_DRAWS='65534'` 等；表中环境项不是 Bash 命令。容量实验约 0.6 秒/进程，真实组件树实验约 0.5 秒/进程。
+
+实验先用独立 buffer 持有 `中`、`文` 两个 live 字形，然后将 TextBufferView 的 `测` 绘制到宽 4 列 buffer、宽 1 列 scissor。TextBufferView 内部宽度合法，但父级只允许第一列，两个 cell 的中文字被拒绝。每次 clear 与重绘仍漏一个槽位；`2 + 65534 = 65536` 正好耗尽 class 0。
+
+真实树实验使用 `BoxRenderable({width:1, height:1, overflow:"hidden"})` 和其 `TextRenderable({content:"测", width:4, height:1, wrapMode:"none"})`，直接执行 `renderer.root.render()`；没有构造非法 cell 或直接修改池。染坏池后隐藏该 box，再添加 `中试文ABC` 的新 TextRenderable，同样只缺 `试`。
+
+独立 Explore 复核 task `ses_f6c0093caffeOSH0aVh4rB456x` 重跑阈值/整字对照/真实树，并将真实 native ANSI 交给 `@xterm/headless`：内存及终端均为 `中  文ABC`，无 OSC 66。不是终端单纯缓存旧帧，也不依赖 Markdown。
+
+### 11.3 第一处偏离与传导链
+
+路径相对 `thirdparty/opentui/packages/core/src`：
+
+1. `Renderable.ts:1423-1434,1819-1825`：普通 overflow-hidden 父组件产生 scissor；`renderables/TextBufferRenderable.ts:475` 在该边界内绘制 TextBufferView。主仓库工具行也存在 overflow-hidden 与不换行文本组合（`packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2687,2725`），但尚未识别现场哪一个具体边界。
+2. `zig/buffer.zig:1800-1811`：多字节字形先 `pool.alloc`；ASCII 直接编码。
+3. `zig/buffer.zig:1825-1829 → :901-929 → :475-483`：写入发现右半字符越出 scissor，提前 return；没有调用 tracker，也没有释放先前新分配的 ID。buffer 级“无 mutation”不等于共享池无分配副作用。
+4. `zig/grapheme.zig:124-153,195-207,407-448`：新槽位 `is_owned=1,is_allocated=1,refcount=0`，只对 live referenced ID 做复用。被拒字符没有 live ID 可复用，因此每次重复绘制都再分配一个。这里 `is_owned=1` 表示字节由池持有，不代表有 buffer 持有引用。
+5. `zig/grapheme.zig:25-33,369-374`：16-bit slot index，class 0 最多 65536 个槽位；`中文测` 的 3-byte UTF-8 都进入容量不超过 8 bytes 的 class 0。耗尽不代表系统 RAM 不够。
+6. `zig/buffer.zig:1804-1809`：新字形分配失败后警告、按字符宽度推进并 continue，于是形成空格，同时保留后续缓存字形和 ASCII。直接 `drawText` 的 `:1280` 会提前结束整次 draw；二者不可混为一谈。
+7. 字形池进程全局共享，销毁 renderable/buffer 只能释放已记录的引用，无法找回漏掉的 refcount=0 槽位。独立实验销毁此前全部 renderer/buffer 后再建 renderer，仍能复现池容量残缺。
+
+`git blame` 将右边界提前拒绝定位到 OpenTUI commit `f933876c7`（`fix(core): 宽 grapheme 跨 scissor 右边界时整字裁剪且无副作用`）。这里只确认该分支来源，不把它等同于用户首次安装或首次故障的时间。
+
+### 11.4 为什么持久、部分缺失、位置会变化
+
+- 已 live/intern 的字形无需新槽位，可继续显示；其他字形分配失败，ASCII 不走该分配。因而是部分中文消失。
+- 实验对已耗尽场景 resize 到 18、20 列并重绘，仍为 `中  文ABC`。重绘不回收没有 tracker owner 的槽位。
+- 释放原先 live 字形并改变绘制顺序后，仅剩两个可用槽位被 `试`、`中` 抢先使用；同一批字改成 `试中文ABC` 时输出 `试中  ABC`。缺字由 `试` 变为 `文`，证明 residency/绘制顺序变化可改变缺失集合。尚未声称单独 resize 必然触发这一步，也未复现截图每个坐标。
+- 无需新建消息或 renderable；每次帧绘制都可能分配被拒字形。仅按“一帧漏一个、每秒 60 帧”的假设估算，65536 槽约 18.2 分钟耗尽；30 帧约 36.4 分钟。实际帧率、拒绝数及 live 字形复用需现场测量，不能把估算当作实测发生时间。
+
+### 11.5 当前全部日志核查
+
+只读核查 `C:/Users/Lenovo/.local/share/opencode/log` 内 13 个日志，统计固定截止本地 2026-09-12 12:44:34（UTC 04:44:34），仅统计真正行首 severity，不把 permission 中的实验命令当作故障。当前六个 TUI 的启动记录均为 1.15.14-smark；PID 除 daemon 外按实际进程启动时间关联，日志本身没有 TUI PID。
+
+| PID / 角色 | 日志文件 | ERROR / WARN | 结论 |
+|---|---|---|---|
+| 33160 daemon | 2026-09-11T190839.log | 59 / 9 | 共享后端记录，非单个 TUI |
+| 12104 TUI | 2026-09-11T190841.log | 0 / 0 | 启动 Session `ses_f6e2c6ab7ffevJGNceQ26VbQIv` |
+| 61492 TUI | 2026-09-11T190844.log | 0 / 0 | 启动 Session `ses_1762e23a2ffeYBi6TXLUSjJuKP` |
+| 68736 TUI | 2026-09-11T190848.log | 1 / 0 | `ses_041cd5549ffeSiDWyPpcy8Xrsl`，重复 tui-smoke 插件 ID |
+| 54464 TUI | 2026-09-11T190851.log | 0 / 0 | 启动 Session `ses_f8b378e68ffePzMwT7iii55Nw7` |
+| 18112 TUI | 2026-09-11T192614.log | 0 / 0 | args=[]，无法据启动日志确定后来打开的 Session |
+| 70948 TUI | 2026-09-12T042118.log | 0 / 0 | args=[]，同上 |
+
+daemon 错误分类：34 次 HTTP 502、1 次 HTTP 500、3 次未记录状态码 API 错误、5 次 Provider stream failed、7 次 Copilot 模型元数据缺字段、7 次 claudecode provider 不在列表、2 次 Aborted process。警告为 6 次 plugin@1.15.14-smark 无匹配 npm 版本、3 次 snapshot GC 已运行。可说明请求重试/配置问题，不能据此归因缺字。
+
+另外两个 TUI 日志 `190837`、`191013` 都记录正常退出；`190827`、`190831` 是较早 1.15.13 的 daemon stop；`dev.log`、`opencode.log` 是历史文件，不属于当前启动。TUI 日志大多只覆盖启动数秒，0 ERROR 不证明随后绘制正常。
+
+本缺陷真实 warning：`GraphemePool.alloc FAILED for grapheme ... error.OutOfMemory`。它经 `zig/logger.zig:17-25 → zig.ts:2615-2631 → console.warn` 进入 OpenTUI console 内存缓存，不保证写入应用 Log 文件。`console.ts:1227-1246` 仅在手动导出时写工作目录 `_console_<timestamp>.log`。已在 `F:/Project`、仓库、`D:/Temp/opencode` 搜索 `_console_*.log` / `opentui_debug_*.log`，未找到可用导出；因此目前没有用户故障实例的该 warning 作为归因证据。
+
+### 11.6 修复方向与未完成项
+
+治本方向：字形生产者必须在分配新池槽前确认它能被实际写入；若其他真实路径在分配后拒绝，也必须由分配者对未交付的引用负责。保留整字裁剪与既有字形引用语义，不通过扩大池、周期性全局清空、反复重建 TUI 或 catch 后继续来隐藏泄漏。后续需核实同类分配调用点及可见性/混合分支，再制定可审计实施方案。
+
+已经定位并重复证明足以产生本类部分缺字的生产根因，尚未捕获用户故障实例的字形池状态或具体漏字组件。因此“当前截图唯一来自此路径”仍不能定为事实。当前无生产修改、无 commit，§11 为调查证据，不继承旧 revision 的实施批准。
