@@ -12,6 +12,8 @@ import { PermissionV2 } from "@opencode-ai/core/permission"
 import { PermissionPrecheck } from "@opencode-ai/core/permission/precheck"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionStore } from "@opencode-ai/core/session/store"
+import type { SessionMessage } from "@opencode-ai/core/session/message"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ApplyPatchTool } from "@opencode-ai/core/tool/apply-patch"
@@ -19,7 +21,7 @@ import { location } from "./fixture/location"
 import { Format } from "@opencode-ai/core/format"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
-import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
+import { toolIdentity, executeTool, settleTool, toolDefinitions, toolHistory } from "./lib/tool"
 
 const sessionID = SessionV2.ID.make("ses_apply_patch_tool_test")
 const assertions: PermissionV2.AssertInput[] = []
@@ -90,7 +92,7 @@ const filesystem = Layer.effect(
   }),
 ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
 
-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>) => {
+const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: SessionMessage.Message[] = []) => {
   const activeLocation = Layer.succeed(
     Location.Service,
     Location.Service.of(location({ directory: AbsolutePath.make(directory) })),
@@ -113,6 +115,8 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
           // 真实文件提交保留；格式化出口显式隔离，不让本套读取用户配置或启动外部命令。
           [Format.node, Layer.succeed(Format.Service, Format.Service.of({ file: () => Effect.succeed(false) }))],
           [PermissionV2.node, permission],
+          // 与Edit相同，仅隔离调用方提供的可见历史；真实解析/授权/提交/结算保持。
+          [SessionStore.node, Layer.mock(SessionStore.Service, { context: () => Effect.succeed(history) })],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
       ),
@@ -408,6 +412,7 @@ describe("ApplyPatchTool", () => {
       Effect.promise(() => tmpdir()),
       (tmp) => {
         reset()
+        const history: SessionMessage.Message[] = []
         return withTool(tmp.path, (registry) =>
           Effect.gen(function* () {
             expect(
@@ -424,8 +429,12 @@ describe("ApplyPatchTool", () => {
             const persisted = "alpha\nconst after = good()\n"
             const target = path.join(tmp.path, "retry.txt")
             yield* Effect.promise(() => fs.writeFile(target, persisted))
+            history.push(...toolHistory("retry.txt", "write"))
             const failed = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n@@\n-const after = good(1)\n+done\n*** End Patch"))
-            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const after = good()"') })
+            expect(failed.type).toBe("error")
+            if (failed.type !== "error") throw new Error("Expected failed patch")
+            expect(failed.value).toContain('Closest match at line 2:\nline 2 actual: "const after = good()"')
+            expect(failed.value).toContain("last modified by your own write in this session and has not been read since")
             // 真实 leaf 的模型输出也必须去重，而非只在共享 helper 单测中修正文案。
             expect(JSON.stringify(failed)).not.toContain("const after = good(1)")
             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
@@ -433,6 +442,7 @@ describe("ApplyPatchTool", () => {
             expect(repeated.type).toBe("error")
             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
           }),
+          history,
         )
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

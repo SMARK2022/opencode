@@ -26,6 +26,21 @@ export function boundMergedPatch(patch: string, additions: number, deletions: nu
     : patch
 }
 
+// 三工具共用连续前缀裁剪：长行放不下立即截止，不能跳过它后再显示短行而制造中间空洞。
+// UTF-8预算按实际保留前缀计算；omitted是全部未显示行，不只计算超长行。
+export function boundDiff(patch: string, budget: { maxLines: number; maxBytes: number }) {
+  const lines = patch.split("\n")
+  let bytes = 0
+  let kept = 0
+  while (kept < lines.length && kept < budget.maxLines) {
+    const size = Buffer.byteLength(lines[kept], "utf-8") + (kept > 0 ? 1 : 0)
+    if (bytes + size > budget.maxBytes) break
+    bytes += size
+    kept++
+  }
+  return { text: lines.slice(0, kept).join("\n"), omitted: lines.length - kept }
+}
+
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 function isBinaryText(text: string) {
@@ -88,8 +103,35 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
   }
 }
 
+// 行多重集对称差是编辑距离下界；严格大于K时原jsdiff必然中止，线性预过滤不改变预算决策。
+// 去除尾换行空token只放松下界；行内CR仍保留，不把大跨度或重排行数误认成大编辑距离。
+function exceedsEditBudgetByLineMultiset(oldText: string, newText: string) {
+  // 分词对齐 jsdiff 行分词的 strip 形态：split("\n") 后去尾部空 token（尾换行产生），
+  // 行尾 \r 归入行内容（strip 只让一致性更粗，保持下界方向安全）。
+  const counts = new Map<string, number>()
+  let excess = 0
+  const consume = (text: string, sign: 1 | -1) => {
+    const lines = text.split("\n")
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+    for (const line of lines) {
+      const next = (counts.get(line) ?? 0) + sign
+      counts.set(line, next)
+      // excess 只跟踪 |count| 的增量变化，避免最后再一次全表求和。
+      excess += Math.abs(next) - Math.abs(next - sign)
+    }
+  }
+  consume(oldText, 1)
+  consume(newText, -1)
+  return excess > MAX_DIFF_EDIT_LINES
+}
+
 export function renderFileDiff(filePath: string, oldText: string, newText: string): RenderedFileDiff {
   if (isBinaryText(oldText) || isBinaryText(newText)) return binaryMarker(filePath, oldText, newText)
+  // INV-11：下界严格大于预算时探测必然中止，跳过的不是「可能成功」的路径。
+  if (exceedsEditBudgetByLineMultiset(oldText, newText)) {
+    const { oldMid, newMid } = trimCommonLines(oldText, newText)
+    return rewriteMarker(filePath, oldMid, newMid, oldText, newText)
+  }
   // 直接用jsdiff原生预算探测；跨度大但改动小的文本仍走真实行级diff。
   const probe = diffLines(oldText, newText, { maxEditLength: MAX_DIFF_EDIT_LINES })
   // 探测成功才使用原生成器以保留正常格式；编辑距离不能替代独立的产物长度检查。

@@ -14,6 +14,8 @@ import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { EditTool } from "@opencode-ai/core/tool/edit"
@@ -275,6 +277,51 @@ describe("EditTool", () => {
           for (const absent of example.absent) expect(result.value).not.toContain(absent)
           expect(writes).toEqual([])
           expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
+        }
+        // 在同一真实leaf验证Native历史适配；只替换已存在的SessionStore历史出口。
+        const page = (filePath: string, start: number, end: number, completed = 2) => {
+          const output = { type: "text-page", content: Array.from({ length: end - start + 1 }, (_, i) => `line ${start + i}`).join("\n"),
+            read: { type: "file" as const, path: filePath, canonicalPath: ReadPresentation.canonicalReadPath(filePath), size: 4096,
+              modified: "", modifiedMs: 1, fp: "fixture", start, end, total: 600, totalExact: true, returned: end - start + 1, stub: false } }
+          return { type: "tool", name: "read", id: `read-${start}-${end}-${completed}`, time: { created: 0, completed },
+            state: { status: "completed", input: { path: filePath }, structured: output,
+              content: [{ type: "text", text: ReadPresentation.renderNativeRead(output) }] } }
+        }
+        const read = page(target, 120, 260)
+        const write = { type: "tool", name: "edit", id: "edited", time: { created: 3, completed: 4 },
+          state: { status: "completed", input: { path: "candidate.txt" }, structured: {}, content: [] } }
+        const messages = (content: unknown[]) => [Schema.decodeUnknownSync(SessionMessage.Assistant)({
+          id: "msg_feedback", type: "assistant", agent: "build", model: { id: "test", providerID: "test" },
+          time: { created: 0, completed: 5 }, content,
+        })]
+        for (const scenario of [
+          { history: messages([read, page(target, 250, 400), page(path.join(tmp.path, "other", "candidate.txt"), 1, 1), write]),
+            shown: ["modified by your own edit after your last read", "Use the result returned by that call", "120-400", "different file with the same name"], absent: [] },
+          // pruned、stub和通用裁切分别失去正文证明；仍保留较晚自写的真实事实。
+          { history: messages([{ ...read, time: { ...read.time, pruned: 3 } }, write]),
+            shown: ["has not been read since"], absent: ["120-260"] },
+          { history: messages([{ ...read, state: { ...read.state, structured: { ...read.state.structured,
+              read: { ...read.state.structured.read, stub: true } } } }, write]),
+            shown: ["has not been read since"], absent: ["120-260"] },
+          { history: messages([{ ...read, state: { ...read.state, content: [{ type: "text", text: "bounded output" }] } }, write]),
+            shown: ["has not been read since"], absent: ["120-260"] },
+          { history: messages([page(target, 120, 260, 5), write]), shown: ["120-260"], absent: ["modified by your own"] },
+          // Move后的正式applied目标仍属于自写，不从提交patch猜测文件列表。
+          { history: messages([read, { ...write, name: "apply_patch", state: { ...write.state, input: { patchText: "not parsed" },
+              structured: { applied: [{ type: "update", resource: "candidate.txt", target }] } } }]),
+            shown: ["modified by your own apply_patch after your last read"], absent: [] },
+        ]) {
+          reset()
+          const before = "line\n".repeat(600)
+          yield* Effect.promise(() => fs.writeFile(target, before))
+          const result = yield* withTool(tmp.path,
+            registry => executeTool(registry, call({ path: "candidate.txt", edits: [{ oldString: "not present anywhere", newString: "replacement" }] })), scenario.history)
+          expect(result.type).toBe("error")
+          if (result.type !== "error") throw new Error("Expected failed edit")
+          for (const shown of scenario.shown) expect(result.value).toContain(shown)
+          for (const absent of scenario.absent) expect(result.value).not.toContain(absent)
+          expect(writes).toEqual([])
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(before)
         }
       }),
       tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
@@ -560,8 +607,9 @@ describe("EditTool", () => {
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "same", newString: "after" })),
                 ).toEqual({
                   type: "error",
+                  // 同行多个候选仍拒绝；反馈还应给出该真实行号。
                   value:
-                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.",
+                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.\n\nMatches at line 1.",
                 })
                 // 重叠literal也是第二候选，不能只按replaceAll的非重叠计数放行。
                 yield* Effect.promise(() => fs.writeFile(target, "aaaa"))

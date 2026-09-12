@@ -2,6 +2,8 @@ export * as EditApply from "./edit-apply"
 import { createHash } from "crypto"
 import { normalizeForMatch } from "../util/normalize-for-match"
 export { normalizeForMatch } from "../util/normalize-for-match"
+import { formatAmbiguityHint, uniqueExtensionHint } from "../patch-match"
+export { AMBIGUITY_MAX_CANDIDATES, formatAmbiguityHint, uniqueExtensionHint } from "../patch-match"
 
 /**
  * edit 文本替换的唯一语义所有者（单条与多条 edits 共用）。
@@ -154,6 +156,55 @@ export function applyReplacementsPreservingUnchangedLines(
   }
   result += originalLines.slice(originalLineIndex).join("")
   return result
+}
+
+// ---- 歧义失败诊断（INV-03）----
+// 以下逻辑只服务失败文本，永不进入成功替换域（模块不变量 8）。
+// 候选行号让模型不必为定位重复段再跑一次 grep；最小唯一扩展直接回答
+// 「oldString 再带多少上下文行才唯一」，避免模型盲目试探。
+
+// 偏移→行号（0-based）。候选偏移天然升序，双指针一次划过不同行起点的重复扫描。
+function offsetsToLines(starts: number[], offsets: number[]) {
+  const lines: number[] = []
+  let cursor = 0
+  for (const offset of offsets) {
+    while (cursor + 1 < starts.length && starts[cursor + 1] <= offset) cursor++
+    lines.push(cursor)
+  }
+  return lines
+}
+
+// 失败错误尾部：候选行号 + 经同域核验的最小唯一扩展。
+// 候选枚举与抛出点的唯一性计数同域（usedNormalized 决定字面/归一化），
+// 禁止用另一域的重扫结果做建议——域分歧的建议会让模型重试再失败。
+function ambiguitySuffix(base: string, oldString: string, usedNormalized: boolean) {
+  const probe = usedNormalized ? normalizeForMatch(oldString) : oldString
+  if (probe.length === 0) return ""
+  // 与 countOccurrences/exactLiteralCount 同构的非重叠步进枚举。
+  const offsets: number[] = []
+  let from = 0
+  while (true) {
+    const index = base.indexOf(probe, from)
+    if (index === -1) break
+    offsets.push(index)
+    from = index + probe.length
+  }
+  if (offsets.length === 0) return ""
+  // replacementBase 与原文行结构一致（normalizeForMatch 不改行数），行号对模型即文件行号。
+  const starts: number[] = [0]
+  for (let i = 0; i < base.length; i++) if (base[i] === "\n") starts.push(i + 1)
+  const candidateLines = offsetsToLines(starts, offsets)
+  // 行对齐校验：扩展语义按整行表达，mid-line 块（如行内单词重复）不满足前提，
+  // 必须降级为只报候选行号，否则「0 行扩展」会把整行吞进建议而说谎。
+  const lineAligned = offsets.every((offset) => {
+    const end = offset + probe.length
+    return (offset === 0 || base[offset - 1] === "\n") && (end === base.length || base[end] === "\n")
+  })
+  const hint = uniqueExtensionHint(base.split("\n"), candidateLines, probe.split("\n").length, (extended) => {
+    const text = extended.join("\n")
+    return (usedNormalized ? countOccurrences(base, text) : exactLiteralCount(base, text)) === 1
+  }, lineAligned)
+  return formatAmbiguityHint(hint)
 }
 
 // progressive locate：先字面 exact，失败才进封闭 normalize；不使用打分/closest 成功。
@@ -441,12 +492,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       : exactLiteralCount(replacementBase, edit.oldString)
     if (occurrences > 1 && edit.replaceAll !== true) {
       // #521：歧义失败同样携带 editIndex；唯一性证据属于当前 edit，不能借邻近 edit 的定位解释。
-      throw new EditApplyError(
+      const message =
         edits.length === 1
           ? `Found multiple matches for oldString. Provide more surrounding context to make the match unique.`
-          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`,
-        i,
-      )
+          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`
+      throw new EditApplyError(message + ambiguitySuffix(replacementBase, edit.oldString, usedNormalized), i)
     }
 
     const ranges = usedNormalized

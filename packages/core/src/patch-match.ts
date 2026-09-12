@@ -9,10 +9,19 @@ export type ExactLocation =
   | { kind: "line"; startLine: number; endLine: number }
   | { kind: "substring"; startOffset: number; endOffset: number }
 
+// 歧义载荷（INV-03）：候选行号（0-based）必须由唯一性判定 owner 随结果携带——
+// 抛出点拿不到多层候选域（exact/normalized whole-line、substring、unsafeNormalized），
+// 自行重扫要么构成第二 matcher，要么用更弱域给出与真实唯一性矛盾的建议。
+export type AmbiguityCandidates = { lines: number[]; total: number }
+
+// 候选展示和扩展步数有界；两代工具只在失败路径共用诊断，不扩大匹配成功域。
+export const AMBIGUITY_MAX_CANDIDATES = 8
+const AMBIGUITY_MAX_EXTENSION = 10
+
 export type ExactResult =
   | { type: "found"; location: ExactLocation }
   | { type: "not-found" }
-  | { type: "ambiguous" }
+  | { type: "ambiguous"; candidates?: AmbiguityCandidates }
 
 // 行起点统一从当前 working lines 推导，避免前一次替换后继续使用失效的原始坐标。
 // index 等于行数时表示逻辑文本末尾，供删除和 replacement 后的 cursor 使用。
@@ -49,6 +58,35 @@ export function locateExact(
   for (const line of lines) {
     starts.push(offset)
     offset += line.length + 1
+  }
+
+  // 偏移→行号（0-based）：starts 是全行起点升序数组，取最后一个 ≤ offset 的下标。
+  const lineOfOffset = (rawOffset: number) => {
+    let low = 0
+    let high = starts.length
+    while (low < high) {
+      const middle = (low + high) >>> 1
+      if (starts[middle] <= rawOffset) low = middle + 1
+      else high = middle
+    }
+    return low - 1
+  }
+
+  // 歧义载荷只描述唯一性判定已枚举的候选；unsafeNormalized（无 raw span 的归一化
+  // 命中）经 normalizedOwnerStart 归到行号，仍是模型需要绕开的真实重复位置。
+  const ambiguityCandidates = (
+    entries: Array<{ location: ExactLocation }>,
+    unsafeRawOffsets: number[],
+  ): AmbiguityCandidates => {
+    const found = new Set<number>()
+    for (const entry of entries) {
+      found.add(entry.location.kind === "line" ? entry.location.startLine : lineOfOffset(entry.location.startOffset))
+    }
+    for (const raw of unsafeRawOffsets) {
+      if (Number.isFinite(raw)) found.add(lineOfOffset(raw))
+    }
+    const sorted = [...found].sort((a, b) => a - b)
+    return { lines: sorted.slice(0, AMBIGUITY_MAX_CANDIDATES), total: sorted.length }
   }
   // cursor 落在一行内部时该行已被部分消费，whole-line 分支只能从下一个完整行起点继续。
   const firstEligibleLine = starts.findIndex((offset) => offset >= cursorOffset)
@@ -91,7 +129,7 @@ export function locateExact(
 
   // #533：proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
   if (exactLineByOffset.size > 0) {
-    if (lineCandidates.length > 1) return { type: "ambiguous" }
+    if (lineCandidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(lineCandidates, []) }
     return { type: "found", location: lineCandidates[0].location }
   }
 
@@ -115,8 +153,11 @@ export function locateExact(
 
   const normalized = normalizedRawView(text)
   const normalizedLiteral = normalizeForMatch(literal)
-  let unsafeNormalized = 0
+  // unsafe 命中没有可写 raw span，但歧义载荷仍需其行号，故收集 ownerStart 而非只计数。
+  const unsafeNormalizedOffsets: number[] = []
   // #533：normalized 域只补充 lower-tier 候选；raw boundary 可逆才可写，否则计入 unsafe 计数。
+  // 位置数组（而非计数）是 INV-03 诊断的输入合同：edit-apply 据此把 normalized 域
+  // 命中换算成模型可定位的 1-based 展示行号，计数无法承载该职责。
   if (normalized && normalizedLiteral.length > 0) {
     for (
       let start = normalized.text.indexOf(normalizedLiteral);
@@ -130,7 +171,7 @@ export function locateExact(
       const ownerStart = rawStart ?? normalizedOwnerStart(normalized.owners, start)
       if (ownerStart < cursorOffset) continue
       if (rawStart === undefined || rawEnd === undefined || hasInternalGap(normalized.gaps, start, end)) {
-        unsafeNormalized++
+        unsafeNormalizedOffsets.push(ownerStart)
         continue
       }
       // #533：whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
@@ -144,12 +185,96 @@ export function locateExact(
   }
 
   // #533：unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
-  if (candidates.length + unsafeNormalized > 1) return { type: "ambiguous" }
-  if (unsafeNormalized > 0) return { type: "not-found" }
-  if (candidates.length > 1) return { type: "ambiguous" }
+  if (candidates.length + unsafeNormalizedOffsets.length > 1) {
+    return { type: "ambiguous", candidates: ambiguityCandidates(candidates, unsafeNormalizedOffsets) }
+  }
+  if (unsafeNormalizedOffsets.length > 0) return { type: "not-found" }
+  if (candidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(candidates, []) }
   if (candidates.length === 0) return { type: "not-found" }
   return { type: "found", location: candidates[0].location }
 }
+
+// 行级扩展只提出最便宜方向，仍须调用方用自己的唯一性域验证；同行重复/mid-line只能报告行号。
+export function uniqueExtensionHint(
+  lines: ReadonlyArray<string>,
+  candidateStartLines: number[],
+  patternLineCount: number,
+  verifyUnique: (extended: string[]) => boolean,
+  lineAligned: boolean,
+): { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined {
+  const distinct = [...new Set(candidateStartLines)].sort((a, b) => a - b)
+  if (distinct.length === 0) return undefined
+  const shown = distinct.slice(0, AMBIGUITY_MAX_CANDIDATES).map((line) => line + 1)
+  if (!lineAligned || distinct.length < 2) return { lines: shown, total: distinct.length }
+
+  let best: { direction: "above" | "below"; count: number; start: number } | undefined
+  for (const start of distinct) {
+    const end = start + patternLineCount - 1
+    let up = 0
+    let down = 0
+    for (const other of distinct) {
+      if (other === start) continue
+      const otherEnd = other + patternLineCount - 1
+      let shared = 0
+      while (
+        shared < AMBIGUITY_MAX_EXTENSION &&
+        start - 1 - shared >= 0 &&
+        other - 1 - shared >= 0 &&
+        lines[start - 1 - shared] === lines[other - 1 - shared]
+      ) {
+        shared++
+      }
+      up = Math.max(up, shared + 1)
+      shared = 0
+      while (
+        shared < AMBIGUITY_MAX_EXTENSION &&
+        end + 1 + shared < lines.length &&
+        otherEnd + 1 + shared < lines.length &&
+        lines[end + 1 + shared] === lines[otherEnd + 1 + shared]
+      ) {
+        shared++
+      }
+      down = Math.max(down, shared + 1)
+    }
+    // 不能建议不存在的上下文行；扩展上限只限制诊断工作，不改变旧块成功域。
+    if (up <= AMBIGUITY_MAX_EXTENSION && start - up >= 0 && (!best || up < best.count)) {
+      best = { direction: "above", count: up, start }
+    }
+    if (down <= AMBIGUITY_MAX_EXTENSION && end + down < lines.length && (!best || down < best.count)) {
+      best = { direction: "below", count: down, start }
+    }
+  }
+
+  if (best) {
+    const extended =
+      best.direction === "above"
+        ? lines.slice(best.start - best.count, best.start + patternLineCount)
+        : lines.slice(best.start, best.start + patternLineCount + best.count)
+    // normalized或被截断候选可能破坏行级推理，原matcher拒绝的建议不允许展示。
+    if (!verifyUnique(extended)) best = undefined
+  }
+  return {
+    lines: shown,
+    total: distinct.length,
+    ...(best ? { extension: { direction: best.direction, count: best.count } } : {}),
+  }
+}
+
+// 两代抛出点共享同一格式；lines已经转换为面向用户的1-based行号。
+export function formatAmbiguityHint(
+  hint: { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined,
+) {
+  if (!hint) return ""
+  const listing =
+    hint.total === 1
+      ? `line ${hint.lines[0]}`
+      : `lines ${hint.lines.join(", ")}${hint.total > hint.lines.length ? `, … (${hint.total} total)` : ""}`
+  const advice = hint.extension
+    ? ` Including ${hint.extension.count} more line(s) ${hint.extension.direction} makes the match unique.`
+    : ""
+  return `\n\nMatches at ${listing}.${advice}`
+}
+
 
 // #533：Patch 与 Edit 共用一个 PI normalization contract，避免标点、空格或 NFKC 集合静默分叉。
 function normalizeLineForFuzzy(line: string) {
