@@ -6,6 +6,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
+import { PromptWindowCache } from "./prompt-window-cache"
+import { InstanceRef } from "@/effect/instance-ref"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionRevert } from "./revert"
 import { Session } from "./session"
@@ -316,17 +318,10 @@ const layer = Layer.effect(
     const goalSvc = yield* SessionGoal.Service
     // 重叠取消共享同一Exit，不能排队后重新读取replacement runner。
     const cancelFlights = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
-    // 只保留一个可替换entry，使后续loop复用前缀而不为每个Session累积缓存。
-    // admission仍核对Session、模型及持久proof，控制面与请求装饰不进入缓存。
-    let retainedMessages:
-      | {
-          sessionID: SessionID
-          model: string
-          proof: MessageV2.PromptWindowProof
-          canonical: MessageV2.WithParts[]
-          chunks: Map<MessageID, ModelMessage[]>
-        }
-      | undefined
+    // Service级单槽继续warm复用；删除/dispose与Service退出按各自生命周期退休其强引用。
+    const promptCache = PromptWindowCache.acquire()
+    yield* Effect.addFinalizer(() => Effect.sync(() => PromptWindowCache.release(promptCache)))
+
     const database = yield* Database.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
@@ -1619,6 +1614,9 @@ const layer = Layer.effect(
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
           // #557：busy 期间 queued prompt 可更新 Permission；每 step 必须在 resolveTools 前重读 control-plane 状态。
+          // lease在读取Session/proof之前取得；失效后本轮仍可完成，但不能重新成为长期缓存owner。
+          const lease = PromptWindowCache.lease(promptCache)
+          const instance = yield* InstanceRef
           const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
           // #557：proof 只读原始 tuple（不 thaw）；boundary 不同直接丢弃旧窗口，禁止 cache 复制 Compaction 规则。
@@ -1626,9 +1624,10 @@ const layer = Layer.effect(
           const proof = yield* MessageV2.promptWindowProof(sessionID).pipe(
             Effect.provideService(Database.Service, database),
           )
+          const slotEntry = PromptWindowCache.read(promptCache, sessionID)
           const cached =
-            retainedMessages?.sessionID === sessionID && retainedMessages.proof.boundary === proof.boundary
-              ? retainedMessages
+            slotEntry?.proof.boundary === proof.boundary
+              ? slotEntry
               : undefined
           // common prefix 覆盖 full hit、append、原地 mutation 与 A-G→A-E contraction；首个 key 不同即停。
           const common = cached
@@ -1658,7 +1657,7 @@ const layer = Layer.effect(
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
           const modelKey = `${lastUser.model.providerID}/${lastUser.model.modelID}/${lastUser.model.variant ?? ""}`
           // #557：model identity 改变 reasoning/media conversion，raw canonical 仍可复用但 chunks 必须清空。
-          retainedMessages = {
+          const nextEntry = {
             sessionID,
             model: modelKey,
             proof,
@@ -1668,9 +1667,12 @@ const layer = Layer.effect(
                 // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
                 ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
                 : new Map(),
+            instance,
           }
           // #557：chunks 与 canonical 同生命周期——request-only decoration 永不回写 DB。
-          const messageEntry = retainedMessages
+          // 当前Provider迭代局部持有entry；被失效的租约只阻止长期发布，不改变真实请求输入。
+          PromptWindowCache.publish(promptCache, lease, nextEntry)
+          const messageEntry = nextEntry
 
           // #557：Goal chronology 延迟到真实 goal Tool adapter，普通对话不支付这次历史查询；
           // 同一 Provider step 内 read/transition 共享 loader 结果。

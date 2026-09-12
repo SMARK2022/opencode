@@ -35,6 +35,7 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionGoal } from "@opencode-ai/core/session/goal"
 import { GoalTool } from "@opencode-ai/core/tool/goal"
 import GOAL_DESCRIPTION from "../../opencode/src/tool/goal.txt"
+import { PromptCacheSlots } from "@opencode-ai/core/session/prompt-cache-slots"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater"
@@ -1443,6 +1444,17 @@ describe("SessionRunnerLLM", () => {
       const failed = (yield* session.context(sessionID)).findLast(message => message.type === "assistant")
       expect(failed).toMatchObject({ finish: "error", snapshot: { start: "tree-1", end: "tree-2", worktree: "declared" } })
       expect(failed?.tokens).toBeUndefined()
+      // 前面的独立resume保warm引用；同一真实runner在失效后必须冷重建且交付相同原话。
+      PromptCacheSlots.invalidateSession(sessionID)
+      responses = [done]
+      responseStream = undefined
+      yield* session.resume(sessionID)
+      const refreshed = projected.at(-1)
+      expect(refreshed?.input).toBeDefined()
+      expect(refreshed?.output).toBeDefined()
+      expect(refreshed?.input).not.toBe(stable.input)
+      expect(refreshed?.output).not.toBe(stable.output)
+      expect(requests.at(-1)?.messages[0]?.content[0]).toEqual({ type: "text", text: "Read only" })
       yield* replaySessionProjection(sessionID)
       expect((yield* session.context(sessionID)).find(message => message.id === failed?.id)).toEqual(failed)
       expect((yield* session.context(sessionID)).find(message => message.id === mutated?.id)).toEqual(mutated)

@@ -196,8 +196,11 @@ describe("EventV2", () => {
       const aggregateID = EventV2.ID.create()
       yield* db.run("CREATE TABLE IF NOT EXISTS event_commit_probe (value text NOT NULL)")
       yield* db.run("DELETE FROM event_commit_probe")
-      yield* events.project(SyncMessage, () =>
-        db.run("INSERT INTO event_commit_probe (value) VALUES ('projected')").pipe(Effect.orDie, Effect.asVoid),
+      let committed = false
+      yield* events.project(
+        SyncMessage,
+        () => db.run("INSERT INTO event_commit_probe (value) VALUES ('projected')").pipe(Effect.orDie, Effect.asVoid),
+        () => Effect.sync(() => { committed = true }),
       )
 
       const exit = yield* events
@@ -205,6 +208,7 @@ describe("EventV2", () => {
         .pipe(Effect.exit)
 
       expect(String(exit)).toContain("commit failed")
+      expect(committed).toBe(false)
       expect(yield* db.all("SELECT value FROM event_commit_probe")).toEqual([])
       expect(yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, aggregateID)).all()).toEqual([])
       expect(
@@ -1122,4 +1126,29 @@ describe("EventV2", () => {
       expect(received[0]?.data).toEqual(durableData(aggregateID, "replayed"))
     }),
   )
+
+it.effect("commits projector lifecycle hooks for quiet replay without repeating stale events", () =>
+  Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    const { db } = yield* Database.Service
+    const aggregateID = Session.ID.create()
+    const received = new Array<string>()
+    yield* events.project(DurableMessage, () => Effect.void, (event) => Effect.gen(function* () {
+      // 提交后回调必须已能读取durable行；静默重放不通知listener，但仍需要退休本地缓存。
+      const rows = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, aggregateID)).all().pipe(Effect.orDie)
+      expect(rows.some((row) => row.id === event.id)).toBe(true)
+      received.push("committed")
+    }))
+    yield* events.listen(() => Effect.sync(() => { received.push("listener") }))
+    const replayed = {
+      id: EventV2.ID.create(), type: EventV2.versionedType(DurableMessage.type, 1), seq: 0,
+      aggregateID, data: durableData(aggregateID, "quiet"),
+    }
+    yield* events.replay(replayed, { publish: false })
+    yield* events.replay(replayed, { publish: false })
+    expect(received).toEqual(["committed"])
+    yield* events.publish(DurableMessage, durableData(aggregateID, "live"))
+    expect(received).toEqual(["committed", "committed", "listener"])
+  }),
+)
 })
