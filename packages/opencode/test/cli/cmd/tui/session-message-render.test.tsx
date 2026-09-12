@@ -1702,6 +1702,41 @@ test("ordinary user Message keeps all Message actions", async () => {
   )
 })
 
+test("Fork carries content captured before the async fork window", async () => {
+  const message = userMessage("msg_fork_capture", 1)
+  const forkGate = Promise.withResolvers<Response>()
+  // fork 挂起制造删除窗口；route prompt 是 Fork 的公开可观察结果。
+  testFetchHooks.onRequest = async (url, request) => {
+    if (request?.method !== "POST") return undefined
+    if (url.pathname === `/session/${sessionID}/fork`) return forkGate.promise
+    return undefined
+  }
+  try {
+    await withRenderedSession([message], { [message.id]: [textPart("part_fork_capture", message.id, "fork capture me")] }, async (app, emit, route) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("fork capture me")))
+      await clickVisibleText(app, "fork capture me")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Message Actions")))
+      await clickVisibleText(app, "Fork")
+      // fork 请求挂起期间原消息被删除并释放正文；Fork 必须使用点击时刻已捕获的内容。
+      emit({
+        directory,
+        project: "proj_test",
+        payload: { id: "evt_fork_capture_removed", type: "message.removed", properties: { sessionID, messageID: message.id } },
+      } as GlobalEvent)
+      forkGate.resolve(json(sessionInfo({ id: "ses_forked" })))
+      await wait(() => route.data.type === "session" && route.data.sessionID === "ses_forked")
+      expect(route.data.type === "session" ? route.data.prompt?.input : undefined).toBe("fork capture me")
+    },
+    {},
+    // 与相邻 action 菜单测试同一高度：四个选项必须都在可视区内，Fork 行才可点击。
+    { height: 28 },
+    // fork 目标必须可被 harness 提供，否则新 Session 路由加载失败会弹回 home。
+    { ses_forked: { info: sessionInfo({ id: "ses_forked" }), messages: [], parts: {} } })
+  } finally {
+    testFetchHooks.onRequest = undefined
+  }
+})
+
 test("Goal continuation renders persisted marker-only and exact-envelope history", async () => {
   // 两个 fixture 都故意省略 detail metadata，模拟功能上线前已经持久化的真实记录。
   const marker = userMessage("msg_goal_legacy_marker", 1)

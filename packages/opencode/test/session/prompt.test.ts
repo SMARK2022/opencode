@@ -1,6 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
-import { expect } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { jsonSchema, tool, type Tool as AITool } from "ai"
 import { symlink } from "fs/promises"
@@ -35,6 +35,9 @@ import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
+import { PromptWindowCache } from "../../src/session/prompt-window-cache"
+import { InstanceBootstrap } from "../../src/project/bootstrap-service"
+import { InstanceStore } from "../../src/project/instance-store"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -52,7 +55,7 @@ import * as Database from "../../src/storage/db"
 import { Ripgrep } from "../../src/file/ripgrep"
 import { Format } from "../../src/format"
 import { Reference } from "../../src/reference/reference"
-import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { disposeAllInstancesEffect, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { httpError, reply, TestLLMServer } from "../lib/llm-server"
 import { SyncEvent } from "@/sync"
@@ -5943,3 +5946,125 @@ it.instance(
     }),
   { git: true },
 )
+
+// InstanceStore 进入 layer 只为让 disposeAllInstancesEffect 的类型合法；
+// 运行时实例由 withTmpdirInstance 的 inner provide 提供，加载与 dispose 共享同一 store。
+const cacheLifetime = testEffect(
+  Layer.mergeAll(SessionPrompt.defaultLayer, Session.defaultLayer, InstanceStore.defaultLayer).pipe(
+    Layer.provide(Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))),
+  ),
+)
+
+// [缓存生命周期] 单槽 current-entry 不得延长已删除 Session / 已 dispose Instance 的生存期。
+// WeakRef 只观察真实 loop 返回的 proof 对象；spy 自身结果已清除，不影响可达性。
+for (const lifecycle of ["delete", "dispose"] as const) {
+  cacheLifetime.instance(
+    `prompt window proof is released after session ${lifecycle}`,
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const prompt = yield* SessionPrompt.Service
+        const seed = (text: string) =>
+          Effect.gen(function* () {
+            const session = yield* sessions.create({ title: "Cache lifetime" })
+            const user = yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              sessionID: session.id,
+              role: "user",
+              agent: "build",
+              model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
+              time: { created: 1 },
+            })
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: user.id,
+              sessionID: session.id,
+              type: "text",
+              text,
+            })
+            yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              sessionID: session.id,
+              role: "assistant",
+              parentID: user.id,
+              agent: "build",
+              mode: "build",
+              modelID: ModelID.make("test-model"),
+              providerID: ProviderID.make("test"),
+              path: { cwd: "unused", root: "unused" },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              time: { created: 2, completed: 3 },
+              finish: "stop",
+            })
+            return session.id
+          })
+        // assistant 已完成（finish: stop）让 loop 单轮退出：缓存条目已发布，但不引入真实 Provider 变量。
+        const sessionID = yield* seed("x".repeat(1024))
+        const original = MessageV2.promptWindowProof
+        let weak: WeakRef<MessageV2.PromptWindowProof> | undefined
+        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) => {
+          const proof = original(id)
+          if (id === sessionID) weak = new WeakRef(proof)
+          return proof
+        })
+        yield* prompt.loop({ sessionID }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              observer.mockClear()
+              observer.mockRestore()
+            }),
+          ),
+        )
+        // 两轮 gc 之间让出事件循环，确保 WeakRef 回调与终结队列先跑完再观察。
+        const collect = Effect.promise(async () => {
+          await Bun.sleep(0)
+          Bun.gc(true)
+          await Bun.sleep(0)
+          Bun.gc(true)
+        })
+        yield* collect
+        // 删除前的强可达是基线事实：没有它，后面的 undefined 断言无法区分修复与测试真空。
+        expect(weak?.deref()).toBeDefined()
+        if (lifecycle === "delete") yield* sessions.remove(sessionID)
+        // dispose 必须走加载该实例的同一 InstanceStore：Promise 版 disposeAllInstances 只清共享 runtime，
+        // it.instance 的实例由当前测试 runtime 的 store 持有。
+        if (lifecycle === "dispose") yield* disposeAllInstancesEffect
+        yield* collect
+        const retainedAfter = weak?.deref() !== undefined
+        // replacement 是 GC 正向对照：同 Service 换入新 Session 后旧 proof 必须可回收。
+        const replacement = yield* seed("small replacement")
+        yield* prompt.loop({ sessionID: replacement })
+        yield* collect
+        expect(weak?.deref()).toBeUndefined()
+        expect(retainedAfter).toBe(false)
+      }),
+    { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
+  )
+}
+
+test("prompt window cache drops in-flight publication after invalidation", () => {
+  // lease 在 await 前取得；失效推进 generation 后，旧 lease 的迟发 publish 必须被丢弃，
+  // 否则删除/dispose 与 loop 发布之间的竞态会重建已失效缓存。
+  const sessionID = SessionID.make("ses_lease_race")
+  const slot = PromptWindowCache.acquire()
+  try {
+    const stale = PromptWindowCache.lease(slot)
+    PromptWindowCache.invalidateSession(sessionID)
+    PromptWindowCache.publish(slot, stale, {
+      sessionID,
+      model: "test/test/",
+      proof: { boundary: "null", messages: [] },
+      canonical: [],
+      chunks: new Map(),
+      instance: undefined,
+    })
+    expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
+    const fresh = PromptWindowCache.lease(slot)
+    const entry = { sessionID, model: "test/test/", proof: { boundary: "null", messages: [] }, canonical: [], chunks: new Map(), instance: undefined }
+    PromptWindowCache.publish(slot, fresh, entry)
+    expect(PromptWindowCache.read(slot, sessionID)).toBe(entry)
+  } finally {
+    PromptWindowCache.release(slot)
+  }
+})

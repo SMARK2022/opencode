@@ -3,9 +3,11 @@ import { eq } from "drizzle-orm"
 import { and } from "drizzle-orm"
 import { sql } from "drizzle-orm"
 import type { TxOrDb } from "@/storage/db"
+import { Database } from "@/storage/db"
 import { SyncEvent } from "@/sync"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
+import { PromptWindowCache } from "./prompt-window-cache"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { WorkspaceTable } from "@/control-plane/workspace.sql"
 import { ColdStorage } from "@/storage/cold"
@@ -137,6 +139,8 @@ export default [
   SyncEvent.project(Session.Event.Deleted, (db, data) => {
     ColdStorage.releaseSession(db, data.sessionID)
     db.delete(SessionTable).where(eq(SessionTable.id, data.sessionID)).run()
+    // 事务提交后才失效缓存：回滚不得清；publish=false 与无实例删除也走同一 after-commit 通道。
+    Database.effect(() => PromptWindowCache.invalidateSession(data.sessionID))
   }),
 
   SyncEvent.project(Session.Event.Forked, (db, data) => {

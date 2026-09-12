@@ -227,6 +227,96 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
     const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
 
+    // [失效事实] 持久删除/hidden 只记录 ID，不保存 payload；300 窗口淘汰不进入这些集合，
+    // 允许后续 sync 重新加载。迟到事件与旧 HTTP 快照统一经 admission 检查拒绝复活。
+    const deletedSessionIDs = new Set<string>()
+    const removedMessageIDs = new Set<string>()
+    const removedPartIDs = new Set<string>()
+    // 每 Session 只有最新 sync 请求可提交；删除或更新的 force 请求使在途旧请求失效。
+    let syncRequestSeq = 0
+    const syncRequests = new Map<string, number>()
+    // 请求期间只登记变化 ID（不复制正文）；提交时并入最终投影，HTTP 页不能抹掉 live 流式。
+    const syncChanges = new Map<string, { messages: Set<string>; parts: Set<string> }>()
+
+    function messageGone(sessionID: string, messageID: string) {
+      return deletedSessionIDs.has(sessionID) || removedMessageIDs.has(messageID)
+    }
+
+    function partGone(sessionID: string, messageID: string, partID: string) {
+      return messageGone(sessionID, messageID) || removedPartIDs.has(partID)
+    }
+
+    function trackSyncChange(sessionID: string, messageID?: string, partID?: string) {
+      const changes = syncChanges.get(sessionID)
+      if (!changes) return
+      if (messageID) changes.messages.add(messageID)
+      if (partID) changes.parts.add(partID)
+    }
+
+    function dropBufferedDeltas(match: (event: EventMessagePartDelta) => boolean) {
+      pendingPartDeltas = pendingPartDeltas.filter((event) => !match(event))
+      for (const [partID, deltas] of orphanPartDeltas) {
+        if (deltas[0] && match(deltas[0])) orphanPartDeltas.delete(partID)
+      }
+    }
+
+    // 释放不依赖父数组存在：part-first 对象与 orphan delta 同样属于该 Message。
+    function releaseMessage(sessionID: string, messageID: string, info?: Message) {
+      dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
+      // chronology key 优先取索引（event-first 与 snapshot 同一形状）；索引未登记时退回事件 info，
+      // 两条入口共用 searchMessage 的 BINARY 语义，不引入第三条定位路径。
+      const target = messageByID.get(sessionID)?.get(messageID) ?? info
+      const messages = store.message[sessionID]
+      batch(() => {
+        if (messages && target) {
+          const result = searchMessage(messages, target)
+          if (result.found)
+            setStore(
+              "message",
+              sessionID,
+              produce((draft) => {
+                draft.splice(result.index, 1)
+              }),
+            )
+        }
+        messageByID.get(sessionID)?.delete(messageID)
+        if (store.part[messageID])
+          setStore(
+            "part",
+            produce((draft) => {
+              delete draft[messageID]
+            }),
+          )
+      })
+    }
+
+    // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
+    function releaseSession(sessionID: string) {
+      syncRequests.delete(sessionID)
+      syncChanges.delete(sessionID)
+      fullSyncedSessions.delete(sessionID)
+      messageByID.delete(sessionID)
+      dropBufferedDeltas((event) => event.properties.sessionID === sessionID)
+      batch(() => {
+        setStore(
+          produce((draft) => {
+            const match = Binary.search(draft.session, sessionID, (item) => item.id)
+            if (match.found) draft.session.splice(match.index, 1)
+            delete draft.message[sessionID]
+            delete draft.todo[sessionID]
+            delete draft.session_diff[sessionID]
+            delete draft.session_status[sessionID]
+            delete draft.permission[sessionID]
+            delete draft.question[sessionID]
+            for (const key of Object.keys(draft.part)) {
+              if (draft.part[key]?.[0]?.sessionID === sessionID) delete draft.part[key]
+            }
+          }),
+        )
+        setStore("session_goal", sessionID, undefined)
+      })
+    }
+
     function clearLsp(owner?: string) {
       lspRoute = owner
       setStore("lsp", reconcile([]))
@@ -303,6 +393,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     }
 
     function applyPartDelta(event: EventMessagePartDelta) {
+      if (partGone(event.properties.sessionID, event.properties.messageID, event.properties.partID)) {
+        // 失效对象的 delta 不再缓冲：缓冲即留存，part.updated 到达时会被同一 admission 拒绝。
+        logPartDeltaApplication(event, "delta.drop", "invalidated")
+        return
+      }
       const parts = store.part[event.properties.messageID]
       if (!parts) {
         // part 尚未到达（fire-and-forget 竞态）：缓冲 delta，等 part.updated 创建 part 后 replay
@@ -493,6 +588,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     }
 
     function enqueuePartDelta(event: EventMessagePartDelta) {
+      // 到达时刻登记 sync 变更；flush 延迟 16ms，不能等 apply 才记录，否则 prune 先于登记。
+      trackSyncChange(event.properties.sessionID, event.properties.messageID, event.properties.partID)
       pendingPartDeltas.push(event)
       if (pendingPartDeltaTimer) return
       // Match the SDK frame queue: a short 16ms window keeps streaming feedback
@@ -517,7 +614,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           limit: SESSION_LIST_BROWSE_LIMIT,
           ...sessionListQuery(),
         })
-        .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+        // 列表快照可能早于 session.deleted 发出；已删除行不能经旧响应回到 store。
+        // 过滤/时间窗口造成的缺项不是删除事实，这里只排除显式删除过的 ID。
+        .then((x) => (x.data ?? []).filter((session) => !deletedSessionIDs.has(session.id)).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
     function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) {
@@ -611,11 +710,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         const response = await sdk.client.permission.list({ workspace })
         // [竞态保护] 多次 reconnect 的 list 可能乱序返回；只有最新快照能覆盖 store。
         if (refreshVersion !== permissionRefreshVersion) return
+        // 快照可能早于 session.deleted 发出；已删除 Session 的 pending 请求不得回填。
+        const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))
         setStore(
           "permission",
           reconcile(
             pendingRequestsWithLiveChanges(
-              pendingRequestsBySession(response.data ?? []),
+              pendingRequestsBySession(rows),
               store.permission,
               permissionChanges,
               version,
@@ -637,11 +738,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         const response = await sdk.client.question.list({ workspace })
         // [问题快照规则] 与 permission 一致：最新 reconnect 快照负责整体替换，实时 SSE 另行叠加。
         if (refreshVersion !== questionRefreshVersion) return
+        // 与 permission 同一失效口径：已删除 Session 的 pending 请求不得回填。
+        const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))
         setStore(
           "question",
           reconcile(
             pendingRequestsWithLiveChanges(
-              pendingRequestsBySession(response.data ?? []),
+              pendingRequestsBySession(rows),
               store.question,
               questionChanges,
               version,
@@ -657,7 +760,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // [local-smark] refreshStatus for daemon session status tracking
     async function refreshStatus() {
       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
-      setStore("session_status", reconcile(x.data ?? {}))
+      // 状态快照可能早于 session.deleted 发出；已删除 Session 的 status 不得回填。
+      setStore(
+        "session_status",
+        reconcile(Object.fromEntries(Object.entries(x.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id)))),
+      )
     }
 
     const exit = useExit()
@@ -709,6 +816,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "permission.asked": {
+          if (deletedSessionIDs.has(event.properties.sessionID)) break
           const request = event.properties
           markPermissionRequestChange(request.sessionID, request.id)
           const requests = store.permission[request.sessionID]
@@ -749,6 +857,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "question.asked": {
+          if (deletedSessionIDs.has(event.properties.sessionID)) break
           const request = event.properties
           markQuestionRequestChange(request.sessionID, request.id)
           const requests = store.question[request.sessionID]
@@ -772,12 +881,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "todo.updated":
+          if (deletedSessionIDs.has(event.properties.sessionID)) break
           setStore("todo", event.properties.sessionID, event.properties.todos)
           break
 
         // [local-smark] goal 事件：更新或清除 sidebar 中的 goal 状态
         // TODO(sdk-regen): SDK 重新生成后移除 as string / as any，改用类型安全的 event.properties
         case "session.goal.updated" as string:
+          if (deletedSessionIDs.has((event as any).properties.sessionID)) break
           setStore("session_goal", (event as any).properties.sessionID, (event as any).properties.goal)
           break
 
@@ -786,6 +897,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.diff":
+          if (deletedSessionIDs.has(event.properties.sessionID)) break
           setStore(
             produce((draft) => {
               // diff rows 与 totals 必须在同一 Solid transaction 收敛，否则 Files 会短暂把旧总数解释成新列表截断。
@@ -799,20 +911,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.deleted": {
-          const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
-          if (result.found) {
-            setStore(
-              "session",
-              produce((draft) => {
-                draft.splice(result.index, 1)
-              }),
-            )
-          }
-          // [local-smark] 清理已删除 session 的 goal 状态，防止 store 泄漏
-          setStore("session_goal", event.properties.info.id, undefined)
+          deletedSessionIDs.add(event.properties.info.id)
+          releaseSession(event.properties.info.id)
           break
         }
         case "session.updated": {
+          // 携带 sessionID 的事件入口统一过 deletedSessionIDs：迟到的 SSE 不得复活已删除 Session 的任何桶。
+          if (deletedSessionIDs.has(event.properties.info.id)) break
           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             const summary = Object.hasOwn(store.session_diff, event.properties.info.id)
@@ -840,30 +945,22 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "session.status": {
+          if (deletedSessionIDs.has(event.properties.sessionID)) break
           setStore("session_status", event.properties.sessionID, event.properties.status)
           break
         }
 
         case "message.updated": {
           const info = event.properties.info
+          if (deletedSessionIDs.has(info.sessionID)) break
           if ((info as Record<string, unknown>).hidden) {
-            const messages = store.message[info.sessionID]
-            // 同Project事件可能属于未加载Session；本地没有可删除的投影时必须保持消费链继续。
-            if (!messages) break
-            // hidden event 仍携带原创建时间，必须与普通 update 共用 chronology locator，不能退回 ID 查找。
-            const result = searchMessage(messages, info)
-            if (result.found) {
-              unindexMessage(info)
-              setStore(
-                "message",
-                info.sessionID,
-                produce((draft) => {
-                  draft.splice(result.index, 1)
-                }),
-              )
-            }
+            // hidden 是持久事实：记录失效 ID 后释放，迟到的 Part/delta 不得复活正文。
+            removedMessageIDs.add(info.id)
+            releaseMessage(info.sessionID, info.id, info)
             break
           }
+          if (removedMessageIDs.has(info.id)) break
+          trackSyncChange(info.sessionID, info.id)
           const messages = store.message[info.sessionID]
           if (!messages) {
             // 首条 SSE 会直接建立数组；先登记索引才能保证紧随其后的 ID-only remove 使用同一投影事实。
@@ -910,30 +1007,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.removed": {
-          const messages = store.message[event.properties.sessionID]
-          // daemon的删除事实仍有效，但未加载Session的TUI投影只能安全地no-op。
-          if (!messages) break
-          // ID-only event 先从同一 bounded 投影取回 chronology key；caller ID 本身不承诺任何时间顺序。
-          // 索引 miss 保持既有 no-op，不能再用线性扫描或纯 ID 二分制造第二套成功路径。
-          const target = messageByID.get(event.properties.sessionID)?.get(event.properties.messageID)
-          if (!target) break
-          const result = searchMessage(messages, target)
-          if (result.found) {
-            unindexMessage(target)
-            setStore(
-              "message",
-              event.properties.sessionID,
-              produce((draft) => {
-                draft.splice(result.index, 1)
-              }),
-            )
-          }
+          // ID-only event：即使本地从未加载父 Message，也要记录失效并清掉 orphan/pending delta。
+          removedMessageIDs.add(event.properties.messageID)
+          releaseMessage(event.properties.sessionID, event.properties.messageID)
           break
         }
         case "message.part.updated":
         case "message.part.progress": {
           const part = event.properties.part
           if ((part as Record<string, unknown>).hidden) {
+            removedPartIDs.add(part.id)
+            dropBufferedDeltas((event) => event.properties.partID === part.id)
             const parts = store.part[part.messageID]
             if (!parts) break
             const foundAt = Binary.search(parts, part.id, (p) => p.id)
@@ -945,10 +1029,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
                 draft.splice(foundAt.index, 1)
               }),
             )
-            // 清除该 part 的缓冲 delta（part 已隐藏移除，delta 不再需要）
-            orphanPartDeltas.delete(part.id)
             break
           }
+          if (partGone(part.sessionID, part.messageID, part.id)) break
+          trackSyncChange(part.sessionID, part.messageID, part.id)
           const parts = store.part[part.messageID]
           if (!parts) {
             setStore("part", part.messageID, [part])
@@ -980,6 +1064,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.removed": {
+          removedPartIDs.add(event.properties.partID)
+          // lambda 参数会遮蔽 switch 作用域的 event；先取常量再比较，避免恒真谓词清空全部会话的缓冲 delta。
+          const removedPartID = event.properties.partID
+          dropBufferedDeltas((event) => event.properties.partID === removedPartID)
           const parts = store.part[event.properties.messageID]
           // Part同样可能先于本地bootstrap到达；缺失集合不应中断后续正文事件。
           if (!parts) break
@@ -993,8 +1081,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               }),
             )
           }
-          // 清除该 part 的缓冲 delta（part 已移除，delta 不再需要）
-          orphanPartDeltas.delete(event.properties.partID)
           break
         }
 
@@ -1017,6 +1103,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       pendingPartDeltas = []
       orphanPartDeltas.clear()
       loggedPartDeltaApplications.clear()
+      // Provider 退出即失效元数据的终点；ID 集合本身也不跨 Provider 生命周期保留。
+      deletedSessionIDs.clear()
+      removedMessageIDs.clear()
+      removedPartIDs.clear()
+      syncRequests.clear()
+      syncChanges.clear()
     })
 
     const args = useArgs()
@@ -1167,55 +1259,104 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         },
         async sync(sessionID: string, options?: { force?: boolean }) {
           if (!options?.force && fullSyncedSessions.has(sessionID)) return
-          const [session, messages, todo, status] = await Promise.all([
-            sdk.client.session.get({ sessionID }, { throwOnError: true }),
-            // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
-            // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
-            sdk.client.session.messages(
-              { sessionID, limit: 300 },
-              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-            ),
-            sdk.client.session.todo({ sessionID }),
-            sdk.client.session.status({ workspace: project.workspace.current() }),
-          ])
-          // 同一份 infos 同时提交 store 和索引，避免两次 projection 对 hidden/window 范围产生分歧。
-          const infos = (messages.data ?? []).map((message) => message.info)
-          // [local-smark] goal fetch：非致命，失败不影响 session sync
-          // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
-          // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
+          if (deletedSessionIDs.has(sessionID)) return
+          const token = ++syncRequestSeq
+          syncRequests.set(sessionID, token)
+          const changes = { messages: new Set<string>(), parts: new Set<string>() }
+          syncChanges.set(sessionID, changes)
+          // 每个 await 之后都必须重新检查 alive：删除或更新的 force 请求会让旧提交失效，
+          // 旧响应既不能复活已删 Session，也不能覆盖较新请求的结果。
+          const alive = () => syncRequests.get(sessionID) === token && !deletedSessionIDs.has(sessionID)
           try {
-            const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
-            if (resp.ok) {
-              const data = await resp.json()
-              setStore("session_goal", sessionID, data?.goal ?? undefined)
-            }
-          } catch {
-            // goal 端点不可用时不阻塞 session sync
-          }
-          setStore(
-            produce((draft) => {
-              const match = Binary.search(draft.session, sessionID, (s) => s.id)
-              if (match.found) draft.session[match.index] = session.data!
-              if (!match.found) draft.session.splice(match.index, 0, session.data!)
-              draft.todo[sessionID] = todo.data ?? []
-              for (const message of messages.data ?? []) {
-                // HTTP 快照合并：DB 在 streaming 期间 text="" ，
-                // mergeLiveParts 保留本地已通过 delta 累积的长文本
-                draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
+            const [session, messages, todo, status] = await Promise.all([
+              sdk.client.session.get({ sessionID }, { throwOnError: true }),
+              // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
+              // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
+              sdk.client.session.messages(
+                { sessionID, limit: 300 },
+                { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
+              ),
+              sdk.client.session.todo({ sessionID }),
+              sdk.client.session.status({ workspace: project.workspace.current() }),
+            ])
+            if (!alive()) return
+            // 同一份 infos 同时提交 store 和索引，避免两次 projection 对 hidden/window 范围产生分歧。
+            const infos = (messages.data ?? []).map((message) => message.info)
+            // [local-smark] goal fetch：非致命，失败不影响 session sync
+            // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
+            // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
+            try {
+              const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
+              if (!alive()) return
+              if (resp.ok) {
+                const data = await resp.json()
+                setStore("session_goal", sessionID, data?.goal ?? undefined)
               }
-              draft.message[sessionID] = infos
-            }),
-          )
-          // force sync 是整页 authoritative replacement；重建而非增量合并可清除已不在窗口内的旧 key。
-          messageByID.set(sessionID, new Map(infos.map((message) => [message.id, message])))
-          setStore("session_status", reconcile(status.data ?? {}))
-          // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
-          // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
-          // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
-          for (const message of messages.data ?? []) {
-            for (const part of message.parts) {
-              replayOrphanDeltas(part.id, message.info.id)
+            } catch {
+              // goal 端点不可用时不阻塞 session sync
             }
+            if (!alive()) return
+            // messages 请求失败时 SDK 合同是 data=undefined（无 throwOnError）；
+            // 失败响应不是权威空页：跳过替换与裁剪，保留本地消息与正文，等下一次 sync。
+            const pageFailed = messages.data === undefined
+            setStore(
+              produce((draft) => {
+                const match = Binary.search(draft.session, sessionID, (s) => s.id)
+                if (match.found) draft.session[match.index] = session.data!
+                if (!match.found) draft.session.splice(match.index, 0, session.data!)
+                draft.todo[sessionID] = todo.data ?? []
+                if (pageFailed) return
+                for (const message of messages.data ?? []) {
+                  // HTTP 快照合并：DB 在 streaming 期间 text="" ，
+                  // mergeLiveParts 保留本地已通过 delta 累积的长文本
+                  if (removedMessageIDs.has(message.info.id)) continue
+                  draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
+                }
+                // 最终投影 = HTTP 页 + 请求期间的合法 live 变化 - 已失效对象。
+                // 合并后按 chronology/BINARY 重排，保持与事件路径相同的顺序不变量。
+                const pageIDs = new Set(infos.map((message) => message.id))
+                const index = messageByID.get(sessionID)
+                const merged = infos.filter((message) => !removedMessageIDs.has(message.id))
+                for (let i = 0; i < merged.length; i++) {
+                  const live = changes.messages.has(merged[i].id) ? index?.get(merged[i].id) : undefined
+                  if (live && !removedMessageIDs.has(live.id)) merged[i] = live
+                }
+                for (const id of changes.messages) {
+                  if (pageIDs.has(id) || removedMessageIDs.has(id)) continue
+                  const live = index?.get(id)
+                  if (live) merged.push(live)
+                }
+                merged.sort((a, b) => a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)))
+                draft.message[sessionID] = merged
+                // 窗口外与 part-first 对象在 authoritative 页落定后释放；
+                // 请求期间有变化的 Part 保留，等待其 Message 到达。
+                const finalIDs = new Set(merged.map((message) => message.id))
+                for (const key of Object.keys(draft.part)) {
+                  const parts = draft.part[key]
+                  if (parts?.[0]?.sessionID !== sessionID || finalIDs.has(key)) continue
+                  if (parts.some((part) => changes.parts.has(part.id))) continue
+                  delete draft.part[key]
+                }
+              }),
+            )
+            // force sync 是整页 authoritative replacement；重建而非增量合并可清除已不在窗口内的旧 key。
+            // 页面失败时没有 authoritative 事实，索引保持现有投影不动。
+            if (!pageFailed) {
+              const finalMessages = store.message[sessionID] ?? []
+              messageByID.set(sessionID, new Map(finalMessages.map((message) => [message.id, message])))
+            }
+            setStore("session_status", reconcile(status.data ?? {}))
+            // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
+            // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
+            // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
+            for (const message of messages.data ?? []) {
+              for (const part of message.parts) {
+                replayOrphanDeltas(part.id, message.info.id)
+              }
+            }
+          } finally {
+            // 只清自己登记的记录：更新的请求已经换了对象，误删会让新请求丢失变更跟踪。
+            if (syncChanges.get(sessionID) === changes) syncChanges.delete(sessionID)
           }
           // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
           // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
@@ -1224,6 +1365,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             { sessionID },
             { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
           )
+          // diff 是 sync 的最后一个 await：删除发生在 diff 挂起时，结果不得回填。
+          if (!alive()) return
           const projected = projectTuiDiff(diff.data ?? [])
           const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
           const additions = diff.response?.headers.get(TUI_DIFF_TOTAL_ADDITIONS) ?? null

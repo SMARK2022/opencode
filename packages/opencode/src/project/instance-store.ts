@@ -6,6 +6,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
 import { type InstanceContext } from "./instance-context"
 import { InstanceBootstrap } from "./bootstrap-service"
+import { PromptWindowCache } from "@/session/prompt-window-cache"
 import * as Project from "./project"
 
 export interface LoadInput {
@@ -102,6 +103,8 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
     const disposeContext = Effect.fn("InstanceStore.disposeContext")(function* (ctx: InstanceContext) {
       yield* Effect.logInfo("disposing instance").pipe(Effect.annotateLogs("directory", ctx.directory))
       yield* Effect.promise(() => runDisposers(ctx.directory))
+      // 旧工作在 barrier 完成后才可能发布缓存；此刻失效旧 context 的槽，dispose 期间不再有再发布窗口。
+      PromptWindowCache.invalidateInstance(ctx.directory)
       yield* emitDisposed({ directory: ctx.directory, project: ctx.project.id })
     })
 
@@ -149,6 +152,9 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
             if (previous) {
               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
               yield* Effect.promise(() => runDisposers(directory))
+              // 与 disposeContext 同一失效边界：reload 的清槽发生在 completeLoad 之前，
+              // 新 context 的循环尚未启动，不会误清新 entry。
+              PromptWindowCache.invalidateInstance(directory)
               yield* emitDisposed({ directory, project: input.project?.id })
             }
             yield* completeLoad(directory, input, entry)

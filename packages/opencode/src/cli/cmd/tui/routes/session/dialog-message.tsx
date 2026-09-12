@@ -70,14 +70,14 @@ export function DialogMessage(props: {
             const msg = message()
             if (!msg) return
             dialog.clear()
+            // 在首个 await 前捕获选中内容：abort/revert 等待期间，原 Message 可能已被删除并释放正文。
+            const promptInfo = extractPromptInfo(msg.id)
             // 如果 session 正在运行，先 abort（与 Undo 命令一致），
             // 确保 runner idle 后 revert 才能通过 assertNotBusy
             const status = sync.data.session_status?.[props.sessionID]
             if (status?.type !== "idle") {
               await sdk.client.session.abort({ sessionID: props.sessionID }).catch(() => {})
             }
-            // 提取原消息内容（在 revert 前，parts 必在 sync.data 中）
-            const promptInfo = extractPromptInfo(msg.id)
             // await revert 完成——B1 守卫确保 revert 期间无其他操作竞争
             const revertResponse = await sdk.client.session.revert({
               sessionID: props.sessionID,
@@ -119,13 +119,10 @@ export function DialogMessage(props: {
           value: "session.fork",
           description: "create a new session",
           onSelect: async (dialog: DialogContext) => {
-            const result = await sdk.client.session.fork({
-              sessionID: props.sessionID,
-              messageID: props.messageID,
-            })
             const msg = message()
+            // fork 请求可能长时间挂起；期间原消息可被删除释放，展示内容必须在 await 前捕获。
             const prompt = msg
-              ? sync.data.part[msg.id].reduce(
+              ? (sync.data.part[msg.id] ?? []).reduce(
                   (agg, part) => {
                     if (part.type === "text") {
                       if (!part.synthetic) agg.input += part.text
@@ -136,6 +133,10 @@ export function DialogMessage(props: {
                   { input: "", parts: [] as PromptInfo["parts"] },
                 )
               : undefined
+            const result = await sdk.client.session.fork({
+              sessionID: props.sessionID,
+              messageID: props.messageID,
+            })
             route.navigate({
               sessionID: result.data!.id,
               type: "session",

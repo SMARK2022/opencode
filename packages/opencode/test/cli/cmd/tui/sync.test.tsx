@@ -1555,3 +1555,211 @@ describe("tui sync", () => {
     }
   })
 })
+
+describe("tui sync memory lifetime", () => {
+  // [失效语义] 持久删除/hidden 与 300 窗口淘汰不同：前者释放 payload 并拒绝迟到复活，后者保持现有加载合同。
+  // 本组测试只观察公开 store 与 sync Promise，不断言私有 Map/Set。
+  const sid = "ses_1"
+  let lifeSeq = 0
+  function lifeMessage(id: string, session = sid, created = 1): UserMessage {
+    return { id, sessionID: session, role: "user", time: { created }, agent: "build", model: { providerID: "provider", modelID: "model" } }
+  }
+  function lifePart(messageID: string, session = sid, text = "payload", id = `prt_${messageID}`): Part {
+    return { id, sessionID: session, messageID, type: "text", text } as Part
+  }
+  function lifeEvent(type: string, properties: object): GlobalEvent {
+    return { directory, project: "proj_test", payload: { id: `evt_life_${++lifeSeq}`, type, properties } } as GlobalEvent
+  }
+  function lifeSession(id = sid) {
+    return { id, directory, projectID: "proj_test", slug: id, version: "1", title: id, time: { created: 1, updated: 1 } }
+  }
+  function lifeTransport(rows: () => { info: UserMessage; parts: Part[] }[]) {
+    return (url: URL) => {
+      if (url.pathname === `/session/${sid}`) return json(lifeSession())
+      if (url.pathname === `/session/${sid}/message`) return json(rows())
+      if (url.pathname === `/session/${sid}/todo` || url.pathname === `/session/${sid}/diff`) return json([])
+    }
+  }
+  type Harness = Awaited<ReturnType<typeof mount>>
+  async function pump(emit: Harness["emit"], sync: Harness["sync"]) {
+    const branch = `life_${++lifeSeq}`
+    emit(branchEvent(branch))
+    await wait(() => sync.data.vcs?.branch === branch)
+  }
+  function put(emit: (event: GlobalEvent) => void, id: string, session = sid, text = "payload", created = 1) {
+    emit(lifeEvent("message.updated", { sessionID: session, info: lifeMessage(id, session, created) }))
+    emit(lifeEvent("message.part.updated", { sessionID: session, part: lifePart(id, session, text), time: 1 }))
+  }
+
+  for (const mode of ["removed", "hidden"] as const) {
+    test(`${mode} Message releases only its own Part payload`, async () => {
+      const { app, emit, sync } = await mount()
+      try {
+        put(emit, "msg_drop")
+        put(emit, "msg_keep", sid, "keep", 2)
+        put(emit, "msg_other", "ses_other", "other")
+        await pump(emit, sync)
+        if (mode === "removed") emit(lifeEvent("message.removed", { sessionID: sid, messageID: "msg_drop" }))
+        if (mode === "hidden") emit(lifeEvent("message.updated", { sessionID: sid, info: { ...lifeMessage("msg_drop"), hidden: { time: 2, reason: "undo" } } }))
+        await pump(emit, sync)
+        // sibling 与其他 Session 不受影响；只有失效 Message 的正文离开公开 store。
+        expect(sync.data.message[sid].map((m) => m.id)).toEqual(["msg_keep"])
+        expect(sync.data.part.msg_keep?.[0]).toMatchObject({ text: "keep" })
+        expect(sync.data.part.msg_other?.[0]).toMatchObject({ text: "other" })
+        expect(sync.data.part.msg_drop).toBeUndefined()
+      } finally {
+        app.renderer.destroy()
+      }
+    })
+  }
+
+  // 四个桶分属不同 reducer 分支；一次性断言全覆盖，防止实现只清 message 而留下 todo/status 残留。
+  test("deleted Session releases its message, part, todo, and status buckets", async () => {
+    const { app, emit, sync } = await mount()
+    try {
+      emit(lifeEvent("session.updated", { sessionID: sid, info: lifeSession() }))
+      put(emit, "msg_owned")
+      put(emit, "msg_other", "ses_other", "other")
+      emit(lifeEvent("todo.updated", { sessionID: sid, todos: [{ content: "owned", status: "pending", priority: "high" }] }))
+      emit(lifeEvent("session.status", { sessionID: sid, status: { type: "busy" } }))
+      await pump(emit, sync)
+      emit(lifeEvent("session.deleted", { sessionID: sid, info: lifeSession() }))
+      await pump(emit, sync)
+      expect(sync.session.get(sid)).toBeUndefined()
+      expect(sync.data.part.msg_other?.[0]).toMatchObject({ text: "other" })
+      expect(sync.data.message[sid]?.length ?? 0).toBe(0)
+      expect(sync.data.part.msg_owned).toBeUndefined()
+      expect(sync.data.todo[sid]?.length ?? 0).toBe(0)
+      expect(sync.data.session_status[sid]).toBeUndefined()
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  for (const mode of ["message.removed", "message.part.removed", "session.deleted"] as const) {
+    // 三种失效路径各有独立的 early-return 位置；参数化锁定任一漏网都会复活缓冲 delta。
+    // 对照：无关 live part 的缓冲 delta 不属于失效对象，必须在局部删除后存活并回放。
+    test(`buffered orphan delta cannot rehydrate after ${mode}`, async () => {
+      const { app, emit, sync } = await mount()
+      try {
+        emit(lifeEvent("message.part.delta", { sessionID: sid, messageID: "msg_late", partID: "prt_msg_late", field: "text", delta: "STALE" }))
+        const aliveSession = mode === "session.deleted" ? "ses_alive" : sid
+        emit(lifeEvent("message.part.delta", { sessionID: aliveSession, messageID: "msg_alive", partID: "prt_msg_alive", field: "text", delta: "ALIVE" }))
+        if (mode === "message.removed") emit(lifeEvent(mode, { sessionID: sid, messageID: "msg_late" }))
+        if (mode === "message.part.removed") emit(lifeEvent(mode, { sessionID: sid, messageID: "msg_late", partID: "prt_msg_late" }))
+        if (mode === "session.deleted") emit(lifeEvent(mode, { sessionID: sid, info: lifeSession() }))
+        await pump(emit, sync)
+        emit(lifeEvent("message.part.updated", { sessionID: sid, part: lifePart("msg_late", sid, ""), time: 1 }))
+        emit(lifeEvent("message.part.updated", { sessionID: aliveSession, part: lifePart("msg_alive", aliveSession, ""), time: 1 }))
+        await pump(emit, sync)
+        expect(sync.data.part.msg_late).toBeUndefined()
+        expect((sync.data.part.msg_alive?.[0] as { text?: string } | undefined)?.text).toBe("ALIVE")
+      } finally {
+        app.renderer.destroy()
+      }
+    })
+  }
+
+  // 完整 Part 更新走与 delta 不同的 admission 分支；失效 Message 的两个入口都必须拒绝。
+  test("late full Part update cannot rehydrate a removed Message", async () => {
+    const { app, emit, sync } = await mount()
+    try {
+      put(emit, "msg_dead")
+      await pump(emit, sync)
+      emit(lifeEvent("message.removed", { sessionID: sid, messageID: "msg_dead" }))
+      await pump(emit, sync)
+      expect(sync.data.part.msg_dead).toBeUndefined()
+      emit(lifeEvent("message.part.updated", { sessionID: sid, part: lifePart("msg_dead", sid, "late"), time: 2 }))
+      await pump(emit, sync)
+      expect(sync.data.message[sid]).toHaveLength(0)
+      expect(sync.data.part.msg_dead).toBeUndefined()
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("force sync prunes out-of-window Parts and part-first orphans", async () => {
+    const { app, emit, sync } = await mount(lifeTransport(() => [{ info: lifeMessage("msg_keep"), parts: [lifePart("msg_keep", sid, "fresh")] }]))
+    try {
+      put(emit, "msg_old")
+      put(emit, "msg_other", "ses_other", "other")
+      emit(lifeEvent("message.part.updated", { sessionID: sid, part: lifePart("msg_part_first"), time: 1 }))
+      await pump(emit, sync)
+      await sync.session.sync(sid, { force: true })
+      expect(sync.data.message[sid].map((m) => m.id)).toEqual(["msg_keep"])
+      expect(sync.data.part.msg_keep?.[0]).toMatchObject({ text: "fresh" })
+      expect(sync.data.part.msg_other?.[0]).toMatchObject({ text: "other" })
+      expect(sync.data.part.msg_old).toBeUndefined()
+      expect(sync.data.part.msg_part_first).toBeUndefined()
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("force sync preserves a Message arriving after the request started", async () => {
+    const gate = Promise.withResolvers<Response>()
+    const normal = lifeTransport(() => [])
+    const { app, emit, sync } = await mount((url) => (url.pathname === `/session/${sid}/message` ? gate.promise : normal(url)))
+    let pending: Promise<void> | undefined
+    try {
+      pending = sync.session.sync(sid, { force: true })
+      put(emit, "msg_live", sid, "live", 10)
+      await pump(emit, sync)
+      gate.resolve(json([]))
+      await pending
+      // 请求期间的合法新增必须并入最终投影，不能被旧快照抹掉。
+      expect(sync.data.message[sid].map((m) => m.id)).toEqual(["msg_live"])
+      expect(sync.data.part.msg_live?.[0]).toMatchObject({ text: "live" })
+    } finally {
+      gate.resolve(json([]))
+      await pending
+      app.renderer.destroy()
+    }
+  })
+
+  test("in-flight force sync cannot resurrect a deleted Session", async () => {
+    const gate = Promise.withResolvers<Response>()
+    const normal = lifeTransport(() => [{ info: lifeMessage("msg_old"), parts: [lifePart("msg_old")] }])
+    const { app, emit, sync } = await mount((url) => (url.pathname === `/session/${sid}/message` ? gate.promise : normal(url)))
+    let pending: Promise<void> | undefined
+    try {
+      emit(lifeEvent("session.updated", { sessionID: sid, info: lifeSession() }))
+      await pump(emit, sync)
+      pending = sync.session.sync(sid, { force: true })
+      emit(lifeEvent("session.deleted", { sessionID: sid, info: lifeSession() }))
+      await pump(emit, sync)
+      expect(sync.session.get(sid)).toBeUndefined()
+      gate.resolve(json([{ info: lifeMessage("msg_old"), parts: [lifePart("msg_old")] }]))
+      await pending
+      // 迟到快照不得重建已删除 Session 的行、消息或正文。
+      expect(sync.session.get(sid)?.id).toBeUndefined()
+      expect(sync.data.message[sid]?.length ?? 0).toBe(0)
+      expect(sync.data.part.msg_old).toBeUndefined()
+    } finally {
+      gate.resolve(json([]))
+      await pending
+      app.renderer.destroy()
+    }
+  })
+
+  // diff 是 sync 的最后一个 await；只检 history 竞态挡不住 diff 提交重建 summary 与行。
+  test("late diff response cannot repopulate a deleted Session", async () => {
+    const gate = Promise.withResolvers<Response>()
+    const normal = lifeTransport(() => [])
+    const { app, emit, sync } = await mount((url) => (url.pathname.endsWith("/diff") ? gate.promise : normal(url)))
+    let pending: Promise<void> | undefined
+    try {
+      pending = sync.session.sync(sid, { force: true })
+      emit(lifeEvent("session.deleted", { sessionID: sid, info: lifeSession() }))
+      await pump(emit, sync)
+      gate.resolve(json([{ file: "stale.ts", additions: 1, deletions: 0, before: "", after: "x" }]))
+      await pending
+      expect(sync.session.get(sid)).toBeUndefined()
+      expect(sync.data.session_diff[sid]).toBeUndefined()
+    } finally {
+      gate.resolve(json([]))
+      await pending
+      app.renderer.destroy()
+    }
+  })
+})

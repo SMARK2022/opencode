@@ -2,6 +2,8 @@ import path from "path"
 import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
+import { PromptWindowCache } from "./prompt-window-cache"
+import { InstanceRef } from "@/effect/instance-ref"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionRevert } from "./revert"
 import { NotFoundError } from "@/storage/storage"
@@ -699,18 +701,12 @@ export const layer = Layer.effect(
     // Deferred<Exit>，而非各自独立执行 state.cancel。这消除了排队 cancel 在旧操作
     // 完成后重新读取 Runner 并误伤 replacement loop 的时序窗口。
     const cancelOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
-    // InstanceState 生命周期内只保留一个 entry；切换 Session 会直接替换而不是累积 Map。
-    // entry 不跨 Project，因为 Service 本身由 InstanceState scope 隔离。
-    // retained 保存 canonical DB view，request-only decoration 永不回写。
-    let retainedMessages:
-      | {
-          sessionID: SessionID
-          model: string
-          proof: MessageV2.PromptWindowProof
-          canonical: MessageV2.WithParts[]
-          chunks: Map<MessageID, ModelMessage[]>
-        }
-      | undefined
+    // 单槽 current-entry：切换 Session 直接替换而不是累积 Map，槽内保存 canonical DB view，
+    // request-only decoration 永不回写。槽由进程级注册表持有（见 prompt-window-cache.ts）：
+    // Session 删除（projector after-commit）与 Instance dispose/reload 完成后失效，
+    // Service 的生命周期不再延长已结束 Session/Instance 的对象生存期。
+    const promptCache = PromptWindowCache.acquire()
+    yield* Effect.addFinalizer(() => Effect.sync(() => PromptWindowCache.release(promptCache)))
     const runner = Effect.fn("SessionPrompt.runner")(function* () {
       return yield* EffectBridge.make()
     })
@@ -2608,13 +2604,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
           // busy期间queued prompt可更新Permission；每step必须在resolveTools前重读control-panel状态。
+          // lease 必须在任何 await 之前取得；删除/dispose 推进 generation 后，旧 lease 的发布会丢弃。
+          const lease = PromptWindowCache.lease(promptCache)
+          const instance = yield* InstanceRef
           const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
           const proof = MessageV2.promptWindowProof(sessionID)
+          const slotEntry = PromptWindowCache.read(promptCache, sessionID)
           // boundary 不同直接丢弃旧窗口，禁止 cache 复制 Compaction 规则。
-          const cached = retainedMessages?.sessionID === sessionID && retainedMessages.proof.boundary === proof.boundary
-            ? retainedMessages
-            : undefined
+          const cached = slotEntry?.proof.boundary === proof.boundary ? slotEntry : undefined
           const common = cached
             ? proof.messages.findIndex((item, index) => item.key !== cached.proof.messages[index]?.key)
             : 0
@@ -2639,7 +2637,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
           const modelKey = `${lastUser.model.providerID}/${lastUser.model.modelID}/${lastUser.model.variant ?? ""}`
           // model identity 改变 reasoning/media conversion，raw canonical 仍可复用但 chunks 必须清空。
-          retainedMessages = {
+          const nextEntry = {
             sessionID,
             model: modelKey,
             proof,
@@ -2649,8 +2647,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
                 ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
                 : new Map(),
+            instance,
           }
-          const messageEntry = retainedMessages
+          // 失效窗口内的发布会丢弃；本轮迭代仍持有局部 entry 完成当前 Provider 请求。
+          PromptWindowCache.publish(promptCache, lease, nextEntry)
+          const messageEntry = nextEntry
 
           const currentUserMessage = msgs.find((message) => message.info.id === lastUser.id)
           if (!currentUserMessage || currentUserMessage.info.role !== "user")
