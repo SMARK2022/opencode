@@ -136,7 +136,7 @@ export interface Interface {
   readonly durable: (input: { readonly aggregateID: string; readonly after?: number }) => Stream.Stream<Payload>
   /** @deprecated Use `all()` and consume the returned stream. */
   readonly listen: (listener: Subscriber, options?: { readonly finalizerSafe?: boolean }) => Effect.Effect<Unsubscribe>
-  readonly project: <D extends Definition>(definition: D, projector: Subscriber<D>) => Effect.Effect<void>
+  readonly project: <D extends Definition>(definition: D, projector: Subscriber<D>, afterCommit?: Subscriber<D>) => Effect.Effect<void>
   readonly replay: (
     event: SerializedEvent,
     options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
@@ -180,7 +180,7 @@ export const layerWith = (options?: LayerOptions) =>
         durable: new Map<string, Set<PubSub.PubSub<void>>>(),
         typed: new Map<string, PubSub.PubSub<Payload>>(),
       }
-      const projectors = new Map<string, Subscriber[]>()
+      const projectors = new Map<string, Array<{ apply: Subscriber; afterCommit?: Subscriber }>>()
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
       const listeners = new Array<{ callback: Subscriber; finalizerSafe: boolean }>()
       const { db } = yield* Database.Service
@@ -237,7 +237,7 @@ export const layerWith = (options?: LayerOptions) =>
                   }),
                 )
               }
-              const list = projectors.get(event.type) ?? []
+              const list = [...(projectors.get(event.type) ?? [])]
               return yield* Effect.uninterruptible(
                 Effect.gen(function* () {
                   const committed = yield* db
@@ -322,7 +322,7 @@ export const layerWith = (options?: LayerOptions) =>
                             durable: { aggregateID, seq, version: durable.version },
                           } as Payload
                           for (const projector of list) {
-                            yield* projector(committed)
+                            yield* projector.apply(committed)
                           }
                           if (commit) yield* commit(seq)
                           yield* db
@@ -356,6 +356,11 @@ export const layerWith = (options?: LayerOptions) =>
                     )
                     .pipe(Effect.orDie)
                   if (committed) {
+                    // 本地失效属于投影提交后语义：回滚/忽略重放不执行，静默replay仍执行，且先于通知返回。
+                    const payload = { ...event, durable: { ...committed, version: durable.version } }
+                    for (const projector of list) {
+                      if (projector.afterCommit) yield* projector.afterCommit(payload)
+                    }
                     yield* Effect.forEach(
                       pubsub.durable.get(committed.aggregateID) ?? [],
                       (wake) => PubSub.publish(wake, undefined),
@@ -623,10 +628,13 @@ export const layerWith = (options?: LayerOptions) =>
           })
         })
 
-      const project = <D extends Definition>(definition: D, projector: Subscriber<D>): Effect.Effect<void> =>
+      const project = <D extends Definition>(definition: D, projector: Subscriber<D>, afterCommit?: Subscriber<D>): Effect.Effect<void> =>
         Effect.sync(() => {
           const list = projectors.get(definition.type) ?? []
-          list.push((event) => projector(event as Payload<D>))
+          list.push({
+            apply: (event) => projector(event as Payload<D>),
+            ...(afterCommit ? { afterCommit: (event: Payload) => afterCommit(event as Payload<D>) } : {}),
+          })
           projectors.set(definition.type, list)
         })
 

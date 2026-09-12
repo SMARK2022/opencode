@@ -2,7 +2,7 @@
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
 import { engine } from "@opentui/core"
-import { onMount } from "solid-js"
+import { onMount, type JSX } from "solid-js"
 import { ArgsProvider } from "../../../../src/context/args"
 import { KVProvider, useKV } from "../../../../src/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/context/project"
@@ -26,7 +26,9 @@ export async function wait(fn: () => boolean, timeout = 2000) {
 
 type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
 
-export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route) {
+export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element) {
+  // 显式测试目录仍优先；批量隔离运行时不读写固定/tmp或用户全局KV。
+  const statePath = state ?? process.env.XDG_STATE_HOME
   const calls = createFetch(override)
   const events = createEventSource()
   let sync!: ReturnType<typeof useSync>
@@ -52,7 +54,7 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
 
   const app = await testRender(
     () => (
-    <TestTuiContexts paths={state ? { state } : undefined}>
+    <TestTuiContexts paths={statePath ? { state: statePath } : undefined}>
       <ArgsProvider>
         <KVProvider>
           <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
@@ -63,6 +65,7 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
                   <ExitProvider exit={() => {}}>
                     <SyncProvider>
                       <Probe />
+                    {render?.()}
                     </SyncProvider>
                   </ExitProvider>
                 </ProjectProvider>

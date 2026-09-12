@@ -19,6 +19,7 @@ import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
 import { ColdStorage } from "../storage/cold-storage"
 import type { DeepMutable } from "../schema"
+import { PromptCacheSlots } from "./prompt-cache-slots"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -439,6 +440,8 @@ const layer = Layer.effectDiscard(
         ColdStorage.releaseSession(sync, event.data.sessionID)
         yield* db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie)
       }),
+      // 同一提交成功后清全部Service图单槽，不依赖公开listener或当前Instance存在。
+      (event) => Effect.sync(() => PromptCacheSlots.invalidateSession(event.data.sessionID)),
     )
     yield* events.project(SessionV1.Event.Forked, (event) =>
       Effect.gen(function* () {

@@ -9,6 +9,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
 import { type InstanceContext } from "./instance-context"
 import { InstanceBootstrap } from "./bootstrap-service"
+import { PromptWindowCache } from "@/session/prompt-window-cache"
 import * as Project from "./project"
 
 export interface LoadInput {
@@ -100,6 +101,8 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
     const disposeContext = Effect.fn("InstanceStore.disposeContext")(function* (ctx: InstanceContext) {
       yield* Effect.logInfo("disposing instance", { directory: ctx.directory })
       yield* Effect.promise(() => runDisposers(ctx.directory))
+      // 原有barrier完成后清槽，失效前的异步工作不能再用旧租约发布正文。
+      PromptWindowCache.invalidateInstance(ctx.directory)
       yield* emitDisposed({ directory: ctx.directory, project: ctx.project.id })
     })
 
@@ -142,6 +145,8 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
             if (previous) {
               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
               yield* Effect.promise(() => runDisposers(directory))
+              // 新context尚未completeLoad；此刻只退休旧实例持有的entry。
+              PromptWindowCache.invalidateInstance(directory)
               yield* emitDisposed({ directory, project: input.project?.id })
             }
             yield* completeLoad(directory, input, entry)

@@ -37,6 +37,7 @@ import { SessionCompaction } from "../compaction"
 import { SessionTodo } from "../todo"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
+import { PromptCacheSlots } from "../prompt-cache-slots"
 import { SessionGoal } from "../goal"
 import { SessionRetry } from "../retry"
 import { SessionGoalProgress } from "../goal-progress"
@@ -139,11 +140,14 @@ const layer = Layer.effect(
     const todos = yield* SessionTodo.Service
     const compaction = SessionCompaction.make({ events, llm, db, todos: todos.get, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
     // Location内只保留可替换entry，跨独立请求复用；执行与Goal状态不进入缓存。
-    let retainedMessages: {
+    const promptCache = PromptCacheSlots.acquire<{
       sessionID: SessionSchema.ID
+      instance: typeof location
       history: ReturnType<typeof SessionHistory.makeCache>
       messages: ReturnType<typeof makeMessageCache>
-    } | undefined
+    }>()
+    // 注销只属于Location Service退出；普通resume/idle继续保留同一个warm单槽。
+    yield* Effect.addFinalizer(() => Effect.sync(() => PromptCacheSlots.release(promptCache)))
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
@@ -235,6 +239,8 @@ const layer = Layer.effect(
       continuation: GoalContinuation,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
     ) {
+      // 首个Session读取前取得租约，删除/dispose期间的迟发结果不能重新成为长期owner。
+      const cacheLease = PromptCacheSlots.lease(promptCache)
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
@@ -325,11 +331,11 @@ const layer = Layer.effect(
         initialized ?? (yield* SessionContextEpoch.prepare(db, events, prepared.context, session.id))
       const selection = yield* models.resolve(session)
       const model = selection.model
-      const retained = retainedMessages?.sessionID === session.id ? retainedMessages : {
-        sessionID: session.id, history: SessionHistory.makeCache(), messages: makeMessageCache(),
+      const retained = PromptCacheSlots.read(promptCache, session.id) ?? {
+        sessionID: session.id, instance: location, history: SessionHistory.makeCache(), messages: makeMessageCache(),
       }
       // await前捕获entry，另一Session替换唯一指针不能混入本次在途历史或转换。
-      retainedMessages = retained
+      PromptCacheSlots.publish(promptCache, cacheLease, retained)
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq, retained.history)
       const context = entries.map((entry) => entry.message)
       // 普通Provider turn不查Goal lineage；同一步并发调用共享查询，同eligible turn保留read身份。
