@@ -8,7 +8,7 @@ Within that envelope, you get a sequence of file operations.
 You MUST include a header to specify the action you are taking.
 Each operation starts with one of three headers:
 
-*** Add File: <path> - create a new file only when the user explicitly requires it. Every following line is a + line (the initial contents).
+*** Add File: <path> - create a new file (or fully rewrite an existing one in place) only when the user explicitly requires it. Every following line is a + line (the initial contents). A rewrite never needs a *** Delete File first — Add alone replaces the whole file.
 *** Delete File: <path> - remove an existing file. Nothing follows.
 *** Update File: <path> - patch an existing file in place (optionally with a rename).
 
@@ -34,4 +34,5 @@ It is important to remember:
 - Update old lines are matched exactly as complete lines first. If that fails, the complete old block may match one exact literal substring while preserving all surrounding text.
 - A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
 - Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.
+- To fully rewrite an existing file, use *** Add File alone with the complete new content — it overwrites in place. A *** Delete File + *** Add File pair on the same path is treated as the rewrite; the Delete is redundant.
 - A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.

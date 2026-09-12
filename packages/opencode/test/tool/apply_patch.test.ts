@@ -437,6 +437,74 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
+  // Delete+Add 同文件对 = 覆写意图：折叠为单个 Add（delete 不执行、不进权限审批），
+  // diff 以真实旧内容为基线，output 附一句提醒。其它组合（Add+Delete、三项以上）维持冲突拒绝。
+  it.instance("collapses a Delete+Add pair into an in-place rewrite without executing the delete", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx, calls } = makeCtx()
+      const target = path.join(test.directory, "rewrite.txt")
+      yield* writeText(target, "old line one\nold line two\n")
+
+      const patchText = [
+        "*** Begin Patch",
+        "*** Delete File: rewrite.txt",
+        "*** Add File: rewrite.txt",
+        "+brand new content",
+        "*** End Patch",
+      ].join("\n")
+      const result = yield* execute({ patchText }, ctx)
+
+      // 覆写语义：内容为新内容；旧内容进入 diff（delete 不曾真实执行，审计可见完整替换）。
+      expect(yield* readText(target)).toBe("brand new content\n")
+      expect(result.metadata.files[0].type).toBe("add")
+      expect(result.metadata.diff).toContain("-old line one")
+      expect(result.metadata.diff).toContain("+brand new content")
+      // 权限审批面看不到 delete：preprocess 后只剩 add，与 write 覆写同构（general 放行）。
+      expect(calls[0].metadata.files.map((f) => f.type)).toEqual(["add"])
+      // 成功后提醒：下次直接 Add 即可。
+      expect(result.output).toContain("Add File alone")
+    }),
+  )
+
+  it.instance("still rejects Add+Delete (wrong order) and Delete+Add+Update on the same path", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "order.txt")
+      yield* writeText(target, "old\n")
+
+      const addThenDelete = [
+        "*** Begin Patch",
+        "*** Add File: order.txt",
+        "+new",
+        "*** Delete File: order.txt",
+        "*** End Patch",
+      ].join("\n")
+      const first = yield* execute({ patchText: addThenDelete }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(first)).toBe(true)
+      if (Exit.isFailure(first)) {
+        expect(String(Cause.squash(first.cause))).toContain("Conflicting operations")
+      }
+
+      const deleteAddUpdate = [
+        "*** Begin Patch",
+        "*** Delete File: order.txt",
+        "*** Add File: order.txt",
+        "+new",
+        "*** Update File: order.txt",
+        "@@\n-old\n+x",
+        "*** End Patch",
+      ].join("\n")
+      const second = yield* execute({ patchText: deleteAddUpdate }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(second)).toBe(true)
+      if (Exit.isFailure(second)) {
+        expect(String(Cause.squash(second.cause))).toContain("Conflicting operations")
+      }
+      expect(yield* readText(target)).toBe("old\n")
+    }),
+  )
+
   // INV-10：description 必须携带陈旧转写禁令与 more-than-3-lines 诱导。文案即合同。
   it.instance("description carries staleness and context-size guidance", () =>
     Effect.gen(function* () {
@@ -444,6 +512,9 @@ describe("tool.apply_patch freeform", () => {
       const tool = yield* info.init()
       expect(tool.description).toContain("latest read")
       expect(tool.description).toContain("more than 3 lines")
+      // 覆写条目：Add 即覆写、Delete+Add 折叠语义都必须在 description 中可见。
+      expect(tool.description).toContain("overwrites in place")
+      expect(tool.description).toContain("Delete is redundant")
     }),
   )
 
