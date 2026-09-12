@@ -39,7 +39,7 @@ type FileChange = {
   expected: Mutation.MutationRead[]
 }
 
-type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
+type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[]; rewrite?: boolean }
 
 // #518：canonicalPath 是 coordinator 的锁键；filePath 保留 patchText 原始解析结果用于错误与 diff 展示。
 // 两者分离后 symlink alias 不会生成第二个锁，展示路径也不被 realpath 改写。
@@ -68,7 +68,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const ending =
         snapshot.version.state === "file" ? detectLineEnding(Bom.split(Mutation.decode(snapshot)).text) : undefined
       // 不读取 Project 配置或邻近文件推断 EOL，missing Add 因此继续严格服从 patch 内容。
-      const oldContent = ""
+      // rewrite 折叠对：旧基线取真实既有内容而非空串，让 diff/审计可见完整替换
+      // （delete 未执行，旧内容不经 rewriteMarker 之外的路径丢失）。
+      const oldContent =
+        group.rewrite && snapshot.version.state === "file" ? Bom.split(Mutation.decode(snapshot)).text : ""
       // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
       const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
       const next = Bom.split(newContent)
@@ -270,6 +273,16 @@ export const ApplyPatchTool = Tool.define(
       // #518：先按 canonicalPath 分组并在 Permission 前拒绝 ownership 冲突。
       // 冲突 patch 不得进入 ask；被批准后再失败会浪费一次审批并污染 always 授权记录。
       const groups = groupHunks(hunks, instance)
+      // 只认完整canonical组恰好[Delete,Add]；删除不执行、不进入审批，真实旧内容仍可审计。
+      // 倒序或三项以上继续冲突；纯Update沿原始快照聚合，不把本次生成文本当后续旧块。
+      const rewritten: string[] = []
+      for (const group of groups) {
+        const [first, second] = group.hunks
+        if (group.hunks.length === 2 && first.type === "delete" && second.type === "add") {
+          group.hunks = [second]
+          group.rewrite = true
+        }
+      }
       validateOwnership(groups, instance)
       for (const group of groups) {
         for (const hunk of group.hunks) {
@@ -298,6 +311,7 @@ export const ApplyPatchTool = Tool.define(
           continue
         }
         const change = exit.value
+        if (group.rewrite) rewritten.push(group.filePath)
         fileChanges.push(change)
         totalDiff += change.diff + "\n"
       }
@@ -448,6 +462,10 @@ export const ApplyPatchTool = Tool.define(
         return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
       })
       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
+      if (rewritten.length > 0) {
+        // 折叠成功后的提醒：下次直接 Add 即可，模型无需发明 Delete+Add。
+        output += `\n\nNote: a *** Delete File + *** Add File pair on the same path was applied as an in-place rewrite; the delete was redundant. Use *** Add File alone to rewrite a file.`
+      }
       // [local-smark] per-file atomicity：部分 hunk 失败时在 output 中报告失败文件
       if (hunkErrors.length > 0) {
         output += `\n\nFailed to update ${hunkErrors.length} file(s):\n${hunkErrors.join("\n")}`
