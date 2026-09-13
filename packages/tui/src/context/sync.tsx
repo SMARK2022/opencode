@@ -403,7 +403,11 @@ export const {
       syncTokens.delete(sessionID)
       syncingSessions.delete(sessionID)
       hydratingSessions.delete(sessionID)
-      releaseSessionParts(sessionID)
+      // 同批路由消费者可能晚于旧树清理注册；仅延迟正文清扫，旧请求资格仍立即失效。
+      queueMicrotask(() => {
+        if (partConsumers.has(sessionID)) return
+        releaseSessionParts(sessionID)
+      })
     }
 
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。

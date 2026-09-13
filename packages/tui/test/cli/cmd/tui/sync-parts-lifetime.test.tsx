@@ -102,10 +102,31 @@ test("explicit acquireParts holds bodies; release drops them; acquire again relo
     const handle = await h.sync.session.acquireParts(other)
     expect(bytes(h, other)).toBe(1024)
     handle.release()
+    // [0626] 清扫在 microtask 落地并复查计数：同一批次注册的新消费者可以阻止擦除。
+    await Promise.resolve()
     expect(bytes(h, other)).toBe(0)
     const again = await h.sync.session.acquireParts(other)
     expect(bytes(h, other)).toBe(1024)
     again.release()
+  } finally {
+    h.app.renderer.destroy()
+  }
+})
+
+test("route handoff preserves acquired bodies across the release microtask", async () => {
+  const rows = [{ info: message("msg_handoff", other), parts: [tool("msg_handoff", other, "Y".repeat(1024))] }]
+  const h = await mount(transport(rows), undefined, { type: "session", sessionID: active })
+  try {
+    const handle = await h.sync.session.acquireParts(other)
+    handle.release()
+    h.route.navigate({ type: "session", sessionID: other })
+    // 同一批不await：新route必须接住原正文，而不是稍后HTTP重建掩盖同步擦除。
+    expect(bytes(h, other)).toBe(1024)
+    await Promise.resolve()
+    expect(bytes(h, other)).toBe(1024)
+    h.route.navigate({ type: "session", sessionID: active })
+    await Promise.resolve()
+    expect(bytes(h, other)).toBe(0)
   } finally {
     h.app.renderer.destroy()
   }
@@ -267,6 +288,7 @@ test("concurrent acquisitions both resolve only after bodies are loaded", async 
     expect(bytes(h, other)).toBe(1024)
     h1.release()
     h2.release()
+    await Promise.resolve()
     expect(bytes(h, other)).toBe(0)
   } finally {
     gates[0].resolve(json([]))

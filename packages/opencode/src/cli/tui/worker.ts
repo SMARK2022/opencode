@@ -234,7 +234,7 @@ if (isDaemon) {
 
   let reconcileStale: ((scope: SessionStaleTurn.Scope, options?: { budgetMs?: number }) => Promise<void>) | undefined
 
-  async function gracefulShutdown(exitCode = 0, reason = "unknown") {
+  async function gracefulShutdown(exitCode = 0, reason = "unknown", defer = false) {
     if (shutdownInProgress) return
     shutdownInProgress = true
     // #547：residual 与 process.exit 硬截止必须同一 t0——maintenance abort 也吃墙钟，不能只从 dispose 起算。
@@ -245,6 +245,8 @@ if (isDaemon) {
       process.exit(1)
     }, 5_000)
     shutdownTimer.unref?.()
+    // 停机资格和总截止已同步发布；先让控制响应刷出，再执行同一拆解闭包。
+    if (defer) await new Promise<void>((resolve) => setTimeout(resolve, 0))
     // #493：graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
     // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
     // maintenance 先停，随后既有 runtime finalizer checkpoint/close，最后才释放 daemon lock。
@@ -598,7 +600,8 @@ if (isDaemon) {
           return Response.json({ error: "database maintenance is active" }, { status: 409 })
         }
         // conditional通过后立即进入同一闭包置位shutdownInProgress，不能暴露接收新维护的窗口。
-        if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(0, DisposedReason.DaemonStop)
+        // 拆解让出macrotask避免stop(true)抢先关闭本次{ok:true}响应，拒绝新维护的时机不变。
+        if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(0, DisposedReason.DaemonStop, true)
         else setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
         return Response.json({ ok: true })
       },
