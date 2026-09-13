@@ -18,11 +18,12 @@ import type {
   SkillV2Info,
   V2Event,
 } from "@opencode-ai/sdk/v2"
-import { createStore, produce } from "solid-js/store"
+import { createStore, produce, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useSDK } from "./sdk"
 import { useEvent } from "./event"
 import { createSignal, onCleanup, onMount } from "solid-js"
+import { PartView } from "@opencode-ai/core/session/part-view"
 import { createDataEventQueue } from "./data-deltas"
 
 type LocationData = {
@@ -84,7 +85,9 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           "session",
           "message",
           produce((draft) => {
-            fn((draft[sessionID] ??= []))
+            // 只有显式刷新过的正文桶接收广播，未使用native历史的界面不被动留存全文。
+            const messages = draft[sessionID]
+            if (messages) fn(messages)
           }),
         )
       },
@@ -342,7 +345,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             match.state = {
               status: "completed",
               input: match.state.input,
-              structured: event.data.structured,
+              // TUI存储与native viewer传输共用幂等投影；进程内测试注入也不保留重复patch。
+              structured: PartView.projectFields(event.data.structured),
               content: [...event.data.content],
               result: event.data.result,
             }
@@ -473,12 +477,13 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             // HTTP 替换前后都结清当前窗，不把旧 delta 追加到包含它的完整快照。
             deltas.flush()
             // Native同样请求无逐轮summary的viewer；正文/附件仍完整，默认客户端不受影响。
+            // 保留既有viewer信号；共享返回边界同时剪重复diff，不改分页或完整SDK合同。
             const result = await sdk.client.v2.session.messages(
               { sessionID },
               { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } },
             )
             deltas.flush()
-            setStore("session", "message", sessionID, result.data.data)
+            setStore("session", "message", sessionID, reconcile(result.data.data))
           },
         },
         permission: {

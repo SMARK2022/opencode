@@ -30,7 +30,8 @@ import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
 import { useArgs } from "./args"
-import { batch, onCleanup, onMount } from "solid-js"
+import { useRoute } from "./route"
+import { batch, createEffect, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { SessionPath } from "@opencode-ai/core/session/path"
 // #132：会话 path 规范化
@@ -39,6 +40,7 @@ import { usePermission } from "./permission"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 // #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
 import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "../util/session-list-params"
+import { PartView } from "@opencode-ai/core/session/part-view"
 
 // 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
 // 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
@@ -137,6 +139,7 @@ export const {
   name: "Sync",
   init: () => {
     const startup = useTuiStartup()
+    const route = useRoute()
     const kv = useKV()
     const permission = usePermission()
     const [store, setStore] = createStore<{
@@ -226,6 +229,12 @@ export const {
     const sdk = useSDK()
 
     const fullSyncedSessions = new Set<string>()
+    // [0624 正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
+    // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
+    const partConsumers = new Map<string, number>()
+    // [0624] 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文；
+    // 随 Message 窗口淘汰、删除与 Provider cleanup 释放，不保存正文或无限历史。
+    const releasedTerminalParts = new Set<string>()
     // #132：区分首次 connected 与重连
     let connectedOnce = false
     // #192：重连后 permission/question 快照版本
@@ -281,6 +290,8 @@ export const {
     function releaseMessage(sessionID: string, messageID: string) {
       touchMessage(sessionID, messageID)
       dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
+      // [0624] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
+      for (const part of store.part[messageID] ?? []) releasedTerminalParts.delete(part.id)
       const messages = store.message[sessionID]
       batch(() => {
         if (messages) {
@@ -305,13 +316,98 @@ export const {
       })
     }
 
+    // [0624] 终态判定：tool 的 completed/error 是持久终值；其余 Part 以父 Message 完成态为准
+    //（user 写完即持久，assistant 以 time.completed 为准）。未完成的流式 Part 保持现状——
+    // 其 bus-only 内容不可从 DB 恢复，不能释放。
+    function isDurableTerminal(part: Part, completedMessages: Set<string>) {
+      if (part.type === "tool") return part.state.status === "completed" || part.state.status === "error"
+      return completedMessages.has(part.messageID)
+    }
+
+    // [0624] 事件准入时的父 Message 完成态查询：目标无 messageByID 索引，退回 bounded store 查找。
+    function isTerminalAdmission(part: Part) {
+      if (part.type === "tool") return part.state.status === "completed" || part.state.status === "error"
+      const match = store.message[part.sessionID]?.find((message) => message.id === part.messageID)
+      if (!match) return false
+      return match.role !== "assistant" || match.time.completed !== undefined
+    }
+
+    // [0624] 释放单个终态 Part：记录 ID 事实、清掉其缓冲 delta、从 store 移除。
+    // 正文终值已持久在 DB，重新进入时由 HTTP sync 恢复。
+    function releasePart(sessionID: string, part: Part) {
+      releasedTerminalParts.add(part.id)
+      dropBufferedDeltas((event) => event.properties.partID === part.id)
+      const parts = store.part[part.messageID] ?? []
+      const index = parts.findIndex(item => item.id === part.id)
+      if (index !== -1) {
+        setStore(
+          "part",
+          part.messageID,
+          produce((draft) => {
+            draft.splice(index, 1)
+          }),
+        )
+      }
+      if ((store.part[part.messageID] ?? []).length === 0) {
+        setStore(
+          "part",
+          produce((draft) => {
+            delete draft[part.messageID]
+          }),
+        )
+      }
+    }
+
+    // [0624] 最后一个消费者离开时释放该 Session 的全部已持久终态正文；Message metadata、状态、
+    // 权限与问题桶保留（它们轻量且 sidebar/status 仍需要）。
+    function releaseSessionParts(sessionID: string) {
+      fullSyncedSessions.delete(sessionID)
+      const completed = new Set(
+        (store.message[sessionID] ?? [])
+          .filter((message) => message.role !== "assistant" || message.time.completed !== undefined)
+          .map((message) => message.id),
+      )
+      const doomed = Object.values(store.part)
+        .flat()
+        .filter((part) => part.sessionID === sessionID && isDurableTerminal(part, completed))
+      batch(() => {
+        for (const part of doomed) releasePart(sessionID, part)
+      })
+    }
+
+    function acquireParts(sessionID: string) {
+      partConsumers.set(sessionID, (partConsumers.get(sessionID) ?? 0) + 1)
+    }
+
+    function releaseParts(sessionID: string) {
+      const count = partConsumers.get(sessionID) ?? 0
+      if (count > 1) {
+        partConsumers.set(sessionID, count - 1)
+        return
+      }
+      if (count === 0) return
+      partConsumers.delete(sessionID)
+      // [0624] 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
+      syncTokens.delete(sessionID)
+      syncingSessions.delete(sessionID)
+      hydratingSessions.delete(sessionID)
+      releaseSessionParts(sessionID)
+    }
+
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
     function releaseSession(sessionID: string) {
       syncTokens.delete(sessionID)
       syncingSessions.delete(sessionID)
       hydratingSessions.delete(sessionID)
       fullSyncedSessions.delete(sessionID)
+      partConsumers.delete(sessionID)
       dropBufferedDeltas((event) => event.properties.sessionID === sessionID)
+      // [0624] 删除边界同时忘掉终态 ID 事实：同一 Session 重建后新 Part 需要能正常准入。
+      for (const parts of Object.values(store.part)) {
+        for (const part of parts) {
+          if (part.sessionID === sessionID) releasedTerminalParts.delete(part.id)
+        }
+      }
       batch(() => {
         setStore(
           produce((draft) => {
@@ -953,6 +1049,14 @@ export const {
           }
           if (removedMessageIDs.has(info.id)) break
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
+          // [0624] Message 内容持久的到达边界：user 写完即持久，assistant 以 time.completed 为准。
+          // 覆盖 part-first 乱序（Part 先于父 Message 到达时已按未知状态准入）。
+          if (!partConsumers.has(info.sessionID) && (info.role !== "assistant" || info.time.completed !== undefined)) {
+            const doomed = store.part[info.id] ?? []
+            batch(() => {
+              for (const part of doomed) releasePart(info.sessionID, part)
+            })
+          }
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
@@ -975,6 +1079,8 @@ export const {
           // #290：本地缓存窗口从 200 提升至 300，降低长会话过早截断风险
           if (updated.length > 300) {
             const oldest = updated[0]
+            // [0624] 窗口淘汰同时忘掉终态 ID 事实：淘汰后重新加载的 Part 需要能正常准入。
+            for (const part of store.part[oldest.id] ?? []) releasedTerminalParts.delete(part.id)
             batch(() => {
               setStore(
                 "message",
@@ -1004,7 +1110,9 @@ export const {
         // 排序在 mergeLivePart 内统一裁决，避免双通道各写各的。
         case "message.part.progress": {
           // #98：隐藏部件先记入 hydration，再从 store 移除。
-          const part = event.properties.part
+          // [0624] 幂等 TUI 投影：剪掉同 Part 逐字重复的大字段；生产 SSE 已在 daemon 侧投影，
+          // 这里覆盖测试 transport 与直接 SDK 注入，重复应用无害。
+          const part = PartView.project(event.properties.part)
           if ((part as Record<string, unknown>).hidden) {
             touchPart(part.sessionID, part.id)
             removedPartIDs.add(part.id)
@@ -1025,35 +1133,48 @@ export const {
           if (partGone(part.sessionID, part.messageID, part.id)) break
           // Message 元数据只由 message.updated 仲裁，Part-first 也不能挡住其首次 hydration。
           touchPart(event.properties.part.sessionID, event.properties.part.id)
-          const parts = store.part[event.properties.part.messageID]
+          // [0624] 无消费者 Session 的终态正文不入 store；已释放 Part 的迟到 progress/update 直接拒绝。
+          if (!partConsumers.has(part.sessionID)) {
+            if (releasedTerminalParts.has(part.id)) break
+            if (isTerminalAdmission(part)) {
+              releasedTerminalParts.add(part.id)
+              dropBufferedDeltas((event) => event.properties.partID === part.id)
+              break
+            }
+          } else {
+            // [0624] 有消费者时新的合法 durable 更新可以覆盖已释放事实。
+            releasedTerminalParts.delete(part.id)
+          }
+          const parts = store.part[part.messageID]
           if (!parts) {
-            setStore("part", event.properties.part.messageID, [event.properties.part])
+            setStore("part", part.messageID, [part])
             // part 首次创建：replay 在 part.updated 之前到达的缓冲 delta
-            replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
+            replayOrphanDeltas(part.id, part.messageID)
             break
           }
-          const result = search(parts, event.properties.part.id, (part) => part.id)
+          const result = search(parts, part.id, item => item.id)
           if (result.found) {
             // 合并守卫：防止 fire-and-forget 竞态导致短快照覆盖长流式文本
-            setStore("part", event.properties.part.messageID, result.index, reconcile(mergeLivePart(parts[result.index], event.properties.part)))
+            setStore("part", part.messageID, result.index, reconcile(mergeLivePart(parts[result.index], part)))
             break
           }
           setStore(
             "part",
-            event.properties.part.messageID,
+            part.messageID,
             produce((draft) => {
-              draft.splice(result.index, 0, event.properties.part)
+              draft.splice(result.index, 0, part)
             }),
           )
           // part 插入到已有数组：replay 在 part.updated 之前到达的缓冲 delta
-          replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
+          replayOrphanDeltas(part.id, part.messageID)
           break
         }
 
         case "message.part.delta": {
           // #186：进入队列合并，applyPartDelta 内仍走 #157 raw 路径
           // #186：此处禁止直接 setStore，否则绕过 coalesce 失去批处理收益
-          enqueuePartDelta(event)
+          // [0624] 已释放终态 Part 的迟到 delta 直接丢弃；其余按原缓冲/应用路径。
+          if (!releasedTerminalParts.has(event.properties.partID)) enqueuePartDelta(event)
           break
         }
 
@@ -1106,6 +1227,8 @@ export const {
       removedMessageIDs.clear()
       removedPartIDs.clear()
       syncTokens.clear()
+      partConsumers.clear()
+      releasedTerminalParts.clear()
     })
 
     const args = useArgs()
@@ -1277,6 +1400,17 @@ export const {
         })
     }
 
+    // [0624] 当前 route 持有其 Session 的正文使用权；离开即释放，后台完成事件不再把正文补进 store。
+    let routeParts: string | undefined
+    createEffect(() => {
+      const current = route.data
+      const next = current.type === "session" ? current.sessionID : undefined
+      if (next === routeParts) return
+      if (routeParts !== undefined) releaseParts(routeParts)
+      routeParts = next
+      if (next !== undefined) acquireParts(next)
+    })
+
     onMount(() => {
       void bootstrap()
     })
@@ -1419,12 +1553,15 @@ export const {
                     continue
                   }
                   const currentParts = draft.part[message.info.id] ?? []
+                  // [0624] HTTP 页的 Part 在合并前过同一幂等 TUI 投影：viewer wire 已在 daemon 侧剪重复字段，
+                  // 这里覆盖测试 transport 与未来 caller，保证 store 中不存在两份相同 patch。
                   const parts = message.parts.flatMap((part) => {
                     if (partGone(part.sessionID, part.messageID, part.id)) return []
-                    const current = currentParts.find((item) => item.id === part.id)
-                    if (tracker.parts.has(part.id) && current) return [current]
+                    const projected = PartView.project(part)
+                    const current = currentParts.find((item) => item.id === projected.id)
+                    if (tracker.parts.has(projected.id) && current) return [current]
                     // 通用单调合并守卫：pending 短快照不回退本地已累积的长文本（text/reasoning/tool raw）
-                    return [mergeLivePart(current, part)]
+                    return [mergeLivePart(current, projected)]
                   })
                   parts.push(
                     ...currentParts.filter(
@@ -1502,6 +1639,24 @@ export const {
           })
           syncingSessions.set(sessionID, task)
           return task
+        },
+        // [0624] 显式正文消费：Task 卡片与插件用它持有 Session 正文，release 后无消费者即释放。
+        // acquire 成功后 await 现有 sync；返回的 release 幂等由调用方/插件 scope 保证。
+        async acquireParts(sessionID: string) {
+          acquireParts(sessionID)
+          try {
+            await result.session.sync(sessionID)
+          } catch (error) {
+            // sync 失败（Session 删除竞态/守护进程重启）必须回滚计数：没有句柄返回，
+            // 不回滚会让该 Session 的正文使用权永久泄漏，后台完成事件持续补入。
+            releaseParts(sessionID)
+            throw error
+          }
+          return {
+            release() {
+              releaseParts(sessionID)
+            },
+          }
         },
       },
       // [local-smark] goal reconcile：POST 成功后立即更新 store，不等 SSE

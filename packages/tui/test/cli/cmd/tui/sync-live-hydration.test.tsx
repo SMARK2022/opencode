@@ -78,7 +78,8 @@ test("stale session hydration does not overwrite live message parts", async () =
   }, tmp.path)
 
   try {
-    const hydrate = sync.session.sync(sessionID)
+    // 正文仅为实际消费者驻留，先取得租约再验证直播与 HTTP 的合并。
+    const hydrate = sync.session.acquireParts(sessionID)
     await wait(() => requested)
     emit(global({ id: "evt_message", type: "message.updated", properties: { sessionID, info: assistant } }))
     emit(
@@ -143,7 +144,7 @@ test.each(["todo", "diff"] as const)("forced hydration waits for pending %s and 
     return undefined
   }, tmp.path)
   try {
-    const hydrate = sync.session.sync(sessionID)
+    const hydrate = sync.session.acquireParts(sessionID)
     const joined = sync.session.sync(sessionID)
     await wait(() => calls.message === 1 && calls.todo === 1)
     resolveMessages(stale)
@@ -239,7 +240,7 @@ test.each(["streaming", "completed"] as const)("orphan live deltas replay only o
   }, tmp.path)
 
   try {
-    const hydrate = sync.session.sync(sessionID)
+    const hydrate = sync.session.acquireParts(sessionID)
     await wait(() => requested)
     emit(
       global({
@@ -280,7 +281,9 @@ test("hydration does not clear text streamed before it starts", async () => {
   }, tmp.path)
 
   try {
-    emit(global({ id: "evt_message", type: "message.updated", properties: { sessionID, info: assistant } }))
+    // 消费者已挂载，但快照仍在等待；流式助手不能预先标记完成。
+    const hydrate = sync.session.acquireParts(sessionID)
+    emit(global({ id: "evt_message", type: "message.updated", properties: { sessionID, info: { ...assistant, time: { created: 1 } } } }))
     emit(
       global({
         id: "evt_part",
@@ -300,7 +303,6 @@ test("hydration does not clear text streamed before it starts", async () => {
       }),
     )
     await wait(() => sync.data.part[messageID]?.[0]?.type === "text" && sync.data.part[messageID][0].text !== "")
-    const hydrate = sync.session.sync(sessionID)
     await wait(() => requested)
     resolveMessages(json([{ info: assistant, parts: [{ id: partID, sessionID, messageID, type: "text", text: "" }] }]))
     await hydrate
@@ -697,7 +699,8 @@ test("hidden messages and parts survive stale session hydration", async () => {
   }, tmp.path)
 
   try {
-    // 先填 store 再发请求；时间与 ID 反序，trace 只能由隐藏事件建立。
+    // 正文消费先于直播；时间与 ID 反序，隐藏屏障仍只能由事件建立。
+    const hydrate = sync.session.acquireParts(sessionID)
     for (const info of [assistant, removed]) {
       emit(global({ id: `evt_live_${info.id}`, type: "message.updated", properties: { sessionID, info } }))
     }
@@ -709,7 +712,6 @@ test("hidden messages and parts survive stale session hydration", async () => {
     await wait(() => sync.data.part[removed.id]?.length === 1)
     expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID, removed.id])
 
-    const hydrate = sync.session.sync(sessionID)
     await wait(() => requested)
     const hidden = { time: 9, reason: "undo" as const }
     for (const info of [{ ...removed, hidden }, { ...absent, hidden }]) {

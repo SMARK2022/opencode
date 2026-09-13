@@ -2788,12 +2788,16 @@ export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect
   return rows.map((row) => {
     if (!row.cold_ref) {
       if (row.cold_key) throw new CorruptionError({ message: "Part owner has a key without a ref" })
+      if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot Part has a cold Stats projection" })
       return row
     }
     if (row.cold_key) {
       const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
       if (!fields) throw new CorruptionError({ message: "Part inspect key is missing from pack", hash: row.cold_ref })
-      return { ...row, data: restorePackedPart(row.data, fields, row.cold_ref) }
+      const data = restorePackedPart(row.data, fields, row.cold_ref)
+      // viewer替换thaw后仍保留同一cold_stats核对，不把损坏的投影读成成功。
+      requirePartStats(row, projectPartStats(data))
+      return { ...row, data }
     }
     return {
       ...row,

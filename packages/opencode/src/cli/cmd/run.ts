@@ -872,6 +872,8 @@ export const RunCommand = effectCmd({
         }
 
         const model = pick(args.model)
+        // runtime 子图只在真正进入交互分支时才加载（目标已内联 lazy import）：
+        // 命令注册仅需要元数据，顶层提前 import 会让每个 CLI 进程白担 runtime 模块内存。
         const { runInteractiveMode } = await import("./run/runtime")
         try {
           await runInteractiveMode({

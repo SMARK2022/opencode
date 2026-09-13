@@ -93,6 +93,7 @@ describe("lsp.spawn", () => {
             })
             // 默认值也不能恢复LSP，与既有true/custom配置防复活测试一致。
             expect(spy).toHaveBeenCalledTimes(0)
+            expect(yield* lsp.status()).toEqual([])
           } finally {
             spy.mockRestore()
           }

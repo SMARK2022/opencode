@@ -131,6 +131,7 @@ const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("LSP.state")(function* (ctx) {
         // 产品固定停用 LSP；true 或自定义 server 配置也不能恢复子进程。
+        // 本项默认关闭收益由该更强产品策略承载，不恢复配置opt-in；formatter保持独立。
         const servers: Record<string, LSPServer.Info> = {}
         yield* Effect.logInfo("all LSPs are disabled")
 

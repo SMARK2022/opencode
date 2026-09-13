@@ -200,6 +200,14 @@ describe("SessionV2.history", () => {
       expect(changed[0]?.message).toBe(cold[0]?.message)
       expect(changed[1]?.message).not.toBe(cold[1]?.message)
       expect(changed[1]?.message).toMatchObject({ text: "changed" })
+      // 继续使用真实Native row和原位修改：大正文不复制进常驻proof，但逐字段编码可完整还原。
+      const text = "large proof payload ".repeat(64 * 1024)
+      yield* db.update(SessionMessageTable).set({ data: Schema.encodeSync(SessionMessage.Synthetic)(SessionMessage.Synthetic.make({ id: ids[2], sessionID: created.id, type: "synthetic", text, time: { created: DateTime.makeUnsafe(2) } })) }).where(eq(SessionMessageTable.id, ids[2])).run().pipe(Effect.orDie)
+      yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
+      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, ids[2])).get().pipe(Effect.orDie)
+      const decodedKeys = cache.proof.map(key => Buffer.from(Bun.zstdDecompressSync(Buffer.from(key, "latin1"))).toString("utf8"))
+      expect(decodedKeys).toContain(JSON.stringify(row))
+      expect(cache.proof.every(key => key.length < 64 * 1024)).toBe(true)
       // 最新隐藏用户不得消耗limit(2)；普通技术Synthetic也不产生Goal turn。
       const turns = Array.from({ length: 3 }, () => SessionMessage.ID.create())
       for (const [index, id] of turns.entries()) yield* db.insert(SessionMessageTable).values({

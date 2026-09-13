@@ -158,8 +158,15 @@ describe("session messages endpoint", () => {
     withoutWatcher(
       Effect.gen(function* () {
         const session = yield* sessionScoped
-        // 保留520条真实Message和limit=510断言，避免无关Part写入耗尽CI原有30秒预算。
-        yield* fill(session.id, 520, undefined, false)
+        const database = yield* Database.Service
+        const created = Date.now()
+        // 本例只测分页边界：一次预约建立520条真实投影行，不让逐条事件写入耗尽原30秒预算。
+        yield* Database.withSync(database, (sync) => sync.insert(MessageTable).values(
+          Array.from({ length: 520 }, (_, index) => ({
+            id: MessageID.ascending(), session_id: session.id, time_created: created + index, time_updated: created + index,
+            data: { role: "user" as const, time: { created: created + index }, agent: "test", model, tools: {} },
+          })),
+        ).run())
 
         const res = yield* request(`/session/${session.id}/message?limit=510`)
         expect(res.status).toBe(200)
@@ -304,6 +311,69 @@ describe("session messages endpoint", () => {
           diffs: [{ file: "large.txt", patch, additions: 512, deletions: 0, status: "modified" }],
         })
         expect(yield* readColdRef).toBeNull()
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "viewer message pages drop duplicate tool patch fields without touching the complete contract",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const svc = yield* SessionNs.Service
+        const messageID = MessageID.ascending()
+        yield* svc.updateMessage({
+          id: messageID,
+          sessionID: session.id,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model,
+          tools: {},
+        } satisfies SessionV1.User)
+        // [0624] 与 diff 逐字相同的 filediff.patch 是 viewer 投影唯一允许删除的重复字段。
+        const patch = "+duplicate patch line\n".repeat(64)
+        yield* svc.updatePart({
+          id: PartID.ascending(),
+          sessionID: session.id,
+          messageID,
+          type: "tool",
+          callID: "call_1",
+          tool: "edit",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts" },
+            output: "Edit applied successfully.",
+            title: "a.ts",
+            metadata: { diff: patch, filediff: { file: "a.ts", patch, additions: 64, deletions: 0 }, diagnostics: {} },
+            time: { start: 1, end: 2 },
+          },
+        } as never)
+
+        const viewer = yield* request(`/session/${session.id}/message?limit=1`, {
+          headers: { "x-opencode-tui-message-projection": "viewer" },
+        })
+        const viewerBody = yield* json<SessionV1.WithParts[]>(viewer)
+        const viewerPart = viewerBody[0]?.parts[0]
+        // viewer 只剪掉与 diff 逐字重复的 patch；diff、input、output 与轻量元数据必须保留。
+        expect(
+          viewerPart?.type === "tool" && viewerPart.state.status === "completed" ? viewerPart.state.metadata : undefined,
+        ).toEqual({
+          diff: patch,
+          filediff: { file: "a.ts", additions: 64, deletions: 0 },
+          diagnostics: {},
+        })
+
+        // 默认完整合同保持原样：同一份数据两份字段都在。
+        const complete = yield* request(`/session/${session.id}/message?limit=1`)
+        const completeBody = yield* json<SessionV1.WithParts[]>(complete)
+        const completePart = completeBody[0]?.parts[0]
+        expect(
+          completePart?.type === "tool" && completePart.state.status === "completed"
+            ? (completePart.state.metadata as { filediff?: { patch?: unknown } }).filediff?.patch
+            : undefined,
+        ).toBe(patch)
       }),
     ),
     { git: true },

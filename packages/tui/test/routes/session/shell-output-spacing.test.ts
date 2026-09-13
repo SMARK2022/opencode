@@ -65,7 +65,9 @@ describe("Session Shell output spacing", () => {
     // 存在性检查与挂载共用一次getter求值，不能要求恢复已修复的重复构树路径。
     expect(blockToolSource).toContain("const previewTree = createMemo(() => props.preview)")
     expect(blockToolSource).toContain("const collapsed = createMemo(() => previewTree() !== undefined)")
-    expect(blockToolSource).toContain("createSignal(!collapsed())")
+    // 正文驻留改由外层交互owner控制，收起时不保留第二份内置展开状态。
+    expect(blockToolSource).toContain("<Show when={!collapsed()}>")
+    expect(blockToolSource).not.toContain("createSignal(!collapsed())")
     expect(blockToolSource).not.toContain("setCanCollapse")
   })
 

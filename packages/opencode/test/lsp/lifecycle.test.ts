@@ -73,6 +73,7 @@ describe("LSP service lifecycle", () => {
         const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
         // 没有活动后端时保持false，不以配置默认值伪造可用状态。
         expect(result).toBe(false)
+        expect(yield* lsp.status()).toEqual([])
       }),
     ),
   )

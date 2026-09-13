@@ -30,6 +30,8 @@ import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 // #0500：boundary-first 读取的权威——compaction 边界决定 hydrate 范围，message-v2 不得自行扫描 marker。
 import { CompactionBoundary } from "@opencode-ai/core/session/compaction-boundary"
+import { PartView } from "@opencode-ai/core/session/part-view"
+import { encodeProofKey } from "@opencode-ai/core/session/history-proof"
 import { Option } from "effect"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
@@ -374,22 +376,21 @@ function hydrate(
     const ids = rows.map((row) => row.id)
     const partByMessage = new Map<string, Part[]>()
     if (ids.length > 0) {
-      const partRows = yield* db
-        .select()
-        .from(PartTable)
-        .where(inArray(PartTable.message_id, ids))
-        .orderBy(PartTable.message_id, PartTable.id)
-        .all()
-        .pipe(Effect.orDie)
-      // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
-      // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
-      // #553：visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
-      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)))
+      // SELECT与冷读取在同一次连接预约和快照中完成，不能跨await携带已失效的cold locator。
+      const restoredParts = yield* Database.withSync({ db, sync }, () => sync.transaction((tx) => {
+        const partRows = tx.select().from(PartTable).where(inArray(PartTable.message_id, ids))
+          .orderBy(PartTable.message_id, PartTable.id).all()
+        const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
+        // viewer仅inspect，不持久预热；完整SDK仍走原thaw与refcount owner。
+        return messageProjection === "viewer" ? ColdStorage.inspectPartRows(tx, visible) : ColdStorage.thawPartRows(tx, visible)
+      }, { behavior: "deferred" }))
       for (const row of restoredParts) {
         const next = partFromRestored(row)
+        // [0624] viewer 路径再过一次 TUI 专用纯投影，剪掉同 Part 内逐字重复的大字段。
+        const projected = messageProjection === "viewer" ? PartView.project(next) : next
         const list = partByMessage.get(row.message_id)
-        if (list) list.push(next)
-        else partByMessage.set(row.message_id, [next])
+        if (list) list.push(projected)
+        else partByMessage.set(row.message_id, [projected])
       }
     }
 
@@ -1290,7 +1291,8 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
     // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
     messages: messageRows.map((row) => ({
       id: row.id,
-      key: JSON.stringify([
+      // zstd(level 1)转latin1无损保存完整tuple，保留exact相等且不让warm槽重复常驻原文。
+      key: encodeProofKey(JSON.stringify([
         row.id,
         row.timeCreated,
         row.timeUpdated,
@@ -1298,7 +1300,7 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
         row.coldRef,
         row.coldKey,
         parts.get(row.id) ?? [],
-      ]),
+      ])),
     })),
   }
 })

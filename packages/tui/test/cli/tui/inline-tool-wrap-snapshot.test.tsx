@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { createRequire } from "node:module"
 import { createContext, createEffect, createMemo, createSignal, For, Match, Show, Switch, useContext } from "solid-js"
+import { createStore } from "solid-js/store"
 import { BoxRenderable, MouseButton, type ScrollBoxRenderable } from "@opentui/core"
 import { testRender, type JSX } from "@opentui/solid"
 import stripAnsi from "strip-ansi"
@@ -338,6 +339,7 @@ describe("TUI inline tool wrapping", () => {
     // 沿用 #212 的生产源码执行边界，编译真实组件，不另写点击或布局算法。
     const names = [
       "UserMessage",
+      "useInteraction",
       "autoReviewColor",
       "autoReviewLineID",
       "autoReviewLabelID",
@@ -387,11 +389,14 @@ describe("TUI inline tool wrapping", () => {
     const [expanded, setExpanded] = createSignal(false)
     let parentClicks = 0
     const ToolAutoReview = createContext(() => review)
+    // 真实组件通过响应式属性重绘，普通对象无法验证点击后的展开状态。
+    const [interaction, setInteraction] = createStore<Record<string, boolean>>({})
     const theme = createTuiPluginApi().theme.current
     const dependencies = {
       createEffect,
       createMemo,
       createSignal,
+      on: runtime.on,
       useContext,
       Show,
       For,
@@ -411,7 +416,16 @@ describe("TUI inline tool wrapping", () => {
       useRenderer: runtime.useRenderer,
       useTheme: () => ({ theme }),
       useRoute: () => ({ navigate }),
-      use: () => ({ sessionID: "ses_render", showTimestamps: () => false, width: 72 }),
+      use: () => ({
+        sessionID: "ses_render", showTimestamps: () => false, width: 72,
+        messageView: () => undefined,
+        pinnedMessages: () => new Set<string>(),
+        markMessageDirty: () => {},
+        interaction: {
+          get: (key: string) => interaction[key] ?? false,
+          set: (key: string, value: boolean) => setInteraction(key, value),
+        },
+      }),
       usePathFormatter: () => ({ format: (value: string) => value }),
       useLocal: () => ({ agent: { color: () => theme.text } }),
       useSync: () => ({ data: { permission: {} } }),
@@ -525,7 +539,7 @@ describe("TUI inline tool wrapping", () => {
             input={{ command: "failed command" }}
             metadata={{ output: visible }}
             output={`${visible}\n${notice}`}
-            part={{ tool: "shell", state: { status: "completed" } }}
+            part={{ id: "part_shell_error", tool: "shell", state: { status: "completed" } }}
           />
         ),
         { width: 160, height: 12 },
@@ -558,7 +572,7 @@ describe("TUI inline tool wrapping", () => {
       shell.renderer.destroy()
       // 空输出的大内联命令必须可展开；真实组件的点击不能只由字符串断言代替。
       await renderFrame(
-        () => <production.Shell input={{ command: `echo ${"x".repeat(1100)} TAIL` }} metadata={{ output: "" }} part={{ tool: "shell", state: { status: "completed" } }} />,
+        () => <production.Shell input={{ command: `echo ${"x".repeat(1100)} TAIL` }} metadata={{ output: "" }} part={{ id: "part_shell_long", tool: "shell", state: { status: "completed" } }} />,
         { width: 72, height: 32 },
       )
       const longShell = testSetup!

@@ -36,6 +36,8 @@ async function setup() {
 }
 
 function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; stateDir: string; width?: number; conceal?: () => boolean }) {
+  // 响应式交互存储才能验证真实点击，不使用不会通知渲染的普通对象。
+  const [interaction, setInteraction] = createSignal<Record<string, boolean>>({})
   const value = {
     get width() { return props.width ?? 60 },
     sessionID: "ses_test",
@@ -48,6 +50,13 @@ function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; s
     providers: () => new Map(),
     sync: {} as never,
     tui: {} as never,
+    messageView: () => undefined,
+    pinnedMessages: () => new Set<string>(),
+    markMessageDirty: () => {},
+    interaction: {
+      get: (key: string) => interaction()[key] ?? false,
+      set: (key: string, value: boolean) => setInteraction((previous) => ({ ...previous, [key]: value })),
+    },
   }
   return (
     <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: props.stateDir, worktree: "/work" }}>

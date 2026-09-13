@@ -165,7 +165,13 @@ test("refreshes integrations after integration updates", async () => {
 
   try {
     await mounted
-    await wait(() => data.location.integration.list() !== undefined)
+    expect(requests).toEqual({ integration: 0, model: 0, provider: 0 })
+    // 事件失效仍覆盖真实消费者；先显式加载，不能靠挂载时的多余请求准备测试。
+    await Promise.all([
+      data.location.integration.refresh(),
+      data.location.model.refresh(),
+      data.location.provider.refresh(),
+    ])
     expect(data.location.integration.list()).toEqual([])
     const before = { ...requests }
 
@@ -192,12 +198,17 @@ test("refreshes effective catalog data after catalog updates", async () => {
     }
   }, events)
 
+  let data!: ReturnType<typeof useData>
+  function Probe() {
+    data = useData()
+    return <box />
+  }
   const app = await testRender(() => (
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
           <InitializedDataProvider>
-            <box />
+            <Probe />
           </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
@@ -205,7 +216,9 @@ test("refreshes effective catalog data after catalog updates", async () => {
   ))
 
   try {
-    await wait(() => requests.model > 0 && requests.provider > 0)
+    await wait(() => !!data)
+    expect(requests).toEqual({ model: 0, provider: 0 })
+    await Promise.all([data.location.model.refresh(), data.location.provider.refresh()])
     const before = { ...requests }
     emitEvent(events, { id: "evt_catalog", type: "catalog.updated", properties: {} })
     await wait(() => requests.model > before.model && requests.provider > before.provider)
@@ -251,7 +264,8 @@ test("refreshes references after updates", async () => {
 
   try {
     await mounted
-    await wait(() => requests === 1)
+    expect(requests).toBe(0)
+    await data.location.reference.refresh()
     emitEvent(events, { id: "evt_reference_1", type: "reference.updated", properties: {} })
     await wait(() => data.location.reference.list()?.length === 1)
     expect(data.location.reference.list()?.[0]?.name).toBe("docs")
@@ -262,7 +276,10 @@ test("refreshes references after updates", async () => {
 
 test("settles pending tools when a live failure arrives", async () => {
   const events = createEventSource()
-  const calls = createFetch(undefined, events)
+  const calls = createFetch(
+    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    events,
+  )
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
   const mounted = new Promise<void>((resolve) => {
@@ -289,6 +306,7 @@ test("settles pending tools when a live failure arrives", async () => {
 
   try {
     await mounted
+    await sync.session.message.refresh("session-1")
     emitEvent(events, {
       id: "evt_agent_1",
       type: "session.next.agent.switched",
@@ -391,7 +409,10 @@ test("settles pending tools when a live failure arrives", async () => {
 
 test("renders admitted prompts only after they become model-visible", async () => {
   const events = createEventSource()
-  const calls = createFetch(undefined, events)
+  const calls = createFetch(
+    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    events,
+  )
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
   const mounted = new Promise<void>((resolve) => {
@@ -418,6 +439,7 @@ test("renders admitted prompts only after they become model-visible", async () =
 
   try {
     await mounted
+    await sync.session.message.refresh("session-1")
     emitEvent(events, {
       id: "evt_admitted_1",
       type: "session.next.prompt.admitted",
@@ -455,7 +477,10 @@ test("renders admitted prompts only after they become model-visible", async () =
 
 test("projects live context updates with their message ID", async () => {
   const events = createEventSource()
-  const calls = createFetch(undefined, events)
+  const calls = createFetch(
+    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    events,
+  )
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
   const mounted = new Promise<void>((resolve) => {
@@ -482,6 +507,18 @@ test("projects live context updates with their message ID", async () => {
 
   try {
     await mounted
+    await sync.session.message.refresh("session-1")
+    // 同一事件流的已加载消息作屏障：不能因广播先到就为无人使用的Session创建正文桶。
+    emitEvent(events, {
+      id: "evt_context_unloaded",
+      type: "session.next.context.updated",
+      properties: {
+        sessionID: "session-unloaded",
+        messageID: "msg_context_unloaded",
+        timestamp: 1,
+        text: "unloaded context".repeat(65536),
+      },
+    }, "proj_session_owner")
     emitEvent(events, {
       id: "evt_context_1",
       type: "session.next.context.updated",
@@ -494,6 +531,7 @@ test("projects live context updates with their message ID", async () => {
     }, "proj_session_owner")
 
     await wait(() => sync.session.message.list("session-1")?.length === 1)
+    expect(sync.session.message.list("session-unloaded")).toBeUndefined()
     expect(sync.session.message.list("session-1")?.[0]).toMatchObject({
       id: "msg_context_1",
       type: "system",
