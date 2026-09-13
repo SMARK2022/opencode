@@ -1,12 +1,13 @@
 // TUI viewer 专用纯投影：删除与同 Part 其他字段逐字重复的大字段，减少 wire/store 的重复驻留。
-// 当前唯一覆盖 edit 类工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串）。
-// 完整 SDK、Provider、daemon SummaryCache 都走原数据路径，不经过这里；
-// 不同值、未知工具与非重复字段必须原样保留。
+// 当前唯一覆盖内建 edit 工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串，
+// 全仓库唯一生产者是 tool/edit.ts）。完整 SDK、Provider、daemon SummaryCache 都走原数据路径；
+// 不同值、未知/第三方工具与非重复字段必须原样保留——按字段形状猜测裁剪属于范围扩大。
 
 // 结构最小约束：daemon 的 MessageV2.Part 与 TUI 的 SDK Part 共用同一 wire 形状，
-// 但品牌 ID 类型不同；投影只读 type/status/metadata，不改写其余字段。
+// 但品牌 ID 类型不同；投影只读 type/tool/status/metadata，不改写其余字段。
 type Projectable = {
   type: string
+  tool?: string
   state?: {
     status: string
     metadata?: Record<string, unknown>
@@ -15,6 +16,7 @@ type Projectable = {
 
 export function project<T extends Projectable>(part: T): T {
   if (part.type !== "tool") return part
+  if (part.tool !== "edit") return part
   if (part.state?.status !== "completed") return part
   const metadata = part.state.metadata
   if (!metadata) return part

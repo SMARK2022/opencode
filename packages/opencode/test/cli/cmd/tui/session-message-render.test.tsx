@@ -4429,6 +4429,116 @@ test("content beyond the residency byte budget is evicted least-recently-rendere
   )
 })
 
+// T03 Task 生命周期切片：子 Session ID 在工具执行后才写入 metadata。首次 mount 时
+// 没有 ID 可读，acquisition 必须跟随 metadata 出现，否则实时卡片的工具计数永远缺失。
+test("task card acquires the child session when its id arrives after mount", async () => {
+  const childID = "ses_task_late_child"
+  const assistant = assistantMessage("msg_task_late", 1)
+  const task = runningToolPart("part_task_late", assistant.id, "task", { description: "late child" })
+  const childUser = { ...userMessage("msg_task_late_child_user", 1), sessionID: childID }
+  const childBase = completedToolPart("part_task_late_child_tool", childUser.id, "bash", { command: "echo hi" }, {}, "hi")
+  const childTool = { ...childBase, sessionID: childID, state: { ...childBase.state, title: "child work" } }
+  await withRenderedSession(
+    [assistant],
+    { [assistant.id]: [task] },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("late child")))
+      expect(app.captureCharFrame().includes("child work")).toBe(false)
+      // sessionId 后到达：卡片必须在此处取得子 Session 正文使用权并加载工具列表。
+      emit(partUpdatedEvent("evt_task_late_id", { ...task, state: { ...task.state, metadata: { sessionId: childID } } }))
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("child work")))
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID }),
+        messages: [childUser],
+        parts: { [childUser.id]: [childTool] },
+      },
+    },
+  )
+})
+
+// T05 Shell 流式切片：Shell 的输出经 metadata.output 更新（status 保持 running）。
+// 已壳化的消息必须按 metadata 变化重测，否则冻结高度落后于持续增长的真实正文。
+test("offscreen shell output growth re-measures the frozen height", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "shellgrow")
+  const target = messages[1].id
+  // progressVersion 是 durable shell 输出的单调版本：缺它时 merge 守卫会把更新当作旧快照丢弃。
+  const shell = runningToolPart("part_shell_grow", target, "bash", {
+    command: "echo growing",
+    metadata: { output: "shellgrow initial", progressVersion: 1 },
+  })
+  parts[target] = [shell]
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app, emit) => {
+      const tailID = messages.at(-1)!.id
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes(`shellgrow assistant ${String(count - 1).padStart(2, "0")}`)))
+      const scroll = sessionScrollBox(app, tailID)
+      await withFakeNow(async (advance) => {
+        advance(RESIDENCY_AGE_TEST_MS)
+        await pumpFrames(app, 8)
+        expect(messageContentReleased(app, target)).toBe(true)
+      })
+      const before = await stableScrollHeight(app, scroll)
+      const heightBefore = messageRoot(app, target).height
+
+      emit(
+        partUpdatedEvent("evt_shell_grow", {
+          ...shell,
+          state: {
+            ...shell.state,
+            metadata: { output: "shellgrow initial\nsecond added line\nthird added line\nfourth added line", progressVersion: 2 },
+          },
+        }),
+      )
+
+      // 输出 +3 行，冻结高度与 scrollbar 全长恰好 +3；不监听 metadata.output 会保持旧值。
+      await waitForFrame(app, () => scroll.scrollHeight === before + 3)
+      expect(messageRoot(app, target).height).toBe(heightBefore + 3)
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
+// T05 容量记账切片：挂载中的正文增长必须同步进驻留估算。旧记账只在挂载时取样，
+// 流式增长到超预算也不会触发驱逐，容量上限形同虚设。
+test("mounted content growth counts toward the residency byte budget", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "growth")
+  const target = messages[1].id
+  const growing = completedToolPart("part_growth_big", target, "bash", { command: "grow" }, {}, "small")
+  parts[target] = [growing]
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app, emit) => {
+      const tailID = messages.at(-1)!.id
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes(`growth assistant ${String(count - 1).padStart(2, "0")}`)))
+      await pumpFrames(app, 3)
+      // 预算内：所有屏外内容保持挂载。
+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(false)
+      // 挂载中的 Part 增长到超过 64MiB 驻留容量；不推进时钟，唯一驱逐理由是容量。
+      emit(
+        partUpdatedEvent("evt_growth_big", {
+          ...growing,
+          state: { ...growing.state, output: "growth payload row\n".repeat(6_000_000) },
+        }),
+      )
+      await waitForFrame(app, () => messageContentReleased(app, "msg_window_user_00"))
+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
+      expect(messageContentReleased(app, "msg_window_assistant_23")).toBe(false)
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
 async function withRenderedSession(
   messages: Array<AssistantMessage | SDKUserMessage>,
   parts: Record<string, Part[]>,

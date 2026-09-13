@@ -106,6 +106,50 @@ test("plugin dispose releases an in-flight acquireParts and its late handle", as
   }
 })
 
+test("explicit release then dispose releases the underlying handle exactly once", async () => {
+  // 释放幂等性回归守卫：显式 release 已消费本次 acquisition，随后 dispose 不得
+  // 再产生第二次底层释放。该守卫在修复前后均绿，锁定的是 track 包装不破坏幂等性。
+  let releases = 0
+  const api = createTuiPluginApi({
+    state: {
+      acquireParts: async () => ({ release: () => releases++ }),
+    },
+  })
+
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      const file = path.join(dir, "plugin.ts")
+      await Bun.write(
+        file,
+        `export default {
+  id: "demo.release",
+  tui: async (api, options) => {
+    const handle = await api.state.acquireParts("ses_explicit")
+    handle.release()
+    options.onReleased?.()
+  },
+}
+`,
+      )
+      return { spec: pathToFileURL(file).href }
+    },
+  })
+
+  let released = false
+  const { config, restore } = mockTuiRuntime(tmp.path, [[tmp.extra.spec, { onReleased: () => (released = true) }]])
+  try {
+    await TuiPluginRuntime.init({ api, config })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(released).toBe(true)
+    expect(releases).toBe(1)
+    await TuiPluginRuntime.dispose()
+    expect(releases).toBe(1)
+  } finally {
+    await TuiPluginRuntime.dispose()
+    restore()
+  }
+})
+
 test("rolls back failed plugin and continues loading next", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

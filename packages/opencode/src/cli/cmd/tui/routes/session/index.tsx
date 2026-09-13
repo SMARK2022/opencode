@@ -514,10 +514,19 @@ export function Session() {
   }
 
   function markMessageDirty(id: string) {
-    // 流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压；
-    // 驻留中的 Message 本来就是 auto 高度，无需标脏。
+    // 驻留中的 Message 本来就是 auto 高度，无需重测；但正文增长必须同步进容量估算，
+    // 否则挂载中的流式输出逃出预算（估算差额更新，不重复计入）。
+    if (messageView[id]?.mounted !== false) {
+      const cached = estimateBytes.get(id)
+      if (cached !== undefined) {
+        const next = estimateMessageBytes(id)
+        residentBytesTotal += next - cached
+        estimateBytes.set(id, next)
+      }
+      return
+    }
+    // 壳化消息的流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压。
     estimateBytes.delete(id)
-    if (messageView[id]?.mounted !== false) return
     remeasureQueue = [id, ...remeasureQueue.filter((queued) => queued !== id)]
     setRemeasuring(true)
   }
@@ -568,6 +577,19 @@ export function Session() {
   // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
   const estimateBytes = new Map<string, number>()
   let residentBytesTotal = 0
+
+  // 驻留记账口径：false→true 计入、true→false 减出。驻留重建、重测批进出、
+  // stale 清理与内容标脏的差额刷新都经由这两个入口；首次见到已挂载消息的补账
+  // 由下方带 estimateBytes.has 守卫的循环直接加总（每 ID 只计一次，不会双计）。
+  function accountMounted(id: string) {
+    const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
+    estimateBytes.set(id, estimate)
+    residentBytesTotal += estimate
+  }
+  function accountShelled(id: string) {
+    residentBytesTotal -= estimateBytes.get(id) ?? 0
+  }
+
   function syncMessageResidency() {
     if (!scroll || scroll.isDestroyed) return
     queueMicrotask(() => {
@@ -630,9 +652,11 @@ export function Session() {
         let finalized = false
         batch(() => {
           // 驻留窗口内的壳立即重建，不等批轮次：用户滚动优先于后台重测。
+          // false→true 的唯一记账口径同样适用于重测路径，否则重测期间的重建只进不出。
           for (const id of desired) {
             const record = messageView[id]
             if (record && !record.mounted) {
+              accountMounted(id)
               setMessageView(id, { mounted: true, height: "auto" })
               remeasureQueue = remeasureQueue.filter((queued) => queued !== id)
               remeasureBatch = remeasureBatch.filter((queued) => queued !== id)
@@ -649,6 +673,7 @@ export function Session() {
               rows += typeof record.height === "number" ? record.height : 0
               remeasureBatch.push(id)
               batchHeights.delete(id)
+              accountMounted(id)
               setMessageView(id, { mounted: true, height: "auto" })
             }
             if (remeasureBatch.length === 0 && remeasureQueue.length === 0) finalized = true
@@ -669,9 +694,12 @@ export function Session() {
                 batchHeights.delete(id)
                 if (!child) continue
                 lastSeenHeights.set(id, child.height)
-                // 批处理期间滚入驻留窗口的不再壳化，auto 高度继续跟随内容。
+                // 批处理期间滚入驻留窗口的不再壳化（批次进队时已记账），auto 高度继续跟随内容。
                 if (desired.has(id)) setMessageView(id, { mounted: true, height: "auto" })
-                else setMessageView(id, { mounted: false, height: child.height })
+                else {
+                  accountShelled(id)
+                  setMessageView(id, { mounted: false, height: child.height })
+                }
               }
               remeasureBatch = []
               batchStablePasses = 0
@@ -700,9 +728,7 @@ export function Session() {
           const record = messageView[id]
           if (record && !record.mounted) {
             // 重建挂载计入驻留容量；估算缓存在标脏时已删除，这里取到新内容的真实量级。
-            const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
-            estimateBytes.set(id, estimate)
-            residentBytesTotal += estimate
+            accountMounted(id)
             setMessageView(id, { mounted: true, height: "auto" })
           }
         }
@@ -746,26 +772,26 @@ export function Session() {
                 continue
               }
               // 冻结值直接读当前布局（内容本帧仍挂载），不需要额外测量通道。
+              accountShelled(id)
               setMessageView(id, { mounted: false, height: child.height })
-              residentBytesTotal -= estimateBytes.get(id) ?? 0
             }
           }
         }
         // 300 窗口淘汰、会话切换或 revert 隐藏后清理无主记录，不随会话时长累积。
         const stale = Object.keys(messageView).filter((id) => !byId.has(id))
         if (stale.length) {
+          for (const id of stale) {
+            // 先减账再删记录：删除后 mounted 状态不可读，顺序颠倒会让容量只进不出。
+            if (messageView[id]?.mounted) accountShelled(id)
+            lastSeenHeights.delete(id)
+            lastRenderedAt.delete(id)
+            estimateBytes.delete(id)
+          }
           setMessageView(
             produce((state) => {
               for (const id of stale) delete state[id]
             }),
           )
-          for (const id of stale) {
-            const record = messageView[id]
-            if (record?.mounted) residentBytesTotal -= estimateBytes.get(id) ?? 0
-            lastSeenHeights.delete(id)
-            lastRenderedAt.delete(id)
-            estimateBytes.delete(id)
-          }
         }
       })
       // 有候选高度还在收敛时主动预约下一帧，否则两条稳定观察规则永远等不到第二帧。
@@ -2050,7 +2076,7 @@ function UserMessage(props: {
     on(
       contentVersion,
       () => {
-        if (!mounted()) ctx.markMessageDirty(props.message.id)
+        ctx.markMessageDirty(props.message.id)
       },
       { defer: true },
     ),
@@ -2309,6 +2335,10 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               "output" in part.state ? part.state.output : undefined,
               "title" in part.state ? part.state.title : undefined,
               "error" in part.state ? part.state.error : undefined,
+              // Shell 等工具的流式 progress 经 metadata.output 落地，状态字段不变；
+              // 壳化后缺这个签名会让冻结高度与 scrollbar 落后于持续增长的真实正文。
+              // pending 的 schema 没有 metadata 字段，in 守卫是类型与行为的双重边界。
+              "metadata" in part.state ? part.state.metadata?.output : undefined,
             ]
           return part.type
         }),
@@ -2318,7 +2348,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     on(
       contentVersion,
       () => {
-        if (!mounted()) ctx.markMessageDirty(props.message.id)
+        ctx.markMessageDirty(props.message.id)
       },
       { defer: true },
     ),
@@ -3737,21 +3767,28 @@ function Task(props: ToolProps<typeof TaskTool>) {
   const { navigate } = useRoute()
   const sync = useSync()
 
-  onMount(() => {
+  // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
+  // 子 Session ID 在工具执行后才写入 metadata（pending 阶段不存在），acquisition 必须
+  // 跟随 metadata 响应式出现而不是只在 mount 取样一次；ID 变化先释放旧消费者。
+  // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关。
+  createEffect(() => {
     const child = props.metadata.sessionId
     if (!child) return
-    // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
-    // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关：
-    // 正文被释放后重新挂载必须能按 acquisition 恢复，而不是看到非空 metadata 就跳过。
     let release: (() => void) | undefined
     let released = false
-    void sync.session.acquireParts(child).then((handle) => {
-      if (released) {
-        handle.release()
-        return
-      }
-      release = handle.release
-    })
+    void sync.session
+      .acquireParts(child)
+      .then((handle) => {
+        if (released) {
+          handle.release()
+          return
+        }
+        release = handle.release
+      })
+      .catch(() => {
+        // 子 Session 删除竞态或守护进程失败：计数已在 acquireParts 内回滚，
+        // 卡片没有正文可展示时保持现状，不重试不合成。
+      })
     onCleanup(() => {
       released = true
       release?.()

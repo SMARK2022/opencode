@@ -606,12 +606,14 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
         released = true
         raw?.()
       }
+      // 暴露给插件的 release 必须是 track 的包装函数：显式释放同时从卸载列表注销，
+      // 直接暴露原始闭包会让每次正常释放都在 scope 里留下一条死记录直到插件卸载。
+      const tracked = scope.track(release)
       const pending = api.state.acquireParts(sessionID).then((handle) => {
         raw = handle.release
         if (released || scope.lifecycle.signal.aborted) raw()
-        return { release }
+        return { release: tracked }
       })
-      scope.track(release)
       return pending
     },
   })

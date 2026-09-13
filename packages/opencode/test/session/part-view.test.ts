@@ -38,6 +38,16 @@ describe("PartView.project", () => {
     expect(PartView.project(part)).toBe(part)
   })
 
+  test("keeps unknown third-party tools with same-shaped fields untouched", () => {
+    // 投影只覆盖已证实重复生产的内建 edit；第三方工具恰好提供同名 diff/filediff
+    // 字段时语义未知，必须原样保留，不能按字段形状猜测裁剪。
+    const custom = {
+      ...editPart({ diff: patch, filediff: { file: "a.ts", patch, additions: 1, deletions: 0 } }),
+      tool: "third_party_custom",
+    } as const
+    expect(PartView.project(custom)).toBe(custom)
+  })
+
   test("keeps non-tool, non-completed and metadata-less parts untouched", () => {
     const text = { id: "prt_2", messageID: "msg_1", sessionID: "ses_1", type: "text", text: "hello" } as const
     expect(PartView.project(text)).toBe(text)
