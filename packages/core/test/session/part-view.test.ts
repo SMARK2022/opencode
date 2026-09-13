@@ -32,7 +32,7 @@ describe("PartView.project", () => {
     // 原对象不被改写：投影必须返回副本，共享事件/DB 对象不能就地修改。
     expect((part.state.metadata.filediff as Record<string, unknown>).patch).toBe(patch)
     // native工具使用structured，复用同一投影且重投影幂等，不能只覆盖V1 metadata。
-    const native = { type: "tool", state: { status: "completed", structured: part.state.metadata } }
+    const native = { type: "tool", name: "edit", state: { status: "completed", structured: part.state.metadata } }
     const next = PartView.project(native)
     expect(next.state.structured.filediff).toEqual({ file: "a.ts", additions: 1, deletions: 0 })
     expect(PartView.project(next)).toBe(next)
@@ -42,6 +42,23 @@ describe("PartView.project", () => {
   test("keeps filediff.patch when it differs from metadata.diff", () => {
     const part = editPart({ diff: patch, filediff: { file: "a.ts", patch: "+different\n" } })
     expect(PartView.project(part)).toBe(part)
+  })
+
+  test("keeps unknown third-party tools with same-shaped fields untouched", () => {
+    // [0625] 投影只覆盖已证实重复生产的内建 edit；第三方工具恰好提供同名 diff/filediff
+    // 字段时语义未知，必须原样保留，不能按字段形状猜测裁剪。
+    const custom = {
+      ...editPart({ diff: patch, filediff: { file: "a.ts", patch, additions: 1, deletions: 0 } }),
+      tool: "third_party_custom",
+    } as const
+    expect(PartView.project(custom)).toBe(custom)
+    const native = { type: "tool", name: "third_party_custom", state: { status: "completed", structured: custom.state.metadata } }
+    expect(PartView.project(native)).toBe(native)
+    const unnamed = { type: "tool", state: native.state }
+    expect(PartView.project(unnamed)).toBe(unnamed)
+    expect(PartView.projectFields(custom.state.metadata)).toBe(custom.state.metadata)
+    expect(PartView.projectFields(custom.state.metadata, native.name)).toBe(custom.state.metadata)
+    expect(PartView.projectFields(custom.state.metadata, "edit").filediff).not.toHaveProperty("patch")
   })
 
   test("keeps non-tool, non-completed and metadata-less parts untouched", () => {

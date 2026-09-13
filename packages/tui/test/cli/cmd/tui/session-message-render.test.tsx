@@ -51,19 +51,22 @@ const assistant = (id: string, created: number, parentID = "msg_user"): Assistan
   time: { created, completed: created + 1 }, finish: "stop",
 })
 const textPart = (id: string, messageID: string, text: string): Part => ({ id, sessionID: sid, messageID, type: "text", text })
-const toolPart = (id: string, messageID: string, output: string, contextOutput = output): Part => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
+const toolPart = (id: string, messageID: string, output: string, contextOutput = output) => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
   state: { status: "completed", input: { command: "fixture" }, output: contextOutput, title: "fixture", metadata: { output }, time: { start: 1, end: 2 } },
-})
+} satisfies Part)
 type App = Awaited<ReturnType<typeof testRender>>
 type Context = { sync: ReturnType<typeof useSync>; local: ReturnType<typeof useLocal>; keymap: ReturnType<typeof useOpencodeKeymap> }
 
 async function withRenderedSession(messages: Array<UserMessage | AssistantMessage>, parts: Record<string, Part[]>,
-  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 }) {
+  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 },
+  override?: Parameters<typeof createFetch>[0]) {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify({ thinking_mode: "show" }))
   const events = createEventSource()
   const info = { id: sid, directory, projectID: "proj_test", slug: sid, version: "1", title: sid, time: { created: 1, updated: 1 } }
-  const calls = createFetch((url) => {
+  const calls = createFetch(async (url, request, init) => {
+    const response = await override?.(url, request, init)
+    if (response) return response
     if (url.pathname === "/session") return json([info])
     if (url.pathname === `/session/${sid}`) return json(info)
     if (url.pathname === `/session/${sid}/message`) return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
@@ -381,6 +384,76 @@ test("content beyond the byte budget is evicted least-recently-rendered first", 
   await withRenderedSession(fixture.messages, fixture.parts, async (app) => {
     await waitForFrame(app, (frame) => frame.includes("budget assistant 23"))
     await pumpFrames(app, 3)
+    await waitForFrame(app, () => released(app, "msg_window_user_00"))
+    expect(released(app, "msg_window_user_00")).toBe(true)
+    expect(released(app, "msg_window_assistant_23")).toBe(false)
+  })
+})
+
+function partUpdatedEvent(id: string, part: Part): GlobalEvent {
+  return { directory, project: "proj_test", payload: { id, type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: Date.now() } } }
+}
+
+test("task card acquires the child session when its id arrives after mount", async () => {
+  const childID = "ses_task_late_child"
+  const info = assistant("msg_task_late", 1)
+  const task = { id: "part_task_late", sessionID: sid, messageID: info.id, type: "tool", callID: "call_task", tool: "task",
+    state: { status: "running", input: { description: "late child" }, metadata: {}, time: { start: 1 } } } satisfies Part
+  const childUser = { ...user("msg_task_late_child_user", 1), sessionID: childID }
+  const childBase = toolPart("part_task_late_child_tool", childUser.id, "hi")
+  const childTool = { ...childBase, sessionID: childID, state: { ...childBase.state, title: "child work" } }
+  await withRenderedSession([info], { [info.id]: [task] }, async (app, emit) => {
+    await waitForFrame(app, (frame) => frame.includes("late child"))
+    expect(app.captureCharFrame().includes("child work")).toBe(false)
+    // 不主动sync或导航：迟到ID必须由Task自身取得正文使用权。
+    emit(partUpdatedEvent("evt_task_late_id", { ...task, state: { ...task.state, metadata: { sessionId: childID } } }))
+    await waitForFrame(app, (frame) => frame.includes("child work"))
+  }, undefined, (url) => {
+    if (url.pathname === `/session/${childID}`) return json({ id: childID, parentID: sid, directory, projectID: "proj_test", slug: childID, version: "1", title: childID, time: { created: 1, updated: 1 } })
+    if (url.pathname === `/session/${childID}/message`) return json([{ info: childUser, parts: [childTool] }])
+    return undefined
+  })
+})
+
+test("offscreen shell output growth re-measures the frozen height", async () => {
+  const fixture = windowFixture("shellgrow")
+  const target = fixture.messages[1].id
+  // metadata写在state上；running Shell仅接受递增的progressVersion。
+  const shell = { id: "part_shell_grow", sessionID: sid, messageID: target, type: "tool", callID: "call_shell", tool: "bash",
+    state: { status: "running", input: { command: "echo growing" }, metadata: { output: "shellgrow initial", progressVersion: 1 }, time: { start: 1 } } } satisfies Part
+  fixture.parts[target] = [shell]
+  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
+    await waitForFrame(app, (frame) => frame.includes("shellgrow assistant 23"))
+    const scroll = sessionScrollBox(app, fixture.messages[47].id)
+    await withFakeNow(async (advance) => {
+      advance(AGE)
+      await pumpFrames(app, 8)
+      expect(released(app, target)).toBe(true)
+    })
+    const before = await stableHeight(app, scroll)
+    const heightBefore = messageRoot(app, target).height
+    emit(partUpdatedEvent("evt_shell_grow", { ...shell, state: { ...shell.state, metadata: {
+      output: "shellgrow initial\nsecond added line\nthird added line\nfourth added line", progressVersion: 2,
+    } } }))
+    // status、命令均不变，根高和滚动全长精确+3只能来自metadata正文的高度失效。
+    await waitForFrame(app, () => scroll.scrollHeight === before + 3)
+    expect(messageRoot(app, target).height).toBe(heightBefore + 3)
+  })
+})
+
+test("mounted content growth counts toward the residency byte budget", async () => {
+  const fixture = windowFixture("growth")
+  const target = fixture.messages[1].id
+  const growing = toolPart("part_growth_big", target, "small visible output", "small")
+  fixture.parts[target] = [growing]
+  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
+    await waitForFrame(app, (frame) => frame.includes("growth assistant 23"))
+    await pumpFrames(app, 3)
+    expect(released(app, "msg_window_user_00")).toBe(false)
+    expect(released(app, target)).toBe(false)
+    // 只增长模型output越过真实64MiB；短metadata输出不把大正文送入renderer。
+    emit(partUpdatedEvent("evt_growth_big", { ...growing, state: { ...growing.state, output: "x".repeat(64 * 1024 * 1024 + 1) } }))
+    // 不推进时钟，也不重挂目标；本轮驱逐必须由挂载中容量差额触发。
     await waitForFrame(app, () => released(app, "msg_window_user_00"))
     expect(released(app, "msg_window_user_00")).toBe(true)
     expect(released(app, "msg_window_assistant_23")).toBe(false)

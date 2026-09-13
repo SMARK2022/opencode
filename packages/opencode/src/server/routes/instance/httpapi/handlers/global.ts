@@ -34,16 +34,12 @@ function projectViewerEvent(event: GlobalBusEvent): GlobalBusEvent {
     const next = PartView.project(part)
     return next === part ? event : { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
   }
-  if (payload.type === "session.next.tool.success") {
-    const structured = PartView.projectFields(payload.properties.structured)
-    return { ...event, payload: { ...payload, properties: { ...payload.properties, structured } } }
-  }
+  // native Success没有工具身份；普通帧和sync副本都保留完整，不增加传输侧状态。
+  if (payload.type === "session.next.tool.success") return event
   if (payload.type === "sync" && payload.syncEvent?.data) {
     const syncEvent = payload.syncEvent
     const data = syncEvent.data
-    if (syncEvent.type === EventV2.versionedType("session.next.tool.success", 1)) {
-      return { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, structured: PartView.projectFields(data.structured) } } } }
-    }
+    if (syncEvent.type === EventV2.versionedType("session.next.tool.success", 1)) return event
     const part = (data as { part?: MessageV2.Part }).part
     if (!part) return event
     const next = PartView.project(part)
