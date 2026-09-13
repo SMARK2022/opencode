@@ -38,7 +38,7 @@ import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
 import { useCommandPalette } from "../../../../src/cli/cmd/tui/context/command-palette"
 import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
-import { Renderable } from "@opentui/core"
+import { Renderable, ScrollBoxRenderable } from "@opentui/core"
 
 // 剪贴板 mock：命令级回绕回归需要观察 copy 副作用，而不是真的写入系统剪贴板。
 // 本文件 serial 运行，模块级 override 不会与其他文件的 clipboard 用例交叉。
@@ -3968,6 +3968,467 @@ test("messages.copy command copies the last assistant before a wrapped revert bo
   )
 })
 
+// ─── 渲染资源窗口（RQ-02 / INV-03 / INV-04）─────────────────────────────────
+// 以下用例共享 24 对 user/assistant fixture：视口较小时头部消息必然落在
+// 视口±一屏的驻留窗口之外，屏外释放、重测与 selection pin 都能在真实 renderer 上观察。
+
+function windowFixture(count: number, marker: string) {
+  const messages: Array<AssistantMessage | SDKUserMessage> = []
+  const parts: Record<string, Part[]> = {}
+  for (let i = 0; i < count; i++) {
+    const tag = String(i).padStart(2, "0")
+    const user = userMessage(`msg_window_user_${tag}`, i * 2 + 1)
+    const assistant = assistantMessage(`msg_window_assistant_${tag}`, i * 2 + 2, user.id)
+    messages.push(user, assistant)
+    parts[user.id] = [textPart(`part_window_user_${tag}`, user.id, `${marker} user ${tag}`)]
+    parts[assistant.id] = [
+      textPart(`part_window_assistant_${tag}`, assistant.id, `${marker} assistant ${tag} ${"wrap content ".repeat(18)}`),
+    ]
+  }
+  return { messages, parts }
+}
+
+// Message 根 renderable 就是 Session ScrollBox 内容区的直接子节点；测试只通过
+// 公开渲染树定位，不触碰 Session 内部 store 或 ref。
+function messageRoot(app: Awaited<ReturnType<typeof testRender>>, id: string) {
+  const node = app.renderer.root.findDescendantById(id)
+  if (!node) throw new Error(`missing message root ${id}`)
+  return node
+}
+
+function sessionScrollBox(app: Awaited<ReturnType<typeof testRender>>, messageID: string) {
+  let node: Renderable | null = messageRoot(app, messageID).parent
+  while (node && !(node instanceof ScrollBoxRenderable)) node = node.parent
+  if (!node) throw new Error(`message ${messageID} is not inside the session ScrollBox`)
+  return node
+}
+
+// 携带 native textBuffer 的节点（TextRenderable、Markdown/Code 等）代表真实正文资源。
+function hasTextBuffer(node: Renderable) {
+  return "textBuffer" in node
+}
+
+// 屏外释放的公开判定：根 renderable 仍在（几何/导航锚点保留），但子树中不再有任何
+// 携带 textBuffer 的节点——正文 native 资源已整体销毁。User 根会保留一个空的 padding
+// 容器，因此不能用子节点数为 0 作判据；Markdown 正文不含 TextRenderable，必须用
+// textBuffer 判定。
+function messageContentReleased(app: Awaited<ReturnType<typeof testRender>>, id: string) {
+  const root = messageRoot(app, id)
+  const stack: Renderable[] = [root]
+  while (stack.length) {
+    const node = stack.pop()!
+    if (node !== root && hasTextBuffer(node)) return false
+    stack.push(...node.getChildren())
+  }
+  return true
+}
+
+// scrollHeight 由 OpenTUI 在内容布局后异步对齐；采样前等它连续三帧不变，
+// 避免把对齐中间帧误当成几何漂移。
+async function stableScrollHeight(app: Awaited<ReturnType<typeof testRender>>, scroll: ScrollBoxRenderable) {
+  let last = -1
+  let stable = 0
+  await waitForFrame(app, () => {
+    const current = scroll.scrollHeight
+    stable = current === last ? stable + 1 : 0
+    last = current
+    return stable >= 2
+  })
+  return last
+}
+
+// 只比较高度不比较 y：y 随滚动 translate 变化，高度与排列顺序才是冻结几何的内容。
+function messageHeights(app: Awaited<ReturnType<typeof testRender>>, ids: string[]) {
+  return ids.map((id) => {
+    const root = messageRoot(app, id)
+    return [id, root.height] as const
+  })
+}
+
+// T04：折叠即释放正文 owner 的回归锁定。反复 100 次展开/折叠后折叠帧逐字节一致，
+// 且 renderable 注册表回到基线；旧“一次展开永久常驻”语义会让注册表随轮次单调增长。
+test("tool card collapse and expand 100 times keeps identical frames and releases the body owner", async () => {
+  const output = Array.from({ length: 30 }, (_, index) => `hundred toggle line ${index}`).join("\n")
+  const assistant = assistantMessage("msg_hundred_toggle", 1)
+  await withRenderedSession(
+    [assistant],
+    {
+      [assistant.id]: [
+        completedToolPart("part_hundred_toggle", assistant.id, "bash", { command: "seq 30" }, { output }),
+      ],
+    },
+    async (app) => {
+      // 预热一轮：初始挂载帧与首次折叠后的稳态帧允许相差一行滚动条缩略图位置，
+      // 本用例锁定的是 100 次循环之间的逐字节一致性，不是初始 mount 的过渡态。
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      await clickVisibleText(app, "Click to expand")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to collapse")))
+      await clickVisibleText(app, "Click to collapse")
+      const collapsed = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      const baseline = Renderable.renderablesByNumber.size
+      for (let round = 0; round < 100; round++) {
+        await clickVisibleText(app, "Click to expand")
+        await waitForFrame(
+          app,
+          (lines) =>
+            lines.some((line) => line.includes("hundred toggle line 15")) &&
+            lines.some((line) => line.includes("Click to collapse")),
+        )
+        await clickVisibleText(app, "Click to collapse")
+        const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+        expect(frame).toEqual(collapsed)
+        expect(Renderable.renderablesByNumber.size).toBe(baseline)
+      }
+    },
+    {},
+    { height: 24 },
+  )
+})
+
+// 受控推进驻留时间窗：驱逐由渲染 pass 驱动且没有后台计时器，测试用假 Date.now
+// 越过 30s 预算窗口（与 index.tsx 的 RESIDENCY_MAX_AGE_MS 对应），而不是真等。
+async function withFakeNow<T>(run: (advance: (ms: number) => void) => Promise<T>): Promise<T> {
+  const realNow = Date.now
+  let current = realNow()
+  Date.now = () => current
+  try {
+    return await run((ms) => {
+      current += ms
+    })
+  } finally {
+    Date.now = realNow
+  }
+}
+
+const RESIDENCY_AGE_TEST_MS = 31_000
+
+// T05 主用例（R3）：预算内屏外内容不驱逐；超过驻留时间窗后才释放。释放后根
+// renderable、逐根几何、scrollbar 全长与可见帧不变；展开态保存在内容 owner 之外，
+// 跨销毁重建后无需重新点击。
+test("offscreen messages release content after aging out while roots, geometry, and expanded state stay exact", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "window")
+  // 首条 assistant 挂一个可折叠工具卡：展开态是否随释放丢失是本用例的一半判定。
+  const output = Array.from({ length: 30 }, (_, index) => `window expanded line ${index}`).join("\n")
+  parts[messages[1].id] = [
+    completedToolPart("part_window_tool_00", messages[1].id, "bash", { command: "seq 30" }, { output }),
+  ]
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      const tailID = messages.at(-1)!.id
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes(`window assistant ${String(count - 1).padStart(2, "0")}`)))
+      const scroll = sessionScrollBox(app, tailID)
+
+      // 先到顶部展开工具卡，让展开后的高度进入几何基线。展开证据取第 15 行：
+      // 折叠预览只含前 10 行；展开的 30 行整体超过视口，把卡片顶滚到视口第 1 行后取样。
+      commandBridge.run("session.first")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      await clickVisibleText(app, "Click to expand")
+      const cardID = messages[1].id
+      scroll.scrollBy(messageRoot(app, cardID).y - scroll.y - 1)
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("window expanded line 15")))
+      const ids = messages.map((message) => message.id)
+      const geometryBefore = messageHeights(app, ids)
+      const expandedScrollHeight = await stableScrollHeight(app, scroll)
+
+      commandBridge.run("session.last")
+      await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes(`window assistant ${String(count - 1).padStart(2, "0")}`)) &&
+          lines.some((line) => line.includes(`window user ${String(count - 1).padStart(2, "0")}`)),
+      )
+
+      await withFakeNow(async (advance) => {
+        // 预算内且未超龄：屏外内容保持挂载，不驱逐（零重挂载前提）。
+        await pumpFrames(app, 3)
+        expect(messageContentReleased(app, "msg_window_user_00")).toBe(false)
+        expect(messageContentReleased(app, "msg_window_assistant_00")).toBe(false)
+
+        // 超过驻留时间窗后，渲染 pass 驱逐屏外内容。冻结时钟下 waitForFrame 的超时
+        // 判定同样冻结，冻结窗口内一律用泵浦节拍驱动，不用条件等待。
+        advance(RESIDENCY_AGE_TEST_MS)
+        const frameBefore = app.captureCharFrame()
+        await pumpFrames(app, 8)
+        expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
+        expect(messageContentReleased(app, "msg_window_assistant_00")).toBe(true)
+
+        // 释放后：scrollbar 全长、每根高度与可见帧全部逐字节不变。
+        expect(await stableScrollHeight(app, scroll)).toBe(expandedScrollHeight)
+        expect(messageHeights(app, ids)).toEqual(geometryBefore)
+        expect(app.captureCharFrame()).toBe(frameBefore)
+      })
+
+      // 返回顶部：展开态来自 Session 级状态而不是已销毁的组件实例，无需重新点击。
+      commandBridge.run("session.first")
+      scroll.scrollBy(messageRoot(app, cardID).y - scroll.y - 1)
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("window expanded line 15")))
+      expect(messageContentReleased(app, "msg_window_assistant_00")).toBe(false)
+      expect(await stableScrollHeight(app, scroll)).toBe(expandedScrollHeight)
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
+// T05 流式切片（R3）：已壳化的屏外 Message 收到 durable Part 更新后，只重测该条的
+// 真实高度。user 正文是不折行的纯文本，4 行替换 1 行，增量恰好 +3 行。
+test("streaming update to an offscreen message re-measures its frozen height exactly", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "stream")
+  const target = "msg_window_user_04"
+  const targetPart = "part_window_user_04"
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app, emit) => {
+      const tailID = messages.at(-1)!.id
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes(`stream assistant ${String(count - 1).padStart(2, "0")}`)))
+      const scroll = sessionScrollBox(app, tailID)
+      // 先让目标超过驻留时间窗壳化，再发 durable 更新触发单条重测。冻结窗口内
+      // 只能用泵浦节拍；emit 与重测观察回到真实时钟后进行。
+      await withFakeNow(async (advance) => {
+        advance(RESIDENCY_AGE_TEST_MS)
+        await pumpFrames(app, 8)
+        expect(messageContentReleased(app, target)).toBe(true)
+      })
+      const before = await stableScrollHeight(app, scroll)
+      const heightBefore = messageRoot(app, target).height
+
+      emit(
+        partUpdatedEvent(
+          "evt_stream_offscreen",
+          textPart(targetPart, target, "stream user 04\nsecond added line\nthird added line\nfourth added line"),
+        ),
+      )
+
+      // 冻结高度与 scrollbar 全长恰好 +3：没有重测会得到旧值，全量重挂会破坏其他根。
+      await waitForFrame(app, () => scroll.scrollHeight === before + 3)
+      expect(messageRoot(app, target).height).toBe(heightBefore + 3)
+
+      // 滚到目标所在位置：更新后的完整四行真实可见，内容不是旧缓存。
+      scroll.scrollBy(messageRoot(app, target).y - scroll.y)
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("fourth added line")))
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
+// T05 选区切片：跨屏拖选时，anchor 与穿越区间的 Message 由 pin 保持挂载；松开后滚离，
+// 复制结果仍覆盖完整区间。清除选区后 pin 解除，区间内容最终释放。
+test("selection dragged across screens keeps the whole traversed range alive for copy", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "drag")
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      // 先等尾部渲染完成（也让 session-open 的 50ms 延迟贴底落定），再导航到顶部，
+      // 否则初始打开滚动与测试导航在起步窗口内相互覆盖。
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("drag assistant 23")))
+      commandBridge.run("session.first")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("drag user 00")))
+      const scroll = sessionScrollBox(app, "msg_window_user_00")
+      const startRow = app.captureCharFrame().split("\n")
+      const y0 = startRow.findIndex((line) => line.includes("drag user 00"))
+      const x0 = startRow[y0].indexOf("drag user 00")
+      const edgeRow = scroll.viewport.screenY + scroll.viewport.height - 2
+
+      await app.mockMouse.pressDown(x0, y0)
+      // 选区推进：指向视口底边延伸 focus；目标未出现就用公开翻页命令下滚一屏再指向底边。
+      let frame: string[] = []
+      let y1 = -1
+      for (let attempt = 0; attempt < 30 && y1 < 0; attempt++) {
+        await app.mockMouse.moveTo(x0, edgeRow)
+        await app.renderOnce()
+        await new Promise((resolve) => process.nextTick(resolve))
+        frame = app.captureCharFrame().split("\n")
+        y1 = frame.findIndex((line) => line.includes("drag user 06"))
+        if (y1 < 0) commandBridge.run("session.message.next")
+        await app.renderOnce()
+      }
+      expect(y1).toBeGreaterThanOrEqual(0)
+      // 终点取 marker 之后一个字符位：列到字符索引的换算向下取整，落在最后一个
+      // 字符格上才能把 “06” 的 6 包含进选区。
+      const x1 = frame[y1].indexOf("drag user 06") + 13
+      await app.mockMouse.moveTo(x1, y1)
+      await app.mockMouse.release(x1, y1)
+      await app.renderOnce()
+
+      const selected = app.renderer.getSelection()?.getSelectedText() ?? ""
+      expect(selected).toContain("drag user 00")
+      expect(selected).toContain("drag user 06")
+
+      // 松开不等于清除：滚到底部后起点区间仍由 selection pin 保持挂载，复制不丢行。
+      // 区间此时已超过驻留时间窗（pin 优先于年龄驱逐，否则跨屏复制会丢行）。
+      // 冻结窗口内一律用泵浦节拍，不用条件等待（其超时判定依赖真实时钟）。
+      await withFakeNow(async (advance) => {
+        advance(RESIDENCY_AGE_TEST_MS)
+        commandBridge.run("session.last")
+        await pumpFrames(app, 6)
+        expect(app.captureCharFrame()).toContain("drag assistant 23")
+        expect(messageContentReleased(app, "msg_window_user_00")).toBe(false)
+        expect(messageContentReleased(app, "msg_window_user_06")).toBe(false)
+        const afterScroll = app.renderer.getSelection()?.getSelectedText() ?? ""
+        expect(afterScroll).toContain("drag user 00")
+        expect(afterScroll).toContain("drag user 06")
+
+        // 清除选区后 pin 解除。覆盖期间区间被判定为驻留并刷新了渲染时间戳，
+        // 因此释放后从清除时刻重新计龄——再推进一个时间窗才逐出。
+        app.renderer.clearSelection()
+        advance(RESIDENCY_AGE_TEST_MS)
+        await pumpFrames(app, 8)
+        expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
+        expect(messageContentReleased(app, "msg_window_user_06")).toBe(true)
+      })
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
+// T05 resize 切片（R3 两阶段）：
+// 阶段一（全部驻留）：宽度变化时自然挂载内容自行 reflow，不产生壳化重测，
+// 几何邻接与 scrollbar 末端保持精确——这是预算内 resize 的基线同构路径。
+// 阶段二（壳化消息存在）：只有壳化消息进入分帧重测队列，逐批实测后重新冻结；
+// 锚点 Message 的视口偏移精确恢复。邻接等式与 scrollHeight = 末根底边是独立几何校验。
+test("resize reflows mounted content and re-measures shelled roots in batched frames exactly", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "resize")
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      const tailID = messages.at(-1)!.id
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("resize assistant 23")))
+      const scroll = sessionScrollBox(app, tailID)
+      const before = await stableScrollHeight(app, scroll)
+      const ids = messages.map((message) => message.id)
+      const expectExactGeometry = () => {
+        const roots = ids.map((id) => messageRoot(app, id))
+        for (const [index, root] of roots.entries()) {
+          expect(root.height).toBeGreaterThan(0)
+          if (index > 0) expect(root.y).toBe(roots[index - 1].y + roots[index - 1].height + 1)
+        }
+        const children = scroll.getChildren()
+        const lastChild = children.at(-1)!
+        expect(scroll.scrollHeight).toBe(lastChild.y + lastChild.height - children[0].y)
+      }
+
+      // 阶段一：预算内无壳化消息，resize 是自然 reflow；几何精确且没有任何内容被壳化。
+      app.resize(48, 24)
+      await stableScrollHeight(app, scroll)
+      expectExactGeometry()
+      expect(scroll.scrollHeight).toBeGreaterThan(before)
+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(false)
+
+      // 阶段二：先让头部消息超龄壳化，再 resize；只有壳化消息分帧重测，
+      // 锚点（当前视口首条）偏移在提交后精确恢复。冻结窗口内用泵浦节拍驱动，
+      // resize 稳定观察回到真实时钟后进行。
+      await withFakeNow(async (advance) => {
+        advance(RESIDENCY_AGE_TEST_MS)
+        await pumpFrames(app, 8)
+        expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
+      })
+      const anchorID = "msg_window_user_20"
+      const anchor = messageRoot(app, anchorID)
+      scroll.scrollBy(anchor.y - scroll.y)
+      await waitForFrame(app, () => anchor.y - scroll.y === 0)
+
+      app.resize(80, 24)
+      let last = -1
+      let stable = 0
+      await waitForFrame(app, () => {
+        const current = scroll.scrollHeight
+        stable = current === last ? stable + 1 : 0
+        last = current
+        return stable >= 2 && anchor.y - scroll.y === 0
+      })
+      expect(anchor.y - scroll.y).toBe(0)
+      expectExactGeometry()
+      // 分帧重测完成后壳化消息重新处于释放状态（新宽度下的实测高度）。
+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
+
+      // 重测后底部内容仍可正常到达。
+      commandBridge.run("session.last")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("resize assistant 23")))
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
+// T05 零重挂载锁定（R3 核心性能语义）：预算内来回滚动时，已进入过视口的正文 owner
+// 保持同一个 renderable 实例——实例身份变化即发生了销毁重建（R1 回归的形态）。
+test("scrolling within the residency budget performs zero content remounts", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "parity")
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("parity assistant 23")))
+      // 实例取样：根子树中的第一个携带 textBuffer 的 renderable 代表该 Message 的
+      // 正文 owner（Markdown 正文在 CodeRenderable 上，不在 TextRenderable 上）。
+      const textOf = (id: string) => {
+        const stack: Renderable[] = [messageRoot(app, id)]
+        while (stack.length) {
+          const node = stack.pop()!
+          if (hasTextBuffer(node)) return node
+          stack.push(...node.getChildren())
+        }
+        throw new Error(`no text content for ${id}`)
+      }
+      commandBridge.run("session.first")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("parity user 00")))
+      const top0 = textOf("msg_window_user_00")
+      const top1 = textOf("msg_window_assistant_01")
+      // 顶部 → 底部 → 顶部两个来回；预算内驻留集合不驱逐，实例必须原样。
+      for (let round = 0; round < 2; round++) {
+        commandBridge.run("session.last")
+        await waitForFrame(app, (lines) => lines.some((line) => line.includes("parity assistant 23")))
+        commandBridge.run("session.first")
+        await waitForFrame(app, (lines) => lines.some((line) => line.includes("parity user 00")))
+      }
+      expect(textOf("msg_window_user_00")).toBe(top0)
+      expect(textOf("msg_window_assistant_01")).toBe(top1)
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
+// T05 容量上限切片（R3）：估算正文总量超过驻留容量时，即使未超龄也按最久未渲染
+// 先驱逐。100KiB 的折叠工具输出参与记账但不展开渲染，单条大字段即可让预算超限。
+test("content beyond the residency byte budget is evicted least-recently-rendered first", async () => {
+  const count = 24
+  const { messages, parts } = windowFixture(count, "budget")
+  // 一条约 100MiB 的折叠工具输出：超出 64MiB 驻留容量；collapsed 卡片只渲染预览，
+  // 大字段只进入 store 与估算记账，测试不为渲染付出全量成本。
+  const hugeOutput = "budget payload line\n".repeat(5_500_000)
+  parts[messages[1].id] = [
+    completedToolPart("part_budget_huge", messages[1].id, "bash", { command: "emit huge" }, { output: hugeOutput }),
+  ]
+  await withRenderedSession(
+    messages,
+    parts,
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("budget assistant 23")))
+      await pumpFrames(app, 3)
+      // 超容量：最早渲染（最久未再进入视口）的头部消息被驱逐，即使远未超龄。
+      await waitForFrame(app, () => messageContentReleased(app, "msg_window_user_00"))
+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
+      // 视口内的当前内容始终驻留，不会被容量驱逐误伤。
+      expect(messageContentReleased(app, "msg_window_assistant_23")).toBe(false)
+    },
+    {},
+    { width: 80, height: 24 },
+  )
+})
+
 async function withRenderedSession(
   messages: Array<AssistantMessage | SDKUserMessage>,
   parts: Record<string, Part[]>,
@@ -4194,6 +4655,17 @@ async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predica
 
 function rows(frame: string) {
   return frame.split("\n").map((line) => line.replace(/\s*█$/, "").trimEnd().trimStart())
+}
+
+// 驻留窗口的驱逐判定发生在渲染完成后的 microtask；泵浦 N 个完整渲染节拍，
+// 让 renderAfter → microtask → store 写入 → 下一帧渲染的链路充分推进。
+async function pumpFrames(app: Awaited<ReturnType<typeof testRender>>, rounds: number) {
+  for (let i = 0; i < rounds; i++) {
+    await app.renderOnce()
+    await Promise.resolve()
+    await new Promise((resolve) => process.nextTick(resolve))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
 }
 
 function findRow(frame: string[], text: string) {

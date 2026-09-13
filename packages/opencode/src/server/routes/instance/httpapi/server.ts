@@ -10,52 +10,9 @@ import {
 } from "effect/unstable/http"
 import * as Socket from "effect/unstable/socket/Socket"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { Account } from "@/account/account"
-import { Agent } from "@/agent/agent"
-import { Auth } from "@/auth"
-import { Bus } from "@/bus"
-import { Config } from "@/config/config"
-import { Command } from "@/command"
-import * as Observability from "@opencode-ai/core/effect/observability"
-import { File } from "@/file"
-import { FileWatcher } from "@/file/watcher"
-import { Ripgrep } from "@/file/ripgrep"
-import { Format } from "@/format"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { LSP } from "@/lsp/lsp"
-import { MCP } from "@/mcp"
-import { Permission } from "@/permission"
-import { Installation } from "@/installation"
-import { InstanceLayer } from "@/project/instance-layer"
-import { Plugin } from "@/plugin"
-import { Project } from "@/project/project"
-import { ProviderAuth } from "@/provider/auth"
-import { ModelsDev } from "@opencode-ai/core/models"
-import { Provider } from "@/provider/provider"
-import { Pty } from "@/pty"
-import { PtyTicket } from "@/pty/ticket"
-import { Question } from "@/question"
-import { Session } from "@/session/session"
-import { SessionCompaction } from "@/session/compaction"
 import { SessionGoal } from "@/session/goal"
-import { SessionPrompt } from "@/session/prompt"
-import { SessionRevert } from "@/session/revert"
-import { SessionRequestUsage } from "@/session/request-usage"
-import { SessionRunState } from "@/session/run-state"
-import { SessionStatus } from "@/session/status"
-import { SessionSummary } from "@/session/summary"
-import { Todo } from "@/session/todo"
-import { SessionShare } from "@/share/session"
-import { ShareNext } from "@/share/share-next"
-import { EventV2Bridge } from "@/event-v2-bridge"
-import { Skill } from "@/skill"
-import { Snapshot } from "@/snapshot"
-import { SyncEvent } from "@/sync"
-import { ToolRegistry } from "@/tool/registry"
 import { lazy } from "@/util/lazy"
-import { Vcs } from "@/project/vcs"
-import { Worktree } from "@/worktree"
-import { Workspace } from "@/control-plane/workspace"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
 import { ServerAuth } from "@/server/auth"
@@ -181,6 +138,17 @@ type RouteRequirements =
   | HttpRouter.Request<"Requires", unknown>
   | HttpRouter.Request<"GlobalRequires", never>
 
+// 应用服务图复用 AppRuntime 的 memoMap（sharedLayer），不再为每个 listener 重建一遍。
+// 顶层静态 import 会让 server 与全部应用服务形成模块循环，因此只在构建期动态 import 装配；
+// InstanceLayer/Observability 已含在 AppLayer 输出中。鉴权、CORS、HTTP server 与 WebSocketTracker
+// 仍留在 listener 本地 layer，不能进入共享图。
+const applicationLayer = Layer.unwrap(
+  Effect.promise(async () => {
+    const { AppLayer, sharedLayer } = await import("@/effect/app-runtime")
+    return sharedLayer(Layer.mergeAll(AppLayer, SessionGoal.defaultLayer, FetchHttpClient.layer))
+  }),
+)
+
 export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
@@ -191,57 +159,10 @@ export function createRoutes(
       corsVaryFix,
       fenceLayer,
       cors(corsOptions),
-      Account.defaultLayer,
-      Agent.defaultLayer,
-      Auth.defaultLayer,
-      Command.defaultLayer,
-      Config.defaultLayer,
-      File.defaultLayer,
-      FileWatcher.defaultLayer,
-      Format.defaultLayer,
-      LSP.defaultLayer,
-      Installation.defaultLayer,
-      MCP.defaultLayer,
-      ModelsDev.defaultLayer,
-      Permission.defaultLayer,
-      Plugin.defaultLayer,
-      Project.defaultLayer,
-      ProviderAuth.defaultLayer,
-      Provider.defaultLayer,
-      Pty.defaultLayer,
-      PtyTicket.defaultLayer,
-      Question.defaultLayer,
-      Ripgrep.defaultLayer,
-      RuntimeFlags.defaultLayer,
-      Session.defaultLayer,
-      SessionCompaction.defaultLayer,
-      SessionPrompt.defaultLayer,
-      SessionRevert.defaultLayer,
-      SessionRequestUsage.defaultLayer,
-      // [local-smark] goal HTTP handler 依赖 SessionGoal.Service
-      SessionGoal.defaultLayer,
-      SessionShare.defaultLayer,
-      SessionRunState.defaultLayer,
-      SessionStatus.defaultLayer,
-      SessionSummary.defaultLayer,
-      ShareNext.defaultLayer,
-      Snapshot.defaultLayer,
-      SyncEvent.defaultLayer,
-      EventV2Bridge.defaultLayer,
-      Skill.defaultLayer,
-      Todo.defaultLayer,
-      ToolRegistry.defaultLayer,
-      Vcs.defaultLayer,
-      Workspace.defaultLayer,
-      Worktree.appLayer,
-      Bus.layer,
-      AppFileSystem.defaultLayer,
-      FetchHttpClient.layer,
+      applicationLayer,
       HttpServer.layerServices,
     ]),
     Layer.provide(Layer.succeed(CorsConfig)(corsOptions)),
-    Layer.provide(InstanceLayer.layer),
-    Layer.provide(Observability.layer),
   )
 }
 

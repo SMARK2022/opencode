@@ -72,13 +72,13 @@ describe("LSP service lifecycle", () => {
     ),
   )
 
-  it.live("hasClients() returns true for .ts files when LSP is unset (default enabled)", () =>
+  it.live("hasClients() returns false for .ts files when LSP is unset (opt-in default)", () =>
     provideTmpdirInstance((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
           const result = yield* lsp.hasClients(path.join(dir, "test.ts"))
-          // [local-smark] 未配置 lsp 时默认启用，hasClients 对 .ts 返回 true
-          expect(result).toBe(true)
+          // 未配置 lsp 时默认关闭（与 config schema 注释一致），hasClients 对 .ts 返回 false
+          expect(result).toBe(false)
         }),
       ),
     ),

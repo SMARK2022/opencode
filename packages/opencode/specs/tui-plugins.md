@@ -323,7 +323,8 @@ Top-level API groups exposed to `tui(api, options, meta)`:
   - `session.status(sessionID)`
   - `session.permission(sessionID)`
   - `session.question(sessionID)`
-  - `part(messageID)`
+  - `part(messageID)` — reads only resident synced state; bodies of background Sessions are not guaranteed to be resident.
+  - `acquireParts(sessionID)` — explicitly acquires full message bodies for a Session; returns `{ release }`. Release when done; acquisitions from a disposed plugin are released by the host.
   - `lsp()`
   - `mcp()`
 - `api.client` always reflects the current runtime client.

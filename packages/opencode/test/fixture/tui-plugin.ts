@@ -101,6 +101,7 @@ type Opts = {
     vcs?: HostPluginApi["state"]["vcs"]
     session?: Partial<HostPluginApi["state"]["session"]>
     part?: HostPluginApi["state"]["part"]
+    acquireParts?: HostPluginApi["state"]["acquireParts"]
     lsp?: HostPluginApi["state"]["lsp"]
     mcp?: HostPluginApi["state"]["mcp"]
   }
@@ -320,6 +321,8 @@ export function createTuiPluginApi(opts: Opts = {}): HostPluginApi {
         goal: opts.state?.session?.goal ?? (() => undefined),
       },
       part: opts.state?.part ?? (() => []),
+      // fixture 默认无正文消费：acquire 返回立即可释放的空句柄；测试可经 opts.state 覆盖时序。
+      acquireParts: opts.state?.acquireParts ?? (async () => ({ release: () => {} })),
       lsp: opts.state?.lsp ?? (() => []),
       mcp: opts.state?.mcp ?? (() => []),
     },

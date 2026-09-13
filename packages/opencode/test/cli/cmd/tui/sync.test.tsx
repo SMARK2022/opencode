@@ -1136,12 +1136,15 @@ describe("tui sync", () => {
     await Bun.write(`${tmp.path}/kv.json`, "{}")
     const message = assistantMessage()
     const legacy = runningShellPart("legacy")
-    const { app, emit, sync } = await mount((url) => {
-      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
-      if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [legacy] }])
-      if (url.pathname === "/session/ses_1/todo") return json([])
-      if (url.pathname === "/session/ses_1/diff") return json([])
-    })
+    const { app, emit, sync } = await mount(
+      (url) => {
+        if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+        if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [legacy] }])
+        if (url.pathname === "/session/ses_1/todo") return json([])
+        if (url.pathname === "/session/ses_1/diff") return json([])
+      },
+      { type: "session", sessionID: "ses_1" },
+    )
 
     try {
       emit(messageEvent(message))
@@ -1574,10 +1577,14 @@ describe("tui sync memory lifetime", () => {
     return { id, directory, projectID: "proj_test", slug: id, version: "1", title: id, time: { created: 1, updated: 1 } }
   }
   function lifeTransport(rows: () => { info: UserMessage; parts: Part[] }[]) {
+    // 服务任意 Session：正文消费计数下，测试可对 sibling Session 显式 acquireParts；
+    // 只有 sid 由 rows() 提供数据，其余 Session 返回空页。
     return (url: URL) => {
-      if (url.pathname === `/session/${sid}`) return json(lifeSession())
-      if (url.pathname === `/session/${sid}/message`) return json(rows())
-      if (url.pathname === `/session/${sid}/todo` || url.pathname === `/session/${sid}/diff`) return json([])
+      if (url.pathname.endsWith("/goal")) return json({ goal: null })
+      if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
+      const sessionMatch = url.pathname.match(/^\/session\/([^/]+?)(\/message)?$/)
+      if (sessionMatch?.[2]) return json(sessionMatch[1] === sid ? rows() : [])
+      if (sessionMatch) return json(lifeSession(sessionMatch[1]))
     }
   }
   type Harness = Awaited<ReturnType<typeof mount>>
@@ -1593,7 +1600,9 @@ describe("tui sync memory lifetime", () => {
 
   for (const mode of ["removed", "hidden"] as const) {
     test(`${mode} Message releases only its own Part payload`, async () => {
-      const { app, emit, sync } = await mount()
+      // sid 由 route 持有正文使用权；ses_other 用显式 acquisition（与可见 Task 卡片同级）持有。
+      const { app, emit, sync } = await mount(lifeTransport(() => []), { type: "session", sessionID: sid })
+      const otherParts = await sync.session.acquireParts("ses_other")
       try {
         put(emit, "msg_drop")
         put(emit, "msg_keep", sid, "keep", 2)
@@ -1608,6 +1617,7 @@ describe("tui sync memory lifetime", () => {
         expect(sync.data.part.msg_other?.[0]).toMatchObject({ text: "other" })
         expect(sync.data.part.msg_drop).toBeUndefined()
       } finally {
+        otherParts.release()
         app.renderer.destroy()
       }
     })
@@ -1615,7 +1625,8 @@ describe("tui sync memory lifetime", () => {
 
   // 四个桶分属不同 reducer 分支；一次性断言全覆盖，防止实现只清 message 而留下 todo/status 残留。
   test("deleted Session releases its message, part, todo, and status buckets", async () => {
-    const { app, emit, sync } = await mount()
+    const { app, emit, sync } = await mount(lifeTransport(() => []), { type: "session", sessionID: sid })
+    const otherParts = await sync.session.acquireParts("ses_other")
     try {
       emit(lifeEvent("session.updated", { sessionID: sid, info: lifeSession() }))
       put(emit, "msg_owned")
@@ -1632,6 +1643,7 @@ describe("tui sync memory lifetime", () => {
       expect(sync.data.todo[sid]?.length ?? 0).toBe(0)
       expect(sync.data.session_status[sid]).toBeUndefined()
     } finally {
+      otherParts.release()
       app.renderer.destroy()
     }
   })
@@ -1679,7 +1691,11 @@ describe("tui sync memory lifetime", () => {
   })
 
   test("force sync prunes out-of-window Parts and part-first orphans", async () => {
-    const { app, emit, sync } = await mount(lifeTransport(() => [{ info: lifeMessage("msg_keep"), parts: [lifePart("msg_keep", sid, "fresh")] }]))
+    const { app, emit, sync } = await mount(lifeTransport(() => [{ info: lifeMessage("msg_keep"), parts: [lifePart("msg_keep", sid, "fresh")] }]), {
+      type: "session",
+      sessionID: sid,
+    })
+    const otherParts = await sync.session.acquireParts("ses_other")
     try {
       put(emit, "msg_old")
       put(emit, "msg_other", "ses_other", "other")
@@ -1692,6 +1708,7 @@ describe("tui sync memory lifetime", () => {
       expect(sync.data.part.msg_old).toBeUndefined()
       expect(sync.data.part.msg_part_first).toBeUndefined()
     } finally {
+      otherParts.release()
       app.renderer.destroy()
     }
   })
@@ -1699,7 +1716,10 @@ describe("tui sync memory lifetime", () => {
   test("force sync preserves a Message arriving after the request started", async () => {
     const gate = Promise.withResolvers<Response>()
     const normal = lifeTransport(() => [])
-    const { app, emit, sync } = await mount((url) => (url.pathname === `/session/${sid}/message` ? gate.promise : normal(url)))
+    const { app, emit, sync } = await mount((url) => (url.pathname === `/session/${sid}/message` ? gate.promise : normal(url)), {
+      type: "session",
+      sessionID: sid,
+    })
     let pending: Promise<void> | undefined
     try {
       pending = sync.session.sync(sid, { force: true })

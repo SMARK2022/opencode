@@ -93,7 +93,7 @@ describe("lsp.spawn", () => {
     ),
   )
 
-  it.live("spawns builtin LSP for files inside instance when LSP is unset (default enabled)", () =>
+  it.live("does not spawn builtin LSP for files inside instance when LSP is unset (opt-in default)", () =>
     provideTmpdirInstance((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -105,8 +105,9 @@ describe("lsp.spawn", () => {
               line: 0,
               character: 0,
             })
-            // [local-smark] 未配置 lsp 时默认启用，会尝试 spawn
-            expect(spy).toHaveBeenCalledTimes(1)
+            // 未配置 lsp 时默认关闭（与 config schema 注释一致），不得尝试 spawn 任何内置 server。
+            expect(spy).toHaveBeenCalledTimes(0)
+            expect(yield* lsp.status()).toEqual([])
           } finally {
             spy.mockRestore()
           }

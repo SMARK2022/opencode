@@ -11,7 +11,13 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
+import { PartView } from "@/session/part-view"
+import type { MessageV2 } from "@/session/message-v2"
 import { PassThrough } from "node:stream"
+
+// 与 session handler 的本地副本保持一致；字面量由双端行为测试锁定，不为四个常量跨 handler 建共享模块。
+const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
+const TUI_VIEWER = "viewer"
 
 const log = Log.create({ service: "server" })
 
@@ -24,6 +30,28 @@ export function onSseClientCountChange(cb: (n: number) => void) {
 
 function eventData(data: unknown) {
   return `data: ${JSON.stringify(data)}\n\n`
+}
+
+// TUI viewer 的 SSE 在序列化前剪掉同 Part 逐字重复的大字段；只操作该连接的副本，
+// 不改变事件 ID/次数/顺序，也不碰其他 listener 共享的原始事件对象。
+function projectViewerEvent(event: GlobalBusEvent): GlobalBusEvent {
+  const payload = event.payload
+  if (payload.type === "message.part.updated" || payload.type === "message.part.progress") {
+    const part = (payload.properties as { part?: MessageV2.Part }).part
+    if (!part) return event
+    const next = PartView.project(part)
+    if (next === part) return event
+    return { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
+  }
+  if (payload.type === "sync") {
+    const syncEvent = (payload as { syncEvent?: { data?: { part?: MessageV2.Part } } }).syncEvent
+    const part = syncEvent?.data?.part
+    if (!part) return event
+    const next = PartView.project(part)
+    if (next === part) return event
+    return { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...syncEvent.data, part: next } } } }
+  }
+  return event
 }
 
 function parseBody(body: string) {
@@ -63,10 +91,11 @@ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
   onSseCountChange?.(sseClientCount)
   log.info("global event connected", { sseClientCount })
 
+  const viewer = request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER
   const stream = new PassThrough()
   const write = (event: GlobalBusEvent) => {
     if (stream.destroyed) return
-    stream.write(eventData(event))
+    stream.write(eventData(viewer ? projectViewerEvent(event) : event))
   }
   const handler = (event: GlobalBusEvent) => write(event)
   const heartbeat = setInterval(

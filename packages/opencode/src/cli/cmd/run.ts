@@ -28,7 +28,9 @@ import { InstanceRef } from "@/effect/instance-ref"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
 
-const runtimeTask = import("./run/runtime")
+// runtime 子图只在真正进入交互分支时才加载；命令注册仅需要元数据，
+// 顶层提前 import 会让每个 TUI/CLI 进程白白承担 runtime 的模块内存。
+const runtimeTask = () => import("./run/runtime")
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
 function pick(value: string | undefined): ModelInput | undefined {
@@ -782,7 +784,7 @@ export const RunCommand = effectCmd({
         }
 
         const model = pick(args.model)
-        const { runInteractiveMode } = await runtimeTask
+        const { runInteractiveMode } = await runtimeTask()
         try {
           await runInteractiveMode({
             sdk: client,
@@ -807,7 +809,7 @@ export const RunCommand = effectCmd({
 
       if (args.interactive && !args.attach && !args.session && !args.continue) {
         const model = pick(args.model)
-        const { runInteractiveLocalMode } = await runtimeTask
+        const { runInteractiveLocalMode } = await runtimeTask()
         const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
           const { Server } = await import("@/server/server")
           const request = new Request(input, init)

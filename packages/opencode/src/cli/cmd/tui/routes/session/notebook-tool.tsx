@@ -20,7 +20,9 @@ export type VscodeNotebookToolView =
   | {
       mode: "block"
       title: string
-      body: JSX.Element
+      // body 必须是工厂而不是预建 JSX：BlockTool 折叠会销毁内容树，重新展开时调用工厂
+      // 得到全新 renderable；若复用同一个 JSX 对象，重挂载已销毁树会渲染空白。
+      body: () => JSX.Element
       preview?: JSX.Element
       totalLines?: number
       totalChars?: number
@@ -116,7 +118,7 @@ export function useVscodeNotebookToolView(props: {
       preview: insertSource !== undefined
         ? <NotebookSourceCode source={insertSource} filePath={filePath} language={language} maxLines={10} />
         : diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} language={language} maxLines={10} /> : undefined,
-      body: (
+      body: () => (
         <box gap={1} flexDirection="column">
           <Show when={insertSource !== undefined} fallback={
             <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
@@ -154,7 +156,7 @@ export function useVscodeNotebookToolView(props: {
           <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
         </box>
       ),
-      body: <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
+      body: () => <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
     }
   }
 
@@ -168,7 +170,7 @@ export function useVscodeNotebookToolView(props: {
       totalLines: output.split("\n").length,
       totalChars: output.length,
       preview: <text fg={theme.text}>{previewText(output, 10)}</text>,
-      body: <text fg={theme.text}>{output}</text>,
+      body: () => <text fg={theme.text}>{output}</text>,
     }
   }
 
@@ -191,7 +193,7 @@ export function useVscodeNotebookToolView(props: {
           </Show>
         </box>
       ),
-      body: <NotebookRun cells={cells} />,
+      body: () => <NotebookRun cells={cells} />,
     }
   }
 
@@ -206,7 +208,7 @@ export function useVscodeNotebookToolView(props: {
       totalLines: artifacts.length + 2,
       totalChars: JSON.stringify(metadata).length,
       preview: <NotebookArtifacts artifacts={artifacts.slice(0, 6)} />,
-      body: (
+      body: () => (
         <box flexDirection="column">
           <text fg={theme.textMuted}>Cell: {cellLabel(cell)} {stringValue(cell.kind)}/{stringValue(cell.lang)}</text>
           <NotebookArtifacts artifacts={artifacts} />
@@ -224,7 +226,7 @@ export function useVscodeNotebookToolView(props: {
       threshold: 20,
       totalLines: 4,
       totalChars: JSON.stringify(metadata).length,
-      body: (
+      body: () => (
         <box flexDirection="column">
           <Show when={stringValue(metadata.operation)}>{(operation) => <text fg={theme.textMuted}>Operation: {operation()}</text>}</Show>
           <Show when={status}>{(item) => <text fg={statusColor(item())}>Status: {item()}</text>}</Show>

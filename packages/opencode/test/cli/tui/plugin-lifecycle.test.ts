@@ -59,6 +59,53 @@ test("runs onDispose callbacks with aborted signal and is idempotent", async () 
   }
 })
 
+test("plugin dispose releases an in-flight acquireParts and its late handle", async () => {
+  // acquire 在途时卸载：scope.track 的释放先标记，晚到的句柄也必须立即释放，
+  // 否则一个失败的/慢速 sync 会让该 Session 的正文消费计数永久泄漏。
+  const gate = Promise.withResolvers<void>()
+  let releases = 0
+  const api = createTuiPluginApi({
+    state: {
+      acquireParts: async () => {
+        await gate.promise
+        return { release: () => releases++ }
+      },
+    },
+  })
+
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      const file = path.join(dir, "plugin.ts")
+      await Bun.write(
+        file,
+        `export default {
+  id: "demo.acquire",
+  tui: async (api, options) => {
+    api.state.acquireParts("ses_inflight").then(() => options.onSettled?.())
+  },
+}
+`,
+      )
+      return { spec: pathToFileURL(file).href }
+    },
+  })
+
+  let settled = false
+  const { config, restore } = mockTuiRuntime(tmp.path, [[tmp.extra.spec, { onSettled: () => (settled = true) }]])
+  try {
+    await TuiPluginRuntime.init({ api, config })
+    // acquire 已在途；此时卸载必须在 resolve 后释放句柄。
+    await TuiPluginRuntime.dispose()
+    gate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(settled).toBe(true)
+    expect(releases).toBe(1)
+  } finally {
+    await TuiPluginRuntime.dispose()
+    restore()
+  }
+})
+
 test("rolls back failed plugin and continues loading next", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

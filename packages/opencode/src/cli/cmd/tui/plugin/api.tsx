@@ -179,6 +179,10 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
     part(messageID) {
       return sync.data.part[messageID] ?? []
     },
+    // state.part 只读取当前驻留数据；需要完整正文时显式 acquire，用完 release。
+    acquireParts(sessionID: string) {
+      return sync.session.acquireParts(sessionID)
+    },
     lsp() {
       return sync.data.lsp.map((item) => ({ id: item.id, root: item.root, status: item.status }))
     },

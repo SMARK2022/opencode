@@ -22,6 +22,7 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
 import { CompactionBoundary } from "./compaction-boundary"
+import { PartView } from "./part-view"
 import { AuthError, OutputLengthError } from "./message-error"
 import {
   ensureTaskResumeVisible,
@@ -1014,24 +1015,30 @@ function hydrate(
   const partByMessage = new Map<string, Part[]>()
   if (ids.length > 0) {
     // Part query 的 persisted order 是最终 child order，Map 只做 message_id join。
-    const partRows = Database.use((db) =>
-      db
+    // viewer 用 inspect 恢复内存投影而不持久 thaw：查看不应把冷数据反向预热进热表。
+    // inspect 与 thaw 共用同一 corruption/refcount 完整性门，不降级校验。
+    Database.use((db) => {
+      const partRows = db
         .select()
         .from(PartTable)
         .where(inArray(PartTable.message_id, ids))
         .orderBy(PartTable.message_id, PartTable.id)
-        .all(),
-    )
-    // grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
-    // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
-    // visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
-    const restoredParts = ColdStorage.thawPartRows(includeHidden ? partRows : partRows.filter((row) => !row.data.hidden))
-    for (const row of restoredParts) {
-      const next = partFromRestored(row)
-      const list = partByMessage.get(row.message_id)
-      if (list) list.push(next)
-      else partByMessage.set(row.message_id, [next])
-    }
+        .all()
+      // grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
+      // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
+      // visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
+      const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
+      const restoredParts =
+        messageProjection === "viewer" ? ColdStorage.inspectPartRows(db, visible) : ColdStorage.thawPartRows(visible)
+      for (const row of restoredParts) {
+        const next = partFromRestored(row)
+        // viewer 路径再过一次 TUI 专用纯投影，剪掉同 Part 内逐字重复的大字段。
+        const projected = messageProjection === "viewer" ? PartView.project(next) : next
+        const list = partByMessage.get(row.message_id)
+        if (list) list.push(projected)
+        else partByMessage.set(row.message_id, [projected])
+      }
+    })
   }
 
   // 持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
@@ -1952,15 +1959,25 @@ export function promptWindowProof(sessionID: SessionID): PromptWindowProof {
       // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
       messages: messageRows.map((row) => ({
         id: row.id,
-        key: JSON.stringify([
-          row.id,
-          row.timeCreated,
-          row.timeUpdated,
-          row.data,
-          row.coldRef,
-          row.coldKey,
-          parts.get(row.id) ?? [],
-        ]),
+        // proof key 会长期驻留在有效 warm cache 中；raw tuple 直接 JSON 会随正文重复占内存。
+        // zstd(level 1) 输出按 latin1 转字符串，保持 string/=== 相等语义且逐字可恢复，
+        // 不引入 hash 碰撞；临时 raw 字符串在返回后不再被缓存引用。
+        key: Buffer.from(
+          Bun.zstdCompressSync(
+            Buffer.from(
+              JSON.stringify([
+                row.id,
+                row.timeCreated,
+                row.timeUpdated,
+                row.data,
+                row.coldRef,
+                row.coldKey,
+                parts.get(row.id) ?? [],
+              ]),
+            ),
+            { level: 1 },
+          ),
+        ).toString("latin1"),
       })),
     }
   })

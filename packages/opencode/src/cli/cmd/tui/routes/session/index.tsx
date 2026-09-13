@@ -15,6 +15,7 @@ import {
   useContext,
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
+import { createStore, produce } from "solid-js/store"
 import path from "path"
 import { useRoute, useRouteData } from "@tui/context/route"
 import { useProject } from "@tui/context/project"
@@ -25,6 +26,7 @@ import { Spinner } from "@tui/component/spinner"
 import { selectedForeground, useTheme } from "@tui/context/theme"
 import {
   BoxRenderable,
+  CodeRenderable,
   ScrollBoxRenderable,
   addDefaultParsers,
   TextAttributes,
@@ -202,6 +204,11 @@ const context = createContext<{
   providers: () => ReadonlyMap<string, Provider>
   sync: ReturnType<typeof useSync>
   tui: ReturnType<typeof useTuiConfig>
+  // 渲染资源窗口的只读视图与回写入口：messageView 无记录时按默认挂载/auto 处理。
+  messageView: (id: string) => { mounted: boolean; height: number | "auto" } | undefined
+  pinnedMessages: () => ReadonlySet<string>
+  markMessageDirty: (id: string) => void
+  interaction: { get: (key: string) => boolean; set: (key: string, value: boolean) => void }
 }>()
 
 function use() {
@@ -209,6 +216,13 @@ function use() {
   if (!ctx) throw new Error("useContext must be used within a Session component")
   return ctx
 }
+
+// 驻留预算常数（R3，plan §10.3，经重型负载实测选择）：64MiB 估算正文容量覆盖
+// 300×100KiB 的活跃会话，滚动与 resize 在预算内保持零重挂载；30s 时间窗让最近浏览的
+// 内容在来回滚动中保持挂载。两者是驻留预算参数而不是功能开关，超出预算的超长/超大
+// 历史仍被有界释放。
+const RESIDENCY_MAX_AGE_MS = 30_000
+const RESIDENCY_MAX_BYTES = 64 * 1024 * 1024
 
 export function Session() {
   const route = useRouteData("session")
@@ -250,8 +264,11 @@ export function Session() {
     return pendingAssistantID(messages(), status)
   })
   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+  // 测量阶段必须关闭 viewport culling：Diff/Markdown 的宽度相关更新在渲染裁剪下
+  // 不会可靠提交（混合 fixture 实测滚动高度失真）；正常浏览恢复现有恒定裁剪。
+  const [remeasuring, setRemeasuring] = createSignal(false)
   const viewportCulling = createMemo(() =>
-    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+    remeasuring() ? false : shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
   )
 
   const lastAssistant = createMemo(() => {
@@ -441,6 +458,9 @@ export function Session() {
 
   function syncSessionViewportStuckToBottom() {
     if (!scroll || scroll.isDestroyed) return
+    // renderAfter 的唯一入口（源码集成断言锁定该组合）：驻留窗口只把 store 写入推迟到
+    // microtask，先调度它不会改变本函数的贴底判定；顺序无关紧要，关键是同一帧驱动两者。
+    syncMessageResidency()
     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
     const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
     const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
@@ -457,6 +477,369 @@ export function Session() {
     if (stuckToBottom() === untrack(viewportStuckToBottom)) return
     queueMicrotask(() => setViewportStuckToBottom(stuckToBottom()))
   }
+
+  // ── 渲染资源窗口（INV-03/INV-04，R3 容量+时间有界驻留）────────────────────
+  // Message 根 renderable 常驻并携带实测高度，scrollbar、导航与 selection 继续读到
+  // 真实几何。驻留集合 = 视口上下各一屏 ∪ 最近 RESIDENCY_MAX_AGE_MS 内渲染过的内容
+  // ∪ selection/导航 pin，且受 RESIDENCY_MAX_BYTES 估算正文容量约束（超限按最久未
+  // 渲染先驱逐）。预算内不驱逐、不重挂载——普通滚动与基线同构、零重挂载（R1 固定
+  // 窗口被实测证伪：scroll p95 劣化 12–14×，证据见 plan §20 R1 实测记录）。
+  const [messageView, setMessageView] = createStore<Record<string, { mounted: boolean; height: number | "auto" }>>({})
+  const [renderPins, setRenderPins] = createSignal<ReadonlySet<string>>(new Set<string>())
+  // 轻量交互状态（工具展开、Shell 上下文输出、reasoning 展开）决定重建后的实测高度，
+  // 必须活在可销毁的内容 owner 之外，否则屏外重建会把用户展开状态重置回折叠。
+  const [interaction, setInteraction] = createStore<Record<string, boolean>>({})
+  // 冻结只允许在“高度连续两帧不变”后发生：异步高亮/conceal 会在首帧后继续改变
+  // 真实行数，过早冻结会把错误高度钉在已销毁的正文上，scrollbar 随之失真。
+  const lastSeenHeights = new Map<string, number>()
+  // LRU 与年龄驱逐的唯一时间来源：进入视口（真实渲染）才刷新。无后台计时器，
+  // 年龄只在渲染驱动的 pass 中求值（plan §10.3 的授权约束）。
+  const lastRenderedAt = new Map<string, number>()
+  let remeasureAnchor: { id: string; offset: number } | "bottom" | undefined
+  let anchorRestorePending = false
+  // 分帧重测队列：每帧最多一批（累计冻结高度≈一屏），把壳化消息的重挂摊到多帧，
+  // 避免 R1 一次性全量重挂产生的 250–320MiB 瞬态 commit（证据见 plan §20）。
+  let remeasureQueue: string[] = []
+  let remeasureBatch: string[] = []
+  let batchStablePasses = 0
+  const batchHeights = new Map<string, number>()
+
+  const interactionState = {
+    get: (key: string) => interaction[key] ?? false,
+    set: (key: string, value: boolean) => setInteraction(key, value),
+  }
+
+  function pinRenderedMessage(id: string) {
+    setRenderPins((previous) => new Set(previous).add(id))
+  }
+
+  function markMessageDirty(id: string) {
+    // 流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压；
+    // 驻留中的 Message 本来就是 auto 高度，无需标脏。
+    estimateBytes.delete(id)
+    if (messageView[id]?.mounted !== false) return
+    remeasureQueue = [id, ...remeasureQueue.filter((queued) => queued !== id)]
+    setRemeasuring(true)
+  }
+
+  // 估算正文字节：只加 text/reasoning 正文与 tool 的 output/metadata 大字段，是驻留
+  // 成本的代理记账（渲染树规模随正文增长），不是精确内存字节数。
+  function estimateMessageBytes(id: string) {
+    let total = 0
+    for (const part of sync.data.part[id] ?? []) {
+      if (part.type === "text" || part.type === "reasoning") {
+        total += part.text.length
+        continue
+      }
+      if (part.type === "tool") {
+        if ("output" in part.state && typeof part.state.output === "string") total += part.state.output.length
+        const metadata = "metadata" in part.state ? part.state.metadata : undefined
+        if (typeof metadata?.output === "string") total += metadata.output.length
+        if (typeof metadata?.diff === "string") total += metadata.diff.length
+      }
+    }
+    return total
+  }
+
+  function subtreeHasPendingHighlight(root: Renderable): boolean {
+    // Markdown/Diff 的异步高亮落地后 conceal 才会定稿行数；冻结高度前必须排空。
+    const stack = [root]
+    while (stack.length) {
+      const node = stack.pop()!
+      if (node instanceof CodeRenderable && node.isHighlighting) return true
+      stack.push(...node.getChildren())
+    }
+    return false
+  }
+
+  function captureRemeasureAnchor(): { id: string; offset: number } | "bottom" {
+    if (untrack(viewportStuckToBottom)) return "bottom"
+    // 任何带 ID 的消息根都是合法锚点，不要求已有冻结记录——首次 resize 时全部消息
+    // 可能还未入档，此时若错误回退贴底会覆盖用户已滚离的位置。
+    const viewportTop = scroll.viewport.screenY
+    for (const child of scroll.getChildren()) {
+      if (!child.id) continue
+      if (child.screenY + child.height > viewportTop) return { id: child.id, offset: child.y - scroll.y }
+    }
+    return "bottom"
+  }
+
+  // 估算字节缓存与增量总量：store 代理读取慢（300 次/帧实测约 2ms），估算只在挂载
+  // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
+  const estimateBytes = new Map<string, number>()
+  let residentBytesTotal = 0
+  function syncMessageResidency() {
+    if (!scroll || scroll.isDestroyed) return
+    queueMicrotask(() => {
+      if (!scroll || scroll.isDestroyed) return
+      // 几何读取与 store 写入推迟到渲染完成后的 microtask：渲染进行中改树会破坏
+      // 当帧 render list；本 pass 读取的是刚完成的布局。
+      const viewport = scroll.viewport
+      const top = viewport.screenY - viewport.height
+      const bottom = viewport.screenY + viewport.height * 2
+      const byId = new Map<string, Renderable>()
+      for (const child of scroll.getChildren()) if (child.id) byId.set(child.id, child)
+
+      if (anchorRestorePending) {
+        anchorRestorePending = false
+        // 锚点恢复滞后提交一帧：scrollHeight 要等冻结根高之后再对齐 content.height
+        // （OpenTUI 滚动条滞后子节点一帧），贴底与偏移都按对齐后的几何计算。
+        if (remeasureAnchor === "bottom") scroll.scrollTo(scroll.scrollHeight)
+        else if (remeasureAnchor) {
+          const child = byId.get(remeasureAnchor.id)
+          if (child) scroll.scrollBy(child.y - scroll.y - remeasureAnchor.offset)
+        }
+        remeasureAnchor = undefined
+      }
+
+      // selection pin 用几何区间而不是 renderable 引用：区间内的冻结壳同样占高，
+      // 跨屏复制要求整条穿越区间的正文保持存活；anchor 起点节点由区间覆盖。
+      const selection = renderer.getSelection()
+      let selectionTop = Number.POSITIVE_INFINITY
+      let selectionBottom = Number.NEGATIVE_INFINITY
+      if (selection?.isActive) {
+        for (const selected of selection.selectedRenderables) {
+          if (selected.isDestroyed) continue
+          let node: Renderable | null = selected
+          while (node && node.parent !== scroll.content) node = node.parent
+          if (node?.id && byId.has(node.id)) {
+            selectionTop = Math.min(selectionTop, node.screenY)
+            selectionBottom = Math.max(selectionBottom, node.screenY + node.height)
+          }
+        }
+      }
+
+      const pins = untrack(renderPins)
+      const desired = new Set<string>()
+      for (const [id, child] of byId) {
+        const visible = child.screenY + child.height > top && child.screenY < bottom
+        const covered = child.screenY + child.height > selectionTop && child.screenY < selectionBottom
+        if (visible || covered || pins.has(id)) desired.add(id)
+      }
+      // pin 只护航到进入驻留窗口；已在窗口内的 pin 及时解除，避免集合随导航增长。
+      const nextPins = new Set<string>()
+      for (const id of pins) {
+        const child = byId.get(id)
+        if (!child) continue
+        const inWindow = child.screenY + child.height > top && child.screenY < bottom
+        if (!inWindow) nextPins.add(id)
+      }
+      if (nextPins.size !== pins.size) setRenderPins(nextPins)
+
+      if (remeasuring()) {
+        let finalized = false
+        batch(() => {
+          // 驻留窗口内的壳立即重建，不等批轮次：用户滚动优先于后台重测。
+          for (const id of desired) {
+            const record = messageView[id]
+            if (record && !record.mounted) {
+              setMessageView(id, { mounted: true, height: "auto" })
+              remeasureQueue = remeasureQueue.filter((queued) => queued !== id)
+              remeasureBatch = remeasureBatch.filter((queued) => queued !== id)
+              batchHeights.delete(id)
+            }
+          }
+          if (remeasureBatch.length === 0) {
+            // 取下一批：累计冻结高度达到一屏为止；队列保持当前几何位置顺序。
+            let rows = 0
+            while (remeasureQueue.length > 0 && rows < viewport.height) {
+              const id = remeasureQueue.shift()!
+              const record = messageView[id]
+              if (!record || record.mounted || desired.has(id)) continue
+              rows += typeof record.height === "number" ? record.height : 0
+              remeasureBatch.push(id)
+              batchHeights.delete(id)
+              setMessageView(id, { mounted: true, height: "auto" })
+            }
+            if (remeasureBatch.length === 0 && remeasureQueue.length === 0) finalized = true
+          } else {
+            // 批次提交门：批内根高连续两帧不变且无在途高亮——与冻结同一规则，
+            // 只是按批求值；异步高亮落地前绝不写回冻结高度。
+            let stable = true
+            for (const id of remeasureBatch) {
+              const child = byId.get(id)
+              if (!child) continue
+              if (batchHeights.get(id) !== child.height || subtreeHasPendingHighlight(child)) stable = false
+              batchHeights.set(id, child.height)
+            }
+            batchStablePasses = stable ? batchStablePasses + 1 : 0
+            if (batchStablePasses >= 2) {
+              for (const id of remeasureBatch) {
+                const child = byId.get(id)
+                batchHeights.delete(id)
+                if (!child) continue
+                lastSeenHeights.set(id, child.height)
+                // 批处理期间滚入驻留窗口的不再壳化，auto 高度继续跟随内容。
+                if (desired.has(id)) setMessageView(id, { mounted: true, height: "auto" })
+                else setMessageView(id, { mounted: false, height: child.height })
+              }
+              remeasureBatch = []
+              batchStablePasses = 0
+            }
+          }
+          if (finalized) {
+            setRemeasuring(false)
+            // 锚点恢复滞后最后一批提交一帧：scrollHeight 要等冻结根高后再对齐
+            // content.height（OpenTUI 滚动条滞后子节点一帧）。
+            anchorRestorePending = remeasureAnchor !== undefined
+          }
+        })
+        // 分帧重测期间主动预约下一帧：渲染空闲时 renderAfter 不会自发触发。
+        if (!finalized) scroll.requestRender()
+        return
+      }
+
+      let followUp = false
+      const now = Date.now()
+      batch(() => {
+        // 驻留集合：进入视口/pin/选区即挂载并刷新渲染 recency；预算内绝不驱逐，
+        // 普通滚动因此零重挂载。
+        for (const id of byId.keys()) {
+          if (!desired.has(id)) continue
+          lastRenderedAt.set(id, now)
+          const record = messageView[id]
+          if (record && !record.mounted) {
+            // 重建挂载计入驻留容量；估算缓存在标脏时已删除，这里取到新内容的真实量级。
+            const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
+            estimateBytes.set(id, estimate)
+            residentBytesTotal += estimate
+            setMessageView(id, { mounted: true, height: "auto" })
+          }
+        }
+        // 挂载消息记账：首次见到的挂载消息补记估算（store 代理读取只发生在此，
+        // 之后命中缓存）。初始加载即挂载与重建挂载都经由这里或上方驻留块进入。
+        for (const id of byId.keys()) {
+          const record = messageView[id]
+          if (record && !record.mounted) continue
+          if (estimateBytes.has(id)) continue
+          const estimate = estimateMessageBytes(id)
+          estimateBytes.set(id, estimate)
+          residentBytesTotal += estimate
+        }
+        // 驱逐候选：已挂载但不在驻留集合。预算内（未超龄且未超容量）直接保留。
+        const candidates: { id: string; child: Renderable }[] = []
+        for (const [id, child] of byId) {
+          if (desired.has(id)) continue
+          const record = messageView[id]
+          if (record && !record.mounted) continue
+          candidates.push({ id, child })
+        }
+        if (candidates.length > 0) {
+          // 从未进入视口的消息没有渲染时间戳：以首次成为驱逐候选的时刻起算并写入，
+          // 否则从未访问的屏外内容永远不可能超龄（只受容量驱逐）。
+          for (const { id } of candidates) {
+            if (!lastRenderedAt.has(id)) lastRenderedAt.set(id, now)
+          }
+          // 便宜的前置闸：没有超龄候选且总量未超预算时完全不评估，不排序不读取。
+          const anyAged = candidates.some(({ id }) => now - lastRenderedAt.get(id)! > RESIDENCY_MAX_AGE_MS)
+          if (anyAged || residentBytesTotal > RESIDENCY_MAX_BYTES) {
+            // 超容量时按最久未渲染先驱逐（LRU）；pin/选区在驻留集合内不会被选中。
+            candidates.sort((a, b) => (lastRenderedAt.get(a.id) ?? 0) - (lastRenderedAt.get(b.id) ?? 0))
+            for (const { id, child } of candidates) {
+              const agedOut = now - lastRenderedAt.get(id)! > RESIDENCY_MAX_AGE_MS
+              const overBudget = residentBytesTotal > RESIDENCY_MAX_BYTES
+              if (!agedOut && !overBudget) continue
+              const previousHeight = lastSeenHeights.get(id)
+              lastSeenHeights.set(id, child.height)
+              if (previousHeight !== child.height || subtreeHasPendingHighlight(child)) {
+                followUp = true
+                continue
+              }
+              // 冻结值直接读当前布局（内容本帧仍挂载），不需要额外测量通道。
+              setMessageView(id, { mounted: false, height: child.height })
+              residentBytesTotal -= estimateBytes.get(id) ?? 0
+            }
+          }
+        }
+        // 300 窗口淘汰、会话切换或 revert 隐藏后清理无主记录，不随会话时长累积。
+        const stale = Object.keys(messageView).filter((id) => !byId.has(id))
+        if (stale.length) {
+          setMessageView(
+            produce((state) => {
+              for (const id of stale) delete state[id]
+            }),
+          )
+          for (const id of stale) {
+            const record = messageView[id]
+            if (record?.mounted) residentBytesTotal -= estimateBytes.get(id) ?? 0
+            lastSeenHeights.delete(id)
+            lastRenderedAt.delete(id)
+            estimateBytes.delete(id)
+          }
+        }
+      })
+      // 有候选高度还在收敛时主动预约下一帧，否则两条稳定观察规则永远等不到第二帧。
+      if (followUp) scroll.requestRender()
+    })
+  }
+
+  // 全局布局失效（终端宽度、conceal、thinking/timestamps/details 等影响行高的开关）：
+  // 只有壳化（已驱逐）消息需要解除冻结重建测量，自然挂载内容随布局自然 reflow 不参与；
+  // 壳化消息按一屏一批分帧重测。这是正常测量路径，不是失败后的备用渲染。
+  createEffect(
+    on(
+      () =>
+        [
+          messageContentWidth(),
+          conceal(),
+          showThinking(),
+          showTimestamps(),
+          showDetails(),
+          showGenericToolOutput(),
+          diffWrapMode(),
+        ] as const,
+      () => {
+        if (!scroll || scroll.isDestroyed) return
+        remeasureAnchor = captureRemeasureAnchor()
+        remeasureBatch = []
+        batchStablePasses = 0
+        batchHeights.clear()
+        remeasureQueue = []
+        for (const child of scroll.getChildren()) {
+          if (!child.id) continue
+          if (messageView[child.id]?.mounted === false) remeasureQueue.push(child.id)
+        }
+        // 无壳化消息时纯自然 reflow，不进入测量阶段：预算内 resize 零重挂载。
+        if (remeasureQueue.length > 0) setRemeasuring(true)
+      },
+      { defer: true },
+    ),
+  )
+
+  // 切换 Session 时窗口状态全部作废：旧 Session 的测量记录、pin、脏标记与交互状态
+  // 不带入新 transcript（既有行为也是卸载整棵树后从零开始）。
+  createEffect(
+    on(
+      () => route.sessionID,
+      () => {
+        batch(() => {
+          setMessageView(
+            produce((state) => {
+              for (const id of Object.keys(state)) delete state[id]
+            }),
+          )
+          setInteraction(
+            produce((state) => {
+              for (const key of Object.keys(state)) delete state[key]
+            }),
+          )
+          setRenderPins(new Set<string>())
+          setRemeasuring(false)
+        })
+        lastSeenHeights.clear()
+        lastRenderedAt.clear()
+        estimateBytes.clear()
+        residentBytesTotal = 0
+        remeasureQueue = []
+        remeasureBatch = []
+        batchStablePasses = 0
+        batchHeights.clear()
+        remeasureAnchor = undefined
+        anchorRestorePending = false
+      },
+      { defer: true },
+    ),
+  )
 
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
@@ -539,7 +922,11 @@ export function Session() {
     }
 
     const child = scroll.getChildren().find((c) => c.id === targetID)
-    if (child) scroll.scrollBy(child.y - scroll.y - 1)
+    if (child) {
+      // 目标可能在驻留窗口外：先 pin 让内容随滚动同帧挂载，再按冻结几何滚动。
+      pinRenderedMessage(targetID)
+      scroll.scrollBy(child.y - scroll.y - 1)
+    }
     dialog.clear()
   }
 
@@ -567,6 +954,7 @@ export function Session() {
         // message 节点 id 即 scroll child id；与 timeline onMove 同一滚动 API
         const child = scroll.getChildren().find((item) => item.id === target)
         if (child) {
+          pinRenderedMessage(target)
           scroll.scrollBy(child.y - scroll.y - 1)
           return
         }
@@ -685,7 +1073,10 @@ export function Session() {
               const child = scroll.getChildren().find((child) => {
                 return child.id === messageID
               })
-              if (child) scroll.scrollBy(child.y - scroll.y - 1)
+              if (child) {
+                pinRenderedMessage(messageID)
+                scroll.scrollBy(child.y - scroll.y - 1)
+              }
             }}
             sessionID={route.sessionID}
             setPrompt={(promptInfo) => prompt?.set(promptInfo)}
@@ -709,7 +1100,10 @@ export function Session() {
               const child = scroll.getChildren().find((child) => {
                 return child.id === messageID
               })
-              if (child) scroll.scrollBy(child.y - scroll.y - 1)
+              if (child) {
+                pinRenderedMessage(messageID)
+                scroll.scrollBy(child.y - scroll.y - 1)
+              }
             }}
             sessionID={route.sessionID}
           />
@@ -987,6 +1381,9 @@ export function Session() {
       category: "Session",
       hidden: true,
       run: () => {
+        // 顶部跳转同样先 pin 首条 Message，避免跳转帧出现已释放的空壳。
+        const first = scroll.getChildren().find((child) => child.id)
+        if (first) pinRenderedMessage(first.id)
         scroll.scrollTo(0)
         dialog.clear()
       },
@@ -997,6 +1394,8 @@ export function Session() {
       category: "Session",
       hidden: true,
       run: () => {
+        const last = scroll.getChildren().findLast((child) => child.id)
+        if (last) pinRenderedMessage(last.id)
         scroll.scrollTo(scroll.scrollHeight)
         dialog.clear()
       },
@@ -1026,7 +1425,10 @@ export function Session() {
             const child = scroll.getChildren().find((child) => {
               return child.id === message.id
             })
-            if (child) scroll.scrollBy(child.y - scroll.y - 1)
+            if (child) {
+              pinRenderedMessage(message.id)
+              scroll.scrollBy(child.y - scroll.y - 1)
+            }
             break
           }
         }
@@ -1319,6 +1721,10 @@ export function Session() {
           providers,
           sync,
           tui: tuiConfig,
+          messageView: (id: string) => messageView[id],
+          pinnedMessages: renderPins,
+          markMessageDirty,
+          interaction: interactionState,
         }}
       >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
@@ -1630,6 +2036,26 @@ function UserMessage(props: {
 
   const compaction = createMemo(() => props.parts.find((x) => x.type === "compaction"))
 
+  // 渲染窗口视图：无记录时默认挂载/auto（初始加载等价旧行为）；pin 覆盖释放决定，
+  // 保证导航目标与选区穿越区间在滚动同帧完成挂载，而不是下一帧才补齐。
+  const view = createMemo(() => ctx.messageView(props.message.id))
+  const mounted = createMemo(() => (view()?.mounted ?? true) || ctx.pinnedMessages().has(props.message.id))
+  // 驻留时保持 auto 跟随流式/异步高度；只有已释放的根才使用冻结的实测高度。
+  const fixedHeight = createMemo(() => (mounted() ? ("auto" as const) : (view()?.height ?? "auto")))
+  // 内容 owner 已销毁时正文仍可能被 durable Part 更新：标脏交给 Session 统一重测
+  // 这一条的真实高度，其余根的冻结几何不动。Sync store 用 reconcile 原位合并，Part
+  // 对象与数组引用都不变，因此监听影响行高的属性级内容签名（文本正文 + 附件行数）。
+  const contentVersion = createMemo(() => [content(), files().length] as const)
+  createEffect(
+    on(
+      contentVersion,
+      () => {
+        if (!mounted()) ctx.markMessageDirty(props.message.id)
+      },
+      { defer: true },
+    ),
+  )
+
   return (
     <>
       <Show when={content()}>
@@ -1640,6 +2066,7 @@ function UserMessage(props: {
           customBorderChars={SplitBorder.customBorderChars}
           marginTop={props.index === 0 ? 0 : 1}
           flexShrink={0}
+          height={fixedHeight()}
         >
           <box
             onMouseOver={() => {
@@ -1656,8 +2083,10 @@ function UserMessage(props: {
             backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
-            <text fg={theme.text}>{content()}</text>
-            <Show when={goal()}>
+            <Show when={mounted()}>
+              <text fg={theme.text}>{content()}</text>
+            </Show>
+            <Show when={mounted() && goal()}>
               {(item) => (
                 // gap={1} 是两个独立 badge 之间的可见列，不依赖文本尾部空格碰巧分隔。
                 <box flexDirection="row" paddingTop={1} gap={1}>
@@ -1673,7 +2102,7 @@ function UserMessage(props: {
                 </box>
               )}
             </Show>
-            <Show when={files().length}>
+            <Show when={mounted() && files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>
                   {(file) => {
@@ -1693,9 +2122,9 @@ function UserMessage(props: {
               </box>
             </Show>
             <Show
-              when={queued()}
+              when={mounted() && queued()}
               fallback={
-                <Show when={ctx.showTimestamps()}>
+                <Show when={mounted() && ctx.showTimestamps()}>
                   <text fg={theme.textMuted}>
                     <span style={{ fg: theme.textMuted }}>
                       {Locale.todayTimeOrDateTime(props.message.time.created)}
@@ -1855,6 +2284,46 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
 
   const childShortcut = useCommandShortcut("session.child.first")
 
+  // 与 UserMessage 同一份渲染窗口视图：根保留 id/边框/实测高度，正文 owner 按
+  // 驻留窗口与 pin 决定存亡；pin 覆盖释放，保证导航目标在滚动同帧挂载。
+  const view = createMemo(() => ctx.messageView(props.message.id))
+  const mounted = createMemo(() => (view()?.mounted ?? true) || ctx.pinnedMessages().has(props.message.id))
+  // 驻留时 auto 跟随流式高度；只有已释放的根使用冻结的实测高度。
+  const fixedHeight = createMemo(() => (mounted() ? ("auto" as const) : (view()?.height ?? "auto")))
+  // 已释放后收到 durable Part 更新 → 标脏，由 Session 统一重测这一条的真实高度。
+  // Sync store 用 reconcile 原位合并，Part/Message 对象身份不变，因此监听影响行高的
+  // 属性级内容签名：text/reasoning 正文、tool 的 status/output/title/error，以及
+  // Message 级 footer/error 的可见性来源。文件徽标等只影响同行内容的字段不改变行数，
+  // 不在签名内；遗漏字段的代价是重建时读到新数据但冻结高度保持旧值，属已知边界。
+  const contentVersion = createMemo(
+    () =>
+      [
+        props.message.time.completed,
+        props.message.finish,
+        props.message.error?.name,
+        ...props.parts.map((part) => {
+          if (part.type === "text" || part.type === "reasoning") return part.text
+          if (part.type === "tool")
+            return [
+              part.state.status,
+              "output" in part.state ? part.state.output : undefined,
+              "title" in part.state ? part.state.title : undefined,
+              "error" in part.state ? part.state.error : undefined,
+            ]
+          return part.type
+        }),
+      ] as const,
+  )
+  createEffect(
+    on(
+      contentVersion,
+      () => {
+        if (!mounted()) ctx.markMessageDirty(props.message.id)
+      },
+      { defer: true },
+    ),
+  )
+
   return (
     <box
       id={props.message.id}
@@ -1866,6 +2335,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       // part gaps remain inside the border, so multi-part messages draw a
       // continuous left edge while adjacent messages have a visible break.
       marginTop={props.index === 0 ? 0 : 1}
+      height={fixedHeight()}
     >
       <For each={renderItemKeys()}>
         {(key, index) => {
@@ -1884,7 +2354,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           return (
             <Switch>
               {/* reasoning descriptor 进入统一 run shell，singleton 也不保留第二套旧 renderer。 */}
-              <Match when={item().kind === "reasoning-run" && item()}>
+              <Match when={mounted() && item().kind === "reasoning-run" && item()}>
                 {(current) => (
                   <ReasoningRun
                     key={current().key}
@@ -1895,7 +2365,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
                 )}
               </Match>
               {/* 普通 Part 原样走既有 Dynamic mapping，聚合不能改变 tool/text 的渲染职责。 */}
-              <Match when={item().kind === "part" && item()}>
+              <Match when={mounted() && item().kind === "part" && item()}>
                 {(current) => {
                   const part = () => (current() as Extract<MessageRenderItem, { kind: "part" }>).part
                   const component = createMemo(() => PART_MAPPING[part().type as keyof typeof PART_MAPPING])
@@ -1918,7 +2388,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           )
         }}
       </For>
-      <Show when={props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
+      <Show when={mounted() && props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
         <box paddingTop={1} paddingLeft={3}>
           <text fg={theme.text}>
             {childShortcut()}
@@ -1926,7 +2396,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           </text>
         </box>
       </Show>
-      <Show when={props.message.error && props.message.error.name !== "MessageAbortedError"}>
+      <Show when={mounted() && props.message.error && props.message.error.name !== "MessageAbortedError"}>
         <box
           border={["left"]}
           paddingTop={1}
@@ -1942,7 +2412,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         </box>
       </Show>
       <Switch>
-        <Match when={footerVisible()}>
+        <Match when={mounted() && footerVisible()}>
           <box paddingLeft={3}>
             <text marginTop={1}>
               <span
@@ -2007,8 +2477,11 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
-  // disclosure 是 run 局部状态；新 Session / 新 run 必须从长正文收缩态开始。
-  const [expanded, setExpanded] = createSignal(false)
+  // disclosure 跨内容 owner 重建保持：状态存在 Session 级 interaction store，
+  // 屏外销毁重建后仍保持用户展开选择；key 含 messageID 与边界 Part，天然唯一。
+  const expanded = () => ctx.interaction.get(`reasoning:${props.key}`)
+  const setExpanded = (update: (previous: boolean) => boolean) =>
+    ctx.interaction.set(`reasoning:${props.key}`, update(expanded()))
   const [rendered, setRendered] = createSignal<Record<string, string | undefined>>({})
   // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
@@ -2416,7 +2889,8 @@ function GenericTool(props: ToolProps<any>) {
             totalChars={view().totalChars}
             preview={view().preview}
           >
-            {view().body}
+            {/* view().body 是工厂：BlockTool 每次展开重新调用，得到全新内容树 */}
+            {view().body()}
           </BlockTool>
         )}
       </Match>
@@ -2757,10 +3231,13 @@ function BlockTool(props: {
   charThreshold?: number
   preview?: JSX.Element
   autoReview?: false
+  // 同一 Part 渲染多张卡片（如 apply_patch 逐文件）时由调用方提供区分键。
+  stateKey?: string
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const { navigate } = useRoute()
+  const ctx = use()
   const review = useContext(ToolAutoReview)
   const toolTopMargin = useContext(ToolPartTopMargin)
   const [hover, setHover] = createSignal(false)
@@ -2784,7 +3261,22 @@ function BlockTool(props: {
     // still pays the full DiffRenderable/tree-sitter cost on the hot path.
     return (props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()
   })
-  const [expanded, setExpanded] = createSignal(false)
+  // 展开状态保存在 Session 级 interaction store：BlockTool 随屏外内容 owner 销毁重建，
+  // 状态决定重建后的实测高度，不能随本地 signal 重置回折叠；无 part 的调用点退回本地状态。
+  const stateKey = createMemo(() => props.stateKey ?? (props.part ? `expanded:${props.part.id}` : undefined))
+  const [localExpanded, setLocalExpanded] = createSignal(false)
+  const expanded = () => {
+    const key = stateKey()
+    return key ? ctx.interaction.get(key) : localExpanded()
+  }
+  const setExpanded = (update: (previous: boolean) => boolean) => {
+    const key = stateKey()
+    if (!key) {
+      setLocalExpanded(update(localExpanded()))
+      return
+    }
+    ctx.interaction.set(key, update(ctx.interaction.get(key)))
+  }
   const collapsed = createMemo(() => collapsible() && !expanded())
   // preview 树只能构造一次并复用：Solid 的 JSX prop 是 getter，每次访问 props.preview
   // 都会立即执行整段 JSX（含 <diff> → new DiffRenderable，占多个 native handle）。
@@ -2792,17 +3284,10 @@ function BlockTool(props: {
   // 从未插入渲染树也从未销毁，在超长会话中累积耗尽 native handle 注册表（65535）。
   const previewTree = createMemo(() => props.preview)
   const hasPreview = createMemo(() => previewTree() !== undefined)
-  // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
-  // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
-  // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
-  // 不使用 maxHeight=0 + overflow=hidden：OpenTUI updateFromLayout 中
-  // Math.max(layout.height, 1) 会将高度 0 强制为 1 行，导致隐藏区域泄漏首行。
-  const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
-  // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
-  // 一旦挂载就不再卸载，后续折叠仅靠 visible=false 隐藏。
-  createEffect(() => {
-    if (!hasPreview() || !collapsed()) setBodyMounted(true)
-  })
+  // body 折叠时彻底卸载而不是常驻后 visible 隐藏：Diff/Markdown 的 native 资源随 Solid owner
+  // 一起销毁。Show 的 children getter 在每次挂载时重新求值，得到全新 JSX 树，因此不存在
+  // “重新挂载已销毁对象导致空白”的问题；展开的点击/复制行为由重建后的新树承担。
+  // preview 是折叠态可见的轻量内容，不跟随 body 释放。
   // BlockTool spacing is intentionally owned by the section wrappers below.
   // The body, expand affordance, and error rows each use marginTop={1}; adding
   // a root gap would stack with those margins and render two blank rows around
@@ -2854,12 +3339,10 @@ function BlockTool(props: {
           {previewTree()}
         </box>
       </Show>
-      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
-          无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
-      <Show when={bodyMounted()}>
+      {/* body 区：有 preview 时折叠即卸载，展开时全新挂载；无 preview 时保持 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块）。body 可见时 marginTop 恒为 1。 */}
+      <Show when={!hasPreview() || !collapsed()}>
         <box
-          marginTop={hasPreview() && collapsed() ? 0 : 1}
-          visible={!collapsed() || !hasPreview()}
+          marginTop={1}
           maxHeight={!hasPreview() && collapsed() ? previewLines() : undefined}
           overflow={!hasPreview() && collapsed() ? "hidden" : undefined}
         >
@@ -2883,8 +3366,13 @@ function BlockTool(props: {
 function Shell(props: ToolProps<typeof ShellTool>) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
+  const ctx = use()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  const [showContextOutput, setShowContextOutput] = createSignal(false)
+  // returned-to-model 开关与展开状态同属轻量交互状态：跨内容 owner 重建保持，
+  // 否则屏外重建会把“查看上下文输出”重置且改变重建后的实测高度。
+  const showContextOutput = () => ctx.interaction.get(`context:${props.part.id}`)
+  const setShowContextOutput = (update: (previous: boolean) => boolean) =>
+    ctx.interaction.set(`context:${props.part.id}`, update(showContextOutput()))
   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
   const output = createMemo(() => {
     const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
@@ -3250,8 +3738,24 @@ function Task(props: ToolProps<typeof TaskTool>) {
   const sync = useSync()
 
   onMount(() => {
-    if (props.metadata.sessionId && !sync.data.message[props.metadata.sessionId]?.length)
-      void sync.session.sync(props.metadata.sessionId)
+    const child = props.metadata.sessionId
+    if (!child) return
+    // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
+    // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关：
+    // 正文被释放后重新挂载必须能按 acquisition 恢复，而不是看到非空 metadata 就跳过。
+    let release: (() => void) | undefined
+    let released = false
+    void sync.session.acquireParts(child).then((handle) => {
+      if (released) {
+        handle.release()
+        return
+      }
+      release = handle.release
+    })
+    onCleanup(() => {
+      released = true
+      release?.()
+    })
   })
 
   const messages = createMemo(() => sync.data.message[props.metadata.sessionId ?? ""] ?? [])
@@ -3462,6 +3966,9 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
               <BlockTool
                 title={title(file)}
                 part={props.part}
+                // 逐文件卡片共享同一 Part：展开状态键必须含文件路径，否则一张卡片的
+                // 展开会串到同 Patch 的其他文件卡片。
+                stateKey={`${props.part.id}:${file.filePath}`}
                 maxLines={10}
                 threshold={20}
                 totalLines={(file.patch ?? "").split("\n").length}

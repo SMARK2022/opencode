@@ -391,7 +391,10 @@ export type TuiState = {
     // [local-smark] goal 状态读取
     goal: (sessionID: string) => TuiSidebarGoalItem | undefined
   }
+  // part 只读取当前驻留的同步状态；后台 Session 的完整正文不保证驻留。
   part: (messageID: string) => ReadonlyArray<Part>
+  // 显式取得某 Session 的完整正文使用权，用完必须 release；插件卸载时未 release 的 acquisition 由宿主释放。
+  acquireParts: (sessionID: string) => Promise<{ release: () => void }>
   lsp: () => ReadonlyArray<TuiSidebarLspItem>
   mcp: () => ReadonlyArray<TuiSidebarMcpItem>
 }

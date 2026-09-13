@@ -185,10 +185,9 @@ export const layer = Layer.effect(
 
         const servers: Record<string, LSPServer.Info> = {}
 
-        // [local-smark] 默认启用 LSP：未配置时视为 true，仅 false 显式禁用。
-        // 官方 PR #23416 因"LSP 有意默认禁用"被关闭，但作为 fork 我们选择默认启用
-        // 以降低使用门槛。LSP 按需启动（touchFile 时 spawn），不影响启动性能。
-        if (cfg.lsp === false) {
+        // LSP 采用显式启用：配置注释约定省略或 false 均关闭，仅 true 或对象开启。
+        // 默认路径不创建任何内置 server，避免为未启用语言功能的用户常驻数 GB 的 LSP 进程。
+        if (!cfg.lsp) {
           log.info("all LSPs are disabled")
         } else {
           for (const server of Object.values(LSPServer)) {
@@ -197,9 +196,8 @@ export const layer = Layer.effect(
 
           filterExperimentalServers(servers, flags)
 
-          // [local-smark] cfg.lsp 为 undefined（默认启用）时跳过自定义配置遍历，
-          // 防止 Object.entries(undefined) 报错。仅对象类型才进入自定义配置。
-          if (cfg.lsp && cfg.lsp !== true) {
+          // cfg.lsp 为 true 时无自定义配置可遍历；仅对象类型才进入自定义配置。
+          if (cfg.lsp !== true) {
             for (const [name, item] of Object.entries(cfg.lsp)) {
               const existing = servers[name]
               if (item.disabled) {

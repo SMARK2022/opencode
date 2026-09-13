@@ -144,6 +144,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
             const events = await sdk.global.event({
               signal: run.signal,
               sseMaxRetryAttempts: 0,
+              // TUI 的 SSE 声明 viewer 投影：daemon 在序列化前剪掉同 Part 内逐字重复的大字段；
+              // 事件 ID、次数、顺序与完整 SDK 合同不变。
+              headers: { "x-opencode-tui-message-projection": "viewer" },
             })
 
             if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {

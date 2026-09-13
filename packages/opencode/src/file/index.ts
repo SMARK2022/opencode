@@ -3,7 +3,7 @@ import { InstanceState } from "@/effect/instance-state"
 
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Git } from "@/git"
-import { Effect, Layer, Context, Schema, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { formatPatch, structuredPatch } from "diff"
 import fuzzysort from "fuzzysort"
@@ -308,7 +308,8 @@ const sortHiddenLast = (items: string[], prefer: boolean) => {
 }
 
 interface State {
-  cache: Entry
+  // 完成结果不留存：只共享同目录的在途扫描，成功/失败/取消后都解除引用。
+  pending?: Deferred.Deferred<Entry, never>
 }
 
 export interface Interface {
@@ -332,19 +333,14 @@ export const layer = Layer.effect(
     const appFs = yield* AppFileSystem.Service
     const rg = yield* Ripgrep.Service
     const git = yield* Git.Service
-    const scope = yield* Scope.Scope
 
     const state = yield* InstanceState.make<State>(
-      Effect.fn("File.state")(() =>
-        Effect.succeed({
-          cache: { files: [], dirs: [] } as Entry,
-        }),
-      ),
+      Effect.fn("File.state")(() => Effect.succeed({})),
     )
 
     const scan = Effect.fn("File.scan")(function* () {
       const ctx = yield* InstanceState.context
-      if (ctx.directory === path.parse(ctx.directory).root) return
+      if (ctx.directory === path.parse(ctx.directory).root) return { files: [], dirs: [] } as Entry
       const isGlobalHome = ctx.directory === Global.Path.home && ctx.project.id === "global"
       const next: Entry = { files: [], dirs: [] }
 
@@ -392,24 +388,39 @@ export const layer = Layer.effect(
         }
       }
 
-      const s = yield* InstanceState.get(state)
-      s.cache = next
+      return next
     })
 
-    let cachedScan = yield* Effect.cached(scan().pipe(Effect.catchCause(() => Effect.void)))
-
-    const ensure = Effect.fn("File.ensure")(function* () {
-      yield* cachedScan
-      cachedScan = yield* Effect.cached(scan().pipe(Effect.catchCause(() => Effect.void)))
+    // 同一目录并发 search 共享一轮在途扫描；扫描 Entry 随请求结束释放，
+    // 不再有预扫和跨请求驻留的完整索引。
+    const scanOnce = Effect.fnUntraced(function* () {
+      return yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const s = yield* InstanceState.get(state)
+          if (s.pending) return yield* restore(Deferred.await(s.pending))
+          const pending = Deferred.makeUnsafe<Entry, never>()
+          s.pending = pending
+          const raw = yield* restore(scan().pipe(Effect.exit))
+          // 保持既有失败语义（首个失败扫描返回空结果而不是陈旧索引）；
+          // 中断不属于扫描失败，必须穿透给等待者而不是被吞。
+          // 类型收窄依据上行判断：到达 else 分支的 Exit 失败面只剩中断/缺陷，typed error 已不存在。
+          const exit: Exit.Exit<Entry, never> =
+            Exit.isFailure(raw) && !Cause.hasInterrupts(raw.cause)
+              ? Exit.succeed({ files: [], dirs: [] })
+              : (raw as Exit.Exit<Entry, never>)
+          s.pending = undefined
+          yield* Deferred.done(pending, exit)
+          return yield* exit
+        }),
+      )
     })
 
     const gitText = Effect.fnUntraced(function* (args: string[]) {
       return (yield* git.run(args, { cwd: (yield* InstanceState.context).directory })).text()
     })
 
-    const init = Effect.fn("File.init")(function* () {
-      yield* ensure().pipe(Effect.forkIn(scope))
-    })
+    // 不再有预扫：索引由首个真实 search 请求驱动，闲置目录不支付扫描成本。
+    const init = Effect.fn("File.init")(function* () {})
 
     const status = Effect.fn("File.status")(function* () {
       const ctx = yield* InstanceState.context
@@ -612,8 +623,7 @@ export const layer = Layer.effect(
       dirs?: boolean
       type?: "file" | "directory"
     }) {
-      yield* ensure()
-      const { cache } = yield* InstanceState.get(state)
+      const cache = yield* scanOnce()
 
       const query = input.query.trim()
       const limit = input.limit ?? 100

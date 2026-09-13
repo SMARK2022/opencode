@@ -35,6 +35,7 @@ import { useKV } from "./kv"
 import { useRoute } from "./route"
 // [local-smark] SessionPath for daemon multi-instance path management
 import { SessionPath } from "@/session/path"
+import { PartView } from "@/session/part-view"
 import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "@tui/util/session-list-params"
 import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
@@ -191,6 +192,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const route = useRoute()
 
     const fullSyncedSessions = new Set<string>()
+    // [正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
+    // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
+    const partConsumers = new Map<string, number>()
+    // 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文；
+    // 随 Message 窗口淘汰、删除与 Provider cleanup 释放，不保存正文或无限历史。
+    const releasedTerminalParts = new Set<string>()
     // remove event 只有 ID，且公开 caller 可提供非单调 ID；索引保存已有 Message 的 chronology key。
     // Map 只引用 bounded store 中的对象，不复制正文，也不引入 ID 排序或失败后的扫描路径。
     const messageByID = new Map<string, Map<string, Message>>()
@@ -266,6 +273,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       // chronology key 优先取索引（event-first 与 snapshot 同一形状）；索引未登记时退回事件 info，
       // 两条入口共用 searchMessage 的 BINARY 语义，不引入第三条定位路径。
       const target = messageByID.get(sessionID)?.get(messageID) ?? info
+      // Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
+      for (const part of store.part[messageID] ?? []) releasedTerminalParts.delete(part.id)
       const messages = store.message[sessionID]
       batch(() => {
         if (messages && target) {
@@ -290,13 +299,98 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       })
     }
 
+    // 终态判定：tool 的 completed/error 是持久终值；其余 Part 以父 Message 完成态为准
+    //（user 写完即持久，assistant 以 time.completed 为准）。未完成的流式 Part 保持现状——
+    // 其 bus-only 内容不可从 DB 恢复，不能释放。
+    function isDurableTerminal(part: Part, completedMessages: Set<string>) {
+      if (part.type === "tool") return part.state.status === "completed" || part.state.status === "error"
+      return completedMessages.has(part.messageID)
+    }
+
+    // 事件准入时的父 Message 完成态查询：优先索引，event-first 次序下退回 bounded store 查找。
+    function isTerminalAdmission(part: Part) {
+      if (part.type === "tool") return part.state.status === "completed" || part.state.status === "error"
+      const match =
+        messageByID.get(part.sessionID)?.get(part.messageID) ??
+        store.message[part.sessionID]?.find((message) => message.id === part.messageID)
+      if (!match) return false
+      return match.role !== "assistant" || match.time.completed !== undefined
+    }
+
+    // 释放单个终态 Part：记录 ID 事实、清掉其缓冲 delta、从 store 移除。
+    // 正文终值已持久在 DB，重新进入时由 HTTP sync 恢复。
+    function releasePart(sessionID: string, part: Part) {
+      releasedTerminalParts.add(part.id)
+      dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.partID === part.id)
+      const parts = store.part[part.messageID]
+      if (!parts) return
+      const foundAt = Binary.search(parts, part.id, (p) => p.id)
+      if (!foundAt.found) return
+      setStore(
+        "part",
+        part.messageID,
+        produce((draft) => {
+          draft.splice(foundAt.index, 1)
+        }),
+      )
+      if ((store.part[part.messageID] ?? []).length === 0) {
+        setStore(
+          "part",
+          produce((draft) => {
+            delete draft[part.messageID]
+          }),
+        )
+      }
+    }
+
+    // 最后一个消费者离开时释放该 Session 的全部已持久终态正文；Message metadata、状态、
+    // 权限与问题桶保留（它们轻量且 sidebar/status 仍需要）。
+    function releaseSessionParts(sessionID: string) {
+      fullSyncedSessions.delete(sessionID)
+      const completed = new Set(
+        (store.message[sessionID] ?? [])
+          .filter((message) => message.role !== "assistant" || message.time.completed !== undefined)
+          .map((message) => message.id),
+      )
+      const doomed = Object.values(store.part)
+        .flat()
+        .filter((part) => part.sessionID === sessionID && isDurableTerminal(part, completed))
+      batch(() => {
+        for (const part of doomed) releasePart(sessionID, part)
+      })
+    }
+
+    function acquireParts(sessionID: string) {
+      partConsumers.set(sessionID, (partConsumers.get(sessionID) ?? 0) + 1)
+    }
+
+    function releaseParts(sessionID: string) {
+      const count = partConsumers.get(sessionID) ?? 0
+      if (count > 1) {
+        partConsumers.set(sessionID, count - 1)
+        return
+      }
+      if (count === 0) return
+      partConsumers.delete(sessionID)
+      // 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
+      syncRequests.delete(sessionID)
+      releaseSessionParts(sessionID)
+    }
+
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
     function releaseSession(sessionID: string) {
       syncRequests.delete(sessionID)
       syncChanges.delete(sessionID)
       fullSyncedSessions.delete(sessionID)
+      partConsumers.delete(sessionID)
       messageByID.delete(sessionID)
       dropBufferedDeltas((event) => event.properties.sessionID === sessionID)
+      // 删除边界同时忘掉终态 ID 事实：同一 Session 重建后新 Part 需要能正常准入。
+      for (const parts of Object.values(store.part)) {
+        for (const part of parts) {
+          if (part.sessionID === sessionID) releasedTerminalParts.delete(part.id)
+        }
+      }
       batch(() => {
         setStore(
           produce((draft) => {
@@ -343,6 +437,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // route 与 Session snapshot 都是 reactive 输入。Session 列表在 bootstrap 后到达时，
     // 当前 route 会自动补做一次正确目录/Workspace 的 LSP 请求。
     createEffect(() => void refreshLsp())
+
+    // 当前 route 持有其 Session 的正文使用权；离开即释放，后台完成事件不再把正文补进 store。
+    let routeParts: string | undefined
+    createEffect(() => {
+      const current = route.data
+      const next = current.type === "session" ? current.sessionID : undefined
+      if (next === routeParts) return
+      if (routeParts !== undefined) releaseParts(routeParts)
+      routeParts = next
+      if (next !== undefined) acquireParts(next)
+    })
 
     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
       // Only adjacent deltas for the same Solid store cell are safe to merge.
@@ -961,6 +1066,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           }
           if (removedMessageIDs.has(info.id)) break
           trackSyncChange(info.sessionID, info.id)
+          // Message 内容持久的到达边界：user 写完即持久，assistant 以 time.completed 为准。
+          // 覆盖 part-first 乱序（Part 先于父 Message 到达时已按未知状态准入）。
+          if (!partConsumers.has(info.sessionID) && (info.role !== "assistant" || info.time.completed !== undefined)) {
+            const doomed = store.part[info.id] ?? []
+            batch(() => {
+              for (const part of doomed) releasePart(info.sessionID, part)
+            })
+          }
           const messages = store.message[info.sessionID]
           if (!messages) {
             // 首条 SSE 会直接建立数组；先登记索引才能保证紧随其后的 ID-only remove 使用同一投影事实。
@@ -988,6 +1101,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             const oldest = updated[0]
             // 300 条窗口删除 chronology 首项；索引必须在同一事件调用栈移除相同 Message。
             unindexMessage(oldest)
+            // 窗口淘汰同时忘掉终态 ID 事实：淘汰后重新加载的 Part 需要能正常准入。
+            for (const part of store.part[oldest.id] ?? []) releasedTerminalParts.delete(part.id)
             batch(() => {
               setStore(
                 "message",
@@ -1014,7 +1129,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
         case "message.part.updated":
         case "message.part.progress": {
-          const part = event.properties.part
+          // 幂等 TUI 投影：剪掉同 Part 逐字重复的大字段；生产 SSE 已在 daemon 侧投影，
+          // 这里覆盖测试 transport 与直接 SDK 注入，重复应用无害。
+          const part = PartView.project(event.properties.part)
           if ((part as Record<string, unknown>).hidden) {
             removedPartIDs.add(part.id)
             dropBufferedDeltas((event) => event.properties.partID === part.id)
@@ -1033,6 +1150,18 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           }
           if (partGone(part.sessionID, part.messageID, part.id)) break
           trackSyncChange(part.sessionID, part.messageID, part.id)
+          if (!partConsumers.has(part.sessionID)) {
+            // 无消费者 Session 的终态正文不入 store；已释放 Part 的迟到 progress/update 直接拒绝。
+            if (releasedTerminalParts.has(part.id)) break
+            if (isTerminalAdmission(part)) {
+              releasedTerminalParts.add(part.id)
+              dropBufferedDeltas((event) => event.properties.partID === part.id)
+              break
+            }
+          } else {
+            // 有消费者时新的合法 durable 更新可以覆盖已释放事实。
+            releasedTerminalParts.delete(part.id)
+          }
           const parts = store.part[part.messageID]
           if (!parts) {
             setStore("part", part.messageID, [part])
@@ -1059,7 +1188,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.delta": {
-          enqueuePartDelta(event)
+          // 已释放终态 Part 的迟到 delta 直接丢弃；其余按原缓冲/应用路径。
+          if (!releasedTerminalParts.has(event.properties.partID)) enqueuePartDelta(event)
           break
         }
 
@@ -1109,6 +1239,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       removedPartIDs.clear()
       syncRequests.clear()
       syncChanges.clear()
+      partConsumers.clear()
+      releasedTerminalParts.clear()
     })
 
     const args = useArgs()
@@ -1310,7 +1442,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
                   // HTTP 快照合并：DB 在 streaming 期间 text="" ，
                   // mergeLiveParts 保留本地已通过 delta 累积的长文本
                   if (removedMessageIDs.has(message.info.id)) continue
-                  draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
+                  draft.part[message.info.id] = mergeLiveParts(
+                    draft.part[message.info.id],
+                    message.parts.map((part) => PartView.project(part)),
+                  )
                 }
                 // 最终投影 = HTTP 页 + 请求期间的合法 live 变化 - 已失效对象。
                 // 合并后按 chronology/BINARY 重排，保持与事件路径相同的顺序不变量。
@@ -1389,6 +1524,24 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             }),
           )
           fullSyncedSessions.add(sessionID)
+        },
+        // 显式正文消费：Task 卡片与插件用它持有 Session 正文，release 后无消费者即释放。
+        // acquire 成功后 await 现有 sync；返回的 release 幂等由调用方/插件 scope 保证。
+        async acquireParts(sessionID: string) {
+          acquireParts(sessionID)
+          try {
+            await result.session.sync(sessionID)
+          } catch (error) {
+            // sync 失败（Session 删除竞态/守护进程重启）必须回滚计数：没有句柄返回，
+            // 不回滚会让该 Session 的正文使用权永久泄漏，后台完成事件持续补入。
+            releaseParts(sessionID)
+            throw error
+          }
+          return {
+            release() {
+              releaseParts(sessionID)
+            },
+          }
         },
       },
       sessionStatus: {

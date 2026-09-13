@@ -205,6 +205,66 @@ describe("session messages endpoint", () => {
   )
 
   it.instance(
+    "viewer message pages drop duplicate tool patch fields without touching the complete contract",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const svc = yield* SessionNs.Service
+        const messageID = MessageID.ascending()
+        yield* svc.updateMessage({
+          id: messageID,
+          sessionID: session.id,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model,
+          tools: {},
+        } satisfies MessageV2.User)
+        const patch = "+duplicate patch line\n".repeat(64)
+        yield* svc.updatePart({
+          id: PartID.ascending(),
+          sessionID: session.id,
+          messageID,
+          type: "tool",
+          callID: "call_1",
+          tool: "edit",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts" },
+            output: "Edit applied successfully.",
+            title: "a.ts",
+            metadata: { diff: patch, filediff: { file: "a.ts", patch, additions: 64, deletions: 0 }, diagnostics: {} },
+            time: { start: 1, end: 2 },
+          },
+        } satisfies MessageV2.ToolPart)
+
+        const viewer = yield* request(`/session/${session.id}/message?limit=1`, {
+          headers: { "x-opencode-tui-message-projection": "viewer" },
+        })
+        const viewerBody = yield* json<MessageV2.WithParts[]>(viewer)
+        const viewerPart = viewerBody[0]?.parts[0]
+        // viewer 只剪掉与 diff 逐字重复的 patch；diff、input、output 与轻量元数据必须保留。
+        expect(viewerPart?.type === "tool" && viewerPart.state.status === "completed" ? viewerPart.state.metadata : undefined).toEqual({
+          diff: patch,
+          filediff: { file: "a.ts", additions: 64, deletions: 0 },
+          diagnostics: {},
+        })
+
+        // 默认完整合同保持原样：同一份数据两份字段都在。
+        const complete = yield* request(`/session/${session.id}/message?limit=1`)
+        const completeBody = yield* json<MessageV2.WithParts[]>(complete)
+        const completePart = completeBody[0]?.parts[0]
+        expect(
+          completePart?.type === "tool" && completePart.state.status === "completed"
+            ? (completePart.state.metadata as { filediff?: { patch?: unknown } }).filediff?.patch
+            : undefined,
+        ).toBe(patch)
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "returns cursor headers for older pages",
     withoutWatcher(
       Effect.gen(function* () {

@@ -1,4 +1,4 @@
-import { Layer, ManagedRuntime } from "effect"
+import { Effect, Layer, ManagedRuntime, Scope } from "effect"
 import { attach } from "./run-service"
 import * as Observability from "@opencode-ai/core/effect/observability"
 
@@ -122,6 +122,16 @@ export const AppLayer = Layer.mergeAll(
   EventV2Bridge.defaultLayer,
   DataMigration.defaultLayer,
 ).pipe(Layer.provideMerge(InstanceLayer.layer), Layer.provideMerge(Observability.layer))
+
+// sharedLayer 让 HTTP listener 在现有 app memoMap 中构建稳定应用服务，
+// 而不是为每个 listener 重建一张服务图；调用方 scope 只决定本次构建边界，
+// memoMap 中的服务实例与 AppRuntime 共享，鉴权/关闭资源不得经过这里。
+export const sharedLayer = <A, E>(layer: Layer.Layer<A, E>) =>
+  Layer.effectContext(
+    Effect.gen(function* () {
+      return yield* Layer.buildWithMemoMap(layer, memoMap, yield* Scope.Scope)
+    }),
+  )
 
 const rt = ManagedRuntime.make(AppLayer, { memoMap })
 type Runtime = Pick<typeof rt, "runSync" | "runPromise" | "runPromiseExit" | "runFork" | "runCallback" | "dispose">

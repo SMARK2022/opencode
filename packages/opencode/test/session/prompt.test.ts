@@ -6043,6 +6043,65 @@ for (const lifecycle of ["delete", "dispose"] as const) {
   )
 }
 
+cacheLifetime.instance(
+  "prompt window proof keys do not retain a second copy of large raw content",
+  () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const session = yield* sessions.create({ title: "Proof key size" })
+      const user = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: session.id,
+        role: "user",
+        agent: "build",
+        model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
+        time: { created: 1 },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: user.id,
+        sessionID: session.id,
+        type: "text",
+        text: "x".repeat(4 * 1024 * 1024),
+      })
+      // assistant 已完成让 loop 单轮退出；proof 已发布且不引入真实 Provider 变量。
+      yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        sessionID: session.id,
+        role: "assistant",
+        parentID: user.id,
+        agent: "build",
+        mode: "build",
+        modelID: ModelID.make("test-model"),
+        providerID: ProviderID.make("test"),
+        path: { cwd: "unused", root: "unused" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 2, completed: 3 },
+        finish: "stop",
+      })
+      const original = PromptWindowCache.publish
+      // mock.calls 记录在当前 bun 版本对该 namespace spy 不可靠；用 mockImplementation 侧道捕获真实发布条目。
+      let captured: MessageV2.PromptWindowProof | undefined
+      const publish = spyOn(PromptWindowCache, "publish").mockImplementation((slot, generation, entry) => {
+        if (entry.sessionID === session.id) captured = entry.proof
+        return original(slot, generation, entry)
+      })
+      try {
+        yield* prompt.loop({ sessionID: session.id })
+      } finally {
+        publish.mockRestore()
+      }
+      expect(captured).toBeDefined()
+      const bytes = captured!.messages.reduce((sum, message) => sum + Buffer.byteLength(message.key), 0)
+      // key 必须是无损压缩表示：raw tuple 直接 JSON 会让有效缓存在正文之外再常驻一份同量内容。
+      // 阈值取压缩后上限（重复文本压缩到百字节级），远低于 4MiB raw，失败即证明退化回 raw。
+      expect(bytes).toBeLessThan(64 * 1024)
+    }),
+  { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
+)
+
 test("prompt window cache drops in-flight publication after invalidation", () => {
   // lease 在 await 前取得；失效推进 generation 后，旧 lease 的迟发 publish 必须被丢弃，
   // 否则删除/dispose 与 loop 发布之间的竞态会重建已失效缓存。

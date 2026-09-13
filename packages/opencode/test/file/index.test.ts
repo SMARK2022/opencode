@@ -1,12 +1,15 @@
 import { afterEach, describe, expect } from "bun:test"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { $ } from "bun"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import * as Stream from "effect/Stream"
 import path from "path"
 import fs from "fs/promises"
 import { File } from "../../src/file"
+import { Ripgrep } from "../../src/file/ripgrep"
+import { Git } from "../../src/git"
 import { disposeAllInstances, TestInstance, withTmpdirInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -760,6 +763,51 @@ describe("file/index Filesystem patterns", () => {
           expect(yield* search({ query: "fresh", type: "file" })).toContain("fresh.ts")
         }),
       { git: true },
+    )
+
+    it.instance("init does not scan; concurrent searches share one in-flight scan; result is not retained", () =>
+      Effect.gen(function* () {
+        let scans = 0
+        let gate = Deferred.makeUnsafe<void>()
+        // Layer.fresh 绕过共享 memoMap：外层测试 layer 已建过 File.layer，
+        // 不带 fresh 的重复 build 会命中缓存而拿到真实 Ripgrep 而不是本测试的 mock。
+        const built = yield* Layer.build(
+          Layer.fresh(File.layer).pipe(
+            Layer.provide([
+              AppFileSystem.defaultLayer,
+              Git.defaultLayer,
+              Layer.mock(Ripgrep.Service, {
+                files: () => {
+                  scans++
+                  return Stream.fromEffect(Deferred.await(gate)).pipe(Stream.map(() => "src/a.ts"))
+                },
+              }),
+            ]),
+          ),
+        )
+        const file = Context.get(built, File.Service)
+        yield* file.init()
+        // init 不再预扫：索引由首个真实 search 驱动。
+        expect(scans).toBe(0)
+        // 先验证 mock 接线：打开 gate 后单轮 search 返回 mock 文件。
+        yield* Deferred.succeed(gate, undefined)
+        expect(yield* file.search({ query: "", type: "file" })).toEqual(["src/a.ts"])
+        expect(scans).toBe(1)
+        // 同目录并发 search 共享一轮在途扫描，而不是各扫一次。
+        gate = Deferred.makeUnsafe<void>()
+        const first = yield* file.search({ query: "", type: "file" }).pipe(Effect.exit, Effect.forkChild)
+        const second = yield* file.search({ query: "", type: "file" }).pipe(Effect.exit, Effect.forkChild)
+        yield* pollWithTimeout(
+          Effect.sync(() => (scans === 2 ? (true as const) : undefined)),
+          "concurrent searches started separate scans",
+        )
+        yield* Deferred.succeed(gate, undefined)
+        expect(yield* Fiber.join(first)).toEqual(Exit.succeed(["src/a.ts"]))
+        expect(yield* Fiber.join(second)).toEqual(Exit.succeed(["src/a.ts"]))
+        // 完成结果不驻留：下一次 search 重新扫描。
+        yield* file.search({ query: "", type: "file" })
+        expect(scans).toBe(3)
+      }),
     )
   })
 
