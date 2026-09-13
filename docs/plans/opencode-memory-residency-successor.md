@@ -2,9 +2,9 @@
 
 > Status: verified
 >
-> Revision: R3
+> Revision: R6
 >
-> Approved revision: R3
+> Approved revision: R6（第 6 轮方案审计 APPROVE，verdict 原文见 §22）
 >
 > Audit mode: full-scope
 >
@@ -14,7 +14,7 @@
 >
 > Last updated: 2026-09-13
 
-本文是本任务唯一 canonical plan。旧 `opencode-memory-lifetime-repair.md` 属于已实施基线，不构成本任务授权。聊天、实验原型和分支研究均不是实施规格。R1 已通过独立方案审计（§22），批准范围仅限 R1 原文加三条 non-blocking 记录修正。
+本文是本任务唯一 canonical plan。旧 `opencode-memory-lifetime-repair.md` 属于已实施基线，不构成本任务授权。聊天、实验原型和分支研究均不是实施规格。R1–R3 已通过独立方案审计（§22），R3 的实现已提交为 `45ba8f0c29`。提交后用户要求的人工完整审计（§25）复现了 8 项实现缺陷，R4 只定义这些缺陷在既定 owner 处的最小返工，不扩大范围、不新增生产文件、不改变已验收的实测结论。
 
 ## 1. Verbatim Requirement
 
@@ -209,9 +209,18 @@ pending/running、未结束的 text/reasoning 以及其 orphan delta 继续走�
 
 重新进入 Session 走现有 HTTP sync，并保留已有未落库内容。route 释放时撤销旧请求提交资格；不取消另一真实消费者的请求。迟到 HTTP 不能因写回而重新标记 fullSynced。Task 卡片的挂载同步触发以 acquisition/fullSynced 状态为准，不再以 `message[].length` 非空为准，避免正文释放后重新挂载得到永久空 Parts。保留当前 300 条完整正文供时间线、Copy、Retry、Fork、context usage 使用，避免把所有同步消费者改成异步。
 
+R4 返工（§25 缺陷证据驱动的修正，均属本节既定 owner 的精确修补）：
+
+- 同 Session 的 `session.sync` 请求串行排队（syncChains）：并发取代会让被取代请求“成功返回但没有提交”，acquireParts 会把空 store 误当正文就绪。排队后每个 `await sync` 对应真实执行或明确失败；跨 Session 仍并行，force 语义不变。
+- `acquireParts` 增加提交后验：sync 返回后 `fullSyncedSessions` 未建立（删除竞态等早退）即抛错并回滚消费计数，调用方不再得到虚假成功句柄。
+- 完成事件清扫使用稳定快照遍历（releasePart 会 splice 同一 store 数组，直接迭代会隔项泄漏）；终态工具更新到达时先移除已驻留的 running 旧版本再拒绝新正文，否则旧正文残留。
+- 终态 Part ID 事实改为 Session→Message→PartID 嵌套归属（releasedTerminalParts 从扁平 Set 改为嵌套 Map）：被释放 Part 已不在 store，窗口淘汰/删除边界不能靠 store 反查 ID，必须有自有轻量归属关系才能兑现“随淘汰/删除释放”的生命周期承诺。
+- Task 卡片 acquisition 改为跟随 `metadata.sessionId` 的响应式生命周期（createEffect 而非 onMount 单次取样）：pending 阶段无 sessionId，ID 后出现即 acquire、卡片销毁即 release、ID 变化先释放旧消费者。
+- 插件 acquisition 的显式 release 使用 `scope.track` 返回的包装函数：显式释放同时从卸载列表注销，正常释放不再在 scope 中积累死记录。
+
 ### 10.2 工具 Parts：删除确定的重复表示
 
-`part-view.ts` 只做纯、幂等、非修改输入的 TUI 投影。首个范围是 Edit `metadata.filediff.patch` 与 `metadata.diff` 完全相同的重复值：保留实际渲染的 `diff`，去掉重复 patch；file/additions/deletions 等轻量信息保留。不同值、未知工具和非重复字段不裁剪。不得清空 output/input/diagnostics、Shell metadata.output 或 returned-to-model 输出，实际消费者已被确认。
+`part-view.ts` 只做纯、幂等、非修改输入的 TUI 投影。范围仅限已证实重复生产的内建 `edit` 工具（filediff 全仓库唯一生产者是 `tool/edit.ts`）：其 `metadata.filediff.patch` 与 `metadata.diff` 完全相同时去掉重复 patch；file/additions/deletions 等轻量信息保留。不同值、未知/第三方工具和非重复字段不裁剪（R4：自定义工具恰好提供同名字段时语义未知，按字段形状猜测裁剪属于范围扩大）。不得清空 output/input/diagnostics、Shell metadata.output 或 returned-to-model 输出，实际消费者已被确认。
 
 有界 viewer HTTP 在 `hydrate` 已选定 Message/Part 范围后，复用 `ColdStorage.inspectPartRows` 取得内存投影，再调用同一纯投影；不为查看而把整份 Part 持久 thaw 回热表。完整业务读取继续原 thaw 路径。inspect 保留既有 corruption/refcount gate；packed 数据仍可能需要解压，不能声称不读取整包或峰值为零。
 
@@ -232,6 +241,11 @@ R1 的“视口±一屏”固定窗口在 R1 实施后被实测证伪（证据�
 - **BlockTool**：取消“一次展开后永久 bodyMounted”（R1 已实施部分不变）。分支进入时调用新的 JSX factory；分支退出时销毁，绝不重新挂载已销毁对象。折叠无延迟；无独立 preview 的工具仍保留实际展示的裁剪 body。
 
 容量/时间常数在实施期以实验确定并写入注释；它们是驻留预算参数，不是功能开关。Session 失活全释放。
+
+R4 返工（§25 渲染侧缺陷的精确修补）：
+
+- 高度失效签名补齐 Shell 等工具实际渲染依赖的 `state.metadata.output`：Shell 流式 progress 持续更新 metadata 而非 status/output，壳化后不重测会让冻结高度与 scrollbar 落后于真实正文。
+- 容量记账统一为“false→true 计入、true→false 减出”的唯一口径，覆盖全部转换点：驻留窗口重建、重测批次进出、stale 清理（删除前先减账）、内容标脏时的挂载中差额刷新。重测期间滚入视口的重建与批次完成后的再壳化同样记账，不再出现幻影容量或漏计。
 
 既有实验证据：混合 fixture 通过 300 Message/401 根、Markdown/Diff、resize、跨屏复制和销毁。逐条 full-frame 重测用了21.9秒，明确拒绝；layout-only 得到错误高度，也拒绝。R1 实施的滚动/resize 回归与瞬态 commit 证据见 §20。
 
@@ -291,8 +305,8 @@ File.init 保留接口而不预扫。search 消费本次扫描的局部 Entry；
 
 | 原需求 | 不变量 | Owner/path/file | 行为验证 |
 | --- | --- | --- | --- |
-| RQ-01 非当前正文与后台补入 | 01/02 | SyncProvider 准入、释放、既有 live 合并；F05/F06/F07/F08/F09 | T02/T03：完成背景正文0驻留，live切换不缺字，Task/插件持有与释放 |
-| RQ-02 展开详情与屏外渲染 | 03/04 | 既有根内可销毁 Solid owner；F06/F16 | T04/T05：折叠重开、跨屏选区、resize及几何独立对照 |
+| RQ-01 非当前正文与后台补入 | 01/02 | SyncProvider 准入、释放、既有 live 合并；F05/F06/F07/F08/F09 | T02/T03：完成背景正文0驻留，live切换不缺字，Task/插件持有与释放；R4 追加 T12/T13/T14/T15/T18 |
+| RQ-02 展开详情与屏外渲染 | 03/04 | 既有根内可销毁 Solid owner；F06/F16 | T04/T05：折叠重开、跨屏选区、resize及几何独立对照；R4 追加 T16/T17 |
 | RQ-03 LSP idle 缺口 | 05 | 默认 opt-in gate；F10 | T01：omitted/false无内置启动，true/object继续可用 |
 | RQ-04 LSP 文档留存 | 05 | 同一默认 gate 阻止 client/document owner 创建；F10 | T01：默认禁用无client/document缓存；显式启用合同保留 |
 | RQ-05 大型 Parts | 01/03/06 | TUI纯去重投影、非持久inspect、无消费者正文与渲染释放；F01–F06 | T06：重复patch不进入viewer payload/store，真正diff/output完整，cold状态不因viewer预热 |
@@ -350,7 +364,7 @@ File.init 保留接口而不预扫。search 消费本次扫描的局部 Entry；
 | F16 | `cli/cmd/tui/routes/session/notebook-tool.tsx` | body 由预建 JSX 改为工厂（BlockTool 折叠销毁后重新展开必须重建） | 25 |
 | 合计 | 16个生产文件 | 1新增、15修改、0删除 | **1265** |
 
-另留335行全局余量，硬上限1600；16个文件为硬上限，不得再扩。`bus/global.ts`、`bus/index.ts`、`sync/index.ts`、processor、prompt生产主体、schema、migration、generated SDK、native源码和package/lockfile均不在修改清单。
+另留335行全局余量，硬上限1600；16个文件为硬上限，不得再扩。R4 返工不新增生产文件，全部修复落在既有 16 个文件内（`sync.tsx`、`index.tsx`、`runtime.ts`、`part-view.ts`），累计生产 gross 仍需 ≤1600。`bus/global.ts`、`bus/index.ts`、`sync/index.ts`、processor、prompt生产主体、schema、migration、generated SDK、native源码和package/lockfile均不在修改清单。
 
 文档适配限本canonical与现有 `packages/opencode/specs/tui-plugins.md` 的接口说明，不计生产代码；不新增第二计划。正式测试预计8–12个现有测试文件、约1600–2200 gross行，单独统计，不挤占生产预算，也不能把实际生产实现藏入测试。
 
@@ -371,6 +385,13 @@ File.init 保留接口而不预扫。search 消费本次扫描的局部 Entry；
 | T09 | init无消费者先scan；完成cache继续持Entry | 未搜索无scan；并发一轮；下一次重扫；成功/失败/owner取消释放pending，waiter取消隔离；路径/ignore/排序/limit不变 |
 | T10 | import run注册触发runtime执行1次 | 未选中0次，选中交互分支仍到同一runtime；help、completion、daemon优先级与参数错误保留 |
 | T11 | 当前资源实测约2GB；没有新实现的A/B结果 | §18内存及性能验收全部满足，不用资源计数比例代替MB实测 |
+| T12（R4） | 完成事件清扫隔项泄漏（4 Part 剩 2）；终态工具替换残留 running 正文 | 全量释放；running→completed 后 store 无旧版本 |
+| T13（R4） | 并发 acquisition 第一个在正文未提交时即返回成功 | 两个并发 acquire 均在正文可读后返回；sync 串行化不破坏 force/删除早退 |
+| T14（R4） | 窗口淘汰后陈旧终态 ID 事实拒绝合法重宣布 | 淘汰后可重新准入；Session 删除路径由嵌套归属结构对称清理（删除后同 ID 复活本身被 deletedSessionIDs 拒绝，无行为面） |
+| T15（R4） | Task 卡片 mount 时无 sessionId，后到 ID 不触发 acquisition | metadata 出现 ID 即加载子 Session 正文；卸载释放 |
+| T16（R4） | 壳化 Shell 的 metadata.output 增长不重测高度 | 冻结高度与 scrollbar 按真实行数增量精确变化 |
+| T17（R4） | 挂载中正文增长不进容量估算，容量上限失效 | 增长后超预算即按 LRU 驱逐，预算内仍零驱逐 |
+| T18（R6） | §25-B-06 的回归守卫（非红测切片）：释放幂等性锁定 | 修复前后均为绿色的守卫：显式 release 后 dispose 不再产生第二次底层释放（幂等性不因重构丢失）；§25-B-06 的不可验证理由内联记录于 §25 该行，行为面无法区分修复前后 |
 
 已有临时viewer probe最初把“保留工具reference形状”作为实验预设；本方案仅承诺非当前Message metadata，不把残缺Tool冒充完整Part。正式T02应直接验证可见元信息及完整重新进入，不照搬该额外预设。实验中的私有调用计数只作为诊断；正式行为测试以输出、可用性、资源生命周期和真实HTTP为主。
 
@@ -422,7 +443,7 @@ bun test --timeout 120000 test/server test/storage test/cli
 bun typecheck
 ```
 
-另在 `packages/plugin` 执行 `bun typecheck`。测试按T01–T10加入上述对应现有目录；新增插件acquisition测试覆盖实际PluginScope卸载。窄测通过后在 `packages/opencode` 运行 `bun test --timeout 120000`；记录所有失败及其基线，不跳过失败、不调用live daemon。打包/可执行入口另按现有构建脚本验证，特别检查动态import在编译二进制中的路径，禁止用开发态成功代替打包验证。
+另在 `packages/plugin` 执行 `bun typecheck`。测试按T01–T10加入上述对应现有目录；R4 切片 T12–T14 加入 `test/cli/cmd/tui/sync-parts-lifetime.test.tsx`，T15–T17 加入 `test/cli/cmd/tui/session-message-render.test.tsx`，T18 加入 `test/cli/tui/plugin-lifecycle.test.ts`；新增插件acquisition测试覆盖实际PluginScope卸载。窄测通过后在 `packages/opencode` 运行 `bun test --timeout 120000`；记录所有失败及其基线，不跳过失败、不调用live daemon。打包/可执行入口另按现有构建脚本验证，特别检查动态import在编译二进制中的路径，禁止用开发态成功代替打包验证。
 
 ### 内存与流畅性硬验收
 
@@ -513,6 +534,9 @@ R1 实施完成后做了同工作负载 A/B 实测（双 worktree，同 harness�
 | 1 | R1 | yes | APPROVE，No blocking findings，3 non-blocking | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU` |
 | 2 | R2 | yes | APPROVE，No blocking findings，5 non-blocking（NB-1/NB-2 涉及实质计划内容，按审计意见递增 R3 并重审） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
 | 3 | R3 | yes | APPROVE，No blocking findings，3 non-blocking（§13/§17/§19 陈旧引用回显，已按记录修正应用，不影响设计） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
+| 4 | R4 | yes | BLOCK（唯一 blocking：§25-B-06 修复缺行为敏感测试映射；已采纳并修订为 R5） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
+| 5 | R5 | yes | BLOCK（唯一 blocking：T18 判据在有缺陷代码上同样通过——内部幂等释放掩盖死记录调用；已采纳，R6 改为显式不可验证理由） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
+| 6 | R6 | yes | APPROVE，No blocking findings，3 non-blocking（NB-1 header 版本字段、NB-2 §22 缺第 5/6 轮记录、NB-3 T18 表述重框定为回归守卫；均为记录修正） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
 
 第1轮独立审计 verdict 原文（不转述）：
 
@@ -528,7 +552,7 @@ R1 实施完成后做了同工作负载 A/B 实测（双 worktree，同 harness�
 
 三条 non-blocking 记录修正已按合同应用（不清空 approval、不触发重审）：NB-1 §15/§17/§19 行数合计修正为1240、余量360；NB-2 §10.1/T03 明确 Task 重新挂载按 acquisition/fullSynced 触发同步；NB-3 §23 标注 idle-directory 红测探针为已记录的非目标诊断。没有借用旧lifetime plan的审计结论。
 
-## 23. Implementation Evidence
+## 23. Implementation Evidence（R3 已提交实现的历史记录；R4 返工证据在实施后追加新节）
 
 ### Actual Files and Diff
 
@@ -545,7 +569,7 @@ R1 实施完成后做了同工作负载 A/B 实测（双 worktree，同 harness�
 - `test/file` 全目录：124 pass / 0 fail；`test/lsp` + `test/config/lsp.test.ts` + `test/tool/lsp.test.ts`：71 pass / 0 fail；`test/cli/run`：120 pass / 0 fail；`test/session/part-view.test.ts`、`test/server/app-layer-sharing.test.ts`、`test/server/httpapi-event.test.ts`、`test/server/session-messages.test.ts`、prompt cache 相关：全绿。
 - 全量套件（309 文件）在最终树上的运行结果记录在案；中途启动的一轮（实施未完成时）不作为证据。
 
-### T11 实测验收（GB 级代表负载）
+### T11 实测验收（GB 级代表负载）（R3 时代记录，R4 返工后需按 §26 规则复评）
 
 双 worktree 同 harness A/B（基线 HEAD `4bdd6813ce`），背景完成正文 1GiB、主会话 15.4MiB，GC×2+5s 同一稳定窗口，各3轮：
 
@@ -579,6 +603,27 @@ R1 实施完成后做了同工作负载 A/B 实测（双 worktree，同 harness�
 
 打包后二級 dynamic import（run/runtime 在编译二进制中的路径）未在本环境验证；生产真实终端的长时间主观手感以实测 p95 门代替；高熵正文下 proof 压缩比较低（有实测上限记录）。`.temp/testing` 下本轮实验文件属调查期产物，不进提交范围。
 
+### R6 返工实施证据（提交 `45ba8f0c29` 之后的未提交 diff）
+
+**文件与 diff**：生产 4 文件（`sync.tsx` +47/−17、`index.tsx` +65/−29、`runtime.ts` +4/−2、`part-view.ts` +6/−4），gross 174；累计生产 16 文件、约 1294 行（≤1600）。测试 4 文件新增 295 行（`sync-parts-lifetime` +131、`session-message-render` +110、`plugin-lifecycle` +44、`part-view` +10）。
+
+**红→绿**：T12–T17 与未知工具投影共 8 个用例在提交基线上全部先红（5 个 sync 断言失败 + 3 个渲染超时），修复后转绿；T18 为幂等性回归守卫（修复前后均绿，按 R6 批准的显式不可验证理由）。实施中两处校准：Shell 测试夹具补 `progressVersion`（merge 守卫要求单调版本才采纳 durable 输出）；挂载中记账的 `if (!mounted())` effect 守卫随 markMessageDirty 双分支化一并移除。
+
+**验证命令与结果**（均在 `packages/opencode` 前台执行）：
+- `bun test --conditions=browser test/cli/cmd/tui/sync-parts-lifetime.test.tsx test/session/part-view.test.ts`：13 pass / 0 fail。
+- `bun test --conditions=browser test/cli/cmd/tui/sync.test.tsx sync-parts-lifetime sync-undefined-messages session-v2-error session-exit session-export sdk.test.tsx`（7 文件）：60 pass / 0 fail。
+- `bun test --conditions=browser test/cli/cmd/tui/session-message-render.test.tsx`：101 pass / 0 fail（含 T15/T16/T17 与全部既有渲染回归）。
+- `bun test --conditions=browser test/cli/cmd/tui/dialog-prompt dialog-session-list exit malformed-sgr-mouse prompt-submit-transport spinner context-usage`（7 文件）：34 pass / 0 fail。
+- `bun test test/cli/tui/plugin-lifecycle.test.ts plugin-toggle.test.ts`：9 pass / 0 fail；`plugin-loader-pure` + `plugin-loader-entrypoint`：9 pass / 0 fail。
+- `bun typecheck`（packages/opencode）：0 错误。packages/plugin 无改动，沿用既有 0 错误状态。
+- 未运行项及理由：`test/cli/tui/daemon.test.ts` 为真实进程集成套件（单用例 30–60s 超时，前台超 4 分钟无输出），不 import 任何返工文件，超出本次涉及面；`plugin-add/install/loader.test.ts` 为 npm reify 重套件，同样与返工文件无依赖交叉。两者在 R3 全量树上为绿，R6 未触碰其依赖。
+
+**T11 复评**：按 §26 规则未重测——返工只在已测路径上减少驻留（完成清扫更彻底、终态替换移除旧正文、记账修正使容量驱逐更准确），无新增驻留机制；T15 会让实时 Task 的子 Session 在 ID 到达后才持有正文（修复前为永久缺失），这是正确性修复的必要行为。
+
+**E/C（返工 diff 机械统计）**：生产 E≈83、C=37（约 45%）；测试 E≈260、C=22。累计 E/C 仍高于 15% 下限。
+
+**既有 workaround 删除**：无（返工不引入也不淘汰 workaround）。**替代路径**：无新增。
+
 ## 24. Implementation Audit Record
 
 | 轮次 | plan revision | 完整原范围 | 结果 | 引用 |
@@ -586,5 +631,30 @@ R1 实施完成后做了同工作负载 A/B 实测（双 worktree，同 harness�
 | R1 | R1 | 已实施（未提交）并已实测 | §10.3 被 R2 修订取代；实现审计覆盖累计 HEAD→最终 diff | 未进行实现审计 |
 | 1 | R3 | yes | BLOCK（B-01 超16文件上限、B-02 acquire 失败泄漏计数、B-03 插件 scope 测试缺失） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
 | 2 | R3 | yes | APPROVE，No blocking findings（3 个 round-1 blocker 均在 owner 接缝修复并带回归测试） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
+| 3 | R6 | yes（累计 diff：45ba8f0c29 + R6 返工） | APPROVE，No blocking findings（8 项 §25 缺陷修复全部落地；NB-1 两个 server viewer 套件已补跑 12 pass，NB-2 记账注释措辞已修正，NB-3 打包验证与 CI 保持开放记录） | adversarial-auditor subagent `ses_f6891bdb0ffeyCHEbXz9tkfwiU`（续会话） |
 
-本计划已实施并通过独立实现审计（第2轮 APPROVE）。提交范围仅限本计划列出的生产与测试路径。
+## 25. R4 Rework Triggers（提交后人工审计发现）
+
+R3 实现提交（`45ba8f0c29`）后，用户要求对计划与实现做完整人工审计（不使用独立 subagent）。审计通过真实 SyncProvider 探针与源码走读复现以下缺陷，全部为 R3 已批准接缝内的实现错误，不是设计方向错误：
+
+| 编号 | 缺陷 | 证据类别 | 复现/路径 | 最小修正方向 |
+| --- | --- | --- | --- | --- |
+| B-01 | 完成事件清扫迭代活数组隔项泄漏；终态工具事件只拒绝新值不删已驻留 running 正文 | observed | 真实 SyncProvider 探针：4 Part 完成清扫后剩 2；running 工具收到 completed 后旧正文仍在 store | 稳定快照遍历；终态替换先 releasePart 旧版本 |
+| B-02 | Task 仅在 onMount 取样 sessionId；pending 阶段无 ID，后到 ID 永不触发 acquisition | reachable | processor pending 创建（processor.ts:573）→ task.ts:327 后写 sessionId；index.tsx 仅 mount 读取 | acquisition 跟随 metadata.sessionId 响应式生命周期 |
+| B-03 | 并发 acquireParts 第一个请求被取代后“成功返回但正文未提交” | observed | 双 acquire 探针：第一个句柄返回时 store 为空 | sync 同 Session 串行排队 + acquireParts fullSynced 后验 |
+| B-04 | 屏外壳化 Shell 的 metadata.output 增长不触发重测 | reachable | shell.ts:1176–1221 progress 走 metadata；index.tsx 签名缺该字段 | 高度失效签名补 metadata.output |
+| B-05 | 容量记账漂移：重测批进出与 stale 清理漏账（stale 先删记录再读 mounted 状态永不减账） | reachable | index.tsx 各转换点与：757–764 删除顺序 | 统一 false→true 计入 / true→false 减出口径 |
+| B-06 | 插件显式 release 未经 scope.track 包装返回值，正常释放在卸载列表积累死记录 | reachable | runtime.ts:603–614 忽略 track 返回值 | 暴露 track 包装函数作为插件侧 release。显式不可验证理由（本行内联记录）：内部 release 闭包幂等，死记录在 dispose 时调用它是无操作，公开行为面无法区分修复前后；且列表在 dispose 时整体清空，累积有界于插件生命周期。修复依据是 track 接缝自身合同（显式释放应消费该记录），由 T18 回归守卫与既有在途卸载测试保持绿色 |
+| B-07 | 终态 ID 事实不随窗口淘汰/Session 删除清理（清理代码从已释放的 store 反查 ID） | observed | 探针：301 条淘汰后 ID 仍 305；删除后仍 305 | Session→Message→PartID 嵌套归属 Map |
+| B-08 | PartView 按字段形状裁剪任意工具，超出计划“未知工具不裁剪”的边界 | observed | 第三方 tool 探针输出被删 filediff.patch | 仅限已证实生产者 edit（tool/edit.ts 为唯一 producer） |
+
+补充记录（非阻断，返工时一并修正）：打包后 run/runtime 动态 import 路径仍未验证（计划 §18 列为必验）；§10/§23 等历史段落的阶段状态表述需标注为历史记录以免歧义。
+
+## 26. R4 Scope Boundaries
+
+- 不新增生产文件；返工只落在 `sync.tsx`、`index.tsx`、`plugin/runtime.ts`、`session/part-view.ts` 四个已批准文件内。
+- 不改 GlobalBus/SSE 协议、不改公开 SDK 合同、不改 300 窗口、不新增配置与 fallback。
+- 测试新增仅覆盖 T12–T18 与未知工具投影边界；不删除或弱化既有断言。
+- R4 不改变 T11 已实测的内存与流畅性结论；返工后需重跑涉及面测试与渲染几何断言，内存复测仅在返工触及驻留/释放路径的行为变化超出测试可证明范围时才需要。
+
+R3 已实施并提交为 `45ba8f0c29`；R6 返工已实施并通过实现审计第 3 轮（APPROVE），当前 `Status: verified`。提交范围：返工的 4 个生产文件、4 个测试文件与本计划。

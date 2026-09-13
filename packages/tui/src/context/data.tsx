@@ -339,8 +339,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             match.state = {
               status: "completed",
               input: match.state.input,
-              // TUI存储与native viewer传输共用幂等投影；进程内测试注入也不保留重复patch。
-              structured: PartView.projectFields(event.data.structured),
+              // Success传输无工具身份保持完整；store已拥有正式name，在这里精确剪edit重复值。
+              structured: PartView.projectFields(event.data.structured, match.name),
               content: [...event.data.content],
               result: event.data.result,
             }

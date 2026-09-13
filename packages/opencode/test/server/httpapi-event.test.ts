@@ -274,9 +274,9 @@ describe("event HttpApi", () => {
     const assistantMessageID = SessionMessage.ID.create()
     const timestamp = DateTime.makeUnsafe(1)
     yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp, agent: "build", model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") } })
-    for (const callID of ["call-a", "call-b"]) {
-      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, timestamp, callID, name: "edit" })
-      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, timestamp, callID, tool: "edit", input: { filePath: "a.ts" }, provider: { executed: false } })
+    for (const [callID, tool] of [["call-a", "edit"], ["call-b", "third_party_custom"]]) {
+      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, timestamp, callID, name: tool })
+      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, timestamp, callID, tool, input: { filePath: "a.ts" }, provider: { executed: false } })
     }
     // 流使用正式SSE分帧；四条连接都先ready，避免把订阅竞态误认为投影丢事件。
     const open = (url: string, viewer: boolean) => Effect.gen(function* () {
@@ -334,9 +334,9 @@ describe("event HttpApi", () => {
     })
     for (const list of [gv.syncs, gc.syncs]) expect(list.map(({ id, type, seq, aggregateID }) => ({ id, type, seq, aggregateID }))).toEqual(durable)
     const Fields = Schema.Struct({ structured: Schema.Struct({ diff: Schema.String, filediff: Schema.Record(Schema.String, Schema.Unknown) }) })
-    // viewer仅删重复patch，完整连接、冻结输入与提交结果都保持完整；marker逐字不变。
+    // Success本身缺工具身份，全部连接保留patch；HTTP持有工具对象后才精确裁剪edit。
     for (const list of [nv, gv.result, gv.syncs]) for (const event of list.slice(0, 2)) {
-      expect(Schema.decodeUnknownSync(Fields)(event.data).structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
+      expect(Schema.decodeUnknownSync(Fields)(event.data).structured.filediff).toEqual({ file: "a.ts", patch, additions: 64, deletions: 0 })
       expect(event.data).toMatchObject({ structured: { diff: patch, diagnostics: {} }, content: [{ type: "text", text: "done" }], result: { kept: true }, outputPaths: ["a.ts"] })
     }
     for (const list of [nc, gc.result, gc.syncs]) for (const event of list.slice(0, 2)) expect(event.data).toMatchObject({ structured: { filediff: { patch } } })
@@ -356,7 +356,8 @@ describe("event HttpApi", () => {
     for (const [view, full] of firstViewer.data.map((message, index) => [message, firstComplete.data[index]] as const)) {
       if (view.type !== "assistant" || full.type !== "assistant") throw new Error("native assistant page is missing")
       expect(view.content.map((part) => part.type === "tool" ? part.id : part.type)).toEqual(full.content.map((part) => part.type === "tool" ? part.id : part.type))
-      for (const part of view.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
+      expect(view.content.filter((part) => part.type === "tool").map((part) => part.name)).toEqual(["edit", "third_party_custom"])
+      for (const part of view.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0, ...(part.name === "edit" ? {} : { patch }) })
       for (const part of full.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toMatchObject({ patch })
     }
     if (!firstViewer.cursor.next || !firstComplete.cursor.next) throw new Error("native next cursor is missing")
