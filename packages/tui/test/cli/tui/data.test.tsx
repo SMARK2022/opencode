@@ -262,7 +262,10 @@ test("refreshes references after updates", async () => {
 
 test("settles pending tools when a live failure arrives", async () => {
   const events = createEventSource()
-  const calls = createFetch(undefined, events)
+  const calls = createFetch(
+    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    events,
+  )
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
   const mounted = new Promise<void>((resolve) => {
@@ -289,6 +292,7 @@ test("settles pending tools when a live failure arrives", async () => {
 
   try {
     await mounted
+    await sync.session.message.refresh("session-1")
     emitEvent(events, {
       id: "evt_agent_1",
       type: "session.next.agent.switched",
@@ -391,7 +395,10 @@ test("settles pending tools when a live failure arrives", async () => {
 
 test("renders admitted prompts only after they become model-visible", async () => {
   const events = createEventSource()
-  const calls = createFetch(undefined, events)
+  const calls = createFetch(
+    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    events,
+  )
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
   const mounted = new Promise<void>((resolve) => {
@@ -418,6 +425,7 @@ test("renders admitted prompts only after they become model-visible", async () =
 
   try {
     await mounted
+    await sync.session.message.refresh("session-1")
     emitEvent(events, {
       id: "evt_admitted_1",
       type: "session.next.prompt.admitted",
@@ -455,7 +463,10 @@ test("renders admitted prompts only after they become model-visible", async () =
 
 test("projects live context updates with their message ID", async () => {
   const events = createEventSource()
-  const calls = createFetch(undefined, events)
+  const calls = createFetch(
+    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    events,
+  )
   let sync!: ReturnType<typeof useData>
   let ready!: () => void
   const mounted = new Promise<void>((resolve) => {
@@ -482,6 +493,18 @@ test("projects live context updates with their message ID", async () => {
 
   try {
     await mounted
+    await sync.session.message.refresh("session-1")
+    // 同一事件流的已加载消息作屏障：不能因广播先到就为无人使用的Session创建正文桶。
+    emitEvent(events, {
+      id: "evt_context_unloaded",
+      type: "session.next.context.updated",
+      properties: {
+        sessionID: "session-unloaded",
+        messageID: "msg_context_unloaded",
+        timestamp: 1,
+        text: "unloaded context".repeat(65536),
+      },
+    }, "proj_session_owner")
     emitEvent(events, {
       id: "evt_context_1",
       type: "session.next.context.updated",
@@ -494,6 +517,7 @@ test("projects live context updates with their message ID", async () => {
     }, "proj_session_owner")
 
     await wait(() => sync.session.message.list("session-1")?.length === 1)
+    expect(sync.session.message.list("session-unloaded")).toBeUndefined()
     expect(sync.session.message.list("session-1")?.[0]).toMatchObject({
       id: "msg_context_1",
       type: "system",

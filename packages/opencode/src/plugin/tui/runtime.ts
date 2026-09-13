@@ -617,6 +617,27 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
 
   const keymap = createScopedKeymap(api.keymap, scope)
 
+  // [0624] 插件的 acquireParts 注册到 scope：卸载（含 acquire 在途）都必须释放正文消费计数。
+  const state: TuiPluginApi["state"] = Object.assign(Object.create(api.state), {
+    acquireParts(sessionID: string) {
+      if (scope.lifecycle.signal.aborted) return Promise.reject(new Error("plugin is disposing"))
+      let released = false
+      let raw: (() => void) | undefined
+      const release = () => {
+        if (released) return
+        released = true
+        raw?.()
+      }
+      const pending = api.state.acquireParts(sessionID).then((handle) => {
+        raw = handle.release
+        if (released || scope.lifecycle.signal.aborted) raw()
+        return { release }
+      })
+      scope.track(release)
+      return pending
+    },
+  })
+
   let count = 0
 
   const slots: TuiPluginApi["slots"] = {
@@ -640,7 +661,7 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
     ui: api.ui,
     tuiConfig: api.tuiConfig,
     kv: api.kv,
-    state: api.state,
+    state,
     theme,
     get client() {
       return api.client

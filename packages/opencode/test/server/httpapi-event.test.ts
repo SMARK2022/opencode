@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer, Queue, Schema, Stream } from "effect"
+import { DateTime, Effect, Layer, Queue, Schema, Stream } from "effect"
 import { Sse } from "effect/unstable/encoding"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -13,9 +13,15 @@ import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
+import { GlobalBus } from "../../src/bus/global"
 import { SessionProcessor } from "../../src/session/processor"
 import { Token } from "@opencode-ai/core/util/token"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { EventV2 } from "@opencode-ai/core/event"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { OpenCodeEvent } from "@opencode-ai/protocol/groups/event"
 
 const EventData = Schema.Struct({
   id: Schema.optional(Schema.String),
@@ -169,5 +175,196 @@ describe("event HttpApi", () => {
     expect(settled.request?.inputEstimate).toEqual({ ...inputEstimate, confirmed: true })
     expect(settled.request?.model?.contextLimit).toBe(8000)
     expect(settled.request).toMatchObject({ input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 })
+  }), { git: true, config: { formatter: false, lsp: false } })
+
+  it.instance(
+    "viewer event stream projects duplicate part fields; default stream stays complete",
+    () =>
+      Effect.gen(function* () {
+        const { directory } = yield* TestInstance
+        const patch = "+duplicate patch line\n".repeat(64)
+        const part = {
+          id: "prt_viewer_sse",
+          messageID: "msg_viewer_sse",
+          sessionID: "ses_viewer_sse",
+          type: "tool",
+          callID: "call_1",
+          tool: "edit",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts" },
+            output: "Edit applied successfully.",
+            title: "a.ts",
+            metadata: { diff: patch, filediff: { file: "a.ts", patch, additions: 64, deletions: 0 } },
+            time: { start: 1, end: 2 },
+          },
+        }
+        // [0624] /global/event 是 GlobalBus 包装流（帧为 {directory, payload}），与 /event 的
+        // payload-直接流不同；TUI SDK 的 sdk.global.event 连接的就是这一端点。
+        const Frame = Schema.Struct({ payload: Schema.Struct({
+          type: Schema.String,
+          properties: Schema.optionalKey(Schema.Struct({ part: Schema.optionalKey(SessionV1.Part) })),
+        }) })
+        const openGlobalStream = (viewer: boolean) =>
+          Effect.gen(function* () {
+            const headers = new Headers({ "x-opencode-directory": directory })
+            if (viewer) headers.set("x-opencode-tui-message-projection", "viewer")
+            const response = yield* requestInDirectory("/global/event", directory, { headers })
+            const reader = yield* Queue.unbounded<typeof Frame.Type["payload"]>()
+            yield* response.stream.pipe(
+              // 网络chunk可拆分/合并SSE帧，复用正式decoder后再读取完整事件。
+              Stream.decodeText(),
+              Stream.pipeThroughChannel(Sse.decodeDataSchema(Frame)),
+              Stream.runForEach((event) => Queue.offer(reader, event.data.payload)),
+              Effect.forkScoped,
+            )
+            return { reader }
+          })
+        const readPayload = (reader: Queue.Dequeue<typeof Frame.Type["payload"]>) =>
+          Effect.gen(function* () {
+            const value = yield* Queue.take(reader).pipe(
+              Effect.timeoutOrElse({
+                duration: "5 seconds",
+                orElse: () => Effect.fail(new Error("timed out waiting for global event")),
+              }),
+            )
+            return value
+          })
+        const readPartEvent = (reader: Queue.Dequeue<typeof Frame.Type["payload"]>) =>
+          Effect.gen(function* () {
+            for (;;) {
+              const event = yield* readPayload(reader)
+              if (event?.type === "message.part.updated") return event
+            }
+          })
+        const viewer = yield* openGlobalStream(true)
+        const complete = yield* openGlobalStream(false)
+        try {
+          expect((yield* readPayload(viewer.reader))?.type).toBe("server.connected")
+          expect((yield* readPayload(complete.reader))?.type).toBe("server.connected")
+
+          GlobalBus.emit("event", {
+            directory,
+            payload: { type: "message.part.updated", properties: { sessionID: "ses_viewer_sse", part, time: 2 } },
+          })
+
+          // viewer 连接剪掉与 diff 逐字重复的 patch；默认连接的合同字段原样保留。
+          const viewerEvent = yield* readPartEvent(viewer.reader)
+          const completeEvent = yield* readPartEvent(complete.reader)
+          const viewerPart = viewerEvent?.properties?.part
+          const completePart = completeEvent?.properties?.part
+          expect(viewerPart).toMatchObject({ type: "tool", state: { status: "completed", metadata: { diff: patch } } })
+          expect(viewerPart?.type === "tool" && viewerPart.state.status === "completed" ? viewerPart.state.metadata.filediff : undefined)
+            .toEqual({ file: "a.ts", additions: 64, deletions: 0 })
+          expect(completePart).toMatchObject({ type: "tool", state: { metadata: { filediff: { patch } } } })
+        } finally {
+          yield* Queue.shutdown(viewer.reader)
+          yield* Queue.shutdown(complete.reader)
+        }
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance("native viewer HTTP and both SSE transports preserve identity order and complete data", () => Effect.gen(function* () {
+    const instance = yield* TestInstance
+    const response = yield* requestInDirectory("/session", instance.directory, { method: "POST" })
+    const info = Schema.decodeUnknownSync(SessionV1.SessionInfo)(yield* response.json)
+    const events = yield* EventV2Bridge.Service
+    const sessionID = SessionV2.ID.make(info.id)
+    const assistantMessageID = SessionMessage.ID.create()
+    const timestamp = DateTime.makeUnsafe(1)
+    yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp, agent: "build", model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") } })
+    for (const callID of ["call-a", "call-b"]) {
+      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, timestamp, callID, name: "edit" })
+      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, timestamp, callID, tool: "edit", input: { filePath: "a.ts" }, provider: { executed: false } })
+    }
+    // 流使用正式SSE分帧；四条连接都先ready，避免把订阅竞态误认为投影丢事件。
+    const open = (url: string, viewer: boolean) => Effect.gen(function* () {
+      const response = yield* requestInDirectory(url, instance.directory, { headers: viewer ? { "x-opencode-tui-message-projection": "viewer" } : {} })
+      const reader = yield* Queue.unbounded<unknown>()
+      yield* response.stream.pipe(Stream.decodeText(), Stream.pipeThroughChannel(Sse.decodeDataSchema(Schema.Unknown)), Stream.runForEach((event) => Queue.offer(reader, event.data)), Effect.forkScoped)
+      return reader
+    })
+    const take = (reader: Queue.Dequeue<unknown>) => Queue.take(reader).pipe(Effect.timeout("5 seconds"))
+    const nativeViewer = yield* open("/api/event", true)
+    const nativeComplete = yield* open("/api/event", false)
+    const globalViewer = yield* open("/global/event", true)
+    const globalComplete = yield* open("/global/event", false)
+    const GlobalFrame = Schema.Struct({ payload: Schema.Struct({ id: Schema.String, type: Schema.String, properties: Schema.optionalKey(Schema.Unknown), syncEvent: Schema.optionalKey(Schema.Unknown) }) })
+    for (const reader of [nativeViewer, nativeComplete]) expect(Schema.decodeUnknownSync(OpenCodeEvent)(yield* take(reader)).type).toBe("server.connected")
+    for (const reader of [globalViewer, globalComplete]) expect(Schema.decodeUnknownSync(GlobalFrame)(yield* take(reader)).payload.type).toBe("server.connected")
+    const patch = "+duplicate\n".repeat(64)
+    const structured = Object.freeze({ diff: patch, filediff: Object.freeze({ file: "a.ts", patch, additions: 64, deletions: 0 }), diagnostics: {} })
+    const published = []
+    for (const callID of ["call-a", "call-b"]) published.push(yield* events.publish(SessionEvent.Tool.Success, {
+      sessionID, assistantMessageID, callID, timestamp: DateTime.makeUnsafe(2), structured,
+      content: [{ type: "text", text: "done" }], result: { kept: true }, outputPaths: ["a.ts"], provider: { executed: false },
+    }))
+    const marker = yield* events.publish(SessionEvent.ContextUpdated, { sessionID, messageID: SessionMessage.ID.create(), text: "marker", timestamp: DateTime.makeUnsafe(0) })
+    published.push(marker)
+    const wanted = new Set(published.map((event) => event.id))
+    const collectNative = (reader: Queue.Dequeue<unknown>) => Effect.gen(function* () {
+      const result = []
+      for (;;) {
+        const event = Schema.decodeUnknownSync(OpenCodeEvent)(yield* take(reader))
+        if (!wanted.has(event.id)) continue
+        result.push(event)
+        if (event.id === marker.id) return result
+      }
+    })
+    const Sync = Schema.Struct({ id: Schema.String, type: Schema.String, seq: Schema.Number, aggregateID: Schema.String, data: Schema.Unknown })
+    const collectGlobal = (reader: Queue.Dequeue<unknown>) => Effect.gen(function* () {
+      const result = []
+      const syncs = []
+      for (;;) {
+        const payload = Schema.decodeUnknownSync(GlobalFrame)(yield* take(reader)).payload
+        if (payload.type === "sync") {
+          const event = Schema.decodeUnknownSync(Sync)(payload.syncEvent)
+          if (wanted.has(EventV2.ID.make(event.id))) syncs.push(event)
+        } else if (wanted.has(EventV2.ID.make(payload.id))) result.push({ id: payload.id, type: payload.type, data: payload.properties })
+        if (result.some((event) => event.id === marker.id) && syncs.some((event) => event.id === marker.id)) return { result, syncs }
+      }
+    })
+    const [nv, nc, gv, gc] = yield* Effect.all([collectNative(nativeViewer), collectNative(nativeComplete), collectGlobal(globalViewer), collectGlobal(globalComplete)])
+    const identities = published.map((event) => ({ id: event.id, type: event.type }))
+    for (const list of [nv, nc, gv.result, gc.result]) expect(list.map((event) => ({ id: event.id, type: event.type }))).toEqual(identities)
+    const durable = published.map((event) => {
+      if (!event.durable) throw new Error("native fixture event did not commit")
+      return { id: event.id, type: EventV2.versionedType(event.type, event.durable.version), seq: event.durable.seq, aggregateID: event.durable.aggregateID }
+    })
+    for (const list of [gv.syncs, gc.syncs]) expect(list.map(({ id, type, seq, aggregateID }) => ({ id, type, seq, aggregateID }))).toEqual(durable)
+    const Fields = Schema.Struct({ structured: Schema.Struct({ diff: Schema.String, filediff: Schema.Record(Schema.String, Schema.Unknown) }) })
+    // viewer仅删重复patch，完整连接、冻结输入与提交结果都保持完整；marker逐字不变。
+    for (const list of [nv, gv.result, gv.syncs]) for (const event of list.slice(0, 2)) {
+      expect(Schema.decodeUnknownSync(Fields)(event.data).structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
+      expect(event.data).toMatchObject({ structured: { diff: patch, diagnostics: {} }, content: [{ type: "text", text: "done" }], result: { kept: true }, outputPaths: ["a.ts"] })
+    }
+    for (const list of [nc, gc.result, gc.syncs]) for (const event of list.slice(0, 2)) expect(event.data).toMatchObject({ structured: { filediff: { patch } } })
+    expect(structured.filediff.patch).toBe(patch)
+    expect(published[0].data).toMatchObject({ structured: { filediff: { patch } } })
+    const Page = Schema.Struct({ data: Schema.Array(SessionMessage.Message), cursor: Schema.Struct({ previous: Schema.optionalKey(Schema.String), next: Schema.optionalKey(Schema.String) }) })
+    const page = (viewer: boolean, cursor?: string) => Effect.gen(function* () {
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "?limit=1&order=asc"
+      const response = yield* requestInDirectory(`/api/session/${sessionID}/message${query}`, instance.directory, { headers: viewer ? { "x-opencode-tui-message-projection": "viewer" } : {} })
+      expect(response.status).toBe(200)
+      return Schema.decodeUnknownSync(Page)(yield* response.json)
+    })
+    const firstViewer = yield* page(true)
+    const firstComplete = yield* page(false)
+    expect(firstViewer.data.map((message) => message.id)).toEqual([assistantMessageID])
+    expect(firstViewer.cursor).toEqual(firstComplete.cursor)
+    for (const [view, full] of firstViewer.data.map((message, index) => [message, firstComplete.data[index]] as const)) {
+      if (view.type !== "assistant" || full.type !== "assistant") throw new Error("native assistant page is missing")
+      expect(view.content.map((part) => part.type === "tool" ? part.id : part.type)).toEqual(full.content.map((part) => part.type === "tool" ? part.id : part.type))
+      for (const part of view.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
+      for (const part of full.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toMatchObject({ patch })
+    }
+    if (!firstViewer.cursor.next || !firstComplete.cursor.next) throw new Error("native next cursor is missing")
+    const nextViewer = yield* page(true, firstViewer.cursor.next)
+    const nextComplete = yield* page(false, firstComplete.cursor.next)
+    expect(nextViewer).toEqual(nextComplete)
+    expect(nextViewer.data.map((message) => message.id)).toEqual([marker.data.messageID])
+    // 最后再读完整页，确认viewer从未改写持久消息。
+    expect(yield* page(false)).toEqual(firstComplete)
   }), { git: true, config: { formatter: false, lsp: false } })
 })

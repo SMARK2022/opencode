@@ -15,9 +15,8 @@ import { BlockTool } from "../../../src/routes/session"
 
 import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
 // 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
-// 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
-// 修复方式为 preview/body 常驻挂载，隐藏态由 #344 起改用 visible 属性整体
-// 不可见（maxHeight=0 会经 Math.max(height,1) 泄漏首行），而非 <Show> 卸载。
+// 折叠销毁正文，重开通过getter构造新树并恢复完整内容；preview仍复用，不能重复挂载已销毁对象。
+// 原preview边界、完整正文与命令不双显断言全部保留。
 test("block tool keeps content after collapse and re-expand", async () => {
   // 24 行输出超过 threshold=20，确保 BlockTool 进入可折叠状态。
   // KV 预置空对象文件，避免 init 读缺失文件时的错误日志噪音。
@@ -97,7 +96,8 @@ test("block tool keeps content after collapse and re-expand", async () => {
     await app.waitForFrame((f) => f.includes("Click to collapse"))
     frame = app.captureCharFrame()
     expect(frame).toContain("source line 24")
-    expect(bodyMounts).toBe(1)
+    // 第二次展开确实重建正文owner，而不是把隐藏误报成释放。
+    expect(bodyMounts).toBe(2)
   } finally {
     app.renderer.destroy()
     engine.detach()

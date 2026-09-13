@@ -30,6 +30,11 @@ import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/se
 import { Session } from "@/session/session"
 import { SessionRunState } from "../../src/session/run-state"
 import { AppLayer } from "../../src/effect/app-runtime"
+import { SessionPrompt } from "../../src/session/prompt"
+import { SessionStatus } from "../../src/session/status"
+import { Provider } from "../../src/provider/provider"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
@@ -263,6 +268,12 @@ describe("session HttpApi", () => {
         expect(Context.get(second, SessionExecution.Service)).toBe(Context.get(first, SessionExecution.Service))
         expect(Context.get(second, LocationServiceMap.Service)).toBe(Context.get(first, LocationServiceMap.Service))
         expect(Context.get(second, Database.Service)).toBe(Context.get(first, Database.Service))
+        // 复用目标共享层，覆盖source要求的实际应用服务身份，不建立第二个共享helper。
+        expect(Context.get(second, SessionStatus.Service)).toBe(Context.get(first, SessionStatus.Service))
+        expect(Context.get(second, SessionPrompt.Service)).toBe(Context.get(first, SessionPrompt.Service))
+        expect(Context.get(second, Provider.Service)).toBe(Context.get(first, Provider.Service))
+        expect(Context.get(second, SessionV2.Service)).toBe(Context.get(first, SessionV2.Service))
+        expect(Context.get(second, EventV2Bridge.Service)).toBe(Context.get(first, EventV2Bridge.Service))
         expect(Context.get(runtime, SessionRunState.Service)).toBe(firstRunState)
         expect(Context.get(runtime, InstanceStore.Service)).toBe(Context.get(first, InstanceStore.Service))
         const configuration = yield* Effect.promise(() => import("../../src/config/config"))
@@ -315,6 +326,9 @@ describe("session HttpApi", () => {
         )
         const exit = yield* awaitWithTimeout(Fiber.await(fiber), "shared V1 run did not complete after cancellation")
         expect(exit).toEqual(Exit.succeed(interrupted))
+        yield* Scope.close(firstScope, Exit.succeed(undefined))
+        // 第一scope退出不关闭第二scope仍持有的应用服务。
+        expect((yield* Context.get(second, Session.Service).get(session.id).pipe(Effect.provide(second))).id).toBe(session.id)
       }),
   )
 

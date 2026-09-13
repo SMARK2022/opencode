@@ -6875,6 +6875,52 @@ for (const lifecycle of ["delete", "dispose"] as const) {
   )
 }
 
+cacheLifetime.instance("prompt window proof keys do not retain a second copy of large raw content", () => Effect.gen(function* () {
+  const sessions = yield* Session.Service
+  const prompt = yield* SessionPrompt.Service
+  const session = yield* sessions.create({ title: "Proof key size" })
+  const message = yield* sessions.updateMessage({
+    id: MessageID.ascending(), sessionID: session.id, role: "user", agent: "build",
+    model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") }, time: { created: 1 },
+  })
+  const text = "x".repeat(4 * 1024 * 1024)
+  const part = yield* sessions.updatePart({ id: PartID.ascending(), messageID: message.id, sessionID: session.id, type: "text", text })
+  // 已完成assistant使真实loop发布warm槽后退出，不把4MiB正文交给Provider或工具外部进程。
+  yield* sessions.updateMessage({
+    id: MessageID.ascending(), sessionID: session.id, role: "assistant", parentID: message.id,
+    agent: "build", mode: "build", modelID: ModelV2.ID.make("test-model"), providerID: ProviderV2.ID.make("test"),
+    path: { cwd: "unused", root: "unused" }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 2, completed: 3 }, finish: "stop",
+  })
+  const original = PromptWindowCache.publish
+  let captured: MessageV2.PromptWindowProof | undefined
+  const observer = spyOn(PromptWindowCache, "publish").mockImplementation((slot, generation, entry) => {
+    if (entry.sessionID === session.id) captured = entry.proof
+    return original(slot, generation, entry)
+  })
+  try {
+    yield* prompt.loop({ sessionID: session.id })
+  } finally {
+    observer.mockClear()
+    observer.mockRestore()
+  }
+  expect(captured).toBeDefined()
+  if (!captured) throw new Error("warm proof was not published")
+  expect(captured.messages.reduce((sum, item) => sum + Buffer.byteLength(item.key, "latin1"), 0)).toBeLessThan(64 * 1024)
+  const key = captured.messages.find((item) => item.id === message.id)?.key
+  if (key === undefined) throw new Error("user proof is missing")
+  // 观察真实发布表示，再逐字解压核对内容；相同窗口相等，原位更新必须失配。
+  const raw = Buffer.from(Bun.zstdDecompressSync(Buffer.from(key, "latin1"))).toString("utf8")
+  expect(raw).toContain(text)
+  expect((JSON.parse(raw) as unknown[])[0]).toBe(message.id)
+  const unchanged = yield* MessageV2.promptWindowProof(session.id)
+  expect(unchanged.messages.find((item) => item.id === message.id)?.key).toBe(key)
+  yield* sessions.updatePart({ ...part, text: `${text}!` })
+  const changed = yield* MessageV2.promptWindowProof(session.id)
+  expect(changed.messages.find((item) => item.id === message.id)?.key).not.toBe(key)
+}), { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } })
+
 test("prompt window cache drops in-flight publication after invalidation", () => {
   const sessionID = SessionID.make("ses_lease_race")
   const slot = PromptWindowCache.acquire()

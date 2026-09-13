@@ -7,12 +7,14 @@ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecy
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Queue } from "effect"
 import * as Stream from "effect/Stream"
-import { HttpServerResponse } from "effect/unstable/http"
+import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
 import { EventClients } from "@opencode-ai/server/event-clients"
+import { PartView } from "@opencode-ai/core/session/part-view"
+import type { MessageV2 } from "@/session/message-v2"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -23,7 +25,34 @@ function eventData(data: unknown): Sse.Event {
   }
 }
 
-function eventResponse(clients: EventClients.Interface) {
+// 只投影当前viewer连接的副本，ID/顺序/次数与其他listener的完整事件保持不变。
+function projectViewerEvent(event: GlobalBusEvent): GlobalBusEvent {
+  const payload = event.payload
+  if (payload.type === "message.part.updated" || payload.type === "message.part.progress") {
+    const part = (payload.properties as { part?: MessageV2.Part }).part
+    if (!part) return event
+    const next = PartView.project(part)
+    return next === part ? event : { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
+  }
+  if (payload.type === "session.next.tool.success") {
+    const structured = PartView.projectFields(payload.properties.structured)
+    return { ...event, payload: { ...payload, properties: { ...payload.properties, structured } } }
+  }
+  if (payload.type === "sync" && payload.syncEvent?.data) {
+    const syncEvent = payload.syncEvent
+    const data = syncEvent.data
+    if (syncEvent.type === EventV2.versionedType("session.next.tool.success", 1)) {
+      return { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, structured: PartView.projectFields(data.structured) } } } }
+    }
+    const part = (data as { part?: MessageV2.Part }).part
+    if (!part) return event
+    const next = PartView.project(part)
+    return next === part ? event : { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, part: next } } } }
+  }
+  return event
+}
+
+function eventResponse(clients: EventClients.Interface, viewer: boolean) {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
     const events = Stream.callback<GlobalBusEvent>((queue) => {
@@ -42,7 +71,7 @@ function eventResponse(clients: EventClients.Interface) {
       // 计数属于响应 body 的 scope；未消费响应不虚增，取消流自动释放。
       Stream.unwrap(Effect.as(clients.acquire, Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
         Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
-        Stream.map(eventData),
+        Stream.map((event) => eventData(viewer ? projectViewerEvent(event) : event)),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
         Stream.ensuring(Effect.logInfo("global event disconnected")),
@@ -71,8 +100,8 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       return { healthy: true as const, version: InstallationVersion }
     })
 
-    const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return yield* eventResponse(clients)
+    const event = Effect.fn("GlobalHttpApi.event")(function* (ctx: { request: HttpServerRequest.HttpServerRequest }) {
+      return yield* eventResponse(clients, ctx.request.headers["x-opencode-tui-message-projection"] === "viewer")
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {

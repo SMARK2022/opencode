@@ -7,6 +7,7 @@ import { MessageDecodeError } from "./error"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { SessionContextEpochTable, SessionMessageTable } from "./sql"
+import { encodeProofKey } from "./history-proof"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -111,7 +112,8 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   const rows = yield* messageRows(db, sessionID, compaction, baselineSeq, false)
   const boundary = JSON.stringify([sessionID, baselineSeq, compaction?.seq])
   // 包含data、seq和cold key/ref/stats，原位修改、隐藏和冷热迁移都会在首个分歧处失效。
-  const proof = rows.map(row => JSON.stringify(row))
+  // 与V1共用无损表示，完整row的每个字段和顺序仍参加exact proof，不另造版本或缓存。
+  const proof = rows.map(row => encodeProofKey(JSON.stringify(row)))
   const mismatch = cache?.boundary === boundary
     ? proof.findIndex((key, index) => key !== cache.proof[index]) : 0
   const matched = cache?.boundary === boundary ? mismatch < 0 ? rows.length : mismatch : 0

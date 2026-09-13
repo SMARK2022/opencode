@@ -2,7 +2,7 @@ export * as FileSystemSearch from "./search"
 
 import { makeLocationNode } from "../effect/app-node"
 import path from "path"
-import { Context, Effect, Layer, Scope } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Layer } from "effect"
 import { Fff } from "#fff"
 import fuzzysort from "fuzzysort"
 import { Entry, Match } from "@opencode-ai/schema/filesystem"
@@ -27,26 +27,39 @@ export const ripgrepLayer = Layer.effect(
     const fs = yield* FSUtil.Service
     const location = yield* Location.Service
     const ripgrep = yield* Ripgrep.Service
-    const scope = yield* Scope.Scope
-    const state = {
-      files: [] as string[],
-      directories: [] as string[],
-    }
-    const directories = new Set<string>()
-    yield* ripgrep
-      .find({
+    type Index = { files: string[]; directories: string[] }
+    // Location只共享正在执行的扫描；空闲构建不预扫，完成结果随请求释放。
+    const state: { pending?: Deferred.Deferred<Index, never> } = {}
+    const scan = Effect.fnUntraced(function* () {
+      const files: string[] = []
+      const directories = new Set<string>()
+      yield* ripgrep.find({
         cwd: location.directory,
         pattern: "*",
         limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
-        onEntry: (entry) =>
-          Effect.sync(() => {
-            state.files.push(entry.path)
-            const parts = entry.path.split("/")
-            parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
-            state.directories = Array.from(directories)
-          }),
-      })
-      .pipe(Effect.orDie, Effect.asVoid, Effect.forkIn(scope))
+        onEntry: (entry) => Effect.sync(() => {
+          files.push(entry.path)
+          const parts = entry.path.split("/")
+          parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
+        }),
+      }).pipe(Effect.orDie)
+      return { files, directories: Array.from(directories) }
+    })
+    const scanOnce = Effect.fnUntraced(function* () {
+      return yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+        if (state.pending) return yield* restore(Deferred.await(state.pending))
+        const pending = Deferred.makeUnsafe<Index, never>()
+        state.pending = pending
+        const raw = yield* restore(scan().pipe(Effect.exit))
+        // 延续source扫描失败为空结果；中断原样传给等待者，不伪造成功。
+        const exit = Exit.isFailure(raw) && !Cause.hasInterrupts(raw.cause)
+          ? Exit.succeed({ files: [], directories: [] })
+          : raw
+        state.pending = undefined
+        yield* Deferred.done(pending, exit)
+        return yield* exit
+      }))
+    })
     return Service.of({
       glob: (input) =>
         Effect.gen(function* () {
@@ -103,14 +116,16 @@ export const ripgrepLayer = Layer.effect(
         }),
       find: (input) =>
         Effect.gen(function* () {
+          const index = yield* scanOnce()
           const items =
             input.type === "file"
-              ? state.files
+              ? index.files
               : input.type === "directory"
-                ? state.directories
-                : [...state.files, ...state.directories]
-          return fuzzysort.go(input.query, items, { limit: input.limit ?? 50 }).map((item) => {
-            const relative = item.target
+                ? index.directories
+                : [...index.files, ...index.directories]
+          const query = input.query.trim()
+          const paths = query ? fuzzysort.go(query, items, { limit: input.limit ?? 50 }).map((item) => item.target) : items.slice(0, input.limit ?? 50)
+          return paths.map((relative) => {
             const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
             return Entry.make({
               path: RelativePath.make(relative),

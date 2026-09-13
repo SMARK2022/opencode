@@ -70,6 +70,8 @@ test("preview card mounts without leaking discarded preview tree", async () => {
     expect(detached).toEqual([])
   } finally {
     app.renderer.destroy()
+    // 预览只有一棵树；Provider卸载后其真实native根也应退休。
+    expect(app.renderer.root.isDestroyed).toBe(true)
     engine.detach()
   }
 })

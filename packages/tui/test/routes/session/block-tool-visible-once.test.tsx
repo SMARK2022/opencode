@@ -75,6 +75,8 @@ test("expanded shell block does not leak preview first row", async () => {
     expect(rows.filter((line) => line.includes("$ echo test")).length).toBe(1)
   } finally {
     app.renderer.destroy()
+    // 命令互斥断言保留，同时确认窗口结束不会留下仍活着的native根。
+    expect(app.renderer.root.isDestroyed).toBe(true)
     engine.detach()
   }
 })
