@@ -40,21 +40,25 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
     "adds a local server while preserving argv and environment values",
     ({ home, opencode }) =>
       Effect.gen(function* () {
-        const result = yield* opencode.spawn([
-          "mcp",
-          "add",
-          "local",
-          "--env",
-          "API_KEY=secret",
-          "--env",
-          "VALUE=one=two",
-          "--",
-          "npx",
-          "-y",
-          "@example/server",
-          "--label",
-          "two words",
-        ])
+        // 注入无效配置，确保命名添加不触发实例启动。
+        const result = yield* opencode.spawn(
+          [
+            "mcp",
+            "add",
+            "local",
+            "--env",
+            "API_KEY=secret",
+            "--env",
+            "VALUE=one=two",
+            "--",
+            "npx",
+            "-y",
+            "@example/server",
+            "--label",
+            "two words",
+          ],
+          { env: { OPENCODE_CONFIG_CONTENT: "{" } },
+        )
         opencode.expectExit(result, 0)
 
         const config = yield* Effect.promise(() =>

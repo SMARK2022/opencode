@@ -3,7 +3,7 @@
 import { testRender } from "@opentui/solid"
 import { engine } from "@opentui/core"
 import { onMount, type JSX } from "solid-js"
-import { ArgsProvider } from "../../../../src/context/args"
+import { ArgsProvider, type Args } from "../../../../src/context/args"
 import { KVProvider, useKV } from "../../../../src/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/context/project"
 import { SDKProvider } from "../../../../src/context/sdk"
@@ -26,11 +26,12 @@ export async function wait(fn: () => boolean, timeout = 2000) {
 
 type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
 
-export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element) {
+export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element, options: { args?: Args; status?: "partial" | "complete" } = {}) {
   // 显式测试目录仍优先；批量隔离运行时不读写固定/tmp或用户全局KV。
   const statePath = state ?? process.env.XDG_STATE_HOME
   const calls = createFetch(override)
   const events = createEventSource()
+  const exits: unknown[] = []
   let sync!: ReturnType<typeof useSync>
   let project!: ReturnType<typeof useProject>
   let kv!: ReturnType<typeof useKV>
@@ -55,14 +56,14 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
   const app = await testRender(
     () => (
     <TestTuiContexts paths={statePath ? { state: statePath } : undefined}>
-      <ArgsProvider>
+      <ArgsProvider {...options.args}>
         <KVProvider>
           <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
             {/* 活动Session资格由现有Route提供，fixture与生产同序，不添加可选context回退。 */}
             <RouteProvider initialRoute={initialRoute}>
               <PermissionProvider>
                 <ProjectProvider>
-                  <ExitProvider exit={() => {}}>
+                  <ExitProvider exit={(error) => { exits.push(error) }}>
                     <SyncProvider>
                       <Probe />
                     {render?.()}
@@ -97,7 +98,7 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
   }
 
   await ready
-  await wait(() => sync.status === "complete")
-  return { app, emit: events.emit, kv, project, sync, route, session: calls.session }
+  await wait(() => sync.status === (options.status ?? "complete"))
+  return { app, emit: events.emit, kv, project, sync, route, session: calls.session, exits }
 }
 

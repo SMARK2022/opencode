@@ -399,11 +399,14 @@ export const {
       }
       if (count === 0) return
       partConsumers.delete(sessionID)
-      // [0624] 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
-      syncTokens.delete(sessionID)
-      syncingSessions.delete(sessionID)
-      hydratingSessions.delete(sessionID)
-      releaseSessionParts(sessionID)
+      // 路由交接在同一批内复用在途刷新；确认无人接手后才一并撤销租约与正文。
+      queueMicrotask(() => {
+        if (partConsumers.has(sessionID)) return
+        syncTokens.delete(sessionID)
+        syncingSessions.delete(sessionID)
+        hydratingSessions.delete(sessionID)
+        releaseSessionParts(sessionID)
+      })
     }
 
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
@@ -1215,7 +1218,13 @@ export const {
 
         case "lsp.updated": {
           const workspace = project.workspace.current()
-          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
+          void sdk.client.lsp.status({ workspace })
+            .then((x) => setStore("lsp", x.data ?? []))
+            .catch((error: unknown) => {
+              // 此订阅拥有刷新任务；仅忽略自身退出信号，避免掩盖同时发生的真实错误。
+              if (sdk.signal.aborted && error === sdk.signal.reason) return
+              console.error("Failed to refresh LSP status", error)
+            })
           break
         }
 
@@ -1313,7 +1322,8 @@ export const {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
       const projectPromise = project.sync()
-      const sessionListPromise = projectPromise.then(() => listSessions())
+      // 普通启动等首组成功后再读列表，避免首组失败留下无人接管的派生 Promise。
+      const sessionListPromise = args.continue ? projectPromise.then(() => listSessions()) : undefined
 
       // blocking - include session.list when continuing a session
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
@@ -1335,7 +1345,7 @@ export const {
         agentsPromise,
         configPromise,
         projectPromise,
-        ...(args.continue ? [sessionListPromise] : []),
+        ...(sessionListPromise ? [sessionListPromise] : []),
       ])
         .then(async () => {
           const providersResponse = providersPromise.then((x) => x.data!)
@@ -1344,7 +1354,6 @@ export const {
           const consoleStateResponse = consoleStatePromise
           const agentsResponse = agentsPromise.then((x) => x.data ?? [])
           const configResponse = configPromise.then((x) => x.data!)
-          const sessionListResponse = args.continue ? sessionListPromise : undefined
 
           return Promise.all([
             providersResponse,
@@ -1353,7 +1362,7 @@ export const {
             consoleStateResponse,
             agentsResponse,
             configResponse,
-            ...(sessionListResponse ? [sessionListResponse] : []),
+            ...(sessionListPromise ? [sessionListPromise] : []),
           ]).then((responses) => {
             const providers = responses[0]
             const providerList = responses[1]
@@ -1375,9 +1384,9 @@ export const {
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
-          // non-blocking
-          void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise]),
+          // partial 已放行 UI；返回异步组，让下方既有 catch 同时接管取消与真实失败。
+          return Promise.all([
+            ...(sessionListPromise ? [] : [listSessions()]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
@@ -1399,7 +1408,7 @@ export const {
           })
         })
         .catch(async (e) => {
-          if (sdk.signal.aborted && e instanceof Error && e.name === "AbortError") return
+          if (sdk.signal.aborted && e === sdk.signal.reason) return
           console.error("tui bootstrap failed", {
             error: e instanceof Error ? e.message : String(e),
             name: e instanceof Error ? e.name : undefined,

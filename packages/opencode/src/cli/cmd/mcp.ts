@@ -449,10 +449,10 @@ export const McpAddCommand = effectCmd({
         type: "string",
         array: true,
       }),
+  // 命名添加只写全局配置，无需启动项目实例。
+  instance: (args) => !args.name,
   handler: Effect.fn("Cli.mcp.add")(function* (args) {
-    const maybeCtx = yield* InstanceRef
-    if (!maybeCtx) return yield* Effect.die("InstanceRef not provided")
-    const ctx = maybeCtx
+    const ctx = yield* InstanceRef
     yield* Effect.promise(async () => {
       const command = args["--"] ?? []
       if (!args.name && (args.url || args.env?.length || args.header?.length || command.length)) {
@@ -500,6 +500,7 @@ export const McpAddCommand = effectCmd({
         return
       }
 
+      if (!ctx) throw new Error("InstanceRef not provided")
       UI.empty()
       prompts.intro("Add MCP server")
 
