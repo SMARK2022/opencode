@@ -388,7 +388,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       partConsumers.delete(sessionID)
       // 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
       syncRequests.delete(sessionID)
-      releaseSessionParts(sessionID)
+      // 正文清扫推迟到 microtask 并复查计数：路由切换时旧树的清理（如 Task 卡片卸载）
+      // 可能先于新路由的消费者注册运行；同步擦除会把“导航进入该 Session”刚要用的正文清掉，
+      // 下游的一次性/节流展示（isServer 下 leadingAndTrailing 只落地首个值）再无恢复机会。
+      queueMicrotask(() => {
+        if (partConsumers.has(sessionID)) return
+        releaseSessionParts(sessionID)
+      })
     }
 
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。

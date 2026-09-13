@@ -263,8 +263,10 @@ async function recoverInterruptedMaintenance() {
 // graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
 // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
 // Database.close 与 daemon lock 清理发生在 maintenance/instance/server 全部停止后，避免替代进程过早接管 SQLite。
-async function gracefulShutdown(reason = "unknown") {
-  if (shutdownInProgress) return
+async function gracefulShutdown(reason = "unknown", published = false) {
+  // published 表示控制面 handler 已同步置过标志（响应返回前到达的 start/resume 被拒）。
+  // 常规入口只允许第一个调用者真正开始拆解；published 入口则必须继续执行主体。
+  if (shutdownInProgress && !published) return
   shutdownInProgress = true
   // residual 与 process.exit 硬截止必须同一 t0：maintenance abort 也吃墙钟，不能只从 dispose 起算。
   const shutdownStartedAt = Date.now()
@@ -478,8 +480,13 @@ controlServer = Bun.serve({
     // 这是 daemon stop 的本机私有控制面：只有持有当前 lock token 的调用方
     // 才能让 daemon 自己执行 gracefulShutdown，避免 CLI 直接杀 pid。
     // conditional 通过后同步发布 shutdownInProgress，响应返回前到达的 start/resume 也必须被拒绝。
-    if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(DisposedReason.DaemonStop)
-    else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
+    // 但拆解主体必须推迟到下一个 macrotask：Bun 在同一 macrotask 内先刷出本次响应，
+    // 若同步进入 gracefulShutdown，其 microtask 续段会先于 socket 写入跑到 controlServer.stop(true)，
+    // 客户端读到的是 ECONNRESET 而不是 {ok:true}（处置工作越少越容易输掉这个竞态）。
+    if (url.searchParams.get("maintenance-idle") === "1") {
+      shutdownInProgress = true
+      setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop, true), 0).unref?.()
+    } else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
     return Response.json({ ok: true })
   },
 })

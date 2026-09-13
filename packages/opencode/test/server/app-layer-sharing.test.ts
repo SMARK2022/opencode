@@ -49,6 +49,9 @@ it.instance("sharedLayer builds application services once across listener scopes
     expect(yield* Context.get(second, SessionStatus.Service).get("ses_shared_layer_probe" as never)).toEqual({
       type: "busy",
     })
+    // 共享图是进程级的：探针状态必须清走，idle 语义会从快照中删除该条目，
+    // 否则同进程的其他 server 测试会读到这个残留 Session。
+    yield* status.set("ses_shared_layer_probe" as never, { type: "idle" })
   }),
   options,
   60000,

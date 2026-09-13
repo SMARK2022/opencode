@@ -101,6 +101,8 @@ test("explicit acquireParts holds bodies; release drops them; acquire again relo
     const handle = await h.sync.session.acquireParts(other)
     expect(bytes(h, other)).toBe(1024)
     handle.release()
+    // 清扫在 microtask 落地并复查计数：同一批次注册的新消费者可以阻止擦除。
+    await Promise.resolve()
     expect(bytes(h, other)).toBe(0)
     const again = await h.sync.session.acquireParts(other)
     expect(bytes(h, other)).toBe(1024)
@@ -257,6 +259,7 @@ test("concurrent acquisitions both resolve only after bodies are loaded", async 
     expect(bytes(h, other)).toBe(1024)
     h1.release()
     h2.release()
+    await Promise.resolve()
     expect(bytes(h, other)).toBe(0)
   } finally {
     h.app.renderer.destroy()

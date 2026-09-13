@@ -658,3 +658,14 @@ R3 实现提交（`45ba8f0c29`）后，用户要求对计划与实现做完整�
 - R4 不改变 T11 已实测的内存与流畅性结论；返工后需重跑涉及面测试与渲染几何断言，内存复测仅在返工触及驻留/释放路径的行为变化超出测试可证明范围时才需要。
 
 R3 已实施并提交为 `45ba8f0c29`；R6 返工已实施并通过实现审计第 3 轮（APPROVE），当前 `Status: verified`。提交范围：返工的 4 个生产文件、4 个测试文件与本计划。
+
+## 27. Post-push CI 修复记录（推送后全量套件首次真实运行发现）
+
+推送后 CI 三平台全量套件首次运行暴露出四类问题，均已修复并验证（本地 TUI shard 731 用例 718 pass/0 fail/13 skip，daemon 维护两例、core 泄漏对均绿）：
+
+| 问题 | 根因 | 修复 | 范围属性 |
+| --- | --- | --- | --- |
+| ~190 个 tsx 测试全线“context missing” | `lazy-runtime.test.ts` 的 `Bun.plugin.clearAll()` 清掉了 preload 注册的 JSX 转换插件，之后加载的 tsx 模块全部编译损坏 | 探针改为子进程隔离，父进程只读退出码与输出 | 测试代码，不动生产 |
+| `httpapi-session` 读到 `ses_shared_layer_probe` | `app-layer-sharing` 测试往进程级共享图写入探针状态未清理 | 结尾以 idle 语义清除探针条目 | 测试代码 |
+| subagent footer usage 在 isServer 解析下永不显示 | 导航进入子会话时 Task 卸载释放把正文清零（计数归零即擦除）先于路由消费者注册；`leadingAndTrailing` 在 isServer 下一次性落地首个值，空值抢先占位 | `releaseParts` 正文清扫推迟到 microtask 并复查计数；同批次到达的新消费者阻止擦除 | sync.tsx（计划内文件） |
+| daemon 维护型 shutdown 客户端读到 ECONNRESET | 首个提交减少处置挂起工作使拆解变快，`controlServer.stop(true)` 抢在响应刷出前关连接 | maintenance-idle 路径同步发布 stopping（拒绝合同不变），拆解主体推迟一个 macrotask | worker.ts（新增第 17 个生产文件，属 CI 缺陷修复而非内存方案扩张） |
