@@ -66,30 +66,66 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
 // #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
 // 递归保护根判定仅依赖递归标志：-f（force）只压制提示符不增加破坏性，
 // rm -r / 与 rm -rf / 破坏力等价，不应把 -f 作为 dangerous 门槛。
-// 系统根（/etc、/usr 等）保护所有子目录；用户数据根（/home、/Users）仅保护
-// 根本身和一级子目录（用户家目录），深层子目录是正常用户操作不视为保护根；
-// /root 仅保护根本身，子目录不保护
+// [local-smark] R3 分级：系统根（/etc、/usr 等）保护根本身与一级子目录
+// （/usr/local、/etc/ssl）；恰好二级子目录降为 dangerous（由 dangerousRaw 的
+// RE_D_RM_RF_SYSTEM_SUBTREE 承载）；更深子树不保护。用户数据根（/home、/Users）
+// 仅保护根本身和一级子目录（用户家目录）；/root 仅保护根本身，子目录不保护。
 const POSIX_SYSTEM_ROOTS = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|Library|Applications|System`
 const POSIX_USER_DATA_ROOTS = String.raw`home|Users`
 const RE_D_RM_RF_ROOT = new RegExp(
-  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$))|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s)'"` + "`" + String.raw`|;]+\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS})\/\.\.(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
+  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s)'"` + "`" + String.raw`;]*)?\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s)'"` + "`" + String.raw`|;]+\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS})\/\.\.(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
 )
+
+// [local-smark] R3：系统根恰好二级子目录的 dangerous 提升。恰好两段的边界前瞻
+// （可选尾斜杠）保证更深子树不命中——/usr/local/libexec/.linkd 落普通 cautious。
+const RE_D_RM_RF_SYSTEM_SUBTREE = new RegExp(
+  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s\/(?:${POSIX_SYSTEM_ROOTS})\/[^\/\s)'"` + "`" + String.raw`;]+\/[^\/\s)'"` + "`" + String.raw`;]+\/?(?=[\s)'"` + "`" + String.raw`]|$)`,
+)
+
+// [local-smark] R3 reason 语义化：明示删除对象层级与终局性（forbidden 授权不可
+// 放行 / dangerous 需显式授权），替换 "critical recursive delete" 黑话。
+const FORBIDDEN_ROOT_DELETE =
+  "recursive delete of filesystem root, home, or top-level system directory — forbidden (cannot be authorized)"
+const WIN_FORBIDDEN_DELETE =
+  "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)"
+const DANGEROUS_SUBTREE_DELETE = "recursive delete under a system directory — requires explicit user authorization"
+const DANGEROUS_INTERPRETER_DELETE =
+  "file deletion under a system directory via interpreter — requires explicit user authorization"
+
+// [local-smark] 解释器族共享路径交替组（R3 审计 B-01）：旧版裸 `\/` 分支匹配任意
+// 绝对路径（os.remove("/tmp/x") 都被 forbidden）。真实矩阵：forbidden 根/家/系统根
+// 一级；dangerous 恰好二级；任意路径由 cautious 兑底（RE_C_*）。边界前瞻前必须
+// 容忍可选尾斜杠（tab 补全形态 "/etc/ssl/"），该族无 token 层兑底。
+const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
+const INTERPRETER_DANGEROUS_PATH = String.raw`\/(?:${POSIX_SYSTEM_ROOTS})\/[^\/\s"']+\/[^\/\s"']+\/?(?=["'\s)])`
 const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i
 const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
 const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
 const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
 // #530：旧 RE_D_WINDOWS_PROTECTED_DELETE 整串正则已删——跨段 .* 共现把 python heredoc（del + tree-sitter 的 -s + if not m: 盘符形）
-// 误报 dangerous；改由 windowsProtectedDeleteInCommand 同段 token 谓词承载（见 protectedDeleteTarget 附近）。
+// 误报 dangerous；改由 windowsProtectedDeleteTier 同段/包装器统一扫描器承载（见 protectedDeleteTier 附近）。
 const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
 const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
 // 凭据文件通过 scp/rsync/sftp 远程传输：由 W4 方向感知 helper 取代（R2）；
 // 出向（本地敏感路径作源）才 dangerous，入向/认证键/.pub 不命中。
 // #556：ri 必须与 Remove-Item 同级——若只写 Remove-Item，generic RAW_FILE_DELETE 会先把 ri 标成 cautious。
-const RE_D_PS_RECURSIVE_DELETE_ROOT = /\b(?:Remove-Item|ri)\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
-const RE_D_PYTHON_RMTREE = /\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
-const RE_D_PYTHON_REMOVE = /\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
-const RE_D_NODE_REMOVE = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
-const RE_D_SUBPROCESS_RM = /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+// [local-smark] PowerShell 保护根递归删除已由 windowsProtectedDeleteTier 统一承载（cmd/PS
+// 双族统一扫描器，见 forbiddenRaw/dangerousRaw 双出口）；原 RE_D_PS_RECURSIVE_DELETE_ROOT
+// 的 i 旗语义由 protectedDeleteTier 的大小写不敏感别名分支承载。
+
+// [local-smark] 解释器族保护路径删除（R3 重写：共享交替组承载分级矩阵，修复裸 \/ 过宽）
+const RE_D_PYTHON_RMTREE = new RegExp(String.raw`\bshutil\.rmtree\(\s*["'](?:${INTERPRETER_FORBIDDEN_PATH})`)
+const RE_D_PYTHON_REMOVE = new RegExp(String.raw`\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:${INTERPRETER_FORBIDDEN_PATH})`)
+const RE_D_NODE_REMOVE = new RegExp(
+  String.raw`(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:${INTERPRETER_FORBIDDEN_PATH})`,
+)
+const RE_D_SUBPROCESS_RM = new RegExp(
+  String.raw`\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:${INTERPRETER_FORBIDDEN_PATH})`,
+)
+// [local-smark] 解释器族恰好二级子目录 → dangerous（可授权高风险）
+const RE_DANGER_INTERPRETER_DELETE = new RegExp(
+  String.raw`(?:\bshutil\.rmtree|\bos\.(?:remove|unlink|rmdir))\(\s*["'](?:${INTERPRETER_DANGEROUS_PATH})|(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:${INTERPRETER_DANGEROUS_PATH})|\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:${INTERPRETER_DANGEROUS_PATH})`,
+)
 const RE_D_REVERSE_SHELL = /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+(?:-i\s+)?[>&]+\s*\/dev\/tcp\/|\bmkfifo\b[^|;]*\b(?:sh|bash)\b|\bNew-Object\s+System\.Net\.Sockets\.TCPClient\b/i
 // #222：SSH authorized_keys 写入（后门持久化访问）。除 ~/$HOME 外，也覆盖常见
 // #222：绝对家目录；重定向会让结构解析降级，因此必须在 raw 层捕获。
@@ -117,7 +153,11 @@ const RE_C_SENSITIVE_READ = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|G
 // #222：看穿到后续 quoted search 文本，也保留 `"-delete"`/`'rm'` 这类 shell
 // #222：引号移除后仍会执行的参数形态。
 const RAW_FIND_OR_PYTHON_COMMAND_PATTERN = String.raw`${RAW_COMMAND_START}(${RAW_COMMAND_PATH}\b(?:find|python|python3|py)\b)`
-const RE_C_PYTHON_FILE_REMOVE_CALL = /\bos\.(?:remove|unlink|rmdir)\(\s*["'][^"']+["']/
+// R3：shutil.rmtree 并入（修复裸 \/ 过宽后任意路径删除仍需 cautious 兜底）；
+// node/subprocess 任意路径删除同理，与 bash rm 同层级，不得低于矩阵。
+const RE_C_PYTHON_FILE_REMOVE_CALL = /\b(?:os\.(?:remove|unlink|rmdir)|shutil\.rmtree)\(\s*["'][^"']+["']/
+const RE_C_NODE_FILE_REMOVE_CALL = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'][^"']+["']/
+const RE_C_SUBPROCESS_RM_ANY = /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf]/
 // #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
 const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "ri", "trash-put"]) // #222：trash-put 是 trash-cli 的删除命令；#556：ri 是 Remove-Item 官方别名，须与 remove-item 同级（含保护根 -Recurse dangerous）
 const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
@@ -834,29 +874,40 @@ function normalizeForRawScan(command: string): string {
 
 // [local-smark] forbiddenRaw：不可逆灾难族（R2 五级拆分）——保护根删除、驱动器
 // 格式化、解释器内保护根删除、反弹 shell、全进程终止。终审拒绝，任何授权不可放行。
+// [local-smark] 保护路径文本折叠（forbidden/dangerous 双 raw 出口共享）：折叠
+// 多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc）。
+function foldProtectedPathText(text: string) {
+  let out = text.replace(/(?!^)\/{2,}/g, "/")
+  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(out)) {
+    out = out.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
+  }
+  return out
+}
+
 function forbiddenRaw(command: string): string | undefined {
   const normalized = normalizeForRawScan(command)
+
+  // ---- 保护目录递归删除（R3 分级：根本身/一级 forbidden，恰好二级由
+  // dangerousRaw 的 RE_D_RM_RF_SYSTEM_SUBTREE 承载）----
   // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式。
-  // 折叠多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc），
-  // 归一化后才能正确匹配保护根路径
-  let rawNormalized = normalized.replace(/(?!^)\/{2,}/g, "/")
-  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
-    rawNormalized = rawNormalized.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
-  }
-  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
+  const rawNormalized = foldProtectedPathText(normalized)
+  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return FORBIDDEN_ROOT_DELETE
 
   // ---- Windows 破坏性操作 ----
   if (RE_D_WINDOWS_FORMAT.test(normalized)) return "Windows drive format"
-  // #530：Windows 保护递归删除：同段 token 谓词（禁整串子串共现误报）
-  if (windowsProtectedDeleteInCommand(normalized)) return "Windows protected directory delete"
+  // [local-smark] Windows 保护递归删除：cmd/PS 双族统一扫描器（tokenize 剥损使 token 层对
+  // 未加引号反斜杠路径不可见，raw 层是唯一检测路径）
+  if (windowsProtectedDeleteTier(normalized) === "forbidden") return WIN_FORBIDDEN_DELETE
 
-  // ---- PowerShell 保护根目录递归删除 ----
-  if (RE_D_PS_RECURSIVE_DELETE_ROOT.test(normalized)) return "critical PowerShell recursive delete"
-
-  if (RE_D_PYTHON_RMTREE.test(normalized)) return "critical Python recursive delete"
-  if (RE_D_PYTHON_REMOVE.test(normalized)) return "critical Python file removal"
-  if (RE_D_NODE_REMOVE.test(normalized)) return "critical Node.js file removal"
-  if (RE_D_SUBPROCESS_RM.test(normalized)) return "critical recursive delete through interpreter"
+  // ---- 解释器 API 内的保护目录删除 ----
+  if (RE_D_PYTHON_RMTREE.test(normalized))
+    return "recursive delete of filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)"
+  if (RE_D_PYTHON_REMOVE.test(normalized))
+    return "file removal targeting filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)"
+  if (RE_D_NODE_REMOVE.test(normalized))
+    return "file removal targeting filesystem root, home, or top-level system directory via Node.js — forbidden (cannot be authorized)"
+  if (RE_D_SUBPROCESS_RM.test(normalized))
+    return "recursive delete of filesystem root, home, or top-level system directory through interpreter — forbidden (cannot be authorized)"
   // #220：反弹 shell——含扩展变体（/dev/tcp、nc -e、socat、bash >&/dev/tcp、mkfifo、PowerShell TCPClient）
   if (RE_D_REVERSE_SHELL.test(normalized)) return "reverse shell pattern"
 
@@ -894,6 +945,13 @@ function dangerousRaw(command: string): string | undefined {
   if (RE_D_SUDOERS_WRITE.test(normalized)) return "sudoers modification grants privilege escalation"
   // sudoers仅目的位写入才dangerous，须先于通用move的cautious规则；源位不命中。
   if (RE_D_SUDOERS_COPY_DEST.test(normalized)) return "sudoers modification grants privilege escalation"
+
+  // ---- 系统根二级子目录删除（R3 分级：可授权高风险，显式授权可放行）----
+  // 与 forbiddenRaw 共享折叠归一化，穿越/多斜杠/尾斜杠形态同样命中。
+  const folded = foldProtectedPathText(normalized)
+  if (RE_D_RM_RF_SYSTEM_SUBTREE.test(folded)) return DANGEROUS_SUBTREE_DELETE
+  if (windowsProtectedDeleteTier(normalized) === "dangerous") return DANGEROUS_SUBTREE_DELETE
+  if (RE_DANGER_INTERPRETER_DELETE.test(normalized)) return DANGEROUS_INTERPRETER_DELETE
 
   // ---- 特权升级 ----
   if (RE_D_CHMOD_SETUID.test(normalized)) return "setuid/setgid bit creates privilege escalation surface"
@@ -962,6 +1020,10 @@ function cautiousRaw(command: string): string | undefined {
   const rawTokens = rawFindOrPythonTokens(command)
   if (rawTokens.some(findDeletesFile)) return "find file deletion requires explicit approval"
   if (rawTokens.some(pythonRemovesFile)) return "Python file deletion requires explicit approval"
+  // 解释器任意路径删除兜底（R3：修复裸 \/ 过宽后，node/subprocess 删除保持
+  // cautious，与 bash rm 同层级）
+  if (RE_C_NODE_FILE_REMOVE_CALL.test(normalized) || RE_C_SUBPROCESS_RM_ANY.test(normalized))
+    return "interpreter file deletion requires explicit approval"
 }
 
 // #220：rawExecutableMatch——引号感知的文件删除/移动匹配，委托 isShellActive 判断可执行上下文
@@ -1059,21 +1121,25 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
     return { level: "cautious", reason: "sensitive system file read requires explicit approval" }
   }
 
-  // #220: 文件删除——rm -r 保护根 forbidden（递归即门槛，不要求 -f），其他 cautious
+  // [local-smark] R3 三级分级（protectedDeleteTier）：保护根/一级 → forbidden；
+  // 系统根恰好二级 → dangerous（可授权高风险）；普通递归删除 → cautious。
   if (cmd === "rm" && hasRecursiveDeleteFlags(tokens.slice(1))) {
-    if (tokens.slice(1).some(protectedDeleteTarget))
-      return { level: "forbidden", reason: "critical recursive delete" }
+    const tier = highestProtectedDeleteTier(tokens.slice(1))
+    if (tier === "forbidden") return { level: "forbidden", reason: FORBIDDEN_ROOT_DELETE }
+    if (tier === "dangerous") return { level: "dangerous", reason: DANGEROUS_SUBTREE_DELETE }
     return { level: "cautious", reason: "recursive delete requires explicit approval" }
   }
   // #556：ri 与 remove-item 共用递归保护根判定——别名不得稀释保护根层级。
   if ((cmd === "remove-item" || cmd === "ri") && tokens.some((item) => item.toLowerCase() === "-recurse")) {
-    if (tokens.slice(1).some(protectedDeleteTarget))
-      return { level: "forbidden", reason: "critical PowerShell recursive delete" }
+    const tier = highestProtectedDeleteTier(tokens.slice(1))
+    if (tier === "forbidden") return { level: "forbidden", reason: WIN_FORBIDDEN_DELETE }
+    if (tier === "dangerous") return { level: "dangerous", reason: DANGEROUS_SUBTREE_DELETE }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
-  // #530：与 rm 对称：del/erase/rd/rmdir 保护根递归删除走同一 Windows 谓词，不降到 cautious
-  if (windowsProtectedRecursiveDelete(tokens))
-    return { level: "forbidden", reason: "Windows protected directory delete" }
+  // [local-smark] 与 rm 对称：del/erase/rd/rmdir 保护目录递归删除走同一分级谓词，不降到 cautious
+  const winTier = windowsRecursiveDeleteTier(tokens)
+  if (winTier === "forbidden") return { level: "forbidden", reason: WIN_FORBIDDEN_DELETE }
+  if (winTier === "dangerous") return { level: "dangerous", reason: DANGEROUS_SUBTREE_DELETE }
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   // #222：find -delete / -exec rm 也属于文件删除——argv 语义判断
@@ -1092,10 +1158,21 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
   if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
     return { level: "forbidden", reason: "raw disk write" }
 
-  // mkfs前缀覆盖文件系统变体，磁盘数据不可逆；不能恢复有限集合的漏项直通。
-  // fdisk/parted/wipefs共用此forbidden分支，关机族单独送审。
-  if (cmd === "mkfs" || cmd.startsWith("mkfs.") || DISK_FORMAT_COMMANDS.has(cmd))
+  // ---- 磁盘格式化/分区（R2 五级拆分 + GAP-1；R3 只读形态收窄）----
+  // mkfs 前缀族覆盖全部文件系统变体，任何形态都写盘 → forbidden（用户决策）。
+  // fdisk/parted 的 -l/--list 与 wipefs 无 -a/--all 均为只读打印（分区表/签名）
+  // → cautious；合并短开关簇感知（wipefs -af、fdisk -lu）防簇形态漏检。
+  if (cmd === "mkfs" || cmd.startsWith("mkfs."))
     return { level: "forbidden", reason: "disk formatting or partition table destruction is irreversible" }
+  if (DISK_FORMAT_COMMANDS.has(cmd)) {
+    const args = tokens.slice(1)
+    const clusterHas = (ch: string) => args.some((a) => /^-[A-Za-z]+$/.test(a) && a.slice(1).includes(ch))
+    const listOnly = clusterHas("l") || args.some((a) => a === "--list")
+    const wipefsWrites = cmd === "wipefs" && (clusterHas("a") || args.some((a) => a === "--all"))
+    if (cmd === "wipefs" ? !wipefsWrites : listOnly)
+      return { level: "cautious", reason: "disk partition inspection is read-only" }
+    return { level: "forbidden", reason: "disk formatting or partition table destruction is irreversible" }
+  }
 
   // ---- 关机/重启族（R2 五级拆分）----
   // 可逆（重新开机），归 dangerous 进 reviewer：显式用户授权可 allow
@@ -1443,13 +1520,46 @@ function isWindowsRecursiveDeleteFlagToken(token: string) {
   return [...body].every((ch) => WINDOWS_CMD_SWITCH_LETTERS.has(ch)) && body.includes("s")
 }
 
-function windowsProtectedRecursiveDelete(tokens: string[]) {
-  // #530：三元组同时成立才 dangerous：命令名 + 递归开关 + 保护根（与 rm 语义对称）
-  if (tokens.length < 2) return false
+// [local-smark] Windows 删除族统一 raw 扫描器（R3 审计 B-02）：tokenizeRich 的
+// POSIX 转义会剥掉未加引号反斜杠（C:\Users\u\AppData → C:UsersuAppData），token
+// 层对这类路径不可见——cmd 与 PS 双族的层级判定只能在 raw 文本层完成。除段首
+// 外，已知包装器（powershell/pwsh/cmd/bash/sh/wsl 的 -Command/-c/-lc 与 /c、--）
+// 载荷起点之后同样视为可执行位置（承载原 RE_D_PS_RECURSIVE_DELETE_ROOT 的包装器
+// 内覆盖）；纯文本形态（echo "del /s …"）不进入判定。
+// forbiddenRaw 消费 forbidden 档，dangerousRaw 消费 dangerous 档。
+function windowsProtectedDeleteTier(command: string): "forbidden" | "dangerous" | undefined {
+  let tier: "forbidden" | "dangerous" | undefined
+  const consider = (rawTokens: string[]) => {
+    if (rawTokens.length < 2) return
+    // 包装器载荷常带引号包裹（powershell -Command "Remove-Item …"），剥除后判定
+    const tokens = rawTokens.map((t) => t.replace(/^["']+|["']+$/g, ""))
+    const cmd = normalizeCommandName(tokens[0])
+    const rest = tokens.slice(1)
+    const isCmdDelete = (cmd === "del" || cmd === "erase" || cmd === "rd" || cmd === "rmdir") && hasWindowsRecursiveDeleteFlag(rest)
+    const isPsDelete = (cmd === "remove-item" || cmd === "ri") && rest.some((t) => t.toLowerCase() === "-recurse")
+    if (!isCmdDelete && !isPsDelete) return
+    const t2 = highestProtectedDeleteTier(rest)
+    if (t2 === "forbidden") tier = "forbidden"
+    else if (t2 === "dangerous" && tier !== "forbidden") tier = "dangerous"
+  }
+  for (const segment of command.split(/[;|&]+/)) {
+    const tokens = windowsCmdTokens(segment.trim())
+    consider(tokens)
+    for (let i = 1; i < tokens.length; i++) {
+      if (/^(?:-(?:command|c|lc)|\/c|--)$/i.test(tokens[i])) consider(tokens.slice(i + 1))
+    }
+  }
+  return tier
+}
+
+function windowsRecursiveDeleteTier(tokens: string[]): "forbidden" | "dangerous" | undefined {
+  // [local-smark] 三元组同时成立才定级：命令名 + 递归开关 + 保护目录（与 rm 语义对称）
+  if (tokens.length < 2) return undefined
   const cmd = normalizeCommandName(tokens[0])
-  if (cmd !== "del" && cmd !== "erase" && cmd !== "rd" && cmd !== "rmdir") return false
+  if (cmd !== "del" && cmd !== "erase" && cmd !== "rd" && cmd !== "rmdir") return undefined
   const rest = tokens.slice(1)
-  return hasWindowsRecursiveDeleteFlag(rest) && rest.some(protectedDeleteTarget)
+  if (!hasWindowsRecursiveDeleteFlag(rest)) return undefined
+  return highestProtectedDeleteTier(rest)
 }
 
 // #530：仅空白切分并保留 \。POSIX tokenize 把 \ 当转义吞掉，C:\Users 会变成 C:Users 导致保护根 FN。
@@ -1457,51 +1567,65 @@ function windowsCmdTokens(segment: string) {
   return segment.trim().split(/\s+/).filter(Boolean)
 }
 
-// #530：normalize 后按段扫描；sole windowsCmdTokens，禁止再顺序 tokenize（R5 impl audit B-01）
-function windowsProtectedDeleteInCommand(normalized: string) {
-  for (const segment of normalized.split(/[;|&]+/)) {
-    const trimmed = segment.trim()
-    if (!trimmed) continue
-    if (windowsProtectedRecursiveDelete(windowsCmdTokens(trimmed))) return true
-  }
-  return false
-}
+// POSIX 保护根（与 RE 常量 POSIX_SYSTEM_ROOTS/POSIX_USER_DATA_ROOTS 同族，
+// /root 另行保持既有"仅根本身"豁免）
+const PROTECTED_POSIX_ROOTS = [
+  "/etc", "/usr", "/var", "/lib", "/lib64", "/bin", "/sbin",
+  "/boot", "/sys", "/proc", "/dev", "/opt", "/root", "/home",
+  // macOS 特有
+  "/Library", "/Applications", "/System", "/Users",
+]
 
-// #220：protectedDeleteTarget——保护根目录覆盖 POSIX 根、家目录、Windows 盘符、系统目录和 macOS 特有目录
-function protectedDeleteTarget(input: string) {
-  // 折叠多斜杠并解析 .. 穿越，保证 /home//user、/home/../etc 等形式正确判定
-  let normalized = input.replaceAll("\\", "/").replace(/\/+$/, "").replace(/\/{2,}/g, "/")
+// [local-smark] 保护删除三级分级（R3）：根/家/驱动器根与系统根根本身及其一级
+// 子目录是不可逆灾难 → forbidden（终审）；系统根恰好二级子目录 → dangerous
+// （可授权高风险）；更深子树不保护（落普通递归删除 cautious）。
+// 用户数据根（/home /Users）深层与 /root 子目录保持既有豁免，不 widen。
+// 家目录/环境变量别名大小写不敏感（PowerShell env provider 语义，承载原
+// RE_D_PS_RECURSIVE_DELETE_ROOT 的 i 旗）。
+function protectedDeleteTier(input: string): "forbidden" | "dangerous" | undefined {
+  // 折叠多斜杠并解析 .. 穿越以正确判定保护根（/home//user → /home/user、
+  // /home/../etc → /etc）
+  let normalized = input.replaceAll("\\", "/").replace(/\/{2,}/g, "/")
+  // 尾斜杠剥除不得把根 "/" 本身剥成空串（保护根 "/" 必须保持可判定）
+  if (normalized.length > 1) normalized = normalized.replace(/\/+$/, "")
   while (/\/[^/]+\/\.\.(?=\/|$)/.test(normalized)) {
     normalized = normalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
   }
-  if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
-  if (normalized === "~" || normalized === "$HOME") return true
-  // #220: Windows 环境变量家目录
-  if (normalized === "$env:USERPROFILE" || normalized === "$env:SystemDrive") return true
-  // #530：Windows 环境变量家目录（%USERPROFILE% 大小写不敏感，对齐旧 raw i 旗）
-  if (normalized.toLowerCase() === "%userprofile%") return true
-  if (/^\w:\/?$/.test(normalized)) return true
-  // #220: POSIX 系统根目录（扩展版）
-  const posixRoots = new Set([
-    "/etc", "/usr", "/var", "/lib", "/lib64", "/bin", "/sbin",
-    "/boot", "/sys", "/proc", "/dev", "/opt", "/root", "/home",
-    "/Library", "/Applications", "/System", "/Users",
-  ])
-  if (posixRoots.has(normalized)) return true
-  // 用户数据根（/home、/Users）仅保护一级子目录（用户家目录），
-  // 深层子目录（/home/<user>/Download/...）是正常用户操作不视为保护根
-  if (normalized.startsWith("/home/") || normalized.startsWith("/Users/")) {
-    return !normalized.replace(/^\/(?:home|Users)\//, "").includes("/")
+  // POSIX 根和通配符
+  if (normalized === "/" || normalized === "/*" || normalized === "/.") return "forbidden"
+  // 家目录/环境变量别名（大小写不敏感）
+  const alias = normalized.toLowerCase()
+  if (alias === "~" || alias === "$home" || alias === "$env:userprofile" || alias === "$env:systemdrive" || alias === "%userprofile%")
+    return "forbidden"
+  // Windows 驱动器根：C:\ 或 C:
+  if (/^\w:\/?$/i.test(normalized)) return "forbidden"
+  // Windows 系统目录：根本身与一级 forbidden、恰好二级 dangerous、更深不保护
+  const win = /^[A-Za-z]:\/([^/]+)(?:\/(.*))?$/.exec(normalized)
+  if (win && /^(Windows|Program Files|Users)$/i.test(win[1]!)) {
+    const depth = win[2] ? win[2].split("/").length : 0
+    return depth <= 1 ? "forbidden" : depth === 2 ? "dangerous" : undefined
   }
-  // /root 仅保护根本身（已由 posixRoots.has 覆盖），子目录不保护
-  if (normalized.startsWith("/root/")) return false
-  // 其他系统根目录：保护根及所有子目录（如 /etc/passwd、/usr/local/bin）
-  for (const root of posixRoots) {
-    if (normalized.startsWith(root + "/")) return true
+  // POSIX 系统根：根本身与一级 forbidden、恰好二级 dangerous、更深不保护；
+  // 用户数据根（/home /Users）深层与 /root 子目录保持既有豁免
+  for (const root of PROTECTED_POSIX_ROOTS) {
+    if (normalized === root) return "forbidden"
+    if (!normalized.startsWith(root + "/")) continue
+    const depth = normalized.slice(root.length + 1).split("/").length
+    if (root === "/root") return undefined
+    if (root === "/home" || root === "/Users") return depth === 1 ? "forbidden" : undefined
+    return depth <= 1 ? "forbidden" : depth === 2 ? "dangerous" : undefined
   }
-  // #220: Windows 系统目录
-  if (/^[A-Za-z]:\/(?:Windows|Program Files|Users)(?:\/|$)/i.test(normalized)) return true
-  return false
+  return undefined
+}
+
+function highestProtectedDeleteTier(tokens: string[]): "forbidden" | "dangerous" | undefined {
+  let tier: "forbidden" | "dangerous" | undefined
+  for (const token of tokens) {
+    const t = protectedDeleteTier(token)
+    if (t === "forbidden") return "forbidden"
+    if (t === "dangerous") tier = "dangerous"
+  }
+  return tier
 }
 
 function safeTokens(tokens: string[], cwd?: string, stripped?: boolean[]) {
