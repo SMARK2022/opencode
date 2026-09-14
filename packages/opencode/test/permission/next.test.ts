@@ -834,6 +834,27 @@ it.instance(
   { git: true },
 )
 
+// [local-smark] R3 终审文案分级：forbidden（不可逆灾难）终审拒绝时授权无意义，
+// 不得再提示 "ask the user for explicit confirmation"（该路径不存在，会诱发
+// agent 换形态重试循环）；非终审拒绝保留原文案字节不变（reviewer 拒绝后用户
+// 显式授权重试是有效路径）。
+test("AutoDeniedError message drops the authorization path for terminal forbidden denials", () => {
+  const terminal = new Permission.AutoDeniedError({
+    reason: "recursive delete of filesystem root — forbidden (cannot be authorized)",
+    terminal: true,
+  })
+  expect(terminal.message).toContain("Do not retry the same outcome through shell indirection")
+  expect(terminal.message).toContain(
+    "This operation is terminally forbidden: it cannot be executed even with explicit user authorization.",
+  )
+  expect(terminal.message).not.toContain("ask the user for explicit confirmation")
+  expect(terminal.message.match(/materially safer approach/g)).toHaveLength(1)
+
+  const normal = new Permission.AutoDeniedError({ reason: "some reviewer denial" })
+  expect(normal.message).toContain("or ask the user for explicit confirmation before attempting a risky operation")
+  expect(normal.message).not.toContain("terminally forbidden")
+})
+
 it.instance(
   "ask - auto denies dangerous commands hidden behind safe shell commands",
   () =>

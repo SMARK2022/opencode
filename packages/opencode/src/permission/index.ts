@@ -136,13 +136,20 @@ export class DeniedError extends Schema.TaggedErrorClass<DeniedError>()("Permiss
 
 export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()("PermissionAutoDeniedError", {
   reason: Schema.String,
+  // [local-smark] R3 终审分级：forbidden（不可逆灾难）由 precheck 终局拒绝，
+  // 授权不可放行——文案必须明示，否则 "ask the user for explicit confirmation"
+  // 是虚假逃生路径，会诱发 agent 换形态重试循环（用户实测）。
+  terminal: Schema.optional(Schema.Boolean),
 }) {
   override get message() {
     // Keep denial feedback non-actionable from a bypass perspective. The agent
     // may choose a safer implementation or ask the user for explicit approval,
     // but the message must not encourage shell wrappers, generated scripts, MCP
     // detours, or alternate tools for the same rejected outcome.
-    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds. Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.`
+    const tail = this.terminal
+      ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
+      : " Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation."
+    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${tail}`
   }
 }
 
@@ -350,7 +357,9 @@ export const layer = Layer.effect(
                 })
               }
             }
-            return yield* new AutoDeniedError({ reason: decision.reason })
+            // 终局性由 decision.source 唯一承载（auto.ts:69 forbidden 是唯一的
+            // precheck deny 路径；reviewer 拒绝保留"用户确认后重试"的有效路径）
+            return yield* new AutoDeniedError({ reason: decision.reason, terminal: decision.source === "precheck" })
           }
           if (decision.action === "ask") needsAsk = true
         }

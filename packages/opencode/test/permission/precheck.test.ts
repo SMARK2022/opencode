@@ -146,19 +146,19 @@ describe("permission precheck bash classifier", () => {
     // cmd 合并开关 /s/q、/s/p 与盘根 X: 必须保持 Windows protected forbidden（不得 demote）
     expect(bash(String.raw`rmdir /s/q C:\Users\Alice`)).toMatchObject({
       level: "forbidden",
-      reason: "Windows protected directory delete",
+      reason: "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)",
     })
     expect(bash("del /s/q %USERPROFILE%")).toMatchObject({
       level: "forbidden",
-      reason: "Windows protected directory delete",
+      reason: "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)",
     })
     expect(bash(String.raw`del /s/p C:\Users\Alice`)).toMatchObject({
       level: "forbidden",
-      reason: "Windows protected directory delete",
+      reason: "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)",
     })
     expect(bash("del /s C:")).toMatchObject({
       level: "forbidden",
-      reason: "Windows protected directory delete",
+      reason: "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)",
     })
     expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "forbidden" })
     expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "forbidden" })
@@ -179,13 +179,84 @@ describe("permission precheck bash classifier", () => {
     ].join("\n")
     expect(bash(command)).not.toMatchObject({
       level: "forbidden",
-      reason: "Windows protected directory delete",
+      reason: "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)",
     })
     // 非单字母开关 token（/setup）不得借保护根抬升本 family
     expect(bash("del /setup C:")).not.toMatchObject({
       level: "forbidden",
-      reason: "Windows protected directory delete",
+      reason: "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)",
     })
+  })
+
+  // [local-smark] R3 forbidden 删除族三级分级（用户拍板）：系统根根本身与一级
+  // 子目录 forbidden（终审）；恰好二级 dangerous（显式授权可放行）；更深 cautious。
+  // reason 语义化：明示对象与终局性，不再用 "critical recursive delete" 黑话。
+  test("tiers recursive deletes of system directories by depth", () => {
+    const FORBIDDEN_ROOT =
+      "recursive delete of filesystem root, home, or top-level system directory — forbidden (cannot be authorized)"
+    const DANGEROUS_SUBTREE = "recursive delete under a system directory — requires explicit user authorization"
+
+    // 根本身与一级子目录 forbidden（含可选尾斜杠形态）
+    expect(bash("rm -rf /usr")).toMatchObject({ level: "forbidden", reason: FORBIDDEN_ROOT })
+    // 系统根裸尾斜杠形态保持 forbidden（收窄正则的边界回归锚）
+    expect(bash("rm -rf /usr/")).toMatchObject({ level: "forbidden", reason: FORBIDDEN_ROOT })
+    expect(bash("rm -rf /usr/local")).toMatchObject({ level: "forbidden", reason: FORBIDDEN_ROOT })
+    expect(bash("rm -rf /etc/ssl")).toMatchObject({ level: "forbidden", reason: FORBIDDEN_ROOT })
+    expect(bash("rm -rf /etc/ssl/")).toMatchObject({ level: "forbidden", reason: FORBIDDEN_ROOT })
+    expect(bash("rm -rf /home/alice")).toMatchObject({ level: "forbidden" })
+    // 恰好二级 → dangerous（可授权高风险，进 reviewer）
+    expect(bash("rm -rf /usr/local/libexec")).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    expect(bash("rm -rf /etc/ssl/certs")).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    expect(bash("rm -rf /usr/local/libexec/")).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    // 穿越折叠后同样分级（/home/../etc → /etc）
+    expect(bash("rm -rf /home/../etc/ssl/certs")).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    // opaque 重定向 + 尾斜杠形态不降级（共享折叠归一化）
+    expect(bash("rm -rf /usr/local/libexec/ > log")).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    // 更深子树 → cautious（用户原始案例：/usr/local/libexec/.linkd）
+    expect(bash("rm -rf /usr/local/libexec/.linkd")).toMatchObject({ level: "cautious" })
+    expect(bash("wsl -- bash -lc 'rm -rf /usr/local/libexec/.linkd/wsl-verify-04'")).toMatchObject({ level: "cautious" })
+    // 用户数据根深层保持既有 cautious（不 widen）
+    expect(bash("rm -rf /home/alice/Downloads/foo")).toMatchObject({ level: "cautious" })
+  })
+
+  test("tiers Windows protected recursive deletes by depth across cmd and PowerShell", () => {
+    const WIN_FORBIDDEN =
+      "recursive delete of Windows drive root, user profile, or system directory — forbidden (cannot be authorized)"
+    const DANGEROUS_SUBTREE = "recursive delete under a system directory — requires explicit user authorization"
+
+    // 未加引号反斜杠路径在 token 层被剥损不可见，必须由 raw 扫描器承载分级
+    expect(bash(String.raw`del /s /q C:\Users\alice\AppData`)).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    expect(bash(String.raw`Remove-Item -Recurse C:\Users\alice\AppData`)).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    expect(bash(String.raw`del /s /q C:\Users\alice\AppData\Local\Temp\x`)).toMatchObject({ level: "cautious" })
+    // 一级与根级保持 forbidden；PowerShell env 名大小写不敏感
+    expect(bash(String.raw`rmdir /s /q C:\Users\alice`)).toMatchObject({ level: "forbidden", reason: WIN_FORBIDDEN })
+    expect(bash(String.raw`Remove-Item -Recurse -Force $ENV:USERPROFILE`)).toMatchObject({ level: "forbidden" })
+  })
+
+  test("tiers interpreter delete payloads with a cautious floor for ordinary paths", () => {
+    const DANGEROUS_SUBTREE = "file deletion under a system directory via interpreter — requires explicit user authorization"
+
+    // 裸 \/ 过宽 bug 修复：任意绝对路径不再 forbidden，落 cautious 兜底
+    expect(bash(`python -c 'import os; os.remove("/tmp/scratch.txt")'`)).toMatchObject({ level: "cautious" })
+    expect(bash(`python -c 'import shutil; shutil.rmtree("/tmp/x")'`)).toMatchObject({ level: "cautious" })
+    expect(bash(`node -e 'require("fs").rmSync("/tmp/x", {recursive:true})'`)).toMatchObject({ level: "cautious" })
+    // 系统根一级 forbidden（含尾斜杠形态）；恰好二级 dangerous（含尾斜杠）
+    expect(bash(`python -c 'import os; os.remove("/etc/passwd")'`)).toMatchObject({ level: "forbidden" })
+    expect(bash(`python -c 'import shutil; shutil.rmtree("/etc/ssl/")'`)).toMatchObject({ level: "forbidden" })
+    expect(bash(`python -c 'import shutil; shutil.rmtree("/etc/ssl/certs")'`)).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    expect(bash(`python -c 'import shutil; shutil.rmtree("/etc/ssl/certs/")'`)).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+    expect(bash(`python -c 'import shutil; shutil.rmtree("/usr/local/libexec")'`)).toMatchObject({ level: "dangerous", reason: DANGEROUS_SUBTREE })
+  })
+
+  test("narrows disk partition tools to read-only listing forms", () => {
+    // fdisk/parted 的 -l/--list 与 wipefs 无 -a/--all 均为只读打印 → cautious
+    expect(bash("fdisk -l")).toMatchObject({ level: "cautious" })
+    expect(bash("parted -l")).toMatchObject({ level: "cautious" })
+    expect(bash("wipefs /dev/sdb1")).toMatchObject({ level: "cautious" })
+    // 写形态与合并短开关簇保持 forbidden
+    expect(bash("fdisk /dev/sda")).toMatchObject({ level: "forbidden" })
+    expect(bash("wipefs -a /dev/sdb1")).toMatchObject({ level: "forbidden" })
+    expect(bash("wipefs -af /dev/sdb1")).toMatchObject({ level: "forbidden" })
   })
 
   test("marks dangerous command substitutions forbidden instead of treating wrappers as safe", () => {
@@ -423,7 +494,8 @@ describe("permission precheck bash classifier", () => {
     expect(bash("rm -rf /root")).toMatchObject({ level: "forbidden" })
     // 系统根子目录仍 dangerous
     expect(bash("rm -rf /etc/passwd")).toMatchObject({ level: "forbidden" })
-    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "forbidden" })
+    // R3 分级：/usr/local/bin 是系统根恰好二级 → dangerous（不再是 forbidden）
+    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "dangerous" })
   })
 
   // sudo 包装器应提取内层命令递归评估，而非短路为 general。
