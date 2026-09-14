@@ -220,7 +220,9 @@ const layer = Layer.effect(
             }
             // #199：auto 拒绝是确定性的：抛出 AutoDeniedError 而非转入 ask，防止
             // #199：agent 通过用户审批旁路 precheck/reviewer 已拒绝的危险操作。
-            return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason })
+            // [local-smark] #627：终局性由 decision.source 唯一承载（auto.ts forbidden
+            // 是唯一的 precheck deny 路径；reviewer 拒绝保留"用户确认后重试"路径）
+            return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: decision.source === "precheck" })
           }
           // #199：reviewer 不可用或返回 ask 时回退到用户审批，保持 fail-open 语义
           // #199：而非 fail-closed——未配置 reviewer 不应阻断正常工作流。

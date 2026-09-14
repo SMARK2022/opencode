@@ -32,11 +32,20 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Per
 
 // #199：AutoDeniedError 不提供可绕过的拒绝信息，防止 agent 通过 shell 包装、
 // #199：生成脚本、MCP 工具或其他策略旁路重试同一危险操作。
+// [local-smark] #627：terminal=true 标记三级分级中的 forbidden 终审拒绝——
+// 该类操作（保护根/家/驱动器根递归删除等）即使用户显式授权也不可放行，
+// 文案分叉避免 agent 尝试向用户索取授权后重试。
 export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()("PermissionAutoDeniedError", {
   reason: Schema.String,
+  terminal: Schema.optional(Schema.Boolean),
 }) {
   override get message() {
-    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds. Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.`
+    // [local-smark] 终审文案：明示不存在授权路径（"请用户确认"对 forbidden 是
+    // 虚假逃生口，会诱发换形态重试循环）；默认文案保留可授权重试路径
+    const tail = this.terminal
+      ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
+      : " Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation."
+    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${tail}`
   }
 }
 

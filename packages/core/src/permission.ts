@@ -251,7 +251,8 @@ const layer = Layer.effect(
             yield* events.publish(PermissionV1.Event.CircuitBroken, { sessionID, consecutive: state.consecutive, recent })
           }
         }
-        return { effect: "deny" as const, rules: all, reason: new PermissionV1.AutoDeniedError({ reason: decision.reason }).message }
+        // 两代共用原话getter，只有precheck终审没有用户授权路径，reviewer拒绝保持默认尾句。
+        return { effect: "deny" as const, rules: all, reason: new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: decision.source === "precheck" }).message }
       }
       if (decision.action === "ask") return { effect: "ask" as const, rules: all }
       record(false)
