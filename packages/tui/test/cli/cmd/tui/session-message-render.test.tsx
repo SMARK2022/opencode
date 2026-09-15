@@ -347,7 +347,7 @@ test("resize naturally reflows mounted content and remeasures shelled roots in b
     app.resize(80, 24)
     let last = -1
     let stable = 0
-    await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 && anchor.y - scroll.y === 0 })
+    await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 && anchor.y - scroll.y === 0 && released(app, fixture.messages[0].id) })
     expect(anchor.y - scroll.y).toBe(0)
     exact()
     expect(released(app, fixture.messages[0].id)).toBe(true)
@@ -457,5 +457,67 @@ test("mounted content growth counts toward the residency byte budget", async () 
     await waitForFrame(app, () => released(app, "msg_window_user_00"))
     expect(released(app, "msg_window_user_00")).toBe(true)
     expect(released(app, "msg_window_assistant_23")).toBe(false)
+  })
+})
+
+test.each([false, true])("session keeps every resize frame stable with released content=%s", async (shelled) => {
+  const fixture = windowFixture("stable")
+  await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
+    await waitForFrame(app, (frame) => frame.includes("stable assistant 23"))
+    const scroll = sessionScrollBox(app, fixture.messages[0].id)
+    if (shelled) await withFakeNow(async (advance) => {
+      advance(AGE)
+      await pumpFrames(app, 8)
+      expect(released(app, fixture.messages[0].id)).toBe(true)
+    })
+    const reader = messageRoot(app, "msg_window_user_20")
+    scroll.scrollBy(reader.y - scroll.viewport.y)
+    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
+    const previousMax = scroll.scrollHeight - scroll.viewport.height
+    const previousTop = scroll.scrollTop
+    // 前方增长必须跨旧剩余到底距离，才能暴露补偿被帧后贴底误覆盖。
+    app.resize(40, 24)
+    let movement = 0
+    for (let frame = 0; frame < 100; frame++) {
+      if (frame === 15) {
+        ctx.keymap.dispatchCommand("session.line.down")
+        movement = 1
+      }
+      await app.renderOnce()
+      await new Promise<void>((resolve) => process.nextTick(resolve))
+      // 每一帧都检查，不等重测结束后才恢复；已经接受的用户位移必须保留。
+      expect(reader.y - scroll.viewport.y).toBe(0 - movement)
+    }
+    expect(scroll.scrollTop - previousTop).toBeGreaterThan(previousMax - previousTop)
+    expect(app.captureCharFrame()).toContain("stable user 20")
+    ctx.keymap.dispatchCommand("session.last")
+    await waitForFrame(app, (frame) => frame.includes("stable assistant 23"))
+  })
+})
+
+test("session preserves selected text while a preceding message grows", async () => {
+  const fixture = windowFixture("selection")
+  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
+    await waitForFrame(app, (frame) => frame.includes("selection assistant 23"))
+    const scroll = sessionScrollBox(app, fixture.messages[0].id)
+    const reader = messageRoot(app, "msg_window_user_20")
+    scroll.scrollBy(reader.y - scroll.viewport.y)
+    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
+    const lines = app.captureCharFrame().split("\n")
+    const y = lines.findIndex((line) => line.includes("selection user 20"))
+    const x = lines[y].indexOf("selection user 20")
+    await app.mockMouse.pressDown(x, y)
+    await app.mockMouse.moveTo(x + "selection user 20".length, y)
+    await app.mockMouse.release(x + "selection user 20".length, y)
+    const selected = app.renderer.getSelection()?.getSelectedText()
+    // 先证明选区非空，再沿真实Part事件改变前方正文，拒绝undefined对照假绿。
+    expect(selected).toContain("selection user 20")
+    emit(partUpdatedEvent("evt_selection_growth", textPart("part_window_user_00", fixture.messages[0].id, "selection user 00\n" + "extra line\n".repeat(60))))
+    for (let frame = 0; frame < 20; frame++) {
+      await app.renderOnce()
+      await new Promise<void>((resolve) => process.nextTick(resolve))
+      expect(reader.y - scroll.viewport.y).toBe(0)
+      expect(app.renderer.getSelection()?.getSelectedText()).toBe(selected)
+    }
   })
 })

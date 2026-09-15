@@ -19,6 +19,8 @@ async function fixture() {
     border: true,
     stickyScroll: true,
     stickyStart: "bottom",
+    preserveVisibleContent: true,
+    stickyScrollTolerance: 1,
   })
   // 使用生产信号契约，回调同时验证跟随和裁剪，不在测试中重写位置算法。
   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
@@ -27,8 +29,10 @@ async function fixture() {
     "untrack",
     "viewportStuckToBottom",
     "setViewportStuckToBottom",
-    `let lastMaxScrollTop = 0\n${callback}\nreturn syncSessionViewportStuckToBottom`,
-  )(scroll, untrack, viewportStuckToBottom, setViewportStuckToBottom) as () => void
+    "syncMessageResidency",
+    `${callback}\nreturn syncSessionViewportStuckToBottom`,
+    // 本窄测试只观察生产状态发布与容器跟随；驻留由完整Session harness验证。
+  )(scroll, untrack, viewportStuckToBottom, setViewportStuckToBottom, () => {}) as () => void
   app.renderer.root.add(scroll)
   const message = new BoxRenderable(app.renderer, { flexShrink: 0 })
   const text = new TextRenderable(app.renderer, {
