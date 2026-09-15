@@ -1,4 +1,7 @@
-# Canonical Implementation Plan: OpenTUI 流式 Markdown 渲染性能与稳定性修复
+# Historical Archive: OpenTUI 流式 Markdown 渲染性能与稳定性修复 R1-R39
+
+> 本文件只保留历史调查、旧 revision 和旧 verdict，不再是 implementation authority。
+> 当前唯一 canonical plan 位于 `docs/plans/opentui-streaming-markdown-performance-repair.md`。
 
 > Status: audit-required
 >

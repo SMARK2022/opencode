@@ -34,7 +34,7 @@ not implementation authority.
 
 > 同时你也看看有没有更加鲁棒的hook机制，也就是在有限时间内等待hook返回
 
-> thirdparty/opencode-v1.17.18-smark 不在本次考虑范围内，是packages/opencode
+> thirdparty\opencode-11720 不在本次考虑范围内，是packages/opencode
 
 > 下面你需要完整检查一下,当前我看,首先有两个问题。第一个,你可以启动VS Code的扩展宿主机来进行相应的实验。你可以启动VS Code,并打开目录,附加目 .temp/testing这个目录。然后请你对当前的扩展进行检查。我比较好奇我们是否能找到一种更加鲁棒,更加不干扰用户的方式进行LSP的分析。与此同时,相应的 VS Code代码在 .temp文件夹里面有一个vscode,你可以自行进行完整审计检查。也就是理论上来说,目前我想要的是,能够不强制show文件,也就是打开并展示文件,而就能实现相应的完整LSP的依赖的一些钩子或者说一些端点等方式来进行LSP。因为如果频繁地打开文件,可能干扰用户的正常文件编辑,以及甚至用户可能会关掉它,而造成LSP结果不稳定。与此同时,你也可以完整检查VS Code的相关源码,在我们仓库里,来查看其到底是否能够稳定完整地得到相应的LSP的消息,譬如是否有任何的更新广播或者相应的其他内容信息,而不只依赖于相应的LSP的结果变化,因为结果变化可能不稳定。如果有钩子等内容,会更加稳定。所以请你自行详细完整进行相应的扩展调试以及测试。
 
@@ -66,7 +66,7 @@ and `sdks/vscode` as the production implementation scope. The isolated
 
 ## 2. Explicit Non-Goals
 
-- Do not change `thirdparty/opencode-v1.17.18-smark`.
+- Do not change `thirdparty\opencode-11720`.
 - Do not claim that the stable VS Code aggregate diagnostics API can prove provider completion, diagnostic generation, or document-version ownership.
 - Do not add `showTextDocument` or change the user's active editor as a diagnostic refresh mechanism.
 - Do not replace the direct OpenCode LSP clients with the generic VS Code bridge; project typecheck/lint integration is outside this revision.

@@ -1,20 +1,794 @@
 # Canonical Implementation Plan: OpenTUI TUI Liveness and Tree-sitter Lifecycle Repair
 
-> Status: verified
+> Status: implementation-audit-required
 >
-> Revision: R60
+> Revision: R81
 >
-> Approved revision: R60
+> Approved revision: R81
 >
-> Audit mode: implementation (full original scope)
+> Audit mode: plan (full original scope)
 >
 > Requirement source: 用户关于 Windows 平台 TUI 整体停止刷新/交互失效、正文和 Thinking 大面积空白、命令面板残影、Tree-sitter worker 错误、persistent Tree 生命周期、Ctrl+C 批量 warning、根因修复和精准修改范围的当前请求。
 >
-> Implementation allowed: no further material changes without a new revision
+> Implementation allowed: no further material changes without rework or revision
 >
 > Last updated: 2026-08-08
 
-本文顶部的R60 sections是当前唯一的canonical authority。R1-R59正文、旧实现、旧预算和旧审计记录从`## R54 Historical Trace`开始全部是non-normative traceability；它们不能授权实施、不能覆盖R60的文件边界、不能覆盖R60的root cause结论。
+本文顶部的R81 sections是当前唯一的canonical authority。R1-R80正文、旧实现、旧预算和旧审计记录全部是non-normative traceability；它们不能授权实施、不能覆盖R81的文件边界、不能覆盖R81的root cause结论。R81吸收R80审计关于one-shot scope过早释放和`HANDLE_EDITS`遗漏的要求，使每个顶层Parser请求在一个scope内完成全部parse/query/injection工作。
+
+## R81 Current Authority
+
+R81由独立R80方案审计的两个blocking findings触发，必须在implementation audit前完成full-scope plan re-audit：
+
+1. 当前`processInjections()`在`parser.parse()`/query异常时catch并继续，最终把部分captures发布为成功highlights；R80删除该catch-and-success路径。异常沿当前worker请求的相关错误终态传播，成功response只在全部注入处理完成时发布。
+2. 当前worker bridge对每个输入调用`void handler(...)`，不会等待前一个异步handler；`ParserWorker`同时持有`filetypeParsers`、`filetypeParserPromises`、`reusableParsers`、`reusableParserPromises`和buffer-owned Parser。配置失效、clear、buffer初始化和高亮操作可交叉访问这些共享cache。
+3. R81的唯一同步机制是不可重入私有`withParserAssets<T>(operation: (scope) => Promise<T>)`：scope同时拥有filetype cache读取/创建、ReusableParser获取和失效操作；回调内部完成该顶层请求涉及的全部cache/Parser操作。调用者不得保存scope、Parser或把Parser引用返回到scope外。
+4. 所有顶层入口都必须进入同一scope：`handleInitializeParser`、`handleEdits`、`handleOneShotHighlight`、`handleStreamingUpdate`、`handleResetBuffer`、`preloadParser`、`clearCache`和`addFiletypeParser`。`processInjections`和`updateReferenceState`只接收当前scope，不自行排队，避免嵌套tail死锁。
+5. `handleInitializeParser`在scope内完成resolve filetype parser、new Parser/setLanguage、parse、initial query/injections和buffer state发布；因此clear/registration不能清理或复活其异步promise。`handleStreamingUpdate`/reset的buffer candidate ownership仍保留，scope只保护共享asset和injection/reference parser。
+6. unsupported injection parser是既有primary-contract pass-through：记录warning、跳过该语言的高亮范围并保留其余主文档结果；它不等同于Parser.parse/query异常。真实parse-null或query exception不得沿partial-success返回。
+7. one-shot从outer parse到全部injection、highlight转换和response准备始终保持同一个scope；普通`HANDLE_EDITS`同样在一个scope内完成candidate parse/query/injection和accepted commit。scope只在请求不再持有任何Parser/Query/Tree依赖后释放。
+8. R81的primary repair只修正Parser asset owner时序和注入异常成功化：不创建第二Parser、不重试、不添加fallback、不吞异常、不把error转换成成功。one-shot client response rejection和初始化Promise传播只是correlated终态协议。
+9. one-shot响应合同仍只有三种结果：`error` reject；`warning + hasParser:false` resolve既有能力结果；无error/warning resolve highlights。warning不是协议失败。
+10. R81保留R74完整六个不变量和producer-first主验收：正常支持域不产生error/permanent pending；异常测试只证明异常不会伪装成成功，不构成失败终态交付目标。
+
+### R74 Complete Scope Contract
+
+| ID | Expected invariant | First divergence / owner | Required public evidence |
+| --- | --- | --- | --- |
+| R74-INV-01 | 合法daemon Project事件对应未加载Session/Message/Part时，TUI projection no-op且继续消费后续事件 | `SyncProvider`缺失collection进入`Binary.search`; owner `sync.tsx` | `sync-undefined-messages.test.tsx` plus compiled target-liveness event/frame continuation |
+| R74-INV-02 | 同buffer mutation完成前不得dispose accepted Tree或删除mirror | `TreeSitterClient.removeStreamingBuffer`绕过in-flight operation; owner per-buffer tail | public delayed update/remove lifecycle test and zero pending callback after destroy |
+| R74-INV-03 | Parser只能在完整parse/query/injection后commit accepted Tree，失败candidate不污染下一次更新 | `ParserWorker.handleStreamingUpdate`提前替换accepted state; worker Tree owner | candidate failure then public successful update/reset and repeated lifecycle tests |
+| R74-INV-04 | Markdown/Thinking/body在异步highlight期间保持当前token/raw可见，`drawUnstyledText=false`不改成常开 | Markdown seed缺失、Code pending TextBuffer提交时机 | structured/list/blockquote/table/fenced pending tests and compiled body/Thinking frames |
+| R74-INV-05 | 正常renderable destroy/Ctrl+C不产生批量Tree-sitter cancellation/highlight warning | Code warning判断晚于destroy owner; Code/client lifecycle | cancellation test plus compiled target-liveness Ctrl+C zero-warning assertion |
+| R74-INV-06 | 支持域primary path不产生worker error/permanent pending；任何真实`error`不能进入成功渲染分支 | correlated response和Code空highlight success conversion; client/Code owners | normal concurrent one-shot/streaming tests, real error-shape protocol test, compiled smoke |
+
+R74 production baseline consists of the already implemented SyncProvider, client tail, parser candidate owner, Code pending seed, Markdown seed and destroy ordering. R74 incremental production change is only one-shot `error` response classification; R74 must not add a new producer fallback or failure state machine.
+
+### R74 One-Shot Protocol Contract
+
+| Response | Worker meaning | Client owner | Consumer contract |
+| --- | --- | --- | --- |
+| `error` present | parser/protocol failure was actually produced | reject matching callback once | Code cannot treat it as empty-highlight success; this is error evidence, not normal success |
+| `warning` + `hasParser:false` and no error | unsupported capability | resolve existing result object | `treeSitterToStyledText()` and existing unsupported-filetype tests retain capability behavior |
+| no error/warning | successful parse/query | resolve highlights | existing one-shot/Markdown rendering path |
+
+### R74 Verification Commands
+
+All Bun commands run from the listed package directory under an external process-tree supervisor:
+
+| Command | Directory | Required observation |
+| --- | --- | --- |
+| `bun test ./src/lib/tree-sitter/client.test.ts -t "concurrent highlightOnce|one-shot response error|unsupported filetype warning"` | `thirdparty/opentui/packages/core` | normal supported calls remain successful; error rejects; warning resolves |
+| `bun test ./src/renderables/Code.test.ts -t "does not commit plain text|drawUnstyledText=false output"` | `thirdparty/opentui/packages/core` | existing no-fallback behavior |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming.*list|pending|table|fenced"` | `thirdparty/opentui/packages/core` | current Markdown/Code representation remains visible |
+| `bun run build:lib` | `thirdparty/opentui/packages/core` | declarations and worker bundle |
+| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | unloaded projection no-op and continued event handling |
+| `bun typecheck` | `packages/opencode` | type contract |
+| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | Thinking/body, command palette, event/frame liveness, worker readiness, Ctrl+C and zero warnings |
+
+R74 keeps the previously measured full nested baseline `E=744` as an observed audit fact, removes the obsolete `E<=300` plan target, and requires final production `E<=600`, total effective `E<=800`, eight code files, six production files and per-file comment-floor verification. R74's new response branch/test delta is expected to remain below 40 effective lines.
+
+### R81 Verbatim Requirement Contract
+
+以下内容是当前R70直接继承的用户原文合同；后续实现和审计不得只引用R1-R69历史正文：
+
+> “当前请注意你的整体当前的方案内容,并该放在一个全新的markdown里面,也就是放在一个全新的一个相应的计划里面,然后包含对如上内容的修复。同时整体的修复的代码修改量不超过六个生产文件,同时修改量不超过600行,避免进行重大的一些重构等等,请保持精准修改,完整解决那些有问题的逻辑,也就是完整解决我们之前的所有的问题,包括相应的长时间空排,Ctrl C后批量报错等等的一些特定缺陷。”
+
+> “根本需求是修正原有产生的opencode的TUI卡死（表现为交互失效，只有基本的TUI渲染，如prompt区域pending的blink，其他命令面板交互无响应、所有内容均不再进行更新与响应的问题）使其之后不再会产生类似的TUI自身渲染卡死、失去响应问题，同时解决在结束之后会爆出大量的（Code streaming highlight failed, falling back to plain text: warn: TreeSitter client destroyed）的问题、禁止添加和‘根治’操作无关的任何修改，也就是最终目的不是让报错更加明显，而是解决报错的根因；与此同时，还要根治TUI正文不渲染且只有markdown的标号的问题，即存在大面积空白、只有1. 2.这种渲染的问题；同时，整体修改量代码不超过8个文件，生产代码修改量不800行，避免进行重大的功能或重构等内容，实现整体保持甜点级别修改，避免引入过于复杂的状态机或者代码为每种边界情况都进行分支，更好的应该是顶层设计保持简单，逻辑完整而不复杂。”
+
+> “当前存在问题,请问你的600毫目前都消耗在哪里了?理论上来说,我们整体的生产代码应该逻辑只需要进行手术刀级的进行替换、移动以及修改,而不需要进行大规模的重构。”
+
+> “同时禁止大幅度增加额外的error的判断与handle机制，根源性修复应当是修正错误的机制使得任何可能的不稳定error根本不会产生。”
+
+> “错误，目的不是保留失败诊断/终态，而是让其不准失败，即不可能再出现错误路径，即错误判定保留，但不会再引起错误失败。”
+
+> “也就是换言之，问题不是错误是如何消费的，而是解决错误是如何产生的。”
+
+> “你可以检查最近十次commit里面是不是引入了一些潜在的异常路径或者机制内容，导致当前内容发生故障。请你仔细检查。同时，不要依靠添加日志断点的形式来解决问题。”
+
+R81把“正常支持域不产生错误”作为主验收条件；完整Parser asset owner scope和注入异常传播是producer根因修复，Code catch收敛、one-shot响应分类和初始化拒绝传播只是删除成功伪装的必要配套，不构成独立交付目标。
+
+R81保留完整用户原文合同、R74-INV-01至R74-INV-06、单一primary path、无新增alternate success path、最多6个生产文件和最多8个代码文件约束。R81最终nested OpenTUI边界仍为5个生产文件和3个既有测试文件，共8个；root SyncProvider是已提交基线，不产生R81新diff；release manifest/lockfile保持`.6`基线。
+
+### R81 Producer Ownership Contract
+
+| Path | Existing behavior | R81 owner repair | Public evidence |
+| --- | --- | --- | --- |
+| `handleInitializeParser()` | resolves shared `filetypeParser` outside the proposed reusable tail and can republish a stale promise result after registration/clear | entire filetype resolution, Parser creation, initial parse/query/injections and buffer-state publication run inside `withParserAssets`; no shared cache reference escapes | real buffer initialization versus registration/clear barrier test |
+| `handleOneShotHighlight()` | uses a cached Parser for outer parse, then performs async injection work | hold one scope from outer parse through all injection parse/query, highlight conversion and response preparation; returned Tree remains one-shot-owned and is deleted in existing `finally` | one-shot invalidation and normal concurrent highlight tests |
+| `processInjections()` | obtains a reusable parser per injected language; local catch logs parse/query failure and returns partial captures | accepts current scope, each language group uses scope-owned Parser, Tree cleanup uses `finally`; remove catch-and-continue so no failed injection produces success | streaming fenced-code and one-shot injection invalidation/error-propagation tests |
+| `handleEdits()` / `handleStreamingUpdate()` / `handleResetBuffer()` | buffer candidate paths call async injection/reference helpers while shared asset cache can be invalidated | wrap each complete top-level operation in `withParserAssets`, pass scope to helpers, and commit the accepted buffer candidate before releasing the scope | ordinary edit, streaming injection/reference and reset-after-clear tests |
+| `updateReferenceState()` | obtains `markdown_inline` reusable parser and parses all inline nodes outside filetype cache barrier | accepts current scope and performs complete inline parse/walk within it | streaming reference append/update test with parser invalidation |
+| `preloadParser()` | creates/returns filetype and reusable cache state without invalidation ordering | cache creation runs inside the same scope | preload plus registration ordering test |
+| `addFiletypeParser()` / `invalidateParserCaches()` | deletes cached Parser and clears filetype promises synchronously | parser options update and deletion run as one scope operation; no synchronous cache owner mutation outside scope | real worker registration interleaving tests |
+| `clearCache()` | clears filetype/reusable maps without waiting for initialization or parser users, and does not delete all cached Parser owners | clear operation enters the same scope barrier, deletes every accepted Parser owner once, clears all maps/promises, then performs filesystem clearing | public clear-cache lifecycle regression |
+| `TreeSitterClient.highlightOnce()` -> `initialize()` rejects | catch returns `{ error }`, allowing Code to treat missing highlights as success | remove the conversion and let the original initialization Promise rejection propagate | public `highlightOnce()` initialization-failure seam rejects |
+| `ONESHOT_HIGHLIGHT_RESPONSE.error` | correlated result currently resolves error-shaped object | reject matching callback once; warning-only unsupported capability still resolves | real `onmessage/postMessage` response-shape test |
+| `warning + hasParser:false` | existing unsupported-filetype capability result | preserve resolved capability result | `client.test.ts:398-405` and styled-text consumer |
+
+The `withParserAssets` scope is the only new producer-side synchronization mechanism. It serializes the existing filetype/reusable cache and Parser instances, not all worker messages or unrelated client messages. Every top-level Parser request, including `HANDLE_EDITS`, has one scope from its first shared-cache access through its final parse/query/injection/accepted-state transition. No cache promise, parser state or Parser object may be used outside the scope callback. It does not create a second Parser, retry a failed parse, synthesize highlights or convert failure into success. `processInjections()` no longer catches a real parse/query exception and returns partial success. The client response branch remains a correlated settlement contract only.
+
+#### R80 Scope Interface and Ordering
+
+1. `enqueueParserAssets<T>(operation)` appends exactly one top-level operation to a private Promise tail. A rejected previous operation does not prevent the next cleanup/invalidation operation; the returned operation preserves its own rejection.
+2. `withParserAssets<T>(operation)` is the only top-level entry into that tail. It creates a scope object with cache lookup/creation/invalidation operations and invokes the callback before releasing the tail. Scope, cache promises, Parser and FiletypeParser references cannot escape.
+3. `getReusableParser()` and `resolveFiletypeParser()` are scope-private operations; no worker handler calls them directly. Their promise creation and map write-back occur before the scope settles, so clear/registration cannot remove a promise and later allow its stale result to resurrect.
+4. `handleInitializeParser()` holds one scope through filetype resolve, Parser creation/setLanguage, initial parse, `initialQuery`/injections and `bufferParsers.set`. `processInjections(scope, parserState)` and `updateReferenceState(scope, parserState, editStart)` consume the same scope and never call `withParserAssets` themselves.
+5. `handleOneShotHighlight()` holds one scope from outer parse through injection parse/query, highlight conversion and response preparation, then deletes the one-shot Tree in `finally`. No nested scope or separately scoped injection helper is allowed.
+6. `handleEdits()`, `handleStreamingUpdate()` and `handleResetBuffer()` hold one scope for the full candidate parse/query/injection/reference operation and accepted buffer Tree transition. The scope is released only after candidate commit or candidate cleanup and before the response leaves the worker.
+7. `preloadParser()` runs resolve/create under one scope and returns only capability. `addFiletypeParser()` updates options and invalidates both filetype and reusable cache under one scope. `clearCache()` waits at the same tail barrier, deletes every cached Parser exactly once, clears all maps/promises, then performs existing filesystem clearing.
+8. Unsupported injection language remains a pass-through branch inside the scope: warning and omitted injected captures are preserved. Parser.parse-null, Query.captures exception or Tree ownership failure throws out of the scope; the caller publishes no success highlights for that request.
+9. Buffer-owned Parsers remain outside the asset cache itself but their top-level worker operations are inside the scope; existing client per-buffer operation/candidate ownership still controls same-buffer ordering. No shared Parser call occurs outside the scoped helper calls above.
+
+### R81 Exact File Boundary
+
+| File | Current R81 responsibility | Planned delta |
+| --- | --- | --- |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts` | Parser asset scope covering filetype/reusable caches, initialization, ordinary edits, one-shot, streaming/reset helpers, registration/clear barriers; remove injection catch-and-success; retain buffer candidate ownership | production modify, expected `E<=115` |
+| `packages/core/src/lib/tree-sitter/client.ts` | Propagate initialization rejection and reject correlated one-shot error response; preserve warning capability result | production modify, expected `E<=10` |
+| `packages/core/src/lib/tree-sitter/types.ts` | Existing typed correlated response contract only; no R81 semantic expansion | production baseline/reverify |
+| `packages/core/src/renderables/Code.ts` | Existing pending seed, no failure-to-success commit and destroyed-first warning suppression | production baseline/reverify |
+| `packages/core/src/renderables/Markdown.ts` | Existing current-token seed into Code with `drawUnstyledText=false` | production baseline/reverify |
+| `packages/core/src/lib/tree-sitter/client.test.ts` | Add deterministic real-worker reusable-parser use/invalidation, clear-cache and one-shot protocol tests; retain normal concurrency | test modify |
+| `packages/core/src/renderables/Code.test.ts` | Existing no-fallback and destroyed-first contracts | test baseline/reverify |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts` | Existing structured/list/table/fenced pending and settle contracts | test baseline/reverify |
+
+Root `sync.tsx`, its regression test and compiled smoke are required verification baselines but are not R81 nested implementation files. Release manifests/lockfiles remain `.6` cleanup only and are not production concepts.
+
+### R81 Verification Boundary
+
+Run under the external process-tree supervisor:
+
+1. `bun test ./src/lib/tree-sitter/client.test.ts -t "should perform one-shot highlighting|should handle one-shot highlighting for unsupported filetype|should handle concurrent highlightOnce calls efficiently|filetype cache barrier during buffer initialization|reusable parser invalidation|clear cache waits for parser assets|ordinary edit parser asset invalidation|streaming injection invalidation|streaming reference invalidation|injection failure does not resolve as highlights|one-shot response error|highlightOnce initialization failure"` from `thirdparty/opentui/packages/core`.
+2. `bun test ./src/renderables/Code.test.ts -t "does not commit plain text|drawUnstyledText=false output"` from `thirdparty/opentui/packages/core`.
+3. R74 normal Markdown focused tests, `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`, `bun run build:lib`, `bun typecheck`, and the compiled `target-liveness` command from the R74 table.
+
+The producer lifecycle slices use a real worker and a deterministic gated parser/query asset fixture. The fixture exposes independent `use-started`, `release-use`, `invalidation-sent` and public Promise settlement signals; it does not inspect cache maps or count private calls. Before R81, registration/clear can settle before a held operation, stale filetype promises can be written back after a barrier, one-shot injection can outlive its released scope, ordinary edits can bypass the scope, and injection exceptions can resolve partial highlights. After R81 every public operation observes scope ordering, current and subsequent supported highlights succeed, and a deliberately failed injected parse rejects rather than publishing highlights. Buffer initialization and ordinary `HANDLE_EDITS` are included explicitly so registration/clear cannot resurrect an old `FiletypeParser`. Unsupported injection remains a warning/pass-through assertion. The initialization test remains protocol evidence: it is red before the existing client conversion is removed because `highlightOnce()` resolves `{error}`, then observes a rejected public Promise. No new fallback or recovery path is permitted.
+
+R81 incremental production delta is expected below 125 effective lines across `parser.worker.ts` and `client.ts`; the full existing baseline remains subject to production `E<=600`, total effective `E<=800`, eight total code files, six production files and per-file Chinese-comment floors. Expected incremental comment floors: `parser.worker.ts E<=115 -> C>=18`; `client.ts E<=10 -> C>=2`; actual per-file counts replace estimates at implementation audit.
+
+### R73 Protocol Traceability
+
+| Response shape | Producer | Owner behavior | Existing consumer/test |
+| --- | --- | --- | --- |
+| `error` present | `ParserWorker.handleOneShotHighlight()` parse/protocol failure response | `TreeSitterClient` rejects the matching callback exactly once; Code cannot enter empty-highlight success rendering | real worker `onmessage/postMessage` seam in `client.test.ts`; Code no-fallback tests |
+| `warning` + `hasParser:false`, no error | unsupported filetype capability response | `TreeSitterClient` resolves existing result object; `treeSitterToStyledText()` keeps capability behavior | `client.test.ts` unsupported-filetype contract and styled-text consumers |
+| no error/warning | successful one-shot highlight | resolve highlights and continue existing rendering | existing one-shot/Markdown normal-path tests |
+
+R73 production delta is limited to the existing `TreeSitterClient` one-shot response branch and one existing protocol test seam. No new parser, error state, fallback, retry or renderer path is authorized. The incremental delta is expected to remain below 40 effective lines; the full current nested baseline remains subject to production `E <= 600`, total `E <= 800`, eight-file and per-file comment gates.
+
+### R73 Verification Boundary
+
+Run from package directories under the existing external process-tree supervisor:
+
+1. `bun test ./src/lib/tree-sitter/client.test.ts -t "one-shot response error|unsupported filetype warning"` from `thirdparty/opentui/packages/core`.
+2. `bun test ./src/renderables/Code.test.ts -t "does not commit plain text|drawUnstyledText=false output"` from `thirdparty/opentui/packages/core`.
+3. The R73 normal Markdown focused pattern, `bun run build:lib`, OpenCode SyncProvider test, `bun typecheck`, and compiled `target-liveness` smoke from R72's exact working directories.
+
+The error-shape test is protocol evidence only; normal compiled liveness and supported-domain lifecycle behavior remain the primary no-error feedback loop.
+
+### R72 File Classification
+
+| Classification | Paths | Audit treatment |
+| --- | --- | --- |
+| Existing approved production baseline | OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`, `Markdown.ts`; root `sync.tsx` | Preserve and reverify owner paths; no new architecture |
+| Root-cause protocol repair | OpenTUI `client.ts` one-shot response branch and `Code.ts` one-shot consumer | Error-shaped one-shot response cannot resolve into empty-highlight success rendering; no fallback or retry |
+| Existing test contracts | OpenTUI `client.test.ts`, `Markdown.test.ts`, `Code.test.ts` | Add real `ONESHOT_HIGHLIGHT_RESPONSE` error-shape regression and retain normal-path/legacy lifecycle tests; three existing test files, eight nested code files total |
+| Original compiled feedback loop | `packages/opencode/script/smoke-opentui-artifact.ts` target-liveness | Required normal-path verification; no production instrumentation |
+| Release cleanup | OpenTUI manifests and `bun.lock` | Final tree must match `.6`; release metadata is not part of repair |
+
+### R72 Verification Boundary
+
+Required commands and directories:
+
+| Command | Directory | Contract |
+| --- | --- | --- |
+| bounded `bun test ./src/lib/tree-sitter/client.test.ts -t "..."` | `thirdparty/opentui/packages/core` | Existing correlated protocol, lifecycle and normal Markdown seams; no new generic error state |
+| bounded `bun test ./src/renderables/Code.test.ts -t "..."` | `thirdparty/opentui/packages/core` | One-shot rejection and real response-shape behavior cannot produce success-shaped plain text |
+| bounded Markdown focused tests | `thirdparty/opentui/packages/core` | structured/fenced/current-seed normal path |
+| `bun run build:lib` | `thirdparty/opentui/packages/core` | TypeScript declarations and worker bundle |
+| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | legal unloaded projection events continue consumption |
+| bounded `bun typecheck` | `packages/opencode` | package type contract |
+| bounded `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | Thinking/body, command palette, event/frame liveness, pending readiness, Ctrl+C and zero warning contract |
+
+Every Bun test uses an external process-tree supervisor. A passing test whose process does not exit is a failed verification. The full native `bun run build` remains separately recorded; missing Zig is an environment limitation, not a source bypass.
+
+### R72 Primary Repair Delta
+
+1. In `TreeSitterClient.handleWorkerMessage()` for `ONESHOT_HIGHLIGHT_RESPONSE`, a response carrying `error` or `warning` must reject/complete the existing request as an error rather than resolve an empty successful result. This is the existing correlated response owner, not a new generic error mechanism.
+2. In `CodeRenderable.startOneShotHighlight()`, do not treat an error-shaped result as `highlights.length === 0` success; the normal supported path must never produce that result, and the existing no-fallback contract must remain closed.
+3. Add one behavior-sensitive test using the existing worker `onmessage/postMessage` seam to deliver a real `ONESHOT_HIGHLIGHT_RESPONSE` with `messageId` and `error`; assert the public one-shot request rejects rather than resolves as a successful highlight result. Keep the existing Code rendering tests for the no-fallback contract.
+4. Recompute actual production `E` and total code `E` from the final eight-file nested diff. R72 hard gates are production `E <= 600`, total effective code `E <= 800`, production files `<=6`, total code files `<=8`, and per-file qualifying Chinese comments at the repository policy floor.
+
+### R71 Implementation Evidence
+
+#### Actual Changed Paths
+
+The final nested OpenTUI diff against `origin/smark/main` contains exactly eight code files:
+
+| Path | Classification | Net diff |
+| --- | --- | ---: |
+| `packages/core/src/lib/tree-sitter/client.ts` | approved lifecycle baseline | `+218/-224` |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts` | approved Tree owner baseline | `+240/-163` |
+| `packages/core/src/lib/tree-sitter/types.ts` | approved correlated protocol baseline | `+16/-7` |
+| `packages/core/src/renderables/Code.ts` | baseline pending owner plus R71 fallback removal | `+23/-19` |
+| `packages/core/src/renderables/Markdown.ts` | approved current-seed baseline | `+84/-10` |
+| `packages/core/src/lib/tree-sitter/client.test.ts` | approved lifecycle regression baseline | `+318/-5` |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts` | pending structured/fenced normal-path regression | `+21/-9` |
+| `packages/core/src/renderables/Code.test.ts` | R71 replacement of two fallback contracts | `+7/-4` |
+
+The root `SyncProvider` repair is a committed baseline and no R71 root source file was changed. `.7` manifests/lockfile are restored to `.6` and absent from the final net diff; generated/native output is excluded. Exact deletion counts and effective `E/C` must be recomputed by the implementation auditor rather than retained as placeholders.
+
+#### Red-Green Evidence
+
+| Command | Directory | Result |
+| --- | --- | --- |
+| bounded Code fallback test before production removal: `bun test ./src/renderables/Code.test.ts -t "does not commit plain text when highlighting throws"` | `thirdparty/opentui/packages/core` | red: visible plain text was still installed; 1 failing test |
+| bounded Code fallback test before production removal: `bun test ./src/renderables/Code.test.ts -t "keeps failed drawUnstyledText=false output non-successful"` | `thirdparty/opentui/packages/core` | red: visible plain text was still installed; 1 failing test |
+| same two Code tests after production removal | `thirdparty/opentui/packages/core` | green: 4 pass and 2 pass respectively, 0 fail; both exited under process supervision |
+
+#### Verification Evidence
+
+| Command | Directory | Result |
+| --- | --- | --- |
+| bounded `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming code blocks with concealCode=true show a seed before conceal highlighting\\|streaming demo-style fenced code block shows a seed before syntax highlighting\\|streaming structured list updates keep previous item text visible while highlighting"` | `thirdparty/opentui/packages/core` | 21 pass, 0 fail; process exited |
+| bounded `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming.*list\\|pending\\|table"` | `thirdparty/opentui/packages/core` | 61 pass, 95 filtered, 0 fail, 32 snapshots |
+| bounded targeted client lifecycle/Markdown tests | `thirdparty/opentui/packages/core` | public lifecycle and current-seed tests passed and exited |
+| `bun run build:lib` | `thirdparty/opentui/packages/core` | pass; declarations and worker bundle generated |
+| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | 1 pass, 0 fail |
+| bounded `bun typecheck` | `packages/opencode` | pass: `tsgo --noEmit` |
+| bounded full `bun run build` | `thirdparty/opentui` | unavailable: native phase requires `zig`, which is not in PATH; `build:lib` is green |
+| bounded `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | pass: `targetEventCount=14`, `sourceCount=2`, `renderedCount=2`, `modelRequests=2`; normal exit and Ctrl+C cancellation path completed |
+| `git diff origin/smark/main --check` | `thirdparty/opentui` | pass; eight nested code files and no `.7` release metadata |
+
+The broad client filter that previously printed passing tests while leaving Bun workers alive is not used as a clean result. All listed test commands used an external process-tree supervisor; timeout or non-exit is failure.
+
+#### E/C and Remaining Limits
+
+The implementation audit must independently calculate actual per-file `E/C`, excluded pure moves/deletions/generated lines, and the 15% minimum. The plan's hard limits are six production files, eight total code files and `E <= 300` for the current approved route. The full native build remains unavailable because `zig` is not in PATH; the current compiled target-liveness artifact smoke is nevertheless available and passed.
+
+### R71 Implementation Audit Record
+
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| R71 | R71 | pending | pending | pending | pending | pending |
+
+### R71 File Classification
+
+| Classification | Paths | Audit treatment |
+| --- | --- | --- |
+| Existing approved production baseline | `packages/opencode/src/cli/cmd/tui/context/sync.tsx`; OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`, `Code.ts` pending-seed owner; `Markdown.ts` fenced seed | Preserve and audit; no new owner architecture |
+| Root-cause production repair | OpenTUI `Code.ts` streaming and one-shot failure consumers | Remove failure-to-plain-text success conversion; normal valid paths must not reach this error branch |
+| Behavioral regressions | OpenTUI `client.test.ts`, `renderables/__tests__/Markdown.test.ts`, `renderables/Code.test.ts`; existing SyncProvider regression | Replace the two contradictory fallback assertions; retain normal lifecycle/representation tests; total nested code-file cap is eight |
+| Original compiled feedback loop | Existing `packages/opencode/script/smoke-opentui-artifact.ts` target-liveness scenario | Verification-only; no production smoke instrumentation or alternate runtime path |
+| Unauthorised release preparation | OpenTUI workspace `package.json` manifests and `bun.lock` at `0.4.3-smark.7` | Restore the final tree to the `.6` baseline; exclude from the repair diff and do not publish |
+| Generated/native output | OpenTUI `dist/**` and native build output | Not source evidence; never commit as repair output |
+
+### R71 Verification Boundary
+
+`bun run build:lib` is the applicable OpenTUI build for this TypeScript-only correction and must pass. The full OpenTUI `bun run build` additionally invokes native Zig compilation; if `zig` is unavailable, record that environment limitation separately without changing source or bypassing the native gate. Every client test command must run under an external process-tree supervisor; a passing test whose Bun process remains alive is a failed verification. R67 must rerun the two updated fenced/structured tests, the related Markdown pattern, lifecycle baseline, `build:lib`, SyncProvider regression, package typecheck, and the original compiled smoke under its external process-tree supervisor:
+
+```text
+bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness
+```
+
+The smoke must report Thinking/body visibility, command-palette transition/restoration, continued daemon event/frame advancement, worker pending readiness, Ctrl+C shutdown and zero cancellation/highlight warnings. A missing current artifact or a smoke timeout is an unverified implementation, not a green skip.
+
+R71 requires the original compiled `target-liveness` smoke as the primary feedback loop, plus normal supported-domain lifecycle/Markdown tests, Code fallback-contract tests, `build:lib`, SyncProvider regression and package typecheck. The smoke must show Thinking/body visibility, command-palette restoration, continued daemon/frame advancement, pending worker readiness, Ctrl+C shutdown and zero cancellation/highlight warnings. Missing artifact or timeout is unverified, not a green skip. Existing correlated-error tests remain protocol regression evidence; Code.test only replaces the two contradictory fallback assertions and does not create a new recovery mechanism.
+
+### R71 Primary Repair Delta
+
+R71 repairs the primary path and removes a success-shaped symptom path:
+
+1. In `CodeRenderable.runStreamingLoop()` remove the failure catch's `textBuffer.setText(content)` and `commitStreamingVisible()` success conversion. Do not add a replacement failure state machine or retry; the normal path is repaired upstream by the approved client/worker/seed owners, and valid supported input must not reach this branch.
+2. In `CodeRenderable.startOneShotHighlight()` remove the failure catch's plain-text success conversion for the same reason; preserve only the existing state cleanup needed to avoid leaving the renderable in an in-flight state.
+3. Replace `Code.test.ts:269-298` and `Code.test.ts:902-930` fallback assertions with public rendering assertions that the rejected highlight completes without committing a new success-shaped plain-text frame; preserve `highlightingDone` completion and existing error detection. These are corrections to existing tests, not new failure-state delivery.
+4. Do not add a new synthetic error mechanism, retry, alternate parser, renderer restart, catch-and-success path or extra error state. Normal compiled target-liveness remains the primary root-cause feedback loop.
+
+### R71 Plan Audit Record
+
+### R71 Traceability and Budget
+
+| Requirement / invariant | Owner and change | Public verification |
+| --- | --- | --- |
+| R61-INV-04 current Markdown visibility with `drawUnstyledText=false` | `Code.ts` pending representation commit plus `Markdown.ts` false flag/seed contract | `Markdown.test.ts` persistent update held before mock response |
+| R61-INV-06 no fallback or diagnostic expansion | same existing streaming path; no new catch or alternate renderer | source diff/path audit and focused client/Markdown tests |
+| No unrelated release mutation | package manifests/lockfile restored to `.6` | exact nested diff against `origin/smark/main` has no release metadata paths |
+
+R71 adds no new error mechanism or success path; its production delta is limited to removing two existing fallback commits in `Code.ts`, while three existing test files are modified to replace contradictory fallback contracts. The nested OpenTUI diff remains exactly eight code files: five production owners and three tests; the root SyncProvider remains a committed baseline. The actual implementation audit must recalculate `E/C`.
+
+The release-cleanup paths are exactly: `bun.lock`, `packages/core/package.json`, `packages/examples/package.json`, `packages/keymap/package.json`, `packages/qrcode/package.json`, `packages/react/package.json`, `packages/solid/package.json`, `packages/ssh/package.json`, `packages/three/package.json`, and `packages/web/package.json`. Their final content must match the `.6` consumer baseline.
+
+### R67 Plan Audit Record
+
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| R62 | R62 | yes | B-01 Markdown pending representation contradicts `drawUnstyledText=false`; B-02 request-seam target already implemented; B-03 unrelated `.7` release metadata in repair scope | stale archive material; SyncProvider count precision; comment-budget inconsistency; candidate-failure seam precision | BLOCK | `ses_01f2f8d39ffe8ut8f6xhDeEDLV` |
+| R63 | R63 | yes | No blocking findings | NB-01 archive size; NB-02 baseline/new-file classification; NB-03 build command distinction; NB-04 release-cleanup path precision; NB-05 actual E/C required at implementation audit | APPROVE, invalidated by R64 scope correction | `ses_01f255bb7ffeWp9ntqHrM0XHyP` |
+| R64 | R64 | yes | B-01 fenced-code owner call sites not explicit in plan | NB-01 baseline classification; NB-02 exact test location; NB-03 inherited traceability navigation; NB-04 build boundary | BLOCK | `ses_01f0e3ac1ffeZbK3WOqIhHxBbK` |
+| R65 | R65 | yes | No blocking findings | NB-01 archive boundary; NB-02 minor numbering/history drift; NB-03 conditional fenced seed; NB-04 inherited baseline verification matrix; NB-05 actual E/C required at implementation audit | APPROVE, invalidated by R66 test-contract correction | `ses_01f0858d6ffeHKlMvz2NlBkVrb` |
+| R66 | R66 | yes | B-01 original compiled target-liveness feedback loop omitted from verification boundary | NB-01 baseline/test classification; NB-02 test-only E/C estimate; NB-03 archive size | BLOCK | `ses_01eff359effeBLBfRDGjY6yA5j` |
+| R67 | R67 | yes | B-01 preserved failure-to-plain-text success fallback violates original no-fallback contract | NB-01 duplicate build instructions; NB-02 client-test classification; NB-03 two seed call sites; NB-04 E excludes tests; NB-05 archive size | BLOCK | `ses_01efaa5f2ffepf0Udir1GYwcXP` |
+| R68 | R68 | pending | invalidated by user's explicit correction: failure terminal/diagnostic is not the repair goal; normal supported paths must stop producing the error | - | not audited | not applicable |
+| R69 | R69 | yes | B-01 complete verbatim original requirement is not preserved in current authoritative sections | NB-01 exact catch cleanup semantics; NB-02 exact verification commands; NB-03 archived budget ambiguity | BLOCK | `ses_01eea2ec7ffeTyWs2haeCSGl2H` |
+| R70 | R70 | yes | B-01 Code fallback removal had no authorized behavior-sensitive test path and contradicted existing Code tests | NB-01 inherited baseline navigation; NB-02 exact verification commands; NB-03 effective scope classification; NB-04 archive size; NB-05 E/C estimate | BLOCK | `ses_01ee40747ffeMuWDcmaUISj8Xl` |
+| R71 | R71 | yes | No blocking findings | NB-01 archive navigation; NB-02 verification wording drift; NB-03 baseline/new-delta boundary; NB-04 inherited traceability; NB-05 actual E/C required at implementation audit | APPROVE | `ses_01eddab16ffesVyAS1QxpQbguv` |
+| R72 | R72 | yes | B-01 warning semantics contradictory: warning must remain capability result while error must reject | NB-01 non-concrete filters; NB-02 artifact freshness; NB-03 archive size; NB-04 missing incremental estimate | BLOCK | `ses_01ebe2197ffeBUAUWjdslt4Nll` |
+| R73 | R73 | yes | B-01 full original scope not authoritative; B-02 downstream one-shot reject does not repair producer-side no-error invariant | NB-01 test seam precision; NB-02 inherited verification references; NB-03 incremental budget wording | BLOCK | `ses_01eb4844effeXZDYu3iNqmoYuM` |
+| R74 | R74 | yes | B-01 `highlightOnce()` initialization failure returns `{error}` and still reaches Code's empty-highlight success path | NB-01 missing R74 per-file E/C estimate; NB-02 archive/navigation noise; NB-03 exact test seam; NB-04 `.7` cleanup state | BLOCK | `ses_01ea19c05ffecAKWS68KGqwa6f` |
+| R75 | R75 | yes | B-01 prescribed verification filter did not select the existing normal supported one-shot and unsupported-warning tests | NB-01 incremental E/C estimate; NB-02 exact R75 file table | BLOCK | `ses_01e91d82dffeAewbvR75ltqWAV` |
+| R76 | R76 | yes | B-01 plan still treated producer initialization/parse errors as acceptable reachable outcomes and only repaired downstream rejection | NB-01 current authority not fully self-contained; NB-02 initialization fixture seam not concrete | BLOCK | `ses_01e865aa4ffeINr2qFHLPix822` |
+| R77 | R77 | yes | B-01 reusable-parser tail covered one-shot but not streaming/reference/injection consumers; B-02 exact current file/test contract was incomplete | NB-01 stale archive budget arithmetic; NB-02 future test-name anchoring; NB-03 per-file E/C estimate | BLOCK | `ses_01e6bda58ffesKRcAHH8Ab5gdk` |
+| R78 | R78 | yes | B-01 `processInjections()` catch still converted parse/query failure to partial success; B-02 tail interface, nesting, invalidation order and public red fixture were not executable | NB-01 archive navigation; NB-02 current E/C estimate; NB-03 indirect R74 verification references | BLOCK | `ses_01e624b07ffeqBqVFGcPReklgy` |
+| R79 | R79 | yes | B-01 shared `filetypeParsers/filetypeParserPromises` remained outside the tail through `handleInitializeParser`, allowing stale promise resurrection after registration/clear | NB-01 unsupported injection classification; NB-02 real failed-injection fixture detail; NB-03 aggregate E arithmetic; NB-04 SyncProvider test mapping | BLOCK | `ses_01e58e166ffehX3fA6wDrQpsm5` |
+| R80 | R80 | yes | B-01 one-shot released parser-asset scope before asynchronous injection; B-02 ordinary `HANDLE_EDITS` remained outside the shared parser-asset scope | NB-01 historical archive/budget drift; NB-02 fixture path precision | BLOCK | `ses_01e4f95cdffe2uVAtWo3CW79HV` |
+| R81 | R81 | yes | No blocking findings | NB-01 `UPDATE_DATA_PATH` is existing public/test compatibility; NB-02 scope numbering drift; NB-03 archive navigation; NB-04 E/C estimates require implementation recount | APPROVE | `ses_01e443d73ffedNAJf0czJAYIYv` |
+
+R62's exact independent verdict was **BLOCK**: the plan could not proceed until the Markdown pending-representation owner is specified, the already-green request-seam item is removed as a no-op target, and release/version/lockfile material is removed from this repair's implementation boundary.
+
+R71 implementation audit returned **BLOCK** with:
+
+- **B-01:** one-shot `ONESHOT_HIGHLIGHT_RESPONSE` error resolves as an empty result and still reaches Code's plain-text success branch; a real response-shape regression is required.
+- **B-02:** actual full nested effective `E=744` exceeds R71's stale `E<=300` promise; R72 replaces that intermediate promise with the user-backed production `<=600` and total effective `<=800` gates.
+
+R72 plan audit returned **BLOCK** because its one-shot response contract simultaneously classified `warning` as rejectable error and as an existing resolved capability result. R73 makes `error`, `warning + hasParser:false`, and successful highlights three distinct response outcomes.
+
+R73 plan audit returned **BLOCK** because it did not restate complete liveness/Tree/Markdown/shutdown traceability in current authority and treated downstream one-shot rejection as sufficient for a producer-side no-error requirement. R74 carries the six invariants directly and classifies `parse()->null` as an abnormal error signal that must not be mistaken for a normal-path fix.
+
+R74 plan audit returned **BLOCK** because `highlightOnce()` initialization rejection still returns `{error}` and allows Code's empty-highlight success branch. R75 must propagate initialization rejection through the existing Promise contract and test that public behavior.
+
+R75 plan audit returned **BLOCK** because its prescribed one-shot filter did not select the existing normal supported and unsupported-warning test names. R76 corrected the selector, but its downstream-only error classification was then rejected as insufficient producer-side root-cause repair.
+
+R76 plan audit returned **BLOCK** because it retained the producer paths that can invalidate or fail a reusable Parser while an asynchronous one-shot operation still owns it. R77 assigns that first divergence to `ParserWorker`'s canonical-filetype reusable-parser owner tail and keeps client rejection only as correlated protocol settlement.
+
+R77 plan audit returned **BLOCK** because its reusable-parser tail covered only one-shot/preload while `processInjections()`, `updateReferenceState()`, streaming/reset and `clearCache()` remained reachable consumers or invalidators. R78 routes all those operations through one owner tail and enumerates the exact five production and three test files.
+
+R78 plan audit returned **BLOCK** because `processInjections()` still caught parse/query exceptions and returned partial success, and because the proposed tail lacked an executable non-reentrant interface and deterministic public settlement fixture. R79 removes that catch-and-success path and specifies every entry, exit, nesting and barrier rule.
+
+R79 plan audit returned **BLOCK** because `handleInitializeParser()` still resolved shared filetype parser cache outside the owner tail, allowing registration/clear to invalidate a promise and later resurrect its stale result. R80 expands the single `withParserAssets` scope to all filetype cache and Parser operations, including buffer initialization.
+
+R80 plan audit returned **BLOCK** because one-shot released the parser-asset scope before asynchronous injection completion and ordinary `HANDLE_EDITS` still accessed shared reusable parsers outside the scope. R81 holds one scope through complete one-shot injection/response preparation and adds `HANDLE_EDITS` to the same owner/test contract.
+
+#### R63 Independent Plan Audit Verdict (verbatim)
+
+No blocking findings.
+
+#### R63 Non-blocking Findings (verbatim classifications)
+
+- **NB-01:** R63 authority boundary is clear, but the archive remains large; implementation must use only the R63 authority sections.
+- **NB-02:** R63 production-file classification is broader than its effective runtime delta; baseline files are explicitly marked above.
+- **NB-03:** Verification distinguishes `bun run build:lib` from the complete native `bun run build`; both results must be recorded.
+- **NB-04:** R63 now enumerates every release-cleanup path.
+- **NB-05:** The implementation audit must independently recalculate actual `E/C` and the 15% ratio.
+
+R63 implementation audit returned **BLOCK** with:
+
+- **B-01:** the pending-frame test did not assert the updated literal before settlement;
+- **B-02:** streaming fenced code had no current seed and remained blank with `drawUnstyledText=false`.
+
+R64 plan audit returned **BLOCK** because the fenced-code seed requirement was not explicitly mapped to `createCodeRenderable()` and `applyCodeBlockRenderable()` with a failing public test seam. R65 adds those exact producer/consumer paths and assertions.
+
+R65 implementation audit returned **BLOCK** because the new producer path made two existing pending-flicker assertions stale, and the structured test did not assert the updated literal before settle. R66 corrected only those stale test expectations.
+
+R66 plan audit returned **BLOCK** because the original compiled target-liveness feedback loop was not a required R66 verification. R67 restored the existing smoke command and its user-visible assertions without adding runtime instrumentation.
+
+R67 plan audit returned **BLOCK** because the preserved `CodeRenderable` catch converted a failed Tree-sitter primary request into visible plain-text success. R68 removed that success conversion directionally, then R70 restates the causal no-error goal and complete user contract before implementation authorization.
+
+#### R71 Independent Plan Audit Verdict (verbatim)
+
+No blocking findings.
+
+#### R71 Non-blocking Findings (verbatim classifications)
+
+- **NB-01:** Canonical authority and historical archive remain a navigation risk; implementation must use only R71 current authority.
+- **NB-02:** Verification wording has a stale R67 label and repeated build/smoke descriptions; the command requirements remain unchanged.
+- **NB-03:** Baseline files and R71 actual fallback/test delta must remain separate in implementation evidence.
+- **NB-04:** R71 must reverify all inherited SyncProvider, Tree ownership, shutdown and compiled-liveness paths, not only Code fallback tests.
+- **NB-05:** Actual implementation `E/C` must be independently recalculated.
+
+R68 was superseded before audit by the user's explicit correction that the goal is not to preserve failure handling, but to repair supported-domain ownership so the failure path is not reached. R69 was blocked because its current authority did not include the complete verbatim requirement. R70 restores that contract and makes normal-path no-error evidence authoritative.
+
+#### R65 Independent Plan Audit Verdict (verbatim)
+
+No blocking findings.
+
+#### R65 Non-blocking Findings (verbatim classifications)
+
+- **NB-01:** R65 authority boundary depends on the top-level statement because the archive remains large.
+- **NB-02:** R65 had minor numbering and historical-reference drift; current authority now uses R65 labels.
+- **NB-03:** fenced-code seed must remain conditional so non-streaming behavior is unchanged.
+- **NB-04:** inherited SyncProvider, Tree-sitter, shutdown and compiled-liveness verification must be rerun during implementation verification.
+- **NB-05:** actual implementation `E/C` must be recomputed independently.
+
+### R65 Forward and Reverse Traceability
+
+| Requirement / invariant | Producer -> consumer -> owner | Exact implementation/test path |
+| --- | --- | --- |
+| R61-INV-04 structured token pending visibility | Markdown structured token -> `applyMarkdownCodeRenderable` -> `CodeRenderable.content`/pending TextBuffer | `Markdown.test.ts` `streaming structured list updates keep previous item text visible while highlighting`, new literal assertions before `resolveAllStreamingUpdates()` |
+| R61-INV-04 fenced token pending visibility | `Tokens.Code.text` -> `createCodeRenderable` or `applyCodeBlockRenderable` -> `CodeRenderable.initialStyledText` -> pending TextBuffer | `Markdown.ts:976-990,1048-1060`; `Markdown.test.ts` `streaming demo-style fenced code block does not flicker unhighlighted`, assertions before `resolveAllHighlightOnce()` |
+| `drawUnstyledText=false` invariant | Markdown caller controls option; Code owns seed commit | both public tests assert false; no error/fallback branch |
+
+Reverse mapping: `createFencedCodeSeed(token.text)` is necessary because fenced `Tokens.Code` has a different representation contract from inline Markdown tokens; reusing inline tokenization could reinterpret code punctuation and cannot guarantee exact `CodeRenderable.content` text. The existing Code owner already provides the one pending TextBuffer commit, so no second renderer path is justified.
+
+### R63 Implementation Evidence
+
+#### Actual Changed Paths
+
+The final nested tree compared with `origin/smark/main` contains exactly seven code files and no release metadata paths:
+
+| Path | Classification | Net diff |
+| --- | --- | ---: |
+| `packages/core/src/lib/tree-sitter/client.test.ts` | public lifecycle regression | `+313/-5` |
+| `packages/core/src/lib/tree-sitter/client.ts` | approved lifecycle owner plus verified request seam | `+218/-224` |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts` | accepted Tree owner | `+240/-163` |
+| `packages/core/src/lib/tree-sitter/types.ts` | correlated response contract | `+16/-7` |
+| `packages/core/src/renderables/Code.ts` | R63 pending representation owner | `+22/-12` |
+| `packages/core/src/renderables/Markdown.ts` | current seed and `drawUnstyledText=false` contract | `+78/-10` |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts` | R63 red-green pending-frame assertion | `+5/-1` |
+
+Root `SyncProvider` is an already committed R61 baseline owner repair and has no new R63 worktree diff. The nested `.7` manifests and `bun.lock` were restored to the `.6` consumer baseline and are absent from the final net diff. Generated `dist/**` and native output are excluded.
+
+#### Red-Green Evidence
+
+| Command | Directory | Result |
+| --- | --- | --- |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming structured list updates keep previous item text visible while highlighting"` before the R63 production edit | `thirdparty/opentui/packages/core` | red: `Received: true` for `drawUnstyledText === false`; 20 pass, 1 fail |
+| same command after the R63 production edit | `thirdparty/opentui/packages/core` | green: 21 pass, 0 fail, 113 expect calls; exited under 60-second process supervisor |
+
+#### Verification Evidence
+
+| Command | Directory | Result |
+| --- | --- | --- |
+| bounded `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming.*list\\|pending\\|table"` | `thirdparty/opentui/packages/core` | 61 pass, 95 filtered, 0 fail, 32 snapshots; process exited |
+| bounded targeted `client.test.ts` cancellation/error/dispose slices | `thirdparty/opentui/packages/core` | each public slice passed and exited; no unbounded full client suite was used |
+| `bun run build:lib` | `thirdparty/opentui/packages/core` | pass; declarations and worker bundle generated |
+| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | 1 pass, 0 fail; process exited |
+| bounded `bun typecheck` | `packages/opencode` | pass: `tsgo --noEmit` |
+| `git diff origin/smark/main --check` | `thirdparty/opentui` | pass; final net diff has seven code files and no `.7` release metadata |
+| bounded full `bun run build` | `thirdparty/opentui` | unavailable: native phase requires `zig`, which is not in PATH; no TypeScript failure was inferred from this environment limitation |
+
+Every Bun test was run under an external process-tree supervisor. A prior broad client filter printed passing tests but left Bun worker processes alive; those processes were terminated/verified absent, and that broad command is not treated as a clean verification result.
+
+#### Preliminary E/C Gate
+
+The pre-audit production count is `E <= 282`, below the R63 `E <= 300` ceiling. Existing qualifying Chinese comments in the approved lifecycle files plus the new adjacent pending-representation explanation are estimated at `C >= 95`; the implementation auditor must independently recalculate per-file `E_i/C_i`, excluded pure moves/deletions, and the 15% minimum. The new test assertion has an adjacent Chinese explanation and no production test control.
+
+#### Remaining Verification Limits
+
+The complete native build and a newly compiled OpenCode Windows artifact smoke are not verified in this environment because `zig` is unavailable and the root consumer remains on the published `.6` package baseline. This does not authorize a native/source workaround; it remains an explicit audit risk.
+
+## R61 Current Authority
+
+R61由用户对R60实施方向的明确纠正触发：
+
+> 同时禁止大幅度增加额外的error的判断与handle机制，根源性修复应当是修正错误的机制使得任何可能的不稳定error根本不会产生
+
+R61保留原始范围中的两个独立第一分歧，但删除R60中把诊断、取消和测试控制面扩展成生产状态机的部分。R61只允许一个主路径：修复合法事件投影的所有权、修复同一Tree的操作顺序和WASM owner转移、修复当前Markdown表示的提交时机；不增加重试、watchdog、renderer restart、常开plain-text、通用catch恢复或第二事件源。
+
+### 1. Verbatim Requirement
+
+R61继承本文R60第1节的完整原始需求，并追加本轮用户原文：
+
+> 同时禁止大幅度增加额外的error的判断与handle机制，根源性修复应当是修正错误的机制使得任何可能的不稳定error根本不会产生
+
+不得把“避免挂起”改写成“发生错误后继续显示”。受支持输入的主路径必须在正确的owner和顺序下完成；仅为不可避免的进程销毁建立终态，不制造成功替代品。
+
+### 2. Explicit Non-Goals
+
+- 不发布当前本地的`0.4.3-smark.7`元数据提交；它只是在源代码路线未重新批准前的未推送准备提交。
+- 不把上游版本字符串直接从`0.4.3`改成`0.5.1`。上游`v0.5.1`是研究证据，不是本次兼容升级授权；真正的上游rebase需要单独的API、asset和行为审计。
+- 不把R60的所有相关请求都改成新的全局Promise状态机；普通edit/reset保持现有接口合同，只在确有owner顺序要求的streaming/dispose边界做最小改动。
+- 不在Code层新增parser重试、异常后换parser、错误后合成成功结果或常驻纯文本显示。
+- 不修改daemon事件扇出、SDK/SSE重连、SessionStatus registry、renderer调度器、native buffer ABI、数据库、生成SDK或命令面板状态机。
+- 不用生产计时、日志标记、ready文件或错误计数作为运行时恢复机制；测试控制面不得进入production bundle。
+
+### 3. Repository Context
+
+| Source | Why it constrains R61 |
+| --- | --- |
+| `CONTEXT.md` | Project事件可包含多个Session；TUI本地projection不等于daemon事实；Session/Message/Part是当前领域术语。 |
+| `AGENTS.md` | 最小修改、避免不必要抽象；测试从package目录运行。 |
+| `thirdparty/opentui/AGENTS.md` | 使用Bun；TUI问题必须在真实可达seam复现，不能凭猜测添加错误处理。 |
+| `packages/opencode/AGENTS.md`及`packages/opencode/test/AGENTS.md` | SyncProvider拥有本地projection；并发测试使用published readiness，不用固定sleep。 |
+| `.opencode/policy/first-principles-engineering.md` | 修复第一分歧；禁止fallback和责任泄漏；diagnostic decision surface不超过10%。 |
+| `.opencode/templates/canonical-plan.md` | 维持单一canonical plan、forward/reverse traceability和独立全范围审计。 |
+| `docs/adr/README.md`、`docs/adr/0001-*.md` | 没有适用于TUI/Tree-sitter的ADR；triage ADR不构成运行时设计授权。 |
+
+### 4. Files and Evidence Read
+
+| Evidence | Relevance | Evidence class |
+| --- | --- | --- |
+| `thirdparty/opentui` commit `61023ba5e` | 引入persistent-tree streaming主路径，并移除原有one-shot/queue主路径。 | observed |
+| `thirdparty/opentui` commit `61023ba5e^` / `df4bd31ca` | 提供改动前的可比较主路径：每buffer edit queue、独立one-shot worker、无persistent streaming owner。 | observed |
+| `thirdparty/opentui` commit `80a46c4d4` | 当前R60实现把candidate ownership、buffer tail和大量correlated error处理一起引入。 | observed |
+| `packages/core/src/lib/tree-sitter/client.ts` | `Code -> client -> worker`的streaming mutation、dispose和destroy调用链。 | reachable |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts` | parser-owned Tree的parse/query/replace/dispose owner。 | reachable |
+| `packages/core/src/lib/tree-sitter/types.ts` | worker wire request/response边界。 | contracted |
+| `packages/core/src/renderables/Code.ts`、`Markdown.ts` | pending frame的当前表示、streaming Code生命周期和shutdown warning owner。 | observed/reachable |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | 合法同Project事件对未加载Session projection的第一分歧。 | observed/reachable |
+| 历史`61023`差分复现 | `STREAMING_UPDATE`未settle时已发送`DISPOSE_BUFFER`且本地buffer已删除。 | observed |
+| 当前`80a`差分复现 | 同一场景下dispose不早于update终态，ack前仍保留buffer。 | observed |
+| upstream `anomalyco/opentui` `v0.4.3`至`v0.5.1` release/compare | `v0.5.1`仍采用queue/one-shot Tree-sitter路线；上游release notes未显示persistent streaming修复。 | observed |
+| 用户提供的Windows日志/截图 | 在途highlight导致正文空白，Ctrl+C销毁时产生批量warning；daemon仍可继续运行。 | observed |
+
+### 5. Current Producer-to-Consumer Behavior
+
+```text
+daemon Message/Part event
+  -> GlobalEvent SSE
+  -> SDK event queue
+  -> SyncProvider reducer
+  -> local Message/Part projection
+  -> Markdown/Code renderable
+  -> TreeSitterClient mutation
+  -> ParserWorker persistent Tree
+```
+
+存在两个已证实的owner断裂：
+
+1. 同Project事件属于未加载Session时，SyncProvider把不存在的本地collection交给`Binary.search`，subscriber在TUI侧抛错，之后daemon仍运行但TUI不再消费后续事件。
+2. `61023ba5e`的streaming主路径允许同一buffer的mutation与dispose交叉。历史复现显示dispose先到且本地mirror先删；worker随后可能访问已释放或已替换的Tree。R60的candidate/tail修改证明了正确顺序，但其实现还夹带了大量不必要的error/cancellation分支。
+
+### 6. Supported Input Domain and Reachability
+
+| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
+| --- | --- | --- | --- | --- | --- |
+| 同Project但未加载Session的hidden/remove Message事件 | daemon Bus / Session producer | event schema合法；本地store只加载当前route所需Session | SSE -> SyncProvider | SyncProvider local projection | observed/reachable |
+| 同Message但未加载Part的remove事件 | daemon Part producer | MessageID/PartID合法 | SSE -> SyncProvider | SyncProvider local projection | observed/reachable |
+| 当前Markdown Code的首个或后续streaming token | Markdown parser | token/raw与Code content同一更新 | Markdown -> Code | Markdown representation seam | observed/reachable |
+| 同buffer尚未完成的streaming mutation后发生destroy/remove | Code destroy/filetype/client lifecycle | renderable销毁可在worker响应前发生 | Code -> client -> worker | client buffer owner | observed/reachable |
+| persistent Tree parse/query期间的candidate替换 | ParserWorker | 一个buffer只有一个accepted Tree owner | client request -> worker | ParserWorker WASM owner | reachable |
+| 上游`v0.5.1`与本地`0.4.3-smark.*`的API/package差异 | release producer | 仅有远端tag，不代表本地fork兼容 | package/release closure | release process | observed, out of scope |
+
+### 7. Required Invariants
+
+| ID | Behavioral invariant | Evidence | Existing test |
+| --- | --- | --- | --- |
+| R61-INV-01 | 合法Project事件即使对应未加载Session，也不能终止SyncProvider的后续事件消费。 | historical hidden-event red harness | `sync-undefined-messages.test.tsx` |
+| R61-INV-02 | 一个buffer的mutation完成前，dispose不能触碰其accepted Tree或删除本地owner；dispose只在真实worker ack后完成。 | historical/current dispose differential | current `client.test.ts` lifecycle seam |
+| R61-INV-03 | parser只能在完整parse/query结果准备好后转移accepted Tree ownership；失败candidate不能改变下一次更新的输入。 | parser worker ownership contract | current lifecycle tests; new failure-then-success slice |
+| R61-INV-04 | 当前Markdown token在异步highlight等待期间仍有同一token/raw的可见表示，且不需要把`drawUnstyledText`改为常开。 | blank screenshot + Code/Markdown path | current Markdown pending-frame tests |
+| R61-INV-05 | 正常renderable销毁不打印Tree-sitter cancellation warning；真正的live failure不能被伪装成成功。 | shutdown trace + renderer destruction order | bounded shutdown test |
+| R61-INV-06 | production新增diagnostic/error decision surface不超过变更决策面的10%，且新增alternate success path为零。 | user requirement + policy | diff audit |
+
+### 8. First Divergence and Root Cause
+
+| Invariant | First divergence | Owning module/interface | Proof |
+| --- | --- | --- | --- |
+| R61-INV-01 | hidden `message.updated`及remove分支把缺失collection传给`Binary.search`。 | `SyncProvider` local projection | 已运行的hidden-event red harness产生`array.length` TypeError。 |
+| R61-INV-02 | `61023ba5e`的`removeBuffer`在streaming mutation没有终态时立即删除mirror并发送dispose；历史复现输出`disposeSentBeforeUpdateSettlement=true`。 | `TreeSitterClient` buffer lifecycle | 同一脚本在`61023`红、`80a`绿。 |
+| R61-INV-03 | `61023`的`handleStreamingUpdate`在query/injection完成前直接改写accepted `parserState.tree/content`，并且替换Tree没有统一释放旧owner。 | `ParserWorker` accepted Tree owner | 代码差分及WASM Tree显式delete合同；这是状态/ownership断裂，不是错误日志问题。 |
+| R61-INV-04 | Markdown Code创建/更新时未统一提供current seed，而Code streaming路径在等待时不提交当前表示。 | `MarkdownRenderable` -> `CodeRenderable` representation seam | 用户正文空白截图；R60新增的分散seed测试只证明症状，不证明需要整套error状态机。 |
+| R61-INV-05 | Code catch先进入warning，再判断renderable是否已经销毁。 | `CodeRenderable` shutdown observer | renderer先销毁renderable、后销毁全局client的既有顺序和退出日志。 |
+
+Bug feedback loop already run:
+
+```text
+历史版本 cwd: D:\Temp\opencode\opentui-61023-repro-99c4e02e94d94459a807c935dbc1257b
+command: bun -e '<public TreeSitterClient; hold STREAMING_UPDATE; call removeStreamingBuffer concurrently>'
+result: {"updateSent":true,"disposeSentBeforeUpdateSettlement":true,"bufferStillPresent":false}
+
+当前版本 cwd: thirdparty/opentui
+same command
+result: {"updateSent":true,"disposeSentBeforeUpdateSettlement":false,"bufferStillPresent":true}
+        {"disposeSentAfterUpdateSettlement":true,"bufferStillPresentBeforeAck":true}
+```
+
+该差分loop锁定的是owner顺序病因；它不把“错误发生后如何继续”当作修复目标。
+
+### 9. Responsibility and Seam
+
+| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
+| --- | --- | --- | --- | --- |
+| 未加载对象的本地projection | SyncProvider | daemon事实可以没有本地行；projection按加载集合表达 | 只有SyncProvider知道collection是否存在 | SSE/SDK不知道TUI本地加载域，不能过滤合法事件 |
+| mutation/dispose顺序 | TreeSitterClient buffer lifecycle | 一个公开buffer操作序列只有一个owner尾部 | client同时拥有本地mirror和worker请求顺序 | Code不应管理WASM Tree或跨调用者竞态 |
+| accepted Tree转移和WASM释放 | ParserWorker | worker拥有Tree并在commit/dispose时释放 | Tree对象只存在worker内 | client无法安全delete worker-owned WASM object |
+| current Markdown表示 | MarkdownRenderable | token/raw转换为Code输入并在异步期间保持可见 | token结构和样式seed只在Markdown层可得 | parser只返回highlight，不能重建UI token |
+| shutdown warning观察 | CodeRenderable | 已销毁renderable不再报告正常取消 | Code知道自己的destroyed状态 | worker不能判断终端UI生命周期 |
+
+### 10. Single Approved Primary-Path Design
+
+```text
+valid event -> SyncProvider local-collection projection
+current token -> one Markdown seed -> one Code streaming request
+buffer mutation -> one client operation tail -> candidate parse/query -> one accepted Tree commit -> acked dispose
+```
+
+具体设计：
+
+1. 覆盖四个受影响的SyncProvider collection ownership情况：hidden/updated Message、removed Message、hidden Part和removed Part；其中hidden Part已有正确no-op guard，本轮只补其余三个缺失边界。缺失本地对象是projection no-op，不是异常恢复。
+2. 将R60当前`bufferOperations`收敛为已有buffer queue/单一tail的最小形式；mutation和dispose共享同一尾部，dispose不得绕过未完成mutation。不得再引入全局request状态机或每种错误的独立分支。
+3. 在ParserWorker中只做candidate ownership修复：使用candidate Tree完成edit/parse/query/injection后一次性安装accepted state；成功时释放旧Tree和scratch，失败时只释放candidate，保留旧accepted state。不得用catch把失败转成空highlights或plain-text成功。
+4. 对streaming/one-shot请求保留现有correlated terminal response所需的最小`messageId`；它只保证协议不悬挂，不生成成功结果。普通edit/reset不扩大为新的错误状态机。worker异常仍是失败，不被Code层吞成新的成功路径。
+5. 将Markdown seed集中在`createMarkdownCodeRenderable`和`applyMarkdownCodeRenderable`的当前content/token seam；保持`drawUnstyledText=false`合同，不在失败后切换渲染算法。
+6. 将Code的destroyed检查置于既有warning之前；删除R60新增的typed cancellation分支和重复warning分类，正常销毁由既有renderable生命周期拥有，live failure仍按既有合同暴露。
+
+R61不是“主路径失败后换一条路径”：只有一条persistent streaming主路径；candidate和seed是该路径的内部所有权/表示步骤。上游`v0.5.1`的旧queue/one-shot实现只作为第一分歧的对照证据，不在本轮以版本字符串替换本地fork。
+
+### 11. Secondary and Replacement Path Inventory
+
+| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| SyncProvider missing-collection no-op | proposed | primary-contract branch | no, projection no-op | primary | preserve |
+| client per-buffer mutation/dispose tail | proposed | primary ownership contract | yes, same operation | primary | preserve |
+| candidate Tree before accepted commit | proposed | primary ownership step | yes, same parse result | primary | preserve |
+| current Markdown seed while request pending | proposed | primary representation step | yes, current token representation | primary | preserve |
+| existing live-error plain-text compatibility | current shipped | existing compatibility | yes, only after genuine failure | existing | preserve without expansion |
+| R60 typed destroy classification / broad callback rejection | current R60 | diagnostic expansion | no | excessive relative to R61 | remove/collapse |
+| retry, watchdog, renderer restart, alternate parser, SDK catch-and-resume | proposed in prior drafts | forbidden fallback | yes | rejected | remove |
+
+New alternate success paths: zero. New diagnostic surface is limited to the pre-existing warning ordering check and the minimum correlated terminal protocol; estimate below must remain within policy's10% ceiling.
+
+### 12. Workaround Deletion and Replacement
+
+| Existing workaround or duplicate | Why it existed | Why R61 supersedes it | Delete or collapse location |
+| --- | --- | --- | --- |
+| R60 broad all-request Promise/cancellation branches | compensated for a wider-than-needed protocol rewrite | owner tail and candidate transaction repair the actual race at its owner | `client.ts`, `types.ts`, related R60 tests |
+| R60 per-callsite Markdown seed duplication | repeated downstream patches for one representation contract | central current-seed seam carries one representation rule | `Markdown.ts` |
+| R60 typed destroy warning branch | classified a symptom after destruction | destroyed check belongs before existing diagnostic branch | `Code.ts` |
+| any renderer/SDK recovery workaround | tried to keep consuming after a producer/consumer invariant broke | SyncProvider and Tree owner invariants are repaired directly | do not retain |
+
+### 13. Forward Traceability
+
+| Requirement or invariant | Production path | Planned file/change | Behavioral test |
+| --- | --- | --- | --- |
+| R61-INV-01 | missing local collection projection | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` four affected cases, with three missing guards added and the existing hidden-Part guard preserved | hidden/remove events followed by loaded event |
+| R61-INV-02 | single buffer mutation/dispose tail | `thirdparty/opentui/.../client.ts` | public concurrent update/remove race |
+| R61-INV-03 | candidate Tree commit/disposal | `thirdparty/opentui/.../parser.worker.ts` | failed candidate followed by successful update/reset |
+| R61-INV-04 | centralized current seed | `thirdparty/opentui/.../Markdown.ts` | list/blockquote/table/body pending frame |
+| R61-INV-05 | destroyed check before warning | `thirdparty/opentui/.../Code.ts` | pending request plus normal renderer destroy |
+| R61-INV-06 | no new fallback/diagnostic budget | all changed production files | diff/path audit and source tests |
+
+### 14. Reverse Traceability
+
+| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
+| --- | --- | --- | --- |
+| four affected missing-collection cases and three new guards | R61-INV-01 | reproducible SyncProvider TypeError plus existing hidden-Part no-op path | current reducer assumes every removable event has loaded local storage |
+| per-buffer mutation/dispose tail | R61-INV-02 | historical red differential | old client deletes mirror and disposes while mutation is pending |
+| candidate ownership transfer | R61-INV-03 | persistent Tree source and WASM ownership contract | old worker mutates accepted state before query and leaves old Tree owner |
+| centralized current seed | R61-INV-04 | screenshot and current Markdown caller matrix | no existing single constructor seam supplies all current representations |
+| destroyed-first check | R61-INV-05 | observed renderer/client destruction order | existing catch logs before its owner-lifetime check |
+| minimum correlated terminal id | R61-INV-02/03 | pending request interface | without request identity a failed operation cannot complete its own channel |
+
+### 15. File-Level Change Plan
+
+| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
+| --- | --- | --- | --- |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | modify | three missing local collection guards; retain the existing hidden-Part guard as the fourth affected case | +3 to +6 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | modify | minimal per-buffer tail/dispose ordering and only required streaming/one-shot terminal correlation; remove R60 broad state machinery | -80 to +80 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | modify | candidate Tree ownership and transient Tree `finally` disposal; no catch-and-success | +35 to +80 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | modify | minimal request/response ids for the two awaitable render paths | +8 to +16 |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | modify | destroyed check before existing warning; remove typed cancellation branch | -4 to +4 |
+| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` | modify | one centralized current token/raw seed seam; remove duplicated R60 call-site seeds | -30 to +20 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | modify | public race, ownership, pending representation and shutdown regressions | +80 to +140 |
+| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` | modify | current pending literal contract only where stale | +1 to +1 |
+
+No new production file, worker telemetry, generated artifact or release asset is authorized. The `.7` version commit remains unpublished until R61 implementation is independently verified.
+
+### 16. TDD Behavior Slices
+
+| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
+| --- | --- | --- | --- | --- |
+| 1 | Emit hidden/remove events for an unloaded Session, then a valid loaded event. | undefined local collection reaches `Binary.search`. | no-op only for missing local projection; next event applies. | R61-INV-01 |
+| 2 | On the historical `61023` path, hold `STREAMING_UPDATE`, call public remove, and observe dispose before update settlement. | dispose bypasses the mutation owner. | dispose is sent only after mutation terminal response and local buffer remains until ack. | R61-INV-02 |
+| 3 | Use the existing `client.test.ts:1380-1441` worker `postMessage/onmessage` seam to force a candidate query/parse failure, then perform a public successful update/reset. | accepted Tree/content is mutated before the failed query completes. | failed candidate is released; previous accepted state remains usable. | R61-INV-03 |
+| 4 | Hold current Markdown list/blockquote/table/body highlight and capture frame before completion. | missing current seed leaves Code representation invisible with `drawUnstyledText=false`. | exact current token/raw representation is visible; eventual highlight replaces it. | R61-INV-04 |
+| 5 | Destroy the renderer while a highlight is pending and capture warning output. | warning is emitted before destroyed owner check. | normal destruction produces no warning; a separately injected live failure remains observable. | R61-INV-05 |
+| 6 | Run the existing compiled TUI scenario for daemon event continuation, Thinking/body and Commands restoration. | reducer or pending Code path can stop downstream frame updates. | same public event/render path remains live without production telemetry. | R61-INV-01/04/05 |
+
+### 17. Chinese Comment Budget
+
+| Metric | Estimate | Method |
+| --- | ---: | --- |
+| Effective changed production lines `E` | <=300 | count substantive executable changes only; exclude imports, formatting, pure moves and tests |
+| Required qualifying Chinese comments `C` | `>= max(1, ceil(E × 0.15))` and `<=45` at the planned `E` ceiling | comments only for owner transfer, ack ordering and current-seed invariant; actual implementation audit recomputes both values |
+
+The implementation must remove surplus R60 comments rather than retain comments for deleted state-machine branches. No comments are added to explain obvious control flow.
+
+### 18. Verification
+
+| Command | Working directory | Evidence produced |
+| --- | --- | --- |
+| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | Sync projection regression |
+| targeted `bun test` for `client.test.ts` race/ownership/pending slices | `thirdparty/opentui/packages/core` | public Tree/client/Code behavior without full hanging suite |
+| `bun typecheck` | `packages/opencode` | root TypeScript contract |
+| `bun run build` | `thirdparty/opentui` | current OpenTUI source artifact |
+| existing bounded compiled TUI smoke | `packages/opencode` | daemon event continuation, Thinking/body and Commands frame behavior |
+| `git diff --check` plus actual path/E/C audit | repository and nested repo | no unrelated files, no fallback, budget compliance |
+
+Full client suite is not a first-line command; it is attempted only after targeted commands pass and always under the repository's external process-tree timeout.
+
+### 19. Diff Budget
+
+| Metric | Estimate | Justification |
+| --- | ---: | --- |
+| Files added | 0 | use existing seams |
+| Production files modified | <=6 | SyncProvider plus five OpenTUI owners |
+| Test files modified | <=2 | public behavior slices in existing suites |
+| Production effective lines | <=300 | surgical owner/representation changes; R60 broad rewrite is removed/collapsed |
+| New alternate success paths | 0 | no retry, fallback, restart or second event source |
+
+### 20. Real Risks and Open Decisions
+
+#### Open Decisions Requiring the User
+
+None for the R61 primary repair. The upstream `v0.5.1` base-version upgrade remains a separate future decision, not an implicit part of this fix.
+
+#### Rejected Speculation
+
+- Upstream `v0.5.1` release notes do not prove a fix for the user's exact fork path; the old queue/one-shot source is corroborating evidence only.
+- The `Continue opencode -s undefined` and active-session count are exit/status symptoms, not evidence that daemon Session execution stopped.
+- A generic worker error or malformed external input without a reachable producer is not used to justify another production branch.
+
+### 21. Audit Contract
+
+The independent auditor must audit the complete original user scope against R61, reconstruct both SyncProvider and OpenTUI paths from source, verify that R60 broad error/cancellation machinery is not silently retained as a second architecture, check the historical/current owner-order evidence, validate the <=6 production-file and <=300 effective-line plan, and copy its exact verdict into the R61 audit record.
+
+### 22. Plan Audit Record
+
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| R61 | R61 | yes | No blocking findings | See verbatim verdict below | APPROVE | `ses_01f724578ffeS5c7aCpIoLy5Jj` |
+
+R60 approval is invalidated by this substantive root-cause, owner, file-scope and fallback-policy revision. R61 is the only implementation-authorizing revision.
+
+#### R61 Independent Plan Audit Verdict (verbatim)
+
+No blocking findings.
+
+## Non-blocking findings
+
+- **R61 contains substantial superseded R60/R1–R60 material after the current authority section.** The plan explicitly states that these sections are non-normative, so this does not invalidate the current revision, but it increases implementation-navigation risk. The recorder should preserve the top-level R61 authority boundary and ensure implementation decisions are taken only from R61 sections 1–22.
+- **The SyncProvider change count is inconsistent.** R61 describes “three” collection-ownership branches, while the current reducer has independently reachable missing-collection cases for hidden/updated messages, removed messages, hidden parts, and removed parts at `packages/opencode/src/cli/cmd/tui/context/sync.tsx:769-905`. The behavioral invariant and owner mapping cover the required no-op behavior, so this is a plan precision issue rather than an uncovered requirement.
+- **The R61 comment estimate uses `C <=45` while the policy defines a minimum ratio.** The accompanying method states `C >= max(1, ceil(E × 0.15))`, and with the planned `E <=300` this permits the required maximum of 45 qualifying lines. The implementation audit must nevertheless recompute actual `E` and `C` independently.
+- **The plan does not name the exact existing test helper or worker-control seam for the candidate failure-then-success slice.** The repository already contains public-client tests that control worker responses through the worker seam, including `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts:1380-1441`; implementation should use a behavior-level seam rather than add production-only test controls.
+
+## Rejected speculation
+
+- Upgrading directly to upstream OpenTUI `v0.5.1` is not required by the stated requirement and is correctly excluded.
+- Adding watchdogs, retries, renderer restarts, generic catches, always-on plain-text rendering, or a second event-consumption path is not justified and is correctly rejected.
+- Changing daemon event fan-out, SDK/SSE reconnect behavior, global session status, database code, native ABI, or the command-panel state machine is unsupported by the reconstructed first-divergence paths.
+- Generic malformed worker payloads without a reachable producer or independently public untrusted seam do not justify additional production guards.
+
+## Requirement and traceability coverage
+
+| Requirement | R61 owner/path | Verification |
+|---|---|---|
+| TUI must continue consuming valid events after an unloaded-session event | `SyncProvider` missing local collection projection | Hidden/remove event followed by a loaded valid event; compiled liveness smoke |
+| TUI must not deadlock on same-buffer mutation/dispose overlap | `TreeSitterClient` per-buffer operation tail | Public concurrent update/remove lifecycle test |
+| Persistent Tree ownership must remain valid across failures and replacement | `ParserWorker` candidate Tree and single commit point | Candidate failure followed by successful update/reset |
+| Markdown body must remain visible while highlighting is pending | `MarkdownRenderable` current-token seed seam | Pending-frame tests for list, blockquote, table, and ordinary body paths |
+| Normal shutdown must not emit cancellation warnings while live failures remain observable | `CodeRenderable` destruction check before diagnostic branch | Pending highlight plus destruction test and compiled shutdown smoke |
+| No unrelated fallback or error-handling expansion | R61 explicit non-goals, single primary-path design, zero new alternate success paths | Diff/path audit |
+| File and production-line limits | R61 file-level and diff budgets | Independent implementation diff audit |
+
+The producer-to-consumer chain is sufficiently reconstructed:
+
+```text
+daemon event
+  -> SSE/SDK queue
+  -> TUI event projection
+  -> local Message/Part store
+  -> Markdown/Code renderable
+  -> TreeSitterClient
+  -> parser worker Tree ownership
+```
+
+The plan identifies the first divergence for each confirmed symptom and assigns the repair to the owning module rather than to a downstream recovery layer.
+
+## Primary-path and fallback verdict
+
+- **Primary path:** one SyncProvider projection path, one per-buffer client operation tail, one parser candidate-to-accepted ownership transition, and one Markdown current-representation path.
+- **Alternate success paths:** none newly introduced.
+- **Existing compatibility:** existing live-error plain-text behavior is explicitly preserved without expansion and is not used to hide the lifecycle defect.
+- **Diagnostics:** R61 removes the broader R60 cancellation/diagnostic machinery and retains only the minimum behavior needed to correlate terminal worker outcomes and suppress normal destruction noise.
+- **Ownership:** SyncProvider owns local projection membership; TreeSitterClient owns operation ordering and client mirrors; ParserWorker owns WASM Tree ownership; Markdown owns current token representation; Code owns renderable-lifetime warning suppression.
+
+The design repairs the identified owner transitions instead of bypassing Tree-sitter or adding recovery state machines.
+
+## Release verdict
+
+**APPROVE** — the exact audited canonical plan revision **R61** has no blocking findings and may proceed to implementation. Implementation remains disallowed until the plan records this exact independent verdict and transitions to an approved revision according to repository policy.
 
 ## R60 Current Authority
 
@@ -332,6 +1106,22 @@ The independent auditor must read this exact R60 file and the original requireme
 | R60 | R60 | yes | No blocking findings | three implementation-stage checks | APPROVE | `ses_020be2f9effeQUktMqNBHi28ls` |
 
 Any substantive revision invalidates earlier approval. Exact R60 is approved for implementation.
+
+### R81 Current Implementation Evidence
+
+This record applies only to approved R81. Code/Markdown renderable hunks are baseline/reverification, and the `.6` manifest/lockfile changes are cleanup-only; neither is counted as a new R81 production concept.
+
+| Area | Evidence |
+| --- | --- |
+| Approved route | `parser.worker.ts` serializes parser-asset use and invalidation through `runWithParserAssets`; injection parse/query failures and inline-reference parse-null propagate instead of publishing partial success; `client.ts` settles correlated one-shot failures through the existing response channel. |
+| TDD red | Before the correlated one-shot repair, the two new client behavior slices resolved instead of rejecting. Before the asset owner tail, the gated `clear cache waits for parser assets in use` slice observed `cleared` before the held operation released. Before the current Markdown seed ordering, the full Markdown suite was `155 pass, 1 fail` on `paragraph updates do not flash raw markdown markers`. Before the current Code pending-owner correction, the full Code suite was `69 pass, 3 fail` in stale/current pending representation contracts. |
+| TDD green | `bun test ./src/lib/tree-sitter/client.test.ts`: `59 pass, 0 fail`; `bun test ./src/renderables/Code.test.ts`: `72 pass, 1 skip, 0 fail`; `bun test ./src/renderables/__tests__/Markdown.test.ts`: `156 pass, 0 fail`. |
+| Package checks | `bunx oxfmt --check` on all affected OpenTUI source/test paths: pass. `bun run build:lib` from `thirdparty/opentui/packages/core`: pass. `bun typecheck` from `packages/opencode`: pass. `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` from `packages/opencode`: `1 pass, 0 fail`. |
+| Compiled artifact | Built with `bun run script/build.ts --skip-install --skip-embed-web-ui --os=win32 --arch=x64`, using a read-only local HTTP endpoint serving the current checked-in models snapshot because direct `models.dev` access was refused. Build version `0.0.0-dev-smark-202608081605`; OpenTUI `0.4.3-smark.6`; executable `152292864` bytes, SHA-256 `7366c7b07fa053510e49094dcced05f8c452e276d2cac469e267d49102a91bf1`; evidence report: `packages/opencode/dist/opencode-windows-x64/opentui-build.json`. |
+| Compiled normal smoke | `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario normal`: pass; `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=0`. |
+| Compiled target-liveness smoke | Same command with `--scenario target-liveness`: pass; `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=14`; shutdown completed without warning failure. |
+| Incremental E/C | Independent auditor conservative recount for R81 parser/client route: `E≈210`, qualifying nearby Chinese explanations `C≈40`, ratio `≈19%`; baseline/reverification and cleanup-only paths excluded. |
+| Unverified items | OpenTUI package-wide typecheck retains existing Yoga/upstream test typing failures; no changed-owner failure was reported. Direct network model fetch is unavailable, so the compiled build used the local snapshot endpoint described above. No commit or push was performed. |
 
 ### 23. Implementation Evidence
 
