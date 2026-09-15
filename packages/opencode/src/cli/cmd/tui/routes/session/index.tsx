@@ -443,7 +443,6 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
-  let lastMaxScrollTop = 0
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
@@ -458,22 +457,10 @@ export function Session() {
 
   function syncSessionViewportStuckToBottom() {
     if (!scroll || scroll.isDestroyed) return
-    // renderAfter 的唯一入口（源码集成断言锁定该组合）：驻留窗口只把 store 写入推迟到
-    // microtask，先调度它不会改变本函数的贴底判定；顺序无关紧要，关键是同一帧驱动两者。
+    // 位置保持与贴底由容器在布局前处理；此处只调度驻留和发布已经绘制的位置状态。
     syncMessageResidency()
     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
-    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
-    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
-    lastMaxScrollTop = maxScrollTop
     const stuckToBottom = () => scroll.scrollTop >= maxScrollTop - 1
-    // The session viewport intentionally treats a one-row gap as visually
-    // bottom-aligned so terminal rounding and scrollbar half-cell drawing do not
-    // make the latest assistant line look detached. OpenTUI's sticky scroll only
-    // follows content growth from the exact max, so when that tolerated bottom
-    // band was already active and new rows appear, advance to the new max. Do
-    // not normalize on an ordinary render after a manual one-line scroll-up; the
-    // user should still be able to inspect the previous row until content grows.
-    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
     if (stuckToBottom() === untrack(viewportStuckToBottom)) return
     queueMicrotask(() => setViewportStuckToBottom(stuckToBottom()))
   }
@@ -495,8 +482,6 @@ export function Session() {
   // LRU 与年龄驱逐的唯一时间来源：进入视口（真实渲染）才刷新。无后台计时器，
   // 年龄只在渲染驱动的 pass 中求值（plan §10.3 的授权约束）。
   const lastRenderedAt = new Map<string, number>()
-  let remeasureAnchor: { id: string; offset: number } | "bottom" | undefined
-  let anchorRestorePending = false
   // 分帧重测队列：每帧最多一批（累计冻结高度≈一屏），把壳化消息的重挂摊到多帧，
   // 避免 R1 一次性全量重挂产生的 250–320MiB 瞬态 commit（证据见 plan §20）。
   let remeasureQueue: string[] = []
@@ -561,18 +546,6 @@ export function Session() {
     return false
   }
 
-  function captureRemeasureAnchor(): { id: string; offset: number } | "bottom" {
-    if (untrack(viewportStuckToBottom)) return "bottom"
-    // 任何带 ID 的消息根都是合法锚点，不要求已有冻结记录——首次 resize 时全部消息
-    // 可能还未入档，此时若错误回退贴底会覆盖用户已滚离的位置。
-    const viewportTop = scroll.viewport.screenY
-    for (const child of scroll.getChildren()) {
-      if (!child.id) continue
-      if (child.screenY + child.height > viewportTop) return { id: child.id, offset: child.y - scroll.y }
-    }
-    return "bottom"
-  }
-
   // 估算字节缓存与增量总量：store 代理读取慢（300 次/帧实测约 2ms），估算只在挂载
   // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
   const estimateBytes = new Map<string, number>()
@@ -601,18 +574,6 @@ export function Session() {
       const bottom = viewport.screenY + viewport.height * 2
       const byId = new Map<string, Renderable>()
       for (const child of scroll.getChildren()) if (child.id) byId.set(child.id, child)
-
-      if (anchorRestorePending) {
-        anchorRestorePending = false
-        // 锚点恢复滞后提交一帧：scrollHeight 要等冻结根高之后再对齐 content.height
-        // （OpenTUI 滚动条滞后子节点一帧），贴底与偏移都按对齐后的几何计算。
-        if (remeasureAnchor === "bottom") scroll.scrollTo(scroll.scrollHeight)
-        else if (remeasureAnchor) {
-          const child = byId.get(remeasureAnchor.id)
-          if (child) scroll.scrollBy(child.y - scroll.y - remeasureAnchor.offset)
-        }
-        remeasureAnchor = undefined
-      }
 
       // selection pin 用几何区间而不是 renderable 引用：区间内的冻结壳同样占高，
       // 跨屏复制要求整条穿越区间的正文保持存活；anchor 起点节点由区间覆盖。
@@ -707,9 +668,6 @@ export function Session() {
           }
           if (finalized) {
             setRemeasuring(false)
-            // 锚点恢复滞后最后一批提交一帧：scrollHeight 要等冻结根高后再对齐
-            // content.height（OpenTUI 滚动条滞后子节点一帧）。
-            anchorRestorePending = remeasureAnchor !== undefined
           }
         })
         // 分帧重测期间主动预约下一帧：渲染空闲时 renderAfter 不会自发触发。
@@ -816,7 +774,6 @@ export function Session() {
         ] as const,
       () => {
         if (!scroll || scroll.isDestroyed) return
-        remeasureAnchor = captureRemeasureAnchor()
         remeasureBatch = []
         batchStablePasses = 0
         batchHeights.clear()
@@ -860,8 +817,6 @@ export function Session() {
         remeasureBatch = []
         batchStablePasses = 0
         batchHeights.clear()
-        remeasureAnchor = undefined
-        anchorRestorePending = false
       },
       { defer: true },
     ),
@@ -1777,6 +1732,8 @@ export function Session() {
                 }}
                 stickyScroll={true}
                 stickyStart="bottom"
+                preserveVisibleContent={true}
+                stickyScrollTolerance={1}
                 flexGrow={1}
                 scrollAcceleration={scrollAcceleration()}
               >

@@ -4295,6 +4295,77 @@ test("selection dragged across screens keeps the whole traversed range alive for
 // 几何邻接与 scrollbar 末端保持精确——这是预算内 resize 的基线同构路径。
 // 阶段二（壳化消息存在）：只有壳化消息进入分帧重测队列，逐批实测后重新冻结；
 // 锚点 Message 的视口偏移精确恢复。邻接等式与 scrollHeight = 末根底边是独立几何校验。
+test.each([false, true])("session keeps every resize frame stable with released content=%s", async (released) => {
+  const { messages, parts } = windowFixture(24, "stable")
+  await withRenderedSession(messages, parts, async (app) => {
+    await waitForFrame(app, (lines) => lines.some((line) => line.includes("stable assistant 23")))
+    const scroll = sessionScrollBox(app, messages[0].id)
+    if (released) {
+      await withFakeNow(async (advance) => {
+        advance(RESIDENCY_AGE_TEST_MS)
+        await pumpFrames(app, 8)
+        expect(messageContentReleased(app, messages[0].id)).toBe(true)
+      })
+    }
+    const reader = messageRoot(app, "msg_window_user_20")
+    scroll.scrollBy(reader.y - scroll.viewport.y)
+    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
+    const previousMax = scroll.scrollHeight - scroll.viewport.height
+    const previousTop = scroll.scrollTop
+    // 前方二十对消息换行后的增量大于剩余到底部距离，可发现补偿被误判为贴底。
+    app.resize(40, 24)
+    let movement = 0
+    for (let frame = 0; frame < 100; frame++) {
+      if (frame === 15) {
+        // 在分批布局尚可能继续时输入一次，旧的结束恢复逻辑会覆盖这次用户选择。
+        commandBridge.run("session.line.down")
+        movement = 1
+      }
+      await app.renderOnce()
+      await new Promise<void>((resolve) => process.nextTick(resolve))
+      // 不等最终稳定再断言，分批测量的中间帧同样不得推走正在阅读的消息。
+      expect(reader.y - scroll.viewport.y).toBe(0 - movement)
+    }
+    // 证明本 fixture 真正跨过旧贴底阈值，避免审计指出的比较错误失去触发条件。
+    expect(scroll.scrollTop - previousTop).toBeGreaterThan(previousMax - previousTop)
+    expect(app.captureCharFrame()).toContain("stable user 20")
+    // 后台测量结束后仍以用户最新位置为准，禁止重放 resize 开始时的旧位置。
+    commandBridge.run("session.last")
+    await waitForFrame(app, (lines) => lines.some((line) => line.includes("stable assistant 23")))
+  }, {}, { width: 80, height: 24 })
+})
+
+test("session preserves selected text while a preceding message grows", async () => {
+  const { messages, parts } = windowFixture(24, "selection")
+  await withRenderedSession(messages, parts, async (app, emit) => {
+    await waitForFrame(app, (lines) => lines.some((line) => line.includes("selection assistant 23")))
+    const scroll = sessionScrollBox(app, messages[0].id)
+    const reader = messageRoot(app, "msg_window_user_20")
+    scroll.scrollBy(reader.y - scroll.viewport.y)
+    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
+    const frame = app.captureCharFrame().split("\n")
+    const y = frame.findIndex((line) => line.includes("selection user 20"))
+    const x = frame[y].indexOf("selection user 20")
+    // 通过真实鼠标选择，验证补偿后的命中区域与文本坐标仍属于同一条消息。
+    await app.mockMouse.pressDown(x, y)
+    await app.mockMouse.moveTo(x + "selection user 20".length, y)
+    await app.mockMouse.release(x + "selection user 20".length, y)
+    // 先证明选择成功，再比较重排后文本，避免两次 undefined 被误当成复制一致。
+    const selected = app.renderer.getSelection()?.getSelectedText()
+    expect(selected).toContain("selection user 20")
+    // 更新通过真实 Part 事件进入 store，不能直接改 renderable 高度替代集成验证。
+    emit(partUpdatedEvent("evt_selection_growth", textPart("part_window_user_00", messages[0].id,
+      "selection user 00\n" + "extra line\n".repeat(60))))
+    for (let i = 0; i < 20; i++) {
+      await app.renderOnce()
+      await new Promise<void>((resolve) => process.nextTick(resolve))
+      expect(reader.y - scroll.viewport.y).toBe(0)
+      // 选区跨布局仍指向原始内容；只保持画面位置而丢失复制内容同样不算通过。
+      expect(app.renderer.getSelection()?.getSelectedText()).toBe(selected)
+    }
+  }, {}, { width: 80, height: 24 })
+})
+
 test("resize reflows mounted content and re-measures shelled roots in batched frames exactly", async () => {
   const count = 24
   const { messages, parts } = windowFixture(count, "resize")
@@ -4345,7 +4416,9 @@ test("resize reflows mounted content and re-measures shelled roots in batched fr
         const current = scroll.scrollHeight
         stable = current === last ? stable + 1 : 0
         last = current
-        return stable >= 2 && anchor.y - scroll.y === 0
+        // 位置现在每帧都保持稳定，不能再把位置恢复误当作整个重测队列已完成。
+        // 等待公开的正文释放结果，仍保留下方最终几何与资源释放断言。
+        return stable >= 2 && anchor.y - scroll.y === 0 && messageContentReleased(app, "msg_window_user_00")
       })
       expect(anchor.y - scroll.y).toBe(0)
       expectExactGeometry()
