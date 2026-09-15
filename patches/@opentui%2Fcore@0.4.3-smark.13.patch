@@ -1,0 +1,74 @@
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -10142,6 +10142,8 @@
+   _hasManualScroll = false;
+   _isApplyingStickyScroll = false;
+   scrollAccel;
++  preserveVisibleContent = false;
++  stickyScrollTolerance = 0;
+   get stickyScroll() {
+     return this._stickyScroll;
+   }
+@@ -10284,6 +10286,8 @@
+       ...sanitizedRootBoxOptions,
+       ...sanitizedRootOptions
+     });
++    this.preserveVisibleContent = options.preserveVisibleContent ?? false;
++    this.stickyScrollTolerance = options.stickyScrollTolerance ?? 0;
+     this.internalId = ScrollBoxRenderable.idCounter++;
+     this._stickyScroll = stickyScroll;
+     this._stickyStart = stickyStart;
+@@ -10360,6 +10364,31 @@
+     };
+     this._ctx.on("selection", this.selectionListener);
+   }
++  updateLayout(deltaTime, renderList = []) {
++    if (this.preserveVisibleContent && this.visible) {
++      // 必须在采用新布局前读取位置；此时已经包含用户本帧的滚轮和导航位移。
++      const top = this.scrollTop;
++      const previousMax = Math.max(0, this.scrollHeight - this.viewport.height);
++      const child = this.getChildren().find((node) => node.visible && node.y + node.height > this.viewport.y);
++      const offset = child ? child.y - this.viewport.y : 0;
++      const sticky = this._stickyScroll && this._stickyStart === "bottom";
++      // 复用尺寸变化回调更新范围，不能逐帧调用会预约下一帧的 recalculateBarProps。
++      this.viewport.updateFromLayout();
++      this.content.updateFromLayout();
++      const maximum = Math.max(0, this.scrollHeight - this.viewport.height);
++      // 一行容差只在内容增长时跟随；普通向上滚动一行必须保留其阅读位置。
++      const follow = sticky && (top >= previousMax ||
++        maximum > previousMax && top >= previousMax - this.stickyScrollTolerance);
++      if (follow) {
++        this.scrollTop = maximum;
++      } else if (child) {
++        // 新 Yoga 坐标与旧视口偏移相抵；即使总高度不变，也能消除前方高度重分布。
++        this.scrollTop = child.yogaNode.getComputedTop() - offset;
++      }
++    }
++    // 在子节点遍历、裁剪和命中区域生成前完成补偿，不留下先错位再恢复的绘制帧。
++    super.updateLayout(deltaTime, renderList);
++  }
+   onUpdate(deltaTime) {
+     this.handleAutoScroll(deltaTime);
+   }
+diff --git a/renderables/ScrollBox.d.ts b/renderables/ScrollBox.d.ts
+--- a/renderables/ScrollBox.d.ts
++++ b/renderables/ScrollBox.d.ts
+@@ -28,6 +28,8 @@
+     scrollX?: boolean;
+     scrollY?: boolean;
+     scrollAcceleration?: ScrollAcceleration;
++    preserveVisibleContent?: boolean;
++    stickyScrollTolerance?: number;
+     viewportCulling?: boolean;
+ }
+ export declare class ScrollBoxRenderable extends BoxRenderable {
+@@ -63,6 +65,8 @@
+     private _isApplyingStickyScroll;
+     private scrollAccel;
+     get stickyScroll(): boolean;
++    preserveVisibleContent: boolean;
++    stickyScrollTolerance: number;
+     set stickyScroll(value: boolean);
+     get stickyStart(): "bottom" | "top" | "left" | "right" | undefined;
+     set stickyStart(value: "bottom" | "top" | "left" | "right" | undefined);

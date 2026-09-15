@@ -535,8 +535,6 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
-  // #212：记录上一次最大滚动位置——用于判断流式内容增长时视口是否原本贴底
-  let lastMaxScrollTop = 0
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
@@ -552,17 +550,9 @@ export function Session() {
   // #212：布局后读取滚动范围，避免文本更新早于原生尺寸刷新。
   function syncSessionViewportStuckToBottom() {
     if (!scroll || scroll.isDestroyed) return
-    // [0624] renderAfter 的唯一入口：驻留窗口只把 store 写入推迟到 microtask，
-    // 先调度它不会改变本函数的贴底判定；顺序无关紧要，关键是同一帧驱动两者。
+    // 位置保持与贴底由容器在布局期处理；这里只调度驻留并发布已绘制状态。
     syncMessageResidency()
     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
-    // #212：scrollTop 是滚动偏移；y 是屏幕位置，不能用于贴底判断。
-    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
-    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
-    lastMaxScrollTop = maxScrollTop
-    // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
-    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
-    // 在既有跟随完成后读取真实粘底状态，延后写信号避免改变当前布局帧。
     const stuckToBottom = scroll.scrollTop >= maxScrollTop - 1
     if (stuckToBottom === untrack(viewportStuckToBottom)) return
     queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
@@ -585,8 +575,6 @@ export function Session() {
   // LRU 与年龄驱逐的唯一时间来源：进入视口（真实渲染）才刷新。无后台计时器，
   // 年龄只在渲染驱动的 pass 中求值（plan §10.3 的授权约束）。
   const lastRenderedAt = new Map<string, number>()
-  let remeasureAnchor: { id: string; offset: number } | "bottom" | undefined
-  let anchorRestorePending = false
   // 分帧重测队列：每帧最多一批（累计冻结高度≈一屏），把壳化消息的重挂摊到多帧，
   // 避免 R1 一次性全量重挂产生的 250–320MiB 瞬态 commit（证据见 plan §20）。
   let remeasureQueue: string[] = []
@@ -651,18 +639,6 @@ export function Session() {
     return false
   }
 
-  function captureRemeasureAnchor(): { id: string; offset: number } | "bottom" {
-    if (untrack(viewportStuckToBottom)) return "bottom"
-    // 任何带 ID 的消息根都是合法锚点，不要求已有冻结记录——首次 resize 时全部消息
-    // 可能还未入档，此时若错误回退贴底会覆盖用户已滚离的位置。
-    const viewportTop = scroll.viewport.screenY
-    for (const child of scroll.getChildren()) {
-      if (!child.id) continue
-      if (child.screenY + child.height > viewportTop) return { id: child.id, offset: child.y - scroll.y }
-    }
-    return "bottom"
-  }
-
   // 估算字节缓存与增量总量：store 代理读取慢（300 次/帧实测约 2ms），估算只在挂载
   // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
   const estimateBytes = new Map<string, number>()
@@ -691,18 +667,6 @@ export function Session() {
       const bottom = viewport.screenY + viewport.height * 2
       const byId = new Map<string, Renderable>()
       for (const child of scroll.getChildren()) if (child.id) byId.set(child.id, child)
-
-      if (anchorRestorePending) {
-        anchorRestorePending = false
-        // 锚点恢复滞后提交一帧：scrollHeight 要等冻结根高之后再对齐 content.height
-        // （OpenTUI 滚动条滞后子节点一帧），贴底与偏移都按对齐后的几何计算。
-        if (remeasureAnchor === "bottom") scroll.scrollTo(scroll.scrollHeight)
-        else if (remeasureAnchor) {
-          const child = byId.get(remeasureAnchor.id)
-          if (child) scroll.scrollBy(child.y - scroll.y - remeasureAnchor.offset)
-        }
-        remeasureAnchor = undefined
-      }
 
       // selection pin 用几何区间而不是 renderable 引用：区间内的冻结壳同样占高，
       // 跨屏复制要求整条穿越区间的正文保持存活；anchor 起点节点由区间覆盖。
@@ -797,10 +761,9 @@ export function Session() {
             }
           }
           if (finalized) {
+            // [0628] 重测完成不再滞后一帧恢复位置：容器补偿在每帧布局前生效，
+            // 尾批冻结后的 scrollHeight 对齐由同帧 recalculateBarProps 完成。
             setRemeasuring(false)
-            // 锚点恢复滞后最后一批提交一帧：scrollHeight 要等冻结根高后再对齐
-            // content.height（OpenTUI 滚动条滞后子节点一帧）。
-            anchorRestorePending = remeasureAnchor !== undefined
           }
         })
         // 分帧重测期间主动预约下一帧：渲染空闲时 renderAfter 不会自发触发。
@@ -907,7 +870,8 @@ export function Session() {
         ] as const,
       () => {
         if (!scroll || scroll.isDestroyed) return
-        remeasureAnchor = captureRemeasureAnchor()
+        // [0628] 重测启动不再捕获旧位置锚点：宽度/显示切换期间的位置由容器在
+        // 每帧布局前保持；这里只重建分帧队列与冻结判定输入。
         remeasureBatch = []
         batchStablePasses = 0
         batchHeights.clear()
@@ -951,8 +915,6 @@ export function Session() {
         remeasureBatch = []
         batchStablePasses = 0
         batchHeights.clear()
-        remeasureAnchor = undefined
-        anchorRestorePending = false
       },
       { defer: true },
     ),
@@ -1849,6 +1811,12 @@ export function Session() {
                 }}
                 stickyScroll={true}
                 stickyStart="bottom"
+                // [0628] 布局前保持可见内容：前方几何变化（挂载/壳化/换行重排）
+                // 不再事后补偿，分帧重测的中间帧也不推走正在阅读的消息。
+                preserveVisibleContent={true}
+                // [0628] 一行贴底容差：终端舍入/滚动条半格绘制下最新行看似脱节时
+                // 仍跟随增长；普通一行上滚保持阅读位置不被吞。
+                stickyScrollTolerance={1}
                 flexGrow={1}
                 scrollAcceleration={scrollAcceleration()}
               >
