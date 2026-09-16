@@ -13,7 +13,7 @@ index cdbc6e66d..69c5fd820 100644
  import { SessionV1 } from "@opencode-ai/core/v1/session"
  import path from "path"
  import { Effect, FileSystem, Layer } from "effect"
-@@ -30,19 +30,19 @@ const it = testEffect(
+@@ -30,19 +30,21 @@
    ]),
  )
  
@@ -21,10 +21,12 @@ index cdbc6e66d..69c5fd820 100644
 -
 -const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
 +// #270：配置参数化，允许测试传入自定义 config
-+const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}, config: Partial<Config.Interface> = {}) =>
++const instructionLayer = (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config: Record<string, unknown> = {}) =>
    AppNodeBuilder.build(Instruction.node, [
 -    [Config.node, configLayer],
-+    [Config.node, Layer.succeed(Config.Service, TestConfig.make(config))],
++    // #270：覆盖 get 而非整个 service——TestConfig.make 的展开目标是服务方法，config 数据必须走 get 返回值
++    // #270：Info 类型未导出——Record + as any 与 code-mode.test.ts 先例一致
++    [Config.node, Layer.succeed(Config.Service, TestConfig.make({ get: () => Effect.succeed(config as any) }))],
      [Global.node, Global.layerWith(global)],
      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
    ])
@@ -39,7 +41,7 @@ index cdbc6e66d..69c5fd820 100644
  
  const write = (filepath: string, content: string) =>
    Effect.gen(function* () {
-@@ -206,7 +206,45 @@ describe("Instruction.resolve", () => {
+@@ -206,7 +206,47 @@
      ),
    )
  
@@ -48,6 +50,7 @@ index cdbc6e66d..69c5fd820 100644
 +  it.live("fetches remote instructions from config URLs via HttpClient", () =>
 +    Effect.acquireUseRelease(
 +      Effect.sync(() => {
++        // #270：port 0 随机绑定——避免固定端口冲突；requests 记录实际请求路径供断言
 +        const requests: string[] = []
 +        const server = Bun.serve({
 +          port: 0,
@@ -61,8 +64,9 @@ index cdbc6e66d..69c5fd820 100644
 +      ({ requests, server }) =>
 +        Effect.gen(function* () {
 +          const globalTmp = yield* tmpWithFiles({})
-+          const projectTmp = yield* tmpdirScoped()
 +          const url = new URL("/instructions.md", server.url).toString()
++          // #270：config.instructions 携带远程 URL——远程拉取与本地文件发现共用同一 system 入口
++          const projectTmp = yield* tmpdirScoped()
 +
 +          yield* Effect.gen(function* () {
 +            const svc = yield* Instruction.Service

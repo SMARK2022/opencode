@@ -1,27 +1,7 @@
-From 8fe72c40871f6b2b357a0c3798100a1e24c3b9e0 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Fri, 19 Jun 2026 01:07:05 +0800
-Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E6=9B=B4=E6=96=B0=E8=AF=AD?=
- =?UTF-8?q?=E9=9F=B3=E8=BE=93=E5=85=A5=E5=BF=AB=E6=8D=B7=E9=94=AE=E9=85=8D?=
- =?UTF-8?q?=E7=BD=AE=EF=BC=8CmacOS=20=E4=BD=BF=E7=94=A8=20F8=20=E9=81=BF?=
- =?UTF-8?q?=E5=85=8D=E4=B8=8E=E7=B2=98=E8=B4=B4=E9=94=AE=E5=86=B2=E7=AA=81?=
- =?UTF-8?q?=20feat(tui):=20=E4=BC=98=E5=8C=96=E8=AF=AD=E9=9F=B3=E5=BD=95?=
- =?UTF-8?q?=E9=9F=B3=E5=99=A8=E7=9A=84=E4=B8=B4=E6=97=B6=E6=96=87=E4=BB=B6?=
- =?UTF-8?q?=E6=B8=85=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E9=81=BF=E5=85=8D?=
- =?UTF-8?q?=E8=AF=AF=E5=88=A0=E8=BF=91=E6=9C=9F=E5=BD=95=E9=9F=B3=20fix(tu?=
- =?UTF-8?q?i):=20=E4=BF=AE=E5=A4=8D=E7=BC=96=E8=AF=91=E7=89=88=E6=9C=AC?=
- =?UTF-8?q?=E7=BC=BA=E5=A4=B1=E5=8E=9F=E7=94=9F=E6=8F=92=E4=BB=B6=E6=97=B6?=
- =?UTF-8?q?=E7=9A=84=E9=94=99=E8=AF=AF=E6=8F=90=E7=A4=BA?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
-index 457168645c6cc6210fa504a1fe5681be13039c95..a1248961b702dc7bb5cc092a2e09d6c74a3720b3 100755
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -3,12 +3,14 @@
+@@ -7,12 +7,14 @@ import "./version-env"
  import { $ } from "bun"
  import fs from "fs"
  import path from "path"
@@ -36,7 +16,7 @@ index 457168645c6cc6210fa504a1fe5681be13039c95..a1248961b702dc7bb5cc092a2e09d6c7
  
  process.chdir(dir)
  
-@@ -176,6 +178,49 @@ const targets = singleFlag
+@@ -144,6 +146,49 @@ const targets = singleFlag
    ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false && (!archFilter || item.arch === archFilter))
    : allTargets
  
@@ -86,7 +66,7 @@ index 457168645c6cc6210fa504a1fe5681be13039c95..a1248961b702dc7bb5cc092a2e09d6c7
  await $`rm -rf dist`
  
  const binaries: Record<string, string> = {}
-@@ -225,8 +270,19 @@ for (const item of targets) {
+@@ -194,8 +239,19 @@ for (const item of targets) {
        execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
        windows: {},
      },
@@ -106,31 +86,32 @@ index 457168645c6cc6210fa504a1fe5681be13039c95..a1248961b702dc7bb5cc092a2e09d6c7
 +      "opencode-pvrecorder.gen.ts",
 +    ],
      define: {
+       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
        OPENCODE_VERSION: `'${Script.version}'`,
-       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
-@@ -234,6 +290,8 @@ for (const item of targets) {
+@@ -204,6 +260,8 @@ for (const item of targets) {
        OPENCODE_WORKER_PATH: workerPath,
        OPENCODE_CHANNEL: `'${Script.channel}'`,
        OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
 +      // 运行时用该常量禁止回退到 @picovoice 的 node_modules 相对路径，防止重新暴露 CI 绝对路径 bug。
 +      OPENCODE_COMPILED: "true",
+       ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
      },
    })
- 
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 9d0e2c75a8f2ecca79e548e6a64eadd09a1ce77c..8e2412cc957061fe3f9062ef1e4b07f6888442d3 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -169,6 +169,8 @@ export function Prompt(props: PromptProps) {
+
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -176,6 +176,8 @@ export function Prompt(props: PromptProps) {
    const agentShortcut = useCommandShortcut("agent.cycle")
    const paletteShortcut = useCommandShortcut("command.palette.show")
    const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
 +  // 正常情况下 shortcut 来自 TuiConfig；fallback 只用于配置缺失/解析异常时保持 footer 和平台默认一致。
 +  const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
    const renderer = useRenderer()
+   const exit = useExit()
    const dimensions = useTerminalDimensions()
-   // The bottom-right token meter shares space with prompt chrome and can be
-@@ -435,8 +437,8 @@ export function Prompt(props: PromptProps) {
+@@ -379,8 +381,8 @@ export function Prompt(props: PromptProps) {
    // busy 覆盖 starting/stopping/transcribing，避免用户在语音文本尚未落入 prompt 前提交旧草稿。
    const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
    const voiceInputStatusText = createMemo(() =>
@@ -141,7 +122,7 @@ index 9d0e2c75a8f2ecca79e548e6a64eadd09a1ce77c..8e2412cc957061fe3f9062ef1e4b07f6
    )
    const voiceInput = PromptVoiceInput.createVoiceInputController({
      // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
-@@ -2065,7 +2067,7 @@ export function Prompt(props: PromptProps) {
+@@ -1942,7 +1944,7 @@ export function Prompt(props: PromptProps) {
                    </text>
                    <Show when={tuiConfig.voice?.transcriber}>
                      <text fg={theme.text}>
@@ -150,11 +131,12 @@ index 9d0e2c75a8f2ecca79e548e6a64eadd09a1ce77c..8e2412cc957061fe3f9062ef1e4b07f6
                      </text>
                    </Show>
                  </Match>
-diff --git a/packages/opencode/src/cli/cmd/tui/config/keybind.ts b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-index 193d8761f188735b5d137653cecf145332c9935e..005c4136d2244218b3435d9e5145b78f464017fc 100644
---- a/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-+++ b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-@@ -138,8 +138,8 @@ export const Definitions = {
+
+
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -156,8 +156,8 @@ export const Definitions = {
    prompt_stash: keybind("none", "Stash prompt"),
    prompt_stash_pop: keybind("none", "Pop stashed prompt"),
    prompt_stash_list: keybind("none", "List stashed prompts"),
@@ -165,26 +147,28 @@ index 193d8761f188735b5d137653cecf145332c9935e..005c4136d2244218b3435d9e5145b78f
    prompt_voice_toggle: keybind("alt+v", "Toggle voice input recording"),
    workspace_set: keybind("none", "Set workspace"),
  
-diff --git a/packages/opencode/src/cli/cmd/tui/config/tui.ts b/packages/opencode/src/cli/cmd/tui/config/tui.ts
-index 42a6daf9bf65261de377863a4071fd6778dcc669..463706a3e0fc46fe2219b8bb63617f6ae6022e3b 100644
---- a/packages/opencode/src/cli/cmd/tui/config/tui.ts
-+++ b/packages/opencode/src/cli/cmd/tui/config/tui.ts
-@@ -318,6 +318,11 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
-     const inputUndo = TuiKeybind.defaultValue("input_undo")
-     keybinds.input_undo ??= unique(["ctrl+z", ...(typeof inputUndo === "string" ? inputUndo.split(",") : [])]).join(",")
-   }
-+  if (process.platform === "darwin") {
-+    // macOS 终端里 Option/Alt 常被当作文本输入，Ctrl+Shift+字母也可能退化成 Ctrl+字母；F8 避开粘贴键和既有 Ctrl+R。
-+    // 只在用户未配置 prompt_voice_toggle 时填默认值，避免破坏已有自定义 keybind。
-+    keybinds.prompt_voice_toggle ??= "f8"
+
+
+diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
+--- a/packages/opencode/src/config/tui.ts
++++ b/packages/opencode/src/config/tui.ts
+@@ -139,6 +139,11 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+       // Flatten a nested "tui" key so users who wrote `{ "tui": { ... } }` inside tui.json
+       // (mirroring the old opencode.json shape) still get their settings applied.
+       const normalized = dropUnknownKeybinds(normalize(data))
++  // #317：macOS 终端里 Option/Alt 常被当作文本输入，Ctrl+Shift+字母也可能退化成 Ctrl+字母；F8 避开粘贴键和既有 Ctrl+R。
++  // 只在用户未配置 prompt_voice_toggle 时填默认值，避免破坏已有自定义 keybind。
++  if (process.platform === "darwin" && isRecord(normalized.keybinds)) {
++    ;(normalized.keybinds as Record<string, unknown>).prompt_voice_toggle ??= "f8"
 +  }
-   const parsedKeybinds = TuiKeybind.parse(keybinds)
-   const result: Resolved = {
-     ...acc.result,
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-index b8cfd6bca82f5c4d81cbeeae44d09fa39c2cfa40..dc4d5c734a6a07f068feb6ad03e54048c9b74950 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+       const parsed = ConfigParse.schema(Info, normalized, configFilepath)
+       const validated = parsed.attention?.sounds
+         ? {
+
+
+diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
+--- a/packages/tui/src/prompt-voice-recorder.ts
++++ b/packages/tui/src/prompt-voice-recorder.ts
 @@ -1,11 +1,22 @@
  import fs from "fs/promises"
  import path from "path"
@@ -453,10 +437,11 @@ index b8cfd6bca82f5c4d81cbeeae44d09fa39c2cfa40..dc4d5c734a6a07f068feb6ad03e54048
  function readFrame(PvRecorder: PvRecorderConstructor, recorder: PvRecorderInstance) {
    // 不能调用 PvRecorder.read()/readSync()：Bun 1.3.x 与该 native addon 的 N-API TypedArray 写回存在兼容差异。
    // 显式创建 ArrayBuffer backing store 后再传入 native read，是当前已验证的 Bun 源码态和 compile exe 态共同可用路径。
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-index 9e17c6b30408a8d4e9eb7e554f6e25d32184dae3..e34e56c6fe1950440db9b2ca604a23c00e2d4d00 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+
+
+diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 @@ -1,4 +1,8 @@
  import { beforeEach, describe, expect, mock, test } from "bun:test"
 +import { randomUUID } from "crypto"
@@ -486,7 +471,7 @@ index 9e17c6b30408a8d4e9eb7e554f6e25d32184dae3..e34e56c6fe1950440db9b2ca604a23c0
 +    const old = new Date(Date.now() - 48 * 60 * 60 * 1_000)
 +    await fs.utimes(stale, old, old)
 +
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +    const recorder = await startPromptVoiceRecorder()
 +    try {
 +      await waitForFakeRead()
@@ -507,7 +492,7 @@ index 9e17c6b30408a8d4e9eb7e554f6e25d32184dae3..e34e56c6fe1950440db9b2ca604a23c0
 +  test("compiled builds fail clearly when the embedded recorder addon is unavailable", async () => {
 +    const globals = globalThis as { OPENCODE_COMPILED?: boolean }
 +    globals.OPENCODE_COMPILED = true
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    await expect(startPromptVoiceRecorder()).rejects.toThrow(/native addon is missing/)
    })
@@ -536,11 +521,12 @@ index 9e17c6b30408a8d4e9eb7e554f6e25d32184dae3..e34e56c6fe1950440db9b2ca604a23c0
  function waitForFakeReadCount(count: number, timeout: number) {
    if (FakePvRecorder.readCount >= count) return Promise.resolve()
    return new Promise<void>((resolve, reject) => {
+
+
 diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
-index 1ceb02cefb3fcc0cf261a289896c77811ea96b60..9a247eabf7e640bbd3f281a2e313173fc0a2f49e 100644
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts
-@@ -494,8 +494,10 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
+@@ -509,8 +509,10 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
        expect(config.keybinds.get("dialog.mcp.toggle")?.[0]?.key).toBe("ctrl+t")
        expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
        expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
@@ -553,7 +539,7 @@ index 1ceb02cefb3fcc0cf261a289896c77811ea96b60..9a247eabf7e640bbd3f281a2e313173f
        // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
        expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
        // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
-@@ -653,6 +655,39 @@ winIt("keeps explicit input undo overrides on Windows", () =>
+@@ -670,6 +672,39 @@ winIt("keeps explicit input undo overrides on Windows", () =>
    ),
  )
  
@@ -578,7 +564,7 @@ index 1ceb02cefb3fcc0cf261a289896c77811ea96b60..9a247eabf7e640bbd3f281a2e313173f
 +    withPlatform(
 +      "darwin",
 +      Effect.gen(function* () {
-+        const fs = yield* AppFileSystem.Service
++        const fs = yield* FSUtil.Service
 +        const test = yield* TestInstance
 +        yield* fs.writeJson(path.join(test.directory, "tui.json"), { keybinds: { prompt_voice_toggle: "alt+v" } })
 +
@@ -593,3 +579,4 @@ index 1ceb02cefb3fcc0cf261a289896c77811ea96b60..9a247eabf7e640bbd3f281a2e313173f
  winIt("ignores terminal suspend bindings on Windows", () =>
    withCleanState(
      Effect.gen(function* () {
+

@@ -25,22 +25,24 @@ Content-Transfer-Encoding: 8bit
    的误导，建议调用 summary 获取当前 cell map
 
 diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
-index 1af6f2688a77d4cdb3fee254a9fc317139ec7cfa..052db051dc2268ffc2869291f9d0c1e672744d2a 100644
 --- a/packages/opencode/src/ide/vscode-bridge.ts
 +++ b/packages/opencode/src/ide/vscode-bridge.ts
-@@ -81,8 +81,6 @@ let cachedRegistryBridge:
-     }
-   | undefined
+@@ -98,8 +98,6 @@ let cachedRegistryBridge:
  
+ // 全局请求队列：序列化所有桥接 HTTP 请求，防止并发 notebook 工具调用竞争同一 VS Code 桥接
+ // 全局串行化 CLI→bridge 调用，避免并发打乱会话状态
 -let bridgeRequestQueue = Promise.resolve()
 -
+ // 注册目录：每个 VS Code 实例在此目录下写入一个 JSON 注册文件
  export function registryDir() {
-   return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
- }
-@@ -183,7 +181,10 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
- }
- 
+ // 环境变量优先：允许测试和自定义安装指定注册目录路径
+@@ -243,10 +241,10 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
+ // 对指定 bridge 发鉴权 HTTP，并走请求队列
+ // CLI 桥接 API：callBridge — 发现/调用 VS Code notebook 能力
  export async function callBridge(input: CallInput): Promise<unknown> {
+-  // 入队后 FIFO 执行；失败不阻塞后续任务
+-  // 客户端全局串行：避免并发 callBridge 打穿扩展侧状态
+-  // 请求队列：每次 callBridge 通过 enqueueBridgeRequest 序列化，确保同一时刻只有一个 HTTP 请求在途
 -  return await enqueueBridgeRequest(() => callBridgeOnce(input))
 +  // 全局请求队列已移除：服务端 withFileLock 已按 filePath 序列化同一文档的请求，
 +  // 客户端不再需要全局 Promise 队列。之前的全局队列会把一个长时间 run（最长 50 分钟）
@@ -48,12 +50,13 @@ index 1af6f2688a77d4cdb3fee254a9fc317139ec7cfa..052db051dc2268ffc2869291f9d0c1e6
 +  return await callBridgeOnce(input)
  }
  
- async function callBridgeOnce(input: CallInput): Promise<unknown> {
-@@ -226,20 +227,6 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
+ // 实际执行桥接调用的函数：从 callBridge 提取，由队列调度
+@@ -299,21 +297,6 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
    return value
  }
  
--async function enqueueBridgeRequest<T>(operation: () => Promise<T>) {
+-// 桥接请求队列调度器：前一个请求完成（或失败）后才执行下一个，finally 确保队列不会卡住
+-async function enqueueBridgeRequest<T>(operation: () => Promise<T>): Promise<T> {
 -  const previous = bridgeRequestQueue
 -  let release!: () => void
 -  bridgeRequestQueue = new Promise<void>((resolve) => {
@@ -67,9 +70,9 @@ index 1af6f2688a77d4cdb3fee254a9fc317139ec7cfa..052db051dc2268ffc2869291f9d0c1e6
 -  }
 -}
 -
+ // 摘要提取：从桥接响应中提取 summary 字段
  export function summaryOnly(value: unknown) {
    if (value && typeof value === "object" && "summary" in value && typeof value.summary === "string") {
-     return value.summary
 diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
 index bb475eadad561e8b4863f448dbad3ec1d580ba6b..0ffb151247d351cec824879b0401b14b12d8029a 100644
 --- a/packages/opencode/test/ide/vscode-bridge.test.ts
@@ -372,12 +375,11 @@ index d0193fdf733a3dc3b7426c375766f2ed4254c6d8..ed9ab068ab8f2d85e397240bdfcf9a11
    const lines = result.summary.split("\n")
    expect(lines[0]).toBe(`Notebook: ${notebookPath}`)
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
-index f46b8f9ef9c2a5f298e93d5467e52ca905963d80..1fbd51cab10e675edf332d057b08ec7fa94b556f 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
 @@ -30,6 +30,11 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
- 
  const EDIT_TYPES = new Set(["insert", "edit", "delete"])
+ // 编辑同步等待上限：applyEdit 后等 notebook/text 版本推进
  const EDIT_SYNC_TIMEOUT_MS = 10_000
 +// after-source 预览的行数和字符上限：让 agent 能从 edit 响应中精确复制
 +// 前若干行作为下一次 oldCode，避免模型从记忆重建时字符漂移。
@@ -387,20 +389,21 @@ index f46b8f9ef9c2a5f298e93d5467e52ca905963d80..1fbd51cab10e675edf332d057b08ec7f
  
  // ---------------------------------------------------------------------------
  // Handler
-@@ -58,6 +63,10 @@ export async function editNotebook(input: Record<string, unknown>) {
-   // must pass the explicit string "" so the destructive intent is unambiguous.
-   rejectEmptySourceArray(input, "oldCode")
+@@ -63,6 +68,11 @@ if (!editType || !EDIT_TYPES.has(editType)) {
+   // 空串才是显式清空——两种意图必须在任何文档变更前区分开
    rejectEmptySourceArray(input, "newCode")
+ 
 +  // 非字符串数组（如对象数组）必须在变更前拦截，防止 sourceProp 静默返回
 +  // undefined 后触发误导性 "newCode is required" 或静默 full-cell replace
 +  rejectNonStringSourceArray(input, "oldCode")
 +  rejectNonStringSourceArray(input, "newCode")
- 
++
    const beforeCount = notebook.cellCount
  
-@@ -446,6 +455,34 @@ function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" |
-   }
- }
+   if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount)
+@@ -542,6 +552,35 @@ function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" |
+ // 压缩工具结果：只保留 applied/定位/预览，降低序列化体积
+ // 工具结果只保留 applied/定位/预览，禁止回传整 cell 源码膨胀上下文
  
 +// agent 偶尔把结构化对象数组（如 HTTP headers）传给 oldCode/newCode。
 +// sourceProp 对非字符串数组返回 undefined，导致 "newCode is required" 误导性错误，
@@ -430,16 +433,14 @@ index f46b8f9ef9c2a5f298e93d5467e52ca905963d80..1fbd51cab10e675edf332d057b08ec7f
 +  }
 +}
 +
- async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
-   const beforeVersion = notebook.version
-   const applied = await vscode.workspace.applyEdit(edit)
-@@ -588,6 +625,25 @@ function compactEditResult(
++
+ // ---------------------------------------------------------------------------
+ // Apply + wait：确保 agent 看到的 notebook 状态已反映编辑
+ // ---------------------------------------------------------------------------
+@@ -694,6 +733,22 @@ function compactEditResult(
+   if (info.sourcePreview) {
      lines.push(`Preview: ${JSON.stringify(previewText(info.sourcePreview, 50))}`)
    }
- 
-+  // after-source 锚点：edit 响应只通过 output（summary）到达模型，metadata 不可见。
-+  // 在 summary 中追加 afterSource 的前若干行，让 agent 能精确复制作为下一次 oldCode，
-+  // 避免从记忆重建时丢失字符（数据库取证显示 43% 的 edit 错误源于 oldCode 漂移）。
 +  // delete 操作的 afterSource 为空，不追加。
 +  if (info.afterSource && info.editType !== "delete") {
 +    const preview = afterSourcePreview(info.afterSource)
@@ -456,30 +457,31 @@ index f46b8f9ef9c2a5f298e93d5467e52ca905963d80..1fbd51cab10e675edf332d057b08ec7f
 +    }
 +  }
 +
+ 
    return {
      ran: false,
-     summary: lines.join("\n"),
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
-index aa6b6176dd55ea0b85cbfb7fa389ee95b4233ec8..5e93e60c0f620afb45afc85e5b0636407990ac2c 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -110,6 +110,10 @@ const RESTART_CMD = "jupyter.restartkernel"
- const CONFIG_SECTION = "jupyter"
- const CONFIG_KEY = "askForKernelRestart"
+@@ -66,6 +66,10 @@ const PYTHON_ID = "ms-python.python"
+ // probe 30s 避免慢内核误判无活动内核
+ // probe 30s：慢内核下过短会误判 no-active-kernel
  const PROBE_TIMEOUT_MS = 30_000
 +// selectKernel 打开内核选择器 UI 后可能无限期阻塞等待用户交互。
 +// 客户端 120s 超时会直接中止操作，agent 无法获得有用信息。
 +// 服务端在 15s 内超时并返回 selection-requested，让 agent 继续工作。
 +const SELECT_KERNEL_TIMEOUT_MS = 15_000
- const DIRTY_SETTLE_TIMEOUT_MS = 10_000
  const decoder = new TextDecoder("utf-8")
- 
-@@ -327,10 +331,23 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
+ const JUPYTER_ID = "ms-toolsai.jupyter"
+ // 固定公开命令，不依赖 vscode.lm.invokeTool
+@@ -307,12 +311,25 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
    let selectKernelError: string | undefined
- 
    try {
--    selectKernelResult = await vscode.commands.executeCommand("notebook.selectKernel", {
+     // 绑定 filePath 对应 notebook；已选核时跳过重复弹层；读取 boolean 返回值
+-    selectKernelResult = await vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
+-      // notebookUri 绑定 filePath 目标，禁止落到 active 编辑器
 -      notebookUri: notebook.uri,
+-      // 已选核跳过 picker，减少无谓 UI
 -      skipIfAlreadySelected: true,
 +    // selectKernel 可能打开内核选择器 UI 并无限期阻塞；
 +    // 用 Promise.race 加 15s 超时，超时后视为 selection-requested
@@ -489,8 +491,10 @@ index aa6b6176dd55ea0b85cbfb7fa389ee95b4233ec8..5e93e60c0f620afb45afc85e5b063640
      })
 +    try {
 +      selectKernelResult = await Promise.race([
-+        vscode.commands.executeCommand("notebook.selectKernel", {
++        vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
++          // notebookUri 绑定 filePath 目标，禁止落到 active 编辑器
 +          notebookUri: notebook.uri,
++          // 已选核跳过 picker，减少无谓 UI
 +          skipIfAlreadySelected: true,
 +        }),
 +        timeoutPromise,
@@ -501,10 +505,19 @@ index aa6b6176dd55ea0b85cbfb7fa389ee95b4233ec8..5e93e60c0f620afb45afc85e5b063640
      selectKernelInvoked = true
    } catch (error) {
      selectKernelError = error instanceof Error ? error.message : String(error)
-@@ -468,8 +485,9 @@ function resolveConfigureStatus(
-     return {
+@@ -371,6 +388,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
+   )
+ 
+   return configureResult({
++    notebook,
+     path: primaryPath,
+     reason,
+     status,
+@@ -444,9 +462,9 @@ function resolveConfigureStatus(
+       // selection-requested：无明确 boolean，勿当 selected
        status: "selection-requested",
        statusSummary: [
+-        // unknown 文案要求 retry configure
 -        "Kernel selection command completed without an explicit boolean result.",
 -        "No active kernel was confirmed. Retry configure or select a kernel manually.",
 +        "Kernel selection was invoked but did not confirm a kernel.",
@@ -530,13 +543,12 @@ index d8b658b644f69b25563831a9328aecf2634dccc6..6accc88e518e5e0b319970daec80621e
  
    if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index 2253069a5abd023d4e47a56eae611fbb9e148f94..762f29a4dd3d96fce52ea424de2cbb24bafdc3a1 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -29,7 +29,10 @@ export async function notebookSource(input: Record<string, unknown>) {
-   const filePath = stringProp(input, "filePath")
-   if (!filePath) throw new Error("filePath is required")
+@@ -33,7 +33,10 @@ export async function notebookSource(input: Record<string, unknown>) {
+   // filePath 必填：禁止 active-notebook 静默回退
    const notebook = await resolveNotebook(filePath)
+   // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐，压低上下文
 -  const limit = Math.max(1, numberProp(input, "limit") ?? 400)
 +  // requestedLimit 区分"用户显式传了 limit"和"使用默认值"：
 +  // 仅在未显式传 limit 且指定了 cellId 时自动扩展到整个 cell，避免破坏显式分页
@@ -545,8 +557,8 @@ index 2253069a5abd023d4e47a56eae611fbb9e148f94..762f29a4dd3d96fce52ea424de2cbb24
    const offset = Math.max(1, numberProp(input, "offset") ?? 1)
  
    const ranges = computeVirtualRanges(notebook)
-@@ -48,6 +51,13 @@ export async function notebookSource(input: Record<string, unknown>) {
- 
+@@ -54,6 +57,13 @@ export async function notebookSource(input: Record<string, unknown>) {
+   // #234：窗口收敛到目标 cell 的虚拟行——offset 越界时重置并警示
    if (targetCellIndex !== undefined && ranges.has(targetCellIndex)) {
      const range = ranges.get(targetCellIndex)!
 +    // 指定 cellId 但未显式传 limit 时，自动扩展到整个 cell 行数（上限 1000）。
@@ -559,3 +571,33 @@ index 2253069a5abd023d4e47a56eae611fbb9e148f94..762f29a4dd3d96fce52ea424de2cbb24
      if (input.offset !== undefined) {
        if (offset >= range.start && offset <= range.end) {
          globalStart = offset
+@@ -168,9 +178,9 @@ export async function notebookSource(input: Record<string, unknown>) {
+     }
+   }
+ 
+-  if (!bytesCut && !lineLimited) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
++  if (!bytesCut && renderedLines < limit) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+   // more：窗口内仍有未返回行，且不是因为 16KB 截断
+-  const more = !bytesCut && lastRenderedLine < globalEnd
++  const more = lastRenderedLine < globalEnd
+ 
+   // #234：source 输出统一 Notebook:/Source: 头部——target/range/offset/limit/
+   // #234：returned/truncated 一屏可读，warning 以独立行呈现。
+@@ -202,7 +212,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   // 页脚仅在 bytesCut 时提示 16KB；行限走 more 分页文案
+   if (bytesCut) {
+     output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+-  } else if (more || lineLimited) {
++  } else if (more) {
+     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
+   }
+   output += "\n</content>"
+@@ -219,7 +229,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+       // returned 使用源码行计数，不含 header
+       returned: renderedLines,
+       totalLines,
+-      truncated: bytesCut || more || lineLimited,
++      truncated: bytesCut || more,
+       bytesCut,
+       lineLimited,
+     },

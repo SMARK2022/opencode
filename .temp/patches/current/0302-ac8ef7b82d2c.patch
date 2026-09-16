@@ -1,26 +1,7 @@
-From ac8ef7b82d2cfe114d9ea100b5d08ba09d78eb09 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 14 Jun 2026 02:02:13 +0800
-Subject: [PATCH] =?UTF-8?q?feat(voice-recorder):=20=E5=A2=9E=E5=BC=BA?=
- =?UTF-8?q?=E5=BD=95=E9=9F=B3=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E7=BC=93=E5=86=B2=E5=A4=84=E7=90=86=E5=92=8C=E6=B5=8B=E8=AF=95?=
- =?UTF-8?q?=E7=94=A8=E4=BE=8B?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/.temp/chatgpt-browser-agent b/.temp/chatgpt-browser-agent
-index 251b7909643d86c68d3d61c562eaf5d804e1a4d8..ab5cd74bd13d2cda881975c4d72fd41fef3455e6 160000
---- a/.temp/chatgpt-browser-agent
-+++ b/.temp/chatgpt-browser-agent
-@@ -1 +1 @@
--Subproject commit 251b7909643d86c68d3d61c562eaf5d804e1a4d8
-+Subproject commit ab5cd74bd13d2cda881975c4d72fd41fef3455e6
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-index 90f89acd9b0a4c7f4d57ee0a25d36aa72bcc7211..b8cfd6bca82f5c4d81cbeeae44d09fa39c2cfa40 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
+index 8232b91..76e4b7d 100644
+--- a/packages/tui/src/prompt-voice-recorder.ts
++++ b/packages/tui/src/prompt-voice-recorder.ts
 @@ -26,10 +26,14 @@ const VOICE_RECORDER_SAMPLE_RATE = 16_000
  const VOICE_RECORDER_CHANNELS = 1
  // 512 是 Picovoice Node 示例和当前录音 helper 使用的帧长；继续沿用它以避免改变延迟和缓冲行为。
@@ -64,10 +45,10 @@ index 90f89acd9b0a4c7f4d57ee0a25d36aa72bcc7211..b8cfd6bca82f5c4d81cbeeae44d09fa3
  function flattenFrames(frames: Int16Array[]) {
    // WAV 需要连续 PCM；这里一次性分配目标数组，避免写文件时逐帧拼 Buffer 产生额外复制边界。
    const samples = frames.reduce((total, frame) => total + frame.length, 0)
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-index 0570ea45e6d891684b781a3db5368e09d0a7d1dd..9e17c6b30408a8d4e9eb7e554f6e25d32184dae3 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
+index 3eaa9e0..2e97391 100644
+--- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 @@ -6,21 +6,32 @@ class FakePvRecorder {
    static releaseCount = 0
    static readCount = 0
@@ -134,7 +115,7 @@ index 0570ea45e6d891684b781a3db5368e09d0a7d1dd..9e17c6b30408a8d4e9eb7e554f6e25d3
    // 这个缺口对应用户观察到的最后约 1.6 到 2 秒音频未被转写。
    test("keeps native audio reads caught up before the stop key writes the WAV", async () => {
 +    FakePvRecorder.queuedFrameValues = [321, 321, 321]
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
  
      const recorder = await startPromptVoiceRecorder()
 @@ -100,6 +124,32 @@ describe("prompt voice recorder", () => {
@@ -147,7 +128,7 @@ index 0570ea45e6d891684b781a3db5368e09d0a7d1dd..9e17c6b30408a8d4e9eb7e554f6e25d3
 +  // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
 +  // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
 +  test("writes audio buffered during a stalled TUI tick before stopping", async () => {
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    const recorder = await startPromptVoiceRecorder()
 +    try {
@@ -170,11 +151,13 @@ index 0570ea45e6d891684b781a3db5368e09d0a7d1dd..9e17c6b30408a8d4e9eb7e554f6e25d3
    // native read 失败必须反馈给 stop 调用者，TUI 才能展示明确错误。
    // 失败后 recorder 要停止并释放一次，避免麦克风句柄被坏状态占住。
    // 不写 WAV 是重要不变量：损坏或不完整的音频不能继续交给转写器。
-@@ -161,3 +211,17 @@ function waitForFakeReadCount(count: number, timeout: number) {
+@@ -160,4 +210,17 @@ function waitForFakeReadCount(count: number, timeout: number) {
+     }
      wait()
    })
- }
-+
+-}
+\ No newline at end of file
++}
 +function wavFrameCount(wav: Buffer) {
 +  return wav.readUInt32LE(40) / (FakePvRecorder.last!.frameLength * Int16Array.BYTES_PER_ELEMENT)
 +}

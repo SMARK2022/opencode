@@ -1,21 +1,3 @@
-From d4bba50a58615694959a10ba6a14b5a00e678e57 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 5 Jul 2026 19:20:50 +0800
-Subject: [PATCH] =?UTF-8?q?feat(ci):=20=E6=96=B0=E5=A2=9E=20VSCode=20?=
- =?UTF-8?q?=E6=89=A9=E5=B1=95=20VSIX=20=E6=89=93=E5=8C=85=20CI=20=E5=B7=A5?=
- =?UTF-8?q?=E4=BD=9C=E6=B5=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-VSIX 打包代码已存在于 sdks/vscode/script/vsix.ts，但 CI 未集成，
-每次发布需手动执行。新建独立 build-vsix.yml 工作流，在 push 到
-dev-smark 且 sdks/vscode/** 有变更时自动构建 VSIX 并上传到 GitHub Release。
-
-不依赖 tag push 触发——workflow 内部主动用 gh release create --target
-创建 vscode-v$VERSION tag 和 Release，对齐 build-opencode.yml 的模式。
-tag 前缀 vscode-v* 与 CLI 的 v* 隔离，不影响 CLI Release 的消息体和历史。
-
 diff --git a/.github/workflows/build-vsix.yml b/.github/workflows/build-vsix.yml
 new file mode 100644
 index 0000000000000000000000000000000000000000..8c13299e89f38285f38cd5bc8ac7a5fad7f17660
@@ -148,13 +130,12 @@ index 0000000000000000000000000000000000000000..8c13299e89f38285f38cd5bc8ac7a5fa
 +              sdks/vscode/dist/*.vsix
 +          fi
 diff --git a/package.json b/package.json
-index aedfbc0bb6325899f8d8721139324515a08d43b1..cbfd4db2adc0c4ed8f5842fafd2bb50d98fcc8b2 100644
 --- a/package.json
 +++ b/package.json
-@@ -18,7 +18,8 @@
-     "prepare": "husky",
+@@ -21,7 +21,8 @@
      "random": "echo 'Random script'",
-     "hello": "echo 'Hello World!'",
+     "sso": "aws sso login --sso-session=opencode --no-browser",
+     "translate:app": "bun run script/translate-app.ts",
 -    "test": "echo 'do not run tests from root' && exit 1"
 +    "test": "echo 'do not run tests from root' && exit 1",
 +    "vsix": "bun run --cwd sdks/vscode vsix"

@@ -271,3 +271,186 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  it.instance(
    "cancel propagates from running task tool to child session",
    () =>
+@@ -1682,6 +1682,9 @@
+       const childID = SessionID.make(sessionID)
+       expect((yield* status.get(childID)).type).toBe("busy")
+ 
++      // #173：并发双 cancel——fork 的 cancel 与串行 cancel 竞争同一 per-session 锁，验证排队不丢弃
++      const cancel = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+       yield* prompt.cancel(chat.id)
++      yield* Fiber.await(cancel)
+       const exit = yield* Fiber.await(fiber)
+       expect(Exit.isSuccess(exit)).toBe(true)
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
+index fd4cb74..0510167 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
+@@ -5,21 +5,16 @@ import { EventV2 } from "@opencode-ai/core/event"
+ import { Installation } from "@/installation"
+ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+-import { Effect, Queue, Schema } from "effect"
+-import * as Stream from "effect/Stream"
++import { Effect, Schema, Stream } from "effect"
+ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+ import { HttpApiBuilder } from "effect/unstable/httpapi"
+-import * as Sse from "effect/unstable/encoding/Sse"
+ import { RootHttpApi } from "../api"
++import { PassThrough, Readable } from "node:stream"
+ import { GlobalUpgradeInput } from "../groups/global"
+ 
+-function eventData(data: unknown): Sse.Event {
+-  return {
+-    _tag: "Event",
+-    event: "message",
+-    id: undefined,
+-    data: JSON.stringify(data),
+-  }
++function eventData(data: unknown) {
++  // SSE 帧格式：data: 前缀 + 空行结尾，替代 v3 时代的 Sse.encode 通道
++  return `data: ${JSON.stringify(data)}\n\n`
+ }
+ 
+ function parseBody(body: string) {
+@@ -38,48 +33,84 @@ export function onSseClientCountChange(cb: (n: number) => void) {
+   onSseCountChange = cb
+ }
+ 
+-function eventResponse() {
+-  return Effect.gen(function* () {
+-    // SSE 客户端连接计数 +1，通知守护进程空闲计时器
+-    sseClientCount++
++type AbortSource = {
++  once: (event: "aborted", listener: () => void) => unknown
++  off: (event: "aborted", listener: () => void) => unknown
++}
++
++function abortSource(source: object): AbortSource | undefined {
++  // 兼容 Web Request 与 Node IncomingMessage 两种 source 形态，双路保证 abort 可达
++  const candidate = source as { once?: unknown; off?: unknown }
++  if (typeof candidate.once !== "function" || typeof candidate.off !== "function") return
++  return candidate as AbortSource
++}
++
++function onRequestAbort(request: HttpServerRequest.HttpServerRequest, close: () => void) {
++  if (request.source instanceof Request) {
++    // Web Request 路径：signal abort 即客户端断连，once 防止 close 重复进入
++    request.source.signal.addEventListener("abort", close, { once: true })
++    return () => request.source instanceof Request && request.source.signal.removeEventListener("abort", close)
++  }
++
++  const source = abortSource(request.source)
++  if (!source) return () => {}
++  source.once("aborted", close)
++  return () => source.off("aborted", close)
++}
++function eventResponse(request: HttpServerRequest.HttpServerRequest) {
++  // SSE 客户端连接计数 +1，通知守护进程空闲计时器
++  sseClientCount++
++  onSseCountChange?.(sseClientCount)
++  const stream = new PassThrough()
++  const write = (event: GlobalBusEvent) => {
++    // abort 竞态下 close 可能已跑但 GlobalBus 仍派发，此时静默丢弃写入
++    if (stream.destroyed) return
++    stream.write(eventData(event))
++  }
++  const handler = (event: GlobalBusEvent) => write(event)
++  const heartbeat = setInterval(
++    () => write({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } }),
++    10_000,
++  )
++  let closed = false
++  let unsubscribeRequestAbort = () => {}
++  // #173：close 确定性清理——客户端中断不保证触发 Stream finalizer
++  const close = () => {
++    if (closed) return
++    closed = true
++    clearInterval(heartbeat)
++    // 清理责任全在此处：停止心跳、退订总线、解除 abort 监听、收流，全部确定性执行
++    GlobalBus.off("event", handler)
++    unsubscribeRequestAbort()
++    if (!stream.destroyed) stream.end()
++    // 下限保护：close 幂等触发（abort 与 stream close 双路）时不得把计数扣成负数
++    sseClientCount = Math.max(0, sseClientCount - 1)
+     onSseCountChange?.(sseClientCount)
+-    yield* Effect.logInfo("global event connected")
+-    const events = Stream.callback<GlobalBusEvent>((queue) => {
+-      const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+-      return Effect.acquireRelease(
+-        Effect.sync(() => GlobalBus.on("event", handler)),
+-        () => Effect.sync(() => GlobalBus.off("event", handler)),
+-      )
+-    })
+-    const heartbeat = Stream.tick("10 seconds").pipe(
+-      Stream.drop(1),
+-      Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
+-    )
+-
+-    return HttpServerResponse.stream(
+-      Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
+-        Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+-        Stream.map(eventData),
+-        Stream.pipeThroughChannel(Sse.encode()),
+-        Stream.encodeText,
+-        Stream.ensuring(Effect.logInfo("global event disconnected")),
+-        // SSE 客户端断开时计数 -1，通知守护进程可能需要启动空闲计时器
+-        Stream.ensuring(
+-          Effect.sync(() => {
+-            sseClientCount--
+-            onSseCountChange?.(sseClientCount)
+-          }),
+-        ),
+-      ),
+-      {
+-        contentType: "text/event-stream",
+-        headers: {
+-          "Cache-Control": "no-cache, no-transform",
+-          "X-Accel-Buffering": "no",
+-          "X-Content-Type-Options": "nosniff",
+-        },
+-      },
+-    )
++  }
++
++  // unref 让心跳计时器不阻止守护进程自然退出（idle 退出依赖进程无强引用）
++  heartbeat.unref?.()
++  // 与 source 同位单次订阅；先于 connected 写入，避免订阅空窗期丢失首帧事件
++  GlobalBus.on("event", handler)
++  unsubscribeRequestAbort = onRequestAbort(request, close)
++  // 断连侧兜底：close 幂等（closed 标志）保证 abort 与流关闭双触发只清理一次
++  stream.once("close", close)
++  stream.once("error", close)
++  write({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } })
++
++  // 目标 v4 合同（httpapi AGENTS）要求 SSE 返回 HttpServerResponse.stream；PassThrough 经 toWeb 桥接，
++  // 终止仍由 close() 确定性拥有（abort/断连双路触发），不回退到不可靠的 Stream finalizer
++  const body = Stream.fromReadableStream({
++    evaluate: () => Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>,
++    onError: (cause) => new Error(`sse body error: ${String(cause)}`),
++  })
++  return HttpServerResponse.stream(body, {
++    contentType: "text/event-stream",
++    headers: {
++      "Cache-Control": "no-cache, no-transform",
++      "X-Accel-Buffering": "no",
++      "X-Content-Type-Options": "nosniff",
++    },
+   })
+ }
+ 
+@@ -94,7 +125,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
+     })
+ 
+     const event = Effect.fn("GlobalHttpApi.event")(function* () {
+-      return yield* eventResponse()
++      return eventResponse(yield* HttpServerRequest.HttpServerRequest)
+     })
+ 
+     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
+@@ -171,4 +202,4 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
+       .handle("dispose", dispose)
+       .handleRaw("upgrade", upgradeRaw)
+   }),
+-)
++)
+\ No newline at end of file

@@ -1,20 +1,7 @@
-From ffc5720e16c21bf37654c3e339069e8ffd5198c3 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Wed, 24 Jun 2026 00:19:53 +0800
-Subject: [PATCH] =?UTF-8?q?fix(install):=20=E4=BD=BF=E7=94=A8=E5=8E=9F?=
- =?UTF-8?q?=E5=AD=90=E6=9B=BF=E6=8D=A2=E6=96=B9=E5=BC=8F=E6=9B=B4=E6=96=B0?=
- =?UTF-8?q?=E4=BA=8C=E8=BF=9B=E5=88=B6=EF=BC=8C=E9=81=BF=E5=85=8D=20macOS?=
- =?UTF-8?q?=20=E4=B8=8A=E7=9A=84=20SIGKILL=20=E9=97=AE=E9=A2=98?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/install b/install
-index 3bb1ea6f20010029d6ad5cb848baafa7da6ff7c4..2d819a6e2d6a45be0226554670fe548cdd82e24a 100755
 --- a/install
 +++ b/install
-@@ -486,8 +486,25 @@ install_executable() {
+@@ -544,8 +544,25 @@ install_executable() {
      local dst_name="$2"
      local dst="${INSTALL_DIR}/${dst_name}"
  
@@ -41,9 +28,10 @@ index 3bb1ea6f20010029d6ad5cb848baafa7da6ff7c4..2d819a6e2d6a45be0226554670fe548c
 +    fi
  
      if [ "${os:-}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
-         xattr -d com.apple.quarantine "$dst" 2>/dev/null || true
+         # #156：清除 mac quarantine，避免 Gatekeeper 拦截
+
+
 diff --git a/packages/opencode/test/installation/install-script.test.ts b/packages/opencode/test/installation/install-script.test.ts
-index ca1c91a97bf31d287381790f63a8fe8f7c156e41..7e4c5a34c305c6375f471305d669339706b0e564 100644
 --- a/packages/opencode/test/installation/install-script.test.ts
 +++ b/packages/opencode/test/installation/install-script.test.ts
 @@ -1,5 +1,5 @@
@@ -53,10 +41,10 @@ index ca1c91a97bf31d287381790f63a8fe8f7c156e41..7e4c5a34c305c6375f471305d6693397
  import fs from "fs/promises"
  import path from "path"
  import { fileURLToPath } from "url"
-@@ -58,6 +58,48 @@ describe("install script", () => {
-     expect(await Bun.file(target).text()).toContain("new-target")
-   })
+@@ -66,6 +66,48 @@ describe("install script", () => {
  
+   // #167：默认多 profile 写入且 $HOME 形式视为已存在去重
+   // #167：默认多 profile 写入且 $HOME 形式视为已存在去重
 +  // 回归：升级时覆盖运行中二进制曾用 `cp` 原地截断，在 macOS 上触发内核
 +  // cs_invalid_page → SIGKILL，令运行中 daemon 与升级后的 --version 验证进程
 +  // 双双卡死。install_executable 必须改用同目录临时文件 + rename 原子替换，
@@ -102,3 +90,4 @@ index ca1c91a97bf31d287381790f63a8fe8f7c156e41..7e4c5a34c305c6375f471305d6693397
    test("updates all existing supported profiles by default without duplicate PATH entries", async () => {
      await using tmp = await tmpdir()
      const home = path.join(tmp.path, "home")
+

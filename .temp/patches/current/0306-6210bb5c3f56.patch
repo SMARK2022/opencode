@@ -1,48 +1,33 @@
-From 6210bb5c3f56e0ff45bdb32a5dcf2f56d962376a Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 14 Jun 2026 15:30:13 +0800
-Subject: [PATCH] =?UTF-8?q?feat(session):=20=E5=A2=9E=E5=8A=A0=E4=BC=9A?=
- =?UTF-8?q?=E8=AF=9D=E5=88=97=E8=A1=A8=E7=9A=84=E9=99=90=E5=88=B6=E5=92=8C?=
- =?UTF-8?q?=E6=9F=A5=E8=AF=A2=E6=97=B6=E9=97=B4=E8=8C=83=E5=9B=B4=EF=BC=8C?=
- =?UTF-8?q?=E4=BC=98=E5=8C=96=E4=BC=9A=E8=AF=9D=E6=A3=80=E7=B4=A2=E6=80=A7?=
- =?UTF-8?q?=E8=83=BD?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-index 75899b2421443d40c660d8366a37be23e70d3eca..838c992d076cb3da18e23b0a9fe37c247d7bfe66 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-@@ -25,7 +25,7 @@ type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
- const SESSION_LIST_PREVIEW_LINES = 2
- const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
+@@ -26,7 +26,9 @@ export function createDialogSessionListQuery(input: { search?: string; filter: S
+   const search = input.search?.trim()
+   return {
+     roots: true,
+-    limit: search ? 30 : 100,
++    // #306：与 sync 侧一致使用 90 天窗口，避免全历史检索拖慢预览；搜索态保持窄结果集。
++        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
++        limit: search ? 30 : 100,
+     ...(search ? { search } : {}),
+     ...input.filter,
+   }
+@@ -50,7 +52,8 @@ const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
+ // #120：最多扫描消息条数，避免全历史
  const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
+ // #120：同时预加载预览的会话数上限
 -const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
++// #306：预览上限从 50 提到 400，预览覆盖更完整，避免滚动时再触发补拉。
 +const SESSION_LIST_PREVIEW_SESSION_LIMIT = 400
+ // #120：会话预览并发度
  const SESSION_LIST_PREVIEW_CONCURRENCY = 6
  
- export function DialogSessionList() {
-@@ -126,7 +126,12 @@ export function DialogSessionList() {
-     () => ({ query: search(), filter: sync.session.query() }),
-     async (input) => {
-       if (!input.query) return undefined
--      const result = await sdk.client.session.list({ search: input.query, limit: 30, ...input.filter })
-+      const result = await sdk.client.session.list({
-+        search: input.query,
-+        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
-+        limit: 100,
-+        ...input.filter,
-+      })
-       return result.data ?? []
-     },
-   )
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index c783745cc9efb22b38f741ca3acfff62bf0925b2..61d40adc9fa96cef8eccc2e2ada413e390ece588 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -243,7 +243,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -296,7 +296,7 @@ export const {
  
      function listSessions() {
        return sdk.client.session
@@ -51,3 +36,27 @@ index c783745cc9efb22b38f741ca3acfff62bf0925b2..61d40adc9fa96cef8eccc2e2ada413e3
          .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
      }
  
+
+diff --git a/packages/tui/test/component/dialog-session-list.test.ts b/packages/tui/test/component/dialog-session-list.test.ts
+--- a/packages/tui/test/component/dialog-session-list.test.ts
++++ b/packages/tui/test/component/dialog-session-list.test.ts
+@@ -3,8 +3,10 @@ import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/c
+ 
+ describe("dialog session list", () => {
+   test("requests root sessions for the default browse list", () => {
++    // #306：query 新增 start 时间窗口，断言用 expect.any(Number) 保持时间无关。
+     expect(createDialogSessionListQuery({ filter: { path: "packages/tui" } })).toEqual({
+       roots: true,
++      start: expect.any(Number),
+       limit: 100,
+       path: "packages/tui",
+     })
+@@ -13,6 +15,7 @@ describe("dialog session list", () => {
+   test("requests root sessions for search results", () => {
+     expect(createDialogSessionListQuery({ search: " deploy ", filter: { scope: "project" } })).toEqual({
+       roots: true,
++      start: expect.any(Number),
+       limit: 30,
+       search: "deploy",
+       scope: "project",
+

@@ -1,20 +1,7 @@
-From 9b0b83e23bc093b561954e09de547d676fb7b33e Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 18 Jun 2026 01:25:17 +0800
-Subject: [PATCH] =?UTF-8?q?feat(tests):=20=E5=A2=9E=E5=8A=A0=E8=BE=93?=
- =?UTF-8?q?=E5=87=BA=E6=88=AA=E6=96=AD=E6=8C=87=E5=AF=BC=E4=BF=A1=E6=81=AF?=
- =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B=E6=81=A2=E5=A4=8D?=
- =?UTF-8?q?=E7=AD=96=E7=95=A5?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
-index b88bd0eece8ba0035c8ebbd64c3c648ac092af56..5059ccb93fbdd6be6e1cd4124c4898e22b9e8581 100644
 --- a/packages/opencode/src/util/output-notice.ts
 +++ b/packages/opencode/src/util/output-notice.ts
-@@ -21,6 +21,13 @@ type ExecutionNotice = {
+@@ -26,6 +26,13 @@ type ExecutionNotice = {
  
  type Notice = Record<string, string | number | undefined>
  
@@ -27,8 +14,8 @@ index b88bd0eece8ba0035c8ebbd64c3c648ac092af56..5059ccb93fbdd6be6e1cd4124c4898e2
 +
  export function outputStats(text: string): Required<OutputAmount> {
    return {
-     // 工具输出经常以最终换行结束；这里按人类查看保存文件时的行数统计，
-@@ -39,6 +46,7 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
+     // #282：工具输出经常以最终换行结束；按人类查看保存文件时的行数统计，
+@@ -44,6 +51,7 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
      total: formatOutputAmount(input.total),
      shown: [input.shown.direction, formatOutputAmount(input.shown)].filter(Boolean).join(" "),
      path: input.path,
@@ -36,11 +23,12 @@ index b88bd0eece8ba0035c8ebbd64c3c648ac092af56..5059ccb93fbdd6be6e1cd4124c4898e2
    })
  }
  
+
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index e62272fb25983e6639b39a41cdc846b21f0549e7..579f637537c93de6e5ae54575d24e904d1cde7cb 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -2065,6 +2065,11 @@ describe("tool.shell truncation", () => {
+@@ -1688,6 +1688,11 @@ describe("tool.shell truncation", () => {
          expect(result.output).toContain(`total="${lineCount}L/`)
          expect(result.output).toContain('shown="tail')
          expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
@@ -52,14 +40,15 @@ index e62272fb25983e6639b39a41cdc846b21f0549e7..579f637537c93de6e5ae54575d24e904
        }),
      ),
    )
+
+
 diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
-index 835b68e4d943134430213c52a9b03710f5d2488f..467d7d2943b7742197b30dbea16364992c6b278c 100644
 --- a/packages/opencode/test/tool/truncation.test.ts
 +++ b/packages/opencode/test/tool/truncation.test.ts
 @@ -66,6 +66,23 @@ describe("Truncate", () => {
-       }),
      )
  
+     // #282：末尾换行不计入行数——notice 的 total 必须等于人类读文件的行数口径
 +    it.live("guides targeted recovery from saved output when truncated", () =>
 +      Effect.gen(function* () {
 +        const svc = yield* Truncate.Service
@@ -80,3 +69,4 @@ index 835b68e4d943134430213c52a9b03710f5d2488f..467d7d2943b7742197b30dbea1636499
      it.live("does not count final newline as an extra notice line", () =>
        Effect.gen(function* () {
          const svc = yield* Truncate.Service
+

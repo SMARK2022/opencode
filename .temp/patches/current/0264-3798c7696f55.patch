@@ -61,11 +61,12 @@ index 7ad0e0039..835d9846c 100644
  export interface Reviewer {
    readonly review: (input: ReviewInput) => Effect.Effect<ReviewDecision, unknown>
  }
-@@ -52,7 +53,7 @@ export function evaluate(
+@@ -52,7 +53,8 @@
      metadata: Readonly<Record<string, unknown>>
      tool?: { readonly messageID: string; readonly callID: string }
      strict?: boolean
 -    reviewerDisabled?: boolean
++    // #264：布尔 reviewerDisabled 改为显式枚举——策略语义（deny/user）由调用方声明而非隐含在布尔里
 +    reviewerFailureFallback?: "deny" | "user"
    },
    reviewer?: Reviewer,
@@ -91,7 +92,7 @@ index 7ad0e0039..835d9846c 100644
      }
  
      // #208：reviewID 在模型调用前 mint——进度 UI 和最终审计事件可引用同一逻辑审查即使模型超时或失败
-@@ -110,15 +108,14 @@ export function evaluate(
+@@ -110,15 +108,15 @@
          reason: input.strict && precheck.level !== "cautious" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
        },
      }).pipe(
@@ -108,6 +109,7 @@ index 7ad0e0039..835d9846c 100644
              return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
            }
 -          // #198：其他失败 fail closed——超时/provider 错误/schema 错误时拒绝而非放行，防止不透明的 reviewer 故障打开安全缺口
++          // #264：fallback=deny 下重试耗尽仍终竭拒绝——基础设施工具故障不得放行
            return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
          },
          onSuccess: (reviewed) => {
@@ -115,11 +117,12 @@ diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/p
 index 8e0b2a61a..587042ad0 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -119,6 +119,10 @@ const layer = Layer.effect(
+@@ -119,6 +119,11 @@
          // #199：strict 模式禁用 precheck fast-path allow，强制所有 auto 请求经过
          // #199：reviewer；但 deny 仍由 precheck 保留，防止危险操作因 reviewer 缺失而放行。
          const strict = permissionConfig?.auto_review?.strict === true
 +        const reviewerDisabled = permissionConfig?.approvals_reviewer === "user"
++        // #264：reviewer 旁路与失败 fallback 是两个独立维度——前者不调用 reviewer，后者只决定重试耗尽后的路由
 +        // #264：reviewer 重试仍由 PermissionReviewer/SessionRetry 管理。此 flag 只决定重试耗尽后的行为：
 +        // 默认回到人工 ask，fallback=deny 保留 fail-closed
 +        const reviewerFailureFallback = reviewerDisabled ? "user" : (permissionConfig?.auto_review?.fallback ?? "user")
@@ -151,7 +154,7 @@ index 64393fe8e..0985e882b 100644
  
          const run = Effect.gen(function* () {
            const request = new ReviewerRequest({
-@@ -233,24 +235,28 @@ export const layer = Layer.effect(
+@@ -233,24 +235,29 @@
  
          // #209：错误时标记工具审查失败——fallback=user 标记 fallback_user，超时标记 timed_out，其他标记 failed，使 UI 能展示失败原因
          return yield* run.pipe(
@@ -182,6 +185,7 @@ index 64393fe8e..0985e882b 100644
                  return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
                }
 -              return yield* Effect.fail(error)
++              // #264：非 ReviewerError 的未知错误包成 ReviewerRunError——类型化错误契约不因 fallback 改造而破裂
 +              return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
              }),
            ),
@@ -195,14 +199,6 @@ index 64393fe8e..0985e882b 100644
        )
      }
    }),
-@@ -937,6 +945,6 @@ function recordJsonFallbackDecision(
- }
- 
- // #198/#250：node deps 包含 Config/Provider/Session/Auth——reviewer layer yield 四个 service，Session 不导入 Permission 故无循环依赖
--export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Auth.node] })
-+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Auth.node, Plugin.node] })
- 
- export * as PermissionReviewer from "./service"
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
 index 3cc9af28c..67397c9ac 100644
 --- a/packages/opencode/test/permission/auto.test.ts
@@ -245,20 +241,23 @@ index 3cc9af28c..67397c9ac 100644
    })
  
    // #203：显式 user reviewer 配置强于原生 auto fail-closed——保留用户审批作为 review 边界
-@@ -522,7 +524,7 @@ describe("permission auto routing", () => {
+@@ -522,7 +524,9 @@
            permission: "bash",
            patterns: ["git add ."],
            metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
 -          reviewerDisabled: true,
++          // #264：显式 user fallback——与源 reviewerDisabled=true 同语义的迁移形态
++          // #264：user fallback 与无 reviewer 同路由——ask 语义单一来源
 +          reviewerFailureFallback: "user",
          }),
        ),
      ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
-@@ -561,13 +563,20 @@ describe("permission auto routing", () => {
+@@ -561,13 +563,22 @@
    })
  
    // #198：验证 reviewer 失败路由——TimedOut fail closed 为 deny，FallbackToUser 回退到 ask
 -  test("reviewer failures fail closed unless they explicitly request user fallback", async () => {
++  // #264：默认翻转 deny→ask——reviewer 超时是基础设施故障而非策略拒绝
 +  test("reviewer failures fall back to user approval by default", async () => {
      await expect(
        bash("git add .", {
@@ -269,6 +268,7 @@ index 3cc9af28c..67397c9ac 100644
 +
  
 +    // #264：SDK defect 应被视为 reviewer 不可用而非绕过权限边界
++    // #264：显式 FallbackToUser tag 在默认配置下照常回退 ask——tag 语义不受 fallback 重构影响
 +    await expect(
 +      bash("git add .", {
 +        review: () => Effect.die(new Error("sdk defect")),
@@ -277,12 +277,12 @@ index 3cc9af28c..67397c9ac 100644
      await expect(
        bash("git add .", {
          review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }),
-@@ -576,6 +585,45 @@ describe("permission auto routing", () => {
+@@ -576,6 +585,46 @@
    })
  
    // #198：验证合约校验——critical+allow 和非低风险+allow+unknown authorization 均转为 deny
 +  // #264：fallback=deny 时 reviewer 失败仍为 terminal fail-closed
-+  // #264：fallback=deny 时 reviewer 失败仍为 terminal fail-closed
++  // #264：该用例与默认路径用例共享同一 reviewer 失败形态，仅配置不同——隔离配置维度的影响
 +  test("reviewer failures fail closed when fallback deny is configured", async () => {
 +    // #264：超时失败在 fallback=deny 下应拒绝
 +    const reviewer = {
@@ -302,8 +302,9 @@ index 3cc9af28c..67397c9ac 100644
 +          reviewer,
 +        ),
 +      ),
-+).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++  ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +
++    // #264：FallbackToUser tag 在 deny 配置下仍是传输信号——不得降级为用户放行
 +    await expect(
 +      Effect.runPromise(
 +        PermissionAuto.evaluate(
@@ -317,7 +318,7 @@ index 3cc9af28c..67397c9ac 100644
 +          { review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }) },
 +        ),
 +      ),
-+).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++  ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +  })
 +
    test("reviewer contract contradictions fail closed", async () => {
@@ -327,11 +328,12 @@ diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/
 index 3a66c04b8..13ed4bfce 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -25,6 +25,7 @@ const env = AppNodeBuilder.build(
+@@ -25,6 +25,8 @@
  // #199：带确定性 reviewer 和真实 session cache 的独立 env，在不启动 provider model 的情况下
  // #199：通过 Permission.ask 测试 auto 集成路径。
  let reviewedCalls = 0
 +let failingReviewedCalls = 0
++// #264：独立计数器——验证失败路径恰好调用一次 reviewer，fallback 不触发重复探测
  let nonDenialCalls = 0
  const reviewedEnv = AppNodeBuilder.build(
    LayerNode.group([
@@ -403,7 +405,7 @@ index 3a66c04b8..13ed4bfce 100644
  const circuit = testEffect(circuitEnv)
  
  const rejectAll = (message?: string) =>
-@@ -952,6 +1012,67 @@ reviewed.instance(
+@@ -952,6 +1012,69 @@
  
  // #199：验证 command 变化使缓存失效——不同命令的风险不同，不能复用旧裁决。
  // #199：验证 command 字段参与缓存键规范化，cwd/shell 相同但命令不同仍失效。
@@ -439,6 +441,7 @@ index 3a66c04b8..13ed4bfce 100644
 +  "ask - fallback deny preserves fail-closed reviewer failures",
 +  () =>
 +    Effect.gen(function* () {
++      // #264：计数归零隔离用例——上一用例的调用不参与本断言
 +      failingReviewedCalls = 0
 +      const err = yield* fail(
 +        ask({
@@ -456,6 +459,7 @@ index 3a66c04b8..13ed4bfce 100644
 +      expect(yield* list()).toHaveLength(0)
 +      expect(failingReviewedCalls).toBe(1)
 +    }),
++  // #264：与默认 ask 用例共享同一实例基建——唯一变量是 fallback 配置
 +  {
 +    git: true,
 +    config: {

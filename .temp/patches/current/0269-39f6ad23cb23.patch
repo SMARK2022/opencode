@@ -34,7 +34,7 @@ index 801598c78..3330a6f31 100644
    if (task) await task.catch((error) => fail("failed to finish loading tui plugins during disposal", { error }))
 -  const state = runtime
 -  runtime = undefined
-+  // #269：只有 runtime 仍指向本轮 state 时才清空
++  // #269：guard 在 await 后仍成立——新 init 不能把新 runtime 误绑到旧清理流程
 +  if (runtime === state) runtime = undefined
    if (!state) return
    const queue = [...state.plugins].reverse()
@@ -77,7 +77,7 @@ index 9d7643cb3..57999a0e3 100644
      { git: true, config: { formatter: false, lsp: false } },
    )
 +
-+  // #269：验证 request_usage 端点在新会话和缺失请求下的行为
++  // #269：三个用例分别锁定空列表/单一 get 404/assistants 404——父请求存在性是各端点的前置契约
 +  it.live("returns empty list for new session request_usage", () =>
 +    Effect.gen(function* () {
 +      const llm = yield* TestLLMServer
@@ -86,12 +86,12 @@ index 9d7643cb3..57999a0e3 100644
 +        provideInstanceEffect(directory),
 +      )
 +      const headers = { "x-opencode-directory": directory }
-+      // #269：新会话应有 0 行 request usage
-+      const body = yield* requestJson<{ data: unknown[] }>(
++      // #269：列表端点返回裸数组——成功契约是 [] 而非 { data: [] } 包装
++      const body = yield* requestJson<unknown[]>(
 +        pathFor("/session/:sessionID/request_usage", { sessionID: session.id }),
 +        { headers },
 +      )
-+      expect(body.data.length).toBe(0)
++      expect(body.length).toBe(0)
 +    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
 +  )
 +
@@ -109,7 +109,7 @@ index 9d7643cb3..57999a0e3 100644
 +        pathFor("/session/:sessionID/request_usage/:requestID", { sessionID: session.id, requestID: missingID }),
 +        { headers },
 +      )
-+      // #269：父请求不存在时必须 404
++      // #269：断言 404 而非 200 空体——缺失资源必须与“存在但无数据”可区分
 +      expect(response.status).toBe(404)
 +    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
 +  )
@@ -128,11 +128,22 @@ index 9d7643cb3..57999a0e3 100644
 +        pathFor("/session/:sessionID/request_usage/:requestID/assistant", { sessionID: session.id, requestID: missingID }),
 +        { headers },
 +      )
-+      // #269：父请求不存在时 assistants 也必须 404
++      // #269：assistants 端点与 get 端点共享同一父请求前置——两处都需锁定
 +      expect(response.status).toBe(404)
 +    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
 +  )
  })
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+@@ -466,5 +466,6 @@
+         HttpApiEndpoint.get("requestUsageAssistants", "/session/:sessionID/request_usage/:requestID/assistant", {
+           params: { sessionID: SessionID, requestID: Schema.String },
+           success: Schema.Array(SessionRequestUsage.AssistantUsageSchema),
++          // #269：assistants 端点同样因父请求缺失抛 NotFound——未声明的错误会被序列化成 500 而非契约 404
+-          error: [HttpApiError.BadRequest, ApiNotFoundError],
++          error: [HttpApiError.BadRequest, ApiNotFoundError, HttpApiError.NotFound],
+         }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" })),
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 index fef1719cc..0e8eba978 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
@@ -146,13 +157,13 @@ index fef1719cc..0e8eba978 100644
      const newCompactionUser: SessionV1.WithParts = {
        info: userInfo(NEW_COMPACTION_USER),
        parts: [
-@@ -1656,8 +1656,8 @@ describe("session.message-v2.latest", () => {
+@@ -1656,8 +1656,8 @@
  
      expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
      expect(state.user?.id).toBe(NEW_COMPACTION_USER)
 -    expect(state.tasks).toHaveLength(1)
 -    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
-+    // #269：compaction 不再是可重放 task（#242），期望空列表
++    // #269：compaction 不再是可重放 task（#242）——tasks 只剩 subtask，故期望空列表
 +    expect(state.tasks).toEqual([])
    })
  })

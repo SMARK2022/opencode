@@ -1,29 +1,5 @@
-From 5b899cdb63c36e9972ee4e3fc63e471a49fdf438 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Wed, 8 Jul 2026 07:11:29 +0800
-Subject: [PATCH] =?UTF-8?q?feat(vscode-notebook):=20=E5=A2=9E=E5=BC=BA=20n?=
- =?UTF-8?q?otebook=20=E5=B7=A5=E5=85=B7=E8=B6=85=E6=97=B6=E5=A4=84?=
- =?UTF-8?q?=E7=90=86=E3=80=81=E9=94=99=E8=AF=AF=E6=81=A2=E5=A4=8D=E5=92=8C?=
- =?UTF-8?q?=E7=8E=AF=E5=A2=83=E7=AE=A1=E7=90=86=E8=83=BD=E5=8A=9B?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-基于 opencode.db 全量取证分析和对 hamelnb 等成熟实现的调研，对已有 notebook
-工具进行 7 项手术级增强，让 agent 能自主管理 notebook 生命周期：
-
-1. withFileLock 旁路只读操作：summary/source/output 不再被长时间 run 阻塞
-2. env 新增 stop 操作：调用 jupyter.interruptkernel 中断超时 cell，保持变量状态
-3. env 新增 create 操作：创建结构化 .ipynb 文件，避免 agent 用 write 写原始 JSON
-4. run 执行前 kernel 预检：无 kernel 且无 kernelspec 时引导 configure，避免死循环
-5. restart 后轻量级验证：用 isKernelAccessible 确认 kernel 可访问，不调 executeCode
-6. readJson 错误处理增强：返回 body 长度和连接中断提示
-7. 全工具错误恢复指引：run 超时引导 env stop/info，文件未找到引导 env create，
-   execute 不可用引导安装 Jupyter 扩展并 configure
-
 diff --git a/docs/notebook-tools-enhancement-plan.md b/docs/notebook-tools-enhancement-plan.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..5bbb23d1f86ea12676fa7a21582c69bb72bd5df8
 --- /dev/null
 +++ b/docs/notebook-tools-enhancement-plan.md
 @@ -0,0 +1,742 @@
@@ -770,42 +746,38 @@ index 0000000000000000000000000000000000000000..5bbb23d1f86ea12676fa7a21582c69bb
 +| readJson 错误 | 6 个 JSON 解析错误获得可诊断的错误消息 |
 +| 全工具错误指引 | 任何错误都告诉 agent 下一步该调用什么工具/操作 |
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-index 4611a162b7d5673ee5434bb6e3e4ed7f930f7f14..2a3c23a9d4017fc0515c04eb5c9c8de12f7ee93f 100644
 --- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -49,5 +49,7 @@ export const VscodeNotebookDescriptions = {
-     "  configure — select a kernel and verify readiness. Returns a status: configured (active kernel found), selected (accepted, kernel starts on first run — proceed directly to run), needs-selection (user cancelled picker), selection-requested (no explicit result), or failed (error). Use before the first run; no need to call info after selected.",
+@@ -60,4 +60,6 @@
+     // restart 文案：清空变量后需重跑 setup cells
      "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward. Only restart when strictly necessary (e.g. stuck kernel, corrupted state); prefer re-running cells over restarting when possible.",
      "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
 +    "  stop      — interrupt the currently executing cell without restarting the kernel. Variables and imports are preserved. Use after a run timeout or when a cell is stuck, instead of the heavier restart.",
 +    "  create    — create a new empty .ipynb file at the given filePath and open it. Use this instead of writing raw JSON with the write tool. After create, use vscode_notebook_edit with editType=insert to add cells, or operation=configure to select a kernel.",
    ].join("\n"),
- }
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
-index 5b4baffad280e65f58b216f54ed6bfc8ce01758a..422eca5a2eb73bbbe87770f0d23e8c39927dea60 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -112,7 +112,7 @@ const editArgs = {
- const envArgs = {
-   ...requiredFilePath,
-   operation: z
--    .enum(["info", "configure", "restart", "save"])
-+    .enum(["info", "configure", "restart", "save", "stop", "create"])
-     .describe("Which notebook environment operation to perform."),
-   reason: z
-     .string()
-@@ -429,7 +429,8 @@ export const VscodeBridgePlugin = async () => ({
+@@ -447,7 +447,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+         ...requiredFilePath,
+         // operation 必选枚举：禁止隐式 info 掩盖 restart 意图
+         operation: z
+-          .enum(["info", "configure", "restart", "save"])
++          .enum(["info", "configure", "restart", "save", "stop", "create"])
+           .describe("Which notebook environment operation to perform."),
+         reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
+       },
+@@ -459,7 +459,8 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
          // save 是 env 工具中的持久化分支，会把 notebook 文档写回磁盘。
          // 因此它必须继续服从通用 edit 门禁；否则用户只禁止 edit 时，仍可
          // 通过 vscode_notebook_env.save 绕过普通文件写入边界。
 -        if (args.operation === "save") await ask(context, "edit", args)
 +        // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
 +        if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
-         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
-       },
-     }),
+         // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
+         const timeout = 120_000
+         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, timeout))
 diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
-index ed9ab068ab8f2d85e397240bdfcf9a11e374a280..fa98ac1ab392a34574961777b9cdddaf35aca9aa 100644
 --- a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
 +++ b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
 @@ -74,9 +74,19 @@ mock.module("vscode", () => ({
@@ -826,18 +798,15 @@ index ed9ab068ab8f2d85e397240bdfcf9a11e374a280..fa98ac1ab392a34574961777b9cdddaf
 +      }
 +      return activeNotebook
 +    },
+     // #234：notebook 内存 fake 的 executeCode 仅用于 info 探测路径
      applyEdit: async (edit: { entries: Array<Record<string, unknown>> }) => applyEdit(edit.entries),
      onDidChangeNotebookDocument: (listener: (event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void) => {
-       notebookListeners.add(listener)
-@@ -128,6 +138,8 @@ const vscodeModule = "vscode"
- const vscodeMock = (await import(vscodeModule)) as {
+@@ -139,4 +139,5 @@ const vscodeMock = (await import(vscodeModule)) as {
    workspace: { notebookDocuments: Array<typeof activeNotebook> }
    window: { activeNotebookEditor?: NotebookEditor; visibleNotebookEditors: NotebookEditor[] }
-+  // commands 可在测试中临时覆盖 executeCommand 来模拟超时等场景
-+  commands: { executeCommand: (command: string, ...args: unknown[]) => Promise<unknown> }
++  commands: { getCommands: (filterInternal?: boolean) => Promise<string[]>; executeCommand: (command: string) => Promise<unknown> }
  }
  const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as { notebookSummary: (filePath: string) => Promise<ToolResult> }
- const { notebookSource } = (await import(sdkNotebookUrl("source"))) as { notebookSource: (input: Record<string, unknown>) => Promise<ToolResult> }
 @@ -438,6 +450,193 @@ test("configure returns configured when selectKernel immediately accepts and ker
    expect(data.status).toBe("configured")
  })
@@ -1032,58 +1001,25 @@ index ed9ab068ab8f2d85e397240bdfcf9a11e374a280..fa98ac1ab392a34574961777b9cdddaf
  async function expectHeader(result: { summary: string }, label: string) {
    const lines = result.summary.split("\n")
    expect(lines[0]).toBe(`Notebook: ${notebookPath}`)
+
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index 3553e61009f2e7804f3bcc375d3d005af3ff45a6..d3196650910131e8b133cb762d36f97e42f83dad 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -38,6 +38,11 @@ let registry: RegistryHandle | undefined
- /** Per-filePath mutex: serializes notebook requests that target the same document. */
- const fileLocks = new Map<string, Promise<void>>()
+@@ -44,6 +44,10 @@ let server: http.Server | undefined
+ let registry: RegistryHandle | undefined
  
+ // 每 notebook filePath 一把锁：串行化同文档并发 POST
 +// 只读路由跳过 withFileLock：summary/source/output 只读取 VS Code 文档状态，
 +// 不修改 notebook/kernel，与并发 run/edit 不冲突。
 +// cell-output 是 output 的路由别名（routeRequest 中 case fallthrough）。
 +const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
-+
- function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-   const prev = fileLocks.get(key) ?? Promise.resolve()
-   let release!: () => void
-@@ -99,7 +104,14 @@ export async function startBridge(output: { appendLine(value: string): void }):
-         const body = await readJson(request)
-         if (!body || !isRecord(body)) throw new Error("Expected JSON object body")
-         const filePath = stringProp(body, "filePath") ?? url.pathname
--        const result = await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
-+        // 只读路由（summary/source/output）不需要 withFileLock：
-+        // 它们只读取 VS Code 文档状态，不修改 notebook/kernel，
-+        // 50 分钟 run 期间 agent 仍可检查 notebook 状态。
-+        // cell-output 是 output 的别名（routeRequest 中 case fallthrough）。
-+        const handler = () => routeRequest(url.pathname, body, output)
-+        const result = READONLY_ROUTES.has(url.pathname)
-+          ? await handler()
-+          : await withFileLock(filePath, handler)
-         if (result !== undefined) return writeJson(response, 200, result)
-       }
- 
-@@ -217,7 +229,13 @@ function readJson(request: http.IncomingMessage) {
-       try {
-         resolve(body ? JSON.parse(body) : {})
-       } catch (error) {
--        reject(error)
-+        // 友好错误消息：包含 body 长度和连接中断提示，
-+        // 帮助 agent 诊断是请求被截断还是格式错误
-+        reject(new Error(
-+          `Failed to parse ${body.length} byte request body as JSON. ` +
-+          `The connection may have been interrupted. ` +
-+          `Original error: ${error instanceof Error ? error.message : String(error)}`
-+        ))
-       }
-     })
-     request.on("error", reject)
+ const fileLocks = new Map<string, Promise<void>>()
+ // 锁表键为 notebook filePath，跨 handler 共享
+ /** Per-filePath mutex: serializes notebook requests that target the same document. */
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
-index 5e93e60c0f620afb45afc85e5b0636407990ac2c..dc01b4e871fa8984bc1586a91f54c629e9c6cb0e 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -40,7 +40,7 @@
+@@ -3,7 +3,7 @@
   */
  import * as vscode from "vscode"
  import { TextDecoder } from "node:util"
@@ -1092,73 +1028,72 @@ index 5e93e60c0f620afb45afc85e5b0636407990ac2c..dc01b4e871fa8984bc1586a91f54c629
  import { resolveNotebook } from "./resolve"
  import { notebookHeader, runtimeLabel } from "./format"
  
-@@ -85,7 +85,7 @@ type SavedMetadata = {
+@@ -35,7 +35,7 @@ type SavedMetadata = {
+   language: string | null
    languageVersion: string | null
  }
- 
 -type Operation = "info" | "configure" | "restart" | "save"
 +type Operation = "info" | "configure" | "restart" | "save" | "stop" | "create"
  
- type ConfigureStatus = "configured" | "selected" | "needs-selection" | "selection-requested" | "failed"
- 
-@@ -107,6 +107,9 @@ type ConfigureProbe = {
+ // #234：env 结果统一 Env 头部——info/restart/save 都复用，字段由调用方给全
+ // #234：target=notebook 是固定语义，失败分支也不会丢失模型决策所需上下文
+@@ -74,6 +74,9 @@ const decoder = new TextDecoder("utf-8")
  const JUPYTER_ID = "ms-toolsai.jupyter"
- const PYTHON_ID = "ms-python.python"
+ // 固定公开命令，不依赖 vscode.lm.invokeTool
  const RESTART_CMD = "jupyter.restartkernel"
 +// interrupt 命令中断当前正在执行的 cell，不清除 kernel 状态（变量/导入保持）。
 +// 与 restart 不同，restart 清除所有运行时状态。命令名遵循 Jupyter 扩展惯例。
 +const INTERRUPT_CMD = "jupyter.interruptkernel"
  const CONFIG_SECTION = "jupyter"
  const CONFIG_KEY = "askForKernelRestart"
- const PROBE_TIMEOUT_MS = 30_000
-@@ -126,15 +129,22 @@ export async function notebookEnv(input: Record<string, unknown>) {
-   if (!filePath) throw new Error("filePath is required")
- 
-   const operation = stringProp(input, "operation") ?? "info"
+ const SELECT_KERNEL_CMD = "notebook.selectKernel"
+@@ -88,11 +91,18 @@ export async function notebookEnv(input: Record<string, unknown> | string) {
+   // #234：缺省 operation=info——与旧 filePath 字符串调用兼容
+   const operation = stringProp(body, "operation") ?? "info"
+   // 非法 operation 硬失败，禁止静默落到 info
 -  if (!["info", "configure", "restart", "save"].includes(operation)) {
+-    throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save.`)
 +  if (!["info", "configure", "restart", "save", "stop", "create"].includes(operation)) {
-     throw new Error(
--      `Invalid operation "${operation}". Must be one of: info, configure, restart, save.`,
-+      `Invalid operation "${operation}". Must be one of: info, configure, restart, save, stop, create.`,
-     )
++    throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save, stop, create.`)
    }
- 
--  const notebook = await resolveNotebook(filePath)
-   const reason = stringProp(input, "reason")
- 
+   const reason = stringProp(body, "reason")
 +  // create 操作在文件不存在时创建新 notebook，不能走 resolveNotebook 路径
 +  // （resolveNotebook 对不存在的文件会 openNotebookDocument 失败）
 +  if (operation === "create") {
 +    return await createNotebook(filePath, reason)
 +  }
 +
-+  const notebook = await resolveNotebook(filePath)
+   const notebook = await resolveNotebook(filePath)
 +
    switch (operation as Operation) {
-     case "info":
-       return await probeNotebookEnv(notebook, reason)
-@@ -144,6 +154,8 @@ export async function notebookEnv(input: Record<string, unknown>) {
-       return await restartNotebookKernel(notebook, reason)
+     // configure：showNotebook + selectKernel，不读 Jupyter 内部 controller
+     case "configure":
+@@ -103,6 +113,8 @@ export async function notebookEnv(input: Record<string, unknown> | string) {
+     // save：用 dirty 前后差补救 notebook.save 假阴性
      case "save":
        return await saveNotebook(notebook, reason)
 +    case "stop":
 +      return await stopNotebookKernel(notebook, reason)
+     default:
+       return await infoNotebook(notebook, reason)
    }
- }
- 
-@@ -671,6 +683,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
-         requested: true,
-         askForKernelRestartOriginal: original,
-         askForKernelRestartSuppressed: needsRestore,
+@@ -622,7 +634,13 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+       ]
+         .filter(Boolean)
+         .join("\n"),
+-      data: { path: primaryPath, operation: "restart", reason, requested: true, durationMs: Date.now() - startedAt },
++      data: {
++        path: primaryPath, operation: "restart", reason, requested: true,
 +        // 轻量级验证：只检查 kernel 是否仍可访问（不调 executeCode 避免 30s 延迟）。
 +        // jupyter.restartkernel 内部 .catch(noop) 吞错误，不验证则不知道是否成功。
-+        // 旧 kernel 尚未完全销毁时可能返回 true（假阳性），作为 best-effort 附加信息可接受。
 +        verified: await isKernelAccessible(notebook.uri),
-         durationMs: Date.now() - startedAt,
-       },
++        durationMs: Date.now() - startedAt,
++      },
      }
-@@ -807,6 +823,179 @@ async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, time
-   })
+   } catch (error) {
+     const message = error instanceof Error ? error.message : String(error)
+@@ -639,6 +657,180 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+   }
  }
  
 +// ===========================================================================
@@ -1334,21 +1269,19 @@ index 5e93e60c0f620afb45afc85e5b0636407990ac2c..dc01b4e871fa8984bc1586a91f54c629
 +  }
 +}
 +
- // ===========================================================================
- // info helpers — active runtime probe + metadata readers
- // ===========================================================================
++
+ // save：dirty settle 后以 !afterDirty 判定成功；禁止未请求自动保存的策略写在 note
+ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 diff --git a/sdks/vscode/src/notebook/resolve.ts b/sdks/vscode/src/notebook/resolve.ts
-index 6accc88e518e5e0b319970daec80621e0e8e0400..67a533365620580627a978032ada771b66c4b82f 100644
 --- a/sdks/vscode/src/notebook/resolve.ts
 +++ b/sdks/vscode/src/notebook/resolve.ts
-@@ -16,7 +16,18 @@ export async function resolveNotebook(filePath: string) {
-   )
+@@ -26,7 +26,16 @@ export async function resolveNotebook(filePath: string) {
    if (existing) return existing
  
+   // 未打开则按路径打开
 -  return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
-+  // 文件不存在时 openNotebookDocument 会失败。补充 create 引导，
-+  // 让 agent 知道可以用 env create 创建新 notebook 而非用 write 写入原始 JSON。
-+  // 此错误被所有工具共用，消息不能只提某个工具的操作。
++  // 文件不存在时 openNotebookDocument 会失败。补充 create 引导。
 +  try {
 +    return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
 +  } catch {
@@ -1362,15 +1295,14 @@ index 6accc88e518e5e0b319970daec80621e0e8e0400..67a533365620580627a978032ada771b
  
  // ---------------------------------------------------------------------------
 diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
-index fd66900d1d4e40e79fe3a3028a11da2ed9364c38..76c5209cd71c4058c41a57b1b017c08ca3fa7397 100644
 --- a/sdks/vscode/src/notebook/run.ts
 +++ b/sdks/vscode/src/notebook/run.ts
-@@ -47,7 +47,55 @@ export async function runNotebook(input: Record<string, unknown>) {
+@@ -40,7 +40,38 @@ export async function runNotebook(input: Record<string, unknown>) {
    const notebook = await resolveNotebook(filePath)
    const commands = await vscode.commands.getCommands(true)
    if (!commands.includes("notebook.cell.execute")) {
 -    throw new Error("VS Code command notebook.cell.execute is not available")
-+    // 引导 agent 安装 Jupyter 扩展并配置 kernel，而非返回不可操作的原始错误
++    // 引导 agent 安装 Jupyter 扩展并配置 kernel
 +    throw new Error(
 +      "VS Code command notebook.cell.execute is not available. " +
 +      "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
@@ -1387,32 +1319,15 @@ index fd66900d1d4e40e79fe3a3028a11da2ed9364c38..76c5209cd71c4058c41a57b1b017c08c
 +    const jupApi = jupyterExt.exports as { kernels?: { getKernel?(uri: vscode.Uri): Promise<unknown> } } | undefined
 +    const kernel = await jupApi?.kernels?.getKernel?.(notebook.uri)
 +    if (!kernel) {
-+      // getKernel 返回 undefined 可能是"已选定但未启动"（正常）或"完全未选定"。
-+      // 检查 metadata 是否有 kernelspec：有则允许继续（kernel 会在执行时启动）
 +      const meta = notebook.metadata as Record<string, unknown>
 +      const hasKernelspec = meta && typeof meta === "object" &&
 +        (meta.kernelspec !== undefined || meta.language_info !== undefined)
 +      if (!hasKernelspec) {
 +        return {
 +          ran: false,
-+          summary: [
-+            ...notebookHeader(notebook, "Run", [
-+              `target=${quoteForSummary(describeRunTarget(resolveRunTarget(notebook, cellId, endCellId)))}`,
-+              `status="no-active-kernel"`,
-+              `dirty=${notebook.isDirty}`,
-+              `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
-+            ]),
-+            "",
-+            "No active kernel and no kernelspec metadata. " +
-+            "Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
-+          ].join("\n"),
++          summary: "No active kernel and no kernelspec metadata. Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
 +          data: {
 +            path: notebook.uri.fsPath || notebook.uri.toString(),
-+            dirty: notebook.isDirty,
-+            runtime: runtimeLabel(notebook),
-+            completed: false,
-+            stoppedAt: undefined,
-+            cells: [],
 +            noActiveKernel: true,
 +          },
 +        }
@@ -1421,15 +1336,15 @@ index fd66900d1d4e40e79fe3a3028a11da2ed9364c38..76c5209cd71c4058c41a57b1b017c08c
 +    }
    }
  
-   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
-@@ -98,7 +146,9 @@ export async function runNotebook(input: Record<string, unknown>) {
-     }
- 
+   // 默认超时 5 分钟：平衡长时间执行和用户体验
+@@ -108,7 +139,9 @@ editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
+     // 结果压缩前刷新 cell，避免旧对象缺 executionSummary
      const result = await compactRunCell(notebook, notebook.cellAt(cell.index))
--    if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
-+    // 超时后引导 agent 调用 env stop 中断（手动），或 env info 检查 kernel 状态。
-+    // 不自动 interrupt——用户明确不想要自动中断机制。
-+    if (!executionSummary) result.exec = "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
+     if (!executionSummary) {
+-      result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
++      // 超时后引导 agent 调用 env stop 中断（手动），或 env info 检查 kernel 状态。
++      // 不自动 interrupt——用户明确不想要自动中断机制。
++      result.exec = "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
+     }
      results.push(result)
    }
- 

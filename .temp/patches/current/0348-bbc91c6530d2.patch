@@ -1,20 +1,4 @@
-From bbc91c6530d2943288dd9d4c5ab3eb61b9725c00 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 29 Jun 2026 10:05:41 +0800
-Subject: [PATCH] =?UTF-8?q?fix(harness):=20P0-2/5/6=20=E6=94=B9=E9=80=A0?=
- =?UTF-8?q?=E2=80=94=E2=80=94=E9=94=99=E8=AF=AF=E8=AF=8A=E6=96=AD=E5=A2=9E?=
- =?UTF-8?q?=E5=BC=BA=E3=80=81per-file=20atomicity=E3=80=81blind=20edit=20?=
- =?UTF-8?q?=E6=A3=80=E6=9F=A5?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-P0-2: edit oldString 未匹配时 error 包含 closest match；apply_patch context 失败时 error 包含 actual content；read binary file error 包含 type-specific 替代建议。
-P0-5: apply_patch 多文件 patch 改为 per-file atomicity，用 Effect.exit 捕获每个 hunk 成功/失败。
-P0-6: edit oldString 非空时检查文件是否被 read/write/edit 接触过，未接触则拒绝。
-
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee526c07748 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -1,5 +1,6 @@
@@ -23,11 +7,11 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 +import { Cause, Effect, Exit, Schema } from "effect"
 +import type { InstanceContext } from "../project/instance-context"
  import * as Tool from "./tool"
- import { Bus } from "../bus"
- import { FileWatcher } from "../file/watcher"
-@@ -16,6 +17,145 @@ import { Format } from "../format"
- import * as Bom from "@/util/bom"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+@@ -17,6 +18,146 @@ import * as Bom from "@/util/bom"
  import { normalizeLineEndings } from "@/util/line-ending"
+ // #131：diff 展示归一行尾，隐藏纯换行变更
  
 +// [local-smark] 从 patch hunk chunks 中提取期望的旧行文本，
 +// 在 oldContent 中找到最近似的位置并返回上下文摘录。
@@ -81,7 +65,7 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 +
 +// [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
 +// 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
-+// 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界。
++// 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界；diff 统计前先归一行尾（#131）。
 +type FileChange = {
 +  filePath: string
 +  oldContent: string
@@ -98,7 +82,7 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 +  hunk: Patch.Hunk,
 +  filePath: string,
 +  instance: InstanceContext,
-+  afs: AppFileSystem.Interface,
++  afs: FSUtil.Interface,
 +  ctx: Tool.Context,
 +  patchText: string,
 +) {
@@ -132,6 +116,7 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 +        newContent = fileUpdate.content
 +        bom = fileUpdate.bom
 +      } catch (error) {
++        // context 匹配失败时附带 actual content 摘录，帮助模型自纠正
 +        const actualExcerpt = extractActualExcerpt(oldContent, hunk.chunks)
 +        return yield* Effect.fail(new Error(`${error}` + (actualExcerpt ? `\n\nActual content near expected location:\n${actualExcerpt}` : "")))
 +      }
@@ -171,21 +156,19 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
  export const Parameters = Schema.Struct({
    patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
  })
-@@ -70,141 +210,35 @@ export const ApplyPatchTool = Tool.define(
+@@ -70,6 +211,11 @@ export const ApplyPatchTool = Tool.define(
+       }> = []
  
        let totalDiff = ""
- 
 +      // [local-smark] per-file atomicity：收集每个 hunk 的错误而非在第一个失败时立即返回。
 +      // 成功的 hunk 进入 fileChanges 正常 apply；失败的 hunk 记录 error 在 output 中报告。
 +      // 仅当全部 hunk 都失败时才返回 Effect.fail（不让空 patch 静默成功）。
 +      // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
 +      const hunkErrors: string[] = []
-+
+ 
        for (const hunk of hunks) {
          const filePath = path.resolve(instance.directory, hunk.path)
-         yield* assertExternalDirectoryEffect(ctx, filePath, {
--          // The external_directory gate runs before the final edit permission;
--          // carry patch intent so Auto review can judge more than the file path.
+@@ -78,135 +224,23 @@ export const ApplyPatchTool = Tool.define(
            metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
          })
  
@@ -197,6 +180,7 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 -            const next = Bom.split(newContent)
 -            const diffOld = normalizeLineEndings(oldContent)
 -            const diffNew = normalizeLineEndings(next.text)
+-            // #131：add 场景 diff 归一行尾
 -            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
 -
 -            let additions = 0
@@ -250,6 +234,7 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 -
 -            const diffOld = normalizeLineEndings(oldContent)
 -            const diffNew = normalizeLineEndings(newContent)
+-            // #131：update 场景 diff 归一行尾
 -            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
 -
 -            let additions = 0
@@ -260,9 +245,8 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 -            }
 -
 -            const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+-            // #210：移动到外部目录是独立目标门禁，复用同一 patch 证据但 operation 标记为 move
 -            yield* assertExternalDirectoryEffect(ctx, movePath, {
--              // Moving to an external directory is a separate target gate; keep
--              // the same patch evidence but name the operation as the move leg.
 -              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
 -            })
 -
@@ -294,6 +278,7 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
 -            )
 -            const contentToDelete = source.text
 -            const diffOld = normalizeLineEndings(contentToDelete)
+-            // #131：delete 场景按归一后行统计 deletions
 -            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
 -
 -            let deletions = 0
@@ -335,23 +320,23 @@ index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee5
        }
  
        // Build per-file metadata for UI rendering (used for both permission and result)
-@@ -300,6 +334,11 @@ export const ApplyPatchTool = Tool.define(
+@@ -301,6 +335,11 @@ export const ApplyPatchTool = Tool.define(
+         return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
        })
        let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
- 
 +      // [local-smark] per-file atomicity：部分 hunk 失败时在 output 中报告失败文件
 +      if (hunkErrors.length > 0) {
 +        output += `\n\nFailed to update ${hunkErrors.length} file(s):\n${hunkErrors.join("\n")}`
 +      }
 +
        let lspFoundErrors = false
+ 
        for (const change of fileChanges) {
-         if (change.type === "delete") continue
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index f2b2678bdab70353526e284a898af7a6f9152272..705b2a2c34cafefa54a584fcb78ef4c096a8e69b 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -68,6 +68,38 @@ export const EditTool = Tool.define(
+@@ -69,6 +69,38 @@ export const EditTool = Tool.define(
            const filePath = path.isAbsolute(params.filePath)
              ? params.filePath
              : path.join(instance.directory, params.filePath)
@@ -387,10 +372,10 @@ index f2b2678bdab70353526e284a898af7a6f9152272..705b2a2c34cafefa54a584fcb78ef4c0
 +            }
 +          }
 +
+           // #210：携带 edit 操作意图让 Auto reviewer 基于工具证据而非仅外部路径 glob 判断
            yield* assertExternalDirectoryEffect(ctx, filePath, {
-             // Include the intended edit operation so Auto reviewer decisions are
-             // based on tool evidence, not just the external path glob.
-@@ -686,6 +718,45 @@ export function trimDiff(diff: string): string {
+             metadata: {
+@@ -697,6 +729,45 @@ export function trimDiff(diff: string): string {
    return trimmedLines.join("\n")
  }
  
@@ -436,7 +421,7 @@ index f2b2678bdab70353526e284a898af7a6f9152272..705b2a2c34cafefa54a584fcb78ef4c0
  export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
    if (oldString === newString) {
      throw new Error("No changes to apply: oldString and newString are identical.")
-@@ -718,8 +789,14 @@ export function replace(content: string, oldString: string, newString: string, r
+@@ -739,8 +810,14 @@ export function replace(content: string, oldString: string, newString: string, r
    }
  
    if (notFound) {
@@ -452,11 +437,11 @@ index f2b2678bdab70353526e284a898af7a6f9152272..705b2a2c34cafefa54a584fcb78ef4c0
      )
    }
    throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 756185987a2cb159f99eb62b9f503738f2955d73..aee26ef75eb205d38f42070d03ed358e619a45c2 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -472,6 +472,31 @@ export const ReadTool = Tool.define(
+@@ -606,6 +606,31 @@ export const ReadTool = Tool.define<
        return nonPrintableCount / bytes.length > 0.3
      }
  
@@ -487,8 +472,8 @@ index 756185987a2cb159f99eb62b9f503738f2955d73..aee26ef75eb205d38f42070d03ed358e
 +
      const run = Effect.fn("ReadTool.execute")(function* (
        params: Schema.Schema.Type<typeof Parameters>,
-       ctx: Tool.Context,
-@@ -615,7 +640,14 @@ export const ReadTool = Tool.define(
+       ctx: Tool.Context<Metadata>,
+@@ -810,7 +835,14 @@ export const ReadTool = Tool.define<
        }
  
        if (isBinaryFile(filepath, sample)) {
@@ -503,12 +488,12 @@ index 756185987a2cb159f99eb62b9f503738f2955d73..aee26ef75eb205d38f42070d03ed358e
 +        ))
        }
  
-       const file = yield* Effect.promise(() =>
+       const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index be5754f3b40db9aa917576b99afb8d03f5bf0725..096b8d0295867079e352aa717cb39e78686a41fc 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -323,7 +323,8 @@ describe("tool.apply_patch freeform", () => {
+@@ -319,7 +319,8 @@ describe("tool.apply_patch freeform", () => {
  
        yield* expectFailure(
          execute({ patchText }, ctx),
@@ -518,7 +503,7 @@ index be5754f3b40db9aa917576b99afb8d03f5bf0725..096b8d0295867079e352aa717cb39e78
        )
      }),
    )
-@@ -373,15 +374,21 @@ describe("tool.apply_patch freeform", () => {
+@@ -369,15 +370,20 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
@@ -531,7 +516,7 @@ index be5754f3b40db9aa917576b99afb8d03f5bf0725..096b8d0295867079e352aa717cb39e78
        const { ctx } = makeCtx()
        const patchText =
          "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch"
- 
+-
 -      yield* expectFailure(execute({ patchText }, ctx))
 -      yield* expectReadFailure(path.join(test.directory, "created.txt"))
 +      const result = yield* execute({ patchText }, ctx)
@@ -543,11 +528,10 @@ index be5754f3b40db9aa917576b99afb8d03f5bf0725..096b8d0295867079e352aa717cb39e78
      }),
    )
  
-@@ -530,4 +537,65 @@ EOF`
-       expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
+@@ -562,4 +568,64 @@ EOF`
      }),
    )
-+
+ 
 +  // [local-smark] 当 patch context 匹配失败时，error 应包含 actual content，
 +  // 帮助模型看到文件中实际有什么而无需单独 re-read。
 +  it.instance("error includes actual content when context mismatch", () =>
@@ -609,11 +593,11 @@ index be5754f3b40db9aa917576b99afb8d03f5bf0725..096b8d0295867079e352aa717cb39e78
 +    }),
 +  )
  })
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index d095f35b6cd38142190e752cf2432be06784b39b..d694cb24e8d156562e6d33d3ab8f1c6d8b5844f3 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -46,12 +46,36 @@ const init = Effect.fn("EditToolTest.init")(function* () {
+@@ -42,12 +42,36 @@ const init = Effect.fn("EditToolTest.init")(function* () {
    return yield* info.init()
  })
  
@@ -652,7 +636,7 @@ index d095f35b6cd38142190e752cf2432be06784b39b..d694cb24e8d156562e6d33d3ab8f1c6d
  })
  
  const fail = Effect.fn("EditToolTest.fail")(function* (args: Tool.InferParameters<typeof EditTool>) {
-@@ -210,6 +234,94 @@ describe("tool.edit", () => {
+@@ -251,6 +275,94 @@ describe("tool.edit", () => {
        }),
      )
  
@@ -747,7 +731,7 @@ index d095f35b6cd38142190e752cf2432be06784b39b..d694cb24e8d156562e6d33d3ab8f1c6d
      it.instance("replaces all occurrences with replaceAll option", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -493,8 +605,9 @@ describe("tool.edit", () => {
+@@ -534,8 +646,9 @@ describe("tool.edit", () => {
  
          const firstAsk = yield* Deferred.make<void>()
          let asks = 0
@@ -758,12 +742,12 @@ index d095f35b6cd38142190e752cf2432be06784b39b..d694cb24e8d156562e6d33d3ab8f1c6d
            ask: () =>
              Effect.gen(function* () {
                asks++
+
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 66c43ca06e3fff5fe62e061a75acd21e59e65270..06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -1005,4 +1005,21 @@ describe("tool.read binary detection", () => {
-       expect(err.message).toContain("Cannot read binary file")
+@@ -1216,5 +1216,22 @@ describe("tool.read visible context stubs", () => {
+       expect(items.join("\n").length).toBeLessThanOrEqual(640)
      }),
    )
 +
@@ -784,3 +768,5 @@ index 66c43ca06e3fff5fe62e061a75acd21e59e65270..06f4f89dc4cd5cfb96c1301fb06ab745
 +    }),
 +  )
  })
+ 
+

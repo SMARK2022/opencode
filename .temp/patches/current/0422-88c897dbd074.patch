@@ -1,26 +1,3 @@
-From 88c897dbd07407d38a87a4c69606bfc0da33478d Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Mon, 13 Jul 2026 23:38:01 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=8B=A6=E6=88=AA=E7=95=B8?=
- =?UTF-8?q?=E5=BD=A2=20SGR=20mouse=20=E6=8A=A5=E5=91=8A=E7=A2=8E=E7=89=87?=
- =?UTF-8?q?=E6=B3=A8=E5=85=A5=20prompt=20textarea?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-某些终端/IDE/触摸屏在鼠标坐标不可用时发送畸形 SGR mouse 报告
-（如 ESC[<64;NaN;NaNM）。OpenTUI 0.3.4 StdinParser 的 csi_sgr_mouse
-状态机在遇到大写 N（CSI final byte 范围）时错误结束 CSI，剩余字节
-aN;NaNM 逐字符变成普通 key event，被 TextareaRenderable.insertText()
-插入 prompt buffer，产生用户可见的 aN;NaNmaN;NaNm... 字符串。
-
-通过 rendererConfig 的 prependInputHandlers 注册实例级 guard：
-- 检测 ESC[<…N 前缀进入 recovery
-- 逐字符消费 SGR mouse 合法字符（a/N/;/数字/M/m）
-- 遇到终止符 M/m 或非法字符即退出 recovery
-- 不影响合法 mouse event、paste、focus、capability reply
-- 不扫描或过滤用户文本内容
-
 diff --git a/docs/Proposal/tui-malformed-sgr-mouse-fix.md b/docs/Proposal/tui-malformed-sgr-mouse-fix.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..6c17a141f943741ff2da2f125adb30e974201ae1
@@ -310,12 +287,11 @@ index 0000000000000000000000000000000000000000..6c17a141f943741ff2da2f125adb30e9
 +
 +- 具体哪个终端版本生成 `NaN` 坐标尚未被公开 issue 确认。不影响修复：应用不能假设终端永远输出合法 SGR mouse。
 +- 建议后续向 OpenTUI 上游提交修复，让 `csi_sgr_mouse` 在遇到非法字符时丢弃整个协议单元。上游修复后可删除本地 handler。
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index 8f16d0a651e6faeb4df53740a589b92120df79f8..cc386799fdbf74a6b8a6571884ff592d8f1eebc1 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -119,10 +119,67 @@ const appBindingCommands = [
-   "app.toggle.session_directory_filter",
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -106,6 +106,61 @@ const appGlobalBindingCommands = [
+   "session.quick_switch.9",
  ] as const
  
 +// 某些终端/IDE/触摸屏在鼠标坐标不可用时发送畸形 SGR mouse 报告，例如
@@ -373,25 +349,42 @@ index 8f16d0a651e6faeb4df53740a589b92120df79f8..cc386799fdbf74a6b8a6571884ff592d
 +  }
 +}
 +
- function rendererConfig(_config: TuiConfig.Resolved): CliRendererConfig {
-   const mouseEnabled = !Flag.OPENCODE_DISABLE_MOUSE && (_config.mouse ?? true)
- 
-   return {
-+    // 拦截畸形 SGR mouse 报告碎片，防止它们被当作普通键盘输入插入 prompt
-+    prependInputHandlers: [createMalformedSgrMouseGuard()],
-     externalOutputMode: "passthrough",
-     targetFps: 60,
-     gatherStats: false,
+ const appBindingCommands = [
+   "command.palette.show",
+   "model.list",
+@@ -225,6 +280,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+               autoFocus: false,
+               openConsoleOnError: false,
+               useMouse: !Flag.OPENCODE_DISABLE_MOUSE && input.config.mouse,
++              // [local-smark] 拦截畸形 SGR mouse 报告碎片，防止被当作普通键盘输入插入 prompt
++              prependInputHandlers: [createMalformedSgrMouseGuard()],
+               consoleOptions: {
+                 keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
+               },
 diff --git a/packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx b/packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx
 new file mode 100644
 index 0000000000000000000000000000000000000000..a0bfc6cad4ec53eeafff80be63c01cf39751f988
 --- /dev/null
 +++ b/packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx
+@@ -0,0 +1,9 @@
++/** @jsxImportSource @opentui/solid */
++import { expect, test as _test } from "bun:test"
++// [local-smark] 权威副本已迁移至 packages/tui/test/malformed-sgr-mouse.test.tsx；此处整文件 skip 保留用例索引
++const test = _test.skip as typeof _test
++import { testRender } from "@opentui/solid"
++// [local-smark] V2 TUI 拆分后 guard 迁移至 packages/tui/src/app.tsx，权威测试副本在
++// packages/tui/test/malformed-sgr-mouse.test.tsx；本文件因包边界不可反向导入而停用，
++// 保留作为历史用例索引，防止用例清单丢失。
++const createMalformedSgrMouseGuard = (..._args: unknown[]): any => undefined
+diff --git a/packages/tui/test/malformed-sgr-mouse.test.tsx b/packages/tui/test/malformed-sgr-mouse.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/malformed-sgr-mouse.test.tsx
 @@ -0,0 +1,139 @@
 +/** @jsxImportSource @opentui/solid */
 +import { expect, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
-+import { createMalformedSgrMouseGuard } from "../../../../src/cli/cmd/tui/app"
++import { createMalformedSgrMouseGuard } from "../src/app"
 +
 +// 畸形 SGR mouse 报告修复测试
 +//

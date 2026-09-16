@@ -1,33 +1,10 @@
-From 92f6a2f56ae055340d9190dacfd2f2b631ce1b67 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Tue, 7 Jul 2026 20:08:06 +0800
-Subject: [PATCH] =?UTF-8?q?fix(session):=20=E6=A3=80=E6=B5=8B=20provider?=
- =?UTF-8?q?=20=E7=A9=BA=E5=AE=8C=E6=88=90=E9=98=B2=E6=AD=A2=20agent=20loop?=
- =?UTF-8?q?=20=E6=97=A0=E6=84=8F=E4=B9=89=E5=BE=AA=E7=8E=AF?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-GLM-5.2 在大上下文下返回 finish_reason=network_error（AI SDK 映射为 other），
-HTTP 200 + SSE 正常关闭但无 content/reasoning/tool delta。processor 把这种空
-完成当成正常结束写入 DB，active goal 继续注入 system_continue 形成循环。
-
-processor.ts finish-step 在设置 assistantMessage.finish 之前检测：finishReason
-为 other 且本轮无 text/reasoning/tool 输出时抛出 retryable APIError。retry 成功
-则正常完成，耗尽则 halt 设 error → process 返回 stop → loop break。
-
-message-v2.ts fromError 添加 APIError 透传 case，避免已分类的 APIError 被降级
-为不可重试的 UnknownError。prompt.ts goal continuation 增加 !lastAssistant.error
-防御性检查。
-
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 38ca2381fbe01e0ff8f1d1f7e69fec8b4b336a1c..31ff1bcb05d89cb4d7e381488be35d0f54c246da 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1449,6 +1449,11 @@ export function fromError(
-         },
-         { cause: e },
-       ).toObject()
+@@ -886,6 +886,11 @@ export function fromError(
+         }
+       }
+       return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
 +    case APIError.isInstance(e):
 +      // [local-smark] 已分类的 APIError 直接透传，避免被降级为 UnknownError。
 +      // 触发场景：processor.ts finish-step 检测到 provider 空完成时抛出 APIError，
@@ -37,16 +14,16 @@ index 38ca2381fbe01e0ff8f1d1f7e69fec8b4b336a1c..31ff1bcb05d89cb4d7e381488be35d0f
        return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
      default:
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 7bd87a7a6381381d17aa9cda01f0245860854f7d..ec81e086202550efee014e857261f68a65918ee3 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -97,6 +97,14 @@ interface ProcessorContext extends Input {
-   reasoningMap: Record<string, MessageV2.ReasoningPart>
+@@ -98,6 +98,15 @@
+   // 输入字符数和细分：由 prompt.ts 计算，在 step-finish 中持久化
    inputChars: number | undefined
-   inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
+   inputBreakdown: SessionV1.StepFinishPart["inputBreakdown"] | undefined
 +  // [local-smark] 追踪当前 step 是否产生了语义输出（text/reasoning/tool）。
 +  // 在 finish-step 时用于检测 provider 空完成：
-+  // finishReason="other"（AI SDK 对 network_error 等未知值的归一化）+ 三个标志全 false
++  // finishReason="unknown"（目标词表无 "other"：AI SDK 原生路径与 openai-chat 协议路径均把
++  // network_error 等未知 finish_reason 归一化为 "unknown"，ids.ts FinishReason 联合可证）+ 三个标志全 false
 +  // = provider 返回了空终止流，必须抛出 retryable APIError 而非静默写成 completed。
 +  // 每个 process() 调用开头重置，retry 时也重置（与 currentText/reasoningMap 同处）。
 +  hasText: boolean
@@ -54,8 +31,8 @@ index 7bd87a7a6381381d17aa9cda01f0245860854f7d..ec81e086202550efee014e857261f68a
 +  hasToolCall: boolean
  }
  
- type StreamEvent = Event
-@@ -148,6 +156,9 @@ export const layer = Layer.effect(
+ type StreamEvent = LLMEvent
+@@ -148,6 +156,9 @@ const layer = Layer.effect(
          reasoningMap: {},
          inputChars: undefined,
          inputBreakdown: undefined,
@@ -64,61 +41,60 @@ index 7bd87a7a6381381d17aa9cda01f0245860854f7d..ec81e086202550efee014e857261f68a
 +        hasToolCall: false,
        }
        let aborted = false
-       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
-@@ -318,6 +329,8 @@ export const layer = Layer.effect(
-                 timestamp: DateTime.makeUnsafe(Date.now()),
-               })
-             }
+ 
+@@ -375,6 +386,8 @@ const layer = Layer.effect(
+         switch (value.type) {
+           case "reasoning-start":
+             if (value.id in ctx.reasoningMap) return
 +            // [local-smark] 标记本轮已产生 reasoning 输出，用于 finish-step 空完成检测
 +            ctx.hasReasoning = true
              ctx.reasoningMap[value.id] = {
                id: PartID.ascending(),
                messageID: ctx.assistantMessage.id,
-@@ -377,6 +390,8 @@ export const layer = Layer.effect(
-                 timestamp: DateTime.makeUnsafe(Date.now()),
-               })
-             }
+@@ -453,6 +466,8 @@ const layer = Layer.effect(
+           }
+ 
+           case "tool-call": {
 +            // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
 +            ctx.hasToolCall = true
-             const part = yield* session.updatePart({
-               id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
-               messageID: ctx.assistantMessage.id,
-@@ -701,6 +716,25 @@ export const layer = Layer.effect(
-                 })
-               }
+             if (ctx.assistantMessage.summary) {
+               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
              }
+@@ -666,6 +681,24 @@
+               usage: value.usage ?? new Usage({}),
+               metadata: value.providerMetadata,
+             })
 +            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
-+            // 任何 text/reasoning/tool 输出，且 finishReason="other"（AI SDK 对
-+            // network_error 等未知 finish_reason 的归一化值）。这通常表示服务端
-+            // 推理阶段异常终止（如 GLM-5.2 大上下文下的 network_error）。
++            // 任何 text/reasoning/tool 输出，且 reason="unknown"（两条 runtime 归一化路径
++            // 一致产出，ai-sdk.ts:21-23 / openai-chat.ts:378-384）。这通常表示服务端
++            // 推理阶段异常终止（如 GLM 大上下文下的 network_error）。
 +            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
 +            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
 +            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
 +            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
-+            if (
-+              value.finishReason === "other" &&
-+              !ctx.hasText &&
-+              !ctx.hasReasoning &&
-+              !ctx.hasToolCall
-+            ) {
-+              throw new MessageV2.APIError({
-+                message: `Provider returned empty completion (finish_reason: ${value.finishReason}), no content/reasoning/tool produced`,
++            if (["other", "unknown"].includes(value.reason) && !ctx.hasText && !ctx.hasReasoning && !ctx.hasToolCall) {
++              // 目标 message-v2 未转出 APIError——SessionV1.APIError 即 core/v1/session 的同一类
++              // throw 在 Effect.gen 内是 defect，SessionRetry 只重试 failure——必须 yield* 让错误进重试通道
++              // NamedError 类非 yieldable：throw 的 defect 由外层 catchCauseIf squash 转回
++              // typed failure，正好进入 SessionRetry.retry 的分类重试通道
++              throw new SessionV1.APIError({
++                message: `Provider returned empty completion (finish_reason: ${value.reason}), no content/reasoning/tool produced`,
 +                isRetryable: true,
 +              })
 +            }
-             ctx.assistantMessage.finish = value.finishReason
+             ctx.assistantMessage.finish = value.reason
              ctx.assistantMessage.cost += usage.cost
              ctx.assistantMessage.tokens = usage.tokens
-@@ -763,6 +797,8 @@ export const layer = Layer.effect(
-                 })
-               }
-             }
+@@ -722,6 +751,8 @@ const layer = Layer.effect(
+           }
+ 
+           case "text-start":
 +            // [local-smark] 标记本轮已产生 text 输出，用于 finish-step 空完成检测
 +            ctx.hasText = true
              ctx.currentText = {
                id: PartID.ascending(),
                messageID: ctx.assistantMessage.id,
-@@ -960,6 +996,11 @@ export const layer = Layer.effect(
+@@ -909,6 +940,11 @@ const layer = Layer.effect(
            yield* Effect.gen(function* () {
              ctx.currentText = undefined
              ctx.reasoningMap = {}
@@ -127,9 +103,9 @@ index 7bd87a7a6381381d17aa9cda01f0245860854f7d..ec81e086202550efee014e857261f68a
 +            ctx.hasText = false
 +            ctx.hasReasoning = false
 +            ctx.hasToolCall = false
+             yield* status.set(ctx.sessionID, { type: "busy" })
              const stream = llm.stream(streamInput)
  
-             yield* stream.pipe(
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index 9958a78e46d0328a5d733f4b8068aa9ce738ab01..7825c95ce6d5357eb3362a4c6ceec4b2456f3835 100644
 --- a/packages/opencode/src/session/prompt.ts
@@ -159,7 +135,7 @@ index 74ed65d3d13a088da7feb2d2db1a17fd856f8461..ec8a737481d57d006347cf6f24843dd9
 +// fromError 必须保持其分类（name=APIError, isRetryable=true），否则 retry 机制无法识别。
 +describe("session.message-v2.fromError APIError passthrough", () => {
 +  test("passes through already-classified APIError without degrading to Unknown", () => {
-+    const apiError = new MessageV2.APIError({
++    const apiError = new SessionV1.APIError({
 +      message: "Provider returned empty completion",
 +      isRetryable: true,
 +    })
@@ -172,7 +148,7 @@ index 74ed65d3d13a088da7feb2d2db1a17fd856f8461..ec8a737481d57d006347cf6f24843dd9
 +  })
 +
 +  test("passes through APIError with metadata intact", () => {
-+    const apiError = new MessageV2.APIError({
++    const apiError = new SessionV1.APIError({
 +      message: "Provider returned empty completion (finish_reason: other)",
 +      isRetryable: true,
 +      metadata: { finishReason: "other" },
@@ -190,7 +166,7 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa1e1238f8 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -1026,3 +1026,189 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
+@@ -1026,3 +1026,189 @@
      { git: true, config: (url) => denyDoomLoopConfig(url) },
    ),
  )
@@ -243,7 +219,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: agent(),
@@ -252,7 +228,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +          tools: {},
 +        })
 +
-+        const parts = MessageV2.parts(msg.id)
++        const parts = yield* MessageV2.parts(msg.id)
 +
 +        // retry 成功后 process 返回 "continue"
 +        expect(value).toBe("continue")
@@ -305,7 +281,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: agent(),
@@ -314,7 +290,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +          tools: {},
 +        })
 +
-+        const parts = MessageV2.parts(msg.id)
++        const parts = yield* MessageV2.parts(msg.id)
 +
 +        // 有输出（hasText=true），不触发空完成检测 → 正常完成
 +        expect(value).toBe("continue")
@@ -363,7 +339,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: agent(),

@@ -14,7 +14,7 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
    "version": "1.17.28-smark",
    "//version-note": "#253 协同升号至 1.17.28-smark；禁止回写 1.14/1.15",
 +  "//284-release-note": "source bump 1.15.5→1.15.6 已被目标版本线 1.17.28-smark 超越；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
-   "#231-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.17.26→1.17.27-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
+   "#253-release-note": "source bump 1.15.4→1.15.5 映射到目标版本线 1.17.27→1.17.28-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
    "name": "opencode",
    "type": "module",
    "license": "MIT",

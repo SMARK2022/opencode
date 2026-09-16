@@ -1,30 +1,7 @@
-From a73e1f718d19bc1a5de6e008de7998bc570acfe8 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Tue, 14 Jul 2026 02:28:05 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20abort=20=E5=AE=8C=E5=85=A8=E9=9D=99?=
- =?UTF-8?q?=E9=9F=B3=E5=B9=B6=E4=BB=8E=E6=BA=90=E5=A4=B4=E4=BF=AE=E5=A4=8D?=
- =?UTF-8?q?=20VS=20Code=20=E5=8F=8C=E6=A8=AA=E5=B9=85?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-attention.ts 不再传默认 title 给 triggerNotification，让 OpenTUI
-OSC 99 只发送一个 body payload，消除 VS Code 双通知横幅。
-
-notifications.ts error handler 对 MessageAbortedError 传 sound:false，
-abort 时完全静音（视觉通知仍显示 Session aborted）。同时新增
-completedTurn 检查：Runner.cancel 先发 idle 后发 error，abort 的
-第一个 idle 到达时 assistant 尚未终态化，保留 active 等待 error
-消费，避免误播 done。
-
-question/permission 静音（sound:false），subagent 完成不发通知，
-只保留 done 和 error 两个默认音效。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/attention.ts b/packages/opencode/src/cli/cmd/tui/attention.ts
-index 1c07da0b9b2ebea9a192207aa2e427710a31be39..50cf3ff9f4e95b90ebeadcf998b5d50e4563135b 100644
---- a/packages/opencode/src/cli/cmd/tui/attention.ts
-+++ b/packages/opencode/src/cli/cmd/tui/attention.ts
-@@ -207,10 +207,11 @@ export function createTuiAttention(input: {
+diff --git a/packages/tui/src/attention.ts b/packages/tui/src/attention.ts
+--- a/packages/tui/src/attention.ts
++++ b/packages/tui/src/attention.ts
+@@ -182,10 +182,11 @@ export function createTuiAttention(input: {
          const notification = shouldNotify
            ? (() => {
                try {
@@ -34,16 +11,15 @@ index 1c07da0b9b2ebea9a192207aa2e427710a31be39..50cf3ff9f4e95b90ebeadcf998b5d50e
 -                )
 +                // 不传默认 title：OpenTUI OSC 99 在 title 非空时发送 title + body 两个 payload，
 +                // 某些终端（如 VS Code）将它们渲染成两个通知横幅。
-+                // 传 undefined 让 OpenTUI 只发送一个 body payload。
++                // 传 undefined 让 OpenTUI 只发送一个 body payload
 +                const title = normalizeText(request.title, "", TITLE_LIMIT)
 +                return input.renderer.triggerNotification(message, title || undefined)
                } catch (error) {
-                 log.debug("failed to trigger attention notification", { error })
+                 console.debug("failed to trigger attention notification", { error })
                  return false
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
-index cda815f5fc143ef33ae6c2fa62c8128954febbbe..53b0cefb6bfd38b0d7945eb4dc8d388fbf438eeb 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
+diff --git a/packages/tui/src/feature-plugins/system/notifications.ts b/packages/tui/src/feature-plugins/system/notifications.ts
+--- a/packages/tui/src/feature-plugins/system/notifications.ts
++++ b/packages/tui/src/feature-plugins/system/notifications.ts
 @@ -6,14 +6,16 @@ const id = "internal:notifications"
  
  type SessionError = Extract<Event, { type: "session.error" }>["properties"]["error"]
@@ -151,46 +127,47 @@ index cda815f5fc143ef33ae6c2fa62c8128954febbbe..53b0cefb6bfd38b0d7945eb4dc8d388f
  }
  
 diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/opencode/test/cli/cmd/tui/attention.test.ts
-index a2184efdb034744a9a1f71f89e201fa445e066c4..1ffa921d337f33192d63fc44e28d76562eb7ec50 100644
 --- a/packages/opencode/test/cli/cmd/tui/attention.test.ts
 +++ b/packages/opencode/test/cli/cmd/tui/attention.test.ts
-@@ -173,7 +173,8 @@ describe("createTuiAttention", () => {
-       notification: true,
-       sound: false,
+@@ -174,7 +174,9 @@ describe("createTuiAttention", () => {
      })
+ // [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
 -    expect(renderer.notifications).toEqual([{ title: "opencode", message: "focused" }])
-+    // 无显式 title 时不传默认 title，避免 OSC 99 双 payload
++        // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
++    // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
 +    expect(renderer.notifications).toEqual([{ title: undefined, message: "focused" }])
    })
  
    test("notification can deliver while focused when requested", async () => {
-@@ -188,7 +189,8 @@ describe("createTuiAttention", () => {
-       sound: true,
-     })
+@@ -191,7 +193,9 @@ describe("createTuiAttention", () => {
      expect(audio.playCalls).toBe(1)
+ // [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
 -    expect(renderer.notifications).toEqual([{ title: "opencode", message: "hello" }])
-+    // 无显式 title 时不传默认 title
++        // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
++    // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
 +    expect(renderer.notifications).toEqual([{ title: undefined, message: "hello" }])
    })
  
    test("notifies while blurred", async () => {
-@@ -250,7 +252,8 @@ describe("createTuiAttention", () => {
-       notification: true,
-       sound: true,
+@@ -255,7 +259,9 @@ describe("createTuiAttention", () => {
      })
+ // [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
 -    expect(renderer.notifications).toEqual([{ title: "opencode", message: "hello again" }])
-+    // 无显式 title 时不传默认 title
++        // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
++    // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
 +    expect(renderer.notifications).toEqual([{ title: undefined, message: "hello again" }])
    })
  
    test("can disable notification per call while still playing sound", async () => {
-diff --git a/packages/opencode/test/cli/cmd/tui/notifications.test.ts b/packages/opencode/test/cli/cmd/tui/notifications.test.ts
-index 17ed54bafd031b1e8b73c0610e3f156938a06e8e..20fb5a4c33830349ff7b396cc7fcee4cfc7360b8 100644
---- a/packages/opencode/test/cli/cmd/tui/notifications.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/notifications.test.ts
+diff --git a/packages/tui/test/cli/cmd/tui/notifications.test.ts b/packages/tui/test/cli/cmd/tui/notifications.test.ts
+--- a/packages/tui/test/cli/cmd/tui/notifications.test.ts
++++ b/packages/tui/test/cli/cmd/tui/notifications.test.ts
 @@ -1,10 +1,36 @@
  import { describe, expect, test } from "bun:test"
- import Notifications from "@/cli/cmd/tui/feature-plugins/system/notifications"
+ import Notifications from "../../../../src/feature-plugins/system/notifications"
 -import type { Event, PermissionRequest, QuestionRequest, Session } from "@opencode-ai/sdk/v2"
 +import type { Event, PermissionRequest, QuestionRequest, Session, AssistantMessage, Message } from "@opencode-ai/sdk/v2"
  import type { TuiAttentionNotifyInput } from "@opencode-ai/plugin/tui"
@@ -439,7 +416,7 @@ index 17ed54bafd031b1e8b73c0610e3f156938a06e8e..20fb5a4c33830349ff7b396cc7fcee4c
        },
        {
          title: "Timeout session",
-@@ -264,4 +332,27 @@ describe("internal notifications TUI plugin", () => {
+@@ -264,4 +332,28 @@ describe("internal notifications TUI plugin", () => {
        },
      ])
    })
@@ -467,3 +444,4 @@ index 17ed54bafd031b1e8b73c0610e3f156938a06e8e..20fb5a4c33830349ff7b396cc7fcee4c
 +    expect(harness.notifications).toHaveLength(1)
 +  })
  })
++

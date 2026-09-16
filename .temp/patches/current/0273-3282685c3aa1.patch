@@ -23,7 +23,7 @@ index 849a91e..e14c1cb 100644
  
  Heap.start()
  
-@@ -119,8 +120,8 @@ if (isDaemon) {
+@@ -119,9 +120,9 @@
        sseClients,
        sessionActivity: SessionActivity.count(),
      })
@@ -32,9 +32,10 @@ index 849a91e..e14c1cb 100644
 +    // #273：daemon stop 时先广播事件，让 TUI 走正常退出路径
 +    if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
      // #259：control server 随 daemon 一起关闭——避免端口残留
+     // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
      controlServer?.stop(true)
      // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
-@@ -136,9 +137,22 @@ if (isDaemon) {
+@@ -136,9 +137,23 @@
      ])
      // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
      Database.close()
@@ -46,6 +47,7 @@ index 849a91e..e14c1cb 100644
 +  // #273：daemon stop 时向已连接 TUI 广播 global.disposed 事件
 +  function notifyDaemonStop() {
 +    GlobalBus.emit("event", {
++      // #273：directory="global" 使事件扇出到所有已连 TUI——不只是发起 stop 的那个
 +      directory: "global",
 +      payload: {
 +        type: ServerEvent.Disposed.type,
@@ -154,7 +156,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 index 444d164..27b87ae 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -363,12 +363,26 @@ export const {
+@@ -363,12 +363,27 @@
        setStore("session_status", reconcile(x.data ?? {}))
      }
  
@@ -173,6 +175,7 @@ index 444d164..27b87ae 100644
 +          if ((event.properties as { reason?: string }).reason !== "daemon-stop") break
 +          daemonStopSeen = true
 +          // #273：直接调用 exit 函数，原因作为参数传递
++          // #273：void 前缀——exit 触发卸载流程，不阻塞事件循环处理后续帧
 +          void exit("opencode daemon stopped.")
 +          break
          case "server.instance.disposed":
@@ -181,8 +184,9 @@ index 444d164..27b87ae 100644
            void bootstrap()
            break
          case "server.connected":
-@@ -682,7 +696,6 @@ export const {
+@@ -682,8 +696,7 @@
        pendingPartDeltas = []
+       loggedPartDeltaApplications.clear()
      })
  
 -    const exit = useExit()

@@ -12,23 +12,24 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/opencode/src/agent/subagent-permissions.ts
-index 051f42e37bb34fe2b868048b296722a51bcab344..b0da2e25c4abc90b61c9308419e07f7b55545f5e 100644
+index 36ab2d4a7..8bae32acc 100644
 --- a/packages/opencode/src/agent/subagent-permissions.ts
 +++ b/packages/opencode/src/agent/subagent-permissions.ts
-@@ -1,5 +1,6 @@
- import type { Permission } from "../permission"
- import type { Agent } from "./agent"
+@@ -1,14 +1,20 @@
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
++// #280：Wildcard 与 Permission.evaluate 的匹配语义保持同一实现
 +import { Wildcard } from "@/util/wildcard"
+ import type { Agent } from "./agent"
  
  /**
   * Build the `permission` ruleset for a subagent's session when it's spawned
-@@ -9,9 +10,13 @@ import type { Agent } from "./agent"
-  *    restriction lives on the agent ruleset, not on the session, so a
-  *    subagent that only inherited the parent SESSION's permission would
-  *    silently bypass it. (#26514)
-- * 2. The parent **session's** deny rules and external_directory rules —
-- *    same forwarding the original code already did.
-- * 3. Default `todowrite` and `task` denies if the subagent's own ruleset
+  * via the task tool. Combines:
+  *
+- * 1. The parent session's deny rules and external_directory rules.
+- *    Parent agent restrictions only govern that agent; the subagent's own
+- *    permissions determine its capabilities.
+- * 2. Default `todowrite` and `task` denies if the subagent's own ruleset
++ * 1. The subagent's own agent ruleset: its capability boundaries stay the base.
 + * 2. The parent **agent's** explicit admission ceilings — `ask` and `auto`
 + *    make subagent execution no less strict than the delegating agent without
 + *    coupling the behavior to a specific agent name.
@@ -38,23 +39,34 @@ index 051f42e37bb34fe2b868048b296722a51bcab344..b0da2e25c4abc90b61c9308419e07f7b
 + * 4. Default `todowrite` and `task` denies if the subagent's own ruleset
   *    doesn't already permit them.
   */
- export function deriveSubagentSessionPermission(input: {
-@@ -21,14 +26,90 @@ export function deriveSubagentSessionPermission(input: {
- }): Permission.Ruleset {
+ export function deriveSubagentSessionPermission(
+@@ -16,20 +22,98 @@ export function deriveSubagentSessionPermission(
+     parentSessionPermission: PermissionV1.Ruleset
+     subagent: Agent.Info
+   },
+-  // 父代理非 allow 规则：下放到 task 子会话，防止子代理静默放宽
++  // #280：父代理权限作为独立第二参数传入（当前委派来源），缺省为空
+   parentAgentPermission: PermissionV1.Ruleset = [],
+ ): PermissionV1.Ruleset {
    const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
    const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
--  const parentAgentDenies =
--    input.parentAgent?.permission.filter((rule) => rule.action === "deny" && rule.permission === "edit") ?? []
-+  const parentHasCatchAllDeny = input.parentAgent?.permission.some(
+-  // #67：parent-agent non-allow 在前，session external_directory/deny 在后
+-  // findLast 后写胜出：会话级 external_directory allow 不被 agent 默认 "* ask" 覆盖
+-  const parentDenyRules = parentAgentPermission.filter((rule) => rule.action !== "allow")
++  // #280：parent `*: deny` 是自执行默认；存在时父显式 deny 仅保留 edit ceiling
++  const parentHasCatchAllDeny = parentAgentPermission.some(
 +    (rule) => rule.permission === "*" && rule.action === "deny",
 +  )
 +  const ceilings = [
-+    ...(input.parentAgent?.permission.flatMap((rule) => parentAgentCeiling(rule, input.subagent.permission, parentHasCatchAllDeny)) ?? []),
++    // #280：agent admission ceiling 在前，session runtime ceiling 在后；
++    // findLast 语义下后者不能比前者更宽松，只能收紧或保持
++    ...parentAgentPermission.flatMap((rule) => parentAgentCeiling(rule, input.subagent.permission, parentHasCatchAllDeny)),
 +    ...input.parentSessionPermission.flatMap((rule) => forwardParentSessionRule(rule, input.subagent.permission)),
 +  ]
 +
++  // #280：返回顺序 = 叠加顺序：ceilings → child deny 终止性保护 → 默认 deny
    return [
--    ...parentAgentDenies,
+-    ...parentDenyRules,
 -    ...input.parentSessionPermission.filter(
 -      (rule) => rule.permission === "external_directory" || rule.action === "deny",
 -    ),
@@ -65,50 +77,49 @@ index 051f42e37bb34fe2b868048b296722a51bcab344..b0da2e25c4abc90b61c9308419e07f7b
    ]
  }
 +
-+function parentAgentCeiling(rule: Permission.Rule, subagent: Permission.Ruleset, parentHasCatchAllDeny: boolean | undefined) {
-+  // Catch-all parent rules are self-execution defaults. Forwarding `*: deny`
-+  // would erase controller/executor style agents that intentionally delegate
-+  // work to a narrower subagent despite being personally tool-restricted.
++// #280：catch-all parent 规则是自执行默认；转发 `*: deny` 会抹掉刻意委派的 controller/executor 型 agent
++function parentAgentCeiling(rule: PermissionV1.Rule, subagent: PermissionV1.Ruleset, parentHasCatchAllDeny: boolean | undefined) {
 +  if (rule.permission === "*") return []
-+  // When a parent is primarily self-restricted by `*: deny`, its extra explicit
-+  // denies are usually UI/tool-selection detail. Preserve the existing Plan Mode
-+  // edit ceiling, but do not turn controller bash/read self-denies into executor
-+  // denials. Parents without a catch-all still pass explicit denies as ceilings.
++  // #280：`*: deny` 自限的父代理，其额外显式 deny 多是 UI/工具选择细节；仅保留 edit ceiling
 +  if (rule.action === "deny" && parentHasCatchAllDeny && rule.permission !== "edit") return []
 +
 +  const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
++  // #280：child 对该边界无规则时按 ask 兜底，父 auto 相对 ask 是收紧而非放宽
 +  if (rule.action === "allow") {
-+    // Parent allow may preserve a shared internal exception, but it must never
-+    // broaden a child ask/auto/deny into allow.
++    // #280：parent allow 只能保留双方共同允许的共享例外，不得把 child ask/auto/deny 放宽为 allow
 +    return childAction === "allow" ? [rule] : []
 +  }
 +  if (childAction === "deny") return childSpecificCeilings(rule, subagent)
 +
 +  const action = rule.action
++  // #280：action 相同时不重写规则，避免覆盖 child 规则的 pattern 细节
 +  if (action === childAction) return []
 +  return [{ ...rule, action }]
 +}
 +
-+function forwardParentSessionRule(rule: Permission.Rule, subagent: Permission.Ruleset) {
-+  // Session allow rules are forwarded only as shared exceptions. They cannot
-+  // relax a child agent that would otherwise ask, auto-review, or deny.
++// #280：session allow 仅作为共享异常转发，不能放宽本会 ask/auto/deny 的 child；
++// deny child 改走窄化路径而非直接转发父 deny
++function forwardParentSessionRule(rule: PermissionV1.Rule, subagent: PermissionV1.Ruleset) {
 +  if (rule.action === "allow")
 +    return evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action === "allow" ? [rule] : []
 +
 +  const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
 +  if (childAction === "deny") return childSpecificCeilings(rule, subagent)
 +  const action = rule.action
++  // #280：与 agent ceiling 同理：相同 action 不重复，避免 overlay 噪声
 +  if (action === childAction) return []
 +  return [{ ...rule, action }]
 +}
 +
-+function childSpecificCeilings(parent: Permission.Rule, subagent: Permission.Ruleset) {
-+  // A child may expose narrow capabilities behind a `*: deny` fallback. When a
-+  // broad parent ceiling meets that fallback, derive ceilings for the narrow
-+  // child patterns instead of widening everything or dropping the parent ceiling.
++// #280：child 常以 `*: deny` fallback 加少量 allow 暴露窄能力；broad ceiling 命中 fallback 时
++// 为这些窄 pattern 推导 ceiling，而不是整体放宽或丢失 ceiling
++function childSpecificCeilings(parent: PermissionV1.Rule, subagent: PermissionV1.Ruleset) {
 +  return subagent.flatMap((rule) => {
++    // #280：deny 规则由 subagentDenyOverrides 单独保护，这里只收紧非 deny 暴露面
 +    if (rule.action === "deny") return []
++    // #280：跳过 child 的 wildcard：通配无法窄化父规则，只会产生重复覆盖
 +    if (rule.permission === "*") return []
++    // #280：双 Wildcard 匹配确保 child 规则同时落在父规则的边界与 pattern 范围内
 +    if (!Wildcard.match(rule.permission, parent.permission)) return []
 +    if (!Wildcard.match(rule.pattern, parent.pattern)) return []
 +    const action = parent.action
@@ -117,180 +128,146 @@ index 051f42e37bb34fe2b868048b296722a51bcab344..b0da2e25c4abc90b61c9308419e07f7b
 +  })
 +}
 +
-+function subagentDenyOverrides(subagent: Permission.Ruleset, ceilings: Permission.Ruleset) {
++// #280：child 特定 deny 必须保持终止性；不重放 wildcard fallback deny，
++// 否则会抹掉只读子代理由自身 allow 推导出的窄 ceiling
++function subagentDenyOverrides(subagent: PermissionV1.Ruleset, ceilings: PermissionV1.Ruleset) {
 +  if (ceilings.length === 0) return []
-+  // A child-specific deny must stay terminal when a broader parent auto/ask
-+  // ceiling was appended after the child agent rules. Do not repeat wildcard
-+  // fallback denies; read-only subagents use those fallbacks together with
-+  // explicit allow rules, and replaying the fallback here would erase the narrow
-+  // ceilings derived from their own allows.
 +  return subagent.filter(
 +    (rule) =>
 +      rule.action === "deny" &&
++      // #280：只重放 child 特定 deny；wildcard fallback 由原位规则继续兜底
 +      rule.permission !== "*" &&
 +      rule.pattern !== "*" &&
++      // #280：仅当存在能命中它的 ceiling 时才重放，无关 deny 不追加噪声
 +      ceilings.some((ceiling) => Wildcard.match(rule.permission, ceiling.permission)),
 +  )
 +}
 +
-+function evaluateSubagentRule(ruleset: Permission.Ruleset, permission: string, pattern: string) {
++// #280：findLast 保持 last-match-wins 语义，与 Permission.evaluate 一致
++function evaluateSubagentRule(ruleset: PermissionV1.Ruleset, permission: string, pattern: string) {
 +  return ruleset.findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern))
 +}
+warning: in the working copy of 'F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0279-00ec4b85ca4f\repo\packages/opencode/src/permission/reviewer/service.ts', LF will be replaced by CRLF the next time Git touches it
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index afdfd9f558bee8703a8c5b50573d028bdadd6821..c6f49bfb18f87c985120655dd0afa881e1e4d233 100644
+index 255d53ccb..a0dc2911a 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -761,13 +761,11 @@ function isReviewerDecisionProtocolError(error: unknown) {
+@@ -809,13 +809,12 @@ function isReviewerDecisionProtocolError(error: unknown) {
    return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
  }
  
--function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
--  // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
--  // 没有全局配置时，原生 auto agent 仍应隐式启用 reviewer；否则选择 auto
--  // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
-+function reviewerEnabled(permission: Config.Info["permission"], _metadata: Readonly<Record<string, unknown>>) {
-+  // reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
-+  // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
+-// #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
+-// #203：无全局配置时原生 auto agent 隐式启用 reviewer；否则选 auto 只会把 cautious 降级成普通 ask
+-function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
++// #203：reviewer 启用判定——显式 user 配置优先保留人工审批
++// #280：reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
++// auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
++function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, _metadata: Readonly<Record<string, unknown>>) {
    if (permission?.approvals_reviewer === "user") return false
 -  if (permission?.approvals_reviewer === "auto_review") return true
+-  // #225：reviewer 隐式启用判定与小写 agent key 对齐
 -  return metadata.agent === "auto"
 +  return true
  }
  
- function errorMessage(error: unknown) {
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 423361b4531fb8ffd96f462581776a1ee01be389..9f9d63e1e36ee544856667542da8d2cd8d33a7a0 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -773,10 +773,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           permission
-             .ask({
-               ...req,
--              // Permission reviewers use metadata.agent as the stable signal that
--              // a request came from the native auto agent. Centralizing it here
--              // keeps every tool, including apply_patch/write/edit and plugins,
--              // on the same security path instead of relying on per-tool metadata.
-+              // metadata.agent is audit evidence for the actual executing agent;
-+              // reviewer routing is decided by the evaluated permission action,
-+              // so tools and plugins should not each invent their own agent marker.
-               metadata: { ...req.metadata, agent: input.agent.name },
-               sessionID: input.session.id,
-               tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-@@ -1030,10 +1029,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-               .ask({
-                 ...req,
-                 // Internally materialized task execution bypasses the main tool
--                // adapter above, so it must attach the same agent evidence here.
--                // Keep this aligned with the primary ctx.ask wrapper: reviewer
--                // enablement must depend on the executing agent, not on each tool
--                // remembering to pass metadata.agent itself.
-+                // adapter above, so it must attach the same audit evidence here.
-+                // Keep this aligned with the primary ctx.ask wrapper: tools should
-+                // not decide reviewer routing by mutating metadata.agent.
-                 metadata: { ...req.metadata, agent: task.agent },
-                 sessionID,
-                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
+ // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index 7dc91afbd85aab8d40f1ca883e7456185f972595..e9b20023505d9c21f49eb8d1095b574daf69941c 100644
+index ad30a6e29..f3d25b0ed 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -15,6 +15,7 @@ import { TuiEvent } from "@/cli/cmd/tui/event"
- import { Cause, Effect, Exit, Option, Schema, Scope } from "effect"
+@@ -13,6 +13,8 @@ import { Config } from "@/config/config"
+ import { Effect, Exit, Schema, Scope } from "effect"
  import { EffectBridge } from "@/effect/bridge"
  import { RuntimeFlags } from "@/effect/runtime-flags"
++// #280：task_id 恢复需要 compact 后的完整子权限集合并回写 session
 +import { Permission } from "@/permission"
+ import { Database } from "@opencode-ai/core/database/database"
  
  export interface TaskPromptOps {
-   cancel(sessionID: SessionID): Effect.Effect<void>
-@@ -158,27 +159,45 @@ export const TaskTool = Tool.define(
-         ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+@@ -135,6 +137,7 @@ export const TaskTool = Tool.define(
          : undefined
        const parent = yield* sessions.get(ctx.sessionID)
--      const parentAgent = parent.agent
--        ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-+      // The current tool context is the actual delegation source. Persisted
-+      // session.agent can be absent or stale on resumed sessions, so it is only a
-+      // fallback and must not override this turn's parent permission ceilings.
-+      const parentAgentName = ctx.agent || parent.agent
-+      const parentAgent = parentAgentName
-+        ? yield* agent.get(parentAgentName).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-         : undefined
+       // 以当前执行代理 ctx.agent 为父权限源（非仅持久化 parent.agent）
++      // #280：derive 失败不存在于本路径——agent.get 缺失时直接失败，不静默降级
+       const parentAgent = yield* agent.get(ctx.agent)
+       const childPermission = deriveSubagentSessionPermission(
+         {
+@@ -156,23 +159,31 @@ export const TaskTool = Tool.define(
+           action: "deny" as const,
+         })) ?? []),
+       ]
 -      const nextSession =
 -        session ??
 -        (yield* sessions.create({
 -          parentID: ctx.sessionID,
 -          title: params.description + ` (@${next.name} subagent)`,
+-          agent: next.name,
 -          permission: [
--            ...deriveSubagentSessionPermission({
--              parentSessionPermission: parent.permission ?? [],
--              parentAgent,
--              subagent: next,
--            }),
--            ...(cfg.experimental?.primary_tools?.map((item) => ({
--              pattern: "*",
--              action: "allow" as const,
--              permission: item,
--            })) ?? []),
+-            ...childPermission,
+-            ...childToolDenies.filter(
+-              (deny) =>
+-                !childPermission.some(
+-                  (rule) =>
+-                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+-                ),
++      // #280：compact 去重后按序生效：派生 ceiling 保持 last-match-wins，
++      // 与既有主路径（deny 边界）合并不产生重复规则
++      const nextPermission = Permission.compact([
++        ...childPermission,
++        ...childToolDenies.filter(
++          (deny) =>
++            !childPermission.some(
++              (rule) =>
++                rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+             ),
 -          ],
 -        }))
-+      const primaryToolPermission = cfg.experimental?.primary_tools?.map((item) => ({
-+        pattern: "*",
-+        action: "allow" as const,
-+        permission: item,
-+      })) ?? []
-+      const nextPermission = Permission.compact([
-+        // primary_tools may grant a subagent additional tool capability, but any
-+        // parent/session ceiling derived below must remain last-match-wins.
-+        ...primaryToolPermission,
-+        ...deriveSubagentSessionPermission({
-+          parentSessionPermission: parent.permission ?? [],
-+          parentAgent,
-+          subagent: next,
-+        }),
++        ),
 +      ])
++      // #280：恢复 task_id 时同样以新推导的权限集回写，不保留过期子规则
 +      const nextSession = session
 +        ? { ...session, agent: next.name, permission: nextPermission }
 +        : yield* sessions.create({
 +            parentID: ctx.sessionID,
 +            title: params.description + ` (@${next.name} subagent)`,
-+            // Store the real executing subagent for audit and later prompt
-+            // defaults; permission derivation still uses ctx.agent for the
-+            // current delegation source.
 +            agent: next.name,
 +            permission: nextPermission,
 +          })
 +      if (session) {
-+        // Resuming a task_id is a fresh delegation from the current parent. Do
-+        // not keep stale child permission rules; recompute the overlay from the
-+        // current parent agent/session and the requested subagent.
++        // #280：setPermission 持久化回写与内存对象同步，避免读取路径看到两套规则
 +        yield* sessions.setPermission({ sessionID: session.id, permission: nextPermission })
 +      }
  
-       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
-       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+         Effect.provideService(Database.Service, database),
+warning: in the working copy of 'F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0279-00ec4b85ca4f\repo\packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts', LF will be replaced by CRLF the next time Git touches it
 diff --git a/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts b/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
-index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7d0a9aa4d 100644
+index 6fc9197d9..600afaa81 100644
 --- a/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
 +++ b/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
-@@ -23,6 +23,7 @@ import { Effect } from "effect"
+@@ -5,6 +5,7 @@ import { Effect } from "effect"
  import { Agent } from "../../src/agent/agent"
  import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
  import { Permission } from "../../src/permission"
 +import { Truncate } from "../../src/tool/truncate"
  import { testEffect } from "../lib/effect"
  
- const it = testEffect(Agent.defaultLayer)
-@@ -137,6 +138,260 @@ it.instance(
-   },
+ const it = testEffect(LayerNode.compile(Agent.node))
+@@ -158,3 +159,293 @@ it.effect("subagent inherits parent session deny rules as hard runtime ceilings"
+     expect(Permission.evaluate("bash", "git status", effective).action).toBe("deny")
+   }),
  )
- 
++
++// #280：以下用例锁定 ceiling 推导契约：parent admission ceilings + session runtime ceilings，
++// allow 仅作为共享异常保留，child 特定 deny 保持终止性；均用二参 derive（父权限独立传入）。
 +it.instance("subagent inherits explicit parent auto ceilings without depending on agent name", () =>
 +  Effect.gen(function* () {
-+    const generalAgent = yield* Agent.Service.use((svc) => svc.get("general"))
++    const generalAgent = yield* Agent.use.get("general")
 +    expect(generalAgent).toBeDefined()
 +    const reviewerParent = testAgent({
 +      name: "reviewer_parent",
 +      mode: "primary",
++      // #280：对象形式区分通配 auto 与 GLOB 共享例外，验证 Wildcard 窄化双方向
 +      permission: {
 +        bash: "auto",
 +        edit: "auto",
@@ -303,17 +280,21 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +
 +    const effective = Permission.merge(
 +      generalAgent!.permission,
-+      deriveSubagentSessionPermission({
-+        parentSessionPermission: [],
-+        parentAgent: reviewerParent,
-+        subagent: generalAgent!,
-+      }),
++      deriveSubagentSessionPermission(
++        {
++          parentSessionPermission: [],
++          subagent: generalAgent!,
++        },
++        reviewerParent.permission,
++      ),
 +    )
 +
-+    // auto 是权限 action 的 admission ceiling，不是名为 auto 的 agent 的特例。
-+    // 任意 parent agent 只要显式配置 auto，就应把 child 的 allow/ask 收紧到 auto。
++    // #280：auto 是 admission ceiling 而非名为 auto 的 agent 的特例；
++    // 任意 parent 显式配置 auto，就把 child 的 allow/ask 收紧到 auto。
 +    expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
++    // #280：edit 同被收紧——Plan Mode 的 edit ceiling 语义与工具名解耦
 +    expect(Permission.evaluate("edit", "src/a.ts", effective).action).toBe("auto")
++    // #280：external_directory 通配命中父 auto；边界内例外仍允许
 +    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
 +    expect(Permission.evaluate("external_directory", Truncate.GLOB, effective).action).toBe("allow")
 +  }),
@@ -336,6 +317,7 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +    const executor = testAgent({
 +      name: "executor",
 +      mode: "subagent",
++      // #280：child 内部 deny 与共享例外并存，验证终止性与例外互不干扰
 +      permission: {
 +        bash: {
 +          "*": "allow",
@@ -351,18 +333,22 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +
 +    const effective = Permission.merge(
 +      executor.permission,
-+      deriveSubagentSessionPermission({
-+        parentSessionPermission: [],
-+        parentAgent: reviewerParent,
-+        subagent: executor,
-+      }),
++      deriveSubagentSessionPermission(
++        {
++          parentSessionPermission: [],
++          subagent: executor,
++        },
++        reviewerParent.permission,
++      ),
 +    )
 +
-+    // parent auto 与 child allow/ask 的交集是 auto；child deny 仍是终止边界；
++    // #280：parent auto 与 child allow/ask 的交集是 auto；child deny 仍是终止边界；
 +    // 双方共同 allow 的内部外部目录例外继续 allow。
 +    expect(Permission.evaluate("bash", "git status", effective).action).toBe("auto")
++    // #280：child 特定 deny 不被 parent auto 覆盖（subagentDenyOverrides 终止性）
 +    expect(Permission.evaluate("bash", "git push origin dev", effective).action).toBe("deny")
 +    expect(Permission.evaluate("edit", "src/a.ts", effective).action).toBe("deny")
++    // #280：外层 auto 收紧，内层共享例外不变——Wildcard 窄化的两个方向
 +    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
 +    expect(Permission.evaluate("external_directory", Truncate.GLOB, effective).action).toBe("allow")
 +  }),
@@ -381,6 +367,7 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +    const restricted = testAgent({
 +      name: "restricted",
 +      mode: "subagent",
++      // #280：restricted fixture：全副 deny + 窄 allow 是最常见的子代理安全形态
 +      permission: {
 +        "*": "deny",
 +        bash: {
@@ -394,19 +381,25 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +
 +    const effective = Permission.merge(
 +      restricted.permission,
-+      deriveSubagentSessionPermission({
-+        parentSessionPermission: [],
-+        parentAgent: reviewerParent,
-+        subagent: restricted,
-+      }),
++      deriveSubagentSessionPermission(
++        {
++          parentSessionPermission: [],
++          subagent: restricted,
++        },
++        reviewerParent.permission,
++      ),
 +    )
 +
-+    // 子 agent 常用 `*: deny` fallback 加少量 allow 暴露能力。parent 的 broad
-+    // auto ceiling 必须只收紧这些 child 已允许的具体 pattern，不能因为 child
-+    // 在 `*` 上是 deny 就完全丢失 ceiling，也不能把其他 denied pattern 放宽。
++    // #280：child 用 `*: deny` fallback 加少量 allow 暴露能力；parent broad auto
++    // 只收紧 child 已允许的具体 pattern，不能因 child 在 `*` 上是 deny 就丢失 ceiling，
++    // 也不能把其他 denied pattern 放宽。
++    // #280：收紧后的 allow 仍被 auto ceiling 覆盖
 +    expect(Permission.evaluate("bash", "git status", effective).action).toBe("auto")
++    // #280：child fallback deny 在无 narrow allow 时保持终止
 +    expect(Permission.evaluate("bash", "git push origin dev", effective).action).toBe("deny")
++    // #280：child 窄 allow 被父 auto 窄化（不丢失也不扩散）
 +    expect(Permission.evaluate("external_directory", Truncate.GLOB, effective).action).toBe("auto")
++    // #280：child 未暴露的外部路径维持 fallback deny
 +    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("deny")
 +  }),
 +)
@@ -433,24 +426,28 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +
 +    const effective = Permission.merge(
 +      restricted.permission,
-+      deriveSubagentSessionPermission({
-+        parentSessionPermission: [],
-+        parentAgent: reviewerParent,
-+        subagent: restricted,
-+      }),
++      deriveSubagentSessionPermission(
++        {
++          parentSessionPermission: [],
++          subagent: restricted,
++        },
++        reviewerParent.permission,
++      ),
 +    )
 +
-+    // tool-specific `*: deny` fallback 与全局 `*: deny` 一样，只是 child 的默认
-+    // 关闭边界。parent auto 应收紧 child 明确允许的 git status，但不能把 fallback
-+    // deny 重放到 overlay 末尾后再次盖掉这个 narrow allow。
++    // #280：tool 级 `*: deny` fallback 与全局一样只是默认关闭边界；parent auto
++    // 收紧 git status 后，不能把 fallback deny 重放到 overlay 末尾再盖掉窄 allow。
++    // #280：narrow allow 被 auto 收紧（而不是被 fallback deny 终止）
 +    expect(Permission.evaluate("bash", "git status", effective).action).toBe("auto")
++    // #280：其余命令仍被 fallback deny 终止
 +    expect(Permission.evaluate("bash", "git push origin dev", effective).action).toBe("deny")
 +  }),
 +)
 +
 +it.instance("nested subagents keep auto ceilings inherited from the parent session", () =>
 +  Effect.gen(function* () {
-+    const generalAgent = yield* Agent.Service.use((svc) => svc.get("general"))
++    // #280：instance 走真实 Agent 层（LayerNode），与 effect 纯同步推导互补
++    const generalAgent = yield* Agent.use.get("general")
 +    expect(generalAgent).toBeDefined()
 +    const reviewerParent = testAgent({
 +      name: "reviewer_parent",
@@ -462,20 +459,26 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +      },
 +    })
 +
-+    const childPermission = deriveSubagentSessionPermission({
-+      parentSessionPermission: [],
-+      parentAgent: reviewerParent,
-+      subagent: generalAgent!,
-+    })
-+    const grandchildPermission = deriveSubagentSessionPermission({
-+      parentSessionPermission: childPermission,
-+      parentAgent: generalAgent,
-+      subagent: generalAgent!,
-+    })
++    // #280：第二跳 direct parent 已是 general；第一跳写入 session 的 auto ceilings
++    // 必须继续作为 runtime ceiling 传递。
++    const childPermission = deriveSubagentSessionPermission(
++      {
++        parentSessionPermission: [],
++        subagent: generalAgent!,
++      },
++      reviewerParent.permission,
++    )
++    // #280：grandchild 的 session 输入 = child 的派生结果，模拟真实嵌套委派链
++    const grandchildPermission = deriveSubagentSessionPermission(
++      {
++        parentSessionPermission: childPermission,
++        subagent: generalAgent!,
++      },
++      generalAgent!.permission,
++    )
 +    const effective = Permission.merge(generalAgent!.permission, grandchildPermission)
 +
-+    // 第二跳的 direct parent agent 已经是 general；因此第一跳写入 parent session
-+    // 的 auto ceilings 必须继续作为 runtime ceiling 传递。
++    // #280：merge 后的三类工具全部保持 auto，证明 ceiling 穿透两跳委派
 +    expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
 +    expect(Permission.evaluate("edit", "src/a.ts", effective).action).toBe("auto")
 +    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
@@ -484,6 +487,7 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +
 +it.effect("parent session allow cannot relax child ask or auto decisions", () =>
 +  Effect.sync(() => {
++    // #280：executor fixture：ask 与 auto 混合，验证 allow 例外只对齐双方共同边界
 +    const executor = testAgent({
 +      name: "executor",
 +      mode: "subagent",
@@ -494,17 +498,22 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +    })
 +    const effective = Permission.merge(
 +      executor.permission,
-+      deriveSubagentSessionPermission({
-+        parentSessionPermission: Permission.fromConfig({
-+          bash: "allow",
-+          external_directory: "allow",
-+        }),
-+        parentAgent: undefined,
-+        subagent: executor,
-+      }),
++      deriveSubagentSessionPermission(
++        {
++          parentSessionPermission: Permission.fromConfig({
++            bash: "allow",
++            external_directory: "allow",
++          }),
++          // #280：fromConfig 构造 session runtime 输入；parentAgent 缺省为空
++          subagent: executor,
++        },
++      ),
 +    )
 +
++    // #280：session allow 仅在 child 也 allow 时保留为共享异常
++    // #280：bash ask 未被父 allow 放宽
 +    expect(Permission.evaluate("bash", "git status", effective).action).toBe("ask")
++    // #280：外层双方共同 allow 的 auto 也保持——auto 不低于 allow
 +    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
 +  }),
 +)
@@ -521,41 +530,53 @@ index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7
 +    })
 +    const effective = Permission.merge(
 +      executor.permission,
-+      deriveSubagentSessionPermission({
-+        parentSessionPermission: Permission.fromConfig({
-+          bash: "ask",
-+          external_directory: "ask",
-+        }),
-+        parentAgent: undefined,
-+        subagent: executor,
-+      }),
++      deriveSubagentSessionPermission(
++        {
++          parentSessionPermission: Permission.fromConfig({
++            bash: "ask",
++            external_directory: "ask",
++          }),
++          subagent: executor,
++        },
++      ),
 +    )
 +
-+    // parent session 的 ask 是人工审批 ceiling；child 自己愿意 auto-review
++    // #280：parent session 的 ask 是人工审批 ceiling；child 自原 auto-review
 +    // 不能把用户审批要求降级成自动 reviewer 路径。
 +    expect(Permission.evaluate("bash", "git add .", effective).action).toBe("ask")
 +    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("ask")
 +  }),
 +)
-+
- it.effect("[#26700] controller self-restrictions do not erase executor permissions", () =>
-   Effect.sync(() => {
-     const controller = testAgent({
+warning: in the working copy of 'F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0279-00ec4b85ca4f\repo\packages/opencode/test/permission/reviewer-service.test.ts', LF will be replaced by CRLF the next time Git touches it
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
-index c5bb3f42868109a3cd4e44d75f2b47dd720fa61e..76ad98c3c3a43998e7fe50c315a0b37b9a795a62 100644
+index 29fc97ee4..79264b0c9 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -57,10 +57,23 @@ describe("permission reviewer service", () => {
+@@ -42,6 +42,10 @@ type CapturedReviewerRequest = {
+   headers: Headers
+ }
+ 
++// #280：从 Config.Interface.get 反取模块私有 Info 的 permission 字段型别
++//（模块未导出 Info 本体；effect 成功通道用 infer 提取）
++type ConfigInfo = ReturnType<Config.Interface["get"]> extends Effect.Effect<infer A, never, never> ? A : never
++
+ // #250：三个 provider/凭据组合覆盖判定矩阵——openai+oauth 提升instructions，
+ // openai+apiKey 与 custom+oauth 都不提升；判定错误方向任一都会被对应 fixture 抓住
+ const OPENAI_PROVIDER_ID = ProviderV2.ID.make("openai")
+@@ -62,10 +66,46 @@ describe("permission reviewer service", () => {
      rejectMaxOutputTokens: true,
      plugin: pluginLayer({ clearMaxOutputTokens: true, header: REVIEWER_HOOK_HEADER }),
    })
++  // #280：无 approvals_reviewer 配置——reviewer 启用由权限计算决定而非 agent 名称
 +  const implicitAutoFixture = reviewerFixture(
 +    { type: "api", key: "test-key" },
 +    {
 +      requireInstructions: false,
 +      permission: {
++        // #280：无 approvals_reviewer 配置：启用不再由配置或 agent 名称决定
 +        auto_review: {
 +          model: `${OPENAI_PROVIDER_ID}/gpt-5`,
++          // #280：policy 仍必填——启用路径与策略内容是两个正交契约
 +          policy: "Reviewer service test policy: allow only bounded auto requests.",
 +        },
 +      },
@@ -566,14 +587,8 @@ index c5bb3f42868109a3cd4e44d75f2b47dd720fa61e..76ad98c3c3a43998e7fe50c315a0b37b
    const customOauth = testEffect(customOauthFixture.layer)
    const oauthHook = testEffect(oauthHookFixture.layer)
 +  const implicitAuto = testEffect(implicitAutoFixture.layer)
- 
-   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
-     Effect.gen(function* () {
-@@ -122,6 +135,22 @@ describe("permission reviewer service", () => {
-       expectPreservedShellEvidence(inputText(request.body))
-     }),
-   )
 +
++  // #280：agent=general 的请求也进入 auto review——启用不再依赖执行 agent 名称
 +  implicitAuto.effect("enables reviewer for auto requests without depending on the executing agent name", () =>
 +    Effect.gen(function* () {
 +      const reviewer = yield* PermissionReviewer.Service
@@ -582,34 +597,39 @@ index c5bb3f42868109a3cd4e44d75f2b47dd720fa61e..76ad98c3c3a43998e7fe50c315a0b37b
 +          agent: "general",
 +        }),
 +      )
++      // #280：bodies[0] 即本次 review 的唯一请求，无其他用例共享 fixture
 +      const body = implicitAutoFixture.bodies[0]
 +
++      // #280：decision allow 证明 reviewer 路径完整走通，而非被静默跳过
 +      expect(decision.action).toBe("allow")
++      // #280：agent 证据进入 user input 而非 instructions——Codex 契约不因名称路径改变
 +      expect(inputText(body)).toContain("general")
 +      expectPreservedShellEvidence(inputText(body))
 +    }),
 +  )
- })
  
- function reviewerFixture(
-@@ -131,6 +160,7 @@ function reviewerFixture(
-     providerID?: ProviderID
+   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
+     Effect.gen(function* () {
+@@ -144,6 +184,8 @@ function reviewerFixture(
+     providerID?: ProviderV2.ID
      rejectMaxOutputTokens?: boolean
      plugin?: Layer.Layer<Plugin.Service>
-+    permission?: Config.Info["permission"]
++    // #280：注入自定义 permission 块（如无 approvals_reviewer 的隐式 auto 场景）
++    permission?: ConfigInfo["permission"]
    } = { requireInstructions: false },
  ) {
    const bodies: ReviewerRequestBody[] = []
-@@ -182,7 +212,7 @@ function reviewerFixture(
-     bodies,
+@@ -200,7 +242,8 @@ function reviewerFixture(
+     // #261：返回 requests 供测试验证 headers
      requests,
      layer: PermissionReviewer.layer.pipe(
 -      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
 +      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID, options.permission)) })),
++      // #280：get 返回注入 permission 的完整 config，替代默认 auto_review 块
        Layer.provide(provider.layer),
        Layer.provide(authLayer(authInfo)),
-       Layer.provide(options.plugin ?? pluginLayer()),
-@@ -251,19 +281,19 @@ function expectPreservedShellEvidence(text: string) {
+       // #261：提供 plugin 层——默认使用空 plugin，测试 fixture 可注入自定义 hook
+@@ -271,20 +314,22 @@ function expectPreservedShellEvidence(text: string) {
    expect(text).toContain("$(pwd)/danger")
  }
  
@@ -620,31 +640,46 @@ index c5bb3f42868109a3cd4e44d75f2b47dd720fa61e..76ad98c3c3a43998e7fe50c315a0b37b
      permission: "bash",
      patterns: [COMMAND_EVIDENCE],
 -    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash" },
++    // #280：metadata 展开供 agent 名称类用例注入，不影响既有证据字段
 +    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash", ...metadata },
      precheck: { level: "cautious" as const, reason: "shell command combines redirection and deletion-like behavior" },
    }
  }
  
--function config(providerID: ProviderID): Config.Info {
-+function config(providerID: ProviderID, permission?: Config.Info["permission"]): Config.Info {
+ // #250：Config.Info 是 config 模块私有别名——测试直接用结构推断，避免依赖未导出类型
+-function config(providerID: ProviderV2.ID) {
++function config(providerID: ProviderV2.ID, permission?: ConfigInfo["permission"]) {
    return {
 -    permission: {
++    // #280：permission 注入时完全替换默认块（隐式 auto 用例无 approvals_reviewer）
 +    permission: permission ?? {
-       approvals_reviewer: "auto_review",
-       auto_review: {
-         model: `${providerID}/gpt-5`,
+       // #250：approvals_reviewer=auto_review 绕过禁用分支；model 字符串走
+       // providerID/gpt-5 形态——与 fixture 的 provider id 严格对应
+       approvals_reviewer: "auto_review" as const,
 diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
-index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017c1ec6a2c 100644
+index 765f0ae89..b85af530a 100644
 --- a/packages/opencode/test/tool/task.test.ts
 +++ b/packages/opencode/test/tool/task.test.ts
-@@ -456,6 +456,136 @@ describe("tool.task", () => {
+@@ -11,6 +11,8 @@ import { Config } from "@/config/config"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
+ import { Session } from "@/session/session"
++// #280：用例直接评估 merge 后的 effective 权限
++import { Permission } from "@/permission"
+ import type { SessionPrompt } from "../../src/session/prompt"
+ import { MessageID, PartID, SessionID } from "../../src/session/schema"
+ import { SessionRunState } from "@/session/run-state"
+@@ -468,6 +470,147 @@ describe("tool.task", () => {
      }),
    )
  
++  // #280：以下用例锁定委派权限契约：ctx.agent 是真实委派源；恢复时重算；
++  // primary_tools deny 保持不高于父 ceiling（目标 #108 deny 语义）。
 +  it.instance("execute records the subagent and tightens permissions from the executing parent agent", () =>
 +    Effect.gen(function* () {
 +      const sessions = yield* Session.Service
 +      const agent = yield* Agent.Service
++      // #280：general 的自身规则是 capability base；ceiling 在其上叠加
 +      const general = yield* agent.get("general")
 +      const { chat, assistant } = yield* seed()
 +      const tool = yield* TaskTool
@@ -670,11 +705,14 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
 +      )
 +
 +      const child = yield* sessions.get(result.metadata.sessionId)
++      // #280：merge 顺序对齐运行时 prompt.ts 的 agent+session 叠加
 +      const effective = Permission.merge(general.permission, child.permission ?? [])
 +
-+      // ctx.agent 是本轮真实委派来源；child session 记录真实执行 subagent。
++      // #280：ctx.agent 是本轮真实委派来源；child session 记录真实执行 subagent。
 +      expect(child.agent).toBe("general")
++      // #280：parent auto agent 的 bash auto ceiling 透过 derive 传递到 child
 +      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
++      // #280：general 无外部目录规则时按 ask 兑底，被 auto ceiling 收紧
 +      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
 +      expect(seen?.agent).toBe("general")
 +    }),
@@ -689,6 +727,7 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
 +      const child = yield* sessions.create({
 +        parentID: chat.id,
 +        title: "Existing child",
++        // #280：预置过期 allow——恢复后必须被重算 ceiling 清除
 +        permission: [{ permission: "external_directory", pattern: "/outside/project/*", action: "allow" }],
 +      })
 +      const tool = yield* TaskTool
@@ -706,6 +745,7 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
 +          messageID: assistant.id,
 +          agent: "auto",
 +          abort: new AbortController().signal,
++          // #280：无 onPrompt 挂钩——本用例只关心权限重算
 +          extra: { promptOps: stubOps() },
 +          messages: [],
 +          metadata: () => Effect.void,
@@ -716,13 +756,14 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
 +      const resumed = yield* sessions.get(result.metadata.sessionId)
 +      const effective = Permission.merge(general.permission, resumed.permission ?? [])
 +
++      // #280：恢复后旧 allow 被重算的 ceiling 覆盖，不再残留过期规则
 +      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
 +      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
 +    }),
 +  )
 +
 +  it.instance(
-+    "execute keeps primary tool allowances below parent permission ceilings",
++    "execute keeps primary tool denies at least as strict as parent admission ceilings",
 +    () =>
 +      Effect.gen(function* () {
 +        const sessions = yield* Session.Service
@@ -750,9 +791,10 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
 +
 +        const child = yield* sessions.get(result.metadata.sessionId)
 +
-+        // primary_tools 给 subagent 临时补工具能力，但它不能排在 parent auto ceiling
-+        // 后面把 reviewer 边界改回 allow。
-+        expect(Permission.evaluate("bash", "git add .", child.permission ?? []).action).toBe("auto")
++        // #280：目标 primary_tools 是 deny（#108），比 source 的 allow 更严格；
++        // 断言 deny 不被 parent auto ceiling 覆盖成 allow。
++        // #280：reviewer 自身仅开放 task；bash 能力完全来自 primary_tools deny 边界。
++        expect(Permission.evaluate("bash", "git add .", child.permission ?? []).action).toBe("deny")
 +      }),
 +    {
 +      config: {
@@ -765,6 +807,7 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
 +          },
 +        },
 +        experimental: {
++          // #280：单工具窄化断言面：只验证 bash deny 的终止性
 +          primary_tools: ["bash"],
 +        },
 +      },
@@ -774,3 +817,33 @@ index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017
    it.instance(
      "execute shapes child permissions for task, todowrite, and primary tools",
      () =>
+warning: in the working copy of 'F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0279-00ec4b85ca4f\repo\packages/opencode/test/session/prompt.test.ts', LF will be replaced by CRLF the next time Git touches it
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index ac432b331..544c64087 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1989,7 +1989,7 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
+   }),
+ )
+ 
+-it.instance("subtask child inherits parent session external_directory allow", () =>
++it.instance("subtask child inherits parent session external_directory rules tied to child-shared boundaries", () =>
+   Effect.gen(function* () {
+     const { llm } = yield* useServerConfig(providerCfg)
+     const prompt = yield* SessionPrompt.Service
+@@ -2008,10 +2008,13 @@ it.instance("subtask child inherits parent session external_directory allow", ()
+     expect(kids).toHaveLength(1)
+     const child = kids[0]!
+     const rules = child.permission ?? []
+-    expect(rules).toEqual(
++    // #280：general 的外部目录默认 ask 是父 allow 不下放后的落点
++    // #280：allow 仅作为共享异常转发——child（general）未允许同边界时，
++    // 父 allow 不下放，child 落回自身默认 ask；task deny 保持不变。
++    expect(rules).not.toEqual(
+       expect.arrayContaining([{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }]),
+     )
+-    expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("allow")
++    expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("ask")
+     expect(Permission.evaluate("task", "anything", rules).action).toBe("deny")
+   }),
+ )

@@ -2814,9 +2814,7 @@ index 1df6f56a149d2e0634bc8c8e14d524167d3ed5fe..e22dff55bbd907406fb582579437bf1b
  describe("prompt voice input", () => {
    // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
    // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
-@@ -660,4 +692,145 @@ describe("prompt voice input", () => {
-     // controller 保证只在转写成功后调用一次 insertText，传入完整文本。
-     expect(inserted).toEqual(["hello world"])
+@@ -666,2 +697,143 @@ describe("prompt voice input", () => {
    })
 +
 +  voiceE2E(
@@ -2960,6 +2958,7 @@ index 1df6f56a149d2e0634bc8c8e14d524167d3ed5fe..e22dff55bbd907406fb582579437bf1b
 +    240_000,
 +  )
  })
+\ No newline at end of file
 diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
 index 6d27a8924669f330a4fb8ce57dc2d07e588caf45..11f9c519390907741a4e4c0576d421378b6ba770 160000
 --- a/thirdparty/chatgpt-browser-agent

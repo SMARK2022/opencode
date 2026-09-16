@@ -551,27 +551,29 @@ index 0000000000000000000000000000000000000000..375c12e9e2feb6e4f282f8b06791037b
 +
 +只要保持这条边界，opencode 的工具输出提示就能在风格上协调一致，同时避免把过多无关信息带入上下文。
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index c9ff21be5a41190a6fbfe031c07cd95708ec2668..73de33fa7bbff55b7e7839cadc5f2f3a5caf6011 100644
+index b51fe1f14..18ab8c2b2 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -26,6 +26,7 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
- import * as EffectLogger from "@opencode-ai/core/effect/logger"
- import { MessageError } from "./message-error"
- import { AuthError, OutputLengthError } from "./message-error"
+@@ -32,6 +32,8 @@ import { ProviderError } from "@/provider/error"
+ import { iife } from "@/util/iife"
+ import { errorMessage } from "@/util/error"
+ import { isMedia } from "@/util/media"
++// #282：compaction 清理后改用统一 notice 信封，替代旧的硬编码英文标记
 +import { formatCompactionClearedNotice } from "@/util/output-notice"
- export { AuthError, OutputLengthError } from "./message-error"
- 
- /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
-@@ -389,7 +390,7 @@ export type ToolStateCompleted = Types.DeepMutable<Schema.Schema.Type<typeof Too
+ import type { SystemError } from "bun"
+ import type { Provider } from "@/provider/provider"
+ import { Effect, Schema } from "effect"
+@@ -79,7 +81,8 @@ export { isMedia }
  function truncateToolOutput(text: string, maxChars?: number) {
    if (!maxChars || text.length <= maxChars) return text
    const omitted = text.length - maxChars
 -  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
++  // #282：机器可解析的省略标记（[... reason stats]），不再用面向人的英文句子
 +  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
  }
  
- export const ToolStateError = Schema.Struct({
-@@ -937,7 +938,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+ export const Event = {
+@@ -330,7 +333,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
            toolNames.add(part.tool)
            if (part.state.status === "completed") {
              const outputText = part.state.time.compacted
@@ -581,63 +583,72 @@ index c9ff21be5a41190a6fbfe031c07cd95708ec2668..73de33fa7bbff55b7e7839cadc5f2f3a
              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
  
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 9f9d63e1e36ee544856667542da8d2cd8d33a7a0..a7a0ed58caf8e18f91b2b82b77d671462d65bd3e 100644
+index 9d9967ed6..929dcd2a8 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -63,6 +63,7 @@ import { AgentAttachment, FileAttachment, ReferenceAttachment, Source } from "@o
- import { Reference } from "@/reference/reference"
- import * as DateTime from "effect/DateTime"
- import { eq } from "@/storage/db"
-+import { formatExecutionNotice } from "@/util/output-notice"
- import * as Database from "@/storage/db"
- import { SessionTable } from "./session.sql"
+@@ -61,6 +61,8 @@ import { SessionTools } from "./tools"
+ import { LLMEvent } from "@opencode-ai/llm"
+ // #194：改用 TokenEstimate 统一上传估算
  import { TokenEstimate } from "@/token/estimate"
-@@ -1238,7 +1239,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
++// #282：abort 路径接入统一 execution notice
++import { formatExecutionNotice } from "@/util/output-notice"
+ // #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
+ import { usable } from "./overflow"
+ 
+@@ -748,7 +750,9 @@ const layer = Layer.effect(
            const finish = Effect.uninterruptible(
              Effect.gen(function* () {
                if (aborted) {
 -                output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
-+                // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
++                // #282：prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
 +                // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
 +                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
                }
                const completed = Date.now()
-               if (flags.experimentalEventSystem) {
+               if (!msg.time.completed) {
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 2bad7cd7b69316b64741bd438435b04a38fcd209..f7fdb4808218a9f004ac09d8c2e5234bb7941e47 100644
+index 4a92ac63a..19c165406 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -33,6 +33,7 @@ import {
-   normalizePowerShellOutput,
-   renderDiagnosticAppendix,
- } from "./bash-compress"
+@@ -15,6 +15,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Shell } from "@opencode-ai/core/shell"
+ import { ShellID } from "./shell/id"
+ import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
++// #282：超时/中止/截断改用统一 notice 信封
 +import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
  
- export { Parameters } from "./shell/prompt"
- 
-@@ -937,14 +938,15 @@ export const ShellTool = Tool.define(
+ import * as Truncate from "./truncate"
+ import { Plugin } from "@/plugin"
+@@ -1015,10 +1017,12 @@ export const ShellTool = Tool.define(
        const meta: string[] = []
        if (expired) {
          meta.push(
 -          `shell tool terminated command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.`,
++          // #282：机器可解析 timeout notice；重试建议由调用方文档承接
 +          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
          )
        }
 -      if (aborted) meta.push("User aborted the command")
++      // #282：abort 同样走 notice，去掉旧的自然语言包装
 +      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
+       // #215：模型输出由原始环形缓冲拼接，不经显示渲染，保证 result.output 忠实于子进程字节流
        const raw = list.map((item) => item.text).join("")
-       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
+       // #130：Windows PowerShell 先 normalize CLIXML 为纯文本
+@@ -1029,6 +1033,8 @@ export const ShellTool = Tool.define(
+       // #130：压缩输入为 normalize 后文本
+       const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
        diag.end()
-       const diagnosticSnapshot = diag.snapshot()
++      // #282：截断前先统计 normalize 后全文，notice 的 total 必须是完整输出量
 +      const normalizedStats = outputStats(normalized)
- 
-       // Compress output if enabled
-       const compressed = input.compressOutput
-@@ -961,7 +963,15 @@ export const ShellTool = Tool.define(
+       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
+       if (end.cut) cut = true
+       if (!file && (end.cut || compressed.stats.applied)) {
+@@ -1040,14 +1046,24 @@ export const ShellTool = Tool.define(
        if (!output) output = "(no output)"
  
        if (cut && file) {
 -        output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
++        // #282：统一 output_truncated notice；shown 为 tail 预览的实际行字节量
 +        output =
 +          formatOutputTruncatedNotice({
 +            source: "shell",
@@ -649,35 +660,35 @@ index 2bad7cd7b69316b64741bd438435b04a38fcd209..f7fdb4808218a9f004ac09d8c2e5234b
 +          output
        }
  
-       // Append diagnostic appendix for failed commands
-@@ -975,7 +985,7 @@ export const ShellTool = Tool.define(
-       }
- 
+       // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
+       const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+       if (appendix) output += "\n\n" + appendix
        if (meta.length > 0) {
 -        output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
++        // #282：notice 本身自带结构化标记，不再加 <shell_metadata> 包装
 +        output += "\n\n" + meta.join("\n")
        }
-       // [local-smark] shell compression: close sink stream and track duration
-       if (sink) {
+       // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
+       const displayOutput = preview(display.value())
 diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
-index 51a50da28edf4743ff525395cce177aef5bef2a8..0619ead5f5a75b679f5720ee0be444abf3a4a969 100644
+index 2d98042bc..c00ae0e01 100644
 --- a/packages/opencode/src/tool/truncate.ts
 +++ b/packages/opencode/src/tool/truncate.ts
-@@ -3,12 +3,12 @@ import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effec
+@@ -4,11 +4,12 @@ import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effec
  import path from "path"
  import type { Agent } from "../agent/agent"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
 -import { evaluate } from "@/permission/evaluate"
  import { Config } from "@/config/config"
  import { Identifier } from "../id/id"
- import * as Log from "@opencode-ai/core/util/log"
  import { ToolID } from "./schema"
  import { TRUNCATION_DIR } from "./truncation-dir"
++// #282：截断提示改用统一 notice，替代 hasTaskTool 分支的英文提示对
 +import { formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
  
- const log = Log.create({ service: "truncation" })
  const RETENTION = Duration.days(7)
-@@ -26,17 +26,12 @@ export interface Options {
+ 
+@@ -28,17 +29,12 @@ export interface Options {
    direction?: "head" | "tail"
  }
  
@@ -692,21 +703,22 @@ index 51a50da28edf4743ff525395cce177aef5bef2a8..0619ead5f5a75b679f5720ee0be444ab
    /**
 -   * Returns output unchanged when it fits within the limits, otherwise writes the full text
 -   * to the truncation directory and returns a preview plus a hint to inspect the saved file.
-+   * 内容未超限时原样返回；超限时保存完整原文，并返回预览加统一 notice。
++   * #282：内容未超限时原样返回；超限时保存完整原文，并返回预览加统一 notice。
 +   * `agent` 保留在签名中，避免调用方在权限上下文中使用截断服务时需要分叉 API。
     */
    readonly output: (text: string, options?: Options, agent?: Agent.Info) => Effect.Effect<Result>
    /**
-@@ -83,7 +78,7 @@ export const layer = Layer.effect(
+@@ -85,7 +81,8 @@ const layer = Layer.effect(
        }
      })
  
 -    const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, agent?: Agent.Info) {
++    // #282：agent 不再参与提示分支，签名保留仅为调用方兼容
 +    const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, _agent?: Agent.Info) {
        const resolved = yield* limits()
        const maxLines = options.maxLines ?? resolved.maxLines
        const maxBytes = options.maxBytes ?? resolved.maxBytes
-@@ -98,44 +93,37 @@ export const layer = Layer.effect(
+@@ -100,44 +97,39 @@ const layer = Layer.effect(
        const out: string[] = []
        let i = 0
        let bytes = 0
@@ -740,10 +752,11 @@ index 51a50da28edf4743ff525395cce177aef5bef2a8..0619ead5f5a75b679f5720ee0be444ab
 -      const unit = hitBytes ? "bytes" : "lines"
        const preview = out.join("\n")
        const file = yield* write(text)
--
+ 
 -      const hint = hasTaskTool(agent)
 -        ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
 -        : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
++      // #282：统一 notice：total 描述完整原文，shown 描述实际保留的预览
 +      const notice = formatOutputTruncatedNotice({
 +        source: "tool",
 +        total: outputStats(text),
@@ -761,12 +774,283 @@ index 51a50da28edf4743ff525395cce177aef5bef2a8..0619ead5f5a75b679f5720ee0be444ab
          truncated: true,
          outputPath: file,
        } as const
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+index c476e651b..07eb2ee7d 100644
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -744,7 +744,10 @@ describe("session.message-v2.toModelMessage", () => {
+             type: "tool-result",
+             toolCallId: "call-1",
+             toolName: "bash",
+-            output: { type: "text", value: "[Old tool result content cleared]" },
++            output: {
++              type: "text",
++              value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />',
++            },
+           },
+         ],
+       },
+@@ -813,7 +816,7 @@ describe("session.message-v2.toModelMessage", () => {
+             toolName: "bash",
+             output: {
+               type: "text",
+-              value: "abcd\n[Tool output truncated for compaction: omitted 6 chars]",
++              value: "abcd\n[... compaction truncated 6 chars]",
+             },
+           },
+         ],
+@@ -898,9 +901,7 @@ describe("session.message-v2.toModelMessage", () => {
+       "12179",
+       "4575",
+       "",
+-      "<shell_metadata>",
+-      "User aborted the command",
+-      "</shell_metadata>",
++      '<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />',
+     ].join("\n")
+ 
+     const input: SessionV1.WithParts[] = [
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 544c64087..b013cac12 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -2993,7 +2993,7 @@ unixNoLLMServer(
+           expect(exit.value.info.role).toBe("assistant")
+           const tool = completedTool(exit.value.parts)
+           if (tool) {
+-            expect(tool.state.output).toContain("User aborted the command")
++            expect(tool.state.output).toContain('reason="user_abort"')
+           }
+         }
+       }),
+@@ -3037,7 +3037,7 @@ unixNoLLMServer(
+           expect(exit.value.info.role).toBe("assistant")
+           const tool = completedTool(exit.value.parts)
+           if (tool) {
+-            expect(tool.state.output).toContain("User aborted the command")
++            expect(tool.state.output).toContain('reason="user_abort"')
+           }
+         }
+       }),
+@@ -3094,8 +3094,8 @@ unix(
+ 
+       expect(tool.state.metadata.truncated).toBe(true)
+       expect(typeof tool.state.metadata.outputPath).toBe("string")
+-      expect(tool.state.output).toMatch(/\.\.\.output truncated\.\.\./)
+-      expect(tool.state.output).toMatch(/Full output saved to:\s+\S+/)
++      expect(tool.state.output).toContain('<opencode_notice type="output_truncated" source="shell"')
++      expect(tool.state.output).toContain(`path="${tool.state.metadata.outputPath}`)
+       expect(tool.state.output).not.toContain("Tool execution aborted")
+     }),
+   { git: true },
+@@ -3120,7 +3120,7 @@ unixNoLLMServer(
+       expect(Exit.isSuccess(exit)).toBe(true)
+       if (Exit.isSuccess(exit)) {
+         const tool = completedTool(exit.value.parts)
+-        expect(tool?.state.output).toContain("User aborted the command")
++        expect(tool?.state.output).toContain('reason="user_abort"')
+       }
+ 
+       yield* Fiber.await(sh)
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 8ae250e1a..71366b2b0 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1300,7 +1300,7 @@ describe("tool.shell abort", () => {
+             },
+           )
+           expect(res.output).toContain("before")
+-          expect(res.output).toContain("User aborted the command")
++          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
+           expect(collected.length).toBeGreaterThan(0)
+         }),
+       ),
+@@ -1317,8 +1317,9 @@ describe("tool.shell abort", () => {
+             command: `sleep 60`,
+             timeout: 500,
+           })
+-          expect(result.output).toContain("shell tool terminated command after exceeding timeout")
+-          expect(result.output).toContain("retry with a larger timeout value in milliseconds")
++          expect(result.output).toContain(
++            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
++          )
+         }),
+       ),
+     15_000,
+@@ -1338,7 +1339,7 @@ describe("tool.shell abort", () => {
+             },
+             ctx,
+           )
+-          expect(result.output).toContain("exceeding timeout 500 ms")
++          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
+         }),
+       ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
+     15_000,
+@@ -1408,8 +1409,11 @@ describe("tool.shell truncation", () => {
+           command: fill("lines", lineCount),
+         })
+         mustTruncate(result)
+-        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
+-        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
++        // #282：total 用源码常量计算行数，锁定 total 与实际完整行数的一致性
++        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
++        expect(result.output).toContain(`total="${lineCount}L/`)
++        expect(result.output).toContain('shown="tail')
++        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
+       }),
+     ),
+   )
+@@ -1423,8 +1427,11 @@ describe("tool.shell truncation", () => {
+           command: fill("bytes", byteCount),
+         })
+         mustTruncate(result)
+-        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
+-        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
++        // #282：单行超大输出的 total 固定为 1L——notice 行数口径与 tail 预览一致
++        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
++        expect(result.output).toContain('total="1L/')
++        expect(result.output).toContain('shown="tail')
++        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
+       }),
+     ),
+   )
+diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
+index 78d635673..72ac3b657 100644
+--- a/packages/opencode/test/tool/truncation.test.ts
++++ b/packages/opencode/test/tool/truncation.test.ts
+@@ -34,7 +34,7 @@ describe("Truncate", () => {
+         const result = yield* svc.output(content)
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("truncated...")
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+         if (result.truncated) expect(result.outputPath).toBeDefined()
+       }),
+     )
+@@ -57,7 +57,24 @@ describe("Truncate", () => {
+         const result = yield* svc.output(lines, { maxLines: 10 })
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("...90 lines truncated...")
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++        expect(result.content).toContain('total="100L/')
++        expect(result.content).toContain('shown="head 10L/')
++        if (!result.truncated) throw new Error("expected truncated")
++        expect(result.content).toContain(`path="${result.outputPath}`)
++      }),
++    )
++
++    // #282：末尾换行不计入行数——notice 的 total 必须等于人类读文件的行数口径
++    it.live("does not count final newline as an extra notice line", () =>
++      Effect.gen(function* () {
++        const svc = yield* Truncate.Service
++        const lines = Array.from({ length: 12 }, (_, i) => `line${i}`).join("\n") + "\n"
++        const result = yield* svc.output(lines, { maxLines: 10 })
++
++        expect(result.truncated).toBe(true)
++        expect(result.content).toContain('total="12L/')
++        expect(result.content).toContain('shown="head 10L/')
+       }),
+     )
+ 
+@@ -68,7 +85,9 @@ describe("Truncate", () => {
+         const result = yield* svc.output(content, { maxBytes: 100 })
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("truncated...")
++        // #282：byte 维度截断同样走统一 notice 标签，不再用 "truncated..." 英文句式
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++        expect(result.content).toContain('shown="head')
+       }),
+     )
+ 
+@@ -132,7 +151,9 @@ describe("Truncate", () => {
+           const content = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
+           const result = yield* (yield* Truncate.Service).output(content)
+           expect(result.truncated).toBe(true)
+-          expect(result.content).toContain("...90 lines truncated...")
++          expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++          expect(result.content).toContain('total="100L/')
++          expect(result.content).toContain('shown="head 10L/')
+         }),
+       )
+ 
+@@ -143,7 +164,8 @@ describe("Truncate", () => {
+           const content = "a".repeat(1000)
+           const result = yield* (yield* Truncate.Service).output(content)
+           expect(result.truncated).toBe(true)
+-          expect(result.content).toContain("bytes truncated...")
++          expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++          expect(result.content).toContain('shown="head')
+         }),
+       )
+ 
+@@ -168,7 +190,8 @@ describe("Truncate", () => {
+         const result = yield* svc.output(content)
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("bytes truncated...")
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++        expect(result.content).toContain('shown="head')
+         expect(Buffer.byteLength(content, "utf-8")).toBeGreaterThan(Truncate.MAX_BYTES)
+       }),
+     )
+@@ -180,8 +203,7 @@ describe("Truncate", () => {
+         const result = yield* svc.output(lines, { maxLines: 10 })
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("The tool call succeeded but the output was truncated")
+-        expect(result.content).toContain("Grep")
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+         if (!result.truncated) throw new Error("expected truncated")
+         expect(result.outputPath).toBeDefined()
+         expect(result.outputPath).toContain("tool_")
+@@ -192,7 +214,7 @@ describe("Truncate", () => {
+       }),
+     )
+ 
+-    it.live("suggests Task tool when agent has task permission", () =>
++    it.live("keeps truncation notice compact when agent has task permission", () =>
+       Effect.gen(function* () {
+         const svc = yield* Truncate.Service
+         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
+@@ -200,12 +222,13 @@ describe("Truncate", () => {
+         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("Grep")
+-        expect(result.content).toContain("Task tool")
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++        expect(result.content).not.toContain("Task tool")
++        expect(result.content).not.toContain("Use Grep")
+       }),
+     )
+ 
+-    it.live("omits Task tool hint when agent lacks task permission", () =>
++    it.live("keeps truncation notice compact when agent lacks task permission", () =>
+       Effect.gen(function* () {
+         const svc = yield* Truncate.Service
+         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
+@@ -213,7 +236,8 @@ describe("Truncate", () => {
+         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
+ 
+         expect(result.truncated).toBe(true)
+-        expect(result.content).toContain("Grep")
++        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
++        expect(result.content).not.toContain("Use Grep")
+         expect(result.content).not.toContain("Task tool")
+       }),
+     )
 diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ceaa0e48bd9e19378fa0de168e53eabbc01626a7
+index 000000000..a35c1f531
 --- /dev/null
 +++ b/packages/opencode/src/util/output-notice.ts
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,86 @@
++// #282：模型可见工具输出 notice 的唯一 owner：块级 opencode_notice 标签 +
++// 机器可解析的行内省略标记。所有旧格式（...output truncated...、<shell_metadata>、
++// [Tool output truncated for compaction: ...]、[Old tool result content cleared]）
++// 一律迁移到这里，禁止调用方再各自拼写。
 +type OutputAmount = {
 +  lines?: number
 +  bytes?: number
@@ -789,14 +1073,14 @@ index 0000000000000000000000000000000000000000..ceaa0e48bd9e19378fa0de168e53eabb
 +
 +export function outputStats(text: string): Required<OutputAmount> {
 +  return {
-+    // 工具输出经常以最终换行结束；这里按人类查看保存文件时的行数统计，
++    // #282：工具输出经常以最终换行结束；按人类查看保存文件时的行数统计，
 +    // 避免 notice 把末尾换行误报成额外空行。
 +    lines: text.length === 0 ? 0 : text.replace(/\r?\n$/, "").split(/\r?\n/).length,
 +    bytes: Buffer.byteLength(text, "utf-8"),
 +  }
 +}
 +
-+// 这些 notice 是模型可见的 harness 边界提示，不是遥测。上下文里只放
++// #282：这些 notice 是模型可见的 harness 边界提示，不是遥测。上下文里只放
 +// 可继续工作的关键字段，详细计数继续留在 metadata/log，避免截断说明本身耗费过多 token。
 +export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
 +  return formatNotice({
@@ -808,21 +1092,25 @@ index 0000000000000000000000000000000000000000..ceaa0e48bd9e19378fa0de168e53eabb
 +  })
 +}
 +
++// #282：timeout_ms 直接内联，模型无需再查 metadata 即可判断是否值得重试
 +export function formatExecutionNotice(input: ExecutionNotice) {
 +  return formatNotice({ type: "execution", source: "shell", ...input })
 +}
 +
++// #282：compaction 已在持久层清理旧输出；给模型一个稳定的占位语义而不是空串
 +export function formatCompactionClearedNotice() {
 +  return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
 +}
 +
 +function formatNotice(input: Notice) {
++  // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
 +  return `<opencode_notice ${Object.entries(input)
 +    .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))
 +    .join(" ")} />`
 +}
 +
 +function formatOutputAmount(input: OutputAmount) {
++  // #282：L/B 分段展示；任一缺失即跳过该段，不输出 0 占位
 +  return [input.lines === undefined ? "" : `${input.lines}L`, input.bytes === undefined ? "" : formatBytes(input.bytes)]
 +    .filter(Boolean)
 +    .join("/")
@@ -834,275 +1122,14 @@ index 0000000000000000000000000000000000000000..ceaa0e48bd9e19378fa0de168e53eabb
 +  return `${formatUnit(bytes / 1024 / 1024)}MB`
 +}
 +
++// #282：≥10 取整、<10 保留一位小数；整数值不拖尾 .0，保证断言稳定
 +function formatUnit(value: number) {
 +  if (value >= 10) return Math.round(value).toString()
 +  const rounded = Math.round(value * 10) / 10
 +  return Number.isInteger(rounded) ? rounded.toString() : rounded.toFixed(1)
 +}
 +
++// #282：属性值转义防破坏标签结构；输出可能包含用户控制的文件路径
 +function escapeAttribute(value: string) {
 +  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;")
 +}
-diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index 800025f1b1285ae0874a3a64ed4d7e309cbdec91..11cd07c33c4331fe71af992f5f2de2d1eea821c1 100644
---- a/packages/opencode/test/session/message-v2.test.ts
-+++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -741,7 +741,10 @@ describe("session.message-v2.toModelMessage", () => {
-             type: "tool-result",
-             toolCallId: "call-1",
-             toolName: "bash",
--            output: { type: "text", value: "[Old tool result content cleared]" },
-+            output: {
-+              type: "text",
-+              value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />',
-+            },
-           },
-         ],
-       },
-@@ -810,7 +813,7 @@ describe("session.message-v2.toModelMessage", () => {
-             toolName: "bash",
-             output: {
-               type: "text",
--              value: "abcd\n[Tool output truncated for compaction: omitted 6 chars]",
-+              value: "abcd\n[... compaction truncated 6 chars]",
-             },
-           },
-         ],
-@@ -895,9 +898,7 @@ describe("session.message-v2.toModelMessage", () => {
-       "12179",
-       "4575",
-       "",
--      "<shell_metadata>",
--      "User aborted the command",
--      "</shell_metadata>",
-+      '<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />',
-     ].join("\n")
- 
-     const input: MessageV2.WithParts[] = [
-diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 0147db13d41ac89bf376b4069a5360cb0e7cf285..13e3bc1ae0e4af31ffe669cb3dda62719f75cfb3 100644
---- a/packages/opencode/test/session/prompt.test.ts
-+++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2384,7 +2384,7 @@ unix(
-           expect(exit.value.info.role).toBe("assistant")
-           const tool = completedTool(exit.value.parts)
-           if (tool) {
--            expect(tool.state.output).toContain("User aborted the command")
-+            expect(tool.state.output).toContain('reason="user_abort"')
-           }
-         }
-       }),
-@@ -2428,7 +2428,7 @@ unix(
-           expect(exit.value.info.role).toBe("assistant")
-           const tool = completedTool(exit.value.parts)
-           if (tool) {
--            expect(tool.state.output).toContain("User aborted the command")
-+            expect(tool.state.output).toContain('reason="user_abort"')
-           }
-         }
-       }),
-@@ -2480,8 +2480,8 @@ unix(
- 
-       expect(tool.state.metadata.truncated).toBe(true)
-       expect(typeof tool.state.metadata.outputPath).toBe("string")
--      expect(tool.state.output).toMatch(/\.\.\.output truncated\.\.\./)
--      expect(tool.state.output).toMatch(/Full output saved to:\s+\S+/)
-+      expect(tool.state.output).toContain('<opencode_notice type="output_truncated" source="shell"')
-+      expect(tool.state.output).toContain(`path="${tool.state.metadata.outputPath}`)
-       expect(tool.state.output).not.toContain("Tool execution aborted")
-     }),
-   { git: true },
-@@ -2506,7 +2506,7 @@ unix(
-       expect(Exit.isSuccess(exit)).toBe(true)
-       if (Exit.isSuccess(exit)) {
-         const tool = completedTool(exit.value.parts)
--        expect(tool?.state.output).toContain("User aborted the command")
-+        expect(tool?.state.output).toContain('reason="user_abort"')
-       }
- 
-       yield* Fiber.await(sh)
-diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index ce992a83f7da251deae67117ce559107413a9485..6624d7e464a96d6a8757d5d5fa33d5321d9b0c7c 100644
---- a/packages/opencode/test/tool/shell.test.ts
-+++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1679,7 +1679,7 @@ describe("tool.shell abort", () => {
-             },
-           )
-           expect(res.output).toContain("before")
--          expect(res.output).toContain("User aborted the command")
-+          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
-           expect(collected.length).toBeGreaterThan(0)
-         }),
-       ),
-@@ -1698,8 +1698,9 @@ describe("tool.shell abort", () => {
-             timeout: 500,
-           })
-           expect(result.output).toContain("started")
--          expect(result.output).toContain("shell tool terminated command after exceeding timeout")
--          expect(result.output).toContain("retry with a larger timeout value in milliseconds")
-+          expect(result.output).toContain(
-+            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
-+          )
-         }),
-       ),
-     15_000,
-@@ -1716,7 +1717,7 @@ describe("tool.shell abort", () => {
-             description: "Default timeout test",
-           })
-           expect(result.output).toContain("started")
--          expect(result.output).toContain("exceeding timeout 500 ms")
-+          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
-         }),
-       ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
-     15_000,
-@@ -1790,8 +1791,10 @@ describe("tool.shell truncation", () => {
-           description: "Generate lines exceeding limit",
-         })
-         mustTruncate(result)
--        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
--        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
-+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
-+        expect(result.output).toContain(`total="${lineCount}L/`)
-+        expect(result.output).toContain('shown="tail')
-+        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
-       }),
-     ),
-   )
-@@ -1806,8 +1809,10 @@ describe("tool.shell truncation", () => {
-           description: "Generate bytes exceeding limit",
-         })
-         mustTruncate(result)
--        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
--        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
-+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
-+        expect(result.output).toContain('total="1L/')
-+        expect(result.output).toContain('shown="tail')
-+        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
-       }),
-     ),
-   )
-diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
-index 152cc66ba45ce0ed3aee98c2b7657288b53d0576..835b68e4d943134430213c52a9b03710f5d2488f 100644
---- a/packages/opencode/test/tool/truncation.test.ts
-+++ b/packages/opencode/test/tool/truncation.test.ts
-@@ -35,7 +35,7 @@ describe("Truncate", () => {
-         const result = yield* svc.output(content)
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("truncated...")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-         if (result.truncated) expect(result.outputPath).toBeDefined()
-       }),
-     )
-@@ -58,7 +58,23 @@ describe("Truncate", () => {
-         const result = yield* svc.output(lines, { maxLines: 10 })
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("...90 lines truncated...")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+        expect(result.content).toContain('total="100L/')
-+        expect(result.content).toContain('shown="head 10L/')
-+        if (!result.truncated) throw new Error("expected truncated")
-+        expect(result.content).toContain(`path="${result.outputPath}`)
-+      }),
-+    )
-+
-+    it.live("does not count final newline as an extra notice line", () =>
-+      Effect.gen(function* () {
-+        const svc = yield* Truncate.Service
-+        const lines = Array.from({ length: 12 }, (_, i) => `line${i}`).join("\n") + "\n"
-+        const result = yield* svc.output(lines, { maxLines: 10 })
-+
-+        expect(result.truncated).toBe(true)
-+        expect(result.content).toContain('total="12L/')
-+        expect(result.content).toContain('shown="head 10L/')
-       }),
-     )
- 
-@@ -69,7 +85,8 @@ describe("Truncate", () => {
-         const result = yield* svc.output(content, { maxBytes: 100 })
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("truncated...")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+        expect(result.content).toContain('shown="head')
-       }),
-     )
- 
-@@ -133,7 +150,9 @@ describe("Truncate", () => {
-           const content = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
-           const result = yield* (yield* Truncate.Service).output(content)
-           expect(result.truncated).toBe(true)
--          expect(result.content).toContain("...90 lines truncated...")
-+          expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+          expect(result.content).toContain('total="100L/')
-+          expect(result.content).toContain('shown="head 10L/')
-         }),
-       )
- 
-@@ -144,7 +163,8 @@ describe("Truncate", () => {
-           const content = "a".repeat(1000)
-           const result = yield* (yield* Truncate.Service).output(content)
-           expect(result.truncated).toBe(true)
--          expect(result.content).toContain("bytes truncated...")
-+          expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+          expect(result.content).toContain('shown="head')
-         }),
-       )
- 
-@@ -169,7 +189,8 @@ describe("Truncate", () => {
-         const result = yield* svc.output(content)
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("bytes truncated...")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+        expect(result.content).toContain('shown="head')
-         expect(Buffer.byteLength(content, "utf-8")).toBeGreaterThan(Truncate.MAX_BYTES)
-       }),
-     )
-@@ -181,8 +202,7 @@ describe("Truncate", () => {
-         const result = yield* svc.output(lines, { maxLines: 10 })
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("The tool call succeeded but the output was truncated")
--        expect(result.content).toContain("Grep")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-         if (!result.truncated) throw new Error("expected truncated")
-         expect(result.outputPath).toBeDefined()
-         expect(result.outputPath).toContain("tool_")
-@@ -193,7 +213,7 @@ describe("Truncate", () => {
-       }),
-     )
- 
--    it.live("suggests Task tool when agent has task permission", () =>
-+    it.live("keeps truncation notice compact when agent has task permission", () =>
-       Effect.gen(function* () {
-         const svc = yield* Truncate.Service
-         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
-@@ -201,12 +221,13 @@ describe("Truncate", () => {
-         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("Grep")
--        expect(result.content).toContain("Task tool")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+        expect(result.content).not.toContain("Task tool")
-+        expect(result.content).not.toContain("Use Grep")
-       }),
-     )
- 
--    it.live("omits Task tool hint when agent lacks task permission", () =>
-+    it.live("keeps truncation notice compact when agent lacks task permission", () =>
-       Effect.gen(function* () {
-         const svc = yield* Truncate.Service
-         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
-@@ -214,7 +235,8 @@ describe("Truncate", () => {
-         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
- 
-         expect(result.truncated).toBe(true)
--        expect(result.content).toContain("Grep")
-+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
-+        expect(result.content).not.toContain("Use Grep")
-         expect(result.content).not.toContain("Task tool")
-       }),
-     )

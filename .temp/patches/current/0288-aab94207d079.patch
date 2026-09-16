@@ -23,7 +23,7 @@ diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1512,7 +1512,10 @@
+@@ -1424,7 +1424,10 @@
        Effect.gen(function* () {
          const byteCount = Truncate.MAX_BYTES + 10000
          const result = yield* run({
@@ -33,4 +33,5 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +          compress_output: false,
          })
          mustTruncate(result)
+         // #282：单行超大输出的 total 固定为 1L——notice 行数口径与 tail 预览一致
          expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')

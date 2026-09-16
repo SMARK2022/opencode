@@ -23,7 +23,7 @@ diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config
 index b1d3ae727..774d1682c 100644
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -173,6 +173,11 @@ export const Info = Schema.Struct({
+@@ -173,6 +173,11 @@
        }),
      }),
    ),
@@ -35,7 +35,7 @@ index b1d3ae727..774d1682c 100644
    experimental: Schema.optional(
      Schema.Struct({
        disable_paste_summary: Schema.optional(Schema.Boolean),
-@@ -186,14 +191,6 @@ export const Info = Schema.Struct({
+@@ -186,14 +191,6 @@
        continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
          description: "Continue the agent loop when a tool call is denied",
        }),
@@ -54,7 +54,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index 54c4307a3..6a140d227 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1490,9 +1490,10 @@ const layer = Layer.effect(
+@@ -1490,9 +1490,10 @@
              // 使用独立 goalTurns 计数器防止无限循环（step++ 在 continue 后跳过）。
              // 仅对主 session（无 parentID）和非 decide agent 生效。
              const cfg = yield* config.get()
@@ -71,7 +71,7 @@ diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool
 index 8c766dc76..fe5e0bd09 100644
 --- a/packages/opencode/src/tool/registry.ts
 +++ b/packages/opencode/src/tool/registry.ts
-@@ -114,7 +114,7 @@ const layer = Layer.effect(
+@@ -114,7 +114,7 @@
      const greptool = yield* GrepTool
      const patchtool = yield* ApplyPatchTool
      const skilltool = yield* SkillTool
@@ -80,7 +80,7 @@ index 8c766dc76..fe5e0bd09 100644
      const goaltool = yield* GoalTool
      const agent = yield* Agent.Service
      const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
-@@ -205,9 +205,6 @@ const layer = Layer.effect(
+@@ -205,9 +205,6 @@
            }
          }
  
@@ -90,7 +90,7 @@ index 8c766dc76..fe5e0bd09 100644
          const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
  
          const tool = yield* Effect.all({
-@@ -253,8 +250,8 @@ const layer = Layer.effect(
+@@ -253,8 +250,8 @@
              tool.patch,
              tool.permission_review_decision,
              ...(tool.execute ? [tool.execute] : []),
@@ -105,7 +105,7 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 index 1efc0a23a..e4094e07c 100644
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -10,10 +10,14 @@ import { InstanceStore } from "@/project/instance-store"
+@@ -10,10 +10,14 @@
  import { InstanceBootstrap } from "@/project/bootstrap"
  import { EventV2Bridge } from "@/event-v2-bridge"
  import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -120,7 +120,7 @@ index 1efc0a23a..e4094e07c 100644
  const it = testEffect(
    AppNodeBuilder.build(
      LayerNode.group([
-@@ -23,6 +27,7 @@ const it = testEffect(
+@@ -23,6 +27,7 @@
        SessionProjector.node,
        CrossSpawnSpawner.node,
        InstanceStore.node,
@@ -128,7 +128,7 @@ index 1efc0a23a..e4094e07c 100644
      ]),
      [
        [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
-@@ -30,6 +35,7 @@ const it = testEffect(
+@@ -30,6 +35,7 @@
          InstanceBootstrap.node,
          Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
        ],
@@ -136,7 +136,7 @@ index 1efc0a23a..e4094e07c 100644
      ],
    ),
  )
-@@ -396,3 +402,20 @@ it.instance(
+@@ -396,3 +402,20 @@
      }),
    { git: true },
  )
@@ -161,7 +161,7 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 index 44dadf590..a5417dbac 100644
 --- a/packages/tui/src/app.tsx
 +++ b/packages/tui/src/app.tsx
-@@ -49,6 +49,8 @@ import { DialogThemeList } from "./component/dialog-theme-list"
+@@ -49,6 +49,8 @@
  import { DialogHelp } from "./ui/dialog-help"
  import { DialogAgent } from "./component/dialog-agent"
  import { DialogSessionList } from "./component/dialog-session-list"
@@ -170,7 +170,7 @@ index 44dadf590..a5417dbac 100644
  import { DialogWorkspaceList } from "./component/dialog-workspace-list"
  import { DialogConsoleOrg } from "./component/dialog-console-org"
  import { ThemeProvider, useTheme } from "./context/theme"
-@@ -644,6 +646,26 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
+@@ -644,6 +646,26 @@
            dialog.replace(() => <DialogSessionList />)
          },
        },
@@ -347,10 +347,9 @@ index 000000000..f3b93ff25
 +}
 \ No newline at end of file
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index 0d12889d7..88564d72c 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1571,26 +1571,22 @@ function UserMessage(props: {
+@@ -1574,26 +1574,21 @@
  }) {
    const ctx = use()
    const local = useLocal()
@@ -379,8 +378,7 @@ index 0d12889d7..88564d72c 100644
 +        if (x.type !== "text") return null
 +        // 非 synthetic 文本直接使用
 +        if (!x.synthetic) return x.text
-+        // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体，
-+        // 走正常用户消息渲染路径，避免独立的 goal 渲染块堆积间距
++        // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体
 +        const m = x.text.match(/<objective>([\s\S]*?)<\/objective>/)
 +        if (!m) return null
 +        return m[1].trim()
@@ -390,7 +388,7 @@ index 0d12889d7..88564d72c 100644
        })
        .filter(Boolean)
      return texts.join("\n\n")
-@@ -1607,33 +1603,6 @@ function UserMessage(props: {
+@@ -1610,35 +1605,6 @@
  
    return (
      <>
@@ -415,6 +413,8 @@ index 0d12889d7..88564d72c 100644
 -            <text fg={theme.textMuted}>
 -              <b>↻ Goal continuation</b>
 -            </text>
+-            {/* [local-smark] 续跑 prompt 内容来自 SessionGoal.continuationPrompt， */}
+-            {/* 含 objective、剩余预算与已用量，模型无需回读历史 goal 记录 */}
 -            <text fg={theme.textMuted} wrapMode="word">
 -              {goalText()}
 -            </text>

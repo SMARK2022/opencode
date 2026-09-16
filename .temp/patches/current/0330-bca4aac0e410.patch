@@ -1,147 +1,14 @@
-From bca4aac0e41036ff53e3b37494538f3190d38afa Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 24 Jun 2026 00:49:07 +0800
-Subject: [PATCH] =?UTF-8?q?fix(accounting):=20=E8=B7=B3=E8=BF=87=20queued?=
- =?UTF-8?q?=20orphan=20user=EF=BC=8C=E9=81=BF=E5=85=8D=20context=20usage?=
- =?UTF-8?q?=20=E4=B8=8E=20estimate=20=E5=BD=92=E9=9B=B6?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-当 transcript 中存在尚未派生 assistant 的 user 消息（TaskTool 后台注入
-noReply prompt 在父会话 busy 期间落库的 orphan）时，footer/sidebar/计时器
-按 lastUser.id 反查 assistant 找不到匹配项，直接 fail-closed 到 undefined/
-全 0，而非显示当前正在执行的 assistant 流统计。
-
-新增 activeTurnPair helper 以最新 assistant 的 parentID 锁定活跃 user，
-跳过 orphan；tokenAccounting 内部 lastUser 与 computeContextData 的 model/
-tool 解析同步采用该口径。activeTurnDuration 一并复用，消除计时器与 token
-widget 的 split-brain。成对场景下不变量 parentID===latestUser.id 成立，
-行为零变化；首次 prompt 空窗（无 assistant）保留原 fail-closed 语义。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 8e2412cc957061fe3f9062ef1e4b07f6888442d3..5c3afbb3dde765d32864d40bfb8a82e9164b58ea 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -51,7 +51,7 @@ import { useToast } from "../../ui/toast"
- import { useKV } from "../../context/kv"
- // [local-smark] Token flow pulse and throttled signal for usage display
- import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
--import { activeTurnDuration } from "../../util/session-pending"
-+import { activeTurnDuration, activeTurnPair } from "../../util/session-pending"
- import { DialogSkill } from "../dialog-skill"
- import {
-   confirmWorkspaceFileChanges,
-@@ -384,9 +384,12 @@ export function Prompt(props: PromptProps) {
-     const msg = sync.data.message[props.sessionID] ?? []
-     const getParts = (id: string) => sync.data.part[id] ?? []
- 
--    const lastUser = msg.findLast((item) => item.role === "user")
--    const last = lastUser ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id) : undefined
--    if (!last) return
-+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-+    // 避免 footer usage 在后台任务注入 orphan user 期间归零（旧逻辑按 lastUser.id
-+    // 反查 assistant 找不到时直接 return undefined）。
-+    const pair = activeTurnPair(msg)
-+    if (!pair?.assistant) return
-+    const last = pair.assistant
- 
-     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-     // [local-smark] Detailed token accounting
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-index f4509368b74c6c2d1b2a242f56e05ebfc81aade3..d7dc1d8b334134abe60b1e52d7b5b6c1ddb5017d 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-@@ -5,6 +5,7 @@ import type { InternalTuiPlugin } from "../../plugin/internal"
- import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
- import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
- import { createTokenFlowPulse } from "../../util/signal"
-+import { activeTurnPair } from "../../util/session-pending"
- import { tokenAccounting } from "@/token/accounting"
- import { useLocal } from "@tui/context/local"
- import { useSDK } from "@tui/context/sdk"
-@@ -40,11 +41,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-     const messages = msg()
-     const getParts = (id: string) => props.api.state.part(id)
- 
--    const lastUser = messages.findLast((item) => item.role === "user")
--    if (!lastUser) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
--
--    const last = messages.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id)
--    if (!last) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-+    // 避免 sidebar context 在 orphan 窗口期显示全 0（旧逻辑找不到匹配 assistant 时
-+    // 直接 return 全 0 对象）。
-+    const pair = activeTurnPair(messages)
-+    if (!pair?.assistant) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-+    const last = pair.assistant
- 
-     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-     const acc = tokenAccounting(messages, getParts, model?.limit.context)
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index 122d12aa0d539df2d81c5a2086b488ca7e4507db..812414957d0b38c5639bdc0de5f630eaf729deae 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -8,6 +8,7 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { Locale } from "@/util/locale"
- import { tokenAccounting } from "@/token/accounting"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-+import { activeTurnPair } from "../../util/session-pending"
- import { useTerminalDimensions } from "@opentui/solid"
- import { useCommandPalette } from "../../context/command-palette"
- import { useCommandShortcut } from "../../keymap"
-@@ -52,9 +53,11 @@ export function SubagentFooter() {
-     const msg = messages()
-     const getParts = (id: string) => sync.data.part[id] ?? []
- 
--    const lastUser = msg.findLast((item) => item.role === "user")
--    const last = lastUser ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id) : undefined
--    if (!last) return
-+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-+    // 避免 subagent footer usage 在 orphan 窗口期归零。
-+    const pair = activeTurnPair(msg)
-+    if (!pair?.assistant) return
-+    const last = pair.assistant
- 
-     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-     // [local-smark] token accounting for detailed usage tracking
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index c2aabf1ac627ece7d0591eeb1aa5db9dfeab5cde..8935199c7f5cbca84194461196dbde44f1a15541 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -42,6 +42,7 @@ import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websear
- import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
- import { usable as overflowUsable } from "@/session/overflow"
- import { estimateDataUrlInputTokens } from "./token-estimate"
-+import { activeTurnPair } from "./session-pending"
- import { tokenAccounting } from "@/token/accounting"
- 
- type WithParts = {
-@@ -665,7 +666,10 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
- }
- 
- export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
--  const lastUser = input.messages.findLast((msg) => msg.role === "user")
-+  // 以活跃轮次取 user，跳过尚未派生 assistant 的 queued orphan user，让 model/tool
-+  // 解析对齐实际运行的 assistant 而非 orphan。computeContextData 不因无 assistant 早退——
-+  // 无 breakdown 时仍走文件系统兜底估算分支，故只取 pair.user。
-+  const lastUser = activeTurnPair(input.messages)?.user
-   const modelInfo = currentModel(input, lastUser)
-   const maxTokens = modelInfo.model?.limit.context ?? 0
- 
-diff --git a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-index 2ea434aa84d2e15c527beae76c1af94609907b90..59a4cbdf5dde204940c573160021439a02597827 100644
---- a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-@@ -59,20 +59,41 @@ export function assistantTurnDuration(messages: Message[], assistant: AssistantM
+diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/session-pending.ts
+--- a/packages/tui/src/util/session-pending.ts
++++ b/packages/tui/src/util/session-pending.ts
+@@ -44,16 +44,37 @@ export function assistantTurnDuration(messages: Message[], assistant: AssistantM
    return durationSince(user.time.created, end)
  }
  
 +// 当前活跃轮次的 (user, assistant) 对。是 footer usage、sidebar context 与左下角计时器
 +// 共用的解析口径，必须跳过尚未派生 assistant 的 queued orphan user——否则这些 widget
 +// 会在 orphan 窗口期（例如 TaskTool 后台注入 noReply prompt 在父会话 busy 期间持久化的
-+// user message）归零或漂移到错误的 user 时间戳。tokenAccounting 与 computeContextData
-+// 也通过同一口径锁定活跃 user，避免 request 累计和 model 解析落到 orphan 上。
++// user message）归零或漂移到错误的 user 时间戳。
 +export type ActiveTurnPair = { user: UserMessage; assistant: AssistantMessage | undefined }
 +
 +export function activeTurnPair(messages: readonly Message[]): ActiveTurnPair | undefined {
@@ -160,6 +27,7 @@ index 2ea434aa84d2e15c527beae76c1af94609907b90..59a4cbdf5dde204940c573160021439a
 +}
 +
  export function activeTurnDuration(messages: Message[], status: SessionStatus | undefined, now: number) {
+   // idle 即无运行中回合；status 本身可能因重连 stale，assistant 形态才是真边界
    if (!status || status.type === "idle") return 0
  
 -  const user = messages.findLast((message): message is UserMessage => message.role === "user")
@@ -168,29 +36,86 @@ index 2ea434aa84d2e15c527beae76c1af94609907b90..59a4cbdf5dde204940c573160021439a
 -  const assistant = messages.findLast((message): message is AssistantMessage => {
 -    return message.role === "assistant" && message.parentID === user.id
 -  })
--  if (!assistant) return durationSince(user.time.created, now)
 +  // 复用 activeTurnPair 锁定活跃 (user, assistant)，确保计时器与 token widget 口径一致，
 +  // 不会在 orphan user 窗口期切到错误的 user 时间戳。
 +  const pair = activeTurnPair(messages)
 +  if (!pair) return 0
 +  const { user, assistant } = pair
- 
-   // tool-calls / unknown 表示同一个 user turn 还可能继续执行工具或下一步模型调用。
-   // 运行中 footer 必须继续按 parent user 计时，不能停在上一条 assistant.completed。
--  if (!assistant.time.completed || assistant.finish === "tool-calls" || assistant.finish === "unknown") {
 +  // assistant 为 undefined（首次 prompt 空窗）时也走此分支，按 user.created 起算。
-+  if (!assistant || !assistant.time.completed || assistant.finish === "tool-calls" || assistant.finish === "unknown") {
-     return durationSince(user.time.created, now)
-   }
+   if (!assistant) return durationSince(user.time.created, now)
  
-diff --git a/packages/opencode/src/token/accounting.ts b/packages/opencode/src/token/accounting.ts
-index e77dd1f227f22c8c89ce75eef9852aee57d6ee09..3ee155c0f57b03398e42399087d5743ba7af94e8 100644
---- a/packages/opencode/src/token/accounting.ts
-+++ b/packages/opencode/src/token/accounting.ts
-@@ -105,7 +105,18 @@ export function tokenAccounting(
-   contextLimit?: number,
+   // finish 枚举语义：stop/end_turn 是终态；tool-calls/unknown/undefined 表示回合仍在推进
+
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -53,7 +53,7 @@ import { DialogAlert } from "../../ui/dialog-alert"
+ import { useToast } from "../../ui/toast"
+ import { useKV } from "../../context/kv"
+ import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+-import { activeTurnDuration } from "../../util/session-pending"
++import { activeTurnDuration, activeTurnPair } from "../../util/session-pending"
+ import { DialogSkill } from "../dialog-skill"
+ import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
+ import { useArgs } from "../../context/args"
+@@ -302,11 +302,12 @@ export function Prompt(props: PromptProps) {
+ 
+     const getParts = (id: string) => sync.data.part[id] ?? []
+     // #122：整会话消息交给 tokenAccounting 一次算清 step/request/session
+-    const lastUser = msg.findLast((item) => item.role === "user")
+-    const last = lastUser
+-      ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id)
+-      : undefined
+-    if (!last) return
++    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
++    // 避免 footer usage 在后台任务注入 orphan user 期间归零（旧逻辑按 lastUser.id
++    // 反查 assistant 找不到时直接 return undefined）。
++    const pair = activeTurnPair(msg)
++    if (!pair?.assistant) return
++    const last = pair.assistant
+ 
+     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+     // #122：整会话一次 accounting，避免 UI 重复 sumConfirmed/computeFinalTokens
+
+
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -8,6 +8,7 @@ import { Locale } from "../../util/locale"
+ import { tokenAccounting } from "../../util/token-accounting"
+ // #122：subagent footer 共用 accounting
+ import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++import { activeTurnPair } from "../../util/session-pending"
+ import { useTerminalDimensions } from "@opentui/solid"
+ import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
+ 
+@@ -60,11 +61,11 @@ export function SubagentFooter() {
+ 
+     const getParts = (id: string) => sync.data.part[id] ?? []
+     // #122：子代理页脚与主提示栏共用 tokenAccounting
+-    const lastUser = msg.findLast((item) => item.role === "user")
+-    const last = lastUser
+-      ? msg.findLast((item) => item.role === "assistant" && (item as any).parentID === lastUser.id)
+-      : undefined
+-    if (!last) return
++    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
++    // 避免 subagent footer usage 在 orphan 窗口期归零。
++    const pair = activeTurnPair(msg)
++    if (!pair?.assistant) return
++    const last = pair.assistant
+ 
+     const model = sync.data.provider.find((item) => item.id === (last as any).providerID)?.models[(last as any).modelID]
+     // #122：子代理页脚与主提示栏同一 accounting 口径
+
+
+diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/token-accounting.ts
+--- a/packages/tui/src/util/token-accounting.ts
++++ b/packages/tui/src/util/token-accounting.ts
+@@ -116,7 +116,18 @@ export function tokenAccounting(
  ): TokenAccounting {
-   // ── 1. lastUser / requestAssistantIDs ──
+   // #122：会话累计与当前 request 边界（按 user 消息切分）
+ // ── 1. lastUser / requestAssistantIDs ──
 -  const lastUser = messages.findLast((m) => m.role === "user")
 +  // 以最新 assistant 的 parentID 锁定当前活跃 user，跳过尚未派生 assistant 的 queued user
 +  // （例如 TaskTool 后台注入 noReply prompt 在父会话 busy 期间落库的 orphan）。
@@ -207,104 +132,92 @@ index e77dd1f227f22c8c89ce75eef9852aee57d6ee09..3ee155c0f57b03398e42399087d5743b
    const latestRequestAssistant = lastUser
      ? messages.findLast((m) => m.role === "assistant" && m.parentID === lastUser.id)
      : undefined
-diff --git a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-index 86a305a442806c3bed3772431fc15d216b288e01..dad92e1162766da85690294c92120a95fd30eafe 100644
---- a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
- import type { AssistantMessage, Message, UserMessage } from "@opencode-ai/sdk/v2"
- import {
-   activeTurnDuration,
-+  activeTurnPair,
-   assistantTurnDuration,
-   hasStreamingAssistant,
-   pendingAssistantID,
-@@ -90,14 +91,25 @@ describe("session pending helpers", () => {
-     expect(assistantTurnDuration([user("msg_user", 1_000), reply], reply)).toBe(0)
+
+
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -161,7 +161,13 @@ const latencyDisplay = createMemo(() => {
+     const getParts = (id: string) => props.api.state.part(id)
+ 
+     // 无助手消息时显示零值，等待服务端写入 tokens.input 后再显示
+-    const lastUser = users.at(-1)
++    // 以活跃轮次对解析当前轮：锁定最新 assistant 的 parent user，跳过其后尚未派生
++    // assistant 的 queued orphan user（如 TaskTool 后台 noReply 注入），避免 orphan
++    // 窗口期 sidebar context 显示全 0（旧逻辑按 users.at(-1) 反查 assistant 落空）。
++    const latestAssistant = assistants.at(-1)
++    const lastUser = latestAssistant
++      ? users.findLast((item) => item.id === latestAssistant.parentID)
++      : users.at(-1)
+     // 侧边栏上下文同样按 parentID 过滤当前请求的助手消息
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+ 
+
+
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1199,7 +1199,16 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+   // 消息按时间倒序过滤压缩历史，再反转回正序
+   const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
+   const compacted = filterCompactedMessages(raw.toReversed())
+-  const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
++  // 以活跃轮次取 user：锁定最新 assistant 的 parent user，跳过其后尚未派生 assistant 的
++  // queued orphan user（如 TaskTool 后台 noReply 注入），避免 model 解析漂移到 orphan 的
++  // 未定义 model。computeContextData 不因无 assistant 早退——无 breakdown 时仍走文件系统
++  // 兜底估算分支，故只取 user，assistant 缺失时退回最新 user（fail-closed 语义）。
++  const latestAssistantMsg = compacted.findLast((msg) => msg.info.role === "assistant")
++  const latestAssistantInfo = latestAssistantMsg?.info
++  const latestAssistantParentID = latestAssistantInfo && latestAssistantInfo.role === "assistant" ? latestAssistantInfo.parentID : undefined
++  const lastUser = latestAssistantParentID
++    ? compacted.findLast((msg) => msg.info.role === "user" && msg.info.id === latestAssistantParentID)?.info
++    : compacted.findLast((msg) => msg.info.role === "user")?.info
+   const modelInfo = currentModel(input, lastUser)
+   const maxTokens = modelInfo.model?.limit.context ?? 0
+   // 历史 step-finish 输入字符校准 chars/token；无历史时回落 4
+
+
+diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
+--- a/packages/tui/test/util/session-pending.test.ts
++++ b/packages/tui/test/util/session-pending.test.ts
+@@ -78,12 +78,26 @@ test("finds the active assistant only while the session is non-idle", () => {
    })
  
+   // 最新 user 之前已有 terminal assistant：active 起点切换到最新 user，上一轮不累计
 -  test("derives active turn duration from the latest user before the assistant exists", () => {
+-    const messages: Message[] = [user("first", 1_000), assistant("done", 2_000, "first", "stop"), user("latest", 5_000)]
 +  test("derives active turn duration from the latest user before any assistant exists", () => {
 +    // 首次 prompt 落库但 assistant 尚未创建的空窗期：保留按最新 user.created 计时的语义，
 +    // 不应因为缺少 assistant 就把耗时归零。
 +    const messages: Message[] = [user("only", 5_000)]
-+
-+    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(2_000)
-+  })
-+
+ 
+     expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(2_000)
+   })
+ 
 +  test("ignores queued orphan user when deriving active turn duration", () => {
 +    // 已完成 assistant 之后再落入 queued orphan user（例如 TaskTool 后台注入 noReply prompt
 +    // 在父会话 busy 期间持久化的 user message）：不应按 orphan user 重新起算耗时，
 +    // 而应沿用已完成 assistant 的终态——stale busy 下耗时归零，与 terminal-finish 语义一致。
++    const messages: Message[] = [
++      user("first", 1_000),
++      assistant("done", 2_000, "first", "stop"),
++      user("latest", 5_000),
++    ]
++    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(0)
++  })
++
+   test("derives active turn duration from the latest user's streaming assistant", () => {
      const messages: Message[] = [
        user("first", 1_000),
-       assistant("done", 2_000, "first", "stop"),
-       user("latest", 5_000),
-     ]
- 
--    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(2_000)
-+    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(0)
+
+
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -627,4 +627,63 @@ test("snapshot tracks streaming tool input deltas", () => {
+     expect(runs).toBe(2)
+     dispose()
    })
- 
-   test("derives active turn duration from the latest user's streaming assistant", () => {
-@@ -143,3 +155,48 @@ describe("session pending helpers", () => {
-     expect(activeTurnDuration(messages, { type: "idle" }, 8_000)).toBe(0)
-   })
- })
-+
-+// activeTurnPair 是 footer/sidebar/timer 共用的"当前活跃轮次"解析口径。
-+// 它必须跳过尚未派生 assistant 的 queued orphan user，否则 footer usage、sidebar context
-+// 和左下角计时器都会在 orphan 窗口期内归零或漂移到错误的 user 时间戳。
-+describe("activeTurnPair", () => {
-+  test("returns the latest paired user and assistant when all turns are paired", () => {
-+    const messages: Message[] = [
-+      user("u1", 1),
-+      assistant("a2", 2, "u1"),
-+      user("u3", 3),
-+      assistant("a4", 4, "u3"),
-+    ]
-+
-+    const pair = activeTurnPair(messages)
-+    expect(pair?.user.id).toBe("u3")
-+    expect(pair?.assistant?.id).toBe("a4")
-+  })
-+
-+  test("skips queued orphan user and returns the latest assistant's parent pair", () => {
-+    // orphan user3 无 assistant 子节点：应跳过它，回退到最新 assistant 的 parent user，
-+    // 让 widget 继续展示正在运行/已完成的 A 轮次，而不是 orphan B 的空数据。
-+    const messages: Message[] = [
-+      user("u1", 1),
-+      assistant("a2", 2, "u1", "stop"),
-+      user("u3", 3),
-+    ]
-+
-+    const pair = activeTurnPair(messages)
-+    expect(pair?.user.id).toBe("u1")
-+    expect(pair?.assistant?.id).toBe("a2")
-+  })
-+
-+  test("falls back to the latest user with undefined assistant before any assistant exists", () => {
-+    // 首次 prompt 空窗：返回 assistant: undefined，让调用点维持既有 fail-closed 显示。
-+    const messages: Message[] = [user("only", 1)]
-+
-+    const pair = activeTurnPair(messages)
-+    expect(pair?.user.id).toBe("only")
-+    expect(pair?.assistant).toBeUndefined()
-+  })
-+
-+  test("returns undefined when there are no messages", () => {
-+    expect(activeTurnPair([])).toBeUndefined()
-+  })
-+})
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
-index abb577b3085dbd3bf970c0d4eeb3c560f5e4a3c3..7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1 100644
---- a/packages/opencode/test/cli/tui/context-usage.test.ts
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -599,4 +599,64 @@ describe("context usage", () => {
-     // 估算应接近确认值 (误差 < 2%)
-     expect(Math.abs(inputTokens - confirmed) / confirmed).toBeLessThan(0.02)
-   })
-+
 +  test("queued trailing user does not blank out context usage or shift the resolved model", async () => {
 +    // orphan user3 没有 assistant 子节点（模拟 TaskTool 后台注入 noReply prompt 在父会话
 +    // busy 期间持久化的 user message）。修复前 lastUser=user3(modelB) 导致 /context 面板
@@ -365,6 +278,8 @@ index abb577b3085dbd3bf970c0d4eeb3c560f5e4a3c3..7f5a35782f8e6a4ae36bcc82f8a66ccb
 +    expect(data.totalTokens).toBe(17_600)
 +  })
  })
+
+
 diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode/test/token/accounting.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..40349c2bab19910ae29b307054c94d40f83d17e3
@@ -431,3 +346,4 @@ index 0000000000000000000000000000000000000000..40349c2bab19910ae29b307054c94d40
 +    expect(acc.session.input).toBe(3_000)
 +  })
 +})
+

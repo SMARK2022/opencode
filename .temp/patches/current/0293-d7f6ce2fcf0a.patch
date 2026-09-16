@@ -273,13 +273,14 @@ index 92f415f32..fa8c031bd 100644
                used -= item.size
                cut = true
              }
-@@ -1075,13 +1089,18 @@ export const ShellTool = Tool.define(
-       // #282：total 统计独立于压缩——notice 报告压缩前完整输出规模
-       const normalizedStats = outputStats(normalized)
+@@ -1067,13 +1091,19 @@ export const ShellTool = Tool.define(
        const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
 -      diag.end()
+       // #282：截断前先统计 normalize 后全文，notice 的 total 必须是完整输出量
+       const normalizedStats = outputStats(normalized)
 -      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
 -      if (end.cut) cut = true
++      // #293：诊断收集改为隐藏模式，tail 输入跟随压缩开关，被丢弃的前缀进入隐藏诊断
 +      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
 +      if (end.cut) {
 +        cut = true
@@ -396,7 +397,7 @@ index 6eb026c71..884a95f14 100644
    )
  
 -  it.live("omits exit notice for non-empty successful output", () =>
-+it.live("omits exit notice for non-empty successful output", () =>
++  it.live("omits exit notice for non-empty successful output", () =>
    // #289：非空成功是正常路径，零噪音不加 notice
      runIn(
        projectRoot,

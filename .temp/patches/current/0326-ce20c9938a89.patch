@@ -1,22 +1,8 @@
-From ce20c9938a89bb242183fdf8a30dc64c4552db74 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Tue, 23 Jun 2026 00:22:23 +0800
-Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E6=89=A9=E5=B1=95=20CLI=20=E6=9E=84?=
- =?UTF-8?q?=E5=BB=BA=E8=A7=A6=E5=8F=91=E8=8C=83=E5=9B=B4?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-Build OpenCode CLI 产物依赖 opencode 的 workspace 依赖包；此前 paths 只覆盖 packages/opencode，导致 core 等依赖包变更不会触发 CLI 构建。
-
-补充 core/plugin/script/sdk/ui 路径，保持触发范围克制，只覆盖会影响 CLI binary 的 workspace 依赖，避免无关文档或应用改动触发发布构建。
-
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index cc0db1c729f8e97b9db0b703097cb864217c7b1c..7d2033970c13424dcd506564f41a5d86224d75d2 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -14,6 +14,11 @@ on:
-       - ".github/workflows/build-opencode.yml"
+@@ -23,6 +23,11 @@ on:
+       # #156：保留 tip setup-bun 路径触发，工具链变更必重建
        - ".github/actions/setup-bun/action.yml"
        - "packages/opencode/**"
 +      - "packages/core/**"
@@ -26,4 +12,19 @@ index cc0db1c729f8e97b9db0b703097cb864217c7b1c..7d2033970c13424dcd506564f41a5d86
 +      - "packages/ui/**"
        - "package.json"
        - "bun.lock"
-       - "install"
+       # #156：install 变更触发重建，保证 release 脚本同步
+
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -18,6 +18,8 @@ const require = createRequire(import.meta.url)
+ 
+ process.chdir(dir)
+ 
++// CI（build-opencode.yml）的触发路径需覆盖本脚本构建的全部 workspace 依赖包，
++// 否则 core/plugin/sdk/ui 变更不会触发 CLI 重建，release 产物会滞后于源码。
+ const generated = await import("./generate.ts")
+ 
+ import { Script } from "@opencode-ai/script"
+

@@ -17,16 +17,17 @@ index 344a29828..12e33df4a 100644
  // purpose="infrastructure" 区分基础设施请求，便于代理路由策略
  
  export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
-@@ -146,6 +147,8 @@ const layer = Layer.effect(
+@@ -146,6 +147,9 @@
    Effect.gen(function* () {
      const fs = yield* FSUtil.Service
      const events = yield* EventV2.Service
-+    // #268：HttpClient seam 供测试和 recorder 注入客户端；生产路径由 NetworkProxy.infrastructureHttpClientLayer 提供
++    // #268：yield HttpClient.HttpClient 后接 filterStatusOk——后续 execute 拿到的是已过滤客户端
 +    const http = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
++    // #268：filterStatusOk 把 4xx/5xx 转为失败——目录源拉取失败不得以空目录静默成功
      // #150：模型源 HTTP 仅走 NetworkProxy.routedFetch
  
      const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
-@@ -164,23 +167,22 @@ const layer = Layer.effect(
+@@ -164,23 +167,23 @@
      })
  
      const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
@@ -36,7 +37,8 @@ index 344a29828..12e33df4a 100644
 -        try: () =>
 -          NetworkProxy.routedFetch(`${source}/api.json`, {
 -            purpose: "infrastructure",
-+      // #268：HttpClient seam 替代直接 routedFetch——保留测试和 recorder 注入能力
++      // #268：HttpClient seam 替代直接 routedFetch——保留测试和 recorder 注入能力；
++      // #268：失败仍走 Effect.fail 通道，refresh 的 ignore 吞掉语义与 #71 一致
 +      // #268：生产路径由 infrastructureHttpClientLayer 接到 NetworkProxy，不能改成裸 FetchHttpClient
 +      return yield* Effect.gen(function* () {
 +        const result = yield* http.execute(
@@ -71,7 +73,7 @@ index 344a29828..12e33df4a 100644
 -// #150：ModelsDev 不再依赖 Effect HttpClient 层
 -export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node] })
 +// #268：ModelsDev 现在依赖 HttpClient seam，生产路径由 NetworkProxy 提供
-+// #268：生产默认层接入 NetworkProxy.infrastructureHttpClientLayer
++// #268：provide 放在 node 边界而非 layer 内——layer 保持可注入，生产组装才固定走 NetworkProxy
 +export const node = makeGlobalNode({ service: Service, layer: layer.pipe(Layer.provide(NetworkProxy.infrastructureHttpClientLayer)), deps: [FSUtil.node, EventV2.node] })
  
  export * as ModelsDev from "./models-dev"
@@ -88,7 +90,7 @@ index 04de50deb..c01e24e51 100644
  // #83：purpose 分流插件/provider/基础设施流量
  export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
  
-@@ -212,6 +215,33 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
+@@ -212,6 +215,35 @@
    return fetch(input, init)
  }
  
@@ -103,11 +105,13 @@ index 04de50deb..c01e24e51 100644
 +            (cause) =>
 +              new HttpClientError.HttpClientError({
 +                reason: new HttpClientError.TransportError({ request, cause }),
++  // #268：错误统一映射 TransportError——消费方拿到的是 Effect HttpClient 错误契约而非裸 fetch 异常
 +              }),
 +          ),
 +        )
 +        return yield* Effect.tryPromise({
 +          try: () => fetch(web, { purpose: "infrastructure", signal }),
++          // #268：signal 由 HttpClient 调用方传入——外层超时的中断经此传播到传输层
 +          catch: (cause) =>
 +            new HttpClientError.HttpClientError({
 +              reason: new HttpClientError.TransportError({ request, cause }),
@@ -133,13 +137,15 @@ index 3643243ea..2d1e6b92f 100644
  import { NetworkProxy } from "../src/network-proxy"
  
  const originalFetch = globalThis.fetch
-@@ -27,4 +29,33 @@ describe("NetworkProxy", () => {
+@@ -27,4 +29,35 @@
      expect(called).toBe(false)
      expect(response).toBeInstanceOf(Error)
    })
 +
 +  test("infrastructureHttpClientLayer keeps Effect HTTP calls off global fetch mocks", async () => {
++  // #268：mock fetch 计数必须为 0——证明 Effect HTTP 走原生 fetch 桥而非全局 mock
 +    let called = false
++  // #268：Object.assign 保留原 fetch 引用——afterEach 恢复后不影响同文件其他用例
 +    globalThis.fetch = Object.assign(() => {
 +      called = true
 +      return Promise.resolve(new Response("mocked"))

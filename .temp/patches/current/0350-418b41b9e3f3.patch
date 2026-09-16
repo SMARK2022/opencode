@@ -1,27 +1,3 @@
-From 418b41b9e3f3015711edd715aaa0d4c0ccbb4808 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 29 Jun 2026 20:55:54 +0800
-Subject: [PATCH] =?UTF-8?q?feat(harness):=20P1=20=E6=94=B9=E9=80=A0?=
- =?UTF-8?q?=E2=80=94=E2=80=94read=20dedup=E3=80=81compaction=20=E4=BF=9D?=
- =?UTF-8?q?=E7=95=99=E3=80=81=E5=BE=AA=E7=8E=AF=E6=A3=80=E6=B5=8B=E3=80=81?=
- =?UTF-8?q?subagent=20=E4=B8=8A=E4=B8=8B=E6=96=87=E7=AD=89=2010=20?=
- =?UTF-8?q?=E9=A1=B9?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-P1-1: read overlap>=80% 时 suppress（stub_high_overlap_visible）+ outline cache（LRU 50，key=canonicalPath+size+modifiedMs）。
-P1-2: Evidence Handoff 新增 ### Search History section，保留 grep/glob 搜索历史。
-P1-3: pruning 保护 read 不被 prune；memento 条件化 floor（usable>=20K 时 4K，小模型保持 0）；compaction 计数暴露在 Lost Context Notice。
-P1-4: task tool 新增 inspected_files 可配置参数（新 subagent 默认 summary，resume 默认 none）；空结果验证；result 截断 32KB。
-P1-5: doom loop 跨消息检测（当前消息 parts 不足时加载前一 assistant message 末尾 parts）；consecutive-error breaker（layer 闭包 Map 跨 step 持久化，3 次连续 error 触发 permission ask）。
-P1-6: 上下文达 80% usable 时注入一次 ephemeral 提示（避免大量内容进入上下文，不降低质量），compaction 后重置标志。
-P1-7: grep/glob 截断时返回真实总数（totalMatches/total metadata + N+ 标签）。
-P1-8: bash truncation command-aware（ls/find/tree/git status 用 head，其余 tail），统一 truncateWindow 实现。
-P1-9: skill load dedup（扫描 ctx.messages 已完成的 skill part，compacted 守卫）。
-P1-10: typecheck error flag（验证命令输出检测 error pattern，hasErrors metadata）。
-Bash timeout: timeout + 空输出时追加 block-buffering/interactive/hung 诊断提示。
-
 diff --git a/docs/p1-implementation-plan.md b/docs/p1-implementation-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..744f6cfb63aee91af9a39f9fa34f381c0bdd1547
@@ -711,111 +687,41 @@ index 0000000000000000000000000000000000000000..744f6cfb63aee91af9a39f9fa34f381c
 +10. **P1-4**（subagent inspected files + 空结果 + 截断）→ 减少 92% re-read + 12% 空结果
 +
 +所有改动遵循 Effect-first 架构、[local-smark] 标记、向后兼容、手术刀式修改。
+
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index cff2b81dbfc629fe10529addcb0ee125a7eede66..690bee2e5e03a62cb705c5fac7ac6ab5e74b279a 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -49,7 +49,7 @@ export const PRUNE_PROTECT = 40_000
+@@ -36,7 +36,9 @@ export const PRUNE_PROTECT = 40_000
  // notice 完整含 path，避免模型压缩后丢失恢复文件路径。
  const TOOL_OUTPUT_HEAD_CHARS = 400
  const TOOL_OUTPUT_TAIL_CHARS = 2_000
 -const PRUNE_PROTECTED_TOOLS = ["skill"]
++// [local-smark] read 输出也受 prune 保护：compaction 后模型最常复用的是文件内容，
++// 丢 read 证据会迫使模型重新读盘；skill 此前已受保护。
 +const PRUNE_PROTECTED_TOOLS = ["skill", "read"]
- // Whole-turn tail retention keeps exact assistant/tool continuity when it fits.
- // The defaults deliberately preserve four recent user turns with a 4k-16k token
- // adaptive budget: enough for normal coding turns, still bounded so compaction
-@@ -194,7 +194,11 @@ function preserveRecentUserBudget(input: { cfg: Config.Info; model: Provider.Mod
-   // No minimum floor here: unlike the whole-turn tail, this memento is additive
-   // to the summary and retained tail, so small-context models must be allowed to
-   // shrink it all the way to zero instead of immediately overflowing again.
--  return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
+ const DEFAULT_TAIL_TURNS = 4
+ // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
+ const MIN_PRESERVE_RECENT_TOKENS = 4_000
+@@ -104,9 +106,13 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
+ // #256：memento 预算没有下限——与整轮尾部不同，它是 summary+tail 之上的增量，
+ // 小窗口模型必须允许把它缩到 0，否则压缩重放后立刻再次溢出。
+ function preserveRecentUserBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
 +  // [local-smark] 条件化 floor：仅当 usable >= 20K 时设 4K floor，
 +  // 小模型（8K context）的 20% 仅 1.6K，4K floor 会吃掉 2/3 预算加剧溢出。
 +  // 大模型 4K floor 确保关键 user intent 不被截断。
 +  const mementoFloor = usable(input) >= 20_000 ? 4_000 : 0
-+  return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(mementoFloor, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
+   return Math.min(
+     DEFAULT_PRESERVE_RECENT_USER_TOKENS,
+-    Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
++    Math.max(mementoFloor, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
+   )
  }
  
- function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; maxTokens: number }) {
-@@ -559,6 +563,45 @@ function renderOutstandingTodos(todos: Todo.Info[]) {
-   return output.join("\n")
- }
- 
-+// [local-smark] Search History section：从 grep/glob tool events 提取搜索历史，
-+// 帮助 compaction 后模型知道之前搜过什么、结果如何，避免重复搜索。
-+// 上限 EVIDENCE_SEARCH_LIMIT=10 条，按 recency 排序，同 pattern+path 去重。
-+const EVIDENCE_SEARCH_LIMIT = 10
-+
-+function renderSearchHistory(input: { events: ToolEvent[]; worktree: string }): string {
-+  const searches = new Map<string, { tool: string; pattern: string; path: string; matches: string; sequence: number }>()
-+  for (const event of input.events) {
-+    if (event.part.tool !== "grep" && event.part.tool !== "glob") continue
-+    const pattern = stringField(event.part.state.input, "pattern")
-+    if (!pattern) continue
-+    const searchPath = stringField(event.part.state.input, "path") ?? "."
-+    // [local-smark] grep metadata 用 matches/totalMatches，glob 用 count/total
-+    const meta = event.part.state.metadata
-+    const matchCount = event.part.tool === "grep"
-+      ? (numberField(meta, "totalMatches") ?? numberField(meta, "matches") ?? 0)
-+      : (numberField(meta, "total") ?? numberField(meta, "count") ?? 0)
-+    const key = `${event.part.tool}\u0000${pattern}\u0000${searchPath}`
-+    searches.set(key, {
-+      tool: event.part.tool,
-+      pattern: pattern.slice(0, 60),
-+      path: displayPath(searchPath, input.worktree),
-+      matches: String(matchCount),
-+      sequence: event.sequence,
-+    })
-+  }
-+  const all = [...searches.values()].toSorted((a, b) => b.sequence - a.sequence)
-+  const rows = all.slice(0, EVIDENCE_SEARCH_LIMIT)
-+  const omitted = Math.max(0, all.length - rows.length)
-+  const output = [
-+    "### Search History",
-+    "| tool | pattern | path | matches |",
-+    "|---|---|---|---:|",
-+    ...rows.map((item) => `| ${item.tool} | ${evidenceCell(item.pattern)} | ${evidenceCell(item.path)} | ${item.matches} |`),
-+  ]
-+  if (omitted > 0) output.push(`Omitted: ${omitted} searches due to evidence budget.`)
-+  return output.join("\n")
-+}
-+
- function renderEvidenceHandoff(input: {
-   messages: MessageV2.WithParts[]
-   todos: Todo.Info[]
-@@ -568,6 +611,8 @@ function renderEvidenceHandoff(input: {
- }) {
-   return Effect.gen(function* () {
-     const events = completedToolEvents(input.messages)
-+    // [local-smark] compaction 计数：暴露已压缩次数，提示模型 summary 可能降级
-+    const compactionCount = completedCompactions(input.messages).length
-     return [
-       "## Evidence Handoff",
-       "",
-@@ -575,12 +620,18 @@ function renderEvidenceHandoff(input: {
-       "",
-       renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
-       "",
-+      // [local-smark] Search History section：保留 grep/glob 搜索历史，
-+      // 避免 compaction 后模型重复搜索已搜过的 pattern
-+      renderSearchHistory({ events, worktree: input.worktree }),
-+      "",
-       renderOutstandingTodos(input.todos),
-       "",
-       "### Lost Context Notice",
-       "- Older raw tool outputs were compacted.",
-       "- Use current evidence before repeating reads or commands.",
-       "- Treat stale evidence as advisory only.",
-+      // [local-smark] 告知模型当前是第几次 compaction，summary 保真度可能下降
-+      `- This is compaction #${compactionCount + 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
-     ].join("\n")
-   })
- }
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 811356c91e56badef6ac7b762919dfe60b593689..26e9f554f9a11add97a80954d0ed00fe1fd7760f 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -115,6 +115,11 @@ export const layer = Layer.effect(
+@@ -115,6 +115,11 @@ const layer = Layer.effect(
      const scope = yield* Scope.Scope
      const status = yield* SessionStatus.Service
      const image = yield* Image.Service
@@ -825,27 +731,29 @@ index 811356c91e56badef6ac7b762919dfe60b593689..26e9f554f9a11add97a80954d0ed00fe
 +    // 按 sessionID 隔离，跨 create()/process() 调用存活。
 +    const consecutiveErrorMap = new Map<SessionID, Record<string, number>>()
      const events = yield* EventV2Bridge.Service
-     const flags = yield* RuntimeFlags.Service
+     const database = yield* Database.Service
  
-@@ -463,9 +468,29 @@ export const layer = Layer.effect(
-             const parts = MessageV2.parts(ctx.assistantMessage.id)
+@@ -471,9 +476,31 @@ const layer = Layer.effect(
+             )
              const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
  
 +            // [local-smark] 跨消息 doom loop 检测：当前消息 parts 不足时，
-+            // 从 session messages 中前一个 assistant message 的末尾 parts 补充，
++            // 从 session 消息中前一个 assistant message 的末尾 tool parts 补充，
 +            // 防止跨消息的重复循环。
 +            // compaction 后旧 parts 可能被清空，此时跨消息检测自然失效——可接受，
 +            // 因为 compaction 本身打破了循环。
 +            let checkParts = recentParts
 +            if (recentParts.length < DOOM_LOOP_THRESHOLD) {
-+              // 从 DB 加载当前 session 的消息历史，取前一个 assistant message 的末尾 tool parts
-+              const allMessages = yield* session.messages({ sessionID: ctx.sessionID })
-+              const prevAssistant = allMessages
-+                .filter((m: MessageV2.WithParts) => m.info.role === "assistant" && m.info.id !== ctx.assistantMessage.id)
++              // page 返回升序 WithParts[]；取除当前消息外最近一个 assistant 的 tool parts
++              const allMessages = yield* MessageV2.page({ sessionID: ctx.sessionID, limit: 8 }).pipe(
++                Effect.provideService(Database.Service, database),
++              )
++              const prevAssistant = allMessages.items
++                .filter((m) => m.info.role === "assistant" && m.info.id !== ctx.assistantMessage.id)
 +                .at(-1)
 +              if (prevAssistant) {
 +                const prevToolParts = prevAssistant.parts
-+                  .filter((p: MessageV2.Part) => p.type === "tool" && p.state.status !== "pending")
++                  .filter((p) => p.type === "tool" && p.state.status !== "pending")
 +                  .slice(-DOOM_LOOP_THRESHOLD)
 +                checkParts = [...prevToolParts, ...recentParts].slice(-DOOM_LOOP_THRESHOLD)
 +              }
@@ -858,11 +766,39 @@ index 811356c91e56badef6ac7b762919dfe60b593689..26e9f554f9a11add97a80954d0ed00fe
 +              !checkParts.every(
                  (part) =>
                    part.type === "tool" &&
-                   part.tool === value.toolName &&
-@@ -548,6 +573,15 @@ export const layer = Layer.effect(
-               })
+                   part.tool === value.name &&
+@@ -501,6 +528,27 @@ const layer = Layer.effect(
+             if (!toolCall && value.result.type === "error") return
+             if (value.result.type === "error") {
+               yield* failToolCall(value.id, value.result.value)
++              // [local-smark] consecutive-error breaker：同一工具连续 3 次 error 后
++              // 注入 doom_loop permission ask，让模型意识到需要改变策略。
++              // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
++              const failToolName = toolCall?.part.tool ?? "unknown"
++              const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
++              errMap[failToolName] = (errMap[failToolName] ?? 0) + 1
++              consecutiveErrorMap.set(ctx.sessionID, errMap)
++              if (errMap[failToolName] >= 3) {
++                const agent = yield* agents.get(ctx.assistantMessage.agent)
++                yield* permission.ask({
++                  permission: "doom_loop",
++                  patterns: [failToolName],
++                  sessionID: ctx.assistantMessage.sessionID,
++                  metadata: { tool: failToolName, input: toolCall?.part.state.input, consecutiveErrors: errMap[failToolName] },
++                  always: [failToolName],
++                  ruleset: agent.permission,
++                })
++                // 重置计数器，避免每次 error 都触发
++                errMap[failToolName] = 0
++                consecutiveErrorMap.set(ctx.sessionID, errMap)
++              }
+               return
              }
-             yield* completeToolCall(value.toolCallId, output)
+             const rawOutput = toolResultOutput(value)
+@@ -526,11 +574,42 @@ const layer = Layer.effect(
+               attachments: attachments.length ? attachments : undefined,
+             }
+             yield* completeToolCall(value.id, output)
 +            // [local-smark] 工具成功时重置 consecutive-error 计数器
 +            const successToolName = toolCall?.part.tool
 +            if (successToolName) {
@@ -875,14 +811,13 @@ index 811356c91e56badef6ac7b762919dfe60b593689..26e9f554f9a11add97a80954d0ed00fe
              return
            }
  
-@@ -569,6 +603,27 @@ export const layer = Layer.effect(
-               })
-             }
-             yield* failToolCall(value.toolCallId, value.error)
-+            // [local-smark] consecutive-error breaker：同一工具连续 3 次 error 后
-+            // 注入 doom_loop permission ask，让模型意识到需要改变策略。
-+            // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
-+            const toolName = toolCall?.part.tool ?? "unknown"
+           case "tool-error": {
++            // [local-smark] breaker 需要工具名；readToolCall 可能失败（调用记录已清），失败则按 unknown 计
++            // readToolCall 错误通道为 never，用 exit 包裹取回可能缺失的调用记录
++            const errToolCallExit = yield* readToolCall(value.id).pipe(Effect.exit)
++            const errToolCall = Exit.isSuccess(errToolCallExit) ? errToolCallExit.value : undefined
+             yield* failToolCall(value.id, value.error ?? new Error(value.message))
++            const toolName = errToolCall?.part.tool ?? "unknown"
 +            const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
 +            errMap[toolName] = (errMap[toolName] ?? 0) + 1
 +            consecutiveErrorMap.set(ctx.sessionID, errMap)
@@ -892,7 +827,7 @@ index 811356c91e56badef6ac7b762919dfe60b593689..26e9f554f9a11add97a80954d0ed00fe
 +                permission: "doom_loop",
 +                patterns: [toolName],
 +                sessionID: ctx.assistantMessage.sessionID,
-+                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: errMap[toolName] },
++                metadata: { tool: toolName, input: errToolCall?.part.state.input, consecutiveErrors: errMap[toolName] },
 +                always: [toolName],
 +                ruleset: agent.permission,
 +              })
@@ -903,12 +838,12 @@ index 811356c91e56badef6ac7b762919dfe60b593689..26e9f554f9a11add97a80954d0ed00fe
              return
            }
  
+
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index d421a50976978452d9ee872dce01f1abad4526b5..15475b7b2503e648bbb92fa69523799299b0c8ed 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -2088,6 +2088,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         const slog = elog.with({ sessionID })
+@@ -1455,6 +1455,11 @@ const layer = Layer.effect(
+         const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
 +        // [local-smark] nearOverflow 提示只注入一次：首次达到 80% usable 时注入，
@@ -919,22 +854,10 @@ index d421a50976978452d9ee872dce01f1abad4526b5..15475b7b2503e648bbb92fa695237992
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -2251,7 +2256,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
-             const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
-             const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
--            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
-+            const messages = [
-+              ...modelMsgs,
-+              ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : []),
-+            ]
-             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-             // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
-             const messageEstimate = TokenEstimate.sanitizeModelMessages(messages)
-@@ -2342,12 +2350,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             // retained tail messages can carry huge pre-compaction token counts even
-             // though the freshly assembled prompt is small; checking estimatedInput
-             // here prevents that stale usage from creating back-to-back auto compacts.
+@@ -1724,12 +1729,11 @@ const layer = Layer.effect(
+             }).inputTokens
+             // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量
+             // #175：overflow 使用含 media 的 estimatedInput
 -            if (
 -              yield* compaction.isOverflow({
 -                tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -946,10 +869,10 @@ index d421a50976978452d9ee872dce01f1abad4526b5..15475b7b2503e648bbb92fa695237992
 +              model,
 +            })
 +            if (isOverflowing) {
-               // Auto-compaction is executed directly instead of queued as a
-               // history task. This keeps the producer side from persisting a
-               // stale compact command that a later prompt or undo could replay.
-@@ -2357,9 +2364,29 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               // #140：auto compact 使用 estimatedInput 窗口
+               // #242：auto compact 直接执行而非排队为历史任务，避免留下可重放的 compact 命令
+               const compacted = yield* compaction.run({
+@@ -1738,9 +1742,30 @@ const layer = Layer.effect(
                  model: lastUser.model,
                  auto: true,
                })
@@ -971,45 +894,41 @@ index d421a50976978452d9ee872dce01f1abad4526b5..15475b7b2503e648bbb92fa695237992
 +                  // [local-smark] 提示重点：避免大量内容进入上下文（大文件读取、
 +                  // 宽范围 grep 等），而非缩短回复。不降低回复质量。
 +                  // 任务仍在进行时忽略此提示，按用户指令正常执行。
-+                  content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
++                  content:
++                    "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
 +                })
 +                nearOverflowNotified = true
 +              }
 +            }
+             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
              handle.message.tokens.input = estimatedInput
-             // Persist the pending input snapshot on the assistant message so the TUI can
-             // render context usage immediately, before the provider emits the first chunk
+             // #127：pending 快照落 assistant message（首 chunk/step-start 前即可读）
+
 diff --git a/packages/opencode/src/tool/glob.ts b/packages/opencode/src/tool/glob.ts
-index ce58331ea328e16395a2a518c5de38eb46f46964..3824049c3a26314fedeed0bf3f14b64fe3ad3e43 100644
 --- a/packages/opencode/src/tool/glob.ts
 +++ b/packages/opencode/src/tool/glob.ts
-@@ -71,10 +71,14 @@ export const GlobTool = Tool.define(
-             Effect.map((chunk) => [...chunk]),
-           )
- 
+@@ -49,6 +49,10 @@ export const GlobTool = Tool.define(
+           const limit = 100
+           const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
+           const truncated = files.length === limit
 +          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
 +          const originalCount = files.length
-           if (files.length > limit) {
-             truncated = true
-             files.length = limit
-           }
-+          // [local-smark] total: 截断前的真实文件数（非哨兵值）
++          // [local-smark] total: 截断前的真实文件数（rg 按 limit 截停时为下界）
 +          const totalFiles = originalCount
-           files.sort((a, b) => b.mtime - a.mtime)
  
            const output = []
-@@ -83,8 +87,9 @@ export const GlobTool = Tool.define(
-             output.push(...files.map((file) => file.path))
+           if (files.length === 0) output.push("No files found")
+@@ -57,7 +61,8 @@ export const GlobTool = Tool.define(
              if (truncated) {
                output.push("")
-+              // [local-smark] 显示真实总数而非仅 "first 100"，帮助模型判断文件密度
                output.push(
 -                `(Results are truncated: showing first ${limit} results. Consider using a more specific path or pattern.)`,
-+                `(Results are truncated: showing first ${limit} results. ${totalFiles > limit ? `Total: ${totalFiles}+ files.` : ""} Consider using a more specific path or pattern.)`,
++                // [local-smark] 显示真实总数下界而非仅 "first 100"，帮助模型判断文件密度
++                `(Results are truncated: showing first ${limit} results. ${truncated ? `Total: ${totalFiles}+ files.` : ""} Consider using a more specific path or pattern.)`,
                )
              }
            }
-@@ -93,6 +98,8 @@ export const GlobTool = Tool.define(
+@@ -66,6 +71,8 @@ export const GlobTool = Tool.define(
              title: path.relative(ins.worktree, search),
              metadata: {
                count: files.length,
@@ -1018,34 +937,33 @@ index ce58331ea328e16395a2a518c5de38eb46f46964..3824049c3a26314fedeed0bf3f14b64f
                truncated,
              },
              output: output.join("\n"),
+
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
-index 9660033280524bbe14ae5067db372c0ded6c71b5..5fd9cc02269826e6ca3882eada54c8079190d795 100644
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
-@@ -162,13 +162,19 @@ export const GrepTool = Tool.define(
-           const resultLimitTruncated = result.truncated || matches.length > RESULT_LIMIT
+@@ -162,6 +162,10 @@ export const GrepTool = Tool.define(
            const truncated = resultLimitTruncated || result.timedOut === true
-           const final = resultLimitTruncated ? matches.slice(0, RESULT_LIMIT) : matches
-+          // [local-smark] 截断时在输出文案中提供 matches.length（截断前的数量），
+           // #138：只返回前 RESULT_LIMIT 条匹配
+           const final = resultLimitTruncated ? rows.slice(0, RESULT_LIMIT) : rows
++          // [local-smark] 截断时在输出文案中提供 rows.length（截断前的数量），
 +          // 保留 + 后缀表示截断（如 "65+ matches"），帮助模型评估搜索密度。
 +          // metadata.matches 是截断后长度（向后兼容），metadata.totalMatches 是截断前数量（新增）。
-+          const totalMatches = matches.length
-           // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
--          // 阶段不可用，也不能把未完成搜索降级成确定性的 “No files found”。
-+          // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"。
++          const totalMatches = rows.length
+           // #244：超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
+           // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"
            if (final.length === 0 && result.timedOut) return emptyTimedOut()
-           if (final.length === 0) return empty
+@@ -169,7 +173,8 @@ export const GrepTool = Tool.define(
  
-+          // [local-smark] 截断时显示数量 + "+" 后缀，不截断时显示精确数
-+          const foundLabel = resultLimitTruncated ? `${totalMatches}+` : `${final.length}`
            const output = [
+             // #244：RESULT_LIMIT 截断与 timeout 截断独立计数，同一结果可能两者同时标注
 -            `Found ${resultLimitTruncated ? `${RESULT_LIMIT}+` : final.length} matches${
-+            `Found ${foundLabel} matches${
++            // [local-smark] 截断时显示实际数量 + "+" 后缀，不截断时显示精确数
++            `Found ${resultLimitTruncated ? `${totalMatches}+` : final.length} matches${
                resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""
              }${result.timedOut ? ` before timing out after ${timeout} ms` : ""}`,
            ]
-@@ -208,6 +214,8 @@ export const GrepTool = Tool.define(
-             title: params.pattern,
+@@ -213,6 +218,8 @@ export const GrepTool = Tool.define(
+             // #244：timedOut 用条件展开写入 metadata，未超时时保持旧 wire 形状（无该键）
              metadata: {
                matches: final.length,
 +              // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
@@ -1053,13 +971,27 @@ index 9660033280524bbe14ae5067db372c0ded6c71b5..5fd9cc02269826e6ca3882eada54c807
                truncated,
                ...(result.timedOut && { timedOut: true }),
              },
+
+diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
+--- a/packages/opencode/test/tool/grep.test.ts
++++ b/packages/opencode/test/tool/grep.test.ts
+@@ -414,7 +414,8 @@ describe("tool.grep", () => {
+       )
+       expect(result.metadata.matches).toBe(64)
+       expect(result.metadata.truncated).toBe(true)
+-      expect(result.output).toContain("Found 64+")
++      // [local-smark] 截断文案改为显示截断前真实数量（rows.length=65）+ "+" 后缀
++      expect(result.output).toContain("Found 65+")
+       expect(result.output).toContain("Results truncated")
+     }),
+   )
+
 diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
-index cc720d6f05db88881dab8af8ac0c3ba9870477ac..5dee764a322ee12c9f0b8fda88e32abed50eb9c8 100644
 --- a/packages/opencode/src/tool/read-outline.ts
 +++ b/packages/opencode/src/tool/read-outline.ts
-@@ -261,3 +261,37 @@ export async function readOutline(filepath: string, total: number, offset: numbe
-   if (items.length === 0) return undefined
-   return { items, truncated }
+@@ -301,3 +301,37 @@ stream.destroy()
+   // #142：返回大纲
+ return { items, truncated }
  }
 +
 +// [local-smark] outline cache：按 canonicalPath+size+modifiedMs 缓存，
@@ -1095,41 +1027,41 @@ index cc720d6f05db88881dab8af8ac0c3ba9870477ac..5dee764a322ee12c9f0b8fda88e32abe
 +  outlineCache.set(canonical, { outline, size, modifiedMs })
 +  return outline
 +}
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index aee26ef75eb205d38f42070d03ed358e619a45c2..0324d3efd27706e44ca0851d3819786dc5e2d0bc 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -13,7 +13,7 @@ import { Instruction } from "../session/instruction"
- // [local-smark] read tool enhancements: image processing, outline
- import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
- import type { MessageV2 } from "../session/message-v2"
+@@ -6,7 +6,7 @@ import * as Tool from "./tool"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { LSP } from "@/lsp/lsp"
+ import DESCRIPTION from "./read.txt"
 -import { readOutline, type Outline } from "./read-outline"
 +import { readOutline, readOutlineCached, type Outline } from "./read-outline"
- import { Reference } from "@/reference/reference"
- import { Image } from "@/image/image"
- import { PartID } from "@/session/schema"
-@@ -26,6 +26,10 @@ const MAX_LINE_LENGTH = 2000
- const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+ import { InstanceState } from "@/effect/instance-state"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { Instruction } from "../session/instruction"
+@@ -36,6 +36,10 @@ const MAX_LINE_LENGTH = 2000
  const OVERLAP_MIN_LINES = 20
+ // #142：重叠占比阈值
  const OVERLAP_MIN_RATIO = 0.3
 +// [local-smark] 高重叠 suppress 阈值：当已可见读取与当前请求的重叠率 >= 80% 时，
 +// 直接返回 stub（而非仅 note），避免大量部分重叠的重复读取。
-+// 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
++// 仍走 size+modifiedMs 同版本门控（findReadStub/findOverlapNote 内部已检查）。
 +const OVERLAP_SUPPRESS_RATIO = 0.8
  
- // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
- const BLOCKED_DEVICE_PATHS = new Set([
-@@ -67,7 +71,8 @@ const TOKEN_BYTE_RATIOS: Record<string, number> = {
-   default: 0.25,
- }
  
+ // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
+@@ -163,7 +167,8 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
+ 
+ // #142：可见上下文 stub 状态
+ // #142：stub 两种语义：同区间已见 / 被更大区间覆盖
 -type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
 +// [local-smark] 新增 stub_high_overlap_visible：高重叠（>=80%）时 suppress
 +type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible" | "stub_high_overlap_visible"
  
- type ReadMetadata = {
-   path: string
-@@ -701,6 +706,47 @@ export const ReadTool = Tool.define(
+ // #142：区间元数据写入 metadata.read，供后续 stub 比对
+ type ReadRangeMeta = {
+@@ -933,6 +938,47 @@ const stub = findReadStub(visibleReads, current)
          }
        }
  
@@ -1152,7 +1084,7 @@ index aee26ef75eb205d38f42070d03ed358e619a45c2..0324d3efd27706e44ca0851d3819786d
 +            ? "No unread lines remain (end of file reached); use grep to locate symbols."
 +            : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
 +          const message = `Lines ${start}-${end} have ${Math.round((overlapLines / requestedLines) * 100)}% overlap with visible read ${overlapRange} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
-+          const output = [
++          const suppressOutput = [
 +            `<path>${escapeXmlText(filepath)}</path>`,
 +            `<type>file</type>`,
 +            `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
@@ -1163,39 +1095,40 @@ index aee26ef75eb205d38f42070d03ed358e619a45c2..0324d3efd27706e44ca0851d3819786d
 +          ].join("\n")
 +          return {
 +            title,
-+            output,
++            output: suppressOutput,
 +            metadata: readToolMetadata({
-+              preview: output,
++              preview: suppressOutput,
 +              truncated: false,
-+              loaded: [] as string[],
++              loaded: loaded.map((item) => item.filepath),
 +              read,
 +            }),
 +          }
 +        }
 +      }
 +
-       // Token 预算验证 - 根据文件类型估算 token 数
-       const content = file.raw.join("\n")
-       const ext = path.extname(filepath).toLowerCase().slice(1)
-@@ -725,7 +771,9 @@ export const ReadTool = Tool.define(
-         end,
-         total: file.count,
-         returned: file.raw.length,
--        outline: yield* Effect.promise(() => readOutline(filepath, file.count, file.offset)),
-+        // [local-smark] 使用 readOutlineCached 替代 readOutline，
-+        // 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
-+        outline: yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, versionMs)),
-         overlap: findOverlapNote(visibleReads, current),
-         content: renderContentLines(file),
-         more: truncated ? { offset: end + 1, reason: file.cut ? "byte_limit" : "line_limit" } : undefined,
+       // 写入去重缓存 — 使用复合键，不同范围分别缓存
+       readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
+         content,
+@@ -941,7 +987,9 @@ const stub = findReadStub(visibleReads, current)
+ 
+       // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
+       // #142：异步 outline
+-const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset))
++// [local-smark] 使用 readOutlineCached 替代 readOutline，
++// 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
++const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs))
+       // #142：部分重叠仍返回内容，但附 note
+       // #142：overlap 判定
+ const overlap = findOverlapNote(visibleReads, current)
+
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e6e8a02ed 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -320,41 +320,52 @@ function preview(text: string) {
+@@ -324,43 +324,54 @@ function preview(text: string) {
  }
  
  function tail(text: string, maxLines: number, maxBytes: number) {
+-  // #283：折叠行末尾换行在压缩前去除，避免重复合并时引入多余空白行
 +  return truncateWindow(text, maxLines, maxBytes, "tail")
 +}
 +
@@ -1208,6 +1141,7 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
 +
 +// 统一的截断窗口实现：direction="tail" 从末尾取，direction="head" 从头取。
 +// 返回 {text, cut, hidden}，hidden 是被窗口丢弃的部分（供诊断扫描）。
++// #283/#293 语义保留：折叠行换行先去除；hidden 仅包含被窗口丢弃的文本。
 +function truncateWindow(text: string, maxLines: number, maxBytes: number, direction: "head" | "tail") {
    const source = text.replace(/\r?\n$/, "")
    const lines = source.split("\n")
@@ -1215,6 +1149,7 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
 -    return {
 -      text,
 -      cut: false,
+-      // #293：未截断时没有隐藏区；诊断仍走完整 visible 输出
 -      hidden: "",
 -    }
 +    return { text, cut: false, hidden: "" }
@@ -1247,13 +1182,14 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
      bytes += size
    }
    const visible = out.join("\n")
+-  // #293：tail 只展示末尾窗口；hidden 是同一个 source 中被窗口丢弃的前缀。
+-  // 后续诊断只扫描这段文本，避免从全量输出再反推“是否已经可见”。
 -  return {
 -    text: visible,
 -    cut: true,
--    // tail 只展示末尾窗口；hidden 是同一个 source 中被窗口丢弃的前缀。
--    // 后续诊断只扫描这段文本，避免从全量输出再反推“是否已经可见”。
 -    hidden: visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source,
 -  }
++  // hidden 语义按方向区分：head 丢弃后缀，tail 丢弃前缀（与 #293 一致）
 +  const hidden = direction === "head"
 +    ? source.slice(visible.length)
 +    : visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source
@@ -1261,10 +1197,10 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
  }
  
  const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
-@@ -1004,7 +1015,19 @@ export const ShellTool = Tool.define(
-         ? compressVisibleOutput(normalized)
-         : { text: normalized, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
- 
+@@ -1089,7 +1100,19 @@ export const ShellTool = Tool.define(
+       // #282：截断前先统计 normalize 后全文，notice 的 total 必须是完整输出量
+       const normalizedStats = outputStats(normalized)
+       // #293：诊断收集改为隐藏模式，tail 输入跟随压缩开关，被丢弃的前缀进入隐藏诊断
 -      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
 +      // [local-smark] command-aware truncation direction：
 +      // 列表/树形命令（ls/find/tree/git status/git diff）用 head 保开头（文件列表在头部），
@@ -1281,8 +1217,8 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
 +      const end = (useHead ? head : tail)(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
        if (end.cut) {
          cut = true
-         hiddenDiag.push(end.hidden)
-@@ -1018,12 +1041,29 @@ export const ShellTool = Tool.define(
+         // #293：被 tail 窗口丢弃的前缀进入隐藏诊断
+@@ -1106,13 +1129,30 @@ export const ShellTool = Tool.define(
        const emptyOutput = end.text.length === 0
        let output = emptyOutput ? "(no output)" : end.text
  
@@ -1304,6 +1240,7 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
 +      }
 +
        if (cut && file) {
+         // #282：统一 output_truncated notice；shown 为 tail 预览的实际行字节量
          output =
            formatOutputTruncatedNotice({
              source: "shell",
@@ -1313,9 +1250,9 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
              path: file,
            }) +
            "\n\n" +
-@@ -1063,13 +1103,23 @@ export const ShellTool = Tool.define(
+@@ -1145,6 +1185,20 @@ export const ShellTool = Tool.define(
        }
-       const durationMs = Date.now() - started
+       // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
        const displayOutput = preview(display.value())
 +
 +      // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
@@ -1332,29 +1269,22 @@ index 10e727d98375ad2c01de121b7e7579e559c150a7..448b8d070800aac205715992a6c2d86e
 +      )
 +
        return {
-         title: input.description,
+         title: input.command,
          metadata: {
--          // Completion metadata preserves the final terminal screen for default
--          // UI rendering. The `output` field returned alongside this metadata is
--          // intentionally left on the existing raw/compressed/truncated path so
--          // right-click "model context output" and provider input stay unchanged.
-           output: displayed ? displayOutput : preview(output),
-           exit: code,
-           description: input.description,
-@@ -1077,6 +1127,8 @@ export const ShellTool = Tool.define(
-           durationMs,
+@@ -1163,6 +1217,8 @@ export const ShellTool = Tool.define(
+           durationMs: Date.now() - started,
            diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
            diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
 +          // [local-smark] hasErrors flag 供 TUI 和后续逻辑判断验证是否失败
 +          hasErrors,
-           ...(compressed.stats ? bashCompressionMetadata(compressed.stats) : {}),
-           ...(cut && file ? { outputPath: file } : {}),
          },
+         output,
+       }
+
 diff --git a/packages/opencode/src/tool/skill.ts b/packages/opencode/src/tool/skill.ts
-index 8c41077be5ec06b40928aee169e3049445bc075d..21036a3b90156066078664ca058eb17f9bb4db69 100644
 --- a/packages/opencode/src/tool/skill.ts
 +++ b/packages/opencode/src/tool/skill.ts
-@@ -36,6 +36,31 @@ export const SkillTool = Tool.define(
+@@ -31,6 +31,31 @@ export const SkillTool = Tool.define(
              metadata: {},
            })
  
@@ -1362,7 +1292,7 @@ index 8c41077be5ec06b40928aee169e3049445bc075d..21036a3b90156066078664ca058eb17f
 +          // 返回 stub 而非重新输出完整 content（~7KB）。
 +          // 通过扫描 ctx.messages 中已完成的 skill tool part 实现，
 +          // 不需要 InstanceState 或额外状态——与 read.ts collectVisibleReads 同一模式。
-+          // 补 compacted 守卫对齐 collectVisibleReads（read.ts L205）：
++          // 补 compacted 守卫对齐 collectVisibleReads：
 +          // compacted 的 skill part 内容已被 prune 清空，不应视为"已加载"。
 +          // full compaction 会移除旧消息——此时 alreadyLoaded=false 正确触发重载。
 +          const alreadyLoaded = ctx.messages.some((msg) =>
@@ -1384,9 +1314,9 @@ index 8c41077be5ec06b40928aee169e3049445bc075d..21036a3b90156066078664ca058eb17f
 +          }
 +
            const dir = path.dirname(info.location)
-           const base = pathToFileURL(dir).href
-           const limit = 10
-@@ -67,6 +92,7 @@ export const SkillTool = Tool.define(
+           const base = dir
+           const files = yield* ripgrep.find({
+@@ -62,6 +87,7 @@ export const SkillTool = Tool.define(
              metadata: {
                name: info.name,
                dir,
@@ -1394,19 +1324,20 @@ index 8c41077be5ec06b40928aee169e3049445bc075d..21036a3b90156066078664ca058eb17f
              },
            }
          }).pipe(Effect.orDie),
+
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index e9b20023505d9c21f49eb8d1095b574daf69941c..3f1a31ca67da2766a0bd2e563ce099ef56dd9e98 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -17,6 +17,54 @@ import { EffectBridge } from "@/effect/bridge"
+@@ -15,6 +15,54 @@ import { EffectBridge } from "@/effect/bridge"
  import { RuntimeFlags } from "@/effect/runtime-flags"
+ // #280：task_id 恢复需要 compact 后的完整子权限集合并回写 session
  import { Permission } from "@/permission"
- 
++
 +// [local-smark] 从父 session 的 messages 提取已读文件列表，
 +// 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
 +// 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
 +// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致）。
-+function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[]): string | undefined {
++function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): string | undefined {
 +  const files = new Map<string, { path: string; ranges: string[]; lastRead: number }>()
 +  let seq = 0
 +  for (const msg of messages) {
@@ -1449,13 +1380,12 @@ index e9b20023505d9c21f49eb8d1095b574daf69941c..3f1a31ca67da2766a0bd2e563ce099ef
 +  if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
 +  return lines.join("\n")
 +}
-+
+ import { Database } from "@opencode-ai/core/database/database"
+ 
  export interface TaskPromptOps {
-   cancel(sessionID: SessionID): Effect.Effect<void>
-   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
-@@ -57,6 +105,13 @@ export const Parameters = Schema.Struct({
-   background: Schema.optional(Schema.Boolean).annotate({
-     description: "When true, launch the subagent in the background and return immediately",
+@@ -61,6 +109,13 @@ export const Parameters = Schema.Struct({
+     description:
+       "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
    }),
 +  // [local-smark] 控制是否传递父 session 的已读文件列表给子 agent。
 +  // 'summary': 传递文件路径+range 表格（新 subagent 默认）。
@@ -1466,8 +1396,8 @@ index e9b20023505d9c21f49eb8d1095b574daf69941c..3f1a31ca67da2766a0bd2e563ce099ef
 +  }),
  })
  
- function output(sessionID: SessionID, text: string) {
-@@ -224,6 +279,16 @@ export const TaskTool = Tool.define(
+ function renderOutput(input: {
+@@ -213,6 +268,16 @@ export const TaskTool = Tool.define(
  
        const runTask = Effect.fn("TaskTool.runTask")(function* () {
          const parts = yield* ops.resolvePromptParts(params.prompt)
@@ -1484,10 +1414,10 @@ index e9b20023505d9c21f49eb8d1095b574daf69941c..3f1a31ca67da2766a0bd2e563ce099ef
          const result = yield* ops.prompt({
            messageID: MessageID.ascending(),
            sessionID: nextSession.id,
-@@ -237,9 +302,22 @@ export const TaskTool = Tool.define(
-             ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
-             ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
+@@ -222,9 +287,22 @@ export const TaskTool = Tool.define(
            },
+           variant: next.model ? undefined : variant,
+           agent: next.name,
 -          parts,
 +          parts: parentContext
 +            ? [...parts, { type: "text" as const, text: `<parent_context>\n${parentContext}\n</parent_context>` } as const]
@@ -1508,12 +1438,12 @@ index e9b20023505d9c21f49eb8d1095b574daf69941c..3f1a31ca67da2766a0bd2e563ce099ef
 +        return text
        })
  
-       const resumeWhenIdle: (input: { userID: MessageID; state: "completed" | "error" }) => Effect.Effect<void> =
+       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
+
 diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-index 731e473968ed5586d463593486fdc556be89cfd9..4588534a6046185309cfc305a3f48149697bee1a 100644
 --- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
 +++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-@@ -365,6 +365,14 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
+@@ -347,6 +347,14 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
        "description": "A short (3-5 words) description of the task",
        "type": "string",
      },
@@ -1528,14 +1458,15 @@ index 731e473968ed5586d463593486fdc556be89cfd9..4588534a6046185309cfc305a3f48149
      "prompt": {
        "description": "The task for the agent to perform",
        "type": "string",
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 7da8736ccd17ed1bd237f794a1c99409d0c53976..acff649d05871b85f343371ac78810ec3042ab99 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -2155,4 +2155,74 @@ describe("tool.shell truncation", () => {
-       }),
-     ),
-   )
+@@ -2313,4 +2313,72 @@ describe("tool.shell local command ERROR nodes (#179)", () => {
+       ),
+     )
+   }
+-})
 +
 +  // [local-smark] timeout + 空输出时追加诊断提示，帮助模型区分
 +  // "block-buffered 未 flush" vs "等待交互输入" vs "进程 hang 住"。
@@ -1550,12 +1481,11 @@ index 7da8736ccd17ed1bd237f794a1c99409d0c53976..acff649d05871b85f343371ac78810ec
 +            // sleep 不产生任何输出，触发 timeout + emptyOutput
 +            const result = yield* run({
 +              command: PS.has(sh()) ? "Start-Sleep -Seconds 60" : "sleep 60",
-+              description: "Timeout no output test",
 +              timeout: 500,
 +            })
 +
 +            expect(result.output).toContain("(no output)")
-+            expect(result.output).toContain("reason=\"timeout\"")
++            expect(result.output).toContain('reason="timeout"')
 +            // [local-smark] 诊断提示应包含 block-buffering 说明
 +            expect(result.output).toContain("block-buffering")
 +            expect(result.output).toContain("--verbose")
@@ -1574,12 +1504,11 @@ index 7da8736ccd17ed1bd237f794a1c99409d0c53976..acff649d05871b85f343371ac78810ec
 +            // 验证有输出时不触发 block-buffering 诊断（仅 timeout+空输出触发）
 +            const result = yield* run({
 +              command: `echo started && sleep 60`,
-+              description: "Timeout with output test",
 +              timeout: 500,
 +            })
 +
 +            expect(result.output).toContain("started")
-+            expect(result.output).toContain("reason=\"timeout\"")
++            expect(result.output).toContain('reason="timeout"')
 +            // 有输出时不应追加 block-buffering 诊断
 +            expect(result.output).not.toContain("block-buffering")
 +          }),
@@ -1596,7 +1525,6 @@ index 7da8736ccd17ed1bd237f794a1c99409d0c53976..acff649d05871b85f343371ac78810ec
 +            const command = `${bin} -e ${evalarg("process.exit(0)")}`
 +            const result = yield* run({
 +              command: PS.has(sh()) ? `& ${command}` : command,
-+              description: "Normal exit no output test",
 +            })
 +
 +            expect(result.output).toContain("(no output)")
@@ -1606,4 +1534,7 @@ index 7da8736ccd17ed1bd237f794a1c99409d0c53976..acff649d05871b85f343371ac78810ec
 +        ),
 +    )
 +  })
- })
++
++})
+\ No newline at end of file
+

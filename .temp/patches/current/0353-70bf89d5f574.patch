@@ -1,21 +1,3 @@
-From 70bf89d5f574a8d00142032480d123a6ccf5830d Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 1 Jul 2026 21:40:53 +0800
-Subject: [PATCH] =?UTF-8?q?fix(harness):=20parent=20context=20range=20?=
- =?UTF-8?q?=E8=81=9A=E5=90=88=20+=20Verified=E2=86=92Executed=20Commands?=
- =?UTF-8?q?=20=E6=94=B9=E9=80=A0?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-task.ts buildParentInspectedFilesSummary 此前不合并重叠/相邻 range，导致子 agent 收到 130+ 个混乱区间。
-提取 mergeRanges 到 src/util/range.ts 共享，渲染前合并+排序+截断 8 个；path 从 slice(-3) 改为
-path.relative 三分支逻辑（worktree 内相对路径/跨盘符或外部保持绝对路径），并做 evidenceCell 转义。
-
-compaction.ts 移除 isSimpleVerificationCommand 白名单过滤——293 条命令仅 6 条匹配，漏掉合法命令。
-改为 renderExecutedCommands 显示全部已执行命令，secret redaction 由 redactCommand 独立处理不受影响。
-stripLeadingEnvAssignments 保留用于 dedup key。
-
 diff --git a/docs/p1-fix-aggregation-plan.md b/docs/p1-fix-aggregation-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..b3ff53e7ffc2deba08d7e1b4dac9ca42c08271c1
@@ -330,107 +312,10 @@ index 0000000000000000000000000000000000000000..b3ff53e7ffc2deba08d7e1b4dac9ca42
 +4. `src/tool/shell.ts`：注释更新
 +5. `test/tool/task.inspected-files.test.ts`：15 个行为级测试
 +6. `test/session/compaction.test.ts`：3 个测试更新（标题、git status 不再过滤、unsafe 命令不再过滤但 redaction 仍生效）
-diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index 690bee2e5e03a62cb705c5fac7ac6ab5e74b279a..cd6b02e6156758978411eb21a455c6aed999e48b 100644
---- a/packages/opencode/src/session/compaction.ts
-+++ b/packages/opencode/src/session/compaction.ts
-@@ -29,6 +29,7 @@ import { SessionEvent } from "@opencode-ai/core/session-event"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import path from "path"
- import { createHash } from "crypto"
-+import { mergeRanges } from "@/util/range"
- 
- const log = Log.create({ service: "session.compaction" })
- 
-@@ -324,15 +325,6 @@ function displayPath(input: string, worktree: string) {
-   return display.replaceAll("\\", "/") || "."
- }
- 
--function mergeRanges(ranges: Array<{ start: number; end: number }>) {
--  const sorted = ranges.toSorted((a, b) => a.start - b.start || a.end - b.end)
--  return sorted.reduce<Array<{ start: number; end: number }>>((result, range) => {
--    const last = result.at(-1)
--    if (!last || range.start > last.end + 1) return [...result, { ...range }]
--    last.end = Math.max(last.end, range.end)
--    return result
--  }, [])
--}
- 
- function hash8(input: string) {
-   // 这里只需要稳定短指纹来区分被截断的公开文本，不把它当安全哈希使用。
-@@ -493,23 +485,6 @@ function stripLeadingEnvAssignments(input: string) {
-   }
- }
- 
--function isSimpleVerificationCommand(command: string) {
--  const trimmed = command.trim()
--  if (!trimmed) return false
--  // Evidence 只记录已经完成的简单验证命令。带管道、重定向、子命令或链式操作的
--  // shell 片段可能混入副作用，不能被压缩摘要误呈现为单纯 verification 结果。
--  if (/[|<>`;]/.test(trimmed) || trimmed.includes("$(") || trimmed.includes("&&") || trimmed.includes("||")) return false
--  const normalized = stripLeadingEnvAssignments(trimmed).toLowerCase()
--  return (
--    /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(normalized) ||
--    /^node\s+--check(\s|$)/.test(normalized) ||
--    /^python\s+-m\s+py_compile(\s|$)/.test(normalized) ||
--    /^tsc\s+--noemit(\s|$)/.test(normalized) ||
--    /^eslint(\s|$)/.test(normalized) ||
--    /^prettier\s+--check(\s|$)/.test(normalized)
--  )
--}
--
- function commandCwd(input: Record<string, unknown>, directory: string) {
-   const legacy = stringField(input, "cwd")
-   if (legacy) return legacy
-@@ -520,12 +495,17 @@ function commandCwd(input: Record<string, unknown>, directory: string) {
-   return path.isAbsolute(workdir) ? workdir : path.join(directory, workdir)
- }
- 
--function renderVerifiedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
-+// [local-smark] 渲染全部已执行命令（非仅验证命令）。
-+// 移除了 isSimpleVerificationCommand 过滤——白名单机制漏掉合法命令（rtk 前缀、&& 链等），
-+// 不如展示全部 executed commands，让模型自行判断。
-+// secret redaction 由 redactCommand 独立处理，不依赖命令类型过滤。
-+function renderExecutedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
-   const commands = new Map<string, { command: string; cwd: string; exit: string; sequence: number }>()
-   for (const event of input.events) {
-     if (event.part.tool !== "bash") continue
-     const command = stringField(event.part.state.input, "command")
--    if (!command || !isSimpleVerificationCommand(command)) continue
-+    // 空命令跳过；非空命令一律保留（不再按验证白名单过滤）
-+    if (!command) continue
-     const cwd = commandCwd(event.part.state.input, input.directory)
-     const exit = numberField(event.part.state.metadata, "exit")
-     commands.set(`${canonicalEvidencePath(cwd, input.worktree)}\u0000${stripLeadingEnvAssignments(command)}`, {
-@@ -539,12 +519,12 @@ function renderVerifiedCommands(input: { events: ToolEvent[]; directory: string;
-   const rows = all.slice(0, EVIDENCE_COMMAND_LIMIT)
-   const omitted = Math.max(0, all.length - rows.length)
-   const output = [
--    "### Verified Commands",
-+    "### Executed Commands",
-     "| command | cwd | exit |",
-     "|---|---|---:|",
-     ...rows.map((item) => `| ${commandDisplay(item.command)} | ${evidenceCell(displayPath(item.cwd, input.worktree))} | ${item.exit} |`),
-   ]
--  if (omitted > 0) output.push(`Omitted: ${omitted} verified commands due to evidence budget.`)
-+  if (omitted > 0) output.push(`Omitted: ${omitted} executed commands due to evidence budget.`)
-   return output.join("\n")
- }
- 
-@@ -618,7 +598,7 @@ function renderEvidenceHandoff(input: {
-       "",
-       yield* renderInspectedFiles({ events, fs: input.fs, worktree: input.worktree }),
-       "",
--      renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
-+      renderExecutedCommands({ events, directory: input.directory, worktree: input.worktree }),
-       "",
-       // [local-smark] Search History section：保留 grep/glob 搜索历史，
-       // 避免 compaction 后模型重复搜索已搜过的 pattern
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 448b8d070800aac205715992a6c2d86e6e8a02ed..8610b7450c560d032d1bb0cca1d531b183b8ae4a 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1106,7 +1106,7 @@ export const ShellTool = Tool.define(
+@@ -1188,7 +1188,7 @@ export const ShellTool = Tool.define(
  
        // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
        // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
@@ -440,12 +325,11 @@ index 448b8d070800aac205715992a6c2d86e6e8a02ed..8610b7450c560d032d1bb0cca1d531b1
        const isVerificationCmd = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(input.command.trim().toLowerCase()) ||
          /^node\s+--check(\s|$)/.test(input.command.trim().toLowerCase()) ||
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index 3f1a31ca67da2766a0bd2e563ce099ef56dd9e98..a65f472575708a8c9476aa69c91468dab88fd6d5 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -16,19 +16,26 @@ import { Cause, Effect, Exit, Option, Schema, Scope } from "effect"
- import { EffectBridge } from "@/effect/bridge"
+@@ -15,13 +15,18 @@ import { EffectBridge } from "@/effect/bridge"
  import { RuntimeFlags } from "@/effect/runtime-flags"
+ // #280：task_id 恢复需要 compact 后的完整子权限集合并回写 session
  import { Permission } from "@/permission"
 +import path from "path"
 +import { InstanceState } from "@/effect/instance-state"
@@ -455,25 +339,25 @@ index 3f1a31ca67da2766a0bd2e563ce099ef56dd9e98..a65f472575708a8c9476aa69c91468da
  // 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
  // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
 -// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致）。
--function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[]): string | undefined {
+-function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): string | undefined {
 -  const files = new Map<string, { path: string; ranges: string[]; lastRead: number }>()
 +// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致），
-+// 每个文件最多 8 个 range（与 EVIDENCE_FILE_RANGE_LIMIT 一致），
-+// range 经过 mergeRanges 合并重叠/相邻区间后输出。
++// 每个文件最多 8 个 range，range 经过 mergeRanges 合并重叠/相邻区间后输出。
 +/** @internal — 导出仅供测试直接调用 */
-+export function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[], worktree: string): string | undefined {
++export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
 +  const files = new Map<string, { path: string; ranges: Array<{ start: number; end: number }>; lastRead: number }>()
    let seq = 0
    for (const msg of messages) {
      if (msg.info.role !== "assistant") continue
-     for (const part of msg.parts) {
+@@ -29,6 +34,7 @@ function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): stri
        if (part.type !== "tool" || part.tool !== "read") continue
        if (part.state.status !== "completed") continue
-+      // 压缩后的旧 read part 不再代表有效证据，跳过
        if (part.state.time.compacted) continue
++      // 压缩后的旧 read part 不再代表有效证据，跳过
        seq++
        const meta = part.state.metadata?.read
-@@ -37,28 +44,39 @@ function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[]): stri
+       if (!meta || typeof meta !== "object") continue
+@@ -36,28 +42,38 @@ function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): stri
        const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
        const filePath = typeof m.path === "string" ? m.path : ""
        if (!filePath) continue
@@ -508,8 +392,7 @@ index 3f1a31ca67da2766a0bd2e563ce099ef56dd9e98..a65f472575708a8c9476aa69c91468da
 +      const merged = mergeRanges(f.ranges)
 +      const shown = merged.slice(0, RANGE_LIMIT).map((r) => `${r.start}-${r.end}`)
 +      const omittedRanges = Math.max(0, merged.length - RANGE_LIMIT)
-+      // path 显示：worktree 内用相对路径（跨盘符或 worktree 外保持绝对路径），
-+      // 与 compaction.ts displayPath 同款三分支逻辑。
++      // path 显示：worktree 内用相对路径（跨盘符或 worktree 外保持绝对路径）；
 +      // 转义 | 和换行，避免路径中的特殊字符破坏 markdown 表格结构
 +      const relative = path.relative(worktree, f.path).replaceAll("\\", "/")
 +      const display = (relative === "" ? "." : !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : f.path.replaceAll("\\", "/"))
@@ -518,7 +401,7 @@ index 3f1a31ca67da2766a0bd2e563ce099ef56dd9e98..a65f472575708a8c9476aa69c91468da
      }),
    ]
    if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
-@@ -284,9 +302,11 @@ export const TaskTool = Tool.define(
+@@ -273,9 +289,11 @@ export const TaskTool = Tool.define(
          // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
          // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
          // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
@@ -533,12 +416,10 @@ index 3f1a31ca67da2766a0bd2e563ce099ef56dd9e98..a65f472575708a8c9476aa69c91468da
          const result = yield* ops.prompt({
 diff --git a/packages/opencode/src/util/range.ts b/packages/opencode/src/util/range.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d07a3ed21afe8aaae71b9a4cb4026ef09b39619f
 --- /dev/null
 +++ b/packages/opencode/src/util/range.ts
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,13 @@
 +// [local-smark] 区间合并工具：将重叠或相邻（start <= last.end + 1）的区间合并为一个。
-+// 被 compaction.ts renderInspectedFiles 和 task.ts buildParentInspectedFilesSummary 共享。
 +// 标准 interval-merge 算法：先按 start 排序，再线性扫描合并。
 +// 不变量：输出区间按 start 升序排列，且任意两个区间不相邻（gap >= 2）。
 +export function mergeRanges(ranges: Array<{ start: number; end: number }>) {
@@ -551,75 +432,15 @@ index 0000000000000000000000000000000000000000..d07a3ed21afe8aaae71b9a4cb4026ef0
 +    return result
 +  }, [])
 +}
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 09f3f91c16799760eda8b9546c882e8a2dd3d1c8..a4b978f7962e46e44ccdaaaa89c52f8221fbb4eb 100644
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1055,10 +1055,11 @@ describe("session.compaction.process", () => {
-         expect(text).toContain("### Inspected Files")
-         expect(text).toContain("| src/compaction.ts | 1-170 | 200 | 2026-06-09 01:00:00 | current |")
-         expect(text).toContain("| src/message-v2.ts | 220-359 | 1547 | 2026-06-09 02:00:00 | current |")
--        expect(text).toContain("### Verified Commands")
-+        expect(text).toContain("### Executed Commands")
-         expect(text).toContain("| bun typecheck | . | 0 |")
-         expect(text).toContain("| 0 |")
--        expect(text).not.toContain("git status")
-+        // [local-smark] 移除 isSimpleVerificationCommand 后，git status 不再被过滤
-+        expect(text).toContain("git status")
-         expect(text).toContain("### Outstanding Todos")
-         expect(text).toContain("| completed | high | Read forensic report |")
-         expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
-@@ -1266,7 +1267,7 @@ describe("session.compaction.process", () => {
-         const text = yield* readLatestSummaryText(session.id)
-         expect(text).toContain("| src/old.ts | 1-10 | 10 | - | deleted |")
-         expect(text).toContain("| node --check file-10.js | src | 1 |")
--        expect(text).toContain("Omitted: 1 verified commands due to evidence budget.")
-+        expect(text).toContain("Omitted: 1 executed commands due to evidence budget.")
-         expect(text).not.toContain("node --check file-0.js")
-       }).pipe(withCompaction({ llm: stub.layer }))
-     },
-@@ -1327,7 +1328,7 @@ describe("session.compaction.process", () => {
-   )
- 
-   itCompaction.instance(
--    "renders verification commands without exposing unsafe shell content",
-+    "renders executed commands with secret redaction",
-     () => {
-       const stub = llm()
-       stub.push(reply("summary"))
-@@ -1371,6 +1372,7 @@ describe("session.compaction.process", () => {
-         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
- 
-         const text = yield* readLatestSummaryText(session.id)
-+        // [local-smark] secret redaction 仍然生效（redactCommand 独立于命令过滤）
-         expect(text).toContain("OPENAI_API_KEY=[redacted]")
-         expect(text).toContain("--token=[redacted]")
-         expect(text).toContain("--api-key [redacted]")
-@@ -1378,10 +1380,12 @@ describe("session.compaction.process", () => {
-         expect(text).not.toContain("sk-secret")
-         expect(text).not.toContain("sk-equals-secret")
-         expect(text).not.toContain("sk-space-secret")
--        expect(text).not.toContain("piped-sentinel")
--        expect(text).not.toContain("redirected-sentinel")
--        expect(text).not.toContain("subcommand-sentinel")
--        expect(text).not.toContain("dangerous-sentinel")
-+        // [local-smark] 移除 isSimpleVerificationCommand 后，含管道/重定向/&& 的命令
-+        // 不再被过滤——它们会出现在 Executed Commands 中（redaction 仍生效）
-+        expect(text).toContain("piped-sentinel")
-+        expect(text).toContain("redirected-sentinel")
-+        expect(text).toContain("subcommand-sentinel")
-+        expect(text).toContain("dangerous-sentinel")
-       }).pipe(withCompaction({ llm: stub.layer }))
-     },
-     { git: true },
 diff --git a/packages/opencode/test/tool/task.inspected-files.test.ts b/packages/opencode/test/tool/task.inspected-files.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..ce603aafc7d7164841795b0db76e5e7a44d96e92
 --- /dev/null
 +++ b/packages/opencode/test/tool/task.inspected-files.test.ts
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,237 @@
 +import { describe, expect, test } from "bun:test"
-+import { MessageV2 } from "../../src/session/message-v2"
++// 目标 MessageV2 不再导出 WithParts/ToolPart 类型，改用 SessionV1 同名类型
++import type { SessionV1 } from "@opencode-ai/core/v1/session"
 +import { MessageID, PartID, SessionID } from "../../src/session/schema"
 +import { buildParentInspectedFilesSummary } from "../../src/tool/task"
 +
@@ -637,17 +458,17 @@ index 0000000000000000000000000000000000000000..ce603aafc7d7164841795b0db76e5e7a
 +    compacted?: boolean
 +    status?: string
 +  },
-+): MessageV2.ToolPart {
++): SessionV1.ToolPart {
 +  return {
 +    id: PartID.ascending(),
 +    type: "tool",
 +    tool: "read",
 +    callID: "test-call-id",
-+    sessionID: SessionID.descending() as MessageV2.ToolPart["sessionID"],
++    sessionID: SessionID.descending() as SessionV1.ToolPart["sessionID"],
 +    messageID: MessageID.ascending(),
 +    state: {
 +      // 允许传入非 completed 状态用于测试过滤逻辑
-+      status: (extra?.status ?? "completed") as MessageV2.ToolStateCompleted["status"],
++      status: (extra?.status ?? "completed") as SessionV1.ToolStateCompleted["status"],
 +      input: { filePath },
 +      output: "...",
 +      title: "Read",
@@ -678,15 +499,15 @@ index 0000000000000000000000000000000000000000..ce603aafc7d7164841795b0db76e5e7a
 +
 +/** 构造一条包含给定 tool parts 的 assistant message。
 + *  info 使用类型断言——buildParentInspectedFilesSummary 只读 info.role，不需要完整 Assistant 结构。*/
-+function makeMessages(parts: MessageV2.ToolPart[]): MessageV2.WithParts[] {
++function makeMessages(parts: SessionV1.ToolPart[]): SessionV1.WithParts[] {
 +  return [
 +    {
 +      info: {
 +        id: MessageID.ascending(),
-+        sessionID: SessionID.descending() as MessageV2.WithParts["info"]["sessionID"],
++        sessionID: SessionID.descending() as SessionV1.WithParts["info"]["sessionID"],
 +        role: "assistant",
 +        time: { created: 0 },
-+      } as MessageV2.WithParts["info"],
++      } as SessionV1.WithParts["info"],
 +      parts,
 +    },
 +  ]

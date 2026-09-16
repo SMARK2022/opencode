@@ -1,53 +1,20 @@
-From 15300d6c865618fad552fd8dbcfb5359ed76614e Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 1 Jul 2026 20:43:08 +0800
-Subject: [PATCH] fix(tui): 修正 Voice 提示宽度门与流式期间录音禁用
-
-路径迁移 0299：cli/cmd/tui/component/prompt/index.tsx -> packages/tui/src/component/prompt/index.tsx，
-cli/cmd/tui/prompt-voice-input.ts -> packages/tui/src/prompt-voice-input.ts。
-test/cli/tui/prompt-voice-input.test.ts -> packages/tui/test/prompt/prompt-voice-input.test.ts（0299 已迁移）。
-
-diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
---- a/packages/tui/src/component/prompt/index.tsx
-+++ b/packages/tui/src/component/prompt/index.tsx
-@@ -1067,9 +1067,9 @@
-       target: inputTarget,
-+      // 流式期间也允许发起/停止/取消录音：录音不写 prompt，转写文本落盘前由 submitInner 的
-+      // voiceInputBusy 提交保护拦截，不会与 assistant 输出竞争 prompt；仅保留对话框/autocomplete/disabled 通用约束。
-       enabled:
-         inputTarget() !== undefined &&
-         !props.disabled &&
-         !auto()?.visible &&
--        !dialog.stack.length &&
--        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
--        (!running() || voiceInputStatus().type === "recording"),
-+        !dialog.stack.length,
-       commands: [
-@@ -1917,8 +1918,10 @@
-                   <text fg={theme.text}>
-                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
-                   </text>
--                  <Show when={tuiConfig.voice?.transcriber}>
-+                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示(比 usage 的 >100 更晚)，窄终端把 chrome 让给更高频信息；
-+                      不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
-+                  <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
-                     <text fg={theme.text}>
-                       {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
-                     </text>
-                   </Show>
 diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
 --- a/packages/tui/src/prompt-voice-input.ts
 +++ b/packages/tui/src/prompt-voice-input.ts
-@@ -6,3 +6,6 @@
+@@ -5,6 +5,9 @@ import path from "path"
+ export const VOICE_FILE_PLACEHOLDER = "{file}"
  // 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
  export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
 +// voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
-+// 比 usage 显示阈值(>100，见 Prompt 组件 showCumulative)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
++// 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
 +export const VOICE_HINT_MIN_PROMPT_WIDTH = 140
  
-@@ -209,3 +212,9 @@
+ export type VoiceTranscriber = {
+   command: string
+@@ -208,6 +211,12 @@ async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
+   }
  }
-
+ 
 +// voice 提示是否在 footer 显示：仅当配置了转写器且 prompt 框足够宽时露出。
 +// 纯显示判定，不影响 Alt+V 绑定本身——窄终端隐藏提示文案但快捷键仍可转录，避免引导文案挤占输入区。
 +export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, promptWidth: number): boolean {
@@ -55,8 +22,38 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
 +}
 +
  export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now()) {
+   // 这些文案直接显示在 prompt footer；保持短文本，避免小终端下挤掉输入区。
+   if (status.type === "starting") return "Starting voice..."
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -1091,9 +1091,9 @@ export function Prompt(props: PromptProps) {
+         inputTarget() !== undefined &&
+         !props.disabled &&
+         !auto()?.visible &&
+-        !dialog.stack.length &&
+-        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
+-        (!isRunning() || voiceInputStatus().type === "recording"),
++        !dialog.stack.length,
++      // [local-smark] 流式期间也允许发起/停止/取消录音：录音不写 prompt，转写文本落盘前由 submitInner 的
++      // voiceInputBusy 提交保护拦截，不会与 assistant 输出竞争 prompt；仅保留对话框/autocomplete/disabled 通用约束。
+       commands: [
+         {
+           name: "prompt.voice.toggle",
+@@ -1943,7 +1943,9 @@ export function Prompt(props: PromptProps) {
+                   <text fg={theme.text}>
+                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
+                   </text>
+-                  <Show when={tuiConfig.voice?.transcriber}>
++                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示（比 usage 的 >100 更晚），窄终端把 chrome 让给更高频信息；
++                      不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
++                  <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
+                     <text fg={theme.text}>
+                       {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
+                     </text>
+
 diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
-index 1e661e8b1..5e42fdd1f 100644
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
 @@ -5,6 +5,7 @@ import {
@@ -87,3 +84,4 @@ index 1e661e8b1..5e42fdd1f 100644
    // 这是完整的正常路径：第一次 toggle 开始录音，第二次 toggle 停止并转写。
    // 断言文本插入的是停止后的 WAV 文件结果，而不是录音中途的旧状态。
    // stop 后仍调用 abort，是为了删除临时文件；这个 cleanup 不应影响已插入文本。
+

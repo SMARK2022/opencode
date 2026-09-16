@@ -1,22 +1,3 @@
-From e5e07de00060aec1d2035017f8266dedea3b9323 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Mon, 6 Jul 2026 18:56:16 +0800
-Subject: [PATCH] =?UTF-8?q?fix(permission):=20reviewer=20=E8=B6=85?=
- =?UTF-8?q?=E6=97=B6/=E5=8D=8F=E8=AE=AE=E9=94=99=E8=AF=AF=E9=87=8D?=
- =?UTF-8?q?=E8=AF=95=E4=BB=8E=200-1=20=E6=AC=A1=E6=8F=90=E5=8D=87=E5=88=B0?=
- =?UTF-8?q?=203=20=E6=AC=A1?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-交换 Effect.timeoutOrElse 与 Effect.catchIf 的 pipe 顺序：旧代码超时在
-catchIf 外层，ReviewerTimedOut 绕过重试直达 handleReviewerFailure；修复后
-per-attempt 超时在 catchIf 内层，超时可被捕获并递归重试最多 3 次。
-
-附带修复：onInterrupt 清理超时中断的子会话 assistant 消息终态避免悬挂；
-transportError 兜底识别无 code 的 socket close；assessmentFromJsonText
-宽容提取 prose 中的 JSON；errorMessage 提取 responseBody 增强诊断。
-
 diff --git a/docs/reviewer-retry-fix-plan.md b/docs/reviewer-retry-fix-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..0e61bec05d8901f7b3420491eff6e8c60ec4af26
@@ -649,58 +630,41 @@ index 0000000000000000000000000000000000000000..0e61bec05d8901f7b3420491eff6e8c6
 +1. **270s 最差总时间**：3 × 90s = 270s。用户可减小 `timeout_ms` 缩短总时间。权限路径非延迟敏感（agent 等待权限时本就阻塞）。
 +2. **7455cd9a 案例的精确根因**：持久化 text 是合法 JSON 但 `assessmentFromJsonText` 失败，且协议重试未执行。Change 6 的宽容提取 + Change 1 的 3 次重试可减少此类场景，但根因可能涉及运行时 `textOutput` 变量不一致，需额外日志诊断。
 +3. **模型回退（auth/400）**：当 reviewer 模型 provider 返回 401/400 时无回退到其他模型。属于行为变更，不在本次范围内。
-diff --git a/packages/opencode/src/config/permission.ts b/packages/opencode/src/config/permission.ts
-index 8678e58f2a8d4fc88895c70e2838be88b925dfc9..75d0a51691a72fb01c0de06a98224b404b2ed37a 100644
---- a/packages/opencode/src/config/permission.ts
-+++ b/packages/opencode/src/config/permission.ts
-@@ -19,7 +19,7 @@ export const AutoReview = Schema.Struct({
-   // `action: "auto"` is resolved, but these fields are not themselves rules and
-   // are skipped by Permission.fromConfig.
-   model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
--  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer timeout in milliseconds. Defaults to 90000." }),
-+  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000." }),
-   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
-   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
-   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe6729a7bc537 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -166,21 +166,40 @@ export const layer = Layer.effect(
+@@ -89,6 +89,8 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
+ // consumers from confusing protocol retry cleanup with undo or session repair.
+ const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
+ // #227：协议失败重试的隐藏原因——首次尝试的畸形输出在重试前隐藏，避免用户把 JSON/散文答案误读为已批准
++// reviewer 总尝试次数：1 初始 + 2 重试。协议错误与超时共用该预算。
++const MAX_REVIEWER_ATTEMPTS = 3
+ const PROTOCOL_RETRY_USER_ITEM = {
+ // #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
+   type: "text" as const,
+@@ -195,20 +197,27 @@ export const layer = Layer.effect(
                )
-             })
+             }) as Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error, never>
            }
 -          const assessment = yield* runReviewerAttempt(messages, true).pipe(
 -            Effect.catchIf(isReviewerDecisionProtocolError, () =>
+-// #227：仅协议格式错误触发重试，其他错误直接走超时/mapError 路径
 -              // Keep the evidence and requested action unchanged; only append a
 -              // protocol nudge so the second attempt repairs submission format
 -              // instead of broadening the authorization or policy context.
 -              runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
 -            ),
+-            // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
 -            Effect.timeoutOrElse({
--              // Timeout covers reviewer execution including its existing provider
--              // retry loop. The tool still never executes from a timeout alone:
--              // default fallback returns to user ask, while fallback=deny preserves
--              // a terminal fail-closed result for stricter deployments.
+-// #227：超时是重试之外的第二道保险——provider 挂起不阻塞 auto 权限评估
 -              duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
 -              orElse: () => Effect.fail(new ReviewerTimedOut()),
 -            }),
-+          // [local-smark] reviewer 重试架构：per-attempt 超时 + 最多 3 次尝试
-+          // timeout_ms 是每次尝试的超时（非总超时），总最差时间为 timeout_ms * MAX_REVIEWER_ATTEMPTS。
-+          // 旧代码的 pipe 顺序是 catchIf → timeoutOrElse（超时在外层），导致超时产生的
-+          // ReviewerTimedOut 在 catchIf 之外，无法被捕获重试。修复后 timeoutOrElse 在
-+          // catchIf 内层，超时可被 catchIf 捕获并触发重试。
-+          const MAX_REVIEWER_ATTEMPTS = 3
++          // perAttemptTimeout：timeout_ms 现为单次尝试预算，总最坏 3 倍（1 初始 + 2 重试）
 +          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
-+
-+          function reviewerRetry(
-+            attemptNum: number,
-+            currentMessages: readonly ModelMessage[],
-+            hideOnProtocolError: boolean,
-+          ): Effect.Effect<Schema.Schema.Type<typeof Assessment>, unknown> {
-+            return runReviewerAttempt(currentMessages, hideOnProtocolError).pipe(
-+              // per-attempt 超时：每次尝试独立计时。超时产生 ReviewerTimedOut，
-+              // 被下方 catchIf 捕获后触发重试，而非直接失败。
++          // 显式返回注解：递归函数的返回类型无法推断（TS7023/7024）
++          const reviewerRetry = (attemptNum: number, currentMessages: readonly ModelMessage[], hideProtocolFailure: boolean): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
++            runReviewerAttempt(currentMessages, hideProtocolFailure).pipe(
 +              Effect.timeoutOrElse({
 +                duration: `${perAttemptTimeout} millis`,
 +                orElse: () => Effect.fail(new ReviewerTimedOut()),
@@ -716,16 +680,14 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
 +                return reviewerRetry(attemptNum + 1, nextMessages, false)
 +              }),
 +            )
-+          }
-+
 +          const assessment = yield* reviewerRetry(0, messages, true).pipe(
+             // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
              Effect.mapError((error) =>
-               isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
-             ),
-@@ -229,6 +248,15 @@ export const layer = Layer.effect(
-           // channel so fallback=user can ask and fallback=deny can fail closed.
-           Effect.catchDefect((defect) => Effect.fail(defect)),
-           Effect.catch(handleReviewerFailure),
+ // #227：非 reviewer 错误统一包装为 RunError——fail-closed 信号可被上层捕获
+@@ -257,6 +266,15 @@ export const layer = Layer.effect(
+               return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
+             }),
+           ),
 +          // 外部取消（session cancel/compaction）不触发 handleReviewerFailure（中断
 +          // 不是 failure）；onInterrupt 作为 processor.interruptedToolMetadata 的补充，
 +          // 覆盖 processor 清理未触达的边界（stuck reviewing 案例）。
@@ -738,8 +700,8 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
          )
        })
  
-@@ -405,6 +433,20 @@ export const layer = Layer.effect(
-               yield* sessions.updateMessage(message)
+@@ -429,6 +447,20 @@ export const layer = Layer.effect(
+               yield* session.updateMessage(message)
              }),
            ),
 +          // 超时中断不会触发 tapError（中断不是 failure）；onInterrupt 确保子会话
@@ -753,14 +715,14 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
 +                { providerID: input.model.providerID, aborted: true },
 +              )
 +              message.time.completed = Date.now()
-+              yield* sessions.updateMessage(message)
++              yield* session.updateMessage(message)
 +            }).pipe(Effect.catch(() => Effect.void), Effect.catchDefect(() => Effect.void)),
 +          ),
          )
+         // #209：流结束后补全 finish 与 completed——tool-calls 标记决策工具已被调用
          message.finish = "tool-calls"
-         message.time.completed = Date.now()
-@@ -795,7 +837,7 @@ export const layer = Layer.effect(
- 
+@@ -847,7 +879,7 @@ export const layer = Layer.effect(
+     // #209：标记工具审查失败——timed_out/failed/fallback_user 状态和错误原因
      function markToolReviewFailed(
        input: PermissionAuto.ReviewInput,
 -      status: "timed_out" | "failed" | "fallback_user",
@@ -768,7 +730,7 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
        reason: string,
      ) {
        return updateToolAutoReview(input, { status, error: reason })
-@@ -804,7 +846,7 @@ export const layer = Layer.effect(
+@@ -857,7 +889,7 @@ export const layer = Layer.effect(
      function updateToolAutoReview(
        input: PermissionAuto.ReviewInput,
        patch: {
@@ -777,32 +739,31 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
          sessionID?: SessionID
          error?: string
          result?: {
-@@ -826,6 +868,9 @@ export const layer = Layer.effect(
+@@ -884,6 +916,9 @@ export const layer = Layer.effect(
            metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
              ? metadata.autoReview
              : {}
 +        // onInterrupt 可能在 handleReviewerFailure 写入终态后延迟触发；
 +        // "aborted" 不应覆盖更具体的终态（timed_out/failed/fallback_user/allowed/denied）。
 +        if (patch.status === "aborted" && current.status && current.status !== "reviewing") return
-         yield* sessions.updatePart({
+         yield* session.updatePart({
            ...part,
            state: {
-@@ -895,6 +940,12 @@ function isReviewerDecisionProtocolError(error: unknown) {
+@@ -948,6 +983,11 @@ function isReviewerDecisionProtocolError(error: unknown) {
+   // retrying those would blur operational failures with model formatting repair.
    return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
  }
- 
 +// 协议错误（reviewer 完成但未调用决策工具）和超时都触发重试。
 +// provider 级 429/503 由 SessionRetry.retry 在每次尝试内处理，不经过此层。
 +function isReviewerRetryable(error: unknown): boolean {
 +  return isReviewerDecisionProtocolError(error) || error instanceof ReviewerTimedOut
 +}
-+
- function reviewerEnabled(permission: Config.Info["permission"], _metadata: Readonly<Record<string, unknown>>) {
-   // reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
-   // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
-@@ -903,9 +954,28 @@ function reviewerEnabled(permission: Config.Info["permission"], _metadata: Reado
- }
  
+ // #203：reviewer 启用判定——显式 user 配置优先保留人工审批
+ // #280：reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
+@@ -959,9 +999,28 @@ function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, _metad
+ 
+ // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
  function errorMessage(error: unknown) {
 -  if (error instanceof Error) return error.message
 +  if (error instanceof Error) {
@@ -830,7 +791,7 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
    return String(error)
  }
  
-@@ -950,16 +1020,48 @@ export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Lay
+@@ -1003,16 +1062,48 @@ export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Lay
  function assessmentFromJsonText(text: string) {
    const trimmed = text.trim()
    if (!trimmed) return
@@ -881,13 +842,12 @@ index d8fe0108eb88a221826d2aad7cfb9a069e758c1c..be4c6404109e0a4ffe0a98e3119fe672
 +}
 +
  function assessmentFromUnknown(input: unknown) {
+ // #227：畸形工具参数与缺失协议输出同等待遇——不绕过修复格式的第二次尝试
    try {
-     // Treat malformed tool/function arguments the same as missing protocol
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 4e29facb96c2bcfee306138b412f5c96a8bc5e71..8274c30b9f852710173c6fc2accf3770088bbfa4 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1554,7 +1554,10 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
+@@ -987,7 +987,10 @@
      retryCode !== undefined ||
      message === "fetch failed" ||
      message === "failed to fetch" ||
@@ -896,61 +856,25 @@ index 4e29facb96c2bcfee306138b412f5c96a8bc5e71..8274c30b9f852710173c6fc2accf3770
 +    // 仅在无 code 时兜底匹配 socket close message；有 code 的 ECONNRESET 等
 +    // 由 fromError switch(true) 中的专用 case 处理，保持 "Connection reset by server" 消息
 +    !code && message.includes("socket connection was closed")
+     // #191：fetch failed 是 Node/undici 网络层通用包装，Cannot connect 是代理层提示，二者均属瞬时故障
  
    if (retryable) {
-     return {
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 7898a95f551643a9437aa495b2fffede572f1fe6..f7770aefa837156b07df9f951bff6f7005a4e12e 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1013,7 +1013,7 @@ it.instance(
+@@ -1326,6 +1326,110 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
+   }),
  )
  
- it.instance(
--  "auto permission reviewer fails closed after one malformed protocol retry",
-+  "auto permission reviewer fails closed after two malformed protocol retries",
-   () =>
-     Effect.gen(function* () {
-       const { llm } = yield* useServerConfig((url) => ({
-@@ -1024,9 +1024,11 @@ it.instance(
-       const sessions = yield* Session.Service
-       const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
-       const command = String.raw`rm "/tmp/file with spaces.txt"`
-+      // reviewer 最多 3 次尝试（1 初始 + 2 重试），每次都输出 prose 而非 tool call
-       yield* llm.push(
-         reply().text("first malformed reviewer response").stop().item(),
-         reply().text("second malformed reviewer response").stop().item(),
-+        reply().text("third malformed reviewer response").stop().item(),
-       )
- 
-       const exit = yield* permissions
-@@ -1043,12 +1045,14 @@ it.instance(
-       expect(Exit.isFailure(exit)).toBe(true)
-       if (!Exit.isFailure(exit)) return
-       expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.AutoDeniedError)
--      expect(yield* llm.calls).toBe(2)
-+      // 3 次尝试全部协议错误后 fail closed
-+      expect(yield* llm.calls).toBe(3)
-       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
-       expect(reviewer).toBeDefined()
-       if (!reviewer) return
- 
-       const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
-+      // 第一次尝试被隐藏（hideProtocolFailure=true），后续可见
-       expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed")))).toBe(false)
-       expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed")))).toBe(true)
-     }),
-@@ -1159,6 +1163,109 @@ it.instance(
-   10_000,
- )
- 
++
++// #390：超时中断后重试——第一次 hang 触发 per-attempt 超时，重试后成功；
++// 同时锁定被中断的子会话 assistant 消息写入终态（error + completed）不悬挂
 +it.instance(
 +  "auto permission reviewer retries on timeout before falling back to user",
 +  () =>
 +    Effect.gen(function* () {
 +      const { llm } = yield* useServerConfig((url) => ({
 +        ...providerCfg(url),
-+        // 极短超时使 hang 快速触发，验证超时后重试而非直接 unavailable
 +        permission: { auto_review: { timeout_ms: 500 } },
 +      }))
 +      const permissions = yield* Permission.Service
@@ -984,12 +908,10 @@ index 7898a95f551643a9437aa495b2fffede572f1fe6..f7770aefa837156b07df9f951bff6f70
 +      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
 +      expect(reviewer).toBeDefined()
 +      if (!reviewer) return
-+      // 被超时中断的 assistant 消息应有终态（error + completed），不悬挂
 +      const msgs = yield* MessageV2.page({ sessionID: reviewer.id, limit: 20, includeHidden: true })
 +      const assistants = msgs.items.filter((m) => m.info.role === "assistant")
 +      expect(assistants.length).toBeGreaterThanOrEqual(2)
-+      // page 返回联合类型，需要断言为 Assistant 才能访问 time.completed / error
-+      const interrupted = assistants[0].info as MessageV2.Assistant
++      const interrupted = assistants[0].info as SessionV1.Assistant
 +      expect(interrupted.time.completed).toBeDefined()
 +      expect(interrupted.error).toBeDefined()
 +    }),
@@ -997,6 +919,8 @@ index 7898a95f551643a9437aa495b2fffede572f1fe6..f7770aefa837156b07df9f951bff6f70
 +  30_000,
 +)
 +
++// #390：prose 前缀的 JSON 提取——旧实现只接受纯 JSON；修复后括号深度扫描
++// 提取第一个 {...} 块并以 json_fallback 落决策，Schema/策略守卫不削弱
 +it.instance(
 +  "auto permission reviewer extracts JSON from prose-prefixed text",
 +  () =>
@@ -1006,11 +930,11 @@ index 7898a95f551643a9437aa495b2fffede572f1fe6..f7770aefa837156b07df9f951bff6f70
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Reviewer JSON extraction" })
 +      const command = String.raw`rsync -av "/Volumes/My Passport/Calibration/" Sensetimex4:~/project/Calibration/`
-+      // 模型在 JSON 前附加 prose，旧实现只接受纯 JSON 会失败；修复后应提取第一个 {...} 块
 +      yield* llm.push(
 +        reply()
 +          .text(
-+            `Based on my analysis:\n${JSON.stringify({
++            `Based on my analysis:
++${JSON.stringify({
 +              outcome: "allow",
 +              risk_level: "high",
 +              user_authorization: "high",
@@ -1032,7 +956,6 @@ index 7898a95f551643a9437aa495b2fffede572f1fe6..f7770aefa837156b07df9f951bff6f70
 +      expect(reviewer).toBeDefined()
 +      if (!reviewer) return
 +      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
-+      // prose 前缀的 JSON 被提取并接受为 json_fallback 决策
 +      expect(
 +        reviewerParts.some(
 +          (part) =>
@@ -1047,6 +970,51 @@ index 7898a95f551643a9437aa495b2fffede572f1fe6..f7770aefa837156b07df9f951bff6f70
 +  { git: true },
 +)
 +
+ // #209：验证 reviewer streaming 持久化真实 reasoning 和 decision tool part
+ // #209：端到端测试——mock LLM 返回 reasoning + permission_review_decision tool call，验证子会话持久化了各 part
  it.instance(
-   "shell auto review metadata survives live output updates and completion",
+@@ -1558,7 +1662,7 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "auto permission reviewer fails closed after one malformed protocol retry",
++  "auto permission reviewer fails closed after two malformed protocol retries",
    () =>
+     Effect.gen(function* () {
+       // #269：审查器失败后必须确定性拒绝，默认 fallback 为 user 会走 ask 而非 deny
+@@ -1568,9 +1672,11 @@ it.instance(
+       const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
+       const command = String.raw`rm "/tmp/file with spaces.txt"`
+       // #227：两次畸形响应使协议重试耗尽——第二次失败后必须确定性拒绝而非放宽为允许
++      // reviewer 最多 3 次尝试（1 初始 + 2 重试），每次都输出 prose 而非 tool call
+       yield* llm.push(
+         reply().text("first malformed reviewer response").stop().item(),
+         reply().text("second malformed reviewer response").stop().item(),
++        reply().text("third malformed reviewer response").stop().item(),
+       )
+ 
+       const exit = yield* permissions
+@@ -1588,8 +1694,8 @@ it.instance(
+       if (!Exit.isFailure(exit)) return
+       // #227：协议重试耗尽后必须确定性失败——AutoDeniedError 使调用方只能拒绝，不存在静默放行分支
+       expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionV1.AutoDeniedError)
+-      // #227：协议输出仅修复一次格式——重试一次后仍畸形即按拒绝退出，不追加更多模型调用
+-      expect(yield* llm.calls).toBe(2)
++      // #227：3 次尝试全部协议错误后 fail closed——AutoDeniedError 使调用方只能拒绝
++      expect(yield* llm.calls).toBe(3)
+       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+       expect(reviewer).toBeDefined()
+       if (!reviewer) return
+diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/config/permission.ts
+--- a/packages/core/src/v1/config/permission.ts
++++ b/packages/core/src/v1/config/permission.ts
+@@ -19,7 +19,8 @@ export const AutoReview = Schema.Struct({
+   // #196：但这些字段本身不是 rules，Permission.fromConfig 会跳过它们。
+   // #196：model 指定 reviewer 使用的模型；timeout_ms 默认 90 秒。
+   model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
+-  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer timeout in milliseconds. Defaults to 90000." }),
++  // #390：timeout_ms 是每次尝试的超时（非总超时）——reviewer 重试 0→3 次后语义已变
++  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000." }),
+   // #196：policy_path 和 policy 追加到默认 tenant policy 之后。
+   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
+   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),

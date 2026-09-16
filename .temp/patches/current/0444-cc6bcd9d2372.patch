@@ -267,3 +267,84 @@ index 0000000000000000000000000000000000000000..2110bad9e861850eb29cb234b6b52d72
 +  // HTTP page 保持 server 顺序，只按 ID 查找本地候选并复用单 Part 合同。
 +  return incoming.map((part) => mergePartSnapshot(existing.find((item) => item.id === part.id), part))
 +}
+diff --git a/packages/app/src/context/server-session.ts b/packages/app/src/context/server-session.ts
+--- a/packages/app/src/context/server-session.ts
++++ b/packages/app/src/context/server-session.ts
+@@ -17,1 +17,2 @@
++import { mergePartSnapshot, mergePartSnapshots } from "./global-sync/part-merge"
+ import { dropSessionCaches, pickSessionCacheEvictions, SESSION_CACHE_LIMIT } from "./global-sync/session-cache"
+@@ -519,3 +519,4 @@ const replaceParts = (
++      // HTTP page 写入前先与本地现值做单调合并，防止 page-load 把 running tool part 回退成旧快照
+       const fetched = load?.clearedMessageParts.has(item.id)
+         ? []
+-        : item.part.filter((part) => !SKIP_PARTS.has(part.type))
++        : mergePartSnapshots(data.part[item.id], item.part.filter((part) => !SKIP_PARTS.has(part.type)))
+diff --git a/packages/app/src/context/server-session.ts b/packages/app/src/context/server-session.ts
+--- a/packages/app/src/context/server-session.ts
++++ b/packages/app/src/context/server-session.ts
+@@ -846,1 +846,3 @@
+-      case "message.part.updated": {
++      // progress 与 updated 是同一 part 快照的两条通道（50ms live / durable），走同一合并写入。
++      case "message.part.progress":
++      case "message.part.updated": {
+@@ -894,3 +894,5 @@
+         const result = Binary.search(parts, part.id, (item) => item.id)
+-        if (result.found) setData("part", part.messageID, result.index, reconcile(part))
++        // 后到 stale 快照不得回退 live running 进度：与 page 路径共用同一单调合同。
++        const merged = result.found ? mergePartSnapshot(parts[result.index], part) : part
++        if (result.found) setData("part", part.messageID, result.index, reconcile(merged))
+         if (!result.found)
+diff --git a/packages/app/src/context/server-session.test.ts b/packages/app/src/context/server-session.test.ts
+--- a/packages/app/src/context/server-session.test.ts
++++ b/packages/app/src/context/server-session.test.ts
+@@ -3,1 +3,1 @@
+-import type { Message, OpencodeClient, Part, Session } from "@opencode-ai/sdk/v2/client"
++import type { Message, OpencodeClient, Part, Session, ToolPart } from "@opencode-ai/sdk/v2/client"
+@@ -59,3 +59,18 @@
+ })
+ 
++const toolPart = (messageID: string, id: string, progressVersion: number): ToolPart => ({
++  id,
++  sessionID: "child",
++  messageID,
++  type: "tool",
++  callID: `call-${id}`,
++  tool: "bash",
++  state: {
++    status: "running",
++    input: {},
++    metadata: { progressVersion },
++    time: { start: 1 },
++  },
++})
++
+ const response = (data: MessageResponse["data"] = [], cursor?: string): MessageResponse => ({
+@@ -448,1 +448,28 @@
++  test("does not regress a running tool part when a stale initial page arrives", async () => {
++    const pending = deferredResponse()
++    const fetched = userMessage("message")
++    const livePart = toolPart(fetched.id, "part", 3)
++    const stalePart = toolPart(fetched.id, "part", 1)
++    const store = createServerSession(messageClient(pending.promise))
++    const loading = store.sync("child")
++
++    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: livePart, time: 2 } })
++    pending.resolve(response([{ info: fetched, parts: [stalePart] }]))
++    await loading
++
++    // page 携带旧 progressVersion 时不得回退 live running tool part——mergePartSnapshot 单调合同
++    expect(store.data.part[fetched.id]).toEqual([livePart])
++  })
++
++  test("does not regress a running tool part from a stale part.updated event", async () => {
++    const store = createServerSession(messageClient(deferredResponse().promise))
++    void store.sync("child")
++    const livePart = toolPart("message", "part", 3)
++    const stalePart = toolPart("message", "part", 1)
++    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: livePart, time: 2 } })
++    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: stalePart, time: 3 } })
++    // 同一 updated 通道的后到 stale 事件同样不得回退——事件路径与 page 路径共用单调合同
++    expect(store.data.part["message"]).toEqual([livePart])
++  })
++
+   test("preserves removals received during the initial load", async () => {

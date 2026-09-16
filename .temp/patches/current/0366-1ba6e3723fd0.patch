@@ -22,7 +22,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session
 index bba63df6b..eb92446d9 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-@@ -90,6 +90,16 @@
+@@ -90,6 +90,19 @@
  export const GoalClearResponse = Schema.Struct({
    cleared: Schema.Boolean,
  })
@@ -32,25 +32,29 @@ index bba63df6b..eb92446d9 100644
 +// limit 约束在 1-10 防止异常大值导致 SQL 返回过多行
 +// (session 上限 400 由 TUI 侧切片控制，服务端不再重复限制)。
 +export const PreviewPayload = Schema.Struct({
++  // [local-smark] sessionIDs 顺序不保证与响应键序一致——响应以 session_id 为键的映射
 +  sessionIDs: Schema.Array(Schema.String),
 +  limit: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10))),
 +})
++// [local-smark] 响应省略无用户消息的 session——消费方按需回退占位文本，
++// 避免空数组与未拉取两种状态在 UI 上无法区分
 +export const PreviewResponse = Schema.Record(Schema.String, Schema.Array(Schema.String))
  
  export const SessionPaths = {
    list: root,
-@@ -120,6 +130,9 @@
+@@ -120,6 +130,10 @@
    updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
    // #364：goal 端点：每个 session 最多一个 current goal
    goal: `${root}/:sessionID/goal`,
-+  // [local-smark] 预览端点：POST /session/preview，批量返回 session 预览文本
++  // [local-smark] 预览端点：POST /session/preview，批量返回 session 预览文本；
++  // POST 语义而非 GET——sessionID 列表作为 payload 传输，规避 URL 长度限制
 +  // 路径不含 :sessionID，需要 workspace-routing 添加例外避免品牌校验
 +  preview: `${root}/preview`,
  } as const
  
  export const SessionApi = HttpApi.make("session")
-@@ -523,6 +536,22 @@
-             description: "Remove the persistent goal from a session.",
+@@ -523,6 +536,24 @@
+             description: "Clear the persistent goal for a session.",
            }),
          ),
 +        // [local-smark] 批量预览端点：单次 POST 返回多个 session 的用户消息预览
@@ -60,6 +64,8 @@ index bba63df6b..eb92446d9 100644
 +          query: WorkspaceRoutingQuery,
 +          payload: PreviewPayload,
 +          success: described(PreviewResponse, "Session preview lines keyed by session ID"),
++          // [local-smark] 错误面仅 BadRequest：payload 非法；未知 session 静默省略
++          // （预览是尽力而为的展示数据，缺失不构成客户端错误）
 +          error: [HttpApiError.BadRequest],
 +        }).annotateMerge(
 +          OpenApi.annotations({
@@ -104,7 +110,7 @@ index 7a8b5695f..6d94bb660 100644
      const summary = yield* SessionSummary.Service
      const events = yield* EventV2Bridge.Service
      const scope = yield* Scope.Scope
-@@ -534,6 +541,83 @@
+@@ -534,6 +541,87 @@
      return { cleared }
    })
  
@@ -120,7 +126,10 @@ index 7a8b5695f..6d94bb660 100644
 +    payload: typeof PreviewPayload.Type
 +  }) {
 +    const { sessionIDs, limit: rawLimit } = ctx.payload
++    // [local-smark] 空列表短路：IN () 是非法 SQL，且空请求语义上就是空结果
 +    if (sessionIDs.length === 0) return {} as Record<string, string[]>
++    // [local-smark] 默认 2 行与 SESSION_LIST_PREVIEW_LINES 对齐——
++    // 服务端不再重复校验上限（payload schema 已限 1-10）
 +    const limit = rawLimit ?? 2
 +
 +    // 参数化 IN 子句，防止 SQL 注入；SQLite 参数上限 32766，400 远在限内
@@ -176,7 +185,8 @@ index 7a8b5695f..6d94bb660 100644
 +    // .replace(/\s+/g, " ").trim() 对齐）并按 session 分组
 +    const result: Record<string, string[]> = {}
 +    for (const row of rows) {
-+      // group_concat 对无匹配行返回 NULL；空文本跳过，与 if (text) 一致
++      // [local-smark] group_concat 对无匹配行返回 NULL；空文本跳过，
++      // 与旧 TUI if (text) 过滤一致——空行不占用预览行数预算
 +      const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()
 +      if (!text) continue
 +      if (!result[row.session_id]) result[row.session_id] = []
@@ -216,7 +226,7 @@ new file mode 100644
 index 000000000..d4944e07a
 --- /dev/null
 +++ b/packages/opencode/test/server/session-preview.test.ts
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,429 @@
 +import { afterEach, describe, expect } from "bun:test"
 +import { Effect, Layer } from "effect"
 +import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -233,6 +243,8 @@ index 000000000..d4944e07a
 +// #366：预览端点测试走生产 HttpApi 路由树 + 进程内 Node HTTP server，
 +// 与 session-messages.test.ts 同构：先经 SessionNs.node 写入 V1 消息行，
 +// 再由 HTTP 端点读取，验证 SQL 窗口函数查询与消息读取路径等价。
++// [local-smark] 测试矩阵：写入 N 个 session × 多条用户/助手消息后调用预览端点，
++// 覆盖排序（新→旧）、hidden/synthetic 过滤、limit 截断、空 session 省略四个契约。
 +const it = testEffect(Layer.mergeAll(LayerNode.compile(SessionNs.node), httpApiLayer))
 +
 +const model = {
@@ -244,6 +256,8 @@ index 000000000..d4944e07a
 +  await disposeAllInstances()
 +})
 +
++// [local-smark] Windows 下 file watcher 与测试写库竞争会放大用例时延，
++// 仅在 win32 禁用 watcher——Linux/macOS CI 保持默认接线以覆盖真实路径。
 +const withoutWatcher = <A, E, R>(effect: Effect.Effect<A, E, R>) => {
 +  if (process.platform !== "win32") return effect
 +  return Effect.acquireUseRelease(
@@ -644,7 +658,6 @@ index 000000000..d4944e07a
 +})
 \ No newline at end of file
 diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
-index 3ae4a6e7b..80f2accfb 100644
 --- a/packages/tui/src/component/dialog-session-list.tsx
 +++ b/packages/tui/src/component/dialog-session-list.tsx
 @@ -1,4 +1,3 @@
@@ -652,7 +665,7 @@ index 3ae4a6e7b..80f2accfb 100644
  import { useDialog } from "../ui/dialog"
  import { DialogSelect } from "../ui/dialog-select"
  import { useRoute } from "../context/route"
-@@ -46,14 +45,8 @@
+@@ -47,15 +46,10 @@
  
  // #115：会话列表预览默认 2 行
  const SESSION_LIST_PREVIEW_LINES = 2
@@ -660,14 +673,16 @@ index 3ae4a6e7b..80f2accfb 100644
 -const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
 -// #120：最多扫描消息条数，避免全历史
 -const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
- // #120：同时预加载预览的会话数上限；400 让长会话列表的预览覆盖更完整，避免滚动时反复补拉。
+ // #120：同时预加载预览的会话数上限
+ // #306：预览上限从 50 提到 400，预览覆盖更完整，避免滚动时再触发补拉。
++// #366：预览内容由批量端点一次性返回，本文件不再分页拉取/解析消息 parts。
  const SESSION_LIST_PREVIEW_SESSION_LIMIT = 400
 -// #120：会话预览并发度
 -const SESSION_LIST_PREVIEW_CONCURRENCY = 6
  
  export function DialogSessionList() {
    const dialog = useDialog()
-@@ -71,74 +64,49 @@
+@@ -73,44 +67,24 @@
    // #120：sessionID -> 多行用户消息预览（非单行再折词）
    const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
  
@@ -709,33 +724,30 @@ index 3ae4a6e7b..80f2accfb 100644
 -      before = cursor
 -    }
 -    return lines
--  }
--
-+  // [local-smark] session list preview: 批量获取预览文本
-+  // 单次 POST /session/preview 替代原来 N×M 次 session.messages 分页调用，
-+  // 将 ~10s 阻塞降至 ~130ms，传输量从 ~50MB 降至 ~200KB。
-+  // AbortController 保证 dialog 关闭或搜索切换时取消 in-flight 请求；
-+  // signal.aborted 守卫防止已取消的响应覆盖新数据（竞态防护）
++  // [local-smark] #366：批量预览——单次 POST /session/preview 拉取全部未加载
++  // session 的预览文本，替代逐 session 分页扫描（N×M 次请求 → 1 次）。
++  // 服务端过滤条件与旧 textFromUserMessage 完全对齐（非 synthetic/ignored
++  // 的用户 text part），返回键为 sessionID、值为按新→旧排序的预览行数组。
++  // SDK client 生成物上不存在 preview 方法，as any 调用会在运行时变成
++  // undefined(...) 同步 TypeError 被 catch 吞掉；sdk.fetch 的 rewrite 仅处理
++  // GET/HEAD，POST 需手动带 directory query param（#368 useGoalApi 同模式）
++  async function loadPreviewsBatch(sessionIDs: string[]) {
++    const url = new URL("/session/preview", sdk.url)
++    const dir = sync.path.directory || sdk.directory
++    if (dir) url.searchParams.set("directory", dir)
++    const resp = await sdk.fetch(url, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ sessionIDs, limit: SESSION_LIST_PREVIEW_LINES }),
++    })
++    if (!resp.ok) return {}
++    return (await resp.json()) as Record<string, string[]>
+   }
+ 
    createEffect(
-     on(
-       () => sessions(),
--      (sessions) => {
-+      (currentSessions) => {
-         if (SESSION_LIST_PREVIEW_LINES <= 0) return
--        // #120：跳过已加载预览的会话
--        const unloaded = sessions
-+
-+        const ids = currentSessions
-           .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
--          .filter((s) => !(s.id in (previews() ?? {})))
--        if (unloaded.length === 0) return
-+          .map((s) => s.id)
-+        if (ids.length === 0) return
-+
-+        // 每次 sessions 变化创建新 controller；onCleanup 在下次触发或卸载时 abort
-+        const controller = new AbortController()
-+        onCleanup(() => controller.abort())
-+
+@@ -124,23 +90,15 @@
+           .filter((s) => !(s.id in (previews() ?? {})))
+         if (unloaded.length === 0) return
          void (async () => {
 -          const next: Record<string, string[]> = {}
 -          // #120：按并发度分块预取
@@ -755,27 +767,14 @@ index 3ae4a6e7b..80f2accfb 100644
 -          if (Object.keys(next).length > 0) {
 -            setPreviews((prev) => ({ ...prev, ...next }))
 +          try {
-+            // POST 请求需手动设置 directory query param（sdk.fetch 的 rewrite
-+            // 仅处理 GET/HEAD），确保 workspace routing 中间件正确定位实例
-+            const url = new URL("/session/preview", sdk.url)
-+            const dir = sync.path.directory || sdk.directory
-+            if (dir) url.searchParams.set("directory", dir)
-+
-+            const res = await sdk.fetch(url, {
-+              method: "POST",
-+              headers: { "Content-Type": "application/json" },
-+              body: JSON.stringify({ sessionIDs: ids, limit: SESSION_LIST_PREVIEW_LINES }),
-+              signal: controller.signal,
-+            })
-+            if (!res.ok) return
-+            const data = (await res.json()) as Record<string, string[]>
-+            // 竞态守卫：若请求完成时已被 abort，不覆盖新数据
-+            // 无条件 setPreviews(data)：空响应也需覆盖，避免搜索切换后残留过期预览
-+            if (!controller.signal.aborted) {
-+              setPreviews(data)
++            // #366：一次批量请求覆盖所有未加载会话；无用户消息的 session
++            // 不在响应中——调用方按需跳过，与旧逻辑的 lines.length 守卫等价
++            const next = await loadPreviewsBatch(unloaded.map((s) => s.id))
++            if (Object.keys(next).length > 0) {
++              setPreviews((prev) => ({ ...prev, ...next }))
 +            }
 +          } catch {
-+            // 预览加载失败不阻塞 session list 显示
++            // #120：预览失败不阻断列表
            }
          })()
        },

@@ -16,5 +16,5 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
    "//version-note": "#253 协同升号至 1.17.28-smark；禁止回写 1.14/1.15",
 +  "//287-release-note": "source 全量更新 22 个 README 翻译文件添加 SMARK 品牌信息；目标 README 为纯上游未移植 SMARK 段，patch pre-image 期望 SMARK 增强版而目标为纯上游版，上下文完全不匹配；按 #161/#231 先例跳过整个 patch；版本展示语义由 package.json 和 workflow 承载",
    "//284-release-note": "source bump 1.15.5→1.15.6 已被目标版本线 1.17.28-smark 超越；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
-   "#231-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.17.26→1.17.27-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
+   "#253-release-note": "source bump 1.15.4→1.15.5 映射到目标版本线 1.17.27→1.17.28-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
    "name": "opencode",

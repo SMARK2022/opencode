@@ -1,28 +1,46 @@
-From c632a9d1e95828e38ddc8dd352f50a917df124dc Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 25 Jun 2026 15:38:55 +0800
-Subject: [PATCH] =?UTF-8?q?fix(test/fixture):=20=E4=BF=AE=E5=A4=8D=20dispo?=
- =?UTF-8?q?seAllInstances=20=E8=B6=85=E6=97=B6=E4=BF=9D=E6=8A=A4=20poison?=
- =?UTF-8?q?=20cachedDisposeAll=20=E5=AF=BC=E8=87=B4=20Linux=20Bus=20?=
- =?UTF-8?q?=E6=B5=8B=E8=AF=95=E5=A4=B1=E8=B4=A5?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+diff --git a/packages/opencode/test/fixture/fixture.ts b/packages/opencode/test/fixture/fixture.ts
+--- a/packages/opencode/test/fixture/fixture.ts
++++ b/packages/opencode/test/fixture/fixture.ts
+@@ -53,8 +53,9 @@ export async function reloadTestInstance(input: { directory: string }) {
+ // 注意：超时只是放弃等待，不会取消后台仍在运行的 disposal fiber——
+ // 挂死的 disposer 会继续占用资源直到进程退出。这是 teardown 场景下
+ // 可接受的折衷：优先保证后续测试不被 hook 超时阻断。
+-const DISPOSAL_TIMEOUT = 5_000
+-const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
++export const DISPOSAL_TIMEOUT = 5_000
++
++export const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
+   // 用 setTimeout 而非 Bun.sleep，以便在 p 先 settle 时 clearTimeout
+   // 避免向后续测试输出虚假的 "timed out" 警告。
+   //
+@@ -75,17 +76,15 @@ const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
+ }
+ 
+ export async function disposeAllInstances() {
+-  // allSettled 而非 all：teardown 中某个 runtime 的 rejection 不应
+-  // 阻止另一个 runtime 的清理，也不应传播给 afterEach 调用方——
+-  // 这与 db.ts 中 resetDatabase 已有的 .catch(() => undefined) 意图一致。
+-  // 但 rejection 也不应完全静默：下方检查 allSettled 结果并输出警告，
+-  // 让 finalizer bug 在 CI 日志中可追踪。
+-  const results = await Promise.allSettled([
++  // Promise.all（而非 allSettled）：disposeInstance（instance-registry.ts）
++  // 内部已用 Promise.allSettled 捕获所有 disposer rejection，因此
++  // disposeAllInstances 不会因单个 disposer 失败而 reject——
++  // 先前 allSettled 的 rejection 日志循环是永远不会触发的死代码。
++  // 保持 Promise.all 与绿测基线（16bb317b8b）行为一致。
++  // （目标仅有 InstanceRuntime 单 runtime，源 patch 的 InstanceStore 元素不存在。）
++  await Promise.all([
+     withDisposalTimeout(InstanceRuntime.disposeAllInstances(), "InstanceRuntime"),
+   ])
+-  for (const r of results) {
+-    if (r.status === "rejected") console.warn(`[fixture] disposal rejected:`, r.reason)
+-  }
+ }
+ 
+ // Strip null bytes from paths (defensive fix for CI environment issues)
 
-hang 测试通过 registerDisposer 注入永不 resolve 的 disposer，经
-disposeAllInstances → store.disposeAll → cachedDisposeAll（Effect.cachedWithTTL
-Duration.zero 缓存 in-flight fiber）poison 了 testInstanceRuntime，后续所有
-disposeAll 调用 join 同一个 stuck fiber，withDisposalTimeout 在 5s 后放弃
-但 InstanceDisposed 从未投递，Bus 测试从 0.03s 变为 7-12s。
-
-修复：hang 测试改为直接测试 withDisposalTimeout（合成 Promise，不经过
-InstanceStore），避免 poison 全局状态。allSettled 回退为 Promise.all——
-disposeInstance 内部已有 allSettled 捕获 disposer rejection，外层 allSettled
-及其 rejection 日志循环是死代码。导出 withDisposalTimeout 和 DISPOSAL_TIMEOUT
-供测试直接引用。
 
 diff --git a/packages/opencode/test/fixture/fixture.test.ts b/packages/opencode/test/fixture/fixture.test.ts
-index d51dfbd431822e4310d4b4fc1fd3f164cdd598dc..0429e4bbaabe5e83f846977293997a9447fe1b64 100644
 --- a/packages/opencode/test/fixture/fixture.test.ts
 +++ b/packages/opencode/test/fixture/fixture.test.ts
 @@ -1,7 +1,7 @@
@@ -34,7 +52,7 @@ index d51dfbd431822e4310d4b4fc1fd3f164cdd598dc..0429e4bbaabe5e83f846977293997a94
  import { registerDisposer } from "../../src/effect/instance-registry"
  
  describe("tmpdir", () => {
-@@ -26,49 +26,73 @@ describe("tmpdir", () => {
+@@ -26,49 +26,72 @@ describe("tmpdir", () => {
    })
  })
  
@@ -113,7 +131,7 @@ index d51dfbd431822e4310d4b4fc1fd3f164cdd598dc..0429e4bbaabe5e83f846977293997a94
      await using tmp = await tmpdir()
 -    // withTestInstance 不 dispose，instance 留在 testInstanceRuntime 缓存中
      await withTestInstance({ directory: tmp.path, fn: () => undefined })
- 
+-
 -    const off = registerDisposer(() => new Promise(() => {}))
 +    const off = registerDisposer(() => Promise.reject(new Error("simulated disposal failure")))
      try {
@@ -138,44 +156,4 @@ index d51dfbd431822e4310d4b4fc1fd3f164cdd598dc..0429e4bbaabe5e83f846977293997a94
 +    expect(Date.now() - start).toBeLessThan(2_000)
 +  })
  })
-diff --git a/packages/opencode/test/fixture/fixture.ts b/packages/opencode/test/fixture/fixture.ts
-index 443ddfd8d7fd79a98de1ad1dbc224cdb2654b52d..a7b36c529888564d4393b0c0882b995aafc104ec 100644
---- a/packages/opencode/test/fixture/fixture.ts
-+++ b/packages/opencode/test/fixture/fixture.ts
-@@ -53,8 +53,9 @@ export async function reloadTestInstance(input: { directory: string }) {
- // 注意：超时只是放弃等待，不会取消后台仍在运行的 disposal fiber——
- // 挂死的 disposer 会继续占用资源直到进程退出。这是 teardown 场景下
- // 可接受的折衷：优先保证后续测试不被 hook 超时阻断。
--const DISPOSAL_TIMEOUT = 5_000
--const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
-+export const DISPOSAL_TIMEOUT = 5_000
-+
-+export const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
-   // 用 setTimeout 而非 Bun.sleep，以便在 p 先 settle 时 clearTimeout
-   // 避免向后续测试输出虚假的 "timed out" 警告。
-   //
-@@ -75,18 +76,15 @@ const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
- }
- 
- export async function disposeAllInstances() {
--  // allSettled 而非 all：teardown 中某个 runtime 的 rejection 不应
--  // 阻止另一个 runtime 的清理，也不应传播给 afterEach 调用方——
--  // 这与 db.ts 中 resetDatabase 已有的 .catch(() => undefined) 意图一致。
--  // 但 rejection 也不应完全静默：下方检查 allSettled 结果并输出警告，
--  // 让 finalizer bug 在 CI 日志中可追踪。
--  const results = await Promise.allSettled([
-+  // Promise.all（而非 allSettled）：disposeInstance（instance-registry.ts）
-+  // 内部已用 Promise.allSettled 捕获所有 disposer rejection，因此
-+  // store.disposeAll() 不会因单个 disposer 失败而 reject——
-+  // 先前 allSettled 的 rejection 日志循环是永远不会触发的死代码。
-+  // 保持 Promise.all 与绿测基线（16bb317b8b）行为一致。
-+  await Promise.all([
-     withDisposalTimeout(InstanceRuntime.disposeAllInstances(), "InstanceRuntime"),
-     withDisposalTimeout(runTestInstanceStore((store) => store.disposeAll()), "InstanceStore"),
-   ])
--  for (const r of results) {
--    if (r.status === "rejected") console.warn(`[fixture] disposal rejected:`, r.reason)
--  }
- }
- 
- // Strip null bytes from paths (defensive fix for CI environment issues)
+

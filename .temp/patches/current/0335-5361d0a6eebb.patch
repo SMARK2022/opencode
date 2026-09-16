@@ -1,19 +1,7 @@
-From 5361d0a6eebb166590ea64a6c856e2d22ae911dc Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Wed, 24 Jun 2026 19:15:09 +0800
-Subject: [PATCH] =?UTF-8?q?feat(release):=20=E7=94=9F=E6=88=90=E5=8F=91?=
- =?UTF-8?q?=E5=B8=83=E8=AF=B4=E6=98=8E=E5=B9=B6=E6=9B=B4=E6=96=B0=20GitHub?=
- =?UTF-8?q?=20Release?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index 7d2033970c13424dcd506564f41a5d86224d75d2..366ea0f68e8cbad5da386adfba44b1d7f225aa18 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -330,6 +330,8 @@ jobs:
+@@ -365,6 +365,8 @@ jobs:
      runs-on: ubuntu-latest
      steps:
        - uses: actions/checkout@v4
@@ -21,8 +9,8 @@ index 7d2033970c13424dcd506564f41a5d86224d75d2..366ea0f68e8cbad5da386adfba44b1d7
 +          fetch-depth: 0 # release notes 需要完整 commit 历史 + 全部 tag
  
        - name: Download release workflow artifacts
-         uses: actions/download-artifact@v4
-@@ -363,23 +365,81 @@ jobs:
+         # #156：checksums job 汇总各平台 artifact
+@@ -400,25 +402,82 @@ jobs:
            echo "==== checksums.txt ===="
            cat checksums.txt
  
@@ -50,7 +38,7 @@ index 7d2033970c13424dcd506564f41a5d86224d75d2..366ea0f68e8cbad5da386adfba44b1d7
 +            else
 +              # 版本 bump commit：首个把当前版本号写进 package.json 的提交
 +              BUMPCOMMIT=$(git log "${PREV_TAG}..HEAD" --reverse --format="%H" \
-+                -S "\"version\": \"${VERSION}\"" -- packages/opencode/package.json | head -1)
++                -S "\"version\": "${VERSION}\"" -- packages/opencode/package.json | head -1)
 +
 +              if [ -n "$BUMPCOMMIT" ]; then
 +                # 有版本 bump：分两节，避免上个版本期间积累的 commit 与本版本新增混在一起
@@ -64,14 +52,14 @@ index 7d2033970c13424dcd506564f41a5d86224d75d2..366ea0f68e8cbad5da386adfba44b1d7
 +
 +                ACCUMULATED=$(git log "${PREV_TAG}..${BUMPCOMMIT}" --format="%h %s" --reverse)
 +                if [ -n "$ACCUMULATED" ]; then
-+                  echo "### 自 \`${PREV_TAG}\` 积累"
++                  echo "### 自 `${PREV_TAG}` 积累"
 +                  echo ""
 +                  echo "$ACCUMULATED"
 +                  echo ""
 +                fi
 +              else
 +                # 无版本 bump（同版本重新 push 或手动覆盖版本号）：单节展示全部增量
-+                echo "自 \`${PREV_TAG}\` 以来的变更："
++                echo "自 `${PREV_TAG}` 以来的变更："
 +                echo ""
 +                git log "${PREV_TAG}..HEAD" --format="%h %s" --reverse
 +                echo ""
@@ -87,18 +75,20 @@ index 7d2033970c13424dcd506564f41a5d86224d75d2..366ea0f68e8cbad5da386adfba44b1d7
 +
 +      - name: Create or update GitHub Release
          env:
+           # #156：Actions 内置 token 注入 GH_TOKEN
            GH_TOKEN: ${{ github.token }}
            TAG: ${{ needs.version.outputs.tag }}
 -          VERSION: ${{ needs.version.outputs.version }}
          shell: bash
          run: |
            set -euo pipefail
- 
+-
            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
 -            echo "Release $TAG already exists; assets will be replaced in the next step."
 +            echo "Release $TAG already exists; updating notes and assets."
 +            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md
            else
+             # #156：release 创建下沉到 checksums，避免空 release
              gh release create "$TAG" \
                --repo "$GITHUB_REPOSITORY" \
                --target "$GITHUB_SHA" \
@@ -108,3 +98,20 @@ index 7d2033970c13424dcd506564f41a5d86224d75d2..366ea0f68e8cbad5da386adfba44b1d7
            fi
  
        - name: Upload release assets with retry
+
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -20,6 +20,10 @@ process.chdir(dir)
+ 
+ // CI（build-opencode.yml）的触发路径需覆盖本脚本构建的全部 workspace 依赖包，
+ // 否则 core/plugin/sdk/ui 变更不会触发 CLI 重建，release 产物会滞后于源码。
++// release 工作流先由 fetch-depth:0 的完整历史生成 release-notes.md（PREV_TAG 定位、
++// 版本 bump commit 分两节统计新增与积累），再 Create or update GitHub Release 挂载
++// notes 与 checksums 资产；build.ts 产出的各平台产物是 notes 中资产清单的来源，
++// 三者共同保证发布说明与实际构建产物一一对应。
+ const generated = await import("./generate.ts")
+ 
+ import { Script } from "@opencode-ai/script"
+

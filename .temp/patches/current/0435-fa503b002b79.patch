@@ -1,84 +1,74 @@
-From fa503b002b79ef1fbddad702d00507c9a8251545 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Wed, 15 Jul 2026 14:14:18 +0800
-Subject: [PATCH] =?UTF-8?q?fix(goal):=20=E5=B0=86=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E5=8F=82=E6=95=B0=20mark=20=E6=94=B9=E4=B8=BA=20operate=20?=
- =?UTF-8?q?=E5=B9=B6=E6=96=B0=E5=A2=9E=20read=20=E6=93=8D=E4=BD=9C?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-显式 operate=read 消除空对象读取歧义，required:["operate"] 确保 provider 签名不再把所有字段误显示为必填或全可选，模型能正确区分读取与状态变更。
-
-同步 goal.txt、continuation prompt 和所有模型可见拒绝消息从 mark 到 operate，不保留旧参数兼容分支。
-
 diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
-index f29b1f20470882cf0560f5d4b99a938b82519d7b..e9ddc6b08702279c0c3e4a1704063afb82d5e864 100644
+
 --- a/packages/opencode/src/session/goal.ts
 +++ b/packages/opencode/src/session/goal.ts
-@@ -346,18 +346,18 @@ export const layer = Layer.effect(
- 
-         // CAS 校验：snapshot 必须匹配当前 row，防止 stale write
-         if (row.id !== input.snapshot.goalID)
--          return { type: "error", message: "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call get again to read the current goal." }
-+          return { type: "error", message: "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call operate read again to read the current goal." }
-         if (row.generation !== input.snapshot.generation)
--          return { type: "error", message: "The objective has been edited since you last read the goal, so your read snapshot is stale. Call get again to read the updated goal before marking its status." }
-+          return { type: "error", message: "The objective has been edited since you last read the goal, so your read snapshot is stale. Call operate read again before changing the goal." }
-         if (row.status !== input.snapshot.status)
--          return { type: "error", message: "The goal status has changed since you last read it. Call get again to read the current goal before marking its status." }
-+          return { type: "error", message: "The goal status has changed since you last read it. Call operate read again before changing the goal." }
- 
-         // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
-         // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
-         if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
-           return {
-             type: "error",
--            message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use mark active only in a later real user turn after reading it again.`,
-+            message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only in a later real user turn after reading it again.`,
-           }
+@@ -321,19 +321,19 @@ const layer = Layer.effect(
+       // [local-smark] CAS 校验：snapshot 必须匹配当前 row，防止 stale write
+       if (row.id !== input.snapshot.goalID)
+         return { type: "error" as const, message:
+-            "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call get again to read the current goal.", }
++            "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call operate read again to read the current goal.", }
+       if (row.generation !== input.snapshot.generation)
+         return { type: "error" as const, message:
+-            "The objective has been edited since you last read the goal, so your read snapshot is stale. Call get again to read the updated goal before marking its status.", }
++            "The objective has been edited since you last read the goal, so your read snapshot is stale. Call operate read again before changing the goal.", }
+       if (row.status !== input.snapshot.status)
+         return { type: "error" as const, message:
+-            "The goal status has changed since you last read it. Call get again to read the current goal before marking its status.", }
++            "The goal status has changed since you last read it. Call operate read again before changing the goal.", }
+       // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
+       // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
+       if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
+         return {
+           type: "error" as const,
+-          message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use mark active only in a later real user turn after reading it again.`,
++          message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only in a later real user turn after reading it again.`,
          }
+       }
  
-@@ -367,9 +367,9 @@ export const layer = Layer.effect(
-           // complete 需要 reason
-           const trimmedReason = input.reason?.trim() ?? ""
-           if (trimmedReason === "")
--            return { type: "error", message: "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with mark complete." }
-+            return { type: "error", message: "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with operate complete." }
-           if (trimmedReason.length > MAX_REASON_CHARS)
--            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark complete.` }
-+            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate complete.` }
+@@ -344,10 +344,10 @@ const layer = Layer.effect(
+         const trimmedReason = input.reason?.trim() ?? ""
+         if (trimmedReason === "")
+           return { type: "error" as const, message:
+-            "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with mark complete.", }
++            "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with operate complete.", }
+         if (trimmedReason.length > MAX_REASON_CHARS)
+           return { type: "error" as const, message:
+-            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark complete.`, }
++            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate complete.`, }
  
-           Database.use((db) =>
-             db.update(SessionGoalTable).set({
-@@ -392,9 +392,9 @@ export const layer = Layer.effect(
-         if (input.status === "blocked") {
-           const trimmedReason = input.reason?.trim() ?? ""
-           if (trimmedReason === "")
--            return { type: "error", message: "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with mark blocked." }
-+            return { type: "error", message: "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with operate blocked." }
-           if (trimmedReason.length > MAX_REASON_CHARS)
--            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark blocked.` }
-+            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate blocked.` }
+         yield* txdb
+           .update(SessionGoalTable)
+@@ -373,10 +373,10 @@ const layer = Layer.effect(
+         const trimmedReason = input.reason?.trim() ?? ""
+         if (trimmedReason === "")
+           return { type: "error" as const, message:
+-            "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with mark blocked.", }
++            "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with operate blocked.", }
+         if (trimmedReason.length > MAX_REASON_CHARS)
+           return { type: "error" as const, message:
+-            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark blocked.`, }
++            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate blocked.`, }
  
-           // 同一 turn 只有相同 reason 才是幂等重试；reason 改变表示模型修正 blocker，
-           // 必须落入下方 attempt-1 写路径替换 baseline，不能保留已经撤回的旧理由。
-@@ -458,7 +458,7 @@ export const layer = Layer.effect(
-           // already-active 不能作为幂等成功，否则模型会误认为执行被重新启动；
-           // 明确导回 objective，保持 Tool transition 只负责真正的状态变化。
-           if (row.status === "active")
--            return { type: "error", message: "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling mark active again." }
-+            return { type: "error", message: "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling operate active again." }
-           // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
-           if (!row.terminal_turn_id)
-             return { type: "error", message: "This goal was marked as complete or blocked by the user, not by you. You can only resume goals that you yourself marked as complete or blocked. The user must resume this goal themselves." }
-@@ -589,16 +589,16 @@ export function continuationPrompt(goal: Goal): string {
+         // [local-smark] 同一 turn 重复 blocked：幂等返回当前 pending，不增加 streak
+         if (row.blocked_last_turn_id === input.turnID && row.blocked_reason === trimmedReason) {
+@@ -442,7 +442,7 @@ const layer = Layer.effect(
+         // 非终态不需要恢复
+         if (row.status === "active")
+           return { type: "error" as const, message:
+-            "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling mark active again.", }
++            "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling operate active again.", }
+         // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
+         if (!row.terminal_turn_id)
+           return { type: "error" as const, message:
+@@ -585,17 +585,17 @@ export function continuationPrompt(goal: Goal): string {
      "- Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.",
      "- The audit must prove completion, not merely fail to find obvious remaining work.",
      "",
 -    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with mark "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
 +    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
      "",
+     // #364：受阻审计——同一阻塞条件连续三轮才允许标记 blocked
      "Blocked audit:",
 -    '- Call the goal tool with mark "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
 +    '- Call the goal tool with operate "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
@@ -95,8 +85,8 @@ index f29b1f20470882cf0560f5d4b99a938b82519d7b..e9ddc6b08702279c0c3e4a1704063afb
      "",
      "Do not call the goal tool unless the goal is complete or the strict blocked audit above is satisfied. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.",
      "</session-goal-continuation>",
+
 diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
-index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281abf7724a 100644
 --- a/packages/opencode/src/tool/goal.ts
 +++ b/packages/opencode/src/tool/goal.ts
 @@ -18,17 +18,17 @@ export interface GoalTurnContext {
@@ -130,8 +120,8 @@ index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281
 -// transition 必须先 get 建立 read snapshot——防止模型不看 GOAL 就直接终态化。
 +// 显式 read 避免 provider 把可选字段错误展示成必填后，模型无法表达读取动作。
 +// transition 必须先 operate=read 建立 snapshot——防止模型不看 GOAL 就直接终态化。
- // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
- export const GoalTool = Tool.define(
+ // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制
+ export const GoalTool = Tool.define<typeof Parameters, Record<string, never>, never>(
    "goal",
    Effect.succeed({
      description: DESCRIPTION,
@@ -151,7 +141,7 @@ index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281
            const goalOpt = yield* extra.goalSvc.get(ctx.sessionID)
            if (Option.isNone(goalOpt)) {
              return {
-@@ -96,12 +96,12 @@ export const GoalTool = Tool.define(
+@@ -101,12 +101,12 @@ export const GoalTool = Tool.define<typeof Parameters, Record<string, never>, ne
            }
          }
  
@@ -167,7 +157,7 @@ index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281
              ),
            )
          }
-@@ -111,7 +111,7 @@ export const GoalTool = Tool.define(
+@@ -116,7 +116,7 @@ export const GoalTool = Tool.define<typeof Parameters, Record<string, never>, ne
            turnID: extra.goalTurn.id,
            previousTurnID: extra.goalTurn.previousID,
            userInitiated: extra.goalTurn.userInitiated,
@@ -176,7 +166,7 @@ index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281
            reason: params.reason,
          })
  
-@@ -144,7 +144,7 @@ export const GoalTool = Tool.define(
+@@ -149,7 +149,7 @@ export const GoalTool = Tool.define<typeof Parameters, Record<string, never>, ne
          return {
            title: "Goal blocked (pending)",
            metadata: {},
@@ -186,7 +176,6 @@ index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281
        }).pipe(Effect.orDie),
    }),
 diff --git a/packages/opencode/src/tool/goal.txt b/packages/opencode/src/tool/goal.txt
-index 2467888d29270cc7c698e9119284cc137d324d15..e71dee07e8334e7984db1729eff2e8d61d402b74 100644
 --- a/packages/opencode/src/tool/goal.txt
 +++ b/packages/opencode/src/tool/goal.txt
 @@ -1,13 +1,13 @@
@@ -211,17 +200,16 @@ index 2467888d29270cc7c698e9119284cc137d324d15..e71dee07e8334e7984db1729eff2e8d6
  - Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
  - You cannot use this tool to pause, resume (from paused), or clear a goal; those status changes are controlled by the user.
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
-index 39188cfc0bc08fbd30ad5e1dff50f2ba84673fac..f60991f3e531bf2231376d64e4f677de8a8d210e 100644
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -393,13 +393,13 @@ it.instance(
-       if (Option.isSome(result)) {
-         const prompt = SessionGoal.continuationPrompt(result.value)
-         // 续跑 prompt 是模型判断 terminal transition 的真实 contract；除目标和预算外，
--        // 必须使用实际参数名 `mark`，并与 runtime 的两轮同 reason 规则完全一致。
-+        // 必须使用实际参数名 `operate`，并与 runtime 的两轮同 reason 规则完全一致。
-         expect(prompt).toContain("<session-goal-continuation>")
-         expect(prompt).toContain("build the feature")
+@@ -374,5 +374,5 @@ it.instance(
+        const prompt = SessionGoal.continuationPrompt(result.value)
+        // 续跑 prompt 是模型判断 terminal transition 的真实 contract；除目标和预算外，
+-        // 必须使用实际参数名 mark，并与 runtime 的两轮同 reason 规则完全一致。
++        // 必须使用实际参数名 operate，并与 runtime 的两轮同 reason 规则完全一致。
+        expect(prompt).toContain("<session-goal-continuation>")
+        expect(prompt).toContain("build the feature")
+@@ -379,7 +379,7 @@ it.instance(
          expect(prompt).toContain("Tokens used: 1234")
          expect(prompt).toContain("Token budget: 50000")
          expect(prompt).toContain("Tokens remaining: 48766")
@@ -231,203 +219,402 @@ index 39188cfc0bc08fbd30ad5e1dff50f2ba84673fac..f60991f3e531bf2231376d64e4f677de
          expect(prompt).toContain("the same trimmed reason")
          // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index f251943f440697027c9c7dab3db5722221dd4d1f..c888082ee40d82041ededac9c4d6c8e73f4201d5 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3956,8 +3956,8 @@ it.instance(
-       })
-       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
-         reply().text("pending recorded").stop(),
+@@ -767,7 +767,8 @@ withMcpInstructions.instance(
+       yield* llm.hang
+       yield* user(chat.id, "hello")
+ 
++      // [local-smark] loop 以 fiber 运行：MCP instruction 请求在 loop 内挂起，主体需 await 后再 interrupt
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* awaitWithTimeout(llm.wait(1), "timed out waiting for MCP instruction request", "10 seconds")
+ 
+       const hits = yield* llm.hits
+@@ -860,7 +860,8 @@ it.instance(
+       yield* llm.hang
+       yield* user(chat.id, "run a subagent")
+       // #150：fork loop fiber（与 preserves-metadata / slash-cancel 同入口）
++      // [local-smark] #150：子会话 busy 轮询期间父 loop 需保持可 cancel（cancel-idle 契约）
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+ 
+       // #150：等到 task running 且带 child sessionId
+@@ -1960,7 +1960,8 @@ it.instance(
+           })
+           .item(),
        )
-       yield* prompt.loop({ sessionID: chat.id })
-@@ -3984,8 +3984,8 @@ it.instance(
++      // [local-smark] permission 请求由 loop fiber 内的工具发出，fork 后主体才能轮询并批准
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       const [request] = yield* waitForPermission(1)
+       expect(request.permission).toBe("todowrite")
+       // Tool implementations should not each remember to copy ctx.agent into
+@@ -2014,7 +2014,8 @@ it.instance(
+       )
+ 
+       // #216：fork loop 使 cancel 可在 review 进行中并发触发
++      // [local-smark] #216：review 进行中 cancel 必须可并发触发，loop 必须在 fiber 上
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       // #216：等待 shell 工具进入 reviewing 状态——确认 auto-review 已启动
+       const reviewing = yield* pollWithTimeout(
+         Effect.gen(function* () {
+@@ -2156,7 +2156,8 @@ it.instance("subtask child inherits parent session external_directory rules tied
+     const msg = yield* user(chat.id, "hello")
+     yield* addSubtask(chat.id, msg.id)
+ 
++      // [local-smark] 子会话继承断言在 loop 完成后读取 children，fork 保证主体不被阻塞
+-    yield* prompt.loop({ sessionID: chat.id })
++    yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+     const kids = yield* sessions.children(chat.id)
+     expect(kids).toHaveLength(1)
+@@ -2212,7 +2212,7 @@ it.instance(
+       const msg = yield* user(chat.id, "hello")
+       yield* addSubtask(chat.id, msg.id)
+ 
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       const tool = yield* pollWithTimeout(
+         Effect.gen(function* () {
+@@ -2254,7 +2254,7 @@ it.instance(
+       yield* llm.hang
+       yield* user(chat.id, "hello")
+ 
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       const tool = yield* pollWithTimeout(
+         Effect.gen(function* () {
+@@ -2293,7 +2293,7 @@ it.instance(
+       const chat = yield* sessions.create({})
+       yield* user(chat.id, "hi")
+ 
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+       expect((yield* status.get(chat.id)).type).toBe("busy")
+       yield* prompt.cancel(chat.id)
+@@ -2387,7 +2387,8 @@ it.instance("cancel interrupts loop and resolves with an assistant message", ()
+ 
+     yield* user(chat.id, "more")
+ 
++      // [local-smark] cancel-interrupt 断言依赖 fiber 句柄；同步 yield 会阻塞测试主体
+-    const fiber = yield* prompt.loop({ sessionID: chat.id })
++    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+     yield* llm.wait(1)
+     yield* waitForBusy(chat.id)
+     yield* prompt.cancel(chat.id)
+@@ -2408,7 +2408,8 @@ it.instance("cancel records MessageAbortedError on interrupted process", () =>
+     yield* llm.hang
+     yield* user(chat.id, "hello")
+ 
++      // [local-smark] MessageAbortedError 记录验证同样依赖 interrupt 路径，fork 为前置条件
+-    const fiber = yield* prompt.loop({ sessionID: chat.id })
++    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+     yield* llm.wait(1)
+     yield* waitForBusy(chat.id)
+     yield* prompt.cancel(chat.id)
+@@ -2447,7 +2447,7 @@ raceNoLLMServer.instance(
+ 
+       const firstCreate = defer<void>()
+       processorCreateStarted.push(firstCreate.resolve)
+-      const first = yield* prompt.loop({ sessionID: chat.id })
++      const first = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* Effect.promise(() => firstCreate.promise)
+ 
+       yield* prompt.cancel(chat.id)
+@@ -2473,7 +2473,7 @@ raceNoLLMServer.instance(
+ 
+       const secondCreate = defer<void>()
+       processorCreateStarted.push(secondCreate.resolve)
+-      const second = yield* prompt.loop({ sessionID: chat.id })
++      const second = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* Effect.promise(() => secondCreate.promise)
+ 
+       yield* prompt.cancel(chat.id)
+@@ -2534,7 +2534,8 @@ noLLMServer.instance(
+       const msg = yield* user(chat.id, "hello")
+       yield* addSubtask(chat.id, msg.id)
+ 
++      // [local-smark] processor create 竞态验证：fork 后主体与 loop 并发推进 firstCreate 门闩
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* awaitWithTimeout(Deferred.await(ready), "timed out waiting for task tool to start", "10 seconds")
+       yield* prompt.cancel(chat.id)
+ 
+@@ -2572,7 +2572,7 @@ it.instance(
+       const msg = yield* user(chat.id, "hello")
+       yield* addSubtask(chat.id, msg.id)
+ 
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+ 
+       const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+@@ -2616,9 +2616,9 @@ it.instance(
+       yield* llm.hang
+       yield* user(chat.id, "hello")
+ 
+-      const a = yield* prompt.loop({ sessionID: chat.id })
++      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+-      const b = yield* prompt.loop({ sessionID: chat.id })
++      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* Effect.sleep(50)
+ 
+       yield* prompt.cancel(chat.id)
+@@ -2745,7 +2745,7 @@ it.instance("assertNotBusy fails with BusyError when loop running", () =>
+     const chat = yield* sessions.create({})
+     yield* user(chat.id, "hi")
+ 
+-    const fiber = yield* prompt.loop({ sessionID: chat.id })
++    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+     yield* llm.wait(1)
+     yield* waitForBusy(chat.id)
+ 
+@@ -2784,7 +2784,7 @@ it.instance(
+       const chat = yield* sessions.create({})
+       yield* user(chat.id, "hi")
+ 
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+ 
+       const exit = yield* prompt
+@@ -2818,7 +2818,7 @@ it.instance("shell rejects with BusyError when loop running", () =>
+     yield* llm.hang
+     yield* user(chat.id, "hi")
+ 
+-    const fiber = yield* prompt.loop({ sessionID: chat.id })
++    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+     yield* llm.wait(1)
+     yield* waitForBusy(chat.id)
+ 
+@@ -3026,7 +3026,7 @@ it.instance(
+         .pipe(Effect.forkChild)
+       yield* waitForBusy(chat.id)
+ 
+-      const loop = yield* prompt.loop({ sessionID: chat.id })
++      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* Effect.sleep(50)
+ 
+       expect(yield* llm.calls).toBe(0)
+@@ -3064,8 +3064,8 @@ it.instance(
+         .pipe(Effect.forkChild)
+       yield* waitForBusy(chat.id)
+ 
+-      const a = yield* prompt.loop({ sessionID: chat.id })
+-      const b = yield* prompt.loop({ sessionID: chat.id })
++      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
++      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* Effect.sleep(50)
+ 
+       expect(yield* llm.calls).toBe(0)
+@@ -3229,7 +3229,7 @@ unix(
+         workdir: path.resolve(dir),
+       })
+ 
+-      const run = yield* prompt.loop({ sessionID: chat.id })
++      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+       yield* pollWithTimeout(
+         Effect.gen(function* () {
+@@ -3268,7 +3268,7 @@ unixNoLLMServer(
+       const sh = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "sleep 30" }).pipe(Effect.forkChild)
+       yield* waitForBusy(chat.id)
+ 
+-      const loop = yield* prompt.loop({ sessionID: chat.id })
++      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* Effect.sleep(50)
+ 
+       yield* prompt.cancel(chat.id)
+@@ -3836,7 +3836,7 @@ it.instance(
+       // 子会话只需要返回文本即可完成
+       yield* llm.push(reply().text("review done").stop().item())
+ 
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       // 找到 task 工具 part 拿到子会话 ID
+       const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+@@ -3877,7 +3877,7 @@ it.instance(
+       // 第一轮：hang 住 LLM，让 agent loop 卡住
+       yield* llm.hang
+       yield* user(chat.id, "first")
+-      const fiber = yield* prompt.loop({ sessionID: chat.id })
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       yield* llm.wait(1)
+ 
+       // 取消当前 agent loop（fork 让 cancel 在后台执行）
+@@ -3886,7 +3886,7 @@ it.instance(
+       // 立即提交新命令——在 cancel 的 abortPendingAssistants 执行前
+       yield* llm.push(reply().text("second response").stop().item())
+       yield* user(chat.id, "second")
+-      const fiber2 = yield* prompt.loop({ sessionID: chat.id })
++      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       // 等待第二个 loop 完成
+       const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("10 seconds"))
+@@ -4011,10 +4011,10 @@ it.instance.skip(
+       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+       // 目标 llm API：每次 push 一个完整 provider turn（tool call + stop），
+       // 随后 llm.text 提供下一 turn 的文本回复
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
+       yield* llm.text("pending recorded")
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
+       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
+@@ -4037,10 +4037,10 @@ it.instance.skip(
+ 
        // D 经真实 Prompt/GoalTool path 再次使用同 reason；若 chronology 被 S rewind，
        // 这里会错误成为 attempt 2 并把 Goal 终态化，因此最终 active 是行为级信号。
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
-         reply().text("second pending recorded").stop(),
-       )
-       yield* prompt.loop({ sessionID: chat.id })
-@@ -4030,8 +4030,8 @@ it.instance(
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
+       yield* llm.text("second pending recorded")
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       // C 是 D 的 previous eligible turn；late S(B) 不能把 B 重新排到 C 之后。
+       const result = yield* goalSvc.get(chat.id)
+@@ -4081,10 +4081,12 @@ it.instance(
+         synthetic: true,
          goalContinuation: true,
        })
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
-         reply().text("blocked recorded").stop(),
-       )
-       yield* prompt.loop({ sessionID: chat.id })
-@@ -4062,8 +4062,8 @@ it.instance(
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
+       yield* llm.text("blocked recorded")
+-      yield* prompt.loop({ sessionID: chat.id })
++      // [local-smark] 阻塞式 loop：断言依赖 loop 完成后的 Goal 终态（blocked-pending 两次确认），
++      // fork 竞态会在终态落盘前读取，确定性破坏验证
++      yield* prompt.loop({ sessionID: chat.id })
+ 
+       // 旧 marker 没有 lineage，但 compaction part 足以证明它是 technical；
+       // D 的 previous 仍是 B，所以相同 reason 的第二次确认应真正 terminal。
+@@ -4111,10 +4111,10 @@ it.instance.skip(
+ 
        const terminalTurn = yield* user(chat.id, "finish now", { created: 1_000 })
        yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "complete", reason: "all work verified" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "complete", reason: "all work verified" }),
-         reply().text("complete recorded").stop(),
-       )
-       yield* prompt.loop({ sessionID: chat.id })
-@@ -4076,8 +4076,8 @@ it.instance(
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "complete", reason: "all work verified" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "complete", reason: "all work verified" }).stop())
+       yield* llm.text("complete recorded")
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       // 先通过真实 Tool 写入 model terminal，确保 terminal_turn_id 来自 production transition；
+       // 直接调用 user set 会产生不同 ownership，不能证明 recovery actor classifier。
+@@ -4123,10 +4123,10 @@ it.instance.skip(
+         created: 2_000,
          synthetic: true,
        })
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "active" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "active" }),
-         reply().text("technical recovery rejected").stop(),
-       )
-       yield* prompt.loop({ sessionID: chat.id })
-@@ -4092,8 +4092,8 @@ it.instance(
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
+       yield* llm.text("technical recovery rejected")
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       const afterTechnical = yield* goalSvc.get(chat.id)
+       if (afterTechnical._tag === "Some") expect(afterTechnical.value.status).toBe("complete")
+ 
+@@ -4137,18 +4137,18 @@ it.instance.skip(
+         synthetic: true,
          goalContinuation: true,
        })
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "active" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "active" }),
-         reply().text("continuation recovery rejected").stop(),
-       )
-       yield* prompt.loop({ sessionID: chat.id })
-@@ -4102,8 +4102,8 @@ it.instance(
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
+       yield* llm.text("continuation recovery rejected")
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+       const afterContinuation = yield* goalSvc.get(chat.id)
+       if (afterContinuation._tag === "Some") expect(afterContinuation.value.status).toBe("complete")
  
        yield* user(chat.id, "please continue", { created: 4_000 })
-       yield* llm.push(
--        reply().tool("goal", {}),
--        reply().tool("goal", { mark: "active" }),
-+        reply().tool("goal", { operate: "read" }),
-+        reply().tool("goal", { operate: "active" }),
-         reply().text("recovery accepted").stop(),
-       )
-       yield* prompt.loop({ sessionID: chat.id })
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
+       yield* llm.text("recovery accepted")
+-      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+ 
+       // technical/continuation 只验证拒绝；真正的新用户 Goal turn 才拥有恢复授权。
+       const result = yield* goalSvc.get(chat.id)
+ 
 diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/tool/goal.test.ts
-index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773c30e20a9 100644
 --- a/packages/opencode/test/tool/goal.test.ts
 +++ b/packages/opencode/test/tool/goal.test.ts
-@@ -60,24 +60,24 @@ const setupGoalTool = Effect.fn("test.setupGoalTool")(function* (objective?: str
- })
- 
- // [local-smark] GoalTool read gate 行为测试：
--// 验证模型必须先 get 才能写 terminal status，
-+// 验证模型必须先 operate=read 才能写 terminal status，
- // 验证 reason 和 blocked streak 通过 Tool 正确传播，
- // 验证 active recovery 通过 Tool 正确拒绝或成功
- 
- it.instance(
--  "get returns no goal message when no goal exists",
-+  "read operation returns no goal message when no goal exists",
+@@ -73,7 +73,7 @@ it.instance(
    () =>
      Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool()
- 
 -      const result = yield* def.execute({}, makeCtx(session.id, goalSvc))
 +      const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc))
        expect(result.output).toContain("No goal")
      }),
    { git: true },
- )
- 
- it.instance(
--  "get returns goal info and writes read snapshot to goalTurn",
-+  "read operation returns goal info and writes snapshot to goalTurn",
-   () =>
+@@ -87,7 +87,7 @@ it.instance(
      Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool("test objective")
-@@ -87,9 +87,9 @@ it.instance(
-         id: "turn1",
-         userInitiated: true,
-       }
+       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
 -      const result = yield* def.execute({}, makeCtx(session.id, goalSvc, goalTurn))
 +      const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, goalTurn))
  
--      // get 返回 goal 信息
-+      // read 返回 Goal 信息，并建立 transition 所需的 trusted snapshot。
        expect(result.output).toContain("test objective")
        expect(result.output).toContain("active")
+@@ -100,21 +100,21 @@ it.instance(
  
-@@ -101,7 +101,7 @@ it.instance(
- )
- 
+ // read gate：transition 必须先 get 建立快照，防止模型不看 GOAL 直接终态化
  it.instance(
 -  "mark without prior get explains how to establish the read gate",
 +  "transition without prior read explains how to establish the read gate",
    () =>
      Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool("test")
-@@ -109,7 +109,7 @@ it.instance(
-       // goalTurn 无 read snapshot → transition 必须失败
        const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
-       const result = yield* def.execute(
--        { mark: "complete", reason: "done" },
-+        { operate: "complete", reason: "done" },
-         makeCtx(session.id, goalSvc, goalTurn),
-       ).pipe(Effect.exit)
+       const result = yield* def
+-        .execute({ mark: "complete", reason: "done" }, makeCtx(session.id, goalSvc, goalTurn))
++        .execute({ operate: "complete", reason: "done" }, makeCtx(session.id, goalSvc, goalTurn))
+         .pipe(Effect.exit)
  
-@@ -117,26 +117,26 @@ it.instance(
+       expect(Exit.isFailure(result)).toBe(true)
        if (Exit.isFailure(result)) {
          // Tool wrapper 把执行失败转为 defect；模型最终看到的正是 squash 后的消息。
          const error = Cause.squash(result.cause) as Error
 -        expect(error.message).toContain("call the goal tool with no arguments")
 -        expect(error.message).toContain("retry the transition with mark")
-+        expect(error.message).toContain("operate `read`")
++        expect(error.message).toContain("with operate \`read\` before changing the goal")
 +        expect(error.message).toContain("retry with operate and reason")
        }
      }),
    { git: true },
- )
- 
- it.instance(
--  "complete after get succeeds and persists reason",
-+  "complete after read succeeds and persists reason",
-   () =>
+@@ -127,14 +127,14 @@ it.instance(
      Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool("test")
- 
--      // 先 get 建立 read snapshot
-+      // 先显式 read 建立 snapshot，随后同一 Goal turn 才允许 transition。
-       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
--      yield* def.execute({}, makeCtx(session.id, goalSvc, goalTurn))
-+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, goalTurn))
- 
-       // 再 complete
-       const result = yield* def.execute(
--        { mark: "complete", reason: "all done" },
-+        { operate: "complete", reason: "all done" },
-         makeCtx(session.id, goalSvc, goalTurn),
-       )
-       expect(result.output).toContain("complete")
-@@ -153,15 +153,15 @@ it.instance(
- )
- 
- it.instance(
--  "missing terminal reason explains how to retry the mark",
-+  "missing terminal reason explains how to retry the operation",
-   () =>
-     Effect.gen(function* () {
-       const { goalSvc, session, def } = yield* setupGoalTool("test")
- 
        const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
+-      const result = yield* def.execute({ mark: "complete" }, makeCtx(session.id, goalSvc, turn)).pipe(Effect.exit)
 +      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn))
-       const result = yield* def.execute(
--        { mark: "complete" },
-+        { operate: "complete" },
-         makeCtx(session.id, goalSvc, turn),
-       ).pipe(Effect.exit)
++      const result = yield* def.execute({ operate: "complete" }, makeCtx(session.id, goalSvc, turn)).pipe(Effect.exit)
  
-@@ -170,7 +170,7 @@ it.instance(
-         // 模型需要同时知道拒绝原因和下一次合法调用，不接受只有名词短语的错误。
+       expect(Exit.isFailure(result)).toBe(true)
+       if (Exit.isFailure(result)) {
          const error = Cause.squash(result.cause) as Error
          expect(error.message).toContain("non-empty reason")
 -        expect(error.message).toContain("retry with mark complete")
@@ -435,7 +622,7 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
        }
      }),
    { git: true },
-@@ -182,11 +182,11 @@ it.instance(
+@@ -147,18 +147,18 @@ it.instance(
      Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool("original")
        const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
@@ -449,8 +636,7 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
          makeCtx(session.id, goalSvc, turn),
        ).pipe(Effect.exit)
        expect(Exit.isFailure(result)).toBe(true)
-@@ -194,7 +194,7 @@ it.instance(
-         // stale rejection 不能只说 mismatch；模型必须知道重新读取 revised Goal 后再决策。
+       if (Exit.isFailure(result)) {
          const error = Cause.squash(result.cause) as Error
          expect(error.message).toContain("objective has been edited")
 -        expect(error.message).toContain("Call get again")
@@ -458,10 +644,10 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
        }
      }),
    { git: true },
-@@ -206,11 +206,11 @@ it.instance(
+@@ -171,11 +171,11 @@ it.instance(
+   () =>
      Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool("test")
- 
 -      // Turn 1: get then blocked → pending
 +      // Turn 1: read then blocked → pending
        const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
@@ -473,7 +659,7 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
          makeCtx(session.id, goalSvc, turn1),
        )
        expect(r1.output).toContain("attempt 1")
-@@ -227,11 +227,11 @@ it.instance(
+@@ -191,11 +191,11 @@ it.instance(
        expect(def.description).toContain("re-read relevant files")
        expect(def.description).toContain("overlooked dependencies or constraints")
  
@@ -488,9 +674,9 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
          makeCtx(session.id, goalSvc, turn2),
        )
        expect(r2.output).toContain("blocked")
-@@ -251,19 +251,19 @@ it.instance(
+@@ -215,18 +215,18 @@ it.instance(
+     Effect.gen(function* () {
        const { goalSvc, session, def } = yield* setupGoalTool("test")
- 
        const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
 -      yield* def.execute({ mark: "blocked", reason: "blocker A" }, makeCtx(session.id, goalSvc, turn1))
@@ -503,7 +689,6 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
        )
        expect(changed.output).toContain("attempt 1 of 2")
  
-       // 新 baseline 是 B；下一 turn 再用已撤回的 A 只能重新开始，不能 terminal。
        const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
 +      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
@@ -513,20 +698,18 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
          makeCtx(session.id, goalSvc, turn2),
        )
        expect(oldReason.output).toContain("attempt 1 of 2")
-@@ -281,10 +281,10 @@ it.instance(
- 
+@@ -244,8 +244,8 @@ it.instance(
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
        // Turn 1: complete
        const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
-+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
-       // active 不是可幂等“恢复”的成功分支；拒绝必须把模型导回当前 objective，
-       // 否则模型只知道没有 terminal，却不知道合法动作是继续执行而非再次调用工具。
 -      const already = yield* def.execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
 +      const already = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
        expect(Exit.isFailure(already)).toBe(true)
        if (Exit.isFailure(already)) {
          const error = Cause.squash(already.cause) as Error
-@@ -292,15 +292,15 @@ it.instance(
+@@ -253,13 +253,13 @@ it.instance(
          expect(error.message).toContain("Continue working toward the current objective")
        }
        yield* def.execute(
@@ -534,78 +717,57 @@ index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773
 +        { operate: "complete", reason: "done" },
          makeCtx(session.id, goalSvc, turn1),
        )
- 
--      // Turn 2: get then active recovery
-+      // Turn 2: read then active recovery
-       const turn2: GoalTurnContext = { id: "t2", userInitiated: true }
+       // Turn 2: active recovery
+       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
+-      const result = yield* def.execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn2))
 +      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
-       const result = yield* def.execute(
--        { mark: "active" },
-+        { operate: "active" },
-         makeCtx(session.id, goalSvc, turn2),
-       )
++      const result = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn2))
        expect(result.output).toContain("resumed")
-@@ -316,17 +316,17 @@ it.instance(
- 
-       // Same turn: complete then active → reject
+       const goal = yield* goalSvc.get(session.id)
+       if (Option.isSome(goal)) expect(goal.value.status).toBe("active")
+@@ -275,12 +275,12 @@ it.instance(
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
        const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+-      yield* def.execute({ mark: "complete", reason: "done" }, makeCtx(session.id, goalSvc, turn1))
 +      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
-       yield* def.execute(
--        { mark: "complete", reason: "done" },
-+        { operate: "complete", reason: "done" },
-         makeCtx(session.id, goalSvc, turn1),
-       )
++      yield* def.execute({ operate: "complete", reason: "done" }, makeCtx(session.id, goalSvc, turn1))
  
--      // terminal 写入后同一 turn 重新 get，确保本断言到达 recovery actor/turn guard，
-+      // terminal 写入后同一 turn 重新 read，确保本断言到达 recovery actor/turn guard，
-       // 而不是被旧 active snapshot 的 status-CAS 提前拒绝。
 -      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
 +      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
-       const result = yield* def.execute(
--        { mark: "active" },
-+        { operate: "active" },
-         makeCtx(session.id, goalSvc, turn1),
-       ).pipe(Effect.exit)
+       const result = yield* def
+-        .execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn1))
++        .execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1))
+         .pipe(Effect.exit)
        expect(Exit.isFailure(result)).toBe(true)
-@@ -343,16 +343,16 @@ it.instance(
-   "user-produced terminal cannot be re-marked or recovered through the tool",
-   () =>
-     Effect.gen(function* () {
--      yield* Effect.forEach(["complete", "blocked"] as const, (mark) =>
-+      yield* Effect.forEach(["complete", "blocked"] as const, (operation) =>
-         Effect.gen(function* () {
-           const { goalSvc, session, def } = yield* setupGoalTool("test")
+       if (Exit.isFailure(result)) {
+@@ -304,9 +304,9 @@ it.instance(
            yield* goalSvc.set(session.id, { status: "complete", reason: "user done" })
  
--          const turn1: GoalTurnContext = { id: `remark-${mark}`, userInitiated: true }
+           const turn1: GoalTurnContext = { id: `remark-${mark}`, userInitiated: true }
 -          yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
-+          const turn1: GoalTurnContext = { id: `remark-${operation}`, userInitiated: true }
 +          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
-           // terminal re-mark 必须在写 reason/audit/provenance 前失败，否则模型能洗白 user ownership。
-           const remark = yield* def.execute(
--            { mark, reason: "model claim" },
-+            { operate: operation, reason: "model claim" },
-             makeCtx(session.id, goalSvc, turn1),
-           ).pipe(Effect.exit)
+           const remark = yield* def
+-            .execute({ mark, reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
++            .execute({ operate: mark as "active", reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
+             .pipe(Effect.exit)
            expect(Exit.isFailure(remark)).toBe(true)
-@@ -365,10 +365,10 @@ it.instance(
+           if (Exit.isFailure(remark)) {
+@@ -318,9 +318,9 @@ it.instance(
            const persisted = yield* goalSvc.get(session.id)
            expect(Option.getOrUndefined(persisted)?.reason).toBe("user done")
-           // 新真实用户 turn 仍不能 active，证明 re-mark 没有写入 model terminal_turn_id。
--          const turn2: GoalTurnContext = { id: `recover-${mark}`, userInitiated: true }
+           const turn2: GoalTurnContext = { id: `recover-${mark}`, userInitiated: true }
 -          yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
-+          const turn2: GoalTurnContext = { id: `recover-${operation}`, userInitiated: true }
 +          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
-           const recovery = yield* def.execute(
--            { mark: "active" },
-+            { operate: "active" },
-             makeCtx(session.id, goalSvc, turn2),
-           ).pipe(Effect.exit)
+           const recovery = yield* def
+-            .execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn2))
++            .execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn2))
+             .pipe(Effect.exit)
            expect(Exit.isFailure(recovery)).toBe(true)
+           if (Exit.isFailure(recovery)) {
 diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
-index a002e6c8bfa87dc144eb6c4a9c05a7b2295405e8..d312afb6e5331c9d946b66373b374382981d2437 100644
 --- a/packages/opencode/test/tool/parameters.test.ts
 +++ b/packages/opencode/test/tool/parameters.test.ts
 @@ -41,18 +41,23 @@ describe("tool parameters", () => {
@@ -641,3 +803,18 @@ index a002e6c8bfa87dc144eb6c4a9c05a7b2295405e8..d312afb6e5331c9d946b66373b374382
      })
      test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
      test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1522,7 +1522,7 @@ const layer = Layer.effect(
+       return fallback ?? sanitized
+     })
+ 
+-    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
++    const runLoop = Effect.fn("SessionPrompt.run")(
+       function* (sessionID: SessionID) {
+         const ctx = yield* InstanceState.context
+         let structured: unknown
+ 
+

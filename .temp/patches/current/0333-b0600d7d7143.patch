@@ -1,34 +1,10 @@
-From b0600d7d714377e8cf53a3df8adc84eaabd917af Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Wed, 24 Jun 2026 18:53:01 +0800
-Subject: [PATCH] =?UTF-8?q?feat(permission):=20=E6=9C=AA=E7=9F=A5=E5=89=8D?=
- =?UTF-8?q?=E7=BC=80=E7=A9=BF=E9=80=8F=E5=90=AF=E5=8F=91=E5=BC=8F=20+=20?=
- =?UTF-8?q?=E5=8F=98=E9=87=8F=E5=B1=95=E5=BC=80=E5=88=A0=E9=99=A4=E5=AE=A1?=
- =?UTF-8?q?=E9=98=85=E6=8C=87=E5=AF=BC?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-新增剥头启发式：当 tokens[0] 不命中任何已知 cmd 分支、raw 层也未短路时，
-对 tokens.slice(1) 再调一次 classifyTokens，仅升 cautious 不升 dangerous——
-确定性 dangerous 仍由 raw 层（dangerousRaw 短路）唯一来源，避免 token 独有
-的 mkfs/dd/setcap 等被前缀遮蔽后跳到 dangerous。排除 KEY=value 环境赋值
-前缀：bashEffect 的 pattern 路径不含 env，故直接命中 classifyGit，maxRisk
-取其 cautious reason，避免改写既有 force push reason 断言。
-
-reviewer 默认策略 policy.md 新增一行：把含变量展开的删除/移动目标
-（如含 $TMP 的保护根子路径）视为可能展开到静态父目录，要求显式审批——
-这是审阅者指导文本而非 deterministic 规则，避免误判合法 $TMPDIR 用法。
-
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index fb5cee4c3834b52e0cc03acde03fd293e7341e41..996e4a9603972779143238c5b28d3895052a34c8 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -469,6 +469,29 @@ function evaluateCommand(command: string, depth: number): Decision {
-   const risk = classifyTokens(tokens)
+@@ -383,6 +383,27 @@ function evaluateCommand(command: string, depth: number): Decision {
    if (risk) return risk
+   // #197：通过只读不变量验证的命令才 safe——安全命令必须直接、本地且只读
    if (safeTokens(tokens)) return { level: "safe", reason: "known read-only shell command" }
-+
 +  // 未知前缀穿透启发式：tokens[0] 不命中任何已知 cmd 分支时，RAW_FILE_DELETE
 +  // 等需 `;`/`&`/`\n` 起点的 raw 正则看不到空格后的内层 rm 等，token 层也
 +  // 因 cmd=tokens[0] 而漏过。剥去前缀后对 tokens.slice(1) 再分类一次。
@@ -50,14 +26,13 @@ index fb5cee4c3834b52e0cc03acde03fd293e7341e41..996e4a9603972779143238c5b28d3895
 +      }
 +    }
 +  }
-+
+   // #197：未识别命令无法证明只读——默认 general 确保未知命令不因缺乏危险特征而自动放行
    return { level: "general", reason: "unknown shell command" }
  }
+@@ -658,8 +679,28 @@ function wslScript(tokens: string[]) {
+ }
  
-@@ -476,8 +499,28 @@ function evaluateCommand(command: string, depth: number): Decision {
- // 第十部分：raw 层扫描
- // ============================================================
- 
+ // #220：dangerousRaw——使用预编译正则常量，在 token 化之前拦截跨管道/编码/命令替换内的危险载荷
 +// raw 层正则用 [^|;]* 作为段边界，只在 ; 和 | 处截断。但 shell 换行
 +// 也是命令分隔符；若归一化时把 \n 变成空白，[^|;]* 就会跨过换行把
 +// 下一条命令的参数混入当前命令，导致误报（如 rm -rf /tmp/foo\n/Users）。
@@ -81,37 +56,42 @@ index fb5cee4c3834b52e0cc03acde03fd293e7341e41..996e4a9603972779143238c5b28d3895
  function dangerousRaw(command: string): string | undefined {
 -  const normalized = command.replace(/\s+/g, " ").trim()
 +  const normalized = normalizeForRawScan(command)
- 
-   // ---- 保护根目录递归删除 ----
-   // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式
-@@ -531,7 +574,7 @@ function cautiousRaw(command: string): string | undefined {
+   if (RE_D_RM_RF_ROOT.test(normalized)) return "critical recursive delete"
+   if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
+     return "remote download piped to interpreter; review the script locally before running safe commands"
+@@ -693,7 +734,7 @@ function dangerousRaw(command: string): string | undefined {
+ function cautiousRaw(command: string): string | undefined {
    if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
    if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
- 
 -  const normalized = command.replace(/\s+/g, " ").trim()
 +  const normalized = normalizeForRawScan(command)
- 
-   // ---- 持久化写入（重定向目标）----
-   // splitCommands 遇到重定向会返回 undefined（降级为 general），因此这些
+   // #220：持久化写入（重定向目标）——splitCommands 遇重定向返回 undefined，必须在 raw 层捕获
+   if (RE_C_SHELL_RC_WRITE.test(normalized)) return "shell RC file modification enables persistent code execution"
+   if (RE_C_GIT_HOOKS_WRITE.test(normalized)) return "git hook modification runs code on git operations"
+
+
 diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packages/opencode/src/permission/reviewer/policy/policy.md
-index eb46a068202541b2bac6c7f2e3bffbc8eecc2130..036f82bf09b4730e11d1354bf4ea1a7db33a45fb 100644
 --- a/packages/opencode/src/permission/reviewer/policy/policy.md
 +++ b/packages/opencode/src/permission/reviewer/policy/policy.md
-@@ -5,5 +5,6 @@ Default opencode auto-review policy:
+@@ -4,6 +4,8 @@ Default opencode auto-review policy:
+ - Deny credential exfiltration, secret reads sent to a network destination, reverse shells, remote download piped to interpreters, protected-root deletion, disk formatting, system shutdown, and attempts to weaken security controls.
  - Deny attempts to retry a rejected outcome through shell indirection, generated scripts, interpreter evals, encoded commands, alternate tools, MCP tools, or remote hosts.
  - Require explicit user authorization for irreversible VCS operations such as `git commit`, `git push`, force push, hard reset, clean, branch deletion, or history rewrite.
- - Require explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
+-- Require explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
++ - Require explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
++ - Treat variable expansion in delete or move targets explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
 +- Treat variable expansion in delete or move targets (e.g. `rm -rf /home/$TMP` or `mv ~/$VAR archive/`) as possibly expanding to the protected static parent directory; require explicit user authorization for that parent path before allowing the action.
  - Allow read-only project inspection when it does not unexpectedly read credentials, private keys, tokens, or sensitive config files.
  - Allow bounded, reversible local changes only when they are clearly part of the user's requested task and do not touch credentials or shared infrastructure.
+
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index be04e3d5ab8e0815e76036a5a59087db49a4da08..6efb787948396f0d5fa97de2bb5f226a50c9c8d4 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -730,4 +730,91 @@ describe("permission precheck bash classifier", () => {
-       }),
+@@ -716,4 +716,91 @@ describe("permission precheck bash classifier", () => {
      ).toMatchObject({ level: "general" })
    })
+ 
 +
 +  // ============================================================
 +  // 换行归一化回归测试：raw 层 [^|;]* 正则不得跨越换行边界
@@ -200,14 +180,15 @@ index be04e3d5ab8e0815e76036a5a59087db49a4da08..6efb787948396f0d5fa97de2bb5f226a
 +    expect(bash("somecmd mkfs /dev/sda").level).not.toBe("dangerous")
 +  })
  })
+
+
 diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
-index 51f676cbff0a989e5bb2aa7a6b94b50300d1c698..715d0292cf61aa98c6bda5fc3c82ae6f28e39a39 100644
 --- a/packages/opencode/test/permission/reviewer-prompt.test.ts
 +++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
-@@ -75,6 +75,15 @@ describe("permission reviewer prompt", () => {
-     expect(prompt).toContain('"outcome": "allow" | "deny"')
+@@ -85,6 +85,16 @@ describe("permission reviewer prompt", () => {
    })
  
+   // #198：验证用户提示词包含哨兵分隔标记——transcript、retry reason、planned action JSON 均有明确边界
 +  test("default policy instructs reviewer to treat variable expansion deletes as parent path", () => {
 +    // 默认策略 policy.md 新增一行指导 reviewer：把含变量展开的删除目标
 +    // （如 rm -rf /home/$TMP）视为可能展开到静态父目录；这是 reviewer
@@ -217,6 +198,8 @@ index 51f676cbff0a989e5bb2aa7a6b94b50300d1c698..715d0292cf61aa98c6bda5fc3c82ae6f
 +    expect(prompt).toContain("/home/$TMP")
 +  })
 +
++
    test("builds user prompt items with transcript, retry reason, and planned action", () => {
      const items = PermissionReviewerPrompt.buildUserPromptItems(
        {
+
