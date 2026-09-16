@@ -63,8 +63,8 @@ export function evaluate(
   }) => Effect.Effect<void>,
 ) {
   return Effect.gen(function* () {
-    // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
-    const precheck = PermissionPrecheck.evaluate(input)
+    // 等待共享grammar取得原level/reason，后续审批与授权政策保持原分支。
+    const precheck = yield* Effect.promise(() => PermissionPrecheck.evaluate(input))
     // 五级路由：forbidden终审拒绝；cautious/dangerous进入既有reviewer及失败回退。
     // safe/general默认直过，strict仍保留低风险也审的用户配置，不新增权限执行owner。
     if (precheck.level === "forbidden") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
