@@ -6812,9 +6812,10 @@ it.instance(
 
 // dispose必须操作it.instance加载实例时的同一store；fixture提供无bootstrap的真实生命周期owner。
 const cacheLifetime = testEffect(Layer.mergeAll(makeHttpNoLLMServer(), testInstanceStoreLayer))
+// 观察真实发布的槽位与generation，不依赖GC回收时机或仅有replacement的假绿。
 for (const lifecycle of ["delete", "dispose"] as const) {
   cacheLifetime.instance(
-    `prompt window proof is released after session ${lifecycle}`,
+    `prompt window cache is invalidated after session ${lifecycle}`,
     () =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
@@ -6839,37 +6840,32 @@ for (const lifecycle of ["delete", "dispose"] as const) {
             return session.id
           })
         const sessionID = yield* seed("x".repeat(1024))
-        const original = MessageV2.promptWindowProof
-        let weak: WeakRef<MessageV2.PromptWindowProof> | undefined
-        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) => original(id).pipe(
-          Effect.map((proof) => {
-            if (id === sessionID) weak = new WeakRef(proof)
-            return proof
-          }),
-        ))
+        const original = PromptWindowCache.publish
+        let slot: Parameters<typeof original>[0] | undefined
+        // 只捕获发布目标并调用真实实现；不额外保留entry/proof改变其生命周期。
+        const observer = spyOn(PromptWindowCache, "publish").mockImplementation((target, generation, entry) => {
+          if (entry.sessionID === sessionID) slot = target
+          return original(target, generation, entry)
+        })
         yield* prompt.loop({ sessionID }).pipe(Effect.ensuring(Effect.sync(() => {
           observer.mockClear()
           observer.mockRestore()
         })))
-        // 清除spy结果后跨事件轮次GC，防止WeakRef当前job或observer自身成为保活来源。
-        const collect = Effect.promise(async () => {
-          await Bun.sleep(0)
-          Bun.gc(true)
-          await Bun.sleep(0)
-          Bun.gc(true)
-        })
-        yield* collect
-        // 正向对照不可省：证明Service仍保有warm缓存，再测试删除/dispose使其不可达。
-        expect(weak?.deref()).toBeDefined()
+        // 先确认真实warm entry存在，再观察失效，不能把从未缓存当作正确清理。
+        expect(slot).toBeDefined()
+        if (!slot) throw new Error("prompt window cache was not published")
+        const generation = PromptWindowCache.lease(slot)
+        expect(PromptWindowCache.read(slot, sessionID)?.instance?.directory).toBe((yield* TestInstance).directory)
         if (lifecycle === "delete") yield* sessions.remove(sessionID)
         if (lifecycle === "dispose") yield* disposeAllInstancesEffect
-        yield* collect
-        const retainedAfter = weak?.deref() !== undefined
+        // 在replacement覆盖槽位前验证清空与凭证推进，避免后续发布掩盖缺陷。
+        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
+        expect(PromptWindowCache.lease(slot)).toBeGreaterThan(generation)
         const replacement = yield* seed("small replacement")
         yield* prompt.loop({ sessionID: replacement })
-        yield* collect
-        expect(weak?.deref()).toBeUndefined()
-        expect(retainedAfter).toBe(false)
+        // 同一Service仍可发布新Session，永久禁用缓存不能通过此正向对照。
+        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
+        expect(PromptWindowCache.read(slot, replacement)).toBeDefined()
       }),
     { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
   )

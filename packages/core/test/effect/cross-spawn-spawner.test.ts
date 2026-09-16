@@ -339,11 +339,51 @@ describe("cross-spawn spawner", () => {
       }),
     )
 
+    fx.live(
+      "escalates for TERM-resistant descendants after the group leader exits",
+      Effect.gen(function* () {
+        if (process.platform === "win32") return
+        for (const mode of ["kill", "scope"] as const) {
+          // 后代安装 TERM trap 后发布 readiness；同一用例覆盖显式 kill 与 scope 清理。
+          const handle = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const handle = yield* ChildProcess.make("sh", ["-c", 'sh -c \'trap "" TERM; echo ready; sleep 30\' & wait'], {
+                detached: true,
+                forceKillAfter: 100,
+              })
+              yield* Stream.runCollect(handle.stdout.pipe(Stream.decodeText, Stream.splitLines, Stream.take(1))).pipe(
+                Effect.tap((lines) => Effect.sync(() => expect(Array.from(lines)).toEqual(["ready"]))),
+                Effect.timeoutOrElse({
+                  duration: "5 seconds",
+                  orElse: () => Effect.fail(new Error("descendant never became ready")),
+                }),
+              )
+              if (mode === "kill") {
+                yield* handle.kill({ forceKillAfter: 100 })
+                yield* decodeByteStream(handle.stderr).pipe(Effect.timeout("5 seconds"))
+              }
+              return handle
+            }),
+          )
+          // scope结束后输出句柄已释放，直接检查同一独占session中的实际进程。
+          const probe = yield* ChildProcess.make("ps", ["-o", "stat=", "-g", String(handle.pid)])
+          yield* decodeByteStream(probe.stdout).pipe(
+            // 僵尸已无执行与管道能力，不把宿主init的回收时机当作泄漏。
+            Effect.tap((states) => Effect.sync(() => expect(states.split(/\s+/).filter((state) => state && !state.startsWith("Z"))).toEqual([]))),
+            Effect.ensuring(handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore)),
+          )
+        }
+      }),
+      20_000,
+    )
+
     fx.effect(
       "isRunning reflects process state",
       Effect.gen(function* () {
         const handle = yield* js('process.stdout.write("done")')
         yield* handle.exitCode
+        // 完成后的重复取消不能把快速退出的写手误报为失败。
+        yield* handle.kill()
         const running = yield* handle.isRunning
         expect(running).toBe(false)
       }),

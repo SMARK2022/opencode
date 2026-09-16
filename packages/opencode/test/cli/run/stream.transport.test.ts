@@ -28,7 +28,8 @@ function defer<T = void>() {
   return { promise, resolve, reject }
 }
 
-async function waitFor<T>(check: () => T | undefined, timeout = 1_000): Promise<T> {
+// 等待已发布条件而非测量性能；给CI调度留余量，不改变真实轮询或状态断言。
+async function waitFor<T>(check: () => T | undefined, timeout = 5_000): Promise<T> {
   const end = Date.now() + timeout
   while (Date.now() < end) {
     const value = check()

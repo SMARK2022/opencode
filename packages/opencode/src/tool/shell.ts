@@ -664,20 +664,14 @@ export const ShellTool = Tool.define(
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
           ])
 
-          if (exit.kind === "abort") {
-            aborted = true
-            // 底层已把退出等待纳入forceKillAfter，复用它而不叠加第二套超时与吞错。
-            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
-          }
-          if (exit.kind === "timeout") {
-            expired = true
+          if (exit.kind !== "exit") {
+            aborted = exit.kind === "abort"
+            expired = exit.kind === "timeout"
+            // Core的强杀等待覆盖持管道的后代；这里不叠第二套计时或提前打断output。
             yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
           }
 
-          // #291：子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
-          // 已缓冲的最后几个 chunk 或它们触发的 metadata 更新。最终输出、截断、
-          // 诊断摘要都必须在输出消费完成后组装，否则 Linux 上 fast-exit 命令
-          // 会偶发丢尾部输出并把错误上下文误判为仍然可见。
+          // 正常退出或强杀后仍需消费完缓冲chunk及metadata，再组装最终输出和诊断。
           yield* Fiber.join(output)
 
           return exit.kind === "exit" ? exit.code : null

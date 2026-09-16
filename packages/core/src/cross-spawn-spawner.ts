@@ -335,7 +335,30 @@ export const make = Effect.gen(function* () {
   ) =>
     Effect.suspend(() => {
       if (proc.kill(signal)) return Effect.void
+      // 已观察到退出时重复取消幂等完成；存活进程发送失败仍保留原错误链。
+      if (proc.exitCode !== null || proc.signalCode !== null) return Effect.void
       return Effect.fail(toPlatformError("kill", new Error("Failed to kill child process"), command))
+    })
+
+  // 主进程 exit 不代表 detached 进程组已退出；只在有界强杀路径等待后代。
+  // 不等待 stdio close：未消费的背压缓冲不能阻塞进程 owner 的清理。
+  const waitForGroup = (command: ChildProcess.StandardCommand, proc: NodeChildProcess.ChildProcess) =>
+    Effect.gen(function* () {
+      if (process.platform === "win32" || command.options.detached === false) return
+      while (yield* Effect.try({
+        try: () => {
+          try {
+            process.kill(-proc.pid!, 0)
+            return true
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === "ESRCH") return false
+            throw err
+          }
+        },
+        catch: (err) => toPlatformError("kill", toError(err), command),
+      })) {
+        yield* Effect.sleep(10)
+      }
     })
 
   const timeout =
@@ -401,7 +424,8 @@ export const make = Effect.gen(function* () {
             Effect.fnUntraced(function* ([proc, signal]) {
               const done = yield* Deferred.isDone(signal)
               const kill = timeout(proc, command, command.options)
-              if (done) {
+              const group = command.options.forceKillAfter && process.platform !== "win32" && command.options.detached !== false
+              if (done && !group) {
                 const [code] = yield* Deferred.await(signal)
                 if (process.platform === "win32") return yield* Effect.void
                 if (code !== 0 && Predicate.isNotNull(code)) return yield* Effect.ignore(kill(killGroup))
@@ -410,7 +434,11 @@ export const make = Effect.gen(function* () {
               const send = (s: NodeJS.Signals) =>
                 Effect.catch(killGroup(command, proc, s), () => killOne(command, proc, s))
               const sig = command.options.killSignal ?? "SIGTERM"
-              const attempt = send(sig).pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid)
+              const attempt = send(sig).pipe(
+                Effect.andThen(Deferred.await(signal)),
+                Effect.andThen(group ? waitForGroup(command, proc) : Effect.void),
+                Effect.asVoid,
+              )
               const escalated = command.options.forceKillAfter
                 ? Effect.timeoutOrElse(attempt, {
                     duration: command.options.forceKillAfter,
@@ -447,7 +475,11 @@ export const make = Effect.gen(function* () {
               const sig = opts?.killSignal ?? "SIGTERM"
               const send = (s: NodeJS.Signals) =>
                 Effect.catch(killGroup(command, proc, s), () => killOne(command, proc, s))
-              const attempt = send(sig).pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid)
+              const attempt = send(sig).pipe(
+                Effect.andThen(Deferred.await(signal)),
+                Effect.andThen(opts?.forceKillAfter ? waitForGroup(command, proc) : Effect.void),
+                Effect.asVoid,
+              )
               if (!opts?.forceKillAfter) return attempt
               return Effect.timeoutOrElse(attempt, {
                 duration: opts.forceKillAfter,

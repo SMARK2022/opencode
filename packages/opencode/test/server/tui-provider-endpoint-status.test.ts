@@ -115,12 +115,21 @@ describe("tui.providerEndpointStatus endpoint", () => {
 
   test("reports a down endpoint without failing the TUI request", async () => {
     await using tmp = await tmpdir()
+    const { pollWithTimeout } = await import("../lib/effect")
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const provider = yield* probeServer()
-          yield* Effect.promise(() => provider.close())
-          const response = yield* request(tmp.path, provider.origin)
+          // 保持端口归 fixture 所有，以连接中断制造失败，避免释放后被其他监听者复用。
+          const provider = yield* probeServer((_req, res) => res.destroy())
+
+          // origin 可能复用上一用例的短期缓存；必须观察到真实探测才判断网络失败结果。
+          // 等待行为信号，不固定 sleep，也不清空生产缓存来绕过真实刷新语义。
+          const response = yield* pollWithTimeout(
+            request(tmp.path, provider.origin).pipe(
+              Effect.map((response) => provider.hits() > 0 ? response : undefined),
+            ),
+            "down endpoint was never probed",
+          )
           // #258：endpoint 不可达时 HTTP 仍返回 200 + down——sidebar 辅助信息
           // 不允许把 TUI 请求本身拖成失败
           expect(response.status).toBe(200)

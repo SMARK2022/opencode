@@ -40,7 +40,8 @@ const TASK_WRITE_RETRY_WORKER = fileURLToPath(new URL("./task-write-retry-worker
 const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
 const credentials = { username: "daemon-test", password: "daemon-test-password" }
 
-const DAEMON_START_TIMEOUT_MS = 30_000
+// 启动窗只是慢宿主的兜底；行为由已发布信号、PID和独立的关闭期限验证。
+const DAEMON_START_TIMEOUT_MS = 60_000
 const POLL_INTERVAL_MS = 100
 const DAEMON_STOP_TIMEOUT_MS = 60_000
 
@@ -60,6 +61,9 @@ function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
   const root = path.dirname(lockPath)
   return {
     ...process.env,
+    // 生命周期用例只验证本机owner；外部插件预热和升级检查另有专测，不应抢占就绪阶段。
+    OPENCODE_PURE: "1",
+    OPENCODE_DISABLE_AUTOUPDATE: "1",
     OPENCODE_DAEMON_LAUNCHER_PID: "",
     OPENCODE_PROCESS_ROLE: "main",
     // Slow WSL/drvfs cold starts can make the real CLI stop path take >5s before
@@ -2238,11 +2242,12 @@ test(
       await using yesTmp = await tmpdir()
       const yesLockPath = path.join(yesTmp.path, "tui-server.json")
       const yesDaemon = await spawnDaemon(yesLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      // contender 属于此 fixture；断言失败时也必须在临时目录销毁前等待它结束。
+      let contender = Promise.resolve()
       try {
         // 未替换 owner 的 Y 必须安全停掉同一 PID，再由当前 CLI 完成 offline compression。
         let acquired = false
         let acquiredAtTerminal = false
-        let contender = Promise.resolve()
         // reconnect 竞争者在旧 PID 退出后争用同一 election lock；terminal renderer 执行时它仍不得进入。
         const result = await runInteractiveDb(
           yesLockPath,
@@ -2270,6 +2275,8 @@ test(
               })
               acquired = true
             })
+            // 立即登记 rejection handler；成功路径仍 await 原 Promise，使竞争失败正常暴露。
+            void contender.catch(() => undefined)
           },
           (chunk) => {
             if (chunk.includes("Compression completed")) {
@@ -2290,6 +2297,8 @@ test(
       } finally {
         if (ServerLock.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
         await yesDaemon.proc.exited.catch(() => undefined)
+        // 失败清理不覆盖原始断言错误，也不让竞争者在下一用例中访问已删除目录。
+        await Promise.allSettled([contender])
       }
       // replacement 场景独立启动 control server，任何 prompt 后请求都会改变公开错误并使测试失败。
       await using replacementTmp = await tmpdir()
