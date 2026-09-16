@@ -339,6 +339,45 @@ describe("cross-spawn spawner", () => {
       }),
     )
 
+    fx.live(
+      "escalates for TERM-resistant descendants after the group leader exits",
+      Effect.gen(function* () {
+        if (process.platform === "win32") return
+        for (const mode of ["kill", "scope"] as const) {
+          // 后代安装 TERM trap 后发布 readiness；同一用例覆盖显式 kill 与 scope 清理。
+          const handle = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const handle = yield* ChildProcess.make("sh", ["-c", 'sh -c \'trap "" TERM; echo ready; sleep 30\' & wait'], {
+                detached: true,
+                forceKillAfter: 100,
+              })
+              yield* Stream.runCollect(handle.stdout.pipe(Stream.decodeText, Stream.splitLines, Stream.take(1))).pipe(
+                Effect.tap((lines) => Effect.sync(() => expect(Array.from(lines)).toEqual(["ready"]))),
+                Effect.timeoutOrElse({
+                  duration: "5 seconds",
+                  orElse: () => Effect.fail(new Error("descendant never became ready")),
+                }),
+              )
+              if (mode === "kill") {
+                yield* handle.kill({ forceKillAfter: 100 })
+                yield* decodeByteStream(handle.stderr).pipe(Effect.timeout("5 seconds"))
+              }
+              return handle
+            }),
+          )
+          // EOF 证明忽略 TERM 的后代不再持有管道，不依赖孤儿 zombie 的 PID 回收时机。
+          yield* decodeByteStream(handle.stderr).pipe(
+            Effect.timeoutOrElse({
+              duration: "5 seconds",
+              orElse: () => Effect.fail(new Error(`${mode} left descendant pipes open`)),
+            }),
+            Effect.ensuring(handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore)),
+          )
+        }
+      }),
+      20_000,
+    )
+
     fx.effect(
       "isRunning reflects process state",
       Effect.gen(function* () {

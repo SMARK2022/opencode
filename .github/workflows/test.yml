@@ -47,12 +47,26 @@ jobs:
             command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
             # opencode 分片产出 junit-core.xml 与 junit-tui.xml——消费侧一律 glob 拾取。
             junit: packages/opencode/.artifacts/unit/*.xml
-          - id: opencode-windows
+          # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
+          # 分片 env 纳入测试缓存键，报告路径逐片唯一，失败不能互相覆盖。
+          - id: opencode-windows-integration
             label: packages/opencode
-            os_label: Windows
+            os_label: Windows / 会话与服务集成
             runner: windows-latest
-            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
-            junit: packages/opencode/.artifacts/unit/*.xml
+            command: GITHUB_ACTIONS=false OPENCODE_TEST_SHARD=integration bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+            junit: packages/opencode/.artifacts/unit/junit-integration.xml
+          - id: opencode-windows-runtime
+            label: packages/opencode
+            os_label: Windows / 工具与基础模块
+            runner: windows-latest
+            command: GITHUB_ACTIONS=false OPENCODE_TEST_SHARD=runtime bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+            junit: packages/opencode/.artifacts/unit/junit-runtime.xml
+          - id: opencode-windows-tui
+            label: packages/opencode
+            os_label: Windows / TUI
+            runner: windows-latest
+            command: GITHUB_ACTIONS=false OPENCODE_TEST_SHARD=tui bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+            junit: packages/opencode/.artifacts/unit/junit-tui.xml
           - id: core-linux
             label: packages/core
             os_label: Linux
@@ -145,7 +159,7 @@ jobs:
         id: junit
         if: always()
         run: |
-          # opencode 产出两个 shard 报告；literal package 路径也由同一 glob 检查兼容。
+          # 默认全量产出两个报告，Windows 单片产出一个；同一检查兼容 glob 与精确路径。
           if compgen -G "${{ matrix.junit }}" > /dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -379,13 +393,16 @@ jobs:
           # 其余包沿原test；opencode仅运行隔离runner，任一侧失败均传播且不阻止另一侧出报告。
           status=0
           GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml || status=$?
-          GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
+          # Windows已由必过三片覆盖；其他包仍执行原test，不把它们误换为test:ci。
+          if [ '${{ matrix.runner }}' != 'windows-latest' ]; then
+            GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
+          fi
           exit "$status"
 
 
       - name: Warn on upstream unit failures
         if: always() && steps.upstream.outcome != 'success'
-        run: echo "::warning title=上游单元兼容性::${{ matrix.os_label }} 上游全量单元测试存在失败；此结果只作为兼容性警告，不阻断 fork 核心测试。"
+        run: echo "::warning title=上游单元兼容性::${{ matrix.os_label }} 上游单元测试存在失败；此结果只作为兼容性警告，不阻断 fork 核心测试。"
 
       - name: Publish upstream unit reports
         if: always() && hashFiles('packages/**/.artifacts/unit/*.xml') != ''
@@ -423,7 +440,7 @@ jobs:
             echo "### 警告 上游单元兼容性"
             echo "| 范围 | 平台 | 结果 | 说明 |"
             echo "| --- | --- | --- | --- |"
-            echo "| bun turbo test --continue=always | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
+            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   upstream-extra-warning:
