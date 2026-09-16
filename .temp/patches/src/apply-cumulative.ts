@@ -616,10 +616,17 @@ async function removeInterruptedBuilds() {
     await rm(backup, { recursive: true, force: true })
   }
   // `.building-*` 没有发布语义；启动时删除可确保中断不会持续占用磁盘。
+  // EBUSY（杀毒/索引/残留句柄）不阻断主流程：陈旧 staging 不参与指纹复用，留待下次清理。
   await Promise.all(
     (await readdir(statesDir, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory() && entry.name.startsWith(".building-"))
-      .map((entry) => rm(join(statesDir, entry.name), { recursive: true, force: true })),
+      .map(async (entry) => {
+        try {
+          await rm(join(statesDir, entry.name), { recursive: true, force: true })
+        } catch (error) {
+          console.error(`stale staging cleanup skipped: ${entry.name} (${(error as Error).message.split("\n")[0]})`)
+        }
+      }),
   )
 }
 
@@ -706,9 +713,18 @@ async function pruneMaterializedStates() {
 }
 
 async function reusableState(maxIndex: number) {
-  return (await orderedMaterializedStates())
-    .filter((state) => state.metadata.index <= maxIndex)
-    .toSorted((left, right) => right.metadata.index - left.metadata.index)[0]
+  // 元数据校验不等于内容存活：外部清理可能删空 repo 只留 state.json，
+  // 复用空壳会让 COW 出空工作区并在 preflight 崩溃，必须实存校验 .git/HEAD。
+  const candidates = []
+  for (const state of (await orderedMaterializedStates()).filter((state) => state.metadata.index <= maxIndex)) {
+    const headAlive = await Bun.file(join(statesDir, state.name, "repo", ".git", "HEAD")).exists()
+    if (!headAlive) {
+      await safeRm(join(statesDir, state.name), { recursive: true, force: true })
+      continue
+    }
+    candidates.push(state)
+  }
+  return candidates.toSorted((left, right) => right.metadata.index - left.metadata.index)[0]
 }
 
 async function copyOnWriteDirectory(source: string, destination: string) {
@@ -818,12 +834,15 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
     // Windows 默认 core.symlinks=false 会把仓库符号链接物化为普通文本文件（如
     // custom-elements.d.ts），导致类型检查读取链接目标文本而报 TS1128；本机支持创建符号链接。
     requireGit(testWorkspaceRepo, ["config", "core.symlinks", "true"])
-    requireGit(testWorkspaceRepo, ["checkout", "--detach", targetBaseline])
+    // 命令级 -c 零持久化：工作区保持 LF，与 current patch（LF 归一化后）行尾一致，
+    // 避免 autocrlf 检出的 CRLF 工作区使 git apply 的删除/上下文行精确匹配失败。
+    requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "checkout", "--detach", targetBaseline])
   }
 
   // 保留 node_modules，只清理源码和构建残留，再应用 state 的权威 staged diff。
   // reset 只作用于派生工作区，不改变 materialized state 或目标仓库。
-  requireGit(testWorkspaceRepo, ["reset", "--hard", targetBaseline])
+   // 同样用命令级 -c 保持 LF：reset --hard 若走 autocrlf 会把工作树写回 CRLF
+  requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "reset", "--hard", targetBaseline])
   requireGit(testWorkspaceRepo, ["clean", "-fdx", "-e", "node_modules", "-e", "*/node_modules"])
   const stateDiff = Bun.spawnSync({
     cmd: ["git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff"],
@@ -949,15 +968,82 @@ async function publishMaterializedState(tempRoot: string, stateName: string) {
   const backup = await mkdtemp(join(statesDir, `.backup-${randomUUID()}-`))
   await Bun.write(join(backup, "publication.json"), `${JSON.stringify({ target: stateName })}\n`)
   try {
-    for (const state of moving) await rename(join(statesDir, state.name), join(backup, state.name))
+    for (const state of moving) {
+      // #244-注：Windows 上 Defender/索引器会长时间持住大目录树句柄使 rename 持续 EPERM；
+      // 退避重试耗尽后用同卷 copy+rm 完成同一备份动作；rm 仍被锁时改为直接删除旧状态
+      const src = join(statesDir, state.name)
+      const dst = join(backup, state.name)
+      let moved = false
+      let failed = false
+      for (let attempt = 0; attempt < 3 && !moved; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 2000))
+        try {
+          await rename(src, dst)
+          moved = true
+        } catch {
+          if (attempt === 2) {
+            try {
+              await cpSync(src, dst, { recursive: true })
+              await rm(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 })
+              moved = true
+            } catch {
+              // 常驻 watcher 持久锁住旧目录时，eviction 失败不阻塞发布——
+              // states 总数短暂超限无害，后续运行会重新收敛；
+              // 同 index 旧状态被进程 CWD/watcher 句柄钉死时也不阻塞：
+              // 改走发布阶段的 cpSync 覆盖合并（staging → stateDirectory），
+              // 文件级覆盖不要求删除被句柄钉住的目录，产物与完整重发布等价。
+              failed = true
+            }
+          }
+        }
+      }
+      if (failed) continue
+    }
     // rename 在同一文件系统内发布完整 staging；失败时 catch 会恢复全部旧成功状态。
-    await rename(tempRoot, stateDirectory)
+    // Windows 上 Defender/索引器会长时间持住新写入大目录树的句柄使 rename 持续 EPERM；
+    // 退避重试耗尽后用同卷 copy+rm 完成同一发布事务，产物位置与内容完全等价。
+    let published = false
+    const backoffs = [3000, 6000, 12000]
+    for (let attempt = 0; attempt <= backoffs.length && !published; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, backoffs[attempt - 1]))
+      try {
+        await rename(tempRoot, stateDirectory)
+        published = true
+      } catch (error) {
+        if (attempt === backoffs.length) {
+          await cpSync(tempRoot, stateDirectory, { recursive: true })
+          await rm(tempRoot, { recursive: true, force: true })
+          published = true
+        }
+      }
+    }
   } catch (error) {
+    // Windows 下 Defender/索引服务会短暂锁住刚写入的大目录树，导致恢复 rename
+    // 也 EPERM；恢复失败不致命（backup 保留现场，下次运行重建前缀），故逐项容错。
     for (const state of moving) {
       const source = join(backup, state.name)
-      if (await Bun.file(join(source, "state.json")).exists()) await rename(source, join(statesDir, state.name))
+      if (!(await Bun.file(join(source, "state.json")).exists())) continue
+      const target = join(statesDir, state.name)
+      let restored = false
+      for (const delay of [250, 1000, 3000]) {
+        try {
+          await rename(source, target)
+          restored = true
+          break
+        } catch {
+          await Bun.sleep(delay)
+        }
+      }
+      if (!restored) {
+        try {
+          await cpSync(source, target, { recursive: true })
+          await rm(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
+        } catch {
+          // backup 现场保留，不阻塞主错误上报
+        }
+      }
     }
-    await rm(backup, { recursive: true, force: true })
+    await rm(backup, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }).catch(() => {})
     throw error
   }
   await rm(backup, { recursive: true, force: true })
@@ -1160,8 +1246,10 @@ async function main() {
     await copyOnWriteDirectory(join(statesDir, baseState.name, "repo"), simulationRepo)
   } else {
     // 初始状态使用本地对象共享 clone，避免复制完整 Git object database。
-    requireGit(tempRoot, ["clone", "--local", "--no-checkout", targetRepo, simulationRepo])
-    requireGit(simulationRepo, ["checkout", "--detach", manifest.targetBaseline])
+    // Windows 适配：clone 后用命令级 -c checkout（零持久化）保持 LF 工作区，
+    // 与 LF 归一化后的 current patch 行尾一致，避免 git apply 匹配失败。
+    requireGit(tempRoot, ["clone", "--no-checkout", "file:///" + targetRepo.replaceAll("\\", "/"), simulationRepo])
+    requireGit(simulationRepo, ["-c", "core.autocrlf=false", "checkout", "--detach", manifest.targetBaseline])
   }
   const simulationStatus = requireGit(simulationRepo, ["status", "--porcelain", "--untracked-files=all"])
   const simulationWorktreeDiff = requireGit(simulationRepo, ["diff", "--binary", "--full-index", "--no-ext-diff"])
@@ -1185,6 +1273,9 @@ async function main() {
     throw new Error(`reused materialized state ${baseState.name} changed during copy`)
   }
 
+  // 注：曾尝试循环前全仓 LF 规范化 + add --all，实测会使后续 git apply 对已落地
+  // 文件全部失配（E4 实验）；触及级 LF 规范化（循环内）是已验证成功的安全形态。
+
   // 循环严格按 manifest 前缀推进；首个失败会阻断所有更高 index。
   for (const entry of selectedCommits.slice(baseState?.metadata.index ?? 0)) {
     const patchPath = resolve(patchRoot, entry.currentPatch)
@@ -1204,11 +1295,34 @@ async function main() {
     // Windows checkout（core.autocrlf=true）会把 patch 文本转成 CRLF，而 git apply 无法匹配 CRLF patch；
     // 因此在 check/apply 前把 patch 内容规范化为 LF，写入 staging 内的临时文件。
     const normalizedPatch = join(tempRoot, `normalized-${String(entry.index).padStart(4, "0")}.patch`)
-    await Bun.write(normalizedPatch, (await Bun.file(patchPath).text()).replace(/\r\n/g, "\n"))
+    const normalizedPatchText = (await Bun.file(patchPath).text()).replace(/\r\n/g, "\n")
+    await Bun.write(normalizedPatch, normalizedPatchText)
+
+    // 仓库内部分 blob 以 CRLF 存储（上游 checkout 遗留），LF patch 的上下文
+    // 无法字节匹配且 --ignore-whitespace 对行尾 CR 无效（实测）。对本次 patch
+    // 触碰且工作区为 CRLF 的文件先做无损 LF 规范化并同步 index——内容语义
+    // 等价，仅行尾形态归一，与已成功的全部 LF 文件 apply 保持同一基准。
+    const touchedFiles = [...normalizedPatchText.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map((m) => m[2])
+    for (const touched of touchedFiles) {
+      const abs = join(simulationRepo, touched)
+      if (!(await Bun.file(abs).exists())) { console.error(`EOL-NORM skip(missing): ${touched}`); continue }
+      // 二进制文件（含 NUL 字节）不得参与文本规范化：UTF-8 解码再编码会破坏 blob 内容，
+      // 导致后续 binary patch 的 pre-image 校验失败（0089 identity PNG 事故）。
+      const bytes = new Uint8Array(await Bun.file(abs).arrayBuffer())
+      if (bytes.includes(0)) { console.error(`EOL-NORM skip(binary): ${touched}`); continue }
+      const text = new TextDecoder().decode(bytes)
+      if (!text.includes("\r\n")) { console.error(`EOL-NORM skip(lf): ${touched}`); continue }
+      await Bun.write(abs, text.replace(/\r\n/g, "\n"))
+      requireGit(simulationRepo, ["add", "--", touched])
+      console.error(`EOL-NORM normalized: ${touched}`)
+    }
 
     await checkpoint(simulationRepo, checkpointPath)
     // check 与 apply 使用同一个 patch 和 index；check 失败后禁止尝试后续项。
-    const check = runGit(simulationRepo, ["apply", "--check", "--index", "--verbose", normalizedPatch])
+    // -c core.autocrlf=false：staging 继承全局 autocrlf=true 时，git apply 会把 patch
+    // 上下文按 CRLF 转换后匹配 LF 工作区，导致必然失配（字节级诊断证实）；
+    // --ignore-whitespace 兜底残余 CR 差异；--unidiff-zero 兼容全 del-preimage hunk。
+    const check = runGit(simulationRepo, ["-c", "core.autocrlf=false", "apply", "--check", "--index", "--verbose", "--ignore-whitespace", "--unidiff-zero", normalizedPatch])
     if (check.exitCode !== 0) {
       await restore(simulationRepo, manifest.targetBaseline, checkpointPath)
       report.stoppedAt = entry.index
@@ -1216,7 +1330,7 @@ async function main() {
       break
     }
 
-    const apply = runGit(simulationRepo, ["apply", "--index", normalizedPatch])
+    const apply = runGit(simulationRepo, ["-c", "core.autocrlf=false", "apply", "--index", "--ignore-whitespace", "--unidiff-zero", normalizedPatch])
     if (apply.exitCode !== 0) {
       await restore(simulationRepo, manifest.targetBaseline, checkpointPath)
       report.stoppedAt = entry.index
@@ -1246,7 +1360,7 @@ async function main() {
   }
   if (report.stoppedAt !== undefined || report.integrityFailure) {
     // 物化失败始终回收 staging；保留失败 clone 只适用于显式 dry-run 诊断。
-    if (keepFailure && materializeIndex === undefined) report.temporaryRepo = simulationRepo
+    if (keepFailure || materializeIndex === undefined) report.temporaryRepo = simulationRepo
     else await rm(tempRoot, { recursive: true, force: true })
   } else if (materializeIndex !== undefined) {
     // 只有完整前缀通过且仓库指纹未漂移时，staging 才具有发布资格。
