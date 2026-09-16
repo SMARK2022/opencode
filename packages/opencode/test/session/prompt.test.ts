@@ -5956,10 +5956,10 @@ const cacheLifetime = testEffect(
 )
 
 // [缓存生命周期] 单槽 current-entry 不得延长已删除 Session / 已 dispose Instance 的生存期。
-// WeakRef 只观察真实 loop 返回的 proof 对象；spy 自身结果已清除，不影响可达性。
+// 观察真实 loop 发布的槽位，以生命周期失效为准，不依赖 GC 的回收时机。
 for (const lifecycle of ["delete", "dispose"] as const) {
   cacheLifetime.instance(
-    `prompt window proof is released after session ${lifecycle}`,
+    `prompt window cache is invalidated after session ${lifecycle}`,
     () =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
@@ -6001,12 +6001,13 @@ for (const lifecycle of ["delete", "dispose"] as const) {
           })
         // assistant 已完成（finish: stop）让 loop 单轮退出：缓存条目已发布，但不引入真实 Provider 变量。
         const sessionID = yield* seed("x".repeat(1024))
-        const original = MessageV2.promptWindowProof
-        let weak: WeakRef<MessageV2.PromptWindowProof> | undefined
-        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) => {
-          const proof = original(id)
-          if (id === sessionID) weak = new WeakRef(proof)
-          return proof
+        const original = PromptWindowCache.publish
+        let slot: Parameters<typeof original>[0] | undefined
+        // 只捕获真实发布目标，仍执行原实现，不在测试中模拟缓存失效。
+        // 不额外保存 entry/proof，避免观察器自身延长被测对象的生命周期。
+        const observer = spyOn(PromptWindowCache, "publish").mockImplementation((target, generation, entry) => {
+          if (entry.sessionID === sessionID) slot = target
+          return original(target, generation, entry)
         })
         yield* prompt.loop({ sessionID }).pipe(
           Effect.ensuring(
@@ -6016,28 +6017,25 @@ for (const lifecycle of ["delete", "dispose"] as const) {
             }),
           ),
         )
-        // 两轮 gc 之间让出事件循环，确保 WeakRef 回调与终结队列先跑完再观察。
-        const collect = Effect.promise(async () => {
-          await Bun.sleep(0)
-          Bun.gc(true)
-          await Bun.sleep(0)
-          Bun.gc(true)
-        })
-        yield* collect
-        // 删除前的强可达是基线事实：没有它，后面的 undefined 断言无法区分修复与测试真空。
-        expect(weak?.deref()).toBeDefined()
+        // 先确认槽内确有当前实例的 entry，避免“从未缓存”也让清理断言通过。
+        // slot 清空是生命周期契约；对象何时被 GC 回收不属于该契约。
+        expect(slot).toBeDefined()
+        if (!slot) throw new Error("prompt window cache was not published")
+        const generation = PromptWindowCache.lease(slot)
+        expect(PromptWindowCache.read(slot, sessionID)?.instance?.directory).toBe((yield* TestInstance).directory)
         if (lifecycle === "delete") yield* sessions.remove(sessionID)
         // dispose 必须走加载该实例的同一 InstanceStore：Promise 版 disposeAllInstances 只清共享 runtime，
         // it.instance 的实例由当前测试 runtime 的 store 持有。
         if (lifecycle === "dispose") yield* disposeAllInstancesEffect
-        yield* collect
-        const retainedAfter = weak?.deref() !== undefined
-        // replacement 是 GC 正向对照：同 Service 换入新 Session 后旧 proof 必须可回收。
+        // 必须在 replacement 覆盖槽位之前验证失效，避免新发布掩盖清理缺失。
+        // generation 推进使旧发布凭证失效；在途发布拒绝仍由现有独立用例覆盖。
+        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
+        expect(PromptWindowCache.lease(slot)).toBeGreaterThan(generation)
+        // 同 Service 随后仍可发布新 Session，避免把永久禁用缓存误当成正确清理。
         const replacement = yield* seed("small replacement")
         yield* prompt.loop({ sessionID: replacement })
-        yield* collect
-        expect(weak?.deref()).toBeUndefined()
-        expect(retainedAfter).toBe(false)
+        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
+        expect(PromptWindowCache.read(slot, replacement)).toBeDefined()
       }),
     { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
   )

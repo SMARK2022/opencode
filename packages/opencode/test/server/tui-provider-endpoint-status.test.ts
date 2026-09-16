@@ -5,7 +5,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { Session } from "@/session/session"
 import { Server } from "../../src/server/server"
 import { TestInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 void Log.init({ print: false })
 
@@ -107,10 +107,17 @@ describe("tui.providerEndpointStatus endpoint", () => {
   it.instance("reports a down endpoint without failing the TUI request", () =>
     Effect.gen(function* () {
       const tmp = yield* TestInstance
-      const provider = yield* probeServer()
-      yield* Effect.promise(() => provider.close())
+      // 保持端口归 fixture 所有，以连接中断制造失败，避免释放后被其他监听者复用。
+      const provider = yield* probeServer((_req, res) => res.destroy())
 
-      const response = yield* request(tmp.directory, provider.origin)
+      // origin 可能复用上一用例的短期缓存；必须观察到真实探测才判断网络失败结果。
+      // 等待行为信号，不固定 sleep，也不清空生产缓存来绕过真实刷新语义。
+      const response = yield* pollWithTimeout(
+        request(tmp.directory, provider.origin).pipe(
+          Effect.map((response) => provider.hits() > 0 ? response : undefined),
+        ),
+        "down endpoint was never probed",
+      )
 
       expect(response.status).toBe(200)
       expect(response.body).toMatchObject({

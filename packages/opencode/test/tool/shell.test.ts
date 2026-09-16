@@ -2162,7 +2162,11 @@ describe("tool.shell abort", () => {
           const collected: string[] = []
           const res = yield* run(
             {
-              command: `echo before && sleep 30`,
+              // POSIX 后代先忽略 TERM 再发布 readiness；主进程退出后仍会持有输出管道。
+              // 保留原有输出触发取消及结果断言，验证强杀升级不能只等待主进程。
+              command: process.platform === "win32"
+                ? `echo before && sleep 30`
+                : `sh -c 'trap "" TERM; echo before; sleep 30' & wait`,
               description: "Long running command",
             },
             {

@@ -163,8 +163,13 @@ async function runCliUntilStderr(root: string, args: string[], marker: string) {
 
 function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
   let answered = false
+  let output = ""
+  // PTY 可以把提示文本和 ANSI 序列拆到不同 chunk；累积后再识别提示。
+  // 回答后停止累积，避免此 helper 持有后续维护进度输出。
   proc.onData((data) => {
-    if (answered || !data.includes(prompt)) return
+    if (answered) return
+    output += data
+    if (!stripAnsi(output).includes(prompt)) return
     answered = true
     proc.write(`${answer}\r`)
   })
@@ -384,7 +389,7 @@ describe("database maintenance CLI", () => {
   // 本用例伪造 live daemon control：POST 只登记 task，进度只写 durable JSON。
   test("online observe completes while control status hangs during nonterminal work", async () => {
     await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 8) })
-    await runCli(tmp.path, ["db", "status", "--json"])
+    // seedColdParts 已通过真实 CLI 完成 migration，无需再次冷启动相同的 status 命令。
     const { realpath } = await import("fs/promises")
     // realpath 与 CLI Database.getPath 对齐，避免 task.dbPath mismatch 拒读。
     const dbPath = await realpath(path.join(tmp.path, "opencode.db"))

@@ -1163,39 +1163,27 @@ export const ShellTool = Tool.define(
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
           ])
 
-          if (exit.kind === "abort") {
-            aborted = true
-            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
-            // Effect ChildProcess.kill 的 forceKillAfter 只限制信号发送（Unix 同步
-            // 即完成），不限制 Deferred.await(exitSignal) 的进程退出等待（无上限）。
-            // 用 timeoutOrElse 包裹整个 kill，实现 SIGTERM→500ms→SIGKILL 序列，
-            // 复用代码库 shell/shell.ts:killTree 的 SIGKILL_TIMEOUT_MS=200 同款语义。
-            // orElse 加 Effect.ignore：进程可能在 SIGTERM 后恰好退出，SIGKILL 时
-            // 抛 ESRCH，与 killTree 的 exited() 检查同理。
+          if (exit.kind !== "exit") {
+            aborted = exit.kind === "abort"
+            expired = exit.kind === "timeout"
+            // kill 等到的是主进程 exit，后代仍可能持有 stdout/stderr。
+            // 将输出排空纳入同一 500ms 宽限期，避免主进程先退出后跳过强杀升级。
+            // 此处只等待 output fiber；宽限期到期不打断它，保留后续缓冲输出消费。
             yield* handle.kill().pipe(
+              Effect.andThen(Fiber.join(output)),
               Effect.timeoutOrElse({
                 duration: "500 millis",
-                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
-              }),
-              Effect.orDie,
-            )
-          }
-          if (exit.kind === "timeout") {
-            expired = true
-            // timeout 路径同样使用 bounded kill
-            yield* handle.kill().pipe(
-              Effect.timeoutOrElse({
-                duration: "500 millis",
+                // 主进程退出后仍向原进程组发送 SIGKILL，清理持有管道的后代。
+                // 保留原有忽略错误语义：升级时进程组可能已经消失。
                 orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
               }),
               Effect.orDie,
             )
           }
 
-          // 子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
-          // 已缓冲的最后几个 chunk 或它们触发的 metadata 更新。最终输出、截断、
-          // 诊断摘要都必须在输出消费完成后组装，否则 Linux 上 fast-exit 命令
-          // 会偶发丢尾部输出并把错误上下文误判为仍然可见。
+          // 进程退出不代表 Effect stream 已处理完缓冲 chunk 及其 metadata 更新。
+          // 正常退出或强杀后都完成消费，再组装最终输出、截断和诊断摘要。
+          // 宽限期内已排空时，此次 join 立即返回；否则继续消费剩余输出。
           yield* Fiber.join(output)
 
           return exit.kind === "exit" ? exit.code : null

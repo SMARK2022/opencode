@@ -1502,11 +1502,12 @@ describe("daemon lifecycle", () => {
       await using yesTmp = await tmpdir()
       const yesLockPath = path.join(yesTmp.path, "tui-server.json")
       const yesDaemon = await spawnDaemon(yesLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      // contender 属于此 fixture；断言失败时也必须在临时目录销毁前等待它结束。
+      let contender = Promise.resolve()
       try {
         // 未替换 owner 的 Y 必须安全停掉同一 PID，再由当前 CLI 完成 offline compression。
         let acquired = false
         let acquiredAtTerminal = false
-        let contender = Promise.resolve()
         // reconnect 竞争者在旧 PID 退出后争用同一 election lock；terminal renderer 执行时它仍不得进入。
         const result = await runInteractiveDb(
           yesLockPath,
@@ -1533,6 +1534,8 @@ describe("daemon lifecycle", () => {
             })
             acquired = true
           })
+          // 立即登记 rejection handler；成功路径仍 await 原 Promise，使竞争失败正常暴露。
+          void contender.catch(() => undefined)
           },
           (chunk) => {
             if (chunk.includes("Compression completed")) {
@@ -1551,6 +1554,8 @@ describe("daemon lifecycle", () => {
       } finally {
         if (ServerLockModule.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
         await yesDaemon.proc.exited.catch(() => undefined)
+        // 失败清理不覆盖原始断言错误，也不让竞争者在下一用例中访问已删除目录。
+        await Promise.allSettled([contender])
       }
       // replacement 场景独立启动 control server，任何 prompt 后请求都会改变公开错误并使测试失败。
       await using replacementTmp = await tmpdir()
