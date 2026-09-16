@@ -22,3 +22,10 @@ test("Tui.run evaluates the epilogue producer only at the exit boundary", async 
   const epilogue = await Bun.file(path.resolve(import.meta.dir, "../../../src/context/epilogue.tsx")).text()
   expect(epilogue).toMatch(/set\(value\?: string \| \(\(\) => string \| undefined\)\): void/)
 })
+
+test("session commands do not recommend retired sharing", async () => {
+  const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/routes/session/index.tsx")).text()
+  // 上游已移除分享命令；先确认命令表有效，再防止重放恢复该误触入口。
+  expect(source).toContain('value: "session.rename"')
+  expect(source).not.toMatch(/value:\s*["']session\.share["']/)
+})
