@@ -993,7 +993,6 @@ export function Session() {
     {
       title: session()?.share?.url ? "Copy share link" : "Share session",
       value: "session.share",
-      suggested: route.type === "session",
       category: "Session",
       enabled: sync.data.config.share !== "disabled",
       slash: {
