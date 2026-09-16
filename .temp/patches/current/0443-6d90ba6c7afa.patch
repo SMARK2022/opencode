@@ -790,10 +790,7 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 index 6fc2dfda6..d32f6d31c 100644
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -3,12 +3,12 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
- import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
- import { SessionV1 } from "@opencode-ai/core/v1/session"
- import path from "path"
+@@ -6,6 +6,6 @@ import path from "path"
 -import { tool, type ModelMessage } from "ai"
 +import { APICallError, tool, type ModelMessage } from "ai"
  import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
@@ -802,10 +799,8 @@ index 6fc2dfda6..d32f6d31c 100644
  import z from "zod"
 -import { LLM } from "../../src/session/llm"
 +import { LLM, streamErrorSummary } from "../../src/session/llm"
- import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
- import { Provider } from "@/provider/provider"
- import { _testFetchTimingLog, progressDeadline } from "@/provider/provider"
-@@ -948,6 +948,107 @@ describe("session.llm.stream", () => {
+@@ -956,4 +956,105 @@ describe("session.llm.stream", () => {
+       }),
      },
    )
  
@@ -910,9 +905,6 @@ index 6fc2dfda6..d32f6d31c 100644
 +    },
 +  )
 +
-   // [local-smark] 行为级验证：用户未配置 timeout / chunkTimeout 时，provider 必须回退到默认值——
-   // 整请求绝对超时 600000ms（10 分钟）、chunk 空闲超时 180000ms（3 分钟）。
-   // 通过 fetch.start 诊断事件里的 timeoutMs / chunkTimeoutMs 字段断言默认值，无需真正等待超时；
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 714861b5a..e0cc78e4b 100644
 --- a/packages/opencode/test/session/prompt.test.ts
@@ -1002,9 +994,8 @@ index 87dfa3ab6..381b7c609 100644
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { InstanceStore } from "@/project/instance-store"
  
-@@ -235,6 +236,116 @@ describe("tool.shell", () => {
-     60_000,
-   )
+@@ -235,2 +236,112 @@ describe("tool.shell", () => {
+   60_000)
  
 +  it.live(
 +    "coalesces shell progress without changing final output",
@@ -1251,9 +1242,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 index 168c5d6d5..094a87eb7 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -189,12 +189,10 @@ export const {
-     let pendingPartDeltaTimer: Timer | undefined
-     // #237：stream timing apply/drop 诊断——与 SDK receive 阶段配对
+@@ -190,8 +190,6 @@ export const {
      const loggedPartDeltaApplications = new Set<string>()
 -    // 缓冲因 part 尚未到达而被 drop 的 delta，按 partID 索引。
 -    // daemon 的 message.part.updated 是 fire-and-forget（void Effect.runPromise），
@@ -1266,24 +1255,14 @@ index 168c5d6d5..094a87eb7 100644
 +    // 对应 part；delta 是 bus-only，若直接 drop 就无法从 SQLite replay。
 +    // 缓冲后在 part.updated 创建 part 时 replay。
      const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
+@@ -328,3 +326,7 @@
+      }
  
-     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
-@@ -320,12 +318,9 @@ export const {
-       }
-     }
- 
--    // 单调合并守卫：防止 pending 阶段的短快照覆盖已累积的长流式文本。
--    // daemon 的 message.part.updated 通过 fire-and-forget 发送（void
--    // Effect.runPromise），而 message.part.delta 通过 yield* await 发送。
--    // 当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta 之后
--    // 才到达时，或 session.sync 从 DB 读到 streaming 期间的空文本快照时，
--    // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
 +    // 单调合并守卫：防止 pending 阶段或 HTTP sync 的短快照覆盖本地长流式文本。
 +    // 当 Session 首次加载、切换或 reconnect 时，HTTP snapshot 与 live BusEvent
 +    // 可以独立到达；不带 time.end 的短文本不能回退本地已拼接内容。
-     // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
++    // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
      function mergeLivePart(existing: Part | undefined, next: Part) {
-       if (!existing) return next
 @@ -345,8 +340,27 @@ export const {
        }
        if (next.type === "tool") {

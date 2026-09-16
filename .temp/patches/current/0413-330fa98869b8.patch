@@ -1,26 +1,3 @@
-From 330fa98869b88e116ebc0ca63fbcfe544ece4acd Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Sat, 11 Jul 2026 04:52:06 +0800
-Subject: [PATCH] =?UTF-8?q?fix(ripgrep):=20Grep/Glob=20=E6=96=87=E4=BB=B6?=
- =?UTF-8?q?=E7=B3=BB=E7=BB=9F=E6=9D=83=E9=99=90=E9=94=99=E8=AF=AF=E6=94=B9?=
- =?UTF-8?q?=E4=B8=BA=20completed=20partial=20=E8=80=8C=E9=9D=9E=E6=95=B4?=
- =?UTF-8?q?=E4=BD=93=E5=A4=B1=E8=B4=A5?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-ripgrep 遇到 macOS TCC、Windows ACL 或 Linux EACCES 等部分子路径不可
-访问时返回 exit code 2。当前 Glob 将其升级为整个 Tool error，完整 stderr
-被持久化并以红色显示；Grep 虽已有 partial 语义，但零匹配分支在检查
-partial 前早退，形成错误的确定性阴性。
-
-本次修改在不改变 streaming files() 和 search() 契约的前提下，新增仅供
-Glob Tool 使用的 bounded Ripgrep.glob()，使用 --no-messages 将空诊断
-code 2 转为 completed partial。Glob/Grep Tool 同时在 output 和 metadata
-传播 partial；Compaction Search History 保留 incomplete 标记；classic TUI
-在 details 关闭时仍显示 partial 搜索。invalid glob/regex、未知 exit、
-spawn/abort 错误保持 fatal，不回传被拒绝路径，不启用 --follow。
-
 diff --git a/docs/Proposal/rg-filesystem-permission-handling.md b/docs/Proposal/rg-filesystem-permission-handling.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..a88cc48ccb46356cfe09ac76803fde9247f057d6
@@ -614,2560 +591,749 @@ index 0000000000000000000000000000000000000000..a88cc48ccb46356cfe09ac76803fde92
 +```
 +
 +独立复核重新运行核心 5 个测试文件，结果为 `165 pass, 0 fail`，并确认 typecheck、diff check、5 个生产文件、5 个测试文件、低于 1,000 行的任务独立 churn，以及约 16.1% 的中文解释性注释比例均满足要求。测试中的 DataPathsManager listener warning 为既有非阻塞提示，没有失败或本任务引入证据。
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index a4c127a6bf5cea77b260d02602079eb9d96b6daa..c12d6744a5cd655edb61b1932d376e3da6afca72 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1099,20 +1099,19 @@ export function Session() {
- 
-           // 导出必须绕过 TUI 本地 200 条渲染窗口，直接让 daemon 从数据库分页读取完整可见会话；
-           // 这样只影响 export 的快照来源，不改变当前页面渲染、copy transcript 或 sync store 的内存边界。
--          const sessionMessages = await sdk.client.session.messages({ sessionID: sessionData.id }, { throwOnError: true })
-+          const sessionMessages = await sdk.client.session.messages(
-+            { sessionID: sessionData.id },
-+            { throwOnError: true },
-+          )
-           // 200 响应必须携带 messages 数组；如果 SDK/daemon 返回异常形态，应沿用现有失败 toast，不能静默写出空 Markdown。
-           if (!sessionMessages.data) throw new Error("Missing session messages for export")
- 
--          const transcript = formatTranscript(
--            sessionData,
--            sessionMessages.data,
--            {
--              thinking: options.thinking,
--              toolDetails: options.toolDetails,
--              assistantMetadata: options.assistantMetadata,
--              providers: sync.data.provider,
--            },
--          )
-+          const transcript = formatTranscript(sessionData, sessionMessages.data, {
-+            thinking: options.thinking,
-+            toolDetails: options.toolDetails,
-+            assistantMetadata: options.assistantMetadata,
-+            providers: sync.data.provider,
-+          })
- 
-           if (options.openWithoutSaving) {
-             // Just open in editor without saving
-@@ -1485,10 +1484,7 @@ function UserMessage(props: {
-         // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体
-         const m = x.text.match(/<objective>([\s\S]*?)<\/objective>/)
-         if (!m) return null
--        return m[1].trim()
--          .replace(/&amp;/g, "&")
--          .replace(/&lt;/g, "<")
--          .replace(/&gt;/g, ">")
-+        return m[1].trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-       })
-       .filter(Boolean)
-     return texts.join("\n\n")
-@@ -1595,6 +1591,59 @@ const ToolPartTopMargin = createContext<() => boolean | undefined>(() => undefin
- // prop; shell and patch can opt out where their layouts need a bespoke position.
- const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
- 
-+function isIncompleteSearch(part: Part) {
-+  // 只放行本次有明确定义的搜索 metadata，避免第三方 Tool 的同名字段改变 details 可见性。
-+  return (
-+    part.type === "tool" &&
-+    (part.tool === "glob" || part.tool === "grep") &&
-+    part.state.status === "completed" &&
-+    part.state.metadata.partial === true
-+  )
-+}
-+
-+type MessageRenderItem =
-+  // 普通 Part 仍交给既有 renderer；投影层只改变遍历单位，不改变 Part 数据。
-+  | { kind: "part"; key: string; part: Part }
-+  // run 是纯显示 descriptor，成员继续保留原始 ID、metadata、time 和 delta 路由。
-+  | { kind: "reasoning-run"; key: string; parts: ReasoningPart[] }
-+
-+function projectMessageParts(messageID: string, parts: Part[]) {
-+  // 该 helper 只返回渲染描述符，调用方不得把结果写回 Sync store 或数据库。
-+  // 单次 O(n) 扫描发生在 Message 内，接口形状从根源上禁止跨 Message 聚合。
-+  const result: MessageRenderItem[] = []
-+  // 暂存数组只收集真正相邻的 reasoning；遇到任意其他 Part 必须立即 flush。
-+  let reasoning: ReasoningPart[] = []
-+  // boundary 保存最近原始非 reasoning Part，它既是语义切点，也是稳定 identity 锚点。
-+  let boundary: Part | undefined
-+
-+  const flush = () => {
-+    if (reasoning.length === 0) return
-+    // run 的身份锚定在前置硬边界，乱序前插 reasoning 时不会重置用户的展开状态。
-+    result.push({
-+      kind: "reasoning-run",
-+      // start key 允许更早 reasoning 乱序前插；after key 允许边界左侧继续保留原状态。
-+      key: boundary ? `${messageID}:reasoning:after:${boundary.id}` : `${messageID}:reasoning:start`,
-+      parts: reasoning,
-+    })
-+    // 新数组避免后续 push 修改已经交给 descriptor 的成员列表。
-+    reasoning = []
-+  }
-+
-+  parts.forEach((part) => {
-+    if (part.type === "reasoning") {
-+      // 连续成员只进入当前 run；这里不读取 text，普通 delta 不应重建拓扑。
-+      reasoning.push(part)
-+      return
-+    }
-+    // 任意原始非 reasoning Part 都是语义边界，不能因当前不可见而被过滤掉。
-+    flush()
-+    result.push({ kind: "part", key: `part:${part.id}`, part })
-+    boundary = part
-+  })
-+  flush()
-+  return result
-+}
-+
- function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean; index: number }) {
-   const ctx = use()
-   const local = useLocal()
-@@ -1603,16 +1652,25 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
-   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
- 
--  const visiblePartIDs = createMemo(() => {
--    return props.parts.flatMap((part) => {
--      if (part.type === "text") return part.text.trim().length > 0 ? [part.id] : []
--      if (part.type === "reasoning") {
-+  const renderItems = createMemo(() => projectMessageParts(props.message.id, props.parts))
-+  // Map 保存当前 reactive descriptor；For callback 只持有不会随更新重建的字符串 key。
-+  const itemByKey = createMemo(() => new Map(renderItems().map((item) => [item.key, item])))
-+  // key 数组只反映 topology；正文 delta 不应因字符变化制造新的 Solid child root。
-+  const renderItemKeys = createMemo(() => renderItems().map((item) => item.key))
-+  // 可见性只决定 spacing/footer，绝不能反向影响 raw topology 的 run 分组结果。
-+  const visibleItemKeys = createMemo(() => {
-+    return renderItems().flatMap((item) => {
-+      if (item.kind === "reasoning-run") {
-+        // 空/redacted reasoning 留在 topology 中，但整个 run 没有正文时不产生视觉占位。
-         if (!ctx.showThinking()) return []
--        return part.text.replace("[REDACTED]", "").trim().length > 0 ? [part.id] : []
-+        return item.parts.some((part) => normalizeReasoning(part.text)) ? [item.key] : []
-       }
-+      const part = item.part
-+      if (part.type === "text") return part.text.trim().length > 0 ? [item.key] : []
-       if (part.type === "tool") {
--        if (!ctx.showDetails() && part.state.status === "completed") return []
--        return [part.id]
-+        // completed partial 仍需要告知用户搜索不完整，普通成功继续遵守 details 开关。
-+        if (!ctx.showDetails() && part.state.status === "completed" && !isIncompleteSearch(part)) return []
-+        return [item.key]
-       }
-       return []
-     })
-@@ -1620,7 +1678,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-   const final = createMemo(() => {
-     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
-   })
--  const visibleParts = createMemo(() => visiblePartIDs().length > 0)
-+  const visibleParts = createMemo(() => visibleItemKeys().length > 0)
-   const footerVisible = createMemo(() => {
-     if (!visibleParts() && !props.message.error) return false
-     return final() || props.message.error?.name === "MessageAbortedError"
-@@ -1647,30 +1705,54 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-       // continuous left edge while adjacent messages have a visible break.
-       marginTop={props.index === 0 ? 0 : 1}
-     >
--      <For each={props.parts}>
--        {(part, index) => {
--          const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
--          const visibleIndex = createMemo(() => visiblePartIDs().indexOf(part.id))
-+      <For each={renderItemKeys()}>
-+        {(key, index) => {
-+          // Solid 的 For 按 item identity 保留子树；primitive key 避免每次投影的新对象触发重挂。
-+          const item = createMemo(() => itemByKey().get(key)!)
-+          const visibleIndex = createMemo(() => visibleItemKeys().indexOf(key))
-           // First visible part starts immediately under the message border;
-           // only later visible parts get an internal separator row.
-           const partTopMargin = createMemo(() => visibleIndex() > 0)
-           const toolTopMargin = createMemo(() => {
-             if (visibleIndex() <= 0) return false
--            const previous = props.parts.find((item) => item.id === visiblePartIDs()[visibleIndex() - 1])
--            return previous?.type === "tool" ? undefined : true
-+            const previous = itemByKey().get(visibleItemKeys()[visibleIndex() - 1])
-+            // run 对 tool spacing 表现为一个非 tool item，连续 tool 的既有 sibling 测量保持不变。
-+            return previous?.kind === "part" && previous.part.type === "tool" ? undefined : true
+diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
+--- a/packages/opencode/src/tool/grep.ts
++++ b/packages/opencode/src/tool/grep.ts
+@@ -109,11 +109,13 @@ export const GrepTool = Tool.define(
+             ...patterns(params.include),
+             ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
+           ]
+-          const emptyTimedOut = () => ({
++          // [local-smark] 源 :1626-1631 契约：timeout 与 partial 可并存（exit 2 竞态），
++          // 四态 metadata 均须持久化——文案归因 timeout，partial 独立记录路径跳过
++          const emptyTimedOut = (partial = false) => ({
+             // #244：title 沿用 pattern 与普通结果对齐，调用方按 title 聚合时不受影响
+             title: params.pattern,
+             // #244：timedOut 必须同时置 truncated——下游消费者只看 truncated 判断结果不完整
+-            metadata: { matches: 0, truncated: true, timedOut: true },
++            metadata: { matches: 0, truncated: true, timedOut: true, ...(partial ? { partial: true } : {}) },
+             // #244：文案同时说明「结果不完整」与「下一步怎么办」，
+             // 让模型能自主选择收窄范围或加大预算重试
+             output: [
+@@ -142,9 +144,21 @@ export const GrepTool = Tool.define(
+             // 调用方用 signal 的错误通道区分「我取消」与「预算耗尽」
+             signal: ctx.abort,
            })
-           return (
--            <Show when={component()}>
--              <ToolPartTopMargin.Provider value={toolTopMargin}>
--                <Dynamic
--                  last={index() === props.parts.length - 1}
--                  topMargin={partTopMargin()}
--                  component={component()}
--                  part={part as any}
--                  message={props.message}
--                />
--              </ToolPartTopMargin.Provider>
--            </Show>
-+            <Switch>
-+              {/* reasoning descriptor 进入统一 run shell，singleton 也不保留第二套旧 renderer。 */}
-+              <Match when={item().kind === "reasoning-run" && item()}>
-+                {(current) => (
-+                  <ReasoningRun
-+                    key={current().key}
-+                    parts={(current() as Extract<MessageRenderItem, { kind: "reasoning-run" }>).parts}
-+                    topMargin={partTopMargin()}
-+                    message={props.message}
-+                  />
-+                )}
-+              </Match>
-+              {/* 普通 Part 原样走既有 Dynamic mapping，聚合不能改变 tool/text 的渲染职责。 */}
-+              <Match when={item().kind === "part" && item()}>
-+                {(current) => {
-+                  const part = () => (current() as Extract<MessageRenderItem, { kind: "part" }>).part
-+                  const component = createMemo(() => PART_MAPPING[part().type as keyof typeof PART_MAPPING])
-+                  return (
-+                    <Show when={component()}>
-+                      <ToolPartTopMargin.Provider value={toolTopMargin}>
-+                        <Dynamic
-+                          last={index() === renderItemKeys().length - 1}
-+                          topMargin={partTopMargin()}
-+                          component={component()}
-+                          part={part() as any}
-+                          message={props.message}
-+                        />
-+                      </ToolPartTopMargin.Provider>
-+                    </Show>
-+                  )
-+                }}
-+              </Match>
-+            </Switch>
-           )
-         }}
-       </For>
-@@ -1729,35 +1811,86 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
- const PART_MAPPING = {
-   text: TextPart,
-   tool: ToolPart,
--  reasoning: ReasoningPart,
- }
+-          if (result.items.length === 0 && result.timedOut) return emptyTimedOut()
++          if (result.items.length === 0 && result.timedOut) return emptyTimedOut(result.partial)
+           // #244：非超时的空结果是完整搜索的确定性结果；两种空结果（确认无匹配 vs
+           // 受控截断）的输出必须可区分，否则模型会把超时误读为全量确认无匹配
++          // [local-smark] partial（rg exit 2，TCC/ACL/EACCES）空结果同样不可当作
++          // 确定性阴性——必须显式携带 partial 标记，模型才能区分「全量无匹配」与
++          // 「部分路径不可访问导致的假阴性」（源提交修复的核心缺陷场景）
++          if (result.items.length === 0 && result.partial)
++            return {
++              title: params.pattern,
++              metadata: { matches: 0, truncated: true, partial: true },
++              output: [
++                "No files found, but the search could not access some paths (permission denied).",
++                "Results may be incomplete. Narrow the search path or adjust include/exclude patterns.",
++              ].join("\n"),
++            }
+           if (result.items.length === 0) return empty
  
--function ReasoningPart(props: { last: boolean; topMargin: boolean; part: ReasoningPart; message: AssistantMessage }) {
-+const REASONING_PREVIEW_ROWS = 5
+           // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文
+@@ -168,7 +182,17 @@ export const GrepTool = Tool.define(
+           const totalMatches = rows.length
+           // #244：超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
+           // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"
+-          if (final.length === 0 && result.timedOut) return emptyTimedOut()
++          if (final.length === 0 && result.timedOut) return emptyTimedOut(result.partial)
++          // [local-smark] 同上：RESULT_LIMIT 过滤后为零匹配也须区分 partial 假阴性
++          if (final.length === 0 && result.partial)
++            return {
++              title: params.pattern,
++              metadata: { matches: 0, truncated: true, partial: true },
++              output: [
++                "No files found, but the search could not access some paths (permission denied).",
++                "Results may be incomplete. Narrow the search path or adjust include/exclude patterns.",
++              ].join("\n"),
++            }
+           if (final.length === 0) return empty
+ 
+           const output = [
+@@ -216,12 +240,15 @@ export const GrepTool = Tool.define(
+             title: params.pattern,
+             // #138：metadata.matches 为展示条数；
+             // #244：timedOut 用条件展开写入 metadata，未超时时保持旧 wire 形状（无该键）
++            // [local-smark] partial 无条件持久化（源 :1657-1663 契约）：compaction
++            // 剪枝 output 后，metadata.partial 是不完整性的唯一载体
+             metadata: {
+               matches: final.length,
+               // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
+               totalMatches,
+               truncated,
+               ...(result.timedOut && { timedOut: true }),
++              partial: result.partial,
+             },
+             output: output.join("\n"),
+           }
+diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
+--- a/packages/core/src/ripgrep.ts
++++ b/packages/core/src/ripgrep.ts
+@@ -110,7 +110,10 @@ export interface SearchResult {
+ 
+ export interface Interface {
+   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
+-  readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
++  readonly glob: (input: GlobInput) => Effect.Effect<
++    { files: readonly Entry[]; partial: boolean; timedOut?: boolean },
++    Error
++  >
+   readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
+   // #244：grep 工具需要 timedOut/truncated/partial 元数据来判断「空结果」与「受控截断」；
+   // grep() 保留纯匹配列表形状给既有 HTTP/debug 调用方。
+@@ -122,8 +125,12 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
+ 
+ const failure = (message: string, cause?: unknown) => new Error({ message, cause })
+ 
++// #244：[local-smark] error parsing glob 与 regex 解析错误同级——include/exclude
++// 与 glob 工具的语法错误都是输入错误，不得落入 exit 2 的权限 partial 分类
+ const isInvalidPattern = (stderr: string) =>
+-  stderr.includes("regex parse error") || stderr.includes("error parsing regex")
++  stderr.includes("regex parse error") ||
++  stderr.includes("error parsing regex") ||
++  stderr.includes("error parsing glob")
+ 
+ const layer = Layer.effect(
+   Service,
+@@ -368,9 +375,15 @@ const layer = Layer.effect(
+           cwd: input.cwd,
+           limit: input.limit,
+           signal: input.signal,
++          // [local-smark] pattern 入 run 激活 InvalidPatternError 门（源 :1464-1467
++          // 契约：无效 pattern 保持 Tool error，不得伪装成权限 partial）
++          pattern: input.pattern,
+           args: [
+             "--no-config",
+             "--files",
++            // [local-smark] --no-messages 抑制遍历诊断（源 :1425 等价）：权限
++            // partial 的 stderr 必须为空，真实输入错误的诊断才能与之可区分
++            "--no-messages",
+             ...(input.hidden ? ["--hidden"] : []),
+             ...(input.follow ? ["--follow"] : []),
+             `--glob=${input.pattern}`,
+@@ -385,14 +398,18 @@ const layer = Layer.effect(
+                 .replaceAll("\\", "/"),
+             ),
+         }).pipe(
+-          Effect.map((result) =>
+-            result.items.map((relative) =>
++          // [local-smark] partial/timedOut 一并透出：glob 通道此前丢弃二者，
++          // tool 层无法区分「全量无匹配」与「部分路径不可访问的假阴性」
++          Effect.map((result) => ({
++            files: result.items.map((relative) =>
+               Entry.make({
+                 path: RelativePath.make(relative),
+                 type: "file",
+               }),
+             ),
+-          ),
++            partial: result.partial,
++            timedOut: result.timedOut,
++          })),
+           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
+         ),
+       find: (input) =>
+diff --git a/packages/core/src/filesystem/search.ts b/packages/core/src/filesystem/search.ts
+--- a/packages/core/src/filesystem/search.ts
++++ b/packages/core/src/filesystem/search.ts
+@@ -59,8 +59,10 @@ export const ripgrepLayer = Layer.effect(
+               limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+             })
+             .pipe(
++              // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装，
++              // consumer 取 .files 保持既有映射逻辑
+               Effect.map((result) =>
+-                result.map((entry) =>
++                result.files.map((entry) =>
+                   FileSystem.Entry.make({
+                     ...entry,
+                     path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
+diff --git a/packages/core/src/tool/glob.ts b/packages/core/src/tool/glob.ts
+--- a/packages/core/src/tool/glob.ts
++++ b/packages/core/src/tool/glob.ts
+@@ -80,8 +80,9 @@ const layer = Layer.effectDiscard(
+                   limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                 })
+                 .pipe(
++                  // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
+                   Effect.map((result) =>
+-                    result.map((entry) =>
++                    result.files.map((entry) =>
+                       FileSystem.Entry.make({
+                         ...entry,
+                         path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
+diff --git a/packages/core/test/filesystem/search.test.ts b/packages/core/test/filesystem/search.test.ts
+--- a/packages/core/test/filesystem/search.test.ts
++++ b/packages/core/test/filesystem/search.test.ts
+@@ -23,7 +23,8 @@ describe("Ripgrep", () => {
+         yield* Effect.promise(() => fs.mkdir(path.join(cwd, "src")))
+         yield* Effect.promise(() => fs.writeFile(path.join(cwd, "src", "match.ts"), "needle\n"))
+         const result = yield* (yield* Ripgrep.Service).glob({ cwd, pattern: "**/*.ts", limit: 10 })
+-        expect(result.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
++        // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
++expect(result.files.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
+       }),
+     ),
+   )
+diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
+--- a/packages/core/test/ripgrep.test.ts
++++ b/packages/core/test/ripgrep.test.ts
+@@ -125,6 +125,83 @@ describe("Ripgrep", () => {
+     ),
+   )
+ 
++  // [local-smark] 源 0413 契约「glob keeps invalid patterns fatal」等价：
++  // glob 语法错误（error parsing glob，exit 2 且 stderr 有诊断）必须保持
++  // Tool error，不得被归因为权限 partial——否则输入错误被隐藏成假阴性
++  it.live("glob keeps invalid glob patterns fatal", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) =>
++        Effect.gen(function* () {
++          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.ts"), "needle\n"))
 +
-+function normalizeReasoning(text: string) {
-+  // 沿用旧 renderer 的规范化口径，避免聚合修复顺手改变 redacted 内容的显示语义。
-+  return text.replace("[REDACTED]", "").trim()
-+}
++          const exit = yield* (yield* Ripgrep.Service)
++            .glob({ cwd: tmp.path, pattern: "[", limit: 10 })
++            .pipe(Effect.exit)
 +
-+function reasoningRows(text: string, width: number) {
-+  // preview 明确使用 char wrap，因此估算也必须按终端 cell，而不是源码逻辑行。
-+  const bodyWidth = Math.max(width, 1)
-+  return text.split("\n").reduce((total, line) => {
-+    // tab 与控制字符按整行收费，宁可少展示，也不能把不可预测宽度当成零成本。
-+    const cells = [...line].reduce((sum, char) => {
-+      const code = char.codePointAt(0) ?? 0
-+      // 一整行是特殊字符的保守上限；过估只会少展示，低估却可能产生孤立 marker。
-+      if (char === "\t" || code < 32 || (code >= 127 && code <= 159)) return sum + bodyWidth
-+      // Bun.stringWidth 与终端 cell 口径一致，能正确处理 CJK 和零宽组合字符。
-+      return sum + Bun.stringWidth(char)
-+    }, 0)
-+    return total + Math.max(1, Math.ceil(cells / bodyWidth))
-+  }, 0)
-+}
-+
-+function ReasoningRun(props: { key: string; topMargin: boolean; parts: ReasoningPart[]; message: AssistantMessage }) {
-+  // run shell 是唯一折叠单位；成员数量增加时不能再复制 header、border 或 toggle。
-   const { theme, subtleSyntax } = useTheme()
-   const ctx = use()
-   const renderer = useRenderer()
--  const [expanded, setExpanded] = createSignal(false)
--
--  const content = createMemo(() => {
--    return props.part.text.replace("[REDACTED]", "").trim()
--  })
--  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
--  createEffect(() => setDisplayContent(content()))
--  const renderedContent = createMemo(() => displayContent() || content())
--  const lines = createMemo(() => renderedContent().split("\n"))
--  const previewLines = 5
--  const overflow = createMemo(() => lines().length > previewLines)
--  const preview = createMemo(() => {
--    if (expanded() || !overflow()) return renderedContent()
--    return [...lines().slice(0, previewLines), "…"].join("\n")
-+  const [override, setOverride] = createSignal<boolean>()
-+  // full body 首次展开后常驻；OpenTUI renderable 被销毁后不能安全复用同一个 JSX 树。
-+  const [bodyMounted, setBodyMounted] = createSignal(false)
-+  // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
-+  const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
-+  // denominator 使用规范化 source 数，不等待异步 conceal，避免 header 在 highlight 后跳变。
-+  const previews = createMemo(() => {
-+    // 所有成员共享同一个五行账户，彻底消除“每个短 Part 各拿五行”的线性增长。
-+    let remaining = REASONING_PREVIEW_ROWS
-+    return parts().flatMap((part, index) => {
-+      // 首 source 不需要边界；后续 source 必须成对获得 marker 行和至少一行正文。
-+      const markerRows = index === 0 ? 0 : 1
-+      // 预算不足时整个成员留给 footer 汇总，绝不只渲染一个没有正文的 marker。
-+      if (remaining <= markerRows) return []
-+      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
-+      // 分配结果只保存原 Part 引用和行数，不制造合成文本或新的持久化身份。
-+      // bodyRows 是成员自己的 clipping 高度，run 级 maxHeight 只是最后一道安全兜底。
-+      remaining -= markerRows + bodyRows
-+      return [{ part, index, bodyRows }]
-+    })
-   })
-+  // overflow 同时考虑未获 allocation 的成员和单成员长行，窄终端也能稳定折叠。
-+  const overflow = createMemo(() => previews().length < parts().length || reasoningRowsTotal(parts(), ctx.width) > 5)
-+  // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
-+  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
-+  // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
-+  const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
-+  // hidden 只统计没有同步 allocation 的 source，不能被异步 highlighting 完成时反复改写。
-+  const hidden = createMemo(() => parts().length - previews().length)
-   const streaming = createMemo(() => !props.message.time.completed)
--  const completedKey = createMemo(() => `${ctx.width}\u0000${preview()}`)
-+  // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
-+
-+  // 全局命令必须覆盖局部点击，否则 “Collapse thinking” 无法得到确定结果。
-+  createEffect(
-+    on(
-+      () => ctx.thinkingMode(),
-+      // 模式实际变化才清除 override，普通正文 delta 不得把用户局部展开强制折回。
-+      () => setOverride(undefined),
-+      { defer: true },
++          // 无效 glob 是输入错误：失败而非「权限拒绝的部分结果」
++          expect(exit._tag).toBe("Failure")
++        }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
 +    ),
 +  )
-+  createEffect(() => {
-+    // 非 overflow run 和全局 show 也要触发首次挂载，保证短内容直接显示完整正文。
-+    if (expanded()) setBodyMounted(true)
-+  })
++
++  // [local-smark] search 的 include/exclude 走 --glob 参数：语法错误同样是
++  // 输入错误，主 pattern 合法不能豁免 include 侧的错误分类
++  it.live("search keeps invalid include globs fatal", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) =>
++        Effect.gen(function* () {
++          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.txt"), "needle\n"))
++
++          const exit = yield* (yield* Ripgrep.Service)
++            .search({ cwd: tmp.path, pattern: "needle", include: "[", limit: 10 })
++            .pipe(Effect.exit)
++
++          expect(exit._tag).toBe("Failure")
++        }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
++  // [local-smark] 完整空结果是兼容基线：partial 只属于真实的 exit 2 空诊断
++  // 场景，正常无匹配必须保持确定性阴性（源 complete-empty 契约等价）
++  it.live("glob returns a deterministic empty result for a complete search", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) =>
++        Effect.gen(function* () {
++          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.ts"), "needle\n"))
++
++          const result = yield* (yield* Ripgrep.Service).glob({ cwd: tmp.path, pattern: "*.nonexistent", limit: 10 })
++
++          expect(result.files).toEqual([])
++          expect(result.partial).toBe(false)
++          expect(result.timedOut).toBeUndefined()
++        }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
++  // [local-smark] 正常 glob 的 partial 契约：有匹配且无错误时 partial 必须为
++  // false，调用方依赖该缺省区分「全量结果」与「部分路径不可访问」
++  it.live("glob reports partial false for a healthy search", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) =>
++        Effect.gen(function* () {
++          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.ts"), "needle\n"))
++
++          const result = yield* (yield* Ripgrep.Service).glob({ cwd: tmp.path, pattern: "*.ts", limit: 10 })
++
++          expect(result.files.map((item) => item.path)).toContain(RelativePath.make("match.ts"))
++          expect(result.partial).toBe(false)
++        }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   // #244：timeout 存在时，正则语法错误仍是 rg 的真实失败，
+   // 不能被降级成「超时后的空部分结果」
+   it.live("search timeout does not hide invalid regex errors", () =>
+diff --git a/packages/opencode/src/cli/cmd/debug/ripgrep.ts b/packages/opencode/src/cli/cmd/debug/ripgrep.ts
+--- a/packages/opencode/src/cli/cmd/debug/ripgrep.ts
++++ b/packages/opencode/src/cli/cmd/debug/ripgrep.ts
+@@ -40,7 +40,8 @@ const FilesCommand = effectCmd({
+         limit: args.limit ?? 10_000,
+       })
+       .pipe(Effect.orDie)
+-    process.stdout.write(files.map((file) => file.path).join(EOL) + EOL)
++    // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
++    process.stdout.write(files.files.map((file) => file.path).join(EOL) + EOL)
+   }),
+ })
  
-   return (
--    <Show when={content() && ctx.showThinking()}>
-+    <Show when={parts().length > 0 && ctx.showThinking()}>
-       <box
--        id={"text-" + props.part.id}
-+        id={`reasoning-run-${props.key}`}
-         paddingLeft={2}
-         marginTop={props.topMargin ? 1 : 0}
-         flexDirection="column"
-@@ -1766,48 +1899,65 @@ function ReasoningPart(props: { last: boolean; topMargin: boolean; part: Reasoni
-         borderColor={theme.backgroundElement}
-         flexShrink={0}
-         onMouseUp={() => {
-+          // 保留既有 selection 保护；拖选 Thinking 文本不能意外触发展开或折叠。
-           if (renderer.getSelection()?.getSelectedText()) return
--          setExpanded((prev) => !prev)
-+          setOverride(!expanded())
-         }}
-       >
-         <box>
-+          {/* 多 source 才显示 segments，singleton 继续保持旧 Thinking (N chars) 兼容格式。 */}
-           <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>
--            Thinking ({renderedContent().length.toLocaleString()} chars):
-+            Thinking ({parts().length > 1 ? `${parts().length} segments · ` : ""}
-+            {characters().toLocaleString()} chars):
-           </text>
-         </box>
--        <box>
--          <Switch>
--            <Match when={streaming()}>
--              <code
--                filetype="markdown"
--                drawUnstyledText={false}
--                streaming={true}
-+        {/* 折叠树始终受五行硬上限保护，估算误差不能重新撑满 viewport。 */}
-+        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
-+          {/* preview 与 full 使用不同 ID 和不同 JSX 树，二者常驻时不会争用 OpenTUI renderable。 */}
-+          <For each={previews()}>
-+            {(preview) => (
-+              <ReasoningBody
-+                id={`reasoning-preview-${preview.part.id}`}
-+                part={preview.part}
-+                marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`}
-+                rows={preview.bodyRows}
-+                width={ctx.width}
-+                streaming={streaming()}
-                 syntaxStyle={subtleSyntax()}
--                content={preview()}
-                 conceal={ctx.conceal()}
--                fg={theme.textMuted}
-               />
--            </Match>
--            <Match when={!streaming()}>
--              <Show keyed when={completedKey()}>
--                {(_key) => (
--                  <code
--                    filetype="markdown"
--                    drawUnstyledText={false}
--                    streaming={false}
-+            )}
-+          </For>
-+        </box>
-+        <Show when={bodyMounted()}>
-+          {/* full tree 首次挂载后只切 visible，避免反复展开时重挂已销毁的 CodeRenderable。 */}
-+          <box visible={expanded()}>
-+            {/* member key 只使用原 Part ID，run 成员前插不会重挂已有 source body。 */}
-+            <For each={parts().map((part) => part.id)}>
-+              {(id) => {
-+                const part = createMemo(() => parts().find((item) => item.id === id)!)
-+                const index = createMemo(() => parts().findIndex((item) => item.id === id))
-+                return (
-+                  <ReasoningBody
-+                    id={`text-${id}`}
-+                    part={part()}
-+                    marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
-+                    width={ctx.width}
-+                    streaming={streaming()}
-                     syntaxStyle={subtleSyntax()}
--                    content={preview()}
-                     conceal={ctx.conceal()}
--                    fg={theme.textMuted}
-                   />
--                )}
--              </Show>
--            </Match>
--          </Switch>
--        </box>
-+                )
-+              }}
-+            </For>
-+          </box>
-+        </Show>
-         <Show when={overflow()}>
-           <box>
--            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
-+            {/* footer 只汇总未获 allocation 的成员，不暴露 Part ID 或 Provider metadata。 */}
-+            <text fg={theme.textMuted}>
-+              {expanded() ? "▲ collapse" : `…${hidden() ? ` · +${hidden()} segments` : ""} · ▼ expand`}
-+            </text>
-           </box>
-         </Show>
-       </box>
-@@ -1815,6 +1965,130 @@ function ReasoningPart(props: { last: boolean; topMargin: boolean; part: Reasoni
+diff --git a/packages/opencode/src/tool/glob.ts b/packages/opencode/src/tool/glob.ts
+--- a/packages/opencode/src/tool/glob.ts
++++ b/packages/opencode/src/tool/glob.ts
+@@ -47,7 +47,10 @@ export const GlobTool = Tool.define(
+           })
+ 
+           const limit = 100
+-          const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
++          // [local-smark] glob 通道透出 partial：零匹配不再等同于确定性无匹配
++        const globResult = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
++        const globPartial = globResult.partial
++        const files = globResult.files
+           const truncated = files.length === limit
+           // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
+           const originalCount = files.length
+@@ -55,7 +58,11 @@ export const GlobTool = Tool.define(
+           const totalFiles = originalCount
+ 
+           const output = []
+-          if (files.length === 0) output.push("No files found")
++          // [local-smark] partial 假阴性防护：部分路径不可访问时显式提示，
++        // 模型可据此收窄路径或调整 pattern，而不是误信全量无匹配
++        if (files.length === 0 && globPartial)
++          output.push("No files found, but some paths could not be accessed (permission denied); results may be incomplete.")
++        else if (files.length === 0) output.push("No files found")
+           if (files.length > 0) {
+             output.push(...files.map((file) => path.resolve(search, file.path)))
+             if (truncated) {
+@@ -67,6 +74,10 @@ export const GlobTool = Tool.define(
+             }
+           }
+ 
++          // [local-smark] partial 与源/grep 约定一致：无论是否有匹配都提示——
++          // 有匹配但部分路径不可访问时模型仍需知道结果可能不完整
++          if (globPartial) output.push("(Some paths could not be accessed; results may be incomplete.)")
++
+           return {
+             title: path.relative(ins.worktree, search),
+             metadata: {
+@@ -74,6 +85,9 @@ export const GlobTool = Tool.define(
+               // [local-smark] total: 截断前的真实文件数
+               total: totalFiles,
+               truncated,
++              // [local-smark] partial: rg exit 2 部分路径不可访问时标记；
++              // 零匹配不再被误读为全量无匹配（wire 缺省无此键 = false，向后兼容）
++              ...(globPartial ? { partial: true } : {}),
+             },
+             output: output.join("\n"),
+           }
+diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
+--- a/packages/opencode/test/tool/grep.test.ts
++++ b/packages/opencode/test/tool/grep.test.ts
+@@ -421,3 +421,133 @@ describe("tool.grep", () => {
    )
- }
  
-+function reasoningRowsTotal(parts: ReasoningPart[], width: number) {
-+  // marker 也属于正文预算；漏算它会让许多短 Part 再次通过 chrome 撑高屏幕。
-+  return parts.reduce(
-+    (total, part, index) => total + reasoningRows(normalizeReasoning(part.text), width) + (index === 0 ? 0 : 1),
-+    0,
-+  )
-+}
+ })
 +
-+function ReasoningBody(props: {
-+  id: string
-+  part: ReasoningPart
-+  marker?: string
-+  rows?: number
-+  width: number
-+  streaming: boolean
-+  syntaxStyle: ReturnType<ReturnType<typeof useTheme>["subtleSyntax"]>
-+  conceal: boolean
-+}) {
-+  const { theme } = useTheme()
-+  // content 直接读取原 Part，SyncProvider 的 delta/final snapshot 仍沿既有对象链更新。
-+  const content = createMemo(() => normalizeReasoning(props.part.text))
-+  // 继续复用旧 50ms 节流，聚合不应放大流式 Markdown 的 highlight 频率。
-+  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
-+  // marker 初始隐藏，只有 post-conceal chunks 证明自己正文可见后才揭示。
-+  const [markerReady, setMarkerReady] = createSignal(false)
-+  let generation = 0
-+  // active 防止异步 tree-sitter callback 在 Solid cleanup 后更新已销毁组件。
-+  let active = true
++  // [local-smark] 源 0413 核心缺陷场景：rg exit 2（TCC/ACL/EACCES）→
++  // search 零匹配 + partial——工具必须显式携带 partial 标记，与确定性
++  // empty / emptyTimedOut 三态可区分，不能把部分路径不可访问当作全量阴性
++  it.instance("flags zero matches as partial when search reports inaccessible paths", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
 +
-+  createEffect(() => setDisplayContent(content()))
-+  const renderedContent = createMemo(() => displayContent() || content())
-+  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
-+  createEffect(() => {
-+    renderedContent()
-+    props.conceal
-+    // 内容或 conceal 变化都先撤下 marker，旧 highlight 结果不能替新的可见性背书。
-+    generation++
-+    setMarkerReady(false)
-+  })
-+  onCleanup(() => {
-+    active = false
-+    generation++
-+  })
++      const info = yield* GrepTool.pipe(
++        Effect.provide(
++          Layer.mock(Ripgrep.Service)({
++            find: () => Effect.die("unused in partial test"),
++            glob: () => Effect.die("unused in partial test"),
++            grep: () => Effect.die("unused in partial test"),
++            search: () =>
++              Effect.succeed({
++                items: [],
++                partial: true,
++                truncated: false,
++                timedOut: false,
++              }),
++          }),
++        ),
++      )
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: test.directory,
++          timeout: 1,
++        },
++        ctx,
++      )
 +
-+  // 每个 source 保持独立 CodeRenderable，未闭合 Markdown fence 不得跨 Part 污染。
-+  const code = () => (
-+    <code
-+      id={props.id}
-+      filetype="markdown"
-+      drawUnstyledText={false}
-+      streaming={props.streaming}
-+      syntaxStyle={props.syntaxStyle}
-+      content={renderedContent()}
-+      conceal={props.conceal}
-+      fg={theme.textMuted}
-+      wrapMode={props.rows ? "char" : "word"}
-+      onChunks={(chunks, context) => {
-+        // chunks 已经过 conceal，检查它们不会泄露 drawUnstyledText=false 保护的原始 Markdown。
-+        const current = generation
-+        const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
-+        queueMicrotask(() => {
-+          // context.content 再校验流式 throttle 后的当前文本，阻止晚到 callback 造成状态倒退。
-+          if (!active || current !== generation || context.content !== renderedContent()) return
-+          // onChunks 已经过 conceal 转换；只在当前 generation 的可见前缀含 glyph 时显示边界。
-+          setMarkerReady(visible)
-+        })
-+        return chunks
-+      }}
-+    />
++      // partial 空结果的三态可区分：metadata.partial 是模型判断
++      // 「结果可能不完整」的唯一信号；输出不得是确定性 "No files found"
++      expect(result.metadata.matches).toBe(0)
++      expect(result.metadata.truncated).toBe(true)
++      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
++      expect(result.output).toContain("could not access some paths")
++      expect(result.output).not.toBe("No files found")
++    }),
 +  )
 +
-+  return (
-+    <>
-+      <Show when={props.marker && markerReady()}>
-+        {/* marker 是可选择的普通 text，但不进入 Markdown，也不会污染 transcript/export。 */}
-+        <text fg={theme.textMuted} wrapMode="none">
-+          {props.marker}
-+        </text>
-+      </Show>
-+      <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
-+        {/* completed key 保留宽度和本 Part 文本，终端 resize 后必须重新完成 conceal。 */}
-+        <Show
-+          when={props.streaming}
-+          fallback={
-+            <Show keyed when={completedKey()}>
-+              {(_key) => code()}
-+            </Show>
-+          }
-+        >
-+          {code()}
-+        </Show>
-+      </box>
-+    </>
++  // [local-smark] 有匹配 + partial：已解析结果保留的同时追加不可访问提示，
++  // 与源提交「部分路径不可访问不改变已解析结果可信度」的语义一致
++  it.instance("keeps matches and marks inaccessibility on non-empty partial results", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++
++      const info = yield* GrepTool.pipe(
++        Effect.provide(
++          Layer.mock(Ripgrep.Service)({
++            find: () => Effect.die("unused in partial test"),
++            glob: () => Effect.die("unused in partial test"),
++            grep: () => Effect.die("unused in partial test"),
++            search: () =>
++              Effect.succeed({
++                items: [
++                  Match.make({
++                    entry: Entry.make({ path: RelativePath.make("match.txt"), type: "file" }),
++                    line: 1,
++                    offset: 0,
++                    text: "needle",
++                    submatches: [],
++                  }),
++                ],
++                partial: true,
++                truncated: false,
++                timedOut: false,
++              }),
++          }),
++        ),
++      )
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: test.directory,
++          timeout: 1,
++        },
++        ctx,
++      )
++
++      expect(result.metadata.matches).toBe(1)
++      expect(result.output).toContain("Line 1: needle")
++      expect(result.output).toContain("inaccessible")
++    }),
 +  )
-+}
 +
-+function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
-+  // 该检查只决定 subordinate marker，不得用于隐藏或改写对应 Reasoning Part 正文。
-+  // preview 只检查成员自己获准的行；被成员 wrapper 裁掉的后文不能让 marker 提前出现。
-+  const bodyWidth = Math.max(width, 1)
-+  let row = 1
-+  let column = 0
-+  return [...text].some((char) => {
-+    if (rows && row > rows) return false
-+    if (char === "\n") {
-+      // 换行重置列位置，确保多逻辑行与 CodeRenderable 的 char-wrap 行边界一致。
-+      row++
-+      column = 0
-+      return false
-+    }
-+    const code = char.codePointAt(0) ?? 0
-+    // 特殊字符继续沿用 allocator 的整行成本，readiness 与 allocation 不能使用两套数学。
-+    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
-+    if (column + cells > bodyWidth) {
-+      // char-wrap 在字符放不下时先换行；必须在检查 glyph 之前推进到真实目标行。
-+      row++
-+      column = 0
-+    }
-+    column += cells
-+    // 只认可分配行内真实占 cell 的非空白字符，后方被裁剪的 glyph 不能提前揭示 marker。
-+    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
-+  })
-+}
++  // [local-smark] 源 :3152-3168 契约：exit 2 竞态下 timedOut 与 partial 可并存——
++  // 四态 metadata（matches/truncated/timedOut/partial）都必须持久化，文案归因
++  // timeout 但 partial 独立记录路径跳过，模型据此同时获知预算与权限两种归因
++  it.instance("preserves partial metadata when an empty search also times out", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
 +
- function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; message: AssistantMessage }) {
-   const ctx = use()
-   const { theme, syntax } = useTheme()
-@@ -1883,7 +2157,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
-   const shouldHide = createMemo(() => {
++      const info = yield* GrepTool.pipe(
++        Effect.provide(
++          Layer.mock(Ripgrep.Service)({
++            find: () => Effect.die("unused in partial test"),
++            glob: () => Effect.die("unused in partial test"),
++            grep: () => Effect.die("unused in partial test"),
++            search: () =>
++              Effect.succeed({
++                items: [],
++                partial: true,
++                truncated: false,
++                timedOut: true,
++              }),
++          }),
++        ),
++      )
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: test.directory,
++          timeout: 1,
++        },
++        ctx,
++      )
++
++      expect(result.metadata.matches).toBe(0)
++      expect(result.metadata.truncated).toBe(true)
++      expect((result.metadata as Record<string, unknown>).timedOut).toBe(true)
++      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
++      expect(result.output).toContain("timed out")
++    }),
++  )
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -19,7 +19,7 @@ import { sessionMessageContentWidth } from "./layout"
+ 
+ // #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
+ export const isVisibleAssistantPart = (
+-  part: { type?: string; text?: string; state?: { status?: string } },
++  part: { type?: string; tool?: string; text?: string; state?: { status?: string; metadata?: { partial?: unknown } } },
+   opts: { showDetails: boolean; showThinking: boolean },
+ ) => {
+   // #185：text 仅非空可见
+@@ -28,7 +28,13 @@ export const isVisibleAssistantPart = (
+   if (part.type === "reasoning") return opts.showThinking && Boolean((part.text ?? "").trim())
+   if (part.type === "tool") {
+     // #185：详情关闭时隐藏已完成工具
+-    if (!opts.showDetails && part.state?.status === "completed") return false
++    // #244：completed 的 glob/grep 携带 partial=true 时豁免——details 关闭会折叠
++    // 输出，part 可见性是「搜索不完整」的唯一信号（源 isIncompleteSearch 语义）
++    const completedPartialSearch =
++      (part.tool === "glob" || part.tool === "grep") &&
++      part.state?.status === "completed" &&
++      part.state?.metadata?.partial === true
++    if (!opts.showDetails && part.state?.status === "completed" && !completedPartialSearch) return false
+     return true
+   }
+   return true
+@@ -1708,7 +1714,7 @@ if (!ctx.showThinking()) return false
+       // #185：工具是否计入 visibleParts 与 shouldHide 同口径
+       if (part.type === "tool")
+         return isVisibleAssistantPart(
+-          { type: "tool", state: part.state },
++          { type: "tool", tool: part.tool, state: part.state },
+           { showDetails: ctx.showDetails(), showThinking: true },
+         )
+       return false
+@@ -2044,7 +2050,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
+     // #185：与 isVisibleAssistantPart 同口径（详情关+completed 隐藏）
      if (ctx.showDetails()) return false
-     if (props.part.state.status !== "completed") return false
--    return true
-+    return !isIncompleteSearch(props.part)
+     return !isVisibleAssistantPart(
+-      { type: "tool", state: props.part.state },
++      { type: "tool", tool: props.part.tool, state: props.part.state },
+       { showDetails: ctx.showDetails(), showThinking: true },
+     )
    })
- 
-   const toolprops = {
-@@ -2260,7 +2534,11 @@ function openAutoReviewFromToolChrome(
-   if (!match) return false
-   if (match.direct) {
-     if (evt.y !== match.row.screenY - 1) return false
--  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || !options?.inline || evt.y !== match.row.screenY - 1)) return false
-+  } else if (
-+    evt.y !== match.row.screenY &&
-+    (review.tool === ShellID.ToolID || !options?.inline || evt.y !== match.row.screenY - 1)
-+  )
-+    return false
-   return openAutoReviewSession(review, navigate, renderer, evt)
- }
- 
-@@ -2478,10 +2756,7 @@ function BlockTool(props: {
+@@ -3143,6 +3149,9 @@ function Glob(props: ToolProps) {
+       <Show when={numberValue(props.metadata.count)}>
+         ({numberValue(props.metadata.count)} {numberValue(props.metadata.count) === 1 ? "match" : "matches"})
        </Show>
-       {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
-       <Show when={hasPreview()}>
--        <box
--          marginTop={collapsed() ? 1 : 0}
--          visible={collapsed()}
--        >
-+        <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
-           {props.preview}
-         </box>
-       </Show>
-@@ -2577,12 +2852,7 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-         </BlockTool>
-       </Match>
-       <Match when={true}>
--        <InlineTool
--          icon="$"
--          pending="Writing command..."
--          complete={props.input.command}
--          part={props.part}
--        >
-+        <InlineTool icon="$" pending="Writing command..." complete={props.input.command} part={props.part}>
-           {props.input.command}
-         </InlineTool>
-       </Match>
-@@ -2711,7 +2981,11 @@ function Write(props: ToolProps<typeof WriteTool>) {
-         >
-           <box gap={1} flexDirection="column">
-             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
-+            <Diagnostics
-+              diagnostics={props.metadata.diagnostics}
-+              filePath={props.input.filePath ?? ""}
-+              summary={props.metadata.diagnosticSummary}
-+            />
-           </box>
-         </BlockTool>
-       </Match>
-@@ -2745,12 +3019,16 @@ function Write(props: ToolProps<typeof WriteTool>) {
-                 content={code()}
-               />
-             </line_number>
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
--           </box>
--         </BlockTool>
--       </Match>
--       <Match when={true}>
--         <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-+            <Diagnostics
-+              diagnostics={props.metadata.diagnostics}
-+              filePath={props.input.filePath ?? ""}
-+              summary={props.metadata.diagnosticSummary}
-+            />
-+          </box>
-+        </BlockTool>
-+      </Match>
-+      <Match when={true}>
-+        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-           Write {pathFormatter.format(props.input.filePath)}
-         </InlineTool>
-       </Match>
-@@ -2766,6 +3044,7 @@ function Glob(props: ToolProps<typeof GlobTool>) {
-       <Show when={props.metadata.count}>
-         ({props.metadata.count} {props.metadata.count === 1 ? "match" : "matches"})
-       </Show>
-+      <Show when={props.metadata.partial}> (incomplete)</Show>
++      {/* #244：partial 时补 (incomplete) 标记——=== true 与 grepResult 同口径，
++          防第三方工具同名字段改变 Glob 行可见性 */}
++      <Show when={props.metadata.partial === true}> (incomplete)</Show>
      </InlineTool>
    )
  }
-@@ -2806,7 +3085,8 @@ function Read(props: ToolProps<typeof ReadTool>) {
- }
+@@ -3207,15 +3216,17 @@ function grepFilter(value: unknown, exclude = false) {
  
- function grepPatterns(value: unknown, exclude = false) {
--  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
-+  const items =
-+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
-   // TUI 的 grep 行必须保持短促；不显示 include=/exclude= 字段名，
-   // exclude 用 !glob 表达真实过滤语义，和 rg/glob 习惯保持一致。
-   return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
-@@ -2822,18 +3102,22 @@ function grepFilter(value: unknown, exclude = false) {
-   return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
- }
- 
+ // #246：numberValue 收窄后的 matches 才参与单复数与截断判断；
+ // 字段缺失或类型不符时退化为空串/超时提示，不渲染误导性数字。
 -function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
 +function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown; partial?: unknown }) {
    const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
    const timedOut = metadata.timedOut === true
+   // #246：TUI 与 run 模式的超时/截断组合语义保持一致——
+   // metadata 缺 matches 字段时只显示 timed out，绝不渲染 undefined 字符串
 -  if (matches === undefined) return timedOut ? "timed out" : ""
 -  if (matches === 0 && timedOut) return "timed out"
++  // #244：partial 与 timeout/truncated 独立组合，不能用一个状态覆盖另一个完整性提示
 +  const incomplete = metadata.partial === true
 +  if (matches === undefined) return [timedOut && "timed out", incomplete && "incomplete"].filter(Boolean).join(", ")
 +  if (matches === 0 && timedOut) return incomplete ? "timed out, incomplete" : "timed out"
    const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
 -  return timedOut ? `${label}, timed out` : label
-+  // partial 与 timeout/truncated 独立组合，不能用一个状态覆盖另一个完整性提示。
 +  return [label, timedOut && "timed out", incomplete && "incomplete"].filter(Boolean).join(", ")
  }
  
- function Grep(props: ToolProps<typeof GrepTool>) {
-   const pathFormatter = usePathFormatter()
--  const filters = createMemo(() => [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "))
-+  const filters = createMemo(() =>
-+    [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "),
-+  )
-   const result = createMemo(() => grepResult(props.metadata))
-   return (
-     <InlineTool icon="✱" pending="Searching content..." complete={props.input.pattern} part={props.part}>
-@@ -2924,19 +3208,19 @@ function Task(props: ToolProps<typeof TaskTool>) {
-     <InlineTool
-       icon="│"
-       spinner={isRunning()}
--        complete={props.input.description}
--        pending="Delegating..."
--        part={props.part}
--        onClick={() => {
--          if (props.metadata.sessionId) {
--            // Task metadata is written as soon as the child session exists, before
--            // its messages necessarily arrive. A previous prefetch can therefore
--            // mark the child as synced while it is still empty; force-refresh on
--            // explicit navigation so clicking a task always opens the live agent view.
--            void sync.session.sync(props.metadata.sessionId, { force: true })
--            navigate({ type: "session", sessionID: props.metadata.sessionId })
--          }
--        }}
-+      complete={props.input.description}
-+      pending="Delegating..."
-+      part={props.part}
-+      onClick={() => {
-+        if (props.metadata.sessionId) {
-+          // Task metadata is written as soon as the child session exists, before
-+          // its messages necessarily arrive. A previous prefetch can therefore
-+          // mark the child as synced while it is still empty; force-refresh on
-+          // explicit navigation so clicking a task always opens the live agent view.
-+          void sync.session.sync(props.metadata.sessionId, { force: true })
-+          navigate({ type: "session", sessionID: props.metadata.sessionId })
-+        }
-+      }}
-     >
-       {content()}
-     </InlineTool>
-@@ -2994,7 +3278,11 @@ function Edit(props: ToolProps<typeof EditTool>) {
-         >
-           <box gap={1} flexDirection="column">
-             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
-+            <Diagnostics
-+              diagnostics={props.metadata.diagnostics}
-+              filePath={props.input.filePath ?? ""}
-+              summary={props.metadata.diagnosticSummary}
-+            />
-           </box>
-         </BlockTool>
-       </Match>
-@@ -3111,7 +3399,11 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-                   >
-                     <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-                   </Show>
--                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary} />
-+                  <Diagnostics
-+                    diagnostics={props.metadata.diagnostics}
-+                    filePath={file.movePath ?? file.filePath}
-+                    summary={props.metadata.diagnosticSummary}
-+                  />
-                 </box>
-               </BlockTool>
-             )}
-@@ -3231,7 +3523,8 @@ function Diagnostics(props: {
-           <For each={errors()}>
-             {(diagnostic) => (
-               <text fg={theme.error}>
--                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {truncateMsg(normalizeMsg(diagnostic.message))}
-+                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}]{" "}
-+                {truncateMsg(normalizeMsg(diagnostic.message))}
-               </text>
-             )}
-           </For>
-@@ -3239,15 +3532,11 @@ function Diagnostics(props: {
-       </Match>
-       {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
-       <Match when={summary() && summary()!.existingCount > 0}>
--        <text fg={theme.textMuted}>
--          LSP checked · 0 new · {summary()!.existingCount} existing
--        </text>
-+        <text fg={theme.textMuted}>LSP checked · 0 new · {summary()!.existingCount} existing</text>
-       </Match>
-       {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
-       <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
--        <text fg={theme.success ?? theme.textMuted}>
--          ✓ LSP checked · no errors in this file
--        </text>
-+        <text fg={theme.success ?? theme.textMuted}>✓ LSP checked · no errors in this file</text>
-       </Match>
-     </Switch>
-   )
-diff --git a/packages/opencode/src/file/ripgrep.ts b/packages/opencode/src/file/ripgrep.ts
-index 83bd4b2956b42c5a9c356adfa7b47a7ece8b0bbb..efdc47637938844cb477bbcd6376572c0ab5736d 100644
---- a/packages/opencode/src/file/ripgrep.ts
-+++ b/packages/opencode/src/file/ripgrep.ts
-@@ -127,6 +127,20 @@ export interface FilesInput {
-   signal?: AbortSignal
- }
- 
-+// Glob 需要同时返回前缀结果和终态完整性，因此不能复用只发出文件名的 streaming files。
-+// 该 contract 仍是 package 内部 Service seam，不进入 Tool input、HTTP 或 SDK schema。
-+export interface GlobInput extends FilesInput {
-+  limit: number
-+}
+ function Grep(props: ToolProps) {
+diff --git a/packages/tui/test/routes/session/session-message-spacing.test.ts b/packages/tui/test/routes/session/session-message-spacing.test.ts
+--- a/packages/tui/test/routes/session/session-message-spacing.test.ts
++++ b/packages/tui/test/routes/session/session-message-spacing.test.ts
+@@ -21,4 +21,35 @@ describe("assistant visible parts (#185)", () => {
+       isVisibleAssistantPart({ type: "tool", state: { status: "completed" } }, { showDetails: true, showThinking: true }),
+     ).toBe(true)
+   })
 +
-+// partial 只表示自然 exit 2 的遍历不完整；达到 sentinel 时只设置 truncated，避免无证据猜测。
-+// items 始终已经 clean 且不超过调用方 limit，Tool 无需再次读取进程或裁剪结果。
-+export interface GlobResult {
-+  items: string[]
-+  partial: boolean
-+  truncated: boolean
-+}
-+
- export interface SearchInput {
-   cwd: string
-   pattern: string
-@@ -149,6 +163,7 @@ export interface TreeInput {
- 
- export interface Interface {
-   readonly files: (input: FilesInput) => Stream.Stream<string, PlatformError | Error>
-+  readonly glob: (input: GlobInput) => Effect.Effect<GlobResult, PlatformError | Error>
-   readonly tree: (input: TreeInput) => Effect.Effect<string, PlatformError | Error>
-   readonly search: (input: SearchInput) => Effect.Effect<SearchResult, PlatformError | Error>
- }
-@@ -221,8 +236,9 @@ function fail(queue: Queue.Queue<string, PlatformError | Error | Cause.Done>, er
-   Queue.failCauseUnsafe(queue, Cause.fail(err))
- }
- 
--function filesArgs(input: FilesInput) {
--  const args = ["--no-config", "--files", "--glob=!.git/*"]
-+function filesArgs(input: FilesInput, noMessages = false) {
-+  // 只为能传播 partial 的 bounded Glob 隐藏遍历诊断；streaming files 仍保留原失败语义。
-+  const args = ["--no-config", "--files", ...(noMessages ? ["--no-messages"] : []), "--glob=!.git/*"]
-   if (input.follow) args.push("--follow")
-   if (input.hidden !== false) args.push("--hidden")
-   if (input.hidden === false) args.push("--glob=!.*")
-@@ -374,6 +390,45 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
-         })
-       })
- 
-+      const glob: Interface["glob"] = Effect.fn("Ripgrep.glob")(function* (input) {
-+        yield* check(input.cwd)
-+        // scoped program 统一拥有 child 和 collector；正常返回、limit、abort 都经过同一释放边界。
-+        const program = Effect.scoped(
-+          Effect.gen(function* () {
-+            const handle = yield* spawner.spawn(yield* command(input.cwd, filesArgs(input, true)))
-+            // stderr 必须从 spawn 起并发 drain，不能等 stdout 结束后才读取，否则大量诊断可能填满 pipe。
-+            // collector 绑定当前 scope，abort 或 sentinel 返回时会与 child 一起被确定性中断。
-+            const stderr = yield* Stream.mkString(Stream.decodeText(handle.stderr)).pipe(Effect.forkScoped)
-+            const items = yield* Stream.decodeText(handle.stdout).pipe(
-+              Stream.splitLines,
-+              Stream.filter((line) => line.length > 0),
-+              Stream.map(clean),
-+              Stream.take(input.limit + 1),
-+              Stream.runCollect,
-+              Effect.map((chunk) => [...chunk]),
-+            )
-+
-+            if (items.length > input.limit) {
-+              // sentinel 分支不能等待 exit/stderr EOF；先返回结果，scope finalizer 才有机会终止 rg。
-+              // 此时 truncated 已足够表达不完整，不再猜测尚未遍历区域是否还会产生权限错误。
-+              return { items: items.slice(0, input.limit), partial: false, truncated: true }
-+            }
-+
-+            // 只有自然读完 stdout 才有资格使用真实 exit code 判断 complete 与 partial。
-+            const code = yield* handle.exitCode
-+            const diagnostic = yield* Fiber.join(stderr)
-+            // rg 对文件枚举通常只使用 0/1；保留 1 的空结果兼容，不能沿用 stdout 中的异常残片。
-+            if (code === 0) return { items, partial: false, truncated: false }
-+            if (code === 1) return { items: [], partial: false, truncated: false }
-+            // --no-messages 只抑制文件 I/O 诊断；仍有 stderr 的 code 2 必须保留为 fatal 输入错误。
-+            // 分类只依赖 exit/stderr 是否为空，不解析会随平台和语言变化的权限错误正文。
-+            if (code === 2 && diagnostic.trim() === "") return { items, partial: true, truncated: false }
-+            return yield* Effect.fail(error(diagnostic, code))
-+          }),
-+        )
-+        return yield* raceAbort(program, input.signal)
-+      })
-+
-       const files: Interface["files"] = (input) =>
-         Stream.callback<string, PlatformError | Error>((queue) =>
-           Effect.gen(function* () {
-@@ -597,7 +652,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
-         return lines.join("\n")
-       })
- 
--      return Service.of({ files, tree, search })
-+      return Service.of({ files, glob, tree, search })
-     }),
-   )
- 
-diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index cd6b02e6156758978411eb21a455c6aed999e48b..1f9f7225dbdc108adb1394597e110896a6fb42ee 100644
---- a/packages/opencode/src/session/compaction.ts
-+++ b/packages/opencode/src/session/compaction.ts
-@@ -565,7 +565,9 @@ function renderSearchHistory(input: { events: ToolEvent[]; worktree: string }):
-       tool: event.part.tool,
-       pattern: pattern.slice(0, 60),
-       path: displayPath(searchPath, input.worktree),
--      matches: String(matchCount),
-+      // 原始 Tool output 会被 Compaction 清除，必须在搜索证据里保留 partial，避免把 0 误读为全量阴性。
-+      // 标识与同一 event 的计数一起生成，不能从旧搜索或输出文案中猜测，避免去重后状态串线。
-+      matches: `${matchCount}${meta.partial === true ? " (incomplete)" : ""}`,
-       sequence: event.sequence,
-     })
-   }
-diff --git a/packages/opencode/src/tool/glob.ts b/packages/opencode/src/tool/glob.ts
-index 3824049c3a26314fedeed0bf3f14b64fe3ad3e43..d46ed332c94ce16dab1648af86379229af004bbc 100644
---- a/packages/opencode/src/tool/glob.ts
-+++ b/packages/opencode/src/tool/glob.ts
-@@ -1,6 +1,5 @@
- import path from "path"
- import { Effect, Option, Schema } from "effect"
--import * as Stream from "effect/Stream"
- import { InstanceState } from "@/effect/instance-state"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import { Ripgrep } from "../file/ripgrep"
-@@ -52,40 +51,34 @@ export const GlobTool = Tool.define(
-           })
- 
-           const limit = 100
--          let truncated = false
--          const files = yield* rg.files({ cwd: search, glob: [params.pattern], signal: ctx.abort }).pipe(
--            Stream.mapEffect((file) =>
--              Effect.gen(function* () {
--                const full = path.resolve(search, file)
--                const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
--                const mtime =
--                  info?.mtime.pipe(
--                    Option.map((date) => date.getTime()),
--                    Option.getOrElse(() => 0),
--                  ) ?? 0
--                return { path: full, mtime }
--              }),
--            ),
--            Stream.take(limit + 1),
--            Stream.runCollect,
--            Effect.map((chunk) => [...chunk]),
-+          // limit 由 Tool 决定，Ripgrep 多观察一个 sentinel；不能在两层各自再次 take 造成双重截断。
-+          const result = yield* rg.glob({ cwd: search, glob: [params.pattern], limit, signal: ctx.abort })
-+          const files = yield* Effect.forEach(result.items, (file) =>
-+            Effect.gen(function* () {
-+              const full = path.resolve(search, file)
-+              const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
-+              // rg 已经确认路径存在；stat 竞态只降低排序优先级，不能删除可用结果。
-+              const mtime =
-+                info?.mtime.pipe(
-+                  Option.map((date) => date.getTime()),
-+                  Option.getOrElse(() => 0),
-+                ) ?? 0
-+              return { path: full, mtime }
-+            }),
-           )
- 
--          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
--          const originalCount = files.length
--          if (files.length > limit) {
--            truncated = true
--            files.length = limit
--          }
--          // [local-smark] total: 截断前的真实文件数（非哨兵值）
--          const totalFiles = originalCount
-+          // total 保持旧的 bounded 口径：101 只证明“至少还有一项”，不是精确全量。
-+          const totalFiles = files.length + Number(result.truncated)
-           files.sort((a, b) => b.mtime - a.mtime)
- 
-           const output = []
--          if (files.length === 0) output.push("No files found")
-+          if (files.length === 0) {
-+            // 只有 complete-empty 能沿用历史精确文案，partial-empty 必须限制结论到可访问路径。
-+            output.push(result.partial ? "No files found in accessible paths." : "No files found")
-+          }
-           if (files.length > 0) {
-             output.push(...files.map((file) => file.path))
--            if (truncated) {
-+            if (result.truncated) {
-               output.push("")
-               // [local-smark] 显示真实总数而非仅 "first 100"，帮助模型判断文件密度
-               output.push(
-@@ -93,6 +86,13 @@ export const GlobTool = Tool.define(
-               )
-             }
-           }
-+          if (result.partial) {
-+            output.push("")
-+            // 不回传被拒绝路径，既避免隐私泄漏，也防止权限诊断重新淹没模型上下文。
-+            output.push(
-+              "(Search incomplete: some paths were inaccessible and skipped. Narrow the path before relying on absence.)",
-+            )
-+          }
- 
-           return {
-             title: path.relative(ins.worktree, search),
-@@ -100,7 +100,9 @@ export const GlobTool = Tool.define(
-               count: files.length,
-               // [local-smark] total: 截断前的真实文件数
-               total: totalFiles,
--              truncated,
-+              truncated: result.truncated,
-+              // metadata 供持久化、Compaction 和 UI 使用；模型提示仍必须存在于 output 中。
-+              partial: result.partial,
-             },
-             output: output.join("\n"),
-           }
-diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
-index 5fd9cc02269826e6ca3882eada54c8079190d795..970f84a5c262c17ae62c23979d240b31f70d1def 100644
---- a/packages/opencode/src/tool/grep.ts
-+++ b/packages/opencode/src/tool/grep.ts
-@@ -61,9 +61,18 @@ export const GrepTool = Tool.define(
-         Effect.gen(function* () {
-           const empty = {
-             title: params.pattern,
--            metadata: { matches: 0, truncated: false },
-+            metadata: { matches: 0, truncated: false, partial: false },
-             output: "No files found",
-           }
-+          // partial-empty 是 completed 结果而非异常；独立对象确保两个空结果不会共享错误文案或 metadata。
-+          const emptyPartial = {
-+            title: params.pattern,
-+            metadata: { matches: 0, truncated: false, partial: true },
-+            output: [
-+              "No files found in accessible paths.",
-+              "(Some paths were inaccessible and skipped; narrow the path before relying on absence.)",
-+            ].join("\n"),
-+          }
-           if (!params.pattern) {
-             throw new Error("pattern is required")
-           }
-@@ -101,9 +110,10 @@ export const GrepTool = Tool.define(
-             ...patterns(params.include),
-             ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
-           ]
--          const emptyTimedOut = () => ({
-+          const emptyTimedOut = (partial = false) => ({
-             title: params.pattern,
--            metadata: { matches: 0, truncated: true, timedOut: true },
-+            // timeout 决定用户文案，partial 仍独立记录文件系统是否同时跳过了路径。
-+            metadata: { matches: 0, truncated: true, timedOut: true, partial },
-             output: [
-               `Search timed out after ${timeout} ms before finding matches.`,
-               "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.",
-@@ -123,8 +133,10 @@ export const GrepTool = Tool.define(
-             signal: ctx.abort,
-           })
-           if (result.items.length === 0 && result.timedOut) {
--            return emptyTimedOut()
-+            return emptyTimedOut(result.partial)
-           }
-+          // partial 必须先于普通 empty；否则权限拒绝会被错误持久化为完整的阴性结论。
-+          if (result.items.length === 0 && result.partial) return emptyPartial
-           if (result.items.length === 0) return empty
- 
-           const rows = result.items.map((item) => ({
-@@ -168,7 +180,8 @@ export const GrepTool = Tool.define(
-           const totalMatches = matches.length
-           // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
-           // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"。
--          if (final.length === 0 && result.timedOut) return emptyTimedOut()
-+          if (final.length === 0 && result.timedOut) return emptyTimedOut(result.partial)
-+          if (final.length === 0 && result.partial) return emptyPartial
-           if (final.length === 0) return empty
- 
-           // [local-smark] 截断时显示数量 + "+" 后缀，不截断时显示精确数
-@@ -217,6 +230,8 @@ export const GrepTool = Tool.define(
-               // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
-               totalMatches,
-               truncated,
-+              // 布尔值始终持久化，后续消费者无需通过自然语言 warning 反向推断完整性。
-+              partial: result.partial,
-               ...(result.timedOut && { timedOut: true }),
-             },
-             output: output.join("\n"),
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index f0ecd8883185a579a120f88e40929adfa286d918..b811480259bc2d5f79553b7e5cfdb22c5e104886 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -73,9 +73,7 @@ test("non-shell auto review status opens the reviewer child session", async () =
-       // 导航进入 reviewer 子会话后,SubagentFooter 从 title 提取 agent 名显示。
-       // 修复前: \w+ 不匹配连字符 → label 回退 "Subagent" → 此断言失败
-       // 修复后: [\w-]+ 匹配 "permission-reviewer" → label "Permission-Reviewer"
--      const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("reviewer child visible")),
--      )
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-       // 行为级断言: footer 必须显示完整 agent 名,不能因连字符回退为泛化 "Subagent"
-       expect(frame.some((line) => line.includes("Permission-Reviewer"))).toBe(true)
-     },
-@@ -83,7 +81,11 @@ test("non-shell auto review status opens the reviewer child session", async () =
-     {},
-     {
-       [childID]: {
--        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-+        info: sessionInfo({
-+          id: childID,
-+          parentID: sessionID,
-+          title: "Auto permission review (@permission-reviewer subagent)",
-+        }),
-         messages: [
-           {
-             ...assistantMessage("msg_reviewer_child", 2),
-@@ -91,7 +93,11 @@ test("non-shell auto review status opens the reviewer child session", async () =
-             agent: "permission-reviewer",
-           },
-         ],
--        parts: { msg_reviewer_child: [textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID })] },
-+        parts: {
-+          msg_reviewer_child: [
-+            textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID }),
-+          ],
-+        },
-       },
-     },
-   )
-@@ -138,7 +144,11 @@ test("block auto review click opens reviewer without toggling the tool card", as
-     {},
-     {
-       [childID]: {
--        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-+        info: sessionInfo({
-+          id: childID,
-+          parentID: sessionID,
-+          title: "Auto permission review (@permission-reviewer subagent)",
-+        }),
-         messages: [
-           {
-             ...assistantMessage("msg_reviewer_child_block", 2),
-@@ -146,7 +156,13 @@ test("block auto review click opens reviewer without toggling the tool card", as
-             agent: "permission-reviewer",
-           },
-         ],
--        parts: { msg_reviewer_child_block: [textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", { sessionID: childID })] },
-+        parts: {
-+          msg_reviewer_child_block: [
-+            textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", {
-+              sessionID: childID,
-+            }),
-+          ],
-+        },
-       },
-     },
-   )
-@@ -234,6 +250,282 @@ test("assistant first visible part ignores hidden completed tool parts", async (
-   )
- })
- 
-+test("incomplete searches remain visible when completed tool details are hidden", async () => {
-+  // 同一 Message 混入普通 completed Read，验证放行条件只影响 partial Glob/Grep 而非全局 details 策略。
-+  await withRenderedSession(
-+    [assistantMessage("msg_incomplete_search", 1)],
-+    {
-+      msg_incomplete_search: [
-+        completedToolPart("part_hidden_read", "msg_incomplete_search", "read", { filePath: "hidden.ts" }),
-+        completedToolPart(
-+          "part_partial_glob",
-+          "msg_incomplete_search",
-+          "glob",
-+          { pattern: "*.ts" },
-+          { count: 0, partial: true },
-+        ),
-+        completedToolPart(
-+          "part_partial_grep",
-+          "msg_incomplete_search",
-+          "grep",
-+          { pattern: "needle" },
-+          { matches: 0, partial: true },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes('Glob "*.ts"') && line.includes("incomplete")),
-+      )
-+
-+      // partial completed 需要保留警告可见性，普通 completed Tool 仍遵守隐藏设置。
-+      expect(frame.some((line) => line.includes('Grep "needle"') && line.includes("incomplete"))).toBe(true)
-+      expect(frame.some((line) => line.includes("Read hidden.ts"))).toBe(false)
-+    },
-+    { tool_details_visibility: false },
-+  )
-+})
-+
-+test("adjacent reasoning parts share one bounded thinking block", async () => {
-+  const messageID = "msg_reasoning_run"
-+  // 十个短 Part 单独都达不到旧的五行阈值；该输入直接复现它们共同占满终端的问题。
-+  const reasoning = Array.from({ length: 10 }, (_, index) =>
-+    reasoningPart(`part_reasoning_${index + 1}`, messageID, `short thought ${index + 1}`),
-+  )
-+
-+  await withRenderedSession(
-+    [assistantMessage(messageID, 1)],
-+    { [messageID]: reasoning },
-+    async (app) => {
-+      // Markdown highlighting 是异步的；等待正文、marker 和折叠控制同时稳定后再断言最终用户帧。
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("short thought 1")) &&
-+          lines.some((line) => line.includes("[seg 2/10]")) &&
-+          lines.some((line) => line.includes("▼ expand")),
-+      )
-+      const header = findRow(frame, "Thinking (10 segments")
-+      const footer = findRow(frame, "▼ expand")
-+
-+      // 用户观察 seam 是最终字符帧；这些断言不依赖 ReasoningRun 的私有函数或组件命名。
-+      // Thinking 必须保持唯一视觉主体，不能再为每个 Provider source Part 重复标题。
-+      expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(1)
-+      // 紧凑标记表达真实 Part 边界；首段无标记，后续序号不能退化成醒目的 Segment 标题。
-+      expect(frame.some((line) => line.includes("[seg 2/10]"))).toBe(true)
-+      expect(frame.some((line) => line.includes("Segment 2/10"))).toBe(false)
-+      // header、共享五行正文和 footer 构成同一个有界块，成员数不能线性扩大屏幕占用。
-+      expect(footer - header + 1).toBeLessThanOrEqual(7)
-+
-+      await clickVisibleText(app, "▼ expand")
-+      // 点击真实可见 footer 验证鼠标事件经过 OpenTUI hitbox，而不是直接操纵组件 signal。
-+      const expanded = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("short thought 10")) && lines.some((line) => line.includes("▲ collapse")),
-+      )
-+      // 展开只改变显示投影，最后一个原始 Part 仍完整、保序且带自己的 source ordinal。
-+      expect(expanded.some((line) => line.includes("[seg 10/10]"))).toBe(true)
-+    },
-+    {},
-+    { height: 24 },
-+  )
-+})
-+
-+test("invisible raw parts still split adjacent reasoning runs", async () => {
-+  const messageID = "msg_reasoning_boundary"
-+  await withRenderedSession(
-+    [assistantMessage(messageID, 1)],
-+    {
-+      [messageID]: [
-+        reasoningPart("part_reasoning_left", messageID, "left source thought"),
-+        // 空 text 不显示，但仍是持久化 Part；先过滤它会错误跨越真实语义边界。
-+        textPart("part_empty_boundary", messageID, "   "),
-+        reasoningPart("part_reasoning_right", messageID, "right source thought"),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("left source thought")) &&
-+          lines.some((line) => line.includes("right source thought")),
-+      )
-+      // 两侧都是 singleton run，因此各自保留兼容 header，不能被投影成一个 2-segment block。
-+      expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(2)
-+      expect(frame.some((line) => line.includes("2 segments"))).toBe(false)
-+    },
-+    {},
-+    { height: 20 },
-+  )
-+})
-+
-+test("concealed reasoning never leaves an orphan source marker", async () => {
-+  const messageID = "msg_reasoning_conceal"
-+  await withRenderedSession(
-+    [assistantMessage(messageID, 1)],
-+    {
-+      [messageID]: [
-+        reasoningPart("part_reasoning_visible", messageID, "visible first source"),
-+        reasoningPart("part_reasoning_concealed", messageID, "![](private-url)"),
-+      ],
-+    },
-+    async (app) => {
-+      // 逐帧观察真实 renderer，而不是只检查最终帧；异步 highlighting 的短暂孤立 marker 也属于回归。
-+      for (let frameIndex = 0; frameIndex < 12; frameIndex++) {
-+        await app.renderOnce()
-+        const frame = rows(app.captureCharFrame())
-+        expect(frame.some((line) => line.includes("[seg 2/2]"))).toBe(false)
-+        await Bun.sleep(5)
-+      }
-+
-+      // 走真实默认快捷键关闭 conceal，确认 marker 只在对应 Markdown 自身可见时出现。
-+      app.mockInput.pressKey("x", { ctrl: true })
-+      app.mockInput.pressKey("h")
-+      // 先证明 unconcealed 分支确实可见，后续竞态断言才不会因快捷键未触发而假绿。
-+      await waitForFrame(
-+        app,
-+        (lines) => lines.some((line) => line.includes("[seg 2/2]")) && lines.some((line) => line.includes("private-url")),
-+      )
-+
-+      app.mockInput.pressKey("x", { ctrl: true })
-+      app.mockInput.pressKey("h")
-+      // 重新 conceal 后逐帧校验配对不变量，旧 highlighting callback 不能单独复活 marker。
-+      for (let frameIndex = 0; frameIndex < 12; frameIndex++) {
-+        await app.renderOnce()
-+        const frame = rows(app.captureCharFrame())
-+        const marker = frame.some((line) => line.includes("[seg 2/2]"))
-+        const body = frame.some((line) => line.includes("private-url"))
-+        expect(marker && !body).toBe(false)
-+        await Bun.sleep(5)
-+      }
-+    },
-+    {},
-+    { height: 16 },
-+  )
-+})
-+
-+test("reasoning run keeps expansion across out-of-order inserts", async () => {
-+  const messageID = "msg_reasoning_insert"
-+  const middle = reasoningPart(
-+    "part_reasoning_b",
-+    messageID,
-+    Array.from({ length: 7 }, (_, index) => `middle ${index}`).join("\n"),
-+  )
-+  await withRenderedSession(
-+    [assistantMessage(messageID, 1)],
-+    { [messageID]: [middle] },
-+    async (app, emit) => {
-+      // 初始长正文先建立 local override，后续事件才能验证稳定 identity 而不只是内容更新。
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
-+      await clickVisibleText(app, "▼ expand")
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("middle 6")))
-+
-+      // 更早 ID 模拟乱序到达；run key 不得依赖首个 reasoning Part，否则展开状态会丢失。
-+      emit(partUpdatedEvent("evt_reasoning_prepend", reasoningPart("part_reasoning_a", messageID, "earlier source")))
-+      let frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Thinking (2 segments")) &&
-+          lines.some((line) => line.includes("earlier source")),
-+      )
-+      expect(frame.some((line) => line.includes("▲ collapse"))).toBe(true)
-+
-+      emit(partUpdatedEvent("evt_reasoning_append", reasoningPart("part_reasoning_c", messageID, "later source")))
-+      // 第三段追加检验同一个 stable run root 的增量扩展，不允许通过整体 remount 假装更新成功。
-+      frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Thinking (3 segments")) &&
-+          lines.some((line) => line.includes("later source")),
-+      )
-+      // append 只增加一个 source，不能重复此前通过事件插入的正文。
-+      expect(frame.filter((line) => line.includes("earlier source")).length).toBe(1)
-+      expect(frame.some((line) => line.includes("▲ collapse"))).toBe(true)
-+    },
-+    {},
-+    { height: 24 },
-+  )
-+})
-+
-+test("removing a hard boundary merges reasoning into the left run", async () => {
-+  const messageID = "msg_reasoning_remove"
-+  const boundaryID = "part_reasoning_boundary"
-+  const rightID = "part_reasoning_right"
-+  await withRenderedSession(
-+    [assistantMessage(messageID, 1)],
-+    {
-+      [messageID]: [
-+        reasoningPart(
-+          "part_reasoning_left",
-+          messageID,
-+          Array.from({ length: 7 }, (_, index) => `left ${index}`).join("\n"),
-+        ),
-+        textPart(boundaryID, messageID, "   "),
-+        reasoningPart(rightID, messageID, "right source"),
-+      ],
-+    },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
-+      await clickVisibleText(app, "▼ expand")
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("left 6")))
-+
-+      // 删除不可见硬边界后，合并必须继承左侧 key 和展开状态，右侧成员只出现一次。
-+      emit(partRemovedEvent("evt_reasoning_boundary_remove", messageID, boundaryID))
-+      let frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Thinking (2 segments")) &&
-+          lines.some((line) => line.includes("right source")),
-+      )
-+      expect(frame.filter((line) => line.includes("right source")).length).toBe(1)
-+      expect(frame.some((line) => line.includes("▲ collapse"))).toBe(true)
-+
-+      emit(partRemovedEvent("evt_reasoning_member_remove", messageID, rightID))
-+      // 第二次删除验证 merge 后的新成员列表仍由 SyncProvider 的原始 Part ID 驱动。
-+      frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("left 6")) && !lines.some((line) => line.includes("right source")),
-+      )
-+      // denominator 随成员删除回到 singleton 兼容格式，不能残留旧的 2-segment header。
-+      expect(frame.some((line) => line.includes("Thinking (2 segments"))).toBe(false)
-+      expect(frame.some((line) => line.includes("Thinking (48 chars)"))).toBe(true)
-+    },
-+    {},
-+    { height: 24 },
-+  )
-+})
-+
-+test("global thinking show mode expands the whole reasoning run", async () => {
-+  const messageID = "msg_reasoning_mode"
-+  await withRenderedSession(
-+    [assistantMessage(messageID, 1)],
-+    {
-+      [messageID]: Array.from({ length: 8 }, (_, index) =>
-+        reasoningPart(`part_reasoning_mode_${index + 1}`, messageID, `mode source ${index + 1}`),
++  test("completed partial search stays visible when details off", () => {
++    // #244：partial 搜索豁免隐藏——details 关闭时 part 可见性是
++    // 「结果可能不完整」的唯一信号，不得被 details 开关吞掉
++    expect(
++      isVisibleAssistantPart(
++        { type: "tool", tool: "glob", state: { status: "completed", metadata: { partial: true } } },
++        { showDetails: false, showThinking: true },
 +      ),
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("mode source 8")) && lines.some((line) => line.includes("▲ collapse")),
-+      )
-+      // thinking_mode 只改变屏幕展开状态；show 下不应先闪现或保留 compact footer。
-+      expect(frame.some((line) => line.includes("▼ expand"))).toBe(false)
-+      expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(1)
-+
-+      await clickVisibleText(app, "▲ collapse")
-+      const collapsed = await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
-+      // 全局 show 是进入页面时的默认值；明确显示的局部 collapse 不能成为无效操作。
-+      expect(collapsed.some((line) => line.includes("mode source 8"))).toBe(false)
-+    },
-+    { thinking_mode: "show" },
-+    { height: 24 },
-+  )
-+})
-+
- test("session follows streaming growth when the viewport is visually at the bottom", async () => {
-   await withRenderedSession(
-     [userMessage("msg_user", 1), assistantMessage("msg_bottom", 2, "msg_user")],
-@@ -253,7 +545,13 @@ test("session follows streaming growth when the viewport is visually at the bott
-       expect(rows(app.captureCharFrame()).some((line) => line.includes("OLD_BOTTOM"))).toBe(false)
- 
-       emit(
--        partDeltaEvent("evt_bottom_growth", "msg_bottom", "part_bottom", `${" new content".repeat(80)} NEW_BOTTOM`, "text"),
-+        partDeltaEvent(
-+          "evt_bottom_growth",
-+          "msg_bottom",
-+          "part_bottom",
-+          `${" new content".repeat(80)} NEW_BOTTOM`,
-+          "text",
-+        ),
-       )
- 
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("NEW_BOTTOM")))
-@@ -268,7 +566,9 @@ test("narrow viewport keeps the user message cell from collapsing", async () =>
-     [userMessage("msg_user_narrow", 1), assistantMessage("msg_assistant_after_user", 2, "msg_user_narrow")],
-     {
-       msg_user_narrow: [textPart("part_user_narrow", "msg_user_narrow", "keep this user request visible")],
--      msg_assistant_after_user: [textPart("part_assistant_after_user", "msg_assistant_after_user", "assistant remains below user")],
-+      msg_assistant_after_user: [
-+        textPart("part_assistant_after_user", "msg_assistant_after_user", "assistant remains below user"),
-+      ],
-     },
-     async (app) => {
-       const frame = await waitForFrame(
-@@ -306,7 +606,10 @@ test("auto compaction boundary is labeled in the session message stream", async
- 
- test("session scrollbar marks compaction boundaries without user prompt text", async () => {
-   await withRenderedSession(
--    [userMessage("msg_compaction_marker", 1), assistantMessage("msg_after_compaction_marker", 2, "msg_compaction_marker")],
-+    [
-+      userMessage("msg_compaction_marker", 1),
-+      assistantMessage("msg_after_compaction_marker", 2, "msg_compaction_marker"),
-+    ],
-     {
-       msg_compaction_marker: [compactionPart("part_compaction_marker", "msg_compaction_marker", true)],
-       msg_after_compaction_marker: [
-@@ -370,7 +673,9 @@ test("pending edit tool reports deletions before the JSON input is complete", as
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("partial.ts") && line.includes("-2")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Edit src") && line.includes("partial.ts") && line.includes("-2")),
-+      )
-       const row = frame[findRow(frame, "partial.ts")]
- 
-       expect(row).toContain("-2")
-@@ -425,7 +730,9 @@ test("pending write tool shows streamed addition counts", async () => {
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src") && line.includes("new file.ts") && line.includes("+2")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Write src") && line.includes("new file.ts") && line.includes("+2")),
-+      )
-       expect(frame[findRow(frame, "new file.ts")]).toContain("+2")
-     },
-   )
-@@ -447,7 +754,9 @@ test("task tool click opens its subagent session", async () => {
-       ],
-     },
-     async (app) => {
--      await waitForFrame(app, (lines) => lines.some((line) => line.includes("General Task") && line.includes("inspect files")))
-+      await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("General Task") && line.includes("inspect files")),
-+      )
-       const raw = app.captureCharFrame().split("\n")
-       const y = raw.findIndex((line) => line.includes("General Task") && line.includes("inspect files"))
-       expect(y).toBeGreaterThanOrEqual(0)
-@@ -535,7 +844,11 @@ test("task tool click refreshes a stale prefetched subagent session", async () =
-           childMessageRequests++
-           return childMessageRequests === 1 ? [] : [childMessage]
-         },
--        parts: { msg_child_stale: [textPart("part_child_stale", "msg_child_stale", "child session refreshed", { sessionID: childID })] },
-+        parts: {
-+          msg_child_stale: [
-+            textPart("part_child_stale", "msg_child_stale", "child session refreshed", { sessionID: childID }),
-+          ],
-+        },
-       },
-     },
-   )
-@@ -561,9 +874,15 @@ test("pending tool line counts update from streamed raw deltas", async () => {
- 
-       await Bun.sleep(50)
-       await app.renderOnce()
--      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2"))).toBe(false)
-+      expect(
-+        rows(app.captureCharFrame()).some(
-+          (line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2"),
-+        ),
-+      ).toBe(false)
- 
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2")),
-+      )
-       expect(frame[findRow(frame, "live.ts")]).toContain("+1 -2")
-     },
-   )
-@@ -573,7 +892,9 @@ test("pending notebook edit shows throttled line counts without rendering raw so
-   await withRenderedSession(
-     [assistantMessage("msg_notebook_live_delta", 1)],
-     {
--      msg_notebook_live_delta: [pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", "")],
-+      msg_notebook_live_delta: [
-+        pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", ""),
-+      ],
-     },
-     async (app, emit) => {
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
-@@ -595,10 +916,15 @@ test("pending notebook edit shows throttled line counts without rendering raw so
- 
-       await Bun.sleep(50)
-       await app.renderOnce()
--      expect(rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2"))).toBe(false)
-+      expect(
-+        rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2")),
-+      ).toBe(false)
- 
-       const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2")),
-+        lines.some(
-+          (line) =>
-+            line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2"),
-+        ),
-       )
-       expect(frame.some((line) => line.includes("new two"))).toBe(false)
-     },
-@@ -630,7 +956,14 @@ test("completed notebook edit renders a diff card instead of raw generic input",
-               dirty: true,
-               cellCountBefore: 4,
-               cellCountAfter: 4,
--              diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1,2 @@", "-old value", "+new value", "+rendered diff line"].join("\n"),
-+              diff: [
-+                "--- notebooks/analysis.ipynb#c3.py",
-+                "+++ notebooks/analysis.ipynb#c3.py",
-+                "@@ -1 +1,2 @@",
-+                "-old value",
-+                "+new value",
-+                "+rendered diff line",
-+              ].join("\n"),
-               added: 2,
-               removed: 1,
-             },
-@@ -639,7 +972,9 @@ test("completed notebook edit renders a diff card instead of raw generic input",
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")),
-+      )
-       expect(frame.some((line) => line.includes("rendered diff line"))).toBe(true)
-       expect(frame.some((line) => line.includes("RAW_ONLY_SHOULD_NOT_RENDER"))).toBe(false)
-     },
-@@ -685,7 +1020,12 @@ test("completed notebook edit uses notebook language for supported diff syntax h
-       const start = Date.now()
-       for (;;) {
-         await app.renderOnce()
--        const line = app.captureSpans().lines.find((item) => item.spans.map((span) => span.text).join("").includes("const verified = true"))
-+        const line = app.captureSpans().lines.find((item) =>
-+          item.spans
-+            .map((span) => span.text)
-+            .join("")
-+            .includes("const verified = true"),
-+        )
-         const identifierSpan = line?.spans.find((span) => span.text.includes("verified"))
-         const keywordSpan = line?.spans.find((span) => span.text.includes("const"))
-         if (identifierSpan && keywordSpan && JSON.stringify(keywordSpan.fg) !== JSON.stringify(identifierSpan.fg)) break
-@@ -714,8 +1054,8 @@ test("completed shell edit uses the existing bash parser for shellscript file ex
-               "--- scripts/install.sh",
-               "+++ scripts/install.sh",
-               "@@ -1 +1 @@",
--              "-echo \"old\"",
--              "+echo \"new\"",
-+              '-echo "old"',
-+              '+echo "new"',
-             ].join("\n"),
-           },
-         ),
-@@ -726,7 +1066,9 @@ test("completed shell edit uses the existing bash parser for shellscript file ex
-       // 真实颜色回填依赖 OpenTUI worker 下载远程 parser 资源；这里锁定本地
-       // 回归点：`.sh` 仍保持 LSP 的 shellscript id，并由 bash parser alias 承接。
-       expect(LANGUAGE_EXTENSIONS[".sh"]).toBe("shellscript")
--      expect(parsers.parsers.some((item) => item.filetype === "bash" && item.aliases?.includes("shellscript"))).toBe(true)
-+      expect(parsers.parsers.some((item) => item.filetype === "bash" && item.aliases?.includes("shellscript"))).toBe(
-+        true,
-+      )
-     },
-   )
++    ).toBe(true)
++    expect(
++      isVisibleAssistantPart(
++        { type: "tool", tool: "grep", state: { status: "completed", metadata: { partial: true } } },
++        { showDetails: false, showThinking: true },
++      ),
++    ).toBe(true)
++    // 同形状但无 partial 标记：维持 #185 隐藏语义，豁免不扩大化
++    expect(
++      isVisibleAssistantPart(
++        { type: "tool", tool: "glob", state: { status: "completed", metadata: {} } },
++        { showDetails: false, showThinking: true },
++      ),
++    ).toBe(false)
++    // 非 glob/grep 工具不享受豁免
++    expect(
++      isVisibleAssistantPart(
++        { type: "tool", tool: "bash", state: { status: "completed", metadata: { partial: true } } },
++        { showDetails: false, showThinking: true },
++      ),
++    ).toBe(false)
++  })
  })
-@@ -746,8 +1088,8 @@ test("completed toml edit uses the registered toml parser", async () => {
-               "--- config/opencode.toml",
-               "+++ config/opencode.toml",
-               "@@ -1 +1 @@",
--              "-name = \"old\"",
--              "+name = \"opencode\"",
-+              '-name = "old"',
-+              '+name = "opencode"',
-             ].join("\n"),
-           },
-         ),
-@@ -791,7 +1133,9 @@ test("completed oversized notebook insert renders inserted source preview when t
-               diffOmitted: "too-large",
-               added: 3003,
-               removed: 0,
--              insertedSourcePreview: ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()"].join("\n"),
-+              insertedSourcePreview: ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()"].join(
-+                "\n",
-+              ),
-               insertedSourcePreviewTruncated: true,
-             },
-           },
-@@ -799,10 +1143,12 @@ test("completed oversized notebook insert renders inserted source preview when t
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Notebook insert") && line.includes("+3003 -0")) &&
--        lines.some((line) => line.includes("import pandas as pd")) &&
--        lines.some((line) => line.includes("df.head()")),
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Notebook insert") && line.includes("+3003 -0")) &&
-+          lines.some((line) => line.includes("import pandas as pd")) &&
-+          lines.some((line) => line.includes("df.head()")),
-       )
-       expect(frame.some((line) => line.includes("RAW_INSERT_INPUT_SHOULD_NOT_RENDER"))).toBe(false)
-       expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
-@@ -835,7 +1181,12 @@ test("completed notebook insert renders inserted source as code instead of a dif
-               dirty: true,
-               cellCountBefore: 3,
-               cellCountAfter: 4,
--              diff: ["--- DIFF_HEADER_SHOULD_NOT_RENDER", "+++ notebooks/analysis.ipynb#c4.py", "@@ -0,0 +1,12 @@", ...inserted.map((line) => `+${line}`)].join("\n"),
-+              diff: [
-+                "--- DIFF_HEADER_SHOULD_NOT_RENDER",
-+                "+++ notebooks/analysis.ipynb#c4.py",
-+                "@@ -0,0 +1,12 @@",
-+                ...inserted.map((line) => `+${line}`),
-+              ].join("\n"),
-               added: 12,
-               removed: 0,
-               insertedSourcePreview: inserted.slice(0, 10).join("\n"),
-@@ -858,7 +1209,9 @@ test("notebook tool switches from pending inline summary to completed rich card"
-   await withRenderedSession(
-     [assistantMessage("msg_notebook_transition", 1)],
-     {
--      msg_notebook_transition: [pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", "")],
-+      msg_notebook_transition: [
-+        pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", ""),
-+      ],
-     },
-     async (app, emit) => {
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
-@@ -877,7 +1230,13 @@ test("notebook tool switches from pending inline summary to completed rich card"
-                 path: "notebooks/analysis.ipynb",
-                 cellLabel: "c3",
-                 editType: "edit",
--                diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1 @@", "-before transition", "+after transition"].join("\n"),
-+                diff: [
-+                  "--- notebooks/analysis.ipynb#c3.py",
-+                  "+++ notebooks/analysis.ipynb#c3.py",
-+                  "@@ -1 +1 @@",
-+                  "-before transition",
-+                  "+after transition",
-+                ].join("\n"),
-                 added: 1,
-                 removed: 1,
-               },
-@@ -909,8 +1268,26 @@ test("notebook summary renders cells from notebook metadata without enabling gen
-               dirty: false,
-               runtime: "Python 3.11",
-               cells: [
--                { i: 1, id: "#VSC-11111111", kind: "markdown", lang: "markdown", lines: 3, exec: "not-run", existing_outs: [], first: "# Analysis" },
--                { i: 2, id: "#VSC-22222222", kind: "code", lang: "python", lines: 5, exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z", existing_outs: ["error"], first: "raise Error" },
-+                {
-+                  i: 1,
-+                  id: "#VSC-11111111",
-+                  kind: "markdown",
-+                  lang: "markdown",
-+                  lines: 3,
-+                  exec: "not-run",
-+                  existing_outs: [],
-+                  first: "# Analysis",
-+                },
-+                {
-+                  i: 2,
-+                  id: "#VSC-22222222",
-+                  kind: "code",
-+                  lang: "python",
-+                  lines: 5,
-+                  exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z",
-+                  existing_outs: ["error"],
-+                  first: "raise Error",
-+                },
-               ],
-             },
-           },
-@@ -918,8 +1295,11 @@ test("notebook summary renders cells from notebook metadata without enabling gen
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) && lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) &&
-+          lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
-       )
-       expect(frame.some((line) => line.includes("Notebook:"))).toBe(false)
-     },
-@@ -948,7 +1328,10 @@ test("collapsed notebook summary preview surfaces late failed cells", async () =
-                 kind: index === 18 || index % 3 !== 0 ? "code" : "markdown",
-                 lang: index === 18 || index % 3 !== 0 ? "python" : "markdown",
-                 lines: 3,
--                exec: index === 18 || index < 6 ? `current-run #${index + 1} failed 12ms ended=2026-05-25T00:00:00.000Z` : "not-run",
-+                exec:
-+                  index === 18 || index < 6
-+                    ? `current-run #${index + 1} failed 12ms ended=2026-05-25T00:00:00.000Z`
-+                    : "not-run",
-                 existing_outs: index === 18 || index < 6 ? ["error"] : [],
-                 first: index === 18 ? "raise Error" : `cell ${index + 1}`,
-               })),
-@@ -958,10 +1341,12 @@ test("collapsed notebook summary preview surfaces late failed cells", async () =
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Notebook summary") && line.includes("19 cells")) &&
--        lines.some((line) => line.includes("c19")) &&
--        lines.some((line) => line.includes("failed")),
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Notebook summary") && line.includes("19 cells")) &&
-+          lines.some((line) => line.includes("c19")) &&
-+          lines.some((line) => line.includes("failed")),
-       )
-       expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
-     },
-@@ -993,7 +1378,9 @@ test("notebook env renders operation status from notebook metadata", async () =>
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")),
-+      )
-       expect(frame.some((line) => line.includes("Select a kernel manually"))).toBe(true)
-       expect(frame.some((line) => line.includes("path with spaces | no shell"))).toBe(false)
-     },
-@@ -1042,7 +1429,14 @@ test("notebook source, run, and output tools render rich notebook cards", async
-                   lines: 3,
-                   exec: "current-run #4 succeeded 12ms ended=2026-05-25T00:00:00.000Z",
-                   existing_outs: ["text"],
--                  artifacts: [{ mime: "text/plain", bytes: 32, preview: "ok", artifactPath: ".opencode/cache/notebook-outputs/run.txt" }],
-+                  artifacts: [
-+                    {
-+                      mime: "text/plain",
-+                      bytes: 32,
-+                      preview: "ok",
-+                      artifactPath: ".opencode/cache/notebook-outputs/run.txt",
-+                    },
-+                  ],
-                 },
-               ],
-             },
-@@ -1058,7 +1452,14 @@ test("notebook source, run, and output tools render rich notebook cards", async
-               view: "output",
-               path: "notebooks/analysis.ipynb",
-               cell: { i: 5, id: "#VSC-output", kind: "code", lang: "python", lines: 2, existing_outs: ["png"] },
--              artifacts: [{ mime: "image/png", bytes: 4096, preview: "<image/png 4096 bytes>", artifactPath: ".opencode/cache/notebook-outputs/plot.png" }],
-+              artifacts: [
-+                {
-+                  mime: "image/png",
-+                  bytes: 4096,
-+                  preview: "<image/png 4096 bytes>",
-+                  artifactPath: ".opencode/cache/notebook-outputs/plot.png",
-+                },
-+              ],
-             },
-           },
-         ),
-@@ -1113,31 +1514,42 @@ test("notebook source card keeps content after collapse and re-expand", async ()
-     },
-     async (app) => {
-       // 初始折叠态：预览可见（前 10 行），完整内容不可见
--      let frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Notebook source")) &&
--        lines.some((line) => line.includes("source line 10")) &&
--        lines.some((line) => line.includes("Click to expand")),
-+      let frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Notebook source")) &&
-+          lines.some((line) => line.includes("source line 10")) &&
-+          lines.some((line) => line.includes("Click to expand")),
-       )
-       expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
- 
-       // 第一次展开：完整内容可见
-       await clickVisibleText(app, "Click to expand")
--      frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
-+      frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("source line 24")) &&
-+          lines.some((line) => line.includes("Click to collapse")),
-       )
-       expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
- 
-       // 折叠回去：预览恢复可见，完整内容再次隐藏——这是原 bug 的复现点
-       await clickVisibleText(app, "Click to collapse")
--      frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("source line 10")) && lines.some((line) => line.includes("Click to expand")),
-+      frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("source line 10")) &&
-+          lines.some((line) => line.includes("Click to expand")),
-       )
-       expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
- 
-       // 再次展开：完整内容仍然可见——验证 body 常驻后不会被销毁成空白
-       await clickVisibleText(app, "Click to expand")
--      frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
-+      frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("source line 24")) &&
-+          lines.some((line) => line.includes("Click to collapse")),
-       )
-       expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
-     },
-@@ -1168,18 +1580,29 @@ test("collapsed notebook run preview surfaces late failed cells", async () => {
-                 kind: "code",
-                 lang: "python",
-                 lines: 3,
--                exec: index === 18 ? "current-run #19 failed 12ms ended=2026-05-25T00:00:00.000Z" : "current-run #1 succeeded 4ms ended=2026-05-25T00:00:00.000Z",
-+                exec:
-+                  index === 18
-+                    ? "current-run #19 failed 12ms ended=2026-05-25T00:00:00.000Z"
-+                    : "current-run #1 succeeded 4ms ended=2026-05-25T00:00:00.000Z",
-                 existing_outs: index === 18 ? ["error"] : index < 6 ? ["text"] : [],
--                artifacts: index === 18
--                  ? Array.from({ length: 8 }, (_, artifact) => ({
--                      mime: "text/plain",
--                      bytes: 32,
--                      preview: `artifact ${artifact}`,
--                      artifactPath: `.opencode/cache/notebook-outputs/artifact-${artifact}.txt`,
--                    }))
--                  : index === 17
--                    ? [{ mime: "text/plain", bytes: 32, preview: "extra artifact", artifactPath: ".opencode/cache/notebook-outputs/artifact-extra.txt" }]
--                    : [],
-+                artifacts:
-+                  index === 18
-+                    ? Array.from({ length: 8 }, (_, artifact) => ({
-+                        mime: "text/plain",
-+                        bytes: 32,
-+                        preview: `artifact ${artifact}`,
-+                        artifactPath: `.opencode/cache/notebook-outputs/artifact-${artifact}.txt`,
-+                      }))
-+                    : index === 17
-+                      ? [
-+                          {
-+                            mime: "text/plain",
-+                            bytes: 32,
-+                            preview: "extra artifact",
-+                            artifactPath: ".opencode/cache/notebook-outputs/artifact-extra.txt",
-+                          },
-+                        ]
-+                      : [],
-               })),
-             },
-           },
-@@ -1187,10 +1610,12 @@ test("collapsed notebook run preview surfaces late failed cells", async () => {
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Notebook run") && line.includes("failed")) &&
--        lines.some((line) => line.includes("c19")) &&
--        lines.some((line) => line.includes("failed")),
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Notebook run") && line.includes("failed")) &&
-+          lines.some((line) => line.includes("c19")) &&
-+          lines.some((line) => line.includes("failed")),
-       )
-       expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
-       expect(frame.some((line) => line.includes("Artifacts: 9 available after expand"))).toBe(true)
-@@ -1265,7 +1690,11 @@ test("pending shell auto review navigation is owned by the status line", async (
-     {},
-     {
-       [childID]: {
--        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-+        info: sessionInfo({
-+          id: childID,
-+          parentID: sessionID,
-+          title: "Auto permission review (@permission-reviewer subagent)",
-+        }),
-         messages: [
-           {
-             ...assistantMessage("msg_reviewer_child_shell", 2),
-@@ -1273,7 +1702,13 @@ test("pending shell auto review navigation is owned by the status line", async (
-             agent: "permission-reviewer",
-           },
-         ],
--        parts: { msg_reviewer_child_shell: [textPart("part_reviewer_child_shell", "msg_reviewer_child_shell", "reviewer child visible", { sessionID: childID })] },
-+        parts: {
-+          msg_reviewer_child_shell: [
-+            textPart("part_reviewer_child_shell", "msg_reviewer_child_shell", "reviewer child visible", {
-+              sessionID: childID,
-+            }),
-+          ],
-+        },
-       },
-     },
-   )
-@@ -1513,7 +1948,9 @@ test("edit block shows auto review status below its card title", async () => {
-           "edit",
-           { filePath: "external folder/config.json", oldString: "old", newString: "new" },
-           {
--            diff: ["--- external folder/config.json", "+++ external folder/config.json", "@@", "-old", "+new"].join("\n"),
-+            diff: ["--- external folder/config.json", "+++ external folder/config.json", "@@", "-old", "+new"].join(
-+              "\n",
-+            ),
-             diagnostics: {},
-             autoReview: {
-               reviewID: "review_edit_done",
-@@ -1538,7 +1975,9 @@ test("tools without auto review metadata keep their original chrome", async () =
-   await withRenderedSession(
-     [assistantMessage("msg_read_without_review", 1)],
-     {
--      msg_read_without_review: [completedToolPart("part_read_without_review", "msg_read_without_review", "read", { filePath: "src/local.ts" })],
-+      msg_read_without_review: [
-+        completedToolPart("part_read_without_review", "msg_read_without_review", "read", { filePath: "src/local.ts" }),
-+      ],
-     },
-     async (app) => {
-       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read src")))
-@@ -1564,7 +2003,11 @@ test("errored non-shell tools keep auto review status below the inline row", asy
-               sessionID: "ses_reviewer_child",
-               status: "denied",
-               precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
--              result: { risk_level: "high", user_authorization: "unknown", rationale: "private key read was not authorized" },
-+              result: {
-+                risk_level: "high",
-+                user_authorization: "unknown",
-+                rationale: "private key read was not authorized",
-+              },
-             },
-           },
-         ),
-@@ -1594,7 +2037,11 @@ test("generic tools inherit the shared auto review chrome", async () => {
-               sessionID: "ses_reviewer_child",
-               status: "allowed",
-               precheck: { level: "cautious", reason: "future tool external access requires reviewer approval" },
--              result: { risk_level: "medium", user_authorization: "high", rationale: "user approved this external access" },
-+              result: {
-+                risk_level: "medium",
-+                user_authorization: "high",
-+                rationale: "user approved this external access",
-+              },
-             },
-           },
-         ),
-@@ -1660,7 +2107,15 @@ test("completed apply_patch with delete file shows diff content and stats in tit
-                 // 删除文件的 patch 是带有完整 - 行的 unified diff，
-                 // DiffView 应将其逐行渲染而非降级为纯 -N lines 摘要。
-                 // "KEEP_THIS" 用作断言锚点，确保 diff 内容真实可见。
--                patch: ["--- src/old.ts", "+++ src/old.ts", "@@ -1,3 +0,0 @@", "-KEEP_THIS_first", "-KEEP_THIS_second", "-KEEP_THIS_third", "\\ No newline at end of file"].join("\n"),
-+                patch: [
-+                  "--- src/old.ts",
-+                  "+++ src/old.ts",
-+                  "@@ -1,3 +0,0 @@",
-+                  "-KEEP_THIS_first",
-+                  "-KEEP_THIS_second",
-+                  "-KEEP_THIS_third",
-+                  "\\ No newline at end of file",
-+                ].join("\n"),
-                 additions: 0,
-                 deletions: 3,
-               },
-@@ -1745,7 +2200,9 @@ test("shell auto review status is not duplicated by generic tool chrome", async
-     },
-     async (app) => {
-       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
--      expect(frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toHaveLength(1)
-+      expect(
-+        frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
-+      ).toHaveLength(1)
-     },
-   )
- })
-@@ -1805,7 +2262,9 @@ test("running shell output card keeps review placement below the title", async (
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read SSH private key via shell")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Read SSH private key via shell")),
-+      )
-       const title = findRow(frame, "Read SSH private key via shell")
-       // Running shell cards use the same BlockTool review slot as completed
-       // cards. This guards the real streaming state where shell output metadata
-@@ -1858,7 +2317,9 @@ test("multi-file apply_patch renders one auto review status for the whole patch"
-     },
-     async (app) => {
-       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched external/a.ts")))
--      const reviewRows = frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
-+      const reviewRows = frame.filter((line) =>
-+        line.includes("✓ auto review · allowed · auth high · @permission-reviewer"),
-+      )
-       expect(reviewRows).toHaveLength(1)
-       expect(findRow(frame, "✓ auto review · allowed · auth high · @permission-reviewer")).toBeLessThan(
-         findRow(frame, "Patched external/a.ts"),
-@@ -2175,6 +2636,18 @@ function textPart(id: string, messageID: string, text: string, extra: Partial<Ex
-   } satisfies Extract<Part, { type: "text" }>
- }
- 
-+function reasoningPart(id: string, messageID: string, text: string) {
-+  // fixture 保留真实 ReasoningPart 的独立身份，防止测试无意中把数据层也合并。
-+  return {
-+    id,
-+    sessionID,
-+    messageID,
-+    type: "reasoning",
-+    text,
-+    time: { start: 1, end: 2 },
-+  } satisfies Extract<Part, { type: "reasoning" }>
-+}
-+
- function compactionPart(id: string, messageID: string, auto: boolean) {
-   return {
-     id,
-@@ -2294,7 +2767,7 @@ function partDeltaEvent(id: string, messageID: string, partID: string, delta: st
-   }
- }
- 
--function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): GlobalEvent {
-+function partUpdatedEvent(id: string, part: Part): GlobalEvent {
-   return {
-     directory,
-     project: "proj_test",
-@@ -2305,3 +2778,16 @@ function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): Gl
-     },
-   }
- }
-+
-+function partRemovedEvent(id: string, messageID: string, partID: string): GlobalEvent {
-+  // 使用公开事件形状驱动 SyncProvider，确保测试覆盖真实删除与 Solid dispose 链路。
-+  return {
-+    directory,
-+    project: "proj_test",
-+    payload: {
-+      id,
-+      type: "message.part.removed",
-+      properties: { sessionID, messageID, partID },
-+    },
-+  }
-+}
-diff --git a/packages/opencode/test/file/ripgrep.test.ts b/packages/opencode/test/file/ripgrep.test.ts
-index 48a0cee158a306266f7af8d17ef93a58080862f5..dc2900b7e09fafb25819f20a40aa2ca079d8b7cc 100644
---- a/packages/opencode/test/file/ripgrep.test.ts
-+++ b/packages/opencode/test/file/ripgrep.test.ts
-@@ -1,11 +1,15 @@
- import { describe, expect } from "bun:test"
--import { Effect } from "effect"
-+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Sink } from "effect"
- import * as Stream from "effect/Stream"
-+import { FetchHttpClient } from "effect/unstable/http"
-+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
- import fs from "fs/promises"
- import os from "os"
- import path from "path"
- import { Ripgrep } from "../../src/file/ripgrep"
--import { testEffect } from "../lib/effect"
-+import { awaitWithTimeout, testEffect } from "../lib/effect"
-+import { AppFileSystem } from "@opencode-ai/core/filesystem"
-+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- 
- const it = testEffect(Ripgrep.defaultLayer)
- 
-@@ -25,6 +29,90 @@ const tmpdir = (init?: (dir: string) => Effect.Effect<void>) =>
- 
- const write = (file: string, data: string) => Effect.promise(() => Bun.write(file, data))
- const mkdir = (dir: string) => Effect.promise(() => fs.mkdir(dir, { recursive: true }))
-+const encoder = new TextEncoder()
-+
-+function scriptedRipgrep(input: {
-+  stdout?: string
-+  stderr?: string
-+  code: number
-+  pending?: boolean
-+  released?: Deferred.Deferred<void>
-+  spawned?: Deferred.Deferred<void>
-+  calls?: string[][]
-+}) {
-+  // 进程边界必须可控，权限位和管理员身份会让 chmod 类测试在不同 CI 上产生相反结果。
-+  // fixture 只模拟 ChildProcess 的公开流和终态，不替换 Ripgrep 的参数、解析或 scope 逻辑。
-+  // pending/spawned/released 三个信号专门区分“调用已返回”和“资源已经释放”，避免假绿。
-+  const spawner = Layer.effect(
-+    ChildProcessSpawner.ChildProcessSpawner,
-+    Effect.gen(function* () {
-+      const real = yield* ChildProcessSpawner.ChildProcessSpawner
-+      return ChildProcessSpawner.make((command) => {
-+        const standard = ChildProcess.isStandardCommand(command) ? command : undefined
-+        // binary 下载/解压仍走真实进程；只截获目标 rg，避免 fixture 污染安装链。
-+        if (path.basename(standard?.command ?? "").toLowerCase() !== (process.platform === "win32" ? "rg.exe" : "rg")) {
-+          return real.spawn(command)
-+        }
-+        input.calls?.push([...(standard?.args ?? [])])
-+        const handle = ChildProcessSpawner.makeHandle({
-+          pid: ChildProcessSpawner.ProcessId(0),
-+          exitCode: input.pending ? Effect.never : Effect.succeed(ChildProcessSpawner.ExitCode(input.code)),
-+          isRunning: Effect.succeed(input.pending === true),
-+          kill: () => Effect.void,
-+          stdin: Sink.drain,
-+          stdout: input.stdout ? Stream.make(encoder.encode(input.stdout)) : Stream.empty,
-+          stderr: input.stderr ? Stream.make(encoder.encode(input.stderr)) : Stream.empty,
-+          all: Stream.empty,
-+          getInputFd: () => Sink.drain,
-+          getOutputFd: () => Stream.empty,
-+          unref: Effect.succeed(Effect.void),
-+        })
-+        const acquire = input.spawned
-+          ? Deferred.succeed(input.spawned, undefined).pipe(Effect.as(handle))
-+          : Effect.succeed(handle)
-+        if (!input.released) return acquire
-+        // release 信号来自 spawner 的资源边界，能证明是 scope 清理而非测试主动完成进程。
-+        return Effect.acquireRelease(acquire, () => Deferred.succeed(input.released!, undefined).pipe(Effect.asVoid))
-+      })
-+    }),
-+  ).pipe(Layer.provide(CrossSpawnSpawner.defaultLayer))
-+  return Ripgrep.layer.pipe(
-+    Layer.provide(spawner),
-+    Layer.provide(AppFileSystem.defaultLayer),
-+    Layer.provide(FetchHttpClient.layer),
-+  )
-+}
-+
-+const partialGlob = testEffect(scriptedRipgrep({ stdout: "accessible.ts\n", code: 2 }))
-+// fatal fixture 与 partial fixture 共享 code 2，唯一差异是 rg 是否仍提供输入诊断。
-+const invalidGlob = testEffect(
-+  scriptedRipgrep({ stderr: "rg: error parsing glob '[': unclosed character class\n", code: 2 }),
-+)
-+const boundedReleased = Deferred.makeUnsafe<void>()
-+// exit 永久 pending 强制实现依赖 scope finalizer，而不是测试进程恰好自然结束。
-+const boundedGlob = testEffect(
-+  scriptedRipgrep({
-+    stdout: Array.from({ length: 101 }, (_, index) => `file-${index}.ts`).join("\n") + "\n",
-+    code: 0,
-+    pending: true,
-+    released: boundedReleased,
-+  }),
-+)
-+const emptyGlob = testEffect(scriptedRipgrep({ code: 1 }))
-+// 未知 code 单独保留，防止未来把所有非零退出都宽泛地归入 partial。
-+const unknownGlob = testEffect(scriptedRipgrep({ code: 3 }))
-+const argumentCalls: string[][] = []
-+// 参数捕获发生在外部进程 seam，验证的是 rg 的实际匹配/诊断契约而非私有 helper 名称。
-+const argumentGlob = testEffect(scriptedRipgrep({ code: 1, calls: argumentCalls }))
-+const filesCalls: string[][] = []
-+const scriptedFiles = testEffect(scriptedRipgrep({ code: 1, calls: filesCalls }))
-+const abortSpawned = Deferred.makeUnsafe<void>()
-+const abortReleased = Deferred.makeUnsafe<void>()
-+// abort fixture 在 stdout EOF 后卡住 exit，确保中断发生在真实等待阶段而非启动前短路。
-+const abortGlob = testEffect(
-+  scriptedRipgrep({ code: 0, pending: true, spawned: abortSpawned, released: abortReleased }),
-+)
-+
- const collectFiles = (input: Ripgrep.FilesInput) =>
-   Ripgrep.Service.use((rg) =>
-     rg.files(input).pipe(
-@@ -49,6 +137,104 @@ const withRipgrepConfig = <A, E, R>(value: string, effect: Effect.Effect<A, E, R
-   )
- 
- describe("file.ripgrep", () => {
-+  partialGlob.live("glob keeps accessible files when traversal is incomplete", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      const result = yield* Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: ["*.ts"], limit: 100 }))
-+
-+      // exit 2 在 --no-messages 且无诊断时代表部分遍历，不能丢掉已经得到的文件。
-+      expect(result).toEqual({ items: ["accessible.ts"], partial: true, truncated: false })
-+    }),
-+  )
-+
-+  invalidGlob.live("glob keeps invalid patterns fatal", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      const exit = yield* Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: ["["], limit: 100 })).pipe(Effect.exit)
-+
-+      // --no-messages 不能吞输入诊断，否则无效 pattern 会被误报成可恢复的文件权限问题。
-+      expect(Exit.isFailure(exit)).toBe(true)
-+      if (Exit.isFailure(exit)) {
-+        expect(String(Cause.squash(exit.cause))).toContain("error parsing glob")
-+      }
-+    }),
-+  )
-+
-+  boundedGlob.live("glob returns bounded results before a pending process exits", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      const result = yield* Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: ["*.ts"], limit: 100 }))
-+
-+      expect(result.items).toHaveLength(100)
-+      expect(result.truncated).toBe(true)
-+      // 不断言 kill 调用次数，允许未来替换 finalizer 实现，只约束公开返回和资源生命周期。
-+      // 若实现等待 exitCode，这个 release 永远不会发生，测试会以明确超时报错而不是挂死。
-+      yield* awaitWithTimeout(Deferred.await(boundedReleased), "bounded glob did not release its child scope")
-+    }),
-+  )
-+
-+  emptyGlob.live("glob distinguishes a complete empty search", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      const result = yield* Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: ["*.ts"], limit: 100 }))
-+
-+      expect(result).toEqual({ items: [], partial: false, truncated: false })
-+    }),
-+  )
-+
-+  unknownGlob.live("glob fails closed for an unknown ripgrep exit code", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      const exit = yield* Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: ["*.ts"], limit: 100 })).pipe(
-+        Effect.exit,
-+      )
-+
-+      // 只有已验证的 code 2 空诊断可降级；未知进程状态不能伪装成 partial success。
-+      expect(Exit.isFailure(exit)).toBe(true)
-+      if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("code 3")
-+    }),
-+  )
-+
-+  argumentGlob.live("glob preserves search scope and explicit git patterns", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      yield* Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: [".git/config"], limit: 100 }))
-+      const args = argumentCalls.at(-1) ?? []
-+
-+      // 参数顺序是外部 rg 的行为契约：后置用户 glob 才能覆盖默认 .git 排除。
-+      expect(args).toContain("--no-messages")
-+      expect(args).not.toContain("--follow")
-+      expect(args.indexOf("--glob=!.git/*")).toBeLessThan(args.indexOf("--glob=.git/config"))
-+    }),
-+  )
-+
-+  scriptedFiles.live("files keeps its existing diagnostic behavior", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      yield* Ripgrep.Service.use((rg) => rg.files({ cwd: dir }).pipe(Stream.runCollect))
-+
-+      // streaming files 的调用方没有 partial 终态，不能静默加入 --no-messages 后吞掉失败原因。
-+      expect(filesCalls.at(-1) ?? []).not.toContain("--no-messages")
-+    }),
-+  )
-+
-+  abortGlob.live("glob aborts a running process and releases its scope", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdir()
-+      const controller = new AbortController()
-+      const fiber = yield* Effect.forkScoped(
-+        Ripgrep.Service.use((rg) => rg.glob({ cwd: dir, glob: ["*.ts"], limit: 100, signal: controller.signal })),
-+      )
-+      yield* awaitWithTimeout(Deferred.await(abortSpawned), "glob process did not start")
-+      controller.abort()
-+      const exit = yield* Fiber.await(fiber)
-+
-+      expect(Exit.isFailure(exit)).toBe(true)
-+      // abort 不能只让调用方返回；child 的 scoped resource 也必须完成 release。
-+      yield* awaitWithTimeout(Deferred.await(abortReleased), "aborted glob did not release its child scope")
-+    }),
-+  )
-+
-   it.live("defaults to include hidden", () =>
-     Effect.gen(function* () {
-       const dir = yield* tmpdir((dir) =>
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index a4b978f7962e46e44ccdaaaa89c52f8221fbb4eb..17c0ba5c8d0441325905a7f7c1aa09df6e2d64cc 100644
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1026,6 +1026,7 @@ describe("session.compaction.process", () => {
-           toolInput: { command: "bun typecheck" },
-           metadata: { exit: 0 },
-         })
-+        // 两个相邻搜索分别代表不完整空结果和完整空结果，防止表格级修复误伤兼容文案。
-         yield* addCompletedToolPart({
-           sessionID: session.id,
-           messageID: assistant.id,
-@@ -1033,6 +1034,22 @@ describe("session.compaction.process", () => {
-           toolInput: { command: "git status" },
-           metadata: { exit: 0 },
-         })
-+        yield* addCompletedToolPart({
-+          sessionID: session.id,
-+          messageID: assistant.id,
-+          tool: "grep",
-+          toolInput: { pattern: "needle", path: "." },
-+          output: "No files found in accessible paths.",
-+          metadata: { matches: 0, partial: true, truncated: false },
-+        })
-+        yield* addCompletedToolPart({
-+          sessionID: session.id,
-+          messageID: assistant.id,
-+          tool: "glob",
-+          toolInput: { pattern: "*.missing", path: "." },
-+          output: "No files found",
-+          metadata: { count: 0, partial: false, truncated: false },
-+        })
-         yield* todo.update({
-           sessionID: session.id,
-           todos: [
-@@ -1060,6 +1077,11 @@ describe("session.compaction.process", () => {
-         expect(text).toContain("| 0 |")
-         // [local-smark] 移除 isSimpleVerificationCommand 后，git status 不再被过滤
-         expect(text).toContain("git status")
-+        expect(text).toContain("### Search History")
-+        // 断言最终 summary 文本而非私有 formatter，确保真实模型 replay 能观察到完整性标记。
-+        // Tool output 会在 Compaction 后清除，Search History 必须继续区分 partial-empty 与完整空结果。
-+        expect(text).toContain("| grep | needle | . | 0 (incomplete) |")
-+        expect(text).toContain("| glob | *.missing | . | 0 |")
-         expect(text).toContain("### Outstanding Todos")
-         expect(text).toContain("| completed | high | Read forensic report |")
-         expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
 diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/tool/glob.test.ts
-index 45dc0b36a9fbb37c6b2621ed18de6ac16b3bd787..60d51cf2b7cf05b33bcfd2ff0fc9629e918097b6 100644
 --- a/packages/opencode/test/tool/glob.test.ts
 +++ b/packages/opencode/test/tool/glob.test.ts
-@@ -1,4 +1,5 @@
+@@ -1,5 +1,6 @@
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
  import { describe, expect } from "bun:test"
 +import fs from "fs/promises"
  import path from "path"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Cause, Effect, Exit, Layer } from "effect"
- import { GlobTool } from "../../src/tool/glob"
-@@ -35,6 +36,110 @@ const ctx = {
- }
- 
- describe("tool.glob", () => {
-+  it.instance("reports an incomplete empty result without claiming the search was exhaustive", () =>
+@@ -7,6 +8,8 @@ import { GlobTool } from "../../src/tool/glob"
+ import { SessionID, MessageID } from "../../src/session/schema"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
++import { Entry } from "@opencode-ai/schema/filesystem"
++import { RelativePath } from "@opencode-ai/core/schema"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { Global } from "@opencode-ai/core/global"
+ import { Truncate } from "@/tool/truncate"
+@@ -129,4 +132,138 @@ describe("tool.glob", () => {
+       }
+     }),
+   )
++
++  // [local-smark] 源 0413 核心缺陷场景：rg exit 2（TCC/ACL/EACCES）时 glob 通道
++  // 透出 partial——零匹配不得伪装成全量确定性阴性，模型可据此收窄路径
++  it.instance("flags zero matches as partial when glob reports inaccessible paths", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      // 这里 mock 的是外部扫描结果 seam；路径解析、Permission、Tool 文案和 metadata 仍执行真实实现。
++      yield* Effect.promise(() => Bun.write(path.join(test.directory, "keep.txt"), "x\n"))
++
++      // mock 的是外部扫描 seam；路径解析、Permission、文案和 metadata 仍执行真实实现
 +      const info = yield* GlobTool.pipe(
 +        Effect.provide(
 +          Layer.mock(Ripgrep.Service)({
-+            glob: () => Effect.succeed({ items: [], partial: true, truncated: false }),
++            find: () => Effect.die("unused in partial test"),
++            glob: () => Effect.succeed({ files: [], partial: true, timedOut: false }),
++            grep: () => Effect.die("unused in partial test"),
++            search: () => Effect.die("unused in partial test"),
 +          }),
 +        ),
 +      )
 +      const glob = yield* info.init()
-+      const result = yield* glob.execute({ pattern: "*.ts", path: test.directory }, ctx)
++      const result = yield* glob.execute({ pattern: "*.txt", path: test.directory }, ctx)
 +
-+      // 同时断言计数和 warning，避免未来只修模型文案却再次丢失可审计 metadata。
-+      // partial-empty 只能证明可访问范围内没有结果，不能复用完整搜索的确定性文案。
++      // 同时断言 metadata 与文案，防止未来只修文案却再次丢失可审计标记
++      expect(result.metadata.count).toBe(0)
++      expect(result.metadata.partial).toBe(true)
++      expect(result.output).toContain("could not be accessed")
 +      expect(result.output).not.toBe("No files found")
-+      expect(result.output).toContain("Search incomplete")
-+      expect(result.metadata).toMatchObject({ count: 0, total: 0, truncated: false, partial: true })
 +    }),
 +  )
 +
-+  it.instance("keeps accessible files in an incomplete result", () =>
++  // [local-smark] 有匹配 + partial：可达文件照常列出（部分失败不能回滚已枚举路径），
++  // 不可访问警告作为补充而不是替代结果
++  it.instance("keeps accessible files and marks inaccessibility on partial glob", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      // accessible.ts 不必预先存在：现有 stat 竞态约定会以 mtime 0 保留 rg 已确认的路径。
++      yield* Effect.promise(() => Bun.write(path.join(test.directory, "keep.ts"), "export const a = 1\n"))
++
 +      const info = yield* GlobTool.pipe(
 +        Effect.provide(
 +          Layer.mock(Ripgrep.Service)({
-+            glob: () => Effect.succeed({ items: ["accessible.ts"], partial: true, truncated: false }),
++            find: () => Effect.die("unused in partial test"),
++            glob: () =>
++              Effect.succeed({
++                files: [Entry.make({ path: RelativePath.make("keep.ts"), type: "file" })],
++                partial: true,
++                timedOut: false,
++              }),
++            grep: () => Effect.die("unused in partial test"),
++            search: () => Effect.die("unused in partial test"),
 +          }),
 +        ),
 +      )
 +      const glob = yield* info.init()
 +      const result = yield* glob.execute({ pattern: "*.ts", path: test.directory }, ctx)
 +
-+      // 部分失败不能回滚已经枚举出的路径，warning 应作为补充而不是替代结果。
-+      expect(result.output).toContain(path.join(test.directory, "accessible.ts"))
-+      expect(result.output).toContain("Search incomplete")
-+      expect(result.metadata).toMatchObject({ count: 1, total: 1, truncated: false, partial: true })
++      expect(result.metadata.count).toBe(1)
++      expect(result.metadata.partial).toBe(true)
++      expect(result.output).toContain(path.join(test.directory, "keep.ts"))
++      expect(result.output).toContain("could not be accessed")
 +    }),
 +  )
 +
++  // [local-smark] 完整空结果是兼容基线：修复 partial 时不得把所有零结果
++  // 都降级成不确定文案——只有真实 partial 才携带警告
 +  it.instance("preserves the exact empty result for a complete search", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      // 完整空结果是兼容基线，防止修复 partial 时把所有零结果都改成不确定文案。
++
 +      const info = yield* GlobTool.pipe(
 +        Effect.provide(
 +          Layer.mock(Ripgrep.Service)({
-+            glob: () => Effect.succeed({ items: [], partial: false, truncated: false }),
++            find: () => Effect.die("unused in partial test"),
++            glob: () => Effect.succeed({ files: [], partial: false, timedOut: false }),
++            grep: () => Effect.die("unused in partial test"),
++            search: () => Effect.die("unused in partial test"),
 +          }),
 +        ),
 +      )
 +      const glob = yield* info.init()
 +      const result = yield* glob.execute({ pattern: "*.ts", path: test.directory }, ctx)
 +
-+      // 只有完整搜索可以继续提供确定性的兼容文案，避免把所有空结果都降级成警告。
 +      expect(result.output).toBe("No files found")
-+      expect(result.metadata.partial).toBe(false)
++      expect(result.metadata.partial).toBeUndefined()
 +    }),
 +  )
 +
++  // [local-smark] 截断边界：limit=100 打满时 truncated/total 下界口径必须保持，
++  // 提示行携带 "Total: 100+ files"（目标 total 为截断前真实条数下界）
 +  it.instance("preserves the bounded total when results are truncated", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      // fixture 已经模拟 Ripgrep 丢弃第 101 条后的公开结果，Tool 只验证原 bounded total 口径。
++
 +      const info = yield* GlobTool.pipe(
 +        Effect.provide(
 +          Layer.mock(Ripgrep.Service)({
++            find: () => Effect.die("unused in partial test"),
 +            glob: () =>
 +              Effect.succeed({
-+                items: Array.from({ length: 100 }, (_, index) => `file-${index}.ts`),
++                files: Array.from({ length: 100 }, (_, index) =>
++                  Entry.make({ path: RelativePath.make(`file-${index}.ts`), type: "file" }),
++                ),
 +                partial: false,
-+                truncated: true,
++                timedOut: false,
 +              }),
++            grep: () => Effect.die("unused in partial test"),
++            search: () => Effect.die("unused in partial test"),
 +          }),
 +        ),
 +      )
 +      const glob = yield* info.init()
 +      const result = yield* glob.execute({ pattern: "*.ts", path: test.directory }, ctx)
 +
-+      // 第 101 条是“至少还有结果”的 sentinel，total 不能被误写成精确全量。
-+      expect(result.metadata).toMatchObject({ count: 100, total: 101, truncated: true, partial: false })
-+      expect(result.output).toContain("Total: 101+ files")
++      expect(result.metadata.count).toBe(100)
++      expect(result.metadata.total).toBe(100)
++      expect(result.metadata.truncated).toBe(true)
++      expect(result.output).toContain("Total: 100+ files")
 +    }),
 +  )
 +
++  // [local-smark] 含空格路径的真实集成：cwd 经参数数组传递而非 shell 拼接，
++  // 空格不能改变搜索根或 pattern
 +  it.instance("matches files under a path containing spaces", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const search = path.join(test.directory, "space dir")
 +      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
-+      // 文件名保持简单，单独隔离 cwd 空格这个变量，失败时能直接定位参数数组边界。
 +      yield* Effect.promise(() => Bun.write(path.join(search, "match.ts"), "export const value = 1\n"))
 +      const info = yield* GlobTool
 +      const glob = yield* info.init()
 +      const result = yield* glob.execute({ pattern: "*.ts", path: search }, ctx)
 +
-+      // cwd 通过 ChildProcess 参数传递而非 shell 拼接，空格不能改变搜索根或 pattern。
 +      expect(result.output).toContain(path.join(search, "match.ts"))
 +    }),
 +  )
-+
-   it.instance("matches files from a directory path", () =>
-     Effect.gen(function* () {
-       const test = yield* TestInstance
-diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 484f5f790e5394ce837b2ba9f45d6391f8d82de6..05e41dcaf51700fe8681f0d6f2f6c295d522d8e7 100644
---- a/packages/opencode/test/tool/grep.test.ts
-+++ b/packages/opencode/test/tool/grep.test.ts
-@@ -78,6 +78,63 @@ describe("tool.grep", () => {
-     }),
-   )
- 
-+  it.instance("reports an incomplete empty result without claiming no files exist", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      // 只替换 Ripgrep 系统边界，Grep 的路径检查、空结果分支和 ExecuteResult 均保持真实。
-+      const info = yield* GrepTool.pipe(
-+        Effect.provide(
-+          Layer.mock(Ripgrep.Service)({
-+            search: () => Effect.succeed({ items: [], partial: true, truncated: false }),
-+          }),
-+        ),
-+      )
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute({ pattern: "needle", path: test.directory }, ctx)
-+
-+      // ExecuteResult 仍应成功返回；这里通过 output/metadata 观察行为，不依赖内部空结果 helper。
-+      // 可访问范围内的零匹配不是全量阴性，模型必须看到 incomplete 而非确定性结论。
-+      expect(result.output).not.toBe("No files found")
-+      expect(result.output).toContain("inaccessible")
-+      expect(result.metadata).toMatchObject({ matches: 0, truncated: false, partial: true })
-+    }),
-+  )
-+
-+  it.instance("keeps matches found before an inaccessible path", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      yield* Effect.promise(() => Bun.write(path.join(test.directory, "match.txt"), "needle\n"))
-+      // 创建真实文件让 post-search stat 参与测试，避免 mock 绕过匹配保留和排序链。
-+      const info = yield* GrepTool.pipe(
-+        Effect.provide(
-+          Layer.mock(Ripgrep.Service)({
-+            search: () =>
-+              Effect.succeed({
-+                items: [
-+                  {
-+                    path: { text: "match.txt" },
-+                    lines: { text: "needle" },
-+                    line_number: 1,
-+                    absolute_offset: 0,
-+                    submatches: [],
-+                  },
-+                ],
-+                partial: true,
-+                truncated: false,
-+              }),
-+          }),
-+        ),
-+      )
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute({ pattern: "needle", path: test.directory }, ctx)
-+
-+      // partial 是完整性标记而非失败状态，已找到的匹配和原有路径格式都必须保留。
-+      expect(result.output).toContain("Line 1: needle")
-+      expect(result.output).toContain("inaccessible")
-+      expect(result.metadata).toMatchObject({ matches: 1, totalMatches: 1, truncated: false, partial: true })
-+    }),
-+  )
-+
-   it.instance("finds matches in tmp instance", () =>
-     Effect.gen(function* () {
-       const test = yield* TestInstance
-@@ -210,11 +267,31 @@ describe("tool.grep", () => {
- 
-       expect(result.metadata.matches).toBe(0)
-       expect(result.metadata.truncated).toBe(true)
-+      expect(result.metadata.partial).toBe(false)
-       expect(result.output).toContain("timed out")
-       expect(result.output).not.toBe("No files found")
-     }),
-   )
- 
-+  it.instance("preserves partial metadata when an empty search also times out", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const info = yield* GrepTool.pipe(
-+        Effect.provide(
-+          Layer.mock(Ripgrep.Service)({
-+            search: () => Effect.succeed({ items: [], partial: true, truncated: false, timedOut: true }),
-+          }),
-+        ),
-+      )
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute({ pattern: "needle", path: test.directory, timeout: 1 }, ctx)
-+
-+      // timeout 文案可以优先，但 metadata 不能覆盖同时存在的文件系统不完整性。
-+      expect(result.output).toContain("timed out")
-+      expect(result.metadata).toMatchObject({ matches: 0, truncated: true, timedOut: true, partial: true })
-+    }),
-+  )
-+
-   it.instance("keeps partial matches when search times out", () =>
-     Effect.gen(function* () {
-       const test = yield* TestInstance
+ })

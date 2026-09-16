@@ -1,31 +1,3 @@
-From 355c9158e9d28892c146d6f9e867a3fad472fb2a Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 9 Jul 2026 16:11:24 +0800
-Subject: [PATCH] =?UTF-8?q?feat(lsp):=20=E9=BB=98=E8=AE=A4=E5=90=AF?=
- =?UTF-8?q?=E7=94=A8=20LSP=20+=20=E5=A2=9E=E9=87=8F=E8=AF=8A=E6=96=AD=20+?=
- =?UTF-8?q?=20VSCode=20Bridge=20LSP=20Backend=20+=20TUI=20=E8=AF=8A?=
- =?UTF-8?q?=E6=96=AD=E6=B8=B2=E6=9F=93=E5=A2=9E=E5=BC=BA?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-- 默认启用 LSP：未配置 lsp 时视为 true（cfg.lsp === false 才禁用），
-  降低使用门槛。LSP 按需启动（touchFile 时 spawn），不影响启动性能。
-- 回移 PR #30226：read.ts warm 从 Effect.ignore 改为 Effect.ignoreCause，
-  隔离后台 LSP 预热 defect 避免逸出到 read scope。
-- 增量诊断策略：编辑后只显示新引入的错误（reportDelta），不重复展示
-  预存错误。借鉴 Copilot "new errors introduced by a file edit" 语义，
-  避免模型误判编辑失败（issue #9102）。
-- MAX_PER_FILE 从 20 降至 5：5 条足以指示问题，减少 token 消耗。
-- metadata.diagnostics 统一存储新错误数组（delta），diagnosticSummary
-  存储摘要供 TUI 渲染紧凑状态行（✓ 0 new · N existing）。
-- VSCode Bridge LSP Backend：新增 sdks/vscode/src/lsp.ts 暴露 VSCode 的
-  LSP 能力（诊断/hover/定义/引用/符号），通过 bridge HTTP 端点传输。
-  opencode 端 LSP Service 优先走 bridge，无 bridge 时回退到内置 LSP。
-  对 agent 完全透明，有 bridge 时零安装全语言覆盖。
-- TUI DiagnosticsDisplay 增强：有新错误显示详情，无新错误但有已存在
-  错误显示紧凑摘要，无错误不显示。apply_patch 添加诊断渲染（此前缺失）。
-
 diff --git a/docs/lsp-complete-enhancement-plan.md b/docs/lsp-complete-enhancement-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..568b5e3dc82f15c36a1ff777aa1136a2968514b6
@@ -3015,20 +2987,19 @@ index 0000000000000000000000000000000000000000..97382f0c7e22fcd67aee8ab2bcf76542
 +- **无 VSCode 时**：默认启用内置 LSP，自动安装服务器
 +- 两者结合，实现"全场景 LSP 可用"
 diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
-index 052db051dc2268ffc2869291f9d0c1e672744d2a..57a83fa6bf7109cb6db89203ed4a7c97c73bc30b 100644
 --- a/packages/opencode/src/ide/vscode-bridge.ts
 +++ b/packages/opencode/src/ide/vscode-bridge.ts
-@@ -49,7 +49,8 @@ export type BridgeEntry = {
-   capabilities?: Record<string, boolean>
+@@ -62,7 +62,8 @@ export type BridgeEntry = {
  }
  
+ // 桥接引用：精简的桥接信息，用于匹配和调用
 -export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token"> & {
-+// [local-smark] BridgeRef 添加 capabilities 字段，让调用方能检查 bridge.capabilities?.lsp
++// [local-smark] BridgeRef 增加 capabilities，让调用方能检查 bridge.capabilities?.lsp
 +export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token" | "capabilities"> & {
    host: string
    score?: number
    source: "env" | "registry"
-@@ -167,6 +168,8 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
+@@ -222,6 +223,8 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
      host: best.entry.host ?? "127.0.0.1",
      port: best.entry.port,
      token: best.entry.token,
@@ -3038,15 +3009,14 @@ index 052db051dc2268ffc2869291f9d0c1e672744d2a..57a83fa6bf7109cb6db89203ed4a7c97
      source: "registry",
    } satisfies BridgeRef
 diff --git a/packages/opencode/src/lsp/diagnostic.ts b/packages/opencode/src/lsp/diagnostic.ts
-index 4bc085e788e40ea22d8f990b93a2a2a2c50520f8..43f3bd137dcbdb1755616e7df9aee3b01420b95f 100644
 --- a/packages/opencode/src/lsp/diagnostic.ts
 +++ b/packages/opencode/src/lsp/diagnostic.ts
 @@ -1,6 +1,8 @@
  import * as LSPClient from "./client"
  
 -const MAX_PER_FILE = 20
-+// [local-smark] 每文件诊断上限：5 条足以指示"有问题"，
-+// 超过 5 条通常意味着编辑不完整或方向错误，模型应重新审视策略而非逐条修复。
++// [local-smark] 每文件诊断上限：5 条足以指示"有问题"；超过 5 条通常意味着
++// 编辑不完整或方向错误，模型应重新审视策略而非逐条修复
 +const MAX_PER_FILE = 5
  
  export function pretty(diagnostic: LSPClient.Diagnostic) {
@@ -3055,10 +3025,10 @@ index 4bc085e788e40ea22d8f990b93a2a2a2c50520f8..43f3bd137dcbdb1755616e7df9aee3b0
    return `${severity} [${line}:${col}] ${diagnostic.message}`
  }
  
-+// [local-smark] 诊断唯一标识：通过 message+行号+列号+code+source 匹配。
-+// 用于 reportDelta 判断某条错误是否在 baseline 中已存在。
-+// 已知局限：在错误位置上方增删行会导致行号漂移，预存错误可能被误报为"新错误"。
-+// 这严格优于现状（现状显示全部预存错误），属可接受容忍范围。
++// [local-smark] 诊断唯一标识：message+行号+列号+code+source 匹配，
++// 供 reportDelta 判断某条错误是否在 baseline 中已存在。
++// 已知局限：错误位置上方增删行会导致行号漂移，预存错误可能被误报为新错误，
++// 但这严格优于现状（显示全部预存错误），属可接受容忍范围。
 +function diagKey(d: LSPClient.Diagnostic): string {
 +  return JSON.stringify({
 +    msg: d.message,
@@ -3072,13 +3042,12 @@ index 4bc085e788e40ea22d8f990b93a2a2a2c50520f8..43f3bd137dcbdb1755616e7df9aee3b0
  export function report(file: string, issues: LSPClient.Diagnostic[]) {
    const errors = issues.filter((item) => item.severity === 1)
    if (errors.length === 0) return ""
-@@ -26,4 +42,46 @@ export function report(file: string, issues: LSPClient.Diagnostic[]) {
+@@ -26,4 +42,45 @@ export function report(file: string, issues: LSPClient.Diagnostic[]) {
    return `<diagnostics file="${file}">\n${limited.map(pretty).join("\n")}${suffix}\n</diagnostics>`
  }
  
-+// [local-smark] 增量诊断：只显示本次编辑新引入的错误（不在 baseline 中的）。
-+// 借鉴 Copilot "new errors introduced by a file edit" 语义，
-+// 避免重复展示预存错误导致模型误判"编辑失败"（opencode issue #9102）。
++// [local-smark] 增量诊断：只显示本次编辑新引入的错误（不在 baseline 中的），
++// 避免重复展示预存错误导致模型误判"编辑失败"（opencode issue #9102）
 +export function reportDelta(
 +  file: string,
 +  current: LSPClient.Diagnostic[],
@@ -3092,10 +3061,10 @@ index 4bc085e788e40ea22d8f990b93a2a2a2c50520f8..43f3bd137dcbdb1755616e7df9aee3b0
 +  return `<new-diagnostics file="${file}">\n${limited.map(pretty).join("\n")}${suffix}\n</new-diagnostics>`
 +}
 +
-+// [local-smark] 返回新错误数组（不在 baseline 中的 ERROR）。
++// [local-smark] 返回新错误数组（不在 baseline 中的 ERROR），
 +// 供 metadata.diagnostics 存储给 TUI DiagnosticsDisplay 渲染。
-+// baseline 过滤逻辑与 reportDelta 完全一致（不预先过滤 baseline severity，
-+// 使同位置 warning→error 升级归为已存在而非新错误）。
++// baseline 过滤与 reportDelta 一致：不预先按 severity 过滤 baseline，
++// 使同位置 warning→error 升级归为已存在而非新错误
 +export function newErrors(
 +  current: LSPClient.Diagnostic[],
 +  baseline: LSPClient.Diagnostic[] = [],
@@ -3104,8 +3073,8 @@ index 4bc085e788e40ea22d8f990b93a2a2a2c50520f8..43f3bd137dcbdb1755616e7df9aee3b0
 +  return current.filter((d) => d.severity === 1).filter((d) => !baselineKeys.has(diagKey(d)))
 +}
 +
-+// [local-smark] 增量诊断摘要：返回新错误数和已存在错误数，
-+// 供 metadata 传递给 TUI 渲染使用（不进入 model output）。
++// [local-smark] 增量诊断摘要：新错误数和已存在错误数，
++// 供 metadata 传递给 TUI 渲染（不进入 model output）
 +export function deltaSummary(
 +  current: LSPClient.Diagnostic[],
 +  baseline: LSPClient.Diagnostic[] = [],
@@ -3120,48 +3089,45 @@ index 4bc085e788e40ea22d8f990b93a2a2a2c50520f8..43f3bd137dcbdb1755616e7df9aee3b0
 +
  export * as Diagnostic from "./diagnostic"
 diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
-index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17df6450482 100644
 --- a/packages/opencode/src/lsp/lsp.ts
 +++ b/packages/opencode/src/lsp/lsp.ts
-@@ -15,6 +15,9 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
+@@ -13,6 +13,8 @@ import { InstanceState } from "@/effect/instance-state"
+ import { containsPath } from "@/project/instance-context"
+ import { NonNegativeInt } from "@opencode-ai/core/schema"
  import { RuntimeFlags } from "@/effect/runtime-flags"
- import { InstanceRef } from "@/effect/instance-ref"
- import { makeRuntime } from "@/effect/run-service"
 +// [local-smark] VSCode Bridge LSP backend：优先通过 bridge 获取 VSCode 的 LSP 能力
 +import * as VscodeBridge from "@/ide/vscode-bridge"
-+import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { LspEvent } from "@opencode-ai/schema/lsp-event"
  
- const log = Log.create({ service: "lsp" })
- const busRuntime = makeRuntime(Bus.Service, Bus.layer)
-@@ -154,7 +157,10 @@ export const layer = Layer.effect(
+ export const Event = LspEvent
+@@ -148,7 +151,9 @@ const layer = Layer.effect(
  
          const servers: Record<string, LSPServer.Info> = {}
  
 -        if (!cfg.lsp) {
 +        // [local-smark] 默认启用 LSP：未配置时视为 true，仅 false 显式禁用。
-+        // 官方 PR #23416 因"LSP 有意默认禁用"被关闭，但作为 fork 我们选择默认启用
-+        // 以降低使用门槛。LSP 按需启动（touchFile 时 spawn），不影响启动性能。
++        // LSP 按需启动（touchFile 时 spawn），不影响启动性能
 +        if (cfg.lsp === false) {
-           log.info("all LSPs are disabled")
+           yield* Effect.logInfo("all LSPs are disabled")
          } else {
            for (const server of Object.values(LSPServer)) {
-@@ -163,7 +169,9 @@ export const layer = Layer.effect(
+@@ -157,7 +162,9 @@ const layer = Layer.effect(
  
            filterExperimentalServers(servers, flags)
  
 -          if (cfg.lsp !== true) {
 +          // [local-smark] cfg.lsp 为 undefined（默认启用）时跳过自定义配置遍历，
-+          // 防止 Object.entries(undefined) 报错。仅对象类型才进入自定义配置。
++          // 防止 Object.entries(undefined) 报错；仅对象类型才进入自定义配置
 +          if (cfg.lsp && cfg.lsp !== true) {
              for (const [name, item] of Object.entries(cfg.lsp)) {
                const existing = servers[name]
                if (item.disabled) {
-@@ -313,11 +321,82 @@ export const layer = Layer.effect(
+@@ -306,11 +313,81 @@ const layer = Layer.effect(
        return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x))))
      })
  
-+    // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存。
-+    // 失败返回 undefined，调用方回退到内置 LSP。
++    // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存；
++    // 失败返回 undefined，调用方回退到内置 LSP
 +    const resolveLspBridge = Effect.fnUntraced(function* (filePath?: string) {
 +      const ctx = yield* InstanceState.context
 +      return yield* Effect.promise(async () => {
@@ -3175,7 +3141,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
 +      })
 +    })
 +
-+    // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined（触发回退）。
++    // [local-smark] 通过 bridge 调用 LSP 端点，失败返回 undefined（触发回退）
 +    const callLspBridge = Effect.fnUntraced(function* (
 +      endpoint: string,
 +      body: Record<string, unknown>,
@@ -3191,8 +3157,8 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
 +      })
 +    })
 +
-+    // [local-smark] 将 bridge 诊断格式转换为内置 LSP 的 Record<string, Diagnostic[]> 格式。
-+    // 对 key 做 normalizePath，与 write/edit/apply_patch 的查找 key 对齐。
++    // [local-smark] bridge 诊断格式转内置 Record<string, Diagnostic[]>；
++    // key 做 FSUtil.normalizePath 与 write/edit/apply_patch 查找 key 对齐
 +    function bridgeDiagnosticsToMap(result: unknown): Record<string, LSPClient.Diagnostic[]> | undefined {
 +      if (!result || typeof result !== "object") return undefined
 +      const diags = (result as { diagnostics?: unknown[] }).diagnostics
@@ -3212,8 +3178,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
 +          severity: (severityMap[item.severity ?? "Error"] ?? 1) as LSPClient.Diagnostic["severity"],
 +          ...(item.source ? { source: item.source } : {}),
 +        }
-+        // [local-smark] 对 key 做 normalizePath，与 write/edit/apply_patch 的查找 key 对齐
-+        const normalizedFile = AppFileSystem.normalizePath(item.file)
++        const normalizedFile = FSUtil.normalizePath(item.file)
 +        const arr = results[normalizedFile] ?? []
 +        arr.push(diagnostic)
 +        results[normalizedFile] = arr
@@ -3239,7 +3204,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        const ctx = yield* InstanceState.context
        const s = yield* InstanceState.get(state)
        const result: Status[] = []
-@@ -333,6 +412,9 @@ export const layer = Layer.effect(
+@@ -326,6 +403,9 @@ const layer = Layer.effect(
      })
  
      const hasClients = Effect.fn("LSP.hasClients")(function* (file: string) {
@@ -3249,20 +3214,22 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        const ctx = yield* InstanceState.context
        const s = yield* InstanceState.get(state)
        return yield* Effect.promise(async () => {
-@@ -349,6 +431,12 @@ export const layer = Layer.effect(
+@@ -342,7 +422,13 @@ const layer = Layer.effect(
      })
  
      const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
+-      yield* Effect.logInfo("touching file", { file: input })
 +      // [local-smark] 有 bridge 时走 bridge /lsp/touch（ensureOpen + awaitDiagnosticsRefresh）
 +      const bridge = yield* resolveLspBridge(input)
 +      if (bridge) {
 +        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
 +        if (touched) return
 +      }
-       log.info("touching file", { file: input })
++      log.info("touching file", { file: input })
        const clients = yield* getClients(input)
        yield* Effect.promise(() =>
-@@ -371,6 +459,13 @@ export const layer = Layer.effect(
+         Promise.all(
+@@ -362,6 +448,13 @@ const layer = Layer.effect(
      })
  
      const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
@@ -3276,7 +3243,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        const results: Record<string, LSPClient.Diagnostic[]> = {}
        const all = yield* runAll(async (client) => client.diagnostics)
        for (const result of all) {
-@@ -384,6 +479,14 @@ export const layer = Layer.effect(
+@@ -375,6 +468,14 @@ const layer = Layer.effect(
      })
  
      const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
@@ -3291,7 +3258,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        return yield* run(input.file, (client) =>
          client.connection
            .sendRequest("textDocument/hover", {
-@@ -395,6 +498,14 @@ export const layer = Layer.effect(
+@@ -386,6 +487,14 @@ const layer = Layer.effect(
      })
  
      const definition = Effect.fn("LSP.definition")(function* (input: LocInput) {
@@ -3306,7 +3273,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        const results = yield* run(input.file, (client) =>
          client.connection
            .sendRequest("textDocument/definition", {
-@@ -407,6 +518,14 @@ export const layer = Layer.effect(
+@@ -398,6 +507,14 @@ const layer = Layer.effect(
      })
  
      const references = Effect.fn("LSP.references")(function* (input: LocInput) {
@@ -3321,7 +3288,7 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        const results = yield* run(input.file, (client) =>
          client.connection
            .sendRequest("textDocument/references", {
-@@ -433,6 +552,12 @@ export const layer = Layer.effect(
+@@ -424,6 +541,12 @@ const layer = Layer.effect(
  
      const documentSymbol = Effect.fn("LSP.documentSymbol")(function* (uri: string) {
        const file = fileURLToPath(uri)
@@ -3334,22 +3301,20 @@ index ada9aba67159c5b3cc715e6a244b5551eb14f552..398b55712c0a985a924e21a54803f17d
        const results = yield* run(file, (client) =>
          client.connection.sendRequest("textDocument/documentSymbol", { textDocument: { uri } }).catch(() => []),
        )
-@@ -440,6 +565,13 @@ export const layer = Layer.effect(
+@@ -431,6 +554,12 @@ const layer = Layer.effect(
      })
  
      const workspaceSymbol = Effect.fn("LSP.workspaceSymbol")(function* (query: string) {
-+      // [local-smark] 优先 bridge，提取 .symbols
++      // [local-smark] 优先 bridge，提取 .symbols（bridge 返回需要类型断言）
 +      const bridge = yield* resolveLspBridge()
 +      if (bridge) {
 +        const result = yield* callLspBridge("/lsp/workspace-symbol", { query })
-+        // [local-smark] workspaceSymbol bridge 返回需要类型断言
 +        if (result) return ((result as { symbols?: unknown[] }).symbols ?? []) as Symbol[]
 +      }
        const results = yield* runAll((client) =>
          client.connection
            .sendRequest<Symbol[]>("workspace/symbol", { query })
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index e1863a53f50930b1424769d80fb7fee526c07748..c5bc79b2cc4c8c0d725c2cf09fe381d403176930 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -10,6 +10,8 @@ import { createTwoFilesPatch, diffLines } from "diff"
@@ -3357,23 +3322,23 @@ index e1863a53f50930b1424769d80fb7fee526c07748..c5bc79b2cc4c8c0d725c2cf09fe381d4
  import { trimDiff } from "./edit"
  import { LSP } from "@/lsp/lsp"
 +// [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
-+import type * as LSPClient from "@/lsp/client"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
++import * as LSPClient from "@/lsp/client"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
  import DESCRIPTION from "./apply_patch.txt"
- import { File } from "../file"
-@@ -313,13 +315,24 @@ export const ApplyPatchTool = Tool.define(
-         yield* bus.publish(FileWatcher.Event.Updated, update)
+ import { FileSystem } from "@opencode-ai/core/filesystem"
+@@ -315,13 +317,24 @@ export const ApplyPatchTool = Tool.define(
+         yield* events.publish(Watcher.Event.Updated, update)
        }
  
 -      // Notify LSP of file changes and collect diagnostics
 +      // [local-smark] 增量诊断：patch 应用前一次性捕获所有目标文件的 baseline，
-+      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta。
++      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta
 +      const beforeAll = yield* lsp.diagnostics()
 +      const baselines = new Map<string, LSPClient.Diagnostic[]>()
 +      for (const change of fileChanges) {
 +        if (change.type === "delete") continue
 +        const target = change.movePath ?? change.filePath
-+        const normalized = AppFileSystem.normalizePath(target)
++        const normalized = FSUtil.normalizePath(target)
 +        baselines.set(normalized, beforeAll[normalized] ?? [])
 +      }
 +
@@ -3388,24 +3353,22 @@ index e1863a53f50930b1424769d80fb7fee526c07748..c5bc79b2cc4c8c0d725c2cf09fe381d4
  
        // Generate output summary
        const summaryLines = fileChanges.map((change) => {
-@@ -339,21 +352,33 @@ export const ApplyPatchTool = Tool.define(
-         output += `\n\nFailed to update ${hunkErrors.length} file(s):\n${hunkErrors.join("\n")}`
-       }
+@@ -342,20 +355,31 @@ export const ApplyPatchTool = Tool.define(
  
 -      let lspFoundErrors = false
-+      // [local-smark] 逐文件计算增量诊断，只显示本次 patch 新引入的错误
 +      let lspFoundNewErrors = false
 +      let totalNew = 0
 +      let totalExisting = 0
 +      const diagMetadata: Record<string, LSPClient.Diagnostic[]> = {}
+ 
++      // [local-smark] 逐文件计算增量诊断，只显示本次 patch 新引入的错误
        for (const change of fileChanges) {
          if (change.type === "delete") continue
          const target = change.movePath ?? change.filePath
--        const block = LSP.Diagnostic.report(target, diagnostics[AppFileSystem.normalizePath(target)] ?? [])
-+        const normalized = AppFileSystem.normalizePath(target)
+-        const block = LSP.Diagnostic.report(target, diagnostics[FSUtil.normalizePath(target)] ?? [])
++        const normalized = FSUtil.normalizePath(target)
 +        const currentIssues = afterAll[normalized] ?? []
 +        const fileBaseline = baselines.get(normalized) ?? []
-+        // [local-smark] 新错误数组和摘要：供 metadata 和 TUI 渲染
 +        const fileNewErrors = LSP.Diagnostic.newErrors(currentIssues, fileBaseline)
 +        const fileDelta = LSP.Diagnostic.deltaSummary(currentIssues, fileBaseline)
 +        totalNew += fileDelta.newCount
@@ -3431,38 +3394,37 @@ index e1863a53f50930b1424769d80fb7fee526c07748..c5bc79b2cc4c8c0d725c2cf09fe381d4
          const clients = yield* lsp.status()
          if (clients.length === 0) {
            output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
-@@ -365,7 +390,9 @@ export const ApplyPatchTool = Tool.define(
+@@ -367,7 +392,9 @@ export const ApplyPatchTool = Tool.define(
          metadata: {
            diff: totalDiff,
            files,
 -          diagnostics,
-+          // [local-smark] metadata.diagnostics 存储新错误数组 + diagnosticSummary 聚合摘要
++          // [local-smark] metadata.diagnostics 存新错误数组 + diagnosticSummary 聚合摘要
 +          diagnostics: diagMetadata,
 +          diagnosticSummary: { newCount: totalNew, existingCount: totalExisting },
          },
          output,
        }
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index e25b7632bb2b77fc97d43d59511218010bc02ba7..25cc1b5a2e6afc6dcaa1f5e1aa4e1cfbb5447c79 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -226,18 +226,23 @@ export const EditTool = Tool.define(
+@@ -233,18 +233,24 @@ export const EditTool = Tool.define(
            })
  
            let output = "Edit applied successfully."
 -          yield* lsp.touchFile(filePath, "document")
 -          const diagnostics = yield* lsp.diagnostics()
-           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
+           const normalizedFilePath = FSUtil.normalizePath(filePath)
 -          const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
-+          // [local-smark] 增量诊断：编辑前获取 baseline，touchFile 后获取 current，
-+          // 只报告新引入的错误。baseline 在 touchFile 之前获取（LSP 缓存的旧诊断）。
++          // [local-smark] 增量诊断：编辑前取 baseline，touchFile 后取 current，
++          // 只报告新引入的错误。baseline 在 touchFile 之前获取（LSP 缓存的旧诊断）
 +          const beforeDiagnostics = yield* lsp.diagnostics()
 +          const beforeIssues = beforeDiagnostics[normalizedFilePath] ?? []
 +          yield* lsp.touchFile(filePath, "document")
 +          const afterDiagnostics = yield* lsp.diagnostics()
 +          const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
 +          const block = LSP.Diagnostic.reportDelta(filePath, currentIssues, beforeIssues)
-+          // [local-smark] 计算新错误数组和摘要供 TUI 渲染
++          // [local-smark] 新错误数组和摘要供 TUI 渲染
 +          const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
 +          const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
            if (block) {
@@ -3475,56 +3437,52 @@ index e25b7632bb2b77fc97d43d59511218010bc02ba7..25cc1b5a2e6afc6dcaa1f5e1aa4e1cfb
 -            // 此时 "无 diagnostics" 不代表 "无类型错误"，需提示模型自行验证。
 -            // 不使用 hasClients()：它检查 server 配置是否存在，但 server 可能已配置
 -            // 却未完成 fire-and-forget 启动，会误判为"有 LSP"而省略提示。
-+            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空
++            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时
++            // baseline 和 current 都为空，delta 必然为空
              const clients = yield* lsp.status()
              if (clients.length === 0) {
                output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
-@@ -246,7 +251,9 @@ export const EditTool = Tool.define(
+@@ -253,7 +259,9 @@ export const EditTool = Tool.define(
  
            return {
              metadata: {
 -              diagnostics,
-+              // [local-smark] metadata.diagnostics 存储新错误数组（delta）+ diagnosticSummary 供 TUI
++              // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
 +              diagnostics: { [normalizedFilePath]: newErrorsArr },
 +              diagnosticSummary: delta,
                diff,
                filediff,
              },
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 1f2dd15c730f58e0b784866d8aeed51e50395191..5bdb607cfe8505242485e6d69ba538a633b5f965 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -444,7 +444,9 @@ export const ReadTool = Tool.define(
+@@ -532,6 +532,7 @@ export const ReadTool = Tool.define<
      })
  
      const warm = Effect.fn("ReadTool.warm")(function* (filepath: string) {
--      yield* lsp.touchFile(filepath).pipe(Effect.ignore, Effect.forkIn(scope))
 +      // [local-smark] 回移 PR #30226：用 ignoreCause 隔离后台 LSP warmup defect，
-+      // 避免 read 成功后异步预热中的 Die 逸出到 scope。
-+      yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
+       // LSP warm-up is optional; do not let a background defect fail an otherwise successful read.
+       yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
      })
- 
-     const readSample = Effect.fn("ReadTool.readSample")(function* (
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index a8f61536bb732ba59a81c9a7a61763e92d6988cb..004076243e5e1674559deea3661686fcdf194534 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -16,8 +16,6 @@ import { assertExternalDirectoryEffect } from "./external-directory"
- import * as Bom from "@/util/bom"
+@@ -17,8 +17,6 @@ import * as Bom from "@/util/bom"
  import { normalizeLineEndings } from "@/util/line-ending"
+ // #131：write 元数据 diff 归一行尾
  
 -const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 -
  export const Parameters = Schema.Struct({
    content: Schema.String.annotate({ description: "The content to write to the file" }),
    filePath: Schema.String.annotate({
-@@ -123,26 +121,25 @@ export const WriteTool = Tool.define(
+@@ -111,26 +109,25 @@ export const WriteTool = Tool.define(
            })
  
            let output = "Wrote file successfully."
 -          yield* lsp.touchFile(filepath, "document")
 -          const diagnostics = yield* lsp.diagnostics()
-           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
+           const normalizedFilepath = FSUtil.normalizePath(filepath)
 -          let projectDiagnosticsCount = 0
 -          for (const [file, issues] of Object.entries(diagnostics)) {
 -            const current = file === normalizedFilepath
@@ -3542,129 +3500,151 @@ index a8f61536bb732ba59a81c9a7a61763e92d6988cb..004076243e5e1674559deea3661686fc
 -          // 模型会误认为写入的文件无类型错误。用 status() 检查是否有已连接的
 -          // LSP client：空列表表示无 server 运行，追加不可用提示。
 -          if (Object.keys(diagnostics).length === 0) {
-+          // [local-smark] 增量诊断：编辑前获取 baseline（LSP 缓存的旧诊断），
-+          // touchFile 后获取 current，只报告新引入的错误。
-+          // baseline 在 touchFile 之前获取：LSP 此时还不知道新内容，诊断反映旧状态。
++          // [local-smark] 增量诊断：编辑前取 baseline（LSP 缓存的旧诊断），
++          // touchFile 后取 current，只报告新引入的错误。
++          // baseline 必须在 touchFile 之前获取：LSP 此时还不知道新内容
 +          const beforeDiagnostics = yield* lsp.diagnostics()
 +          const beforeIssues = beforeDiagnostics[normalizedFilepath] ?? []
 +          yield* lsp.touchFile(filepath, "document")
 +          const afterDiagnostics = yield* lsp.diagnostics()
 +          const currentIssues = afterDiagnostics[normalizedFilepath] ?? []
 +          const block = LSP.Diagnostic.reportDelta(filepath, currentIssues, beforeIssues)
-+          // [local-smark] 计算新错误数组和摘要供 TUI 渲染
++          // [local-smark] 新错误数组和摘要供 TUI 渲染
 +          const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
 +          const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
 +          if (block) {
 +            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
 +            output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
 +          } else {
-+            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空，
-+            // delta 必然为空。须用 status() 确认 LSP 确实在运行，否则模型获得虚假"类型安全"信号。
++            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时
++            // baseline 和 current 都为空，delta 必然为空
              const clients = yield* lsp.status()
              if (clients.length === 0) {
                output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
-@@ -152,7 +149,11 @@ export const WriteTool = Tool.define(
+@@ -140,7 +137,10 @@ export const WriteTool = Tool.define(
            return {
              title: path.relative(instance.worktree, filepath),
              metadata: {
 -              diagnostics,
-+              // [local-smark] metadata.diagnostics 存储新错误数组（delta），不是全部当前错误。
-+              // TUI getDiagnostics() 从此字段读取，只显示新引入的错误。
-+              // diagnosticSummary 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）。
++              // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary
++              // 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）
 +              diagnostics: { [normalizedFilepath]: newErrorsArr },
 +              diagnosticSummary: delta,
                filepath,
                exists,
-               ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
+               // 条件展开：仅在 metadataDiff 存在时展开 diff 字段，避免 undefined 污染 metadata
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
-index 78543c4583d96f7021853c2994b04290ad95dfc7..18c9815b1be4487f8c41ba9b70fd0954fb357460 100644
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -50,7 +50,32 @@ describe("lsp.spawn", () => {
-     ),
+@@ -50,24 +50,52 @@ describe("lsp.spawn", () => {
+     { config: { lsp: true } },
    )
  
--  it.live("does not spawn builtin LSP for files inside instance when LSP is unset", () =>
-+  it.live("does not spawn builtin LSP for files inside instance when LSP is false", () =>
-+    provideTmpdirInstance(
-+      (dir) =>
-+        LSP.Service.use((lsp) =>
-+          Effect.gen(function* () {
-+            const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+-  it.instance("does not spawn builtin LSP for files inside instance when LSP is unset", () =>
+-    LSP.Service.use((lsp) =>
+-      Effect.gen(function* () {
+-        const dir = (yield* TestInstance).directory
+-        const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+-
+-        try {
+-          yield* lsp.hover({
+-            file: path.join(dir, "src", "inside.ts"),
+-            line: 0,
+-            character: 0,
+-          })
+-          expect(spy).toHaveBeenCalledTimes(0)
+-        } finally {
+-          spy.mockRestore()
+-        }
+-      }),
+-    ),
++  it.instance(
++    "does not spawn builtin LSP for files inside instance when LSP is false",
++    () =>
++      LSP.Service.use((lsp) =>
++        Effect.gen(function* () {
++          const dir = (yield* TestInstance).directory
++          const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
 +
-+            try {
-+              yield* lsp.hover({
-+                file: path.join(dir, "src", "inside.ts"),
-+                line: 0,
-+                character: 0,
-+              })
-+              // [local-smark] LSP 显式设为 false 时不 spawn
-+              expect(spy).toHaveBeenCalledTimes(0)
-+            } finally {
-+              spy.mockRestore()
-+            }
-+          }),
-+        ),
-+      // [local-smark] 默认启用 LSP：未配置时视为 true，仅 false 显式禁用
-+      { config: { lsp: false } },
-+    ),
++          try {
++            yield* lsp.hover({
++              file: path.join(dir, "src", "inside.ts"),
++              line: 0,
++              character: 0,
++            })
++            // [local-smark] LSP 显式设为 false 时不 spawn
++            expect(spy).toHaveBeenCalledTimes(0)
++          } finally {
++            spy.mockRestore()
++          }
++        }),
++      ),
++    // [local-smark] 默认启用 LSP：仅 false 显式禁用
++    { config: { lsp: false } },
 +  )
 +
-+  it.live("spawns builtin LSP for files inside instance when LSP is unset (default enabled)", () =>
-     provideTmpdirInstance((dir) =>
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
-@@ -62,7 +87,8 @@ describe("lsp.spawn", () => {
-               line: 0,
-               character: 0,
-             })
--            expect(spy).toHaveBeenCalledTimes(0)
++  it.instance(
++    "spawns builtin LSP for files inside instance when LSP is unset (default enabled)",
++    () =>
++      LSP.Service.use((lsp) =>
++        Effect.gen(function* () {
++          const dir = (yield* TestInstance).directory
++          const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
++
++          try {
++            yield* lsp.hover({
++              file: path.join(dir, "src", "inside.ts"),
++              line: 0,
++              character: 0,
++            })
 +            // [local-smark] 未配置 lsp 时默认启用，会尝试 spawn
 +            expect(spy).toHaveBeenCalledTimes(1)
-           } finally {
-             spy.mockRestore()
-           }
++          } finally {
++            spy.mockRestore()
++          }
++        }),
++      ),
+   )
+ 
+   it.instance(
 diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
-index 11b191f005259ee20bc5db29e6ad76221970ff3c..0c532930b82c26ae949c853fbd0d7454bb5ae9e3 100644
 --- a/packages/opencode/test/lsp/lifecycle.test.ts
 +++ b/packages/opencode/test/lsp/lifecycle.test.ts
-@@ -46,12 +46,27 @@ describe("LSP service lifecycle", () => {
+@@ -42,11 +42,25 @@ describe("LSP service lifecycle", () => {
      ),
    )
  
--  it.live("hasClients() returns false for .ts files in instance when LSP is unset", () =>
-+  it.live("hasClients() returns false for .ts files in instance when LSP is false", () =>
-+    provideTmpdirInstance(
-+      (dir) =>
-+        LSP.Service.use((lsp) =>
-+          Effect.gen(function* () {
-+            const result = yield* lsp.hasClients(path.join(dir, "test.ts"))
-+            // [local-smark] LSP 显式 false 时 hasClients 返回 false
-+            expect(result).toBe(false)
-+          }),
-+        ),
-+      { config: { lsp: false } },
-+    ),
+-  it.instance("hasClients() returns false for .ts files in instance when LSP is unset", () =>
++  it.instance(
++    "hasClients() returns false for .ts files in instance when LSP is false",
++    () =>
++      LSP.Service.use((lsp) =>
++        Effect.gen(function* () {
++          const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
++          // [local-smark] LSP 显式 false 时 hasClients 返回 false
++          expect(result).toBe(false)
++        }),
++      ),
++    { config: { lsp: false } },
 +  )
 +
-+  it.live("hasClients() returns true for .ts files when LSP is unset (default enabled)", () =>
-     provideTmpdirInstance((dir) =>
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
-           const result = yield* lsp.hasClients(path.join(dir, "test.ts"))
--          expect(result).toBe(false)
-+          // [local-smark] 未配置 lsp 时默认启用，hasClients 对 .ts 返回 true
-+          expect(result).toBe(true)
-         }),
-       ),
++  it.instance("hasClients() returns true for .ts files when LSP is unset (default enabled)", () =>
+     LSP.Service.use((lsp) =>
+       Effect.gen(function* () {
+         const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
+-        expect(result).toBe(false)
++        // [local-smark] 未配置 lsp 时默认启用，hasClients 对 .ts 返回 true
++        expect(result).toBe(true)
+       }),
      ),
-@@ -181,4 +196,101 @@ describe("LSP.Diagnostic", () => {
+   )
+@@ -157,4 +171,102 @@ describe("LSP.Diagnostic", () => {
      } as any)
      expect(result).toBe("ERROR [1:1] Something wrong")
    })
 +
 +  // [local-smark] reportDelta 增量诊断测试：只显示 baseline 中不存在的新错误，
-+  // 避免重复展示预存错误干扰模型判断编辑是否成功。
++  // 避免重复展示预存错误干扰模型判断编辑是否成功
 +  function makeDiag(line: number, message: string, severity = 1) {
 +    return {
 +      range: { start: { line, character: 0 }, end: { line, character: 10 } },
@@ -3760,11 +3740,11 @@ index 11b191f005259ee20bc5db29e6ad76221970ff3c..0c532930b82c26ae949c853fbd0d7454
 +    expect(result[0].message).toBe("new error")
 +  })
  })
-diff --git a/packages/ui/src/components/message-part.tsx b/packages/ui/src/components/message-part.tsx
-index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7612eead6 100644
---- a/packages/ui/src/components/message-part.tsx
-+++ b/packages/ui/src/components/message-part.tsx
-@@ -109,22 +109,39 @@ function getDiagnostics(
++
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -141,22 +141,39 @@ function getDiagnostics(
    return diagnostics.filter((d) => d.severity === 1).slice(0, 3)
  }
  
@@ -3817,7 +3797,7 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
        </div>
      </Show>
    )
-@@ -1882,6 +1899,8 @@ ToolRegistry.register({
+@@ -2141,6 +2158,8 @@ ToolRegistry.register({
      const i18n = useI18n()
      const fileComponent = useFileComponent()
      const diagnostics = createMemo(() => getDiagnostics(props.metadata.diagnostics, props.input.filePath))
@@ -3826,7 +3806,7 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
      const path = createMemo(() => props.metadata?.filediff?.file || props.input.filePath || "")
      const filename = () => getFilename(props.input.filePath ?? "")
      const pending = () => props.status === "pending" || props.status === "running"
-@@ -1957,7 +1976,7 @@ ToolRegistry.register({
+@@ -2236,7 +2255,7 @@ ToolRegistry.register({
                </div>
              </ToolFileAccordion>
            </Show>
@@ -3835,7 +3815,7 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
          </BasicTool>
        </div>
      )
-@@ -1970,6 +1989,8 @@ ToolRegistry.register({
+@@ -2249,6 +2268,8 @@ ToolRegistry.register({
      const i18n = useI18n()
      const fileComponent = useFileComponent()
      const diagnostics = createMemo(() => getDiagnostics(props.metadata.diagnostics, props.input.filePath))
@@ -3844,7 +3824,7 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
      const path = createMemo(() => props.input.filePath || "")
      const filename = () => getFilename(props.input.filePath ?? "")
      const pending = () => props.status === "pending" || props.status === "running"
-@@ -2018,7 +2039,7 @@ ToolRegistry.register({
+@@ -2298,7 +2319,7 @@ ToolRegistry.register({
                </div>
              </ToolFileAccordion>
            </Show>
@@ -3853,7 +3833,7 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
          </BasicTool>
        </div>
      )
-@@ -2031,6 +2052,19 @@ ToolRegistry.register({
+@@ -2311,6 +2332,19 @@ ToolRegistry.register({
      const i18n = useI18n()
      const fileComponent = useFileComponent()
      const files = createMemo(() => patchFiles(props.metadata.files))
@@ -3873,7 +3853,7 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
      const pending = createMemo(() => props.status === "pending" || props.status === "running")
      const single = createMemo(() => {
        const list = files()
-@@ -2153,6 +2187,8 @@ ToolRegistry.register({
+@@ -2435,6 +2469,8 @@ ToolRegistry.register({
                    </For>
                  </Accordion>
                </Show>
@@ -3882,8 +3862,8 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
              </BasicTool>
            </div>
          }
-@@ -2216,6 +2252,8 @@ ToolRegistry.register({
-                 <Dynamic component={fileComponent} mode="diff" fileDiff={single()!.view.fileDiff} />
+@@ -2504,6 +2540,8 @@ ToolRegistry.register({
+                 />
                </div>
              </ToolFileAccordion>
 +            {/* [local-smark] apply_patch 单文件路径也添加诊断渲染 */}
@@ -3892,50 +3872,47 @@ index 4b2486d1671e0797f31951e88d5821a7a31aebb0..f1e996554c1464c48aedf7c47a66e6d7
          </div>
        </Show>
 diff --git a/sdks/vscode/src/bridge-registry.ts b/sdks/vscode/src/bridge-registry.ts
-index f224820b64df2ed4507dabfe9cf59a3e68b26e73..bedca4d11a86121edabbba55a9c3e97136ae100d 100644
 --- a/sdks/vscode/src/bridge-registry.ts
 +++ b/sdks/vscode/src/bridge-registry.ts
-@@ -75,6 +75,8 @@ export function manifest(input: RegistryInput) {
+@@ -89,6 +89,8 @@ export function manifest(input: RegistryInput) {
        notebookOutputArtifacts: true,
        notebookSource: true,
        lmToolsProxy: false,
-+      // [local-smark] 声明 LSP bridge 能力：opencode 端通过此标记决定是否走 bridge 获取 LSP
++      // [local-smark] 声明 LSP bridge 能力：opencode 端通过此标记决定是否走 bridge
 +      lsp: true,
      },
    }
  }
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index d3196650910131e8b133cb762d36f97e42f83dad..f261862d73a02bf75d077c5248aa8b0a9674686a 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -25,6 +25,8 @@ import { runNotebook } from "./notebook/run"
+@@ -33,6 +33,8 @@ import { runNotebook } from "./notebook/run"
  import { editNotebook } from "./notebook/edit"
  import { readNotebookCellOutput } from "./notebook/output"
  import { notebookEnv } from "./notebook/env"
 +// [local-smark] LSP bridge 端点：通过 VSCode API 获取诊断/hover/定义等 LSP 能力
 +import { lspTouch, lspDiagnostics, lspHover, lspDefinition, lspReferences, lspDocumentSymbol, lspWorkspaceSymbol } from "./lsp"
- import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
  
+ // 强制 127.0.0.1 监听，不暴露 0.0.0.0
  const BRIDGE_HOST = "127.0.0.1"
-@@ -41,7 +43,12 @@ const fileLocks = new Map<string, Promise<void>>()
+@@ -47,7 +49,12 @@ let registry: RegistryHandle | undefined
  // 只读路由跳过 withFileLock：summary/source/output 只读取 VS Code 文档状态，
  // 不修改 notebook/kernel，与并发 run/edit 不冲突。
  // cell-output 是 output 的路由别名（routeRequest 中 case fallthrough）。
 -const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
-+// [local-smark] LSP 路由是只读的（不修改 notebook/kernel），加入 READONLY_ROUTES 避免不必要串行化
++// [local-smark] LSP 路由只读（不修改 notebook/kernel），加入 READONLY_ROUTES 避免不必要串行化
 +const READONLY_ROUTES = new Set([
 +  "/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output",
 +  "/lsp/touch", "/lsp/diagnostics", "/lsp/hover", "/lsp/definition",
 +  "/lsp/references", "/lsp/document-symbol", "/lsp/workspace-symbol",
 +])
- 
- function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-   const prev = fileLocks.get(key) ?? Promise.resolve()
-@@ -187,6 +194,22 @@ async function routeRequest(
- 
-     case "/notebook/env":
+ const fileLocks = new Map<string, Promise<void>>()
+ // 锁表键为 notebook filePath，跨 handler 共享
+ /** Per-filePath mutex: serializes notebook requests that target the same document. */
+@@ -224,6 +231,22 @@ async function routeRequest(
+       // bridge 只转发 body；operation 校验在 env
        return await notebookEnv(body)
-+
+ 
 +    // [local-smark] LSP bridge 端点路由
 +    case "/lsp/touch":
 +      return await lspTouch(body as { filePath: string })
@@ -3951,9 +3928,10 @@ index d3196650910131e8b133cb762d36f97e42f83dad..f261862d73a02bf75d077c5248aa8b0a
 +      return await lspDocumentSymbol(body as { filePath: string })
 +    case "/lsp/workspace-symbol":
 +      return await lspWorkspaceSymbol(body as { query: string })
++
+     // 路由到内核重启 handler，body 已在 filePath 锁内读入
+     // 独立 kernel 端点（#91 中间态；#92 将并入 env）
    }
- 
-   return undefined
 diff --git a/sdks/vscode/src/lsp.ts b/sdks/vscode/src/lsp.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..c7681bb4bb7efda2b9fc077e18758159f78d4ed2

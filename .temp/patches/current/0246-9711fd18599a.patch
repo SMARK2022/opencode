@@ -1,27 +1,16 @@
-From 9711fd18599aff8424ecea57bbbd88d66762edf1 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 28 May 2026 12:42:08 +0800
-Subject: [PATCH] =?UTF-8?q?feat(grep):=20=E4=BC=98=E5=8C=96=20grep=20?=
- =?UTF-8?q?=E8=BF=87=E6=BB=A4=E5=99=A8=E7=9A=84=E8=BE=93=E5=87=BA=E6=A0=BC?=
- =?UTF-8?q?=E5=BC=8F=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=9C=A8=20TUI=20=E5=92=8C?=
- =?UTF-8?q?=E6=BB=9A=E5=8A=A8=E5=9B=9E=E6=98=BE=E4=B8=AD=E7=B4=A7=E5=87=91?=
- =?UTF-8?q?=E6=98=BE=E7=A4=BA=EF=BC=8C=E9=81=BF=E5=85=8D=E6=9A=B4=E9=9C=B2?=
- =?UTF-8?q?=E5=8F=82=E6=95=B0=E5=90=8D=E7=A7=B0?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/cli/cmd/run/tool.ts b/packages/opencode/src/cli/cmd/run/tool.ts
-index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd49bc0f363 100644
 --- a/packages/opencode/src/cli/cmd/run/tool.ts
 +++ b/packages/opencode/src/cli/cmd/run/tool.ts
-@@ -285,6 +285,42 @@ function count(n: number, label: string): string {
+@@ -285,6 +285,55 @@
    return `${n} ${label}${n === 1 ? "" : "es"}`
  }
  
++// #246：run 模式与 TUI 滚动回显共用同一套 grep 摘要语义；helper 放在
++// tool.ts 顶层供 runGrep/scrollGrepStart 复用，避免两处各写一份漂移。
 +function grepPatterns(value: unknown, exclude = false): string[] {
 +  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
++  // #246：exclude 项已带 ! 前缀时不重复添加，保持 rg 的幂等语义；
++  // 非 string 数组项直接丢弃，不报错——历史会话的 input 可能不完整
 +  // grep 的 inline 行是给人扫一眼的摘要，不展示 include=/exclude= 字段名；
 +  // exclude 直接沿用 ripgrep 的 !glob 语义，既短又能和普通 include 区分。
 +  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
@@ -29,6 +18,7 @@ index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd4
 +
 +function grepFilter(value: unknown, exclude = false): string {
 +  const items = grepPatterns(value, exclude)
++  // #246：空 filter 必须返回空串而非占位符，否则 grepDetails 会拼接出孤立的 · 分段
 +  if (items.length === 0) return ""
 +  // include 通常只有一两个扩展名，最多展示两个；exclude 往往更长，
 +  // 只展示第一个并用 +N 表示其余项，避免把 inline tool 行变成参数列表。
@@ -37,17 +27,25 @@ index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd4
 +  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
 +}
 +
++// #246：matches/truncated/timedOut 三个字段组合出用户可读结果——
++// 0 匹配且超时优先显示 timed out，截断用 + 后缀而非省略匹配数。
 +function grepResult(metadata: ToolDict): string {
 +  const matches = num(metadata.matches)
 +  const timedOut = metadata.timedOut === true
++  // #246：matches=1 且未截断用单数 match；截断后单复数统一为 matches，
++  // 因为 + 后缀已表示「至少还有更多」，单数形式会产生语义矛盾
 +  if (matches === undefined) return timedOut ? "timed out" : ""
 +  if (matches === 0 && timedOut) return "timed out"
 +  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
++  // #246：timed out 后置而非替换匹配数，保留「搜到了多少」的信息量
 +  return timedOut ? `${label}, timed out` : label
 +}
 +
++// #246：输入段（path/include/exclude）与结果段用 ` · ` 分段拼接；
++// metadata 缺省时只渲染输入段，供 start 阶段滚动回显复用。
 +function grepDetails(input: ToolDict, metadata?: ToolDict): string {
 +  const parts = [
++    // #246：path 缺失时跳过 in 段而不是渲染 "in "，无根目录的搜索同样成立
 +    text(input.path) ? `in ${toolPath(text(input.path))}` : "",
 +    grepFilter(input.include),
 +    grepFilter(input.exclude, true),
@@ -59,7 +57,7 @@ index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd4
  function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
    const root = p.input.path ?? ""
    const title = `Glob "${p.input.pattern ?? ""}"`
-@@ -299,11 +335,8 @@ function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
+@@ -299,11 +341,9 @@
  }
  
  function runGrep(p: ToolProps<typeof GrepTool>): ToolInline {
@@ -68,16 +66,21 @@ index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd4
 -  const suffix = root ? `in ${toolPath(root)}` : ""
 -  const matches = p.metadata.matches
 -  const description = matches === undefined ? suffix : `${suffix}${suffix ? " · " : ""}${count(matches, "match")}`
++  // #246：description 统一走 grepDetails，与滚动回显保持同一摘要口径
 +  const description = grepDetails(p.input, p.metadata)
    return {
      icon: "✱",
      title,
-@@ -879,12 +912,12 @@ function scrollGlobFinal(p: ToolProps<typeof GlobTool>): string {
+@@ -879,15 +895,16 @@
+   return toolError(p.frame) || fail(p.frame)
+ }
+ 
  function scrollGrepStart(p: ToolProps<typeof GrepTool>): string {
    const pattern = p.input.pattern ?? ""
    const head = pattern ? `✱ Grep "${pattern}"` : "✱ Grep"
 -  const dir = p.input.path ?? ""
 -  if (!dir) {
++  // #246：start 阶段尚无 metadata，grepDetails 退化为纯输入段摘要
 +  const details = grepDetails(p.input)
 +  if (!details) {
      return head
@@ -88,16 +91,21 @@ index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd4
  }
  
  function scrollListStart(p: ToolProps): string {
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index f85cb7ef402025bcef6383918ae19cc4edd5f312..66ba9baf3e66ffa34d7c065f7b92dfc122d9b0cb 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -2669,14 +2669,41 @@ function Read(props: ToolProps<typeof ReadTool>) {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -3030,15 +3030,55 @@
    )
  }
  
++// #246：TUI 侧 grep 摘要与 run 模式同语义；目标 ToolProps 的 input/metadata
++// 是 Record<string, unknown>，helper 用 typeof 收窄而非具体工具类型。
++// helpers 与 Grep 组件同文件同居——这三个 helper 只服务 TUI inline 渲染，
++// 抽到共享模块反而让 run/tui 两侧产生跨包依赖
 +function grepPatterns(value: unknown, exclude = false) {
 +  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
++  // #246：数组形态来自 PatternList，脏项（非 string）静默剔除而非抛错，
++  // 避免 V1 历史会话的残留 input 让 TUI 渲染整条消息失败
 +  // TUI 的 grep 行必须保持短促；不显示 include=/exclude= 字段名，
 +  // exclude 用 !glob 表达真实过滤语义，和 rg/glob 习惯保持一致。
 +  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
@@ -113,24 +121,32 @@ index f85cb7ef402025bcef6383918ae19cc4edd5f312..66ba9baf3e66ffa34d7c065f7b92dfc1
 +  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
 +}
 +
++// #246：numberValue 收窄后的 matches 才参与单复数与截断判断；
++// 字段缺失或类型不符时退化为空串/超时提示，不渲染误导性数字。
 +function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
 +  const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
 +  const timedOut = metadata.timedOut === true
++  // #246：TUI 与 run 模式的超时/截断组合语义保持一致——
++  // metadata 缺 matches 字段时只显示 timed out，绝不渲染 undefined 字符串
 +  if (matches === undefined) return timedOut ? "timed out" : ""
 +  if (matches === 0 && timedOut) return "timed out"
 +  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
 +  return timedOut ? `${label}, timed out` : label
 +}
 +
- function Grep(props: ToolProps<typeof GrepTool>) {
+ function Grep(props: ToolProps) {
    const pathFormatter = usePathFormatter()
++  // #246：filters/result 各自 memo 化，输入段与结果段独立响应 metadata 回填
++  // #246：filters 段在 start 阶段即可渲染（仅依赖 input），
++  // result 段等待 metadata 回填——两个 memo 分离避免回显闪断
 +  const filters = createMemo(() => [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "))
 +  const result = createMemo(() => grepResult(props.metadata))
    return (
-     <InlineTool icon="✱" pending="Searching content..." complete={props.input.pattern} part={props.part}>
-       Grep "{props.input.pattern}" <Show when={props.input.path}>in {pathFormatter.format(props.input.path)} </Show>
--      <Show when={props.metadata.matches}>
--        ({props.metadata.matches} {props.metadata.matches === 1 ? "match" : "matches"})
+     <InlineTool icon="✱" pending="Searching content..." complete={stringValue(props.input.pattern)} part={props.part}>
+       Grep "{stringValue(props.input.pattern)}"{" "}
+       <Show when={stringValue(props.input.path)}>in {pathFormatter.format(stringValue(props.input.path))} </Show>
+-      <Show when={numberValue(props.metadata.matches)}>
+-        ({numberValue(props.metadata.matches)} {numberValue(props.metadata.matches) === 1 ? "match" : "matches"})
 -      </Show>
 +      <Show when={filters()}>· {filters()} </Show>
 +      <Show when={result()}>({result()})</Show>
@@ -138,7 +154,6 @@ index f85cb7ef402025bcef6383918ae19cc4edd5f312..66ba9baf3e66ffa34d7c065f7b92dfc1
    )
  }
 diff --git a/packages/opencode/test/cli/run/entry.body.test.ts b/packages/opencode/test/cli/run/entry.body.test.ts
-index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924444d5090 100644
 --- a/packages/opencode/test/cli/run/entry.body.test.ts
 +++ b/packages/opencode/test/cli/run/entry.body.test.ts
 @@ -1,6 +1,7 @@
@@ -149,7 +164,7 @@ index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924
  import type { StreamCommit, ToolSnapshot } from "@/cli/cmd/run/types"
  
  function commit(input: Partial<StreamCommit> & Pick<StreamCommit, "kind" | "text" | "phase" | "source">): StreamCommit {
-@@ -453,6 +454,38 @@ describe("run entry body", () => {
+@@ -453,6 +454,44 @@
      })
    })
  
@@ -166,6 +181,8 @@ index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924
 +        },
 +        output: "",
 +        title: "function",
++        // #246：timeout 字段留在输入里但断言其不得出现在 description——
++        // 超时是执行细节，泄漏到 inline 行会被误读为过滤条件
 +        metadata: {
 +          matches: 64,
 +          truncated: true,
@@ -175,6 +192,8 @@ index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924
 +      }),
 +    )
 +
++    // #246：正负断言成对出现——锁定紧凑摘要格式的同时，防止字段名
++    // include=/exclude=/timeout 重新泄漏回 inline 描述
 +    expect(inline).toEqual({
 +      icon: "✱",
 +      title: 'Grep "function"',
@@ -182,6 +201,8 @@ index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924
 +    })
 +    expect(inline.description).not.toContain("include=")
 +    expect(inline.description).not.toContain("exclude=")
++    // #246：三条 not.toContain 独立成行——任何一条参数名回归都能
++    // 精确定位到具体字段，而不是笼统的格式断言失败
 +    expect(inline.description).not.toContain("timeout")
 +  })
 +
@@ -189,10 +210,9 @@ index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924
      expect(
        entryBody(
 diff --git a/packages/opencode/test/cli/run/scrollback.surface.test.ts b/packages/opencode/test/cli/run/scrollback.surface.test.ts
-index 5b2966a5e1ec56e1013e11acea61a7221c16fb33..f5094e24821059a463eabdbb8a02736ea2a3c5ad 100644
 --- a/packages/opencode/test/cli/run/scrollback.surface.test.ts
 +++ b/packages/opencode/test/cli/run/scrollback.surface.test.ts
-@@ -649,6 +649,44 @@ test("does not double-space before completed bash output when inline tool header
+@@ -649,5 +649,48 @@
    }
  })
  
@@ -205,6 +225,8 @@ index 5b2966a5e1ec56e1013e11acea61a7221c16fb33..f5094e24821059a463eabdbb8a02736e
 +        tool: "grep",
 +        phase: "start",
 +        toolState: "running",
++        // #246：start 阶段无 metadata——断言纯输入摘要路径，
++        // 与 completed 阶段（entry.body 测试）互补覆盖两条渲染分支
 +        state: {
 +          status: "running",
 +          input: {
@@ -222,9 +244,12 @@ index 5b2966a5e1ec56e1013e11acea61a7221c16fb33..f5094e24821059a463eabdbb8a02736e
 +    const commits = claim(out.renderer)
 +    try {
 +      const output = render(commits)
++      // #246：start 阶段只有输入段摘要；!glob 与 +N 压缩必须在滚动回显
++      // 中与 run 模式一致，且同样不得泄漏参数名（头格式的回归门）
 +      expect(output).toContain('✱ Grep "function" in node_modules · *.js · !**/.cache/** +2')
 +      expect(output).not.toContain("include=")
 +      expect(output).not.toContain("exclude=")
++      // #246：滚动回显与 inline 行共用同一条负向断言口径，双路径缺一即漏
 +      expect(output).not.toContain("timeout")
 +    } finally {
 +      destroy(commits)
@@ -236,4 +261,3 @@ index 5b2966a5e1ec56e1013e11acea61a7221c16fb33..f5094e24821059a463eabdbb8a02736e
 +
  test("does not emit blank patch snapshots between edit and task", async () => {
    const out = await setup()
- 

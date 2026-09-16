@@ -4,6 +4,7 @@ Date: Wed, 20 May 2026 02:14:45 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E9=87=8D=E6=9E=84=E4=BC=9A=E8=AF=9D?=
 
 diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
+index 26c16df..9386fcf 100644
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
 @@ -10,7 +10,7 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
@@ -15,13 +16,12 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  // #174：SessionTable 只用于枚举，不在此写用量
  import { SessionTable } from "@opencode-ai/core/session/sql"
  import type { Project } from "@/project/project"
-@@ -409,9 +409,27 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
+@@ -409,9 +409,20 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
  // #174：必须调用 Effect.fn 枚举会话
  // #174：getAllSessions 通过 Database.Service 拉取会话列表
  // #180：按 cutoff 下推 SQL，减少全表 session 扫描
 -const getAllSessions = Effect.fnUntraced(function* () {
 +const getSessions = Effect.fnUntraced(function* (cutoff: number) {
-+  // #180：按 cutoff 下推 SQL，减少全表 session 扫描
    const { db } = yield* Database.Service
 -  return (yield* db.select().from(SessionTable).all().pipe(Effect.orDie)).map((row) => Session.fromRow(row))
 +  // #180：cutoff=0 表示全历史，仍走全表扫描
@@ -36,83 +36,17 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +          .pipe(Effect.orDie)
 +      : yield* db.select().from(SessionTable).all().pipe(Effect.orDie)
 +  return rows.map((row) => Session.fromRow(row))
-+})
-+
-+// #180：无 cutoff 的兼容封装，内部委托 getSessions(0)
-+const getAllSessions = Effect.fnUntraced(function* () {
-+  // #180：全历史兼容路径
-+  return yield* getSessions(0)
  })
  
  // #174：cutoffFromDays 解释 0/缺省/正数
-@@ -693,13 +711,57 @@ const toolEventsFromAssistant = (input: {
- // #180：单遍扫描 assistants，避免每条消息重复 toolCharsByName
- // #180：批量种子入口，语义同逐条但可扩展单遍优化
- const toolEventsFromAssistants = (
--  assistants: Array<{ message: any; event: any }>,
-+  assistants: Array<{
-+    message: any
-+    event: {
-+      time: number
-+      sessionID: SessionID
-+      projectID: string
-+      providerID: string
-+      modelID: string
-+      source: string
-+      agent: string
-+      status: string
-+    }
-+  }>,
-   visibleMessages: any[],
- ) => {
--  // #176：批量入口复用归因公式
-+  // #180：按时间排序以便复用同刻 toolChars 缓存
-+  const sorted = [...assistants].sort((a, b) => a.event.time - b.event.time)
-   const events: ToolUsageEvent[] = []
--  for (const item of assistants) {
--    events.push(...toolEventsFromAssistant({ message: item.message, visibleMessages, event: item.event }))
-+  // #180：缓存键为 message 创建时间
-+  let cachedTime = -1
-+  let cachedChars: Map<string, { inputChars: number; outputChars: number }> | undefined
-+  for (const item of sorted) {
-+    if (!item.message) continue
-+    const time = item.message.info?.time?.created ?? item.event.time
-+    if (cachedTime !== time || !cachedChars) {
-+      // #180：同 timestamp 只扫一次 visibleMessages
-+      cachedChars = toolCharsByName(visibleMessages, time)
-+      cachedTime = time
-+    }
-+    // #180：组件归因仍走 step-finish.inputBreakdown
-+    const components = componentsFromAssistant(item.message)
-+    const inputTotal = Array.from(cachedChars.values()).reduce((sum, row) => sum + row.inputChars, 0)
-+    const outputTotal = Array.from(cachedChars.values()).reduce((sum, row) => sum + row.outputChars, 0)
-+    for (const [toolID, row] of cachedChars.entries()) {
-+      const contextTokens =
-+        (inputTotal > 0 ? Math.round((components.toolCalls * row.inputChars) / inputTotal) : 0) +
-+        (outputTotal > 0 ? Math.round((components.toolResults * row.outputChars) / outputTotal) : 0)
-+      if (contextTokens <= 0) continue
-+      events.push({
-+        time: item.event.time,
-+        sessionID: item.event.sessionID,
-+        projectID: item.event.projectID,
-+        providerID: item.event.providerID,
-+        modelID: item.event.modelID,
-+        source: item.event.source,
-+        agent: item.event.agent,
-+        status: item.event.status,
-+        toolID,
-+        contextTokens,
-+      })
-+    }
-   }
-   return events
- }
-@@ -895,7 +957,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -894,8 +905,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+ // #174：aggregateStats 生成只读 StatsReport 快照
  export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
    const cutoff = cutoffFromDays(input.days)
-   const sessions =   // #180：聚合入口改用 SQL 预过滤会话
+-  const sessions =   // #180：聚合入口改用 SQL 预过滤会话
 -  yield* getAllSessions()
-+  yield* getSessions(cutoff)
++  // #180：聚合入口改用 SQL 预过滤会话，降低全表扫描
++  const sessions = yield* getSessions(cutoff)
    const filteredSessions = sessions
  // #174：time.updated 过滤会话
      .filter((session) => includeTime(cutoff, session.time.updated))

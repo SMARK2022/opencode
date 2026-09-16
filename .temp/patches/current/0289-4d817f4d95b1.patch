@@ -12,7 +12,7 @@ diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src
 index f27b9a57a4b33dd9c1686d767b3746a7f69c83a1..e69fa6f2f69c28e4b365e2edd4e2d5b3f9a4d2c1 100644
 --- a/packages/opencode/src/util/output-notice.ts
 +++ b/packages/opencode/src/util/output-notice.ts
-@@ -14,8 +14,12 @@
+@@ -17,7 +17,11 @@
  type ExecutionNotice = {
 -  severity: "warning"
 -  reason: "timeout" | "user_abort"
@@ -25,7 +25,6 @@ index f27b9a57a4b33dd9c1686d767b3746a7f69c83a1..e69fa6f2f69c28e4b365e2edd4e2d5b3
 +  exit_code?: number
  }
  
- // #282：属性值只允许标量——notice 永不做嵌套，模型无需解析复合结构
  type Notice = Record<string, string | number | undefined>
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 index e4b83d268..2489abcab 100644
@@ -42,8 +41,8 @@ index e4b83d268..2489abcab 100644
 +      let output = emptyOutput ? "(no output)" : end.text
  
        if (cut && file) {
-         // #282：shown 描述实际展示段（tail 方向），total 描述完整原文
-@@ -1094,6 +1095,23 @@
+         // #282：统一 output_truncated notice；shown 为 tail 预览的实际行字节量
+@@ -1094,7 +1095,24 @@
        // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
        const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
        if (appendix) output += "\n\n" + appendix
@@ -65,6 +64,7 @@ index e4b83d268..2489abcab 100644
 +      if (exitNotice) meta.push(exitNotice)
 +
        if (meta.length > 0) {
+         // #282：notice 本身自带结构化标记，不再加 <shell_metadata> 包装
          output += "\n\n" + meta.join("\n")
        }
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
@@ -196,5 +196,3 @@ index ccf2e36dd..0b02c5013 100644
    it.live("streams metadata updates progressively", () =>
      runIn(
        projectRoot,
-
-

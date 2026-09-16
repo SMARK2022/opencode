@@ -12,7 +12,7 @@ new file mode 100644
 index 000000000..0289c3998
 --- /dev/null
 +++ b/packages/opencode/src/cli/cmd/daemon.ts
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,101 @@
 +import { cmd } from "./cmd"
 +import { UI } from "../ui"
 +import { errorMessage } from "@/util/error"
@@ -76,12 +76,14 @@ index 000000000..0289c3998
 +  UI.println(`Stopping opencode daemon pid=${lock.pid}...`)
 +
 +  if (await waitForStop(lock)) {
++    // #259：只在停止成功后清锁，且仍走同 token 校验——进程若已换代则保留新 owner 的锁
 +    await ServerLock.clearIfOwner(lock.token)
 +    UI.println("Stopped opencode daemon.")
 +    return
 +  }
 +
 +  UI.error(`Timed out waiting for opencode daemon pid=${lock.pid} to stop.`)
++  // #259：超时非零退出——脚本调用方可以据此检测 stop 未完成并采取后续动作
 +  process.exitCode = 1
 +}
 +
@@ -91,6 +93,7 @@ index 000000000..0289c3998
 +      method: "POST",
 +      // #259：control token 复用 lock token——端口证明"本机私有控制面"，token 证明"当前 lock owner"
 +      headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
++      // #259：控制面请求自身必须有界——daemon 卡死时 stop 不能跟着无限悬挂
 +      signal: AbortSignal.timeout(1_000),
 +    })
 +    if (response.ok) return
@@ -124,16 +127,17 @@ index d7c826708..2562da749 100644
  
  // 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
  // #49 收紧选举/陈旧/轮询默认值（10s/5s/200ms）
-@@ -262,7 +264,7 @@ export async function discoverOrSpawnDaemon(
+@@ -262,7 +264,8 @@
                existingUrl = daemonLock.externalUrl
                break
              }
 -          } else if (await deps.ping(daemonLock.port)) {
 +          } else if (await deps.ping(daemonLock.port, { headers: ServerAuth.headers() })) {
++            // #259：health 探测带同一套 server auth——启用 password 后无凭证 ping 会被 401，必须视为不健康
              existingUrl = `http://127.0.0.1:${daemonLock.port}`
              break
            }
-@@ -306,6 +308,28 @@ export function resolveThreadDirectory(project?: string, envPWD = process.env.PW
+@@ -306,6 +308,30 @@
    return Filesystem.resolve(cwd)
  }
  
@@ -141,10 +145,12 @@ index d7c826708..2562da749 100644
 +// 因为它只用于 TUI 退出后的提示，不能影响主流程退出
 +export async function status(): Promise<Status | undefined> {
 +  const lock = await ServerLock.read()
++  // #259：controlPort 与 pid 存活双重校验——旧 lock 或已死 daemon 都直接静默退出
 +  if (!lock?.controlPort || !ServerLock.alive(lock.pid)) return
 +
 +  const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
 +    headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
++    // #259：500ms 有界——status 是退出路径上的旁路查询，不能拖慢主流程退出
 +    signal: AbortSignal.timeout(500),
 +  }).catch(() => undefined)
 +  if (!response?.ok) return
@@ -162,7 +168,7 @@ index d7c826708..2562da749 100644
  export const TuiThreadCommand = cmd({
    command: "$0 [project]",
    describe: "start opencode tui",
-@@ -554,7 +577,26 @@ export const TuiThreadCommand = cmd({
+@@ -554,7 +577,28 @@
          unguard?.()
        } catch {}
      }
@@ -175,6 +181,7 @@ index d7c826708..2562da749 100644
 +// #259：退出时查询 daemon 状态并提示 stop 命令——仅在有活跃 TUI/会话时显示
 +export async function printDaemonExitHint() {
 +  const s = await status()
++  // #259：无 daemon 或零活跃时保持完全静默——退出提示不能变成常态噪音
 +  if (!s || (s.tuiClients === 0 && s.sessionActivity === 0)) return
 +
 +  UI.println(
@@ -186,6 +193,7 @@ index d7c826708..2562da749 100644
 +}
 +
 +function count(value: number, label: string) {
++  // #259：1 不加复数——提示文案对单/多连接保持自然英文
 +  return `${value} ${label}${value === 1 ? "" : "s"}`
 +}
  // scratch
@@ -193,7 +201,7 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 index 725fe837c..a9f839007 100644
 --- a/packages/opencode/src/cli/tui/server-lock.ts
 +++ b/packages/opencode/src/cli/tui/server-lock.ts
-@@ -13,9 +13,17 @@ export type ServerLock = {
+@@ -13,9 +13,18 @@
    channel: string
    startedAt: string
    externalUrl?: string
@@ -206,17 +214,19 @@ index 725fe837c..a9f839007 100644
 +// 只服务 CLI/TUI 的 stop/status，不进入公共 HTTP API、OpenAPI 或 SDK
 +export const CONTROL_SHUTDOWN_PATH = "/shutdown"
 +export const CONTROL_STATUS_PATH = "/status"
++// #259：header 名是 CLI 与 daemon 两侧的契约常量——集中定义避免字符串漂移
 +export const CONTROL_TOKEN_HEADER = "x-opencode-daemon-token"
 +
  export class ExistingLiveServerError extends Error {
    constructor(public readonly lock: ServerLock) {
      super(`Existing live opencode daemon is still running: pid=${lock.pid}, port=${lock.port}`)
-@@ -36,7 +44,7 @@ function getLockPath() {
+@@ -36,7 +44,8 @@
  
  // 原子写入锁文件（tmp → rename），返回新 token 供 clearIfOwner 安全删除
  // 原子写锁：记录 pid/port/token，供 clearIfOwner 安全删除
 -export async function write(port: number, externalUrl?: string): Promise<string> {
 +export async function write(port: number, externalUrl?: string, controlPort?: number): Promise<string> {
++  // #259：controlPort 可选——旧格式调用方仍可写锁，但新 daemon 必须传入才能被安全 stop
    // #152：已有存活 owner 时拒绝写锁，防止双 daemon
    const existing = await read()
    if (existing && alive(existing.pid) && existing.pid !== process.pid) {
@@ -273,16 +283,17 @@ index 2bacaf987..b0e4f2c61 100644
  
    // 优雅关闭：清锁、停 HTTP、关库，避免陈旧锁残留
    
-@@ -133,6 +121,8 @@ if (isDaemon) {
+@@ -133,6 +121,9 @@
      })
      // 仅当 token 匹配时删除锁，防止误删不再属于自己的锁
      await ServerLock.clearIfOwner(lockToken)
 +    // #259：control server 随 daemon 一起关闭——避免端口残留
++    // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
 +    controlServer?.stop(true)
      // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
      // #235：（Effect scope closeScopeOnce/实例清理等残留句柄）。
      // #235：整个清理序列包在 3s 总超时内——不论哪步挂起，daemon 都能完成 exit(0)
-@@ -205,6 +195,37 @@ if (isDaemon) {
+@@ -205,6 +195,41 @@
    let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
    let launcherTimer: ReturnType<typeof setInterval> | undefined
  
@@ -290,13 +301,16 @@ index 2bacaf987..b0e4f2c61 100644
 +  // 才能让 daemon 自己执行 gracefulShutdown，避免 CLI 直接杀 pid
 +  controlServer = Bun.serve({
 +    hostname: "127.0.0.1",
++    // #259：port 0 随机绑定——真实端口写回 lock 文件，不与主 HTTP 端口冲突
 +    port: 0,
 +    fetch(request) {
 +      const url = new URL(request.url)
++      // #259：token 校验先于路径分发——所有 control 路由共用同一道鉴权门
 +      if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
 +      // #259：token 不匹配时 401——即使端口被猜到也无法伪造 stop 请求
 +        return new Response("unauthorized", { status: 401 })
 +      if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH) {
++        // #259：SSE 客户数与会话活跃度来自 worker 既有状态——只读快照，不触发任何清理
 +        return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
 +      }
 +      if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
@@ -307,6 +321,7 @@ index 2bacaf987..b0e4f2c61 100644
 +    },
 +  })
 +  lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
++  // #259：lock 写入延后到 controlPort 已知——锁文件与控制面端口原子地对外可见
 +  log.info("daemon lock written", {
 +    pid: process.pid,
 +    port: internalServer.port,
@@ -362,7 +377,7 @@ index 36dedf989..193a6313f 100644
  
  const DAEMON_START_TIMEOUT_MS = 15_000
  const POLL_INTERVAL_MS = 100
-@@ -24,6 +27,55 @@ afterEach(() => {
+@@ -24,6 +27,56 @@
    ServerLockModule._setLockPath(undefined)
  })
  
@@ -382,6 +397,7 @@ index 36dedf989..193a6313f 100644
 +    XDG_CACHE_HOME: path.join(root, "cache"),
 +    XDG_CONFIG_HOME: path.join(root, "config"),
 +    XDG_STATE_HOME: path.join(root, "state"),
++    // #259：XDG 全套重定向——测试进程绝不触碰真实用户状态目录
 +  }
 +}
 +
@@ -411,7 +427,7 @@ index 36dedf989..193a6313f 100644
 +    stderr: "pipe",
 +  })
 +  const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
-+  // #259：同时等待退出码和 stderr——完整捕获 CLI 输出
++  // #259：必须等 stderr 排空——子进程 stderr 管道写满会阻塞其退出，stop 会整体卡死
 +  return { exitCode, stderr }
 +}
 +
@@ -440,7 +456,7 @@ index 36dedf989..193a6313f 100644
        if (ok) return { proc, lock }
      }
      await Bun.sleep(POLL_INTERVAL_MS)
-@@ -62,6 +110,97 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+@@ -62,6 +110,100 @@
  }
  
  describe("daemon lifecycle", () => {
@@ -451,6 +467,7 @@ index 36dedf989..193a6313f 100644
 +      await using tmp = await tmpdir()
 +      const lockPath = path.join(tmp.path, "tui-server.json")
 +      const { proc } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
++      // #259：5s idle 超时低于外层测试 timeout——stop 失败时 daemon 也会自行退出，避免悬挂
 +
 +      try {
 +        const result = await runDaemonStop(lockPath)
@@ -478,6 +495,7 @@ index 36dedf989..193a6313f 100644
 +        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
 +        OPENCODE_SERVER_USERNAME: "daemon-user",
 +        OPENCODE_SERVER_PASSWORD: "daemon password with spaces",
++        // #259：带空格密码覆盖 Basic 编码边界——头部值不能直接内插原始密码
 +      }
 +      const { proc } = await spawnDaemon(lockPath, env)
 +
@@ -516,6 +534,7 @@ index 36dedf989..193a6313f 100644
 +      stderr: "ignore",
 +    })
 +    await exited.exited
++    // #259：已退出进程的 pid 保留在 lock 中——模拟 pid 复用前的过期锁场景
 +
 +    await Bun.write(
 +      lockPath,
@@ -551,7 +570,7 @@ index c0a282590..35db922f0 100644
  
  // 注入 deps 验证单服务器复用与 spawn 主路径
  // #179：幸福路径 mock 使用永不 resolve 的 exited
-@@ -344,4 +346,14 @@ describe("daemon startup exit (#179)", () => {
+@@ -344,4 +346,15 @@
      // #179：进程已退出，不应再 kill
      expect(killed).toBe(false)
    })
@@ -559,6 +578,7 @@ index c0a282590..35db922f0 100644
 +  // #259：status 在无 lock 时返回 undefined（不影响主流程退出）
 +  test("status returns undefined when no daemon lock exists", async () => {
 +    await using tmp = await tmpdir()
++    // #259：_setLockPath 重定向到临时目录——status 不得看到开发者真实 daemon
 +    ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
 +    const result = await status()
 +    expect(result).toBeUndefined()
@@ -570,7 +590,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index 193a6313f..b8dbdffd4 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -200,7 +200,123 @@ describe("daemon lifecycle", () => {
+@@ -200,7 +200,127 @@
      expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
    })
  
@@ -602,6 +622,7 @@ index 193a6313f..b8dbdffd4 100644
 +      const result = await runDaemonStop(lockPath)
 +      expect(result.exitCode).toBe(1)
 +      expect(result.stderr).toContain("does not support safe stop")
++      // #259：存活断言是本测试的核心——pid 复用场景下绝不能误杀无辜进程
 +      expect(ServerLockModule.alive(nonDaemon.pid)).toBe(true)
 +      expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeDefined()
 +    } finally {
@@ -635,6 +656,7 @@ index 193a6313f..b8dbdffd4 100644
 +        const result = await runDaemonStop(lockPath)
 +        expect(result.exitCode).toBe(1)
 +        expect(result.stderr).toContain("control endpoint returned 401")
++        // #259：双存活断言——token 错误时假 pid 进程与真 daemon 都必须毫发无损
 +        expect(ServerLockModule.alive(nonDaemon.pid)).toBe(true)
 +        expect(ServerLockModule.alive(proc.pid)).toBe(true)
 +      } finally {
@@ -659,6 +681,7 @@ index 193a6313f..b8dbdffd4 100644
 +        const statusBefore = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_STATUS_PATH}`, {
 +          headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token },
 +        }).then((x) => x.json() as Promise<{ tuiClients: number; sessionActivity: number }>)
++        // #259：基线断言——建立 SSE 前两个计数都必须为零，排除残留状态干扰
 +        expect(statusBefore.tuiClients).toBe(0)
 +        expect(statusBefore.sessionActivity).toBe(0)
 +
@@ -676,8 +699,9 @@ index 193a6313f..b8dbdffd4 100644
 +            headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token },
 +          }).then((x) => x.json() as Promise<{ tuiClients: number; sessionActivity: number }>)
 +          expect(statusDuring.tuiClients).toBe(1)
-+          // #259：SSE 连接后 tuiClients 应为 1
++          // #259：控制面快照读的是 worker 内存态——SSE 订阅必须即时反映，不允许独立统计源
 +        } finally {
++          // #259：先 abort 再释放 reader——SSE 句柄若泄漏会让 daemon 永不 idle
 +          ctrl.abort()
 +          await reader.cancel().catch(() => undefined)
 +          reader.releaseLock()
@@ -698,18 +722,19 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 index 35db922f0..dbc3bba76 100644
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -14,7 +14,10 @@ import {
+@@ -14,7 +14,11 @@
  import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
  import { cliIt } from "../../lib/cli-process"
  import { status } from "../../../src/cli/cmd/tui"
 +import * as TuiModule from "../../../src/cli/cmd/tui"
++import { Flag } from "@opencode-ai/core/flag/flag"
  import * as ServerLockModule from "../../../src/cli/tui/server-lock"
 +import { UI } from "../../../src/cli/ui"
 +import { mock, spyOn } from "bun:test"
  
  // 注入 deps 验证单服务器复用与 spawn 主路径
  // #179：幸福路径 mock 使用永不 resolve 的 exited
-@@ -355,5 +358,75 @@ describe("daemon startup exit (#179)", () => {
+@@ -355,5 +358,109 @@
      expect(result).toBeUndefined()
    })
  
@@ -731,6 +756,7 @@ index 35db922f0..dbc3bba76 100644
 +      // #259：提示必须包含客户数和 stop 命令
 +      expect(output).toContain("opencode daemon stop")
 +    } finally {
++      // #259：spy 必须恢复——否则会污染同文件后续测试的 status/UI 行为
 +      statusSpy.mockRestore()
 +      printlnSpy.mockRestore()
 +    }
@@ -756,28 +782,61 @@ index 35db922f0..dbc3bba76 100644
 +    }
 +  })
 +
-+  // #259：ping 带 auth header 验证
-+  test("ping includes auth headers when server password is configured", async () => {
++  // #259：真实凭证契约——生产守护进程发现必须携带 ServerAuth 派生的 Basic 头，否则健康轮询永远不通过
++  test("authenticates daemon health checks when server password is configured", async () => {
 +    await using tmp = await tmpdir()
 +    ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-+
-+    let capturedInit: Pick<RequestInit, "headers"> | undefined
-+    // #259：捕获 ping 的 init 参数——验证 auth header 被传递
-+    const pingSpy = spyOn(ServerLockModule, "ping").mockImplementation(async (_port: number, init?: Pick<RequestInit, "headers">) => {
-+      capturedInit = init
-+      return true
-+    })
++    const previousPassword = Flag.OPENCODE_SERVER_PASSWORD
++    const previousUsername = Flag.OPENCODE_SERVER_USERNAME
++    // #259：直接写 Flag 而非 process.env——ServerAuth 读取的是模块加载时的快照，事后改 env 无效
++    Flag.OPENCODE_SERVER_PASSWORD = "daemon password with spaces"
++    Flag.OPENCODE_SERVER_USERNAME = "daemon-user"
 +
 +    try {
-+      // 测试 ping 接受 init 参数——启用 password 后必须带 auth header
-+      const ok = await ServerLockModule.ping(9999, { headers: { Authorization: "Basic test" } })
-+      // #259：ping 接受 headers 参数——启用 password 后必须带 auth
-+      expect(ok).toBe(true)
-+      expect(capturedInit?.headers).toBeDefined()
-+      // #259：确认 headers 被正确传递到 fetch
++      const expected = `Basic ${Buffer.from("daemon-user:daemon password with spaces").toString("base64")}`
++      // #259：期望值由测试自行编码——与 ServerAuth.header 同一算法，空格密码必须逐字节一致
++      let readCount = 0
++      const result = await discoverOrSpawnDaemon({ port: 0, hostname: "127.0.0.1", mdns: false, cors: [] } as never, {
++        read: async () => {
++          readCount++
++          // #259：前两次读取为空使发现流程走 spawn 主路径；随后返回新 daemon 的锁进入健康轮询
++          if (readCount <= 2) return undefined
++          return {
++            pid: 99999,
++            port: 9999,
++            token: "test-token",
++            dbPath: "/tmp/test.db",
++            channel: "local" as const,
++            startedAt: new Date().toISOString(),
++          }
++        },
++        alive: (pid) => pid === 99999,
++        // #259：仅当携带正确 Basic 凭证才判健康——生产若丢失 ServerAuth.headers() 传递，轮询将超时失败
++        ping: async (_port, init) => {
++          // #259：同时兼容 Headers 实例与普通对象——生产 fetch init 的 headers 形态不受本测试假设约束
++          const authorization =
++            init?.headers instanceof Headers
++              ? init.headers.get("Authorization")
++              : (init?.headers as Record<string, string> | undefined)?.Authorization
++          return authorization === expected
++        },
++        clear: async () => {},
++        acquire: async () => ({ release: async () => {} }) as never,
++        spawn: (() => ({ pid: 99999, exited: hangingExited(), unref() {}, kill() {} })) as never,
++        // #259：spawn 必须返回永不退出的假进程——若立即退出，轮询会走崩溃分支而不是健康检查
++        sleep: async () => {},
++        resolveDaemonFile: async () => "/tmp/daemon.ts",
++        electionTimeoutMs: 10_000,
++        electionStaleMs: 5_000,
++        pollMs: 1,
++        waitMs: 5_000,
++      })
++      expect(result.url).toBe("http://127.0.0.1:9999")
++      // #259：复用成功即凭证通过的证明——header 错误时轮询永不健康，直接超时抛错
 +    } finally {
-+      pingSpy.mockRestore()
-+      ServerLockModule._setLockPath(undefined)
++      // #259：恢复全局 Flag——凭证污染会泄漏到同进程其他测试的 server auth 行为
++      Flag.OPENCODE_SERVER_PASSWORD = previousPassword
++      Flag.OPENCODE_SERVER_USERNAME = previousUsername
 +    }
 +  })
 +

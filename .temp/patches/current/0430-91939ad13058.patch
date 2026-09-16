@@ -2182,19 +2182,19 @@ index 0000000000000000000000000000000000000000..2cf30e4c09df111fd9fd306250bcee4b
 +   the requested `<verified-implementation-and-commit>` terminal state be
 +   reported.
 diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
-index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045dbd7dcf2 100644
+
 --- a/packages/opencode/src/patch/index.ts
 +++ b/packages/opencode/src/patch/index.ts
-@@ -4,6 +4,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import * as Log from "@opencode-ai/core/util/log"
+@@ -4,6 +4,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "../util/bom"
- import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
+ import { convertToLineEnding, detectLineEnding, splitLines } from "../util/line-ending"
+ // #131：patch 逻辑行匹配，写回保留原行尾
 +import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./match"
  
- const log = Log.create({ service: "patch" })
- 
-@@ -317,21 +318,17 @@ export function deriveNewContentsFromChunks(
- 
+ export const PatchSchema = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
+@@ -316,21 +317,14 @@ export function deriveNewContentsFromChunks(
+   // #131：按逻辑行分割（含 CR-only）
    let originalLines = splitLines(originalContent.text)
  
 -  // Drop trailing empty element for consistent line counting
@@ -2202,7 +2202,7 @@ index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045
    if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
      originalLines.pop()
    }
- 
+-
 -  const replacements = computeReplacements(originalLines, filePath, chunks)
 -  let newLines = applyReplacements(originalLines, replacements)
 -
@@ -2210,17 +2210,17 @@ index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045
 -  if (newLines.length === 0 || newLines[newLines.length - 1] !== "") {
 -    newLines.push("")
 -  }
-+  const newLines = applyChunks(originalLines, filePath, chunks, originalContent.text)
- 
-   // Patch matching works on logical lines; preserve the file's original line ending when writing back.
+-
+-  // #131：匹配用逻辑行，写回保留原文件行尾
 -  const next = Bom.split(convertToLineEnding(newLines.join("\n"), detectLineEnding(originalContent.text)))
++  const newLines = applyChunks(originalLines, filePath, chunks, originalContent.text)
 +  // 既有 update contract 始终补一个终止换行；substring recovery 不能改变这个写回约定。
 +  const normalized = newLines.length === 0 ? "" : newLines.join("\n") + "\n"
 +  const next = Bom.split(convertToLineEnding(normalized, detectLineEnding(originalContent.text)))
    const newContent = next.text
  
    // Generate unified diff
-@@ -344,148 +341,91 @@ export function deriveNewContentsFromChunks(
+@@ -343,148 +337,89 @@ export function deriveNewContentsFromChunks(
    }
  }
  
@@ -2271,7 +2271,7 @@ index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045
 +      insertions.push(chunk.new_lines)
        continue
      }
- 
+-
 -    // Try to match old lines in the file
 -    let pattern = chunk.old_lines
 -    let newSlice = chunk.new_lines
@@ -2317,7 +2317,7 @@ index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045
 -
 -    // Remove old lines
 -    result.splice(startIdx, oldLen)
- 
+-
 -    // Insert new lines
 -    for (let j = 0; j < newSegment.length; j++) {
 -      result.splice(startIdx + j, 0, newSegment[j])
@@ -2337,10 +2337,10 @@ index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045
 +      continue
      }
 -  }
--
+ 
 -  return result
 -}
- 
+-
 -// Normalize Unicode punctuation to ASCII equivalents (like Rust's normalize_unicode)
 -function normalizeUnicode(str: string): string {
 -  return str
@@ -2434,6 +2434,7 @@ index b9d865814ec313b1aa9e6e8bbc9a862a4dff0fcf..d0658d084f39b1638f498d01de4e6045
  }
  
  function generateUnifiedDiff(oldContent: string, newContent: string): string {
+
 diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..a4e595c1c78d43b9175ec55dfa293bdffc67e5bc
@@ -2597,12 +2598,12 @@ index 0000000000000000000000000000000000000000..a4e595c1c78d43b9175ec55dfa293bdf
 +  }
 +}
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 5a39d9d33ef7a92bdef94c4e76cd0480de960178..70e48ba7155e73bc4e96cc6af641910d67f44261 100644
+
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -19,56 +19,6 @@ import { Format } from "../format"
- import * as Bom from "@/util/bom"
+@@ -20,56 +20,6 @@ import * as Bom from "@/util/bom"
  import { normalizeLineEndings } from "@/util/line-ending"
+ // #131：diff 展示归一行尾，隐藏纯换行变更
  
 -// [local-smark] 从 patch hunk chunks 中提取期望的旧行文本，
 -// 在 oldContent 中找到最近似的位置并返回上下文摘录。
@@ -2656,11 +2657,11 @@ index 5a39d9d33ef7a92bdef94c4e76cd0480de960178..70e48ba7155e73bc4e96cc6af641910d
 -
  // [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
  // 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
- // 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界。
-@@ -122,8 +72,8 @@ const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function
-         newContent = fileUpdate.content
+ // 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界；diff 统计前先归一行尾（#131）。
+@@ -124,8 +74,8 @@ const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function
          bom = fileUpdate.bom
        } catch (error) {
+         // context 匹配失败时附带 actual content 摘录，帮助模型自纠正
 -        const actualExcerpt = extractActualExcerpt(oldContent, hunk.chunks)
 -        return yield* Effect.fail(new Error(`${error}` + (actualExcerpt ? `\n\nActual content near expected location:\n${actualExcerpt}` : "")))
 +        // Patch owner 仍持有失败 chunk 身份与 persisted text；Tool 只聚合其错误，不能运行第二套 matcher。
@@ -2668,6 +2669,7 @@ index 5a39d9d33ef7a92bdef94c4e76cd0480de960178..70e48ba7155e73bc4e96cc6af641910d
        }
        const diffOld = normalizeLineEndings(oldContent)
        const diffNew = normalizeLineEndings(newContent)
+
 diff --git a/packages/opencode/src/tool/apply_patch.txt b/packages/opencode/src/tool/apply_patch.txt
 index 5b2d95608c532194a386a79a05e1aa38e2f97f97..3bec3e12222991cf099f0f9a97d5defb6540b066 100644
 --- a/packages/opencode/src/tool/apply_patch.txt
@@ -2680,36 +2682,295 @@ index 5b2d95608c532194a386a79a05e1aa38e2f97f97..3bec3e12222991cf099f0f9a97d5defb
 +- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
 +- A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d583cdfd86 100644
+
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -7,8 +7,7 @@ import * as path from "path"
- import { Effect, Schema, Semaphore } from "effect"
- import * as Tool from "./tool"
- import { LSP } from "@/lsp/lsp"
+@@ -1,953 +1,342 @@
+-// the approaches in this edit tool are sourced from
+-// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
+-// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
+-// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
+-
+-import * as path from "path"
+-import { Effect, Schema, Semaphore } from "effect"
+-import * as Tool from "./tool"
+-import { LSP } from "@/lsp/lsp"
 -import { createTwoFilesPatch, diffLines, diffChars } from "diff"
 -import type { Change } from "diff"
-+import { createTwoFilesPatch, diffLines } from "diff"
- import DESCRIPTION from "./edit.txt"
- import { File } from "../file"
- import { FileWatcher } from "../file/watcher"
-@@ -20,6 +19,7 @@ import { assertExternalDirectoryEffect } from "./external-directory"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import * as Bom from "@/util/bom"
- import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
-+import { closestWindow } from "@/patch/match"
- 
- const locks = new Map<string, Semaphore.Semaphore>()
- 
-@@ -269,431 +269,6 @@ export const EditTool = Tool.define(
-   }),
- )
- 
+-import DESCRIPTION from "./edit.txt"
+-import { FileSystem } from "@opencode-ai/core/filesystem"
+-import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+-import { EventV2Bridge } from "@/event-v2-bridge"
+-import { Format } from "../format"
+-import { InstanceState } from "@/effect/instance-state"
+-import { Snapshot } from "@/snapshot"
+-import { assertExternalDirectoryEffect } from "./external-directory"
+-import { FSUtil } from "@opencode-ai/core/fs-util"
+-import * as Bom from "@/util/bom"
+-import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+-// #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
+-
+-const locks = new Map<string, Semaphore.Semaphore>()
+-
+-function lock(filePath: string) {
+-  const resolvedFilePath = FSUtil.resolve(filePath)
+-  const hit = locks.get(resolvedFilePath)
+-  if (hit) return hit
+-
+-  const next = Semaphore.makeUnsafe(1)
+-  locks.set(resolvedFilePath, next)
+-  return next
+-}
+-
+-export const Parameters = Schema.Struct({
+-  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
+-  oldString: Schema.String.annotate({ description: "The text to replace" }),
+-  newString: Schema.String.annotate({
+-    description: "The text to replace it with (must be different from oldString)",
+-  }),
+-  replaceAll: Schema.optional(Schema.Boolean).annotate({
+-    description: "Replace all occurrences of oldString (default false)",
+-  }),
+-})
+-
+-export const EditTool = Tool.define(
+-  "edit",
+-  Effect.gen(function* () {
+-    const lsp = yield* LSP.Service
+-    const afs = yield* FSUtil.Service
+-    const format = yield* Format.Service
+-    const events = yield* EventV2Bridge.Service
+-
+-    return {
+-      description: DESCRIPTION,
+-      parameters: Parameters,
+-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+-        Effect.gen(function* () {
+-          if (!params.filePath) {
+-            throw new Error("filePath is required")
+-          }
+-
+-          if (params.oldString === params.newString) {
+-            throw new Error("No changes to apply: oldString and newString are identical.")
+-          }
+-
+-          const instance = yield* InstanceState.context
+-          const filePath = path.isAbsolute(params.filePath)
+-            ? params.filePath
+-            : path.join(instance.directory, params.filePath)
+-
+-          // [local-smark] blind edit 检查：当 oldString 非空（非创建文件模式）时，
+-          // 检查文件是否在当前 session 的消息历史中被 read/write/edit 接触过。
+-          // 未接触过的文件可能有过期内容（auto-format、外部修改），
+-          // oldString 基于假设会导致匹配失败。
+-          // 用 path.resolve 规范化路径比较，避免正斜杠/反斜杠差异导致误拦截。
+-          // Windows 下 NTFS 大小写不敏感，需 toLowerCase；Linux/macOS 大小写敏感，不应 lower。
+-          // 遵循 read.ts canonicalReadPath 的同一平台分支范式。
+-          // apply_patch 的 input 是 patchText 而非 filePath，无法简单匹配，不纳入检查。
+-          if (params.oldString !== "") {
+-            const resolveForCompare = (p: string) => {
+-              const r = path.resolve(p)
+-              return process.platform === "win32" ? r.toLowerCase() : r
+-            }
+-            const resolvedFilePath = resolveForCompare(filePath)
+-            const hasTouched = ctx.messages.some((msg) =>
+-              msg.info.role === "assistant" &&
+-              msg.parts.some((part) => {
+-                if (part.type !== "tool" || part.state.status !== "completed") return false
+-                if (part.tool !== "read" && part.tool !== "write" && part.tool !== "edit") return false
+-                const input = part.state.input as Record<string, unknown> | undefined
+-                if (!input || typeof input.filePath !== "string") return false
+-                return resolveForCompare(input.filePath) === resolvedFilePath
+-              }),
+-            )
+-            if (!hasTouched) {
+-              throw new Error(
+-                `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
+-              )
+-            }
+-          }
+-
+-          // #210：携带 edit 操作意图让 Auto reviewer 基于工具证据而非仅外部路径 glob 判断
+-          yield* assertExternalDirectoryEffect(ctx, filePath, {
+-            metadata: {
+-              action_kind: "tool",
+-              tool: "edit",
+-              // #210：oldString 为空表示创建新文件，operation 区分 create/edit
+-              operation: params.oldString === "" ? "create" : "edit",
+-              oldString: params.oldString,
+-              newString: params.newString,
+-              replaceAll: params.replaceAll === true,
+-            },
+-          })
+-
+-          let diff = ""
+-          let contentOld = ""
+-          let contentNew = ""
+-          yield* lock(filePath).withPermits(1)(
+-            Effect.gen(function* () {
+-              if (params.oldString === "") {
+-                const existed = yield* afs.existsSafe(filePath)
+-                if (existed) {
+-                  throw new Error(
+-                    "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+-                  )
+-                }
+-                const next = Bom.split(params.newString)
+-                const desiredBom = next.bom
+-                contentOld = ""
+-                contentNew = next.text
+-                diff = trimDiff(
+-                  // #131：ask 元数据 diff 忽略纯行尾差异
+-                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+-                )
+-                yield* ctx.ask({
+-                  permission: "edit",
+-                  patterns: [path.relative(instance.worktree, filePath)],
+-                  always: ["*"],
+-                  metadata: {
+-                    filepath: filePath,
+-                    diff,
+-                  },
+-                })
+-                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-                if (yield* format.file(filePath)) {
+-                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-                }
+-                yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+-                yield* events.publish(Watcher.Event.Updated, {
+-                  file: filePath,
+-                  event: "add",
+-                })
+-                return
+-              }
+-
+-              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+-              if (!info) throw new Error(`File ${filePath} not found`)
+-              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+-              const source = yield* Bom.readFile(afs, filePath)
+-              contentOld = source.text
+-
+-              const ending = detectLineEnding(contentOld)
+-              const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
+-              const replacement = convertToLineEnding(normalizeLineEndings(params.newString), ending)
+-
+-              const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
+-              const desiredBom = source.bom || next.bom
+-              contentNew = next.text
+-
+-              diff = trimDiff(
+-                createTwoFilesPatch(
+-                  filePath,
+-                  filePath,
+-                  normalizeLineEndings(contentOld),
+-                  normalizeLineEndings(contentNew),
+-                ),
+-              )
+-              yield* ctx.ask({
+-                permission: "edit",
+-                patterns: [path.relative(instance.worktree, filePath)],
+-                always: ["*"],
+-                metadata: {
+-                  filepath: filePath,
+-                  diff,
+-                },
+-              })
+-
+-              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-              if (yield* format.file(filePath)) {
+-                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-              }
+-              yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+-              yield* events.publish(Watcher.Event.Updated, {
+-                file: filePath,
+-                event: "change",
+-              })
+-              diff = trimDiff(
+-                createTwoFilesPatch(
+-                  filePath,
+-                  filePath,
+-                  normalizeLineEndings(contentOld),
+-                  normalizeLineEndings(contentNew),
+-                ),
+-              )
+-            }).pipe(Effect.orDie),
+-          )
+-
+-          const diffOld = normalizeLineEndings(contentOld)
+-          const diffNew = normalizeLineEndings(contentNew)
+-          // #131：统计增删行时忽略行尾风格
+-          let additions = 0
+-          let deletions = 0
+-          for (const change of diffLines(diffOld, diffNew)) {
+-            if (change.added) additions += change.count || 0
+-            if (change.removed) deletions += change.count || 0
+-          }
+-          const filediff: Snapshot.FileDiff = {
+-            file: filePath,
+-            patch: diff,
+-            additions,
+-            deletions,
+-          }
+-
+-          yield* ctx.metadata({
+-            metadata: {
+-              diff,
+-              filediff,
+-              diagnostics: {},
+-            },
+-          })
+-
+-          let output = "Edit applied successfully."
+-          const normalizedFilePath = FSUtil.normalizePath(filePath)
+-          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
+-          const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
+-          yield* lsp.touchFile(filePath, "document")
+-          const afterDiagnostics = yield* lsp.diagnostics()
+-          const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
+-          const block = LSP.Diagnostic.reportDelta(filePath, currentIssues, beforeIssues)
+-          // [local-smark] 新错误数组和摘要供 TUI 渲染
+-          const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
+-          const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+-          // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
+-          let diagnosticSummary: typeof delta | undefined = delta
+-          if (block) {
+-            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
+-            output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
+-          } else {
+-            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时
+-            // baseline 和 current 都为空，delta 必然为空
+-            const clients = yield* lsp.status()
+-            if (clients.length === 0) {
+-              diagnosticSummary = undefined
+-              output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+-            } else {
+-              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持反馈高信噪比
+-              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
+-            }
+-          }
+-
+-          return {
+-            metadata: {
+-              // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
+-              diagnostics: { [normalizedFilePath]: newErrorsArr },
+-              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
+-              ...(diagnosticSummary ? { diagnosticSummary } : {}),
+-              diff,
+-              filediff,
+-            },
+-            title: `${path.relative(instance.worktree, filePath)}`,
+-            output,
+-          }
+-        }),
+-    }
+-  }),
+-)
+-
 -export type Replacer = (content: string, find: string) => Generator<string, void, unknown>
 -
 -// Similarity thresholds for block anchor fallback matching
--const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.0
--const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.3
+-const SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.65
+-const MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.65
 -
 -/**
 - * Levenshtein distance algorithm implementation
@@ -2791,6 +3052,7 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -  const firstLineSearch = searchLines[0].trim()
 -  const lastLineSearch = searchLines[searchLines.length - 1].trim()
 -  const searchBlockSize = searchLines.length
+-  const maxLineDelta = Math.max(1, Math.floor(searchBlockSize * 0.25))
 -
 -  // Collect all candidate positions where both anchors match
 -  const candidates: Array<{ startLine: number; endLine: number }> = []
@@ -2802,7 +3064,10 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -    // Look for the matching last line after this first line
 -    for (let j = i + 2; j < originalLines.length; j++) {
 -      if (originalLines[j].trim() === lastLineSearch) {
--        candidates.push({ startLine: i, endLine: j })
+-        const actualBlockSize = j - i + 1
+-        if (Math.abs(actualBlockSize - searchBlockSize) <= maxLineDelta) {
+-          candidates.push({ startLine: i, endLine: j })
+-        }
 -        break // Only match the first occurrence of the last line
 -      }
 -    }
@@ -2819,7 +3084,7 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -    const actualBlockSize = endLine - startLine + 1
 -
 -    let similarity = 0
--    let linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
+-    const linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
 -
 -    if (linesToCheck > 0) {
 -      for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
@@ -2868,7 +3133,7 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -    const actualBlockSize = endLine - startLine + 1
 -
 -    let similarity = 0
--    let linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
+-    const linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2) // Middle lines only
 -
 -    if (linesToCheck > 0) {
 -      for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
@@ -3130,13 +3395,42 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -  }
 -}
 -
- export function trimDiff(diff: string): string {
-   const lines = diff.split("\n")
-   const contentLines = lines.filter(
-@@ -730,193 +305,28 @@ export function trimDiff(diff: string): string {
-   return trimmedLines.join("\n")
- }
- 
+-export function trimDiff(diff: string): string {
+-  const lines = diff.split("\n")
+-  const contentLines = lines.filter(
+-    (line) =>
+-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
+-      !line.startsWith("---") &&
+-      !line.startsWith("+++"),
+-  )
+-
+-  if (contentLines.length === 0) return diff
+-
+-  let min = Infinity
+-  for (const line of contentLines) {
+-    const content = line.slice(1)
+-    if (content.trim().length > 0) {
+-      const match = content.match(/^(\s*)/)
+-      if (match) min = Math.min(min, match[1].length)
+-    }
+-  }
+-  if (min === Infinity || min === 0) return diff
+-  const trimmedLines = lines.map((line) => {
+-    if (
+-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
+-      !line.startsWith("---") &&
+-      !line.startsWith("+++")
+-    ) {
+-      const prefix = line[0]
+-      const content = line.slice(1)
+-      return prefix + content.slice(min)
+-    }
+-    return line
+-  })
+-
+-  return trimmedLines.join("\n")
+-}
+-
 -// [local-smark] 滑动窗口查找 content 中与 oldString 最相似的区域。
 -// 用 oldString 首行与 content 各行做简单字符重叠比较，返回最佳匹配位置和摘录。
 -// 仅在 replace() 抛出 notFound 错误时调用，不影响正常路径性能。
@@ -3283,11 +3577,16 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -  return common / Math.max(1, Math.min(a.length, b.length))
 -}
 -
- export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
-   if (oldString === newString) {
-     throw new Error("No changes to apply: oldString and newString are identical.")
-   }
- 
+-export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
+-  if (oldString === newString) {
+-    throw new Error("No changes to apply: oldString and newString are identical.")
+-  }
+-  if (oldString === "") {
+-    throw new Error(
+-      "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+-    )
+-  }
+-
 -  let notFound = true
 -
 -  for (const replacer of [
@@ -3305,6 +3604,11 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -      const index = content.indexOf(search)
 -      if (index === -1) continue
 -      notFound = false
+-      if (isDisproportionateMatch(search, oldString)) {
+-        throw new Error(
+-          "Refusing replacement because the matched span is much larger than oldString. Re-read the file and provide the full exact oldString for the intended replacement.",
+-        )
+-      }
 -      if (replaceAll) {
 -        return content.replaceAll(search, newString)
 -      }
@@ -3320,19 +3624,354 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 -    // 用滑动窗口逐行比较 oldString 首行与 content 各行的相似度，
 -    // 返回相似度最高的区域摘要（限制 5 行避免上下文膨胀）。
 -    const closest = findClosestMatch(content, oldString)
+-    throw new Error(
+-      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
+-        (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
+-    )
+-  }
+-  throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
+-}
+-
+-function isDisproportionateMatch(search: string, oldString: string) {
+-  const oldLines = oldString.split("\n").length
+-  const searchLines = search.split("\n").length
+-  if (searchLines >= Math.max(oldLines + 3, oldLines * 2)) return true
+-  if (oldLines === 1) return false
+-  return search.trim().length > Math.max(oldString.trim().length + 500, oldString.trim().length * 4)
+-}
++// the approaches in this edit tool are sourced from
++// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
++// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
++// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
++
++import * as path from "path"
++import { Effect, Schema, Semaphore } from "effect"
++import * as Tool from "./tool"
++import { LSP } from "@/lsp/lsp"
++import { createTwoFilesPatch, diffLines } from "diff"
++import DESCRIPTION from "./edit.txt"
++import { FileSystem } from "@opencode-ai/core/filesystem"
++import { Watcher } from "@opencode-ai/core/filesystem/watcher"
++import { EventV2Bridge } from "@/event-v2-bridge"
++import { Format } from "../format"
++import { InstanceState } from "@/effect/instance-state"
++import { Snapshot } from "@/snapshot"
++import { assertExternalDirectoryEffect } from "./external-directory"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import * as Bom from "@/util/bom"
++import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
++import { closestWindow } from "@/patch/match"
++// #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
++
++const locks = new Map<string, Semaphore.Semaphore>()
++
++function lock(filePath: string) {
++  const resolvedFilePath = FSUtil.resolve(filePath)
++  const hit = locks.get(resolvedFilePath)
++  if (hit) return hit
++
++  const next = Semaphore.makeUnsafe(1)
++  locks.set(resolvedFilePath, next)
++  return next
++}
++
++export const Parameters = Schema.Struct({
++  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
++  oldString: Schema.String.annotate({ description: "The text to replace" }),
++  newString: Schema.String.annotate({
++    description: "The text to replace it with (must be different from oldString)",
++  }),
++  replaceAll: Schema.optional(Schema.Boolean).annotate({
++    description: "Replace all occurrences of oldString (default false)",
++  }),
++})
++
++export const EditTool = Tool.define(
++  "edit",
++  Effect.gen(function* () {
++    const lsp = yield* LSP.Service
++    const afs = yield* FSUtil.Service
++    const format = yield* Format.Service
++    const events = yield* EventV2Bridge.Service
++
++    return {
++      description: DESCRIPTION,
++      parameters: Parameters,
++      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
++        Effect.gen(function* () {
++          if (!params.filePath) {
++            throw new Error("filePath is required")
++          }
++
++          if (params.oldString === params.newString) {
++            throw new Error("No changes to apply: oldString and newString are identical.")
++          }
++
++          const instance = yield* InstanceState.context
++          const filePath = path.isAbsolute(params.filePath)
++            ? params.filePath
++            : path.join(instance.directory, params.filePath)
++
++          // [local-smark] blind edit 检查：当 oldString 非空（非创建文件模式）时，
++          // 检查文件是否在当前 session 的消息历史中被 read/write/edit 接触过。
++          // 未接触过的文件可能有过期内容（auto-format、外部修改），
++          // oldString 基于假设会导致匹配失败。
++          // 用 path.resolve 规范化路径比较，避免正斜杠/反斜杠差异导致误拦截。
++          // Windows 下 NTFS 大小写不敏感，需 toLowerCase；Linux/macOS 大小写敏感，不应 lower。
++          // 遵循 read.ts canonicalReadPath 的同一平台分支范式。
++          // apply_patch 的 input 是 patchText 而非 filePath，无法简单匹配，不纳入检查。
++          if (params.oldString !== "") {
++            const resolveForCompare = (p: string) => {
++              const r = path.resolve(p)
++              return process.platform === "win32" ? r.toLowerCase() : r
++            }
++            const resolvedFilePath = resolveForCompare(filePath)
++            const hasTouched = ctx.messages.some((msg) =>
++              msg.info.role === "assistant" &&
++              msg.parts.some((part) => {
++                if (part.type !== "tool" || part.state.status !== "completed") return false
++                if (part.tool !== "read" && part.tool !== "write" && part.tool !== "edit") return false
++                const input = part.state.input as Record<string, unknown> | undefined
++                if (!input || typeof input.filePath !== "string") return false
++                return resolveForCompare(input.filePath) === resolvedFilePath
++              }),
++            )
++            if (!hasTouched) {
++              throw new Error(
++                `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
++              )
++            }
++          }
++
++          // #210：携带 edit 操作意图让 Auto reviewer 基于工具证据而非仅外部路径 glob 判断
++          yield* assertExternalDirectoryEffect(ctx, filePath, {
++            metadata: {
++              action_kind: "tool",
++              tool: "edit",
++              // #210：oldString 为空表示创建新文件，operation 区分 create/edit
++              operation: params.oldString === "" ? "create" : "edit",
++              oldString: params.oldString,
++              newString: params.newString,
++              replaceAll: params.replaceAll === true,
++            },
++          })
++
++          let diff = ""
++          let contentOld = ""
++          let contentNew = ""
++          yield* lock(filePath).withPermits(1)(
++            Effect.gen(function* () {
++              if (params.oldString === "") {
++                const existed = yield* afs.existsSafe(filePath)
++                if (existed) {
++                  throw new Error(
++                    "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
++                  )
++                }
++                const next = Bom.split(params.newString)
++                const desiredBom = next.bom
++                contentOld = ""
++                contentNew = next.text
++                diff = trimDiff(
++                  // #131：ask 元数据 diff 忽略纯行尾差异
++                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
++                )
++                yield* ctx.ask({
++                  permission: "edit",
++                  patterns: [path.relative(instance.worktree, filePath)],
++                  always: ["*"],
++                  metadata: {
++                    filepath: filePath,
++                    diff,
++                  },
++                })
++                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
++                if (yield* format.file(filePath)) {
++                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
++                }
++                yield* events.publish(FileSystem.Event.Edited, { file: filePath })
++                yield* events.publish(Watcher.Event.Updated, {
++                  file: filePath,
++                  event: "add",
++                })
++                return
++              }
++
++              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
++              if (!info) throw new Error(`File ${filePath} not found`)
++              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
++              const source = yield* Bom.readFile(afs, filePath)
++              contentOld = source.text
++
++              const ending = detectLineEnding(contentOld)
++              const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
++              const replacement = convertToLineEnding(normalizeLineEndings(params.newString), ending)
++
++              const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
++              const desiredBom = source.bom || next.bom
++              contentNew = next.text
++
++              diff = trimDiff(
++                createTwoFilesPatch(
++                  filePath,
++                  filePath,
++                  normalizeLineEndings(contentOld),
++                  normalizeLineEndings(contentNew),
++                ),
++              )
++              yield* ctx.ask({
++                permission: "edit",
++                patterns: [path.relative(instance.worktree, filePath)],
++                always: ["*"],
++                metadata: {
++                  filepath: filePath,
++                  diff,
++                },
++              })
++
++              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
++              if (yield* format.file(filePath)) {
++                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
++              }
++              yield* events.publish(FileSystem.Event.Edited, { file: filePath })
++              yield* events.publish(Watcher.Event.Updated, {
++                file: filePath,
++                event: "change",
++              })
++              diff = trimDiff(
++                createTwoFilesPatch(
++                  filePath,
++                  filePath,
++                  normalizeLineEndings(contentOld),
++                  normalizeLineEndings(contentNew),
++                ),
++              )
++            }).pipe(Effect.orDie),
++          )
++
++          const diffOld = normalizeLineEndings(contentOld)
++          const diffNew = normalizeLineEndings(contentNew)
++          // #131：统计增删行时忽略行尾风格
++          let additions = 0
++          let deletions = 0
++          for (const change of diffLines(diffOld, diffNew)) {
++            if (change.added) additions += change.count || 0
++            if (change.removed) deletions += change.count || 0
++          }
++          const filediff: Snapshot.FileDiff = {
++            file: filePath,
++            patch: diff,
++            additions,
++            deletions,
++          }
++
++          yield* ctx.metadata({
++            metadata: {
++              diff,
++              filediff,
++              diagnostics: {},
++            },
++          })
++
++          let output = "Edit applied successfully."
++          const normalizedFilePath = FSUtil.normalizePath(filePath)
++          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
++          const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
++          yield* lsp.touchFile(filePath, "document")
++          const afterDiagnostics = yield* lsp.diagnostics()
++          const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
++          const block = LSP.Diagnostic.reportDelta(filePath, currentIssues, beforeIssues)
++          // [local-smark] 新错误数组和摘要供 TUI 渲染
++          const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
++          const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
++          // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
++          let diagnosticSummary: typeof delta | undefined = delta
++          if (block) {
++            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
++            output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
++          } else {
++            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时
++            // baseline 和 current 都为空，delta 必然为空
++            const clients = yield* lsp.status()
++            if (clients.length === 0) {
++              diagnosticSummary = undefined
++              output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
++            } else {
++              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持反馈高信噪比
++              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
++            }
++          }
++
++          return {
++            metadata: {
++              // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
++              diagnostics: { [normalizedFilePath]: newErrorsArr },
++              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
++              ...(diagnosticSummary ? { diagnosticSummary } : {}),
++              diff,
++              filediff,
++            },
++            title: `${path.relative(instance.worktree, filePath)}`,
++            output,
++          }
++        }),
++    }
++  }),
++)
++
++
++export function trimDiff(diff: string): string {
++  const lines = diff.split("\n")
++  const contentLines = lines.filter(
++    (line) =>
++      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
++      !line.startsWith("---") &&
++      !line.startsWith("+++"),
++  )
++
++  if (contentLines.length === 0) return diff
++
++  let min = Infinity
++  for (const line of contentLines) {
++    const content = line.slice(1)
++    if (content.trim().length > 0) {
++      const match = content.match(/^(\s*)/)
++      if (match) min = Math.min(min, match[1].length)
++    }
++  }
++  if (min === Infinity || min === 0) return diff
++  const trimmedLines = lines.map((line) => {
++    if (
++      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
++      !line.startsWith("---") &&
++      !line.startsWith("+++")
++    ) {
++      const prefix = line[0]
++      const content = line.slice(1)
++      return prefix + content.slice(min)
++    }
++    return line
++  })
++
++  return trimmedLines.join("\n")
++}
++
++export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
++  if (oldString === newString) {
++    throw new Error("No changes to apply: oldString and newString are identical.")
++  }
++
 +  const first = content.indexOf(oldString)
 +  if (first === -1) {
 +    // closest 只解释失败；即使分数很高也绝不能转成 replacement success。
 +    const closest = closestWindow(content, oldString)
-     throw new Error(
-       `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
--        (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
++    throw new Error(
++      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
 +        (closest
 +          ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
 +          : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
-     )
-   }
--  throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
++    )
++  }
 +
 +  // replaceAll 是调用方对多处 exact literal 的显式授权，必须在 ambiguity 拒绝前处理。
 +  if (replaceAll) return content.replaceAll(oldString, newString)
@@ -3341,7 +3980,8 @@ index 30a528ddde93fb23b352ffe6f70e51e798bdab56..05840c3443a37c1c505ecb07791a98d5
 +    throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
 +  }
 +  return content.slice(0, first) + newString + content.slice(first + oldString.length)
- }
++}
+
 diff --git a/packages/opencode/src/tool/edit.txt b/packages/opencode/src/tool/edit.txt
 index 618fd5ad1ef8cc0c8a091ea502eac77e2e839954..d3e7d46cc41a266155824210ce8a1beddfc93a2b 100644
 --- a/packages/opencode/src/tool/edit.txt
@@ -3630,10 +4270,10 @@ index e4952b9e0039acdac1ee34b50a50caa467ad7379..0d4c54079515b15acc78bbb2a6547244
      it.live("should add a new file", () =>
        Effect.gen(function* () {
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b1a47f2a2 100644
+
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -204,6 +204,215 @@ describe("tool.apply_patch freeform", () => {
+@@ -200,6 +200,217 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
@@ -3841,7 +4481,9 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
 +        const error = Cause.squash(exit.cause) as Error
 +        expect(error.message).toContain("Closest match at line 1")
 +        expect(error.message).toContain("chars omitted")
-+        expect(error.message).toContain("b".repeat(100))
++                // 0441 起摘录改为有界窗口 char-diff：差异点 ±30 字符可见，其余以 omitted 标记；
++        // 100 连字符不再整体出现，断言收敛到差异点局部 context 的可见性。
++        expect(error.message).toContain("b".repeat(20))
 +      }
 +    }),
 +  )
@@ -3849,7 +4491,7 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
    it.instance("does not invent a first-line diff for BOM files", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
-@@ -484,39 +693,41 @@ EOF`
+@@ -479,39 +690,41 @@ EOF`
      }),
    )
  
@@ -3906,7 +4548,7 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -527,20 +738,17 @@ EOF`
+@@ -522,14 +735,10 @@ EOF`
        const emDash = "\u2014"
        yield* writeText(target, `He said ${leftQuote}hello${rightQuote}\nsome${emDash}dash\nend\n`)
  
@@ -3914,12 +4556,16 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
 -      // The replacement uses ASCII quotes from the patch (not preserving Unicode)
        const patchText =
          '*** Begin Patch\n*** Update File: unicode.txt\n@@\n-He said "hello"\n+He said "hi"\n*** End Patch'
- 
+-
 -      yield* execute({ patchText }, ctx)
 -      // Result has ASCII quotes because that's what the patch specifies
 -      expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
 +      yield* expectFailure(execute({ patchText }, ctx), "Failed to find expected lines")
 +      expect(yield* readText(target)).toBe(`He said ${leftQuote}hello${rightQuote}\nsome${emDash}dash\nend\n`)
+     }),
+   )
+   // #131：对 CRLF 文件 apply 后内容正确且 ask 元数据 diff 归一
+@@ -568,9 +777,9 @@ EOF`
      }),
    )
  
@@ -3932,7 +4578,7 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -555,9 +763,45 @@ EOF`
+@@ -585,12 +794,47 @@ EOF`
        expect(Exit.isFailure(exit)).toBe(true)
        if (Exit.isFailure(exit)) {
          const err = Cause.squash(exit.cause) as Error
@@ -3940,7 +4586,7 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
 -        expect(err.message).toContain("real content")
 +        expect(err.message).toContain("No reliable nearby candidate was found")
 +        expect(err.message).not.toContain("real content")
-+      }
+       }
 +      }),
 +    )
 +
@@ -3975,27 +4621,32 @@ index 096b8d0295867079e352aa717cb39e78686a41fc..b21e2e00c53cdeebef2b2b3a33bef01b
 +        expect(error.message).toContain("Closest match at line 4")
 +        expect(error.message).toContain(candidate)
 +        expect(error.message).not.toContain(decoy)
-       }
++      }
 +      expect(yield* readText(target)).toBe(`first\n${decoy}\nfiller\n${candidate}\n`)
      }),
    )
- 
+-
+   // [local-smark] per-file atomicity：多文件 patch 中一个文件失败时，
+   // 成功的文件应正常 apply，失败的文件在 output 中报告 error。
+   // 旧行为是整个 patch 失败（all-or-nothing），成功的 hunk 也被丢弃。
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd7b0c7606 100644
+
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -10,7 +10,9 @@ import { Format } from "../../src/format"
+@@ -11,7 +11,10 @@ import { Format } from "../../src/format"
  import { Agent } from "../../src/agent/agent"
- import { Bus } from "../../src/bus"
+ import { EventV2Bridge } from "../../src/event-v2-bridge"
  import { Truncate } from "@/tool/truncate"
 -import { SessionID, MessageID } from "../../src/session/schema"
 +import { SessionID, MessageID, PartID } from "../../src/session/schema"
 +import { MessageV2 } from "../../src/session/message-v2"
-+import { ModelID, ProviderID } from "../../src/provider/schema"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import { ModelV2 } from "@opencode-ai/core/model"
  import * as Tool from "../../src/tool/tool"
  import { testEffect } from "../lib/effect"
- import { FileWatcher } from "../../src/file/watcher"
-@@ -49,20 +51,48 @@ const init = Effect.fn("EditToolTest.init")(function* () {
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+@@ -45,20 +48,48 @@ const init = Effect.fn("EditToolTest.init")(function* () {
  // [local-smark] 构造包含 prior read 的 context，模拟生产环境中 edit 前已 read 文件的正常流程。
  // blind edit 检查要求 ctx.messages 中有指向同一文件的已完成 read/write/edit tool part。
  function ctxWithPriorRead(filePath: string): Tool.Context {
@@ -4017,8 +4668,8 @@ index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd
 +          path: { cwd: ".", root: "." },
 +          cost: 0,
 +          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+          modelID: ModelID.make("test"),
-+          providerID: ProviderID.make("test"),
++          modelID: ModelV2.ID.make("test"),
++          providerID: ProviderV2.ID.make("test"),
 +          time: { created: 0 },
 +        } satisfies MessageV2.Assistant,
          parts: [
@@ -4051,7 +4702,7 @@ index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd
    }
  }
  
-@@ -255,10 +285,31 @@ describe("tool.edit", () => {
+@@ -296,10 +327,31 @@ describe("tool.edit", () => {
        }),
      )
  
@@ -4087,7 +4738,7 @@ index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd
        Effect.gen(function* () {
          const test = yield* TestInstance
          const filepath = path.join(test.directory, "charmatch.txt")
-@@ -272,15 +323,15 @@ describe("tool.edit", () => {
+@@ -313,15 +365,15 @@ describe("tool.edit", () => {
          })
  
          expect(error).toBeInstanceOf(Error)
@@ -4108,7 +4759,7 @@ index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd
        Effect.gen(function* () {
          const test = yield* TestInstance
          const filepath = path.join(test.directory, "mismatch.txt")
-@@ -293,8 +344,31 @@ describe("tool.edit", () => {
+@@ -334,8 +386,31 @@ describe("tool.edit", () => {
          })
  
          expect(error).toBeInstanceOf(Error)
@@ -4142,7 +4793,7 @@ index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd
        }),
      )
  
-@@ -377,6 +451,45 @@ describe("tool.edit", () => {
+@@ -418,6 +493,45 @@ describe("tool.edit", () => {
        }),
      )
  
@@ -4188,3 +4839,18 @@ index 877a2d4c7d73f0301f793737c9101158d9268187..0aa0571a67634f197347ee479e8b79fd
      it.instance("emits change event for existing files", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
+
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ 
+ // [local-smark] 测试与 prompt.ts 通过 MessageV2 命名空间引用 WithParts/Part；
+ // 显式 re-export 让命名空间自导出携带这两个类型（SessionV1 为唯一来源）
+-export type { WithParts, Part, User, Assistant } from "@opencode-ai/core/v1/session"
++export type { WithParts, Part, User, Assistant, ToolPart } from "@opencode-ai/core/v1/session"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import {
+   APIError,
+

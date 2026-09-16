@@ -16,9 +16,9 @@ index 91c2f88f1..f66bec8cd 100644
  | Package path | `sdks/vscode` |
  | Source repository | `https://github.com/SMARK2022/opencode` |
  | Source branch | `dev-smark` |
--| Repository extension version | `1.17.31` |
-+| Repository extension version | `1.17.32` |
- | Recommended CLI | `opencode 1.17.32-smark` |
+-| Repository extension version | `1.17.28` |
++| Repository extension version | `1.17.31` |
+ | Recommended CLI | `opencode 1.17.28-smark` |
  | Default version source | `sdks/vscode/package.json` |
  | Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
 @@ -77,15 +77,15 @@ The expected payload is compact:
@@ -55,14 +55,16 @@ index 91c2f88f1..f66bec8cd 100644
  6. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
  7. If the notebook has executable cells, call `vscode_notebook_run` on one safe cell.
  8. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
-@@ -158,7 +158,7 @@ Do not publish before the extension manifest, README, and recommended CLI statem
+@@ -158,9 +158,9 @@ Do not publish before the extension manifest, README, and recommended CLI state.
  
  ## Versioning
  
--Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.17.31`) so Marketplace tooling accepts it; the recommended CLI is `1.17.32-smark`, but the two packages remain independently versioned.
-+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.17.32`) so Marketplace tooling accepts it; the recommended CLI is `1.17.32-smark`, but the two packages remain independently versioned.
+-Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.17.28`) so Marketplace tooling accepts it; the recommended CLI is `1.17.28-smark`, but the two packages remain independently versioned.
++Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.17.31`) so Marketplace tooling accepts it; the recommended CLI is `1.17.28-smark`, but the two packages remain independently versioned.
  
  Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
+ 
+ The repository root `script/release` currently targets a `publish.yml` workflow that is absent from this checkout. It is not an extension tag helper. Do not substitute either root release script for the local VSIX and manual publishing flow documented above.
  
 @@ -178,19 +178,19 @@ Supported IDE commands are `code`, `code-insiders`, `windsurf`, `cursor`, and `c
  
@@ -104,20 +106,16 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
 index 9a3331438..9a2d04e7a 100644
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
-@@ -6,11 +6,11 @@ Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CL
+@@ -3,7 +3,7 @@ # SMARK OpenCode IDE Bridge
+-Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code language, workspace, and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.17.27` until this repository build is published.
++Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code language, workspace, and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
+ 
+ | Field | Value |
  | --- | --- |
  | Extension ID | `SMARK2022.opencode-ide-bridge` |
  | Publisher | `SMARK2022` |
--| Repository extension version | `1.17.31` |
-+| Repository extension version | `1.17.32` |
- | Recommended CLI | `opencode 1.17.32-smark` |
- | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
- 
--The CLI and extension are versioned independently. Marketplace may continue to show `1.17.27` until this repository build is published.
-+The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
- 
- ## What It Adds
- 
+-| Repository extension version | `1.17.28` |
++| Repository extension version | `1.17.31` |
 @@ -121,7 +121,7 @@ The bridge does not bundle language servers. It calls providers registered by en
  
  | Operation | VS Code-backed behavior |
@@ -189,14 +187,12 @@ diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
 index e118aa534..7a8c4d9e7 100644
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
-@@ -2,8 +2,8 @@
+@@ -2,6 +2,6 @@
    "name": "opencode-ide-bridge",
    "displayName": "OpenCode IDE Bridge",
-   "description": "Local HTTP bridge extension for OpenCode IDE. Provides VS Code-backed language intelligence, notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
--  "version": "1.17.31",
--  "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3；#408 扩展版本追赶 CLI 1.17.31-smark，1.17.27→1.17.31",
-+  "version": "1.17.32",
-+  "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3；#450 扩展补丁版本 +1（1.17.31→1.17.32，独立 semver）；#408 扩展版本追赶 CLI 1.17.31-smark，1.17.27→1.17.31",
+   "description": "SMARK OpenCode IDE bridge for VS Code. Provides VS Code-backed language intelligence, notebook and Jupyter kernel operations, workspace context sharing, and terminal integration over a local authenticated bridge.",
+-  "version": "1.17.28",
+-  "//": "#408：协同升号 1.17.27→1.17.28——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
++  "version": "1.17.31",
++  "//": "#450：扩展版本对齐 CLI 1.17.31——1.17.28→1.17.31，格式保持三段式",
    "homepage": "https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode",
-   "publisher": "SMARK2022",
-   "repository": {

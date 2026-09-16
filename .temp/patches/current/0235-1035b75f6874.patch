@@ -310,75 +310,28 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -38,12 +38,39 @@
-   onSseCountChange = cb
- }
- 
--function eventResponse() {
-+function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-   return Effect.gen(function* () {
-     // SSE 客户端连接计数 +1，通知守护进程空闲计时器
-     sseClientCount++
+@@ -60,7 +60,10 @@
+ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
+   // SSE 客户端连接计数 +1，通知守护进程空闲计时器
+   sseClientCount++
+   onSseCountChange?.(sseClientCount)
++  // #235：计数进日志——daemon 空闲退出调试需要连接数上下文
++  // #235：eventResponse 为同步函数——日志经 runSync 即时落盘，不改变 SSE 返回形态
++  Effect.logInfo("global event connected", { sseClientCount }).pipe(Effect.runSync)
+   const stream = new PassThrough()
+   const write = (event: GlobalBusEvent) => {
+     // abort 竞态下 close 可能已跑但 GlobalBus 仍派发，此时静默丢弃写入
+@@ -83,7 +86,10 @@
+     GlobalBus.off("event", handler)
+     unsubscribeRequestAbort()
+     if (!stream.destroyed) stream.end()
+     // 下限保护：close 幂等触发（abort 与 stream close 双路）时不得把计数扣成负数
+     sseClientCount = Math.max(0, sseClientCount - 1)
      onSseCountChange?.(sseClientCount)
--    yield* Effect.logInfo("global event connected")
-+    // #235：计数进日志——daemon 空闲退出调试需要连接数上下文
-+    yield* Effect.logInfo("global event connected", { sseClientCount })
-+    // #235：Effect Stream 的 ensuring 在 Windows 客户端 abort 时不触发（0173 遗留），
-+    // #235：显式监听 request abort 保证断开计数/通知可靠到达 daemon
-+    // #235：disconnected 去重——abort 监听与 ensuring 共享同一清理，只执行一次
-+    let disconnected = false
-+    const disconnect = () => {
-+      if (disconnected) return
-+      disconnected = true
-+      sseClientCount = Math.max(0, sseClientCount - 1)
-+      onSseCountChange?.(sseClientCount)
-+      Effect.logInfo("global event disconnected", { sseClientCount }).pipe(Effect.runSync)
-+    }
-+    // #235：Bun/Node 的 request.source 是 IncomingMessage——用 aborted/close 事件感知客户端断开
-+    // #235：source 类型在 Bun/Node 间不统一——双路径注册保证任意运行时都可靠
-+    const source = request.source as { aborted?: boolean; on?: (event: string, listener: () => void) => unknown; off?: (event: string, listener: () => void) => unknown }
-+    if (source instanceof Request) {
-+      source.signal.addEventListener("abort", disconnect, { once: true })
-+    } else if (typeof source?.on === "function") {
-+      const onAborted = () => {
-+        disconnect()
-+        source.off?.("aborted", onAborted)
-+        source.off?.("close", onAborted)
-+      }
-+      // #235：aborted 与 close 任一到达即视为断开——去重由 disconnected 标志保证
-+      source.on("aborted", onAborted)
-+      source.on("close", onAborted)
-+    }
-     const events = Stream.callback<GlobalBusEvent>((queue) => {
-       const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
-       return Effect.acquireRelease(
-@@ -62,14 +89,8 @@
-         Stream.map(eventData),
-         Stream.pipeThroughChannel(Sse.encode()),
-         Stream.encodeText,
--        Stream.ensuring(Effect.logInfo("global event disconnected")),
--        // SSE 客户端断开时计数 -1，通知守护进程可能需要启动空闲计时器
--        Stream.ensuring(
--          Effect.sync(() => {
--            sseClientCount--
--            onSseCountChange?.(sseClientCount)
--          }),
--        ),
-+        // #235：断开清理走去重 disconnect——与 abort 监听共享，避免重复减计数
-+        Stream.ensuring(Effect.sync(disconnect)),
-       ),
-       {
-         contentType: "text/event-stream",
-@@ -94,7 +115,8 @@
-     })
- 
-     const event = Effect.fn("GlobalHttpApi.event")(function* () {
--      return yield* eventResponse()
-+      const request = yield* HttpServerRequest.HttpServerRequest
-+      return yield* eventResponse(request)
-     })
- 
-     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
++    // #235：断开计数进日志——与 connected 日志配对，空闲退出调试可观测断开时刻
++    // #235：closed 标志保证 abort 与 stream close 双触发去重后日志只发一次
++    Effect.logInfo("global event disconnected", { sseClientCount }).pipe(Effect.runSync)
+   }
 diff --git a/packages/opencode/test/cli/cmd/tui/exit.test.tsx b/packages/opencode/test/cli/cmd/tui/exit.test.tsx
 new file mode 100644
 --- /dev/null

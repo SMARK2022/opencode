@@ -1,34 +1,21 @@
-From 018c14b9317d6d84fe99d8a99d37b74fa2c24e95 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Fri, 19 Jun 2026 22:40:47 +0800
-Subject: [PATCH] =?UTF-8?q?feat(diff):=20=E5=AE=9E=E7=8E=B0=E5=B7=A5?=
- =?UTF-8?q?=E5=85=B7=E8=B0=83=E7=94=A8=E6=B5=81=E8=81=9A=E5=90=88=E7=9A=84?=
- =?UTF-8?q?=E6=96=87=E4=BB=B6=E4=BF=AE=E6=94=B9=E8=BF=BD=E8=B8=AA=EF=BC=8C?=
- =?UTF-8?q?=E6=94=AF=E6=8C=81=E5=B9=B6=E8=A1=8C=E5=B7=A5=E5=85=B7=E7=9A=84?=
- =?UTF-8?q?=E6=94=B9=E5=8A=A8=E5=BD=92=E5=9B=A0?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
-index aa4b8719bc9eee52563db130a53f0e536641f0a7..55dcd8b119ae1164592687ad70183325843a63b4 100644
 --- a/packages/opencode/src/session/summary.ts
 +++ b/packages/opencode/src/session/summary.ts
-@@ -1,7 +1,9 @@
+@@ -1,8 +1,10 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Effect, Layer, Context, Schema } from "effect"
 +import path from "path"
- import { Bus } from "@/bus"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { EventV2Bridge } from "@/event-v2-bridge"
  import { Snapshot } from "@/snapshot"
- import { Storage } from "@/storage/storage"
 +import { InstanceState } from "@/effect/instance-state"
- import * as Session from "./session"
- import { MessageV2 } from "./message-v2"
+ import { Session } from "./session"
  import { SessionID, MessageID } from "./schema"
-@@ -79,6 +81,18 @@ export const layer = Layer.effect(
-     const bus = yield* Bus.Service
+ import { Config } from "@/config/config"
+@@ -80,6 +82,18 @@ const layer = Layer.effect(
+     const config = yield* Config.Service
  
-     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: MessageV2.WithParts[] }) {
+     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: SessionV1.WithParts[] }) {
 +      // 修改文件追踪以「工具调用流」为主源：edit/write/apply_patch 各自携带落盘前后的
 +      // 文件改动证据（part.state.metadata），按文件聚合后能区分不同工具/并行 subagent
 +      // 的改动归属，避免 git 整树快照把并发改动并集成 A∪B。
@@ -44,7 +31,7 @@ index aa4b8719bc9eee52563db130a53f0e536641f0a7..55dcd8b119ae1164592687ad70183325
        let from: string | undefined
        let to: string | undefined
        for (const item of input.messages) {
-@@ -94,8 +108,21 @@ export const layer = Layer.effect(
+@@ -95,8 +109,21 @@ const layer = Layer.effect(
            if (part.type === "step-finish" && part.snapshot) to = part.snapshot
          }
        }
@@ -68,10 +55,11 @@ index aa4b8719bc9eee52563db130a53f0e536641f0a7..55dcd8b119ae1164592687ad70183325
      })
  
      const summarize = Effect.fn("SessionSummary.summarize")(function* (input: {
-@@ -155,6 +182,126 @@ export const defaultLayer = Layer.suspend(() =>
-   ),
+@@ -145,6 +172,127 @@ const layer = Layer.effect(
+   }),
  )
  
++
 +// 将路径统一为相对 base 的正斜杠路径，与 git numstat 输出格式对齐，
 +// 保证工具来源与 git 兜底来源能在合并去重时按同一 key 匹配。
 +// 相对路径按 fromBase（默认 base 本身）解析为绝对再求相对：git 路径来自 directory，
@@ -107,7 +95,7 @@ index aa4b8719bc9eee52563db130a53f0e536641f0a7..55dcd8b119ae1164592687ad70183325
 +// - apply_patch: metadata.files[]（relativePath 已相对 worktree，含 type/计数）
 +// - edit: metadata.filediff（绝对 file，含 patch/计数）
 +// - write: metadata.diff + metadata.filepath（绝对，仅 exists=true 有 diff，计数现场算）
-+function collectToolDiffs(messages: MessageV2.WithParts[], worktree: string): Snapshot.FileDiff[] {
++function collectToolDiffs(messages: SessionV1.WithParts[], worktree: string): Snapshot.FileDiff[] {
 +  const byFile = new Map<string, Snapshot.FileDiff>()
 +  const merge = (file: string, patch: string, additions: number, deletions: number, status?: string) => {
 +    const rel = toWorktreeRel(worktree, file)
@@ -195,21 +183,28 @@ index aa4b8719bc9eee52563db130a53f0e536641f0a7..55dcd8b119ae1164592687ad70183325
  export const DiffInput = Schema.Struct({
    sessionID: SessionID,
    messageID: Schema.optional(MessageID),
+
+
 diff --git a/packages/opencode/test/session/summary-tool-diff.test.ts b/packages/opencode/test/session/summary-tool-diff.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f521550b404a01
 --- /dev/null
 +++ b/packages/opencode/test/session/summary-tool-diff.test.ts
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,206 @@
 +import { describe, expect } from "bun:test"
 +import { Effect, Layer } from "effect"
 +import { Session } from "@/session/session"
 +import { SessionSummary } from "@/session/summary"
 +import { Snapshot } from "@/snapshot"
-+import { MessageV2 } from "@/session/message-v2"
-+import { ModelID, ProviderID } from "../../src/provider/schema"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
++import { Model } from "@opencode-ai/schema/model"
++import { Provider } from "@opencode-ai/schema/provider"
 +import { MessageID, PartID, SessionID } from "../../src/session/schema"
 +import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { InstanceStore } from "../../src/project/instance-store"
++import { InstanceBootstrap } from "../../src/project/bootstrap-service"
 +import { provideTmpdirInstance } from "../fixture/fixture"
 +import { testEffect } from "../lib/effect"
 +
@@ -217,11 +212,21 @@ index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f52155
 +// 现状 computeDiff 仅用 snapshot.diffFull(from,to)，无 step 快照时返回空数组，
 +// 无法反映同 turn 内 edit/write/apply_patch 各自的文件改动，也无法在并行 subagent
 +// 场景下按工具归因（会把并发改动并集成 A∪B）。下列断言在旧实现下均为 RED。
-+const env = Layer.mergeAll(
-+  Session.defaultLayer,
-+  SessionSummary.defaultLayer,
-+  Snapshot.defaultLayer,
-+  CrossSpawnSpawner.defaultLayer,
++// InstanceStore.bootstrapNode 设计为 unbound，测试环境用 noop 引导替代真实项目扫描
++const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
++
++// V2 装配：CrossSpawnSpawner 依赖 filesystem+path（缺 path 则 ChildProcessSpawner 未初始化），
++// SessionSummary.node 传递依赖 Session/Snapshot/Config，InstanceStore 承载 provideTmpdirInstance 的实例上下文。
++const env = AppNodeBuilder.build(
++  LayerNode.group([
++    CrossSpawnSpawner.node,
++    LayerNodePlatform.filesystem,
++    LayerNodePlatform.path,
++    InstanceStore.node,
++    Session.node,
++    SessionSummary.node,
++  ]),
++  [[InstanceStore.bootstrapNode, noopBootstrap]],
 +)
 +
 +const it = testEffect(env)
@@ -229,7 +234,7 @@ index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f52155
 +// 构造一条带 completed 工具 part 的 assistant 消息。metadata 形态与真实 edit/write/
 +// apply_patch 工具返回一致（edit 用 filediff、write 用 diff+filepath、apply_patch 用 files[]），
 +// 这样测试断言的是行为而非实现细节。
-+function assistantWithTools(sessionID: SessionID, worktree: string, parts: MessageV2.Part[]): MessageV2.WithParts {
++function assistantWithTools(sessionID: SessionID, worktree: string, parts: SessionV1.Part[]): SessionV1.WithParts {
 +  const messageID = MessageID.ascending()
 +  return {
 +    info: {
@@ -241,8 +246,8 @@ index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f52155
 +      path: { cwd: worktree, root: worktree },
 +      cost: 0,
 +      tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+      modelID: ModelID.make("gpt-4"),
-+      providerID: ProviderID.make("openai"),
++      modelID: Model.ID.make("gpt-4"),
++      providerID: Provider.ID.make("openai"),
 +      parentID: MessageID.ascending(),
 +      time: { created: Date.now() },
 +      finish: "end_turn",
@@ -251,7 +256,7 @@ index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f52155
 +  }
 +}
 +
-+function toolPart(tool: string, metadata: Record<string, unknown>): MessageV2.Part {
++function toolPart(tool: string, metadata: Record<string, unknown>): SessionV1.Part {
 +  return {
 +    id: PartID.ascending(),
 +    sessionID: "" as SessionID,
@@ -268,7 +273,7 @@ index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f52155
 +      metadata,
 +      time: { start: 0, end: 1 },
 +    },
-+  } as MessageV2.Part
++  } as SessionV1.Part
 +}
 +
 +// edit 工具的 metadata：filediff 内含绝对路径的 file、patch 文本与增删计数
@@ -390,3 +395,4 @@ index 0000000000000000000000000000000000000000..c00a002b25776fbd56655c7d22f52155
 +    ),
 +  )
 +})
++

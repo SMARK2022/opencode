@@ -40,10 +40,12 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 index 633b4aeb7..d7f4ca5ea 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1253,7 +1253,60 @@ const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"))
+@@ -1183,9 +1183,64 @@
+     { git: true },
    )
  
    itCompaction.instance(
+     // #256：synthetic/ignored 文本不得污染 memento——过滤按 part 粒度生效
 -    "keeps synthetic and ignored user text out of recent user mementos",
 +    "preserves raw recent user instructions across repeated compactions",
 +    () => {
@@ -65,6 +67,7 @@ index 633b4aeb7..d7f4ca5ea 100644
 +        let msgs = yield* ssn.messages({ sessionID: session.id })
 +        let parent = msgs.at(-1)?.info.id
 +        expect(parent).toBeTruthy()
++        // #257：第二次压缩基于第一次压缩后的尾部——memento 只携带尚未被压缩边界覆盖的原始指令
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 +
 +        const latest = yield* createUserMessage(session.id, "latest request after prior compaction")
@@ -80,6 +83,7 @@ index 633b4aeb7..d7f4ca5ea 100644
 +        // #257：readCompactionPart 读最近一次压缩边界——两次压缩后取第二次的 memento
 +        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
 +
++        // #257：核心不变量——首次压缩前的 raw 指令在第二次压缩后仍须完整出现在 memento 中
 +        expect(recentUserMemento).toContain("latest request after prior compaction")
 +        expect(recentUserMemento).toContain("raw instruction before prior compaction")
 +        expect(recentUserMemento).toContain("truncated for compaction memento")

@@ -11,172 +11,412 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/file/ripgrep.ts b/packages/opencode/src/file/ripgrep.ts
-index af711cc6b0ff75e7c335039d88ffdb54bde7722a..83bd4b2956b42c5a9c356adfa7b47a7ece8b0bbb 100644
---- a/packages/opencode/src/file/ripgrep.ts
-+++ b/packages/opencode/src/file/ripgrep.ts
-@@ -113,6 +113,9 @@ export interface SearchResult {
-   items: Item[]
-   partial: boolean
-   truncated: boolean
-+  // true 表示 rg 已被时间预算主动终止；调用方应把 items 当作不完整结果，
+diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
+--- a/packages/core/src/ripgrep.ts
++++ b/packages/core/src/ripgrep.ts
+@@ -81,18 +81,41 @@ export interface GlobInput {
+ export interface GrepInput {
+   readonly cwd: string
+   readonly pattern: string
++  // #244：单文件目标不受 include/exclude glob 影响，在 search 内部单独传给 rg
+   readonly file?: string
+-  readonly include?: string
++  // #244：include/exclude 允许单个 glob 或 glob 列表，保持同一形态避免两参数定义分叉
++  readonly include?: string | readonly string[]
++  readonly exclude?: string | readonly string[]
+   readonly limit: number
+   // #138：false 关闭候选上限
+   readonly maxFiles?: number | false
++  // #244：默认 undefined 保持既有调用方行为；只有显式传入 timeout 的调用
++  // 才启用受控终止，避免改变 find/glob 等内部搜索语义。
++  readonly timeout?: number | false
++  // #244：false 是显式关闭（与 undefined 未设置区分），供调用方声明「本路径永不超时」
+   readonly signal?: AbortSignal
+ }
+ 
++export interface SearchResult {
++  // #244：items 已按调用方 limit 截断；展示层需要自行决定是否提示 "N+"
++  readonly items: readonly Match[]
++  // #138：达到 limit 时为 true，并且进程已被主动终止以避免无谓的全量扫描
++  readonly truncated: boolean
++  // #244：partial 来自 rg 的 exit code 2，表示部分路径不可访问但搜索本身完成
++  readonly partial: boolean
++  // #244：true 表示 rg 已被时间预算主动终止；调用方应把 items 当作不完整结果，
 +  // 不能把空 items 解释成“全量搜索确认没有匹配”。
-+  timedOut?: boolean
- }
- 
- export interface FilesInput {
-@@ -130,6 +133,9 @@ export interface SearchInput {
-   glob?: string[]
-   limit?: number
-   maxFiles?: number | false
-+  // 默认 undefined 保持既有调用方行为；只有显式传入 timeout 的工具调用
-+  // 才启用受控终止，避免改变 file API/debug 命令等内部搜索语义。
-+  timeout?: number | false
-   follow?: boolean
-   file?: string[]
-   signal?: AbortSignal
-@@ -187,6 +193,12 @@ function error(stderr: string, code: number) {
-   return err
- }
- 
-+function fatalSearchError(stderr: string) {
-+  // timeout 后的普通 stderr 可能只是被截断搜索中的诊断信息；只有 rg 明确
-+  // 报告正则/参数类错误时，才覆盖 timeout 语义并向调用方暴露失败。
-+  return stderr.includes("regex parse error") || stderr.includes("error parsing regex")
++  readonly timedOut?: boolean
 +}
 +
- function clean(file: string) {
-   return path.normalize(file.replace(/^\.[\\/]/, ""))
+ export interface Interface {
+   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
+   readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
+   readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
++  // #244：grep 工具需要 timedOut/truncated/partial 元数据来判断「空结果」与「受控截断」；
++  // grep() 保留纯匹配列表形状给既有 HTTP/debug 调用方。
++  // search 与 grep 由同一 searchImpl 支撑，仅返回投影不同，不存在双实现漂移。
++  readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
  }
-@@ -443,49 +455,86 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
-             const handle = yield* spawner.spawn(yield* command(input.cwd, searchArgs(input)))
-             const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
-             let truncated = false
-+            let timedOut = false
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Ripgrep") {}
+@@ -113,6 +136,9 @@ const layer = Layer.effect(
+       readonly args: string[]
+       readonly limit: number
+       readonly signal?: AbortSignal
++      // #244：与 GrepInput.timeout 同形；仅 search 通道透传，
++      // find/glob/grep 调用方不传即保持零行为变化
++      readonly timeout?: number | false
+       readonly parse: (line: string) => Effect.Effect<A | undefined, Error>
+       readonly pattern?: string
+       readonly onItem?: (item: A) => Effect.Effect<void>
+@@ -122,15 +148,42 @@ const layer = Layer.effect(
+           const handle = yield* process.spawn(
+             ChildProcess.make(yield* binary.filepath, input.args, { cwd: input.cwd, extendEnv: true, stdin: "ignore" }),
+           )
++          // #244：搜索超时是「受控截断」而不是工具错误：调用方仍需要已解析的匹配项，
++          // 同时必须确定性终止 rg，避免低命中大目录扫描无限等待；forceKillAfter
++          // 先给 rg 正常退出机会再升级强杀（与 shell 工具同一升级窗口）。
++          let timedOut = false
++          if (input.timeout !== false && input.timeout !== undefined && input.timeout > 0) {
++            yield* Effect.forkScoped(
++              Effect.sleep(`${input.timeout} millis`).pipe(
++                Effect.tap(() => Effect.sync(() => (timedOut = true))),
++                Effect.flatMap(() => handle.kill({ forceKillAfter: "3 seconds" })),
++                // #244：kill 失败（进程已自然退出）无需恢复——此刻 timedOut 已置位，
++                // 结果仍按受控截断返回，不让竞态尾部污染主流程
++                Effect.ignore,
++              ),
++            )
++          }
++          // #244：stderr 采集与 timeout 独立并行——超时 kill 后仍要 join 到完整 stderr，
++          // 用于区分「被中断扫描的噪音」与「真实的正则/参数错误」
+           const stderrFiber = yield* collectStream(handle.stderr, ERROR_BYTES).pipe(
+             Effect.map((output) => output.buffer.toString("utf8")),
+             Effect.forkScoped,
+           )
+           let observed = 0
++          // #244：rows 采集与 timeout fiber 并发推进——kill 触发后 stdout 流自然 EOF，
++          // 已入流的完整行仍会被解析入结果，这就是「受控截断保留部分匹配」的实现基础；
++          // observed 计数只服务 onItem 回调限流，与 rows 截断判定无关
+           const rows = yield* Stream.decodeText(handle.stdout).pipe(
+             Stream.splitLines,
+             Stream.filter((line) => line.length > 0),
+-            Stream.mapEffect(input.parse),
++            Stream.mapEffect((line) =>
++              input.parse(line).pipe(
++                // #244：timeout 可能在 rg 写出最后一行 JSON 中途杀进程；半行残渣
++                // 只表示输出被受控截断，不能丢掉此前已解析的匹配。非超时的解析
++                // 错误仍然上抛，继续暴露真实 rg 输出异常。
++                Effect.catch((err) => (timedOut ? Effect.succeed(undefined) : Effect.fail(err))),
++              ),
++            ),
+             Stream.filter((row): row is A => row !== undefined),
+             Stream.tap((row) => {
+               if (!input.onItem || observed++ >= input.limit) return Effect.void
+@@ -144,18 +197,36 @@ const layer = Layer.effect(
+           if (truncated) {
+             // #138：达到结果上限后主动 kill，避免超大仓库继续全量扫描
+             yield* handle.kill().pipe(Effect.ignore)
+-            return { items: rows.slice(0, input.limit), truncated, partial: false }
++            return { items: rows.slice(0, input.limit), truncated, partial: false, timedOut: timedOut || undefined }
+           }
+ 
+-          const code = yield* handle.exitCode
++          // #244：timeout 主动 kill 是成功的有界搜索；POSIX 上被信号终止的
++          // exitCode 会以错误出现，不能让受控截断伪装成进程失败。
++          // 用户 abort（signal 通道）不在此列：它必须保持原始错误语义，
++          // 否则调用方无法区分「我取消的」和「搜索自己结束的」。
++          const code = yield* handle.exitCode.pipe(
++            Effect.catch((err) => (timedOut ? Effect.succeed(0) : Effect.fail(err))),
++          )
+           const stderr = yield* Fiber.join(stderrFiber)
++          // #244：非超时路径的正则错误检查；超时后 stderr 可能包含被中断扫描的
++          // 无关诊断，只有无匹配可保留时才升级为失败（见下方超时分支）
+           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
+             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
+           }
+           if (code !== 0 && code !== 1 && code !== 2) {
+             return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
+           }
+-          return { items: code === 1 ? [] : rows, truncated: false, partial: code === 2 }
++          // #244：极小 timeout 可能先触发 kill 再等到正则错误 stderr；没有可保留
++          // 匹配时暴露真实错误，不伪装成空的超时结果。
++          if (timedOut && rows.length === 0 && input.pattern && isInvalidPattern(stderr)) {
++            return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
++          }
++          return {
++            items: code === 1 && !timedOut ? [] : rows,
++            truncated: false,
++            partial: code === 2,
++            timedOut: timedOut || undefined,
++          }
+         }),
+       )
+       const abortable = input.signal ? program.pipe(Effect.raceFirst(waitForAbort(input.signal))) : program
+@@ -168,80 +239,29 @@ const layer = Layer.effect(
+       )
+     }
+ 
+-    return Service.of({
+-      glob: (input) =>
+-        run<string>({
+-          cwd: input.cwd,
+-          limit: input.limit,
+-          signal: input.signal,
+-          args: [
+-            "--no-config",
+-            "--files",
+-            ...(input.hidden ? ["--hidden"] : []),
+-            ...(input.follow ? ["--follow"] : []),
+-            `--glob=${input.pattern}`,
+-            "--glob=!**/.git/**",
+-            ".",
+-          ],
+-          parse: (line) =>
+-            Effect.succeed(
+-              line
+-                .replace(/^(?:\.[\\/])+/u, "")
+-                .replace(/^[\\/]+/u, "")
+-                .replaceAll("\\", "/"),
+-            ),
+-        }).pipe(
+-          Effect.map((result) =>
+-            result.items.map((relative) =>
+-              Entry.make({
+-                path: RelativePath.make(relative),
+-                type: "file",
+-              }),
+-            ),
+-          ),
+-          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
+-        ),
+-      find: (input) =>
+-        run<Entry>({
+-          cwd: input.cwd,
+-          limit: input.limit,
+-          signal: input.signal,
+-          args: [
+-            "--no-config",
+-            "--files",
+-            ...(input.hidden ? ["--hidden"] : []),
+-            ...(input.follow ? ["--follow"] : []),
+-            ...(input.pattern === "*" ? [] : [`--glob=${input.pattern}`]),
+-            "--glob=!**/.git/**",
+-            ".",
+-          ],
+-          parse: (line) => {
+-            const relative = line
+-              .replace(/^(?:\.[\\/])+/u, "")
+-              .replace(/^[\\/]+/u, "")
+-              .replaceAll("\\", "/")
+-            return Effect.succeed(
+-              Entry.make({
+-                path: RelativePath.make(relative),
+-                type: "file",
+-              }),
+-            )
+-          },
+-          onItem: input.onEntry,
+-        }).pipe(
+-          Effect.map((result) => result.items),
+-          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
+-        ),
+-      grep: (input) =>
++    // #244：空 glob 没有明确搜索语义，作为 no-op 忽略；真实 pattern 的必填校验仍在工具入口。
++    // 复制入参为数组，避免调用方传入的 readonly 数组被下游意外变更。
++    const patterns = (input?: string | readonly string[]) =>
++      !input ? [] : (Array.isArray(input) ? [...input] : [input]).filter((item) => item.length > 0)
 +
-+            if (input.timeout !== false && input.timeout !== undefined && input.timeout > 0) {
-+              // 搜索超时是“受控截断”而不是工具错误：调用方仍需要已经从
-+              // stdout 解析出的匹配项，同时必须确定性终止 rg，避免低命中
-+              // 大目录扫描让工具无限等待。forceKillAfter 与 shell 工具保持
-+              // 同一个 3 秒升级窗口，先给 rg 正常退出机会，再由 spawner 升级。
-+              yield* Effect.forkScoped(
-+                Effect.sleep(`${input.timeout} millis`).pipe(
-+                  Effect.tap(() =>
-+                    Effect.sync(() => {
-+                      timedOut = true
-+                    }),
-+                  ),
-+                  Effect.flatMap(() => handle.kill({ forceKillAfter: "3 seconds" })),
-+                  Effect.ignore,
-+                ),
-+              )
-+            }
- 
-             const [items, stderr, code] = yield* Effect.all(
-               [
-                 Stream.decodeText(handle.stdout).pipe(
-                   Stream.splitLines,
-                   Stream.filter((line) => line.length > 0),
--                  Stream.mapEffect(parse),
--                  Stream.filter((item): item is Match => item.type === "match"),
-+                  Stream.mapEffect((line) =>
-+                    parse(line).pipe(
-+                      Effect.catch((err) => {
-+                        // timeout 可能在 rg 写出最后一行 JSON 中途杀进程；这类半行
-+                        // 只表示输出被受控截断，不能丢掉此前已解析的 matches。非超时
-+                        // 的解析错误仍然上抛，继续暴露真实 rg 输出异常。
-+                        if (timedOut) return Effect.succeed(undefined)
-+                        return Effect.fail(err)
-+                      }),
-+                    ),
-+                  ),
-+                  Stream.filter((item): item is Match => item?.type === "match"),
-                   Stream.map((item) => row(item.data)),
--                  // Tool callers usually need a bounded preview, not a precise
--                  // count. Taking one extra row lets us report truncation and
--                  // then terminate rg instead of continuing an expensive full
--                  // repository scan just to discard the remaining output later.
--                  Stream.take(limit === undefined ? Infinity : limit + 1),
-+                  // 工具调用方需要有界预览而不是精确总数；多取一条只用于确认
-+                  // 截断状态，随后立即终止 rg，避免为了丢弃后续输出而继续扫全库。
-+                  Stream.take(limit + 1),
-                   Stream.runCollect,
-                   Effect.map((chunk) => [...chunk]),
-                   Effect.tap((items) =>
-                     Effect.gen(function* () {
--                      if (limit === undefined || items.length <= limit) return
-+                      if (items.length <= limit) return
-                       truncated = true
-                       yield* handle.kill().pipe(Effect.ignore)
-                     }),
-                   ),
--                  Effect.map((items) => (limit === undefined ? items : items.slice(0, limit))),
-+                  Effect.map((items) => items.slice(0, limit)),
-                 ),
-                 Stream.mkString(Stream.decodeText(handle.stderr)),
--                // A limit-triggered kill is a successful bounded search, while
--                // user aborts or real process failures should keep surfacing as
--                // errors through the normal exitCode path.
--                handle.exitCode.pipe(Effect.catch((err) => (truncated ? Effect.succeed(0) : Effect.fail(err)))),
-+                // limit/timeout 主动 kill 都是成功的有界搜索；用户 abort 或真实
-+                // 进程失败仍通过 exitCode 保持错误语义，不能被普通截断吞掉。
-+                handle.exitCode.pipe(
-+                  Effect.catch((err) => (truncated || timedOut ? Effect.succeed(0) : Effect.fail(err))),
-+                ),
-               ],
-               { concurrency: "unbounded" },
-             )
- 
--            if (!truncated && code !== 0 && code !== 1 && code !== 2) {
-+            // 极小 timeout 可能先触发 kill，再等到 rg 写出正则错误等 stderr；
-+            // 没有任何匹配可保留时应暴露真实错误，不能伪装成空的超时结果。
-+            const stderrText = stderr.trim()
-+            if (timedOut && items.length === 0 && fatalSearchError(stderrText)) {
-+              return yield* Effect.fail(error(stderr, code))
-+            }
-+            if (!truncated && (!timedOut || stderrText) && code !== 0 && code !== 1 && code !== 2) {
-+              return yield* Effect.fail(error(stderr, code))
-+            }
-+            if (code === 2 && items.length === 0 && stderrText && (!timedOut || fatalSearchError(stderrText))) {
-               return yield* Effect.fail(error(stderr, code))
-             }
--            if (code === 2 && items.length === 0 && stderr.trim()) return yield* Effect.fail(error(stderr, code))
- 
-             return {
--              items: code === 1 && !truncated ? [] : items,
-+              items: code === 1 && !truncated && !timedOut ? [] : items,
-               partial: code === 2 && !truncated,
-               truncated,
-+              timedOut: timedOut || undefined,
-             }
-           }),
-         )
++    const searchImpl = (input: GrepInput) =>
+         Effect.gen(function* () {
+-          // #138：先限制候选文件数
++          // #244：include 原样入选，exclude 统一加 ! 负向 glob；两者都是空时退回
++          // 默认只排除 .git 的行为。已带 ! 的 exclude 原样透传避免双重取反，
++          // 与工具层 patterns() 的过滤语义一致
++          const globs = [
++            ...patterns(input.include),
++            ...patterns(input.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
++          ]
++          // #138：先限制候选文件数；grep 工具传 maxFiles:false 关闭预扫，改用时间预算
+           const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
+           if (maxFiles !== undefined) {
+             // #138：显式单文件目标不走目录候选计数
+             if (input.file) {
+               // single file target is always within bound
+             } else {
+-              // #138：--files 预扫候选，超过 maxFiles 则拒绝
++              // #138：--files 预扫候选，超过 maxFiles 则拒绝；exclude 同样收窄候选，
++              // 否则被排除目录仍会占满候选额度造成误拒
+               const candidates = yield* run<string>({
+                 cwd: input.cwd,
+                 limit: maxFiles + 1,
+@@ -250,7 +270,10 @@ const layer = Layer.effect(
+                   "--no-config",
+                   "--files",
+                   "--hidden",
+-                  ...(input.include ? [`--glob=${input.include}`] : []),
++                  ...patterns(input.include).map((item) => `--glob=${item}`),
++                  ...patterns(input.exclude).map((item) => `--glob=${item.startsWith("!") ? item : `!${item}`}`),
++                  // #244：.git 兑底排除放在用户 glob 之后——用户排除永不失效，
++                  // 且 rg 的多 glob 语义是并集匹配，顺序不影响正确性
+                   "--glob=!**/.git/**",
+                   ".",
+                 ],
+@@ -270,6 +293,8 @@ const layer = Layer.effect(
+           }
+           // #138：结果条数默认 MAX_SEARCH_RESULTS
+           const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
++          // #244：...input 透传 include/exclude/timeout/signal——search 的全部预算
++          // 与过滤语义都经由这一处进入底层执行器
+           return yield* run<RawMatchData>({
+           ...input,
+           limit,
+@@ -278,7 +303,7 @@ const layer = Layer.effect(
+             "--json",
+             "--hidden",
+             "--no-messages",
+-            ...(input.include ? [`--glob=${input.include}`] : []),
++            ...globs.map((item) => `--glob=${item}`),
+             "--glob=!**/.git/**",
+             "--",
+             input.pattern,
+@@ -306,8 +331,8 @@ const layer = Layer.effect(
+               }),
+             ),
+         }).pipe(
+-          Effect.map((result) =>
+-            result.items.map((match) => {
++          Effect.map((result) => ({
++            items: result.items.map((match) => {
+               const relative = match.path.text
+                 .replace(/^(?:\.[\\/])+/u, "")
+                 .replace(/^[\\/]+/u, "")
+@@ -319,6 +344,8 @@ const layer = Layer.effect(
+                 }),
+                 line: match.line_number,
+                 offset: match.absolute_offset,
++                // #244：行预览截断与 timeout 截断独立——超时返回的部分匹配
++                // 仍按同一线预览上限裁剪，不因截断来源不同而放大单行体积
+                 text: match.lines.text.length > 2_000 ? match.lines.text.slice(0, 2_000) + "..." : match.lines.text,
+                 submatches: match.submatches.map((submatch) => ({
+                   text: submatch.match.text,
+@@ -327,9 +354,86 @@ const layer = Layer.effect(
+                 })),
+               })
+             }),
+-          ),
++            truncated: result.truncated,
++            partial: result.partial,
++            timedOut: result.timedOut,
++          })),
+           )
+-        }),
++        })
++    return Service.of({
++      glob: (input) =>
++        // #244：glob/find 不接受 timeout——内部诊断路径保持既有的无预算语义，
++        // 时间预算只面向面向用户交互的 search 通道
++        run<string>({
++          cwd: input.cwd,
++          limit: input.limit,
++          signal: input.signal,
++          args: [
++            "--no-config",
++            "--files",
++            ...(input.hidden ? ["--hidden"] : []),
++            ...(input.follow ? ["--follow"] : []),
++            `--glob=${input.pattern}`,
++            "--glob=!**/.git/**",
++            ".",
++          ],
++          parse: (line) =>
++            Effect.succeed(
++              line
++                .replace(/^(?:\.[\\/])+/u, "")
++                .replace(/^[\\/]+/u, "")
++                .replaceAll("\\", "/"),
++            ),
++        }).pipe(
++          Effect.map((result) =>
++            result.items.map((relative) =>
++              Entry.make({
++                path: RelativePath.make(relative),
++                type: "file",
++              }),
++            ),
++          ),
++          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
++        ),
++      find: (input) =>
++        run<Entry>({
++          cwd: input.cwd,
++          limit: input.limit,
++          signal: input.signal,
++          args: [
++            "--no-config",
++            "--files",
++            ...(input.hidden ? ["--hidden"] : []),
++            ...(input.follow ? ["--follow"] : []),
++            ...(input.pattern === "*" ? [] : [`--glob=${input.pattern}`]),
++            "--glob=!**/.git/**",
++            // #244：与 glob 通道同序：用户过滤先命中，git 元数据兑底排除
++            ".",
++          ],
++          parse: (line) => {
++            const relative = line
++              .replace(/^(?:\.[\\/])+/u, "")
++              .replace(/^[\\/]+/u, "")
++              .replaceAll("\\", "/")
++            return Effect.succeed(
++              Entry.make({
++                path: RelativePath.make(relative),
++                type: "file",
++              }),
++            )
++          },
++          onItem: input.onEntry,
++        }).pipe(
++          Effect.map((result) => result.items),
++          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
++        ),
++      search: searchImpl,
++      // #244：grep 薄壳保持 Service 早入调用方的返回形状，避免协议层连锁修改；
++      // HTTP file API 与 debug 命令的既有行为由这条薄壳完整保留
++      grep: (input) =>
++        // #244：既有 HTTP/debug 调用方只要匹配列表；受控截断元数据走 search 通道。
++        // 错误通道逐字透传，保持 SearchTooBroadError 在 file API 的既有映射行为。
++        Effect.map(searchImpl(input), (result) => result.items),
+     })
+   }),
+ )
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
-index 91b87a24b20cb69bf9ac264ecc476ac3d3c3039a..9660033280524bbe14ae5067db372c0ded6c71b5 100644
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
-@@ -3,7 +3,8 @@ import { Schema } from "effect"
- import { Effect, Option } from "effect"
+@@ -3,6 +3,8 @@ import { Effect, Schema } from "effect"
  import { InstanceState } from "@/effect/instance-state"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
--import { Ripgrep, SearchTooBroadError } from "../file/ripgrep"
-+import { PositiveInt } from "@opencode-ai/core/schema"
-+import { Ripgrep } from "../file/ripgrep"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
++// #244：timeout 上限用 schema 包的正整数与上限检查表达
++import { PositiveInt } from "@opencode-ai/schema"
+ // #138：grep 结果上限与过宽候选处理
  import { assertExternalDirectoryEffect } from "./external-directory"
  import DESCRIPTION from "./grep.txt"
- import * as Tool from "./tool"
-@@ -11,17 +12,41 @@ import { Reference } from "@/reference/reference"
- 
- const MAX_LINE_LENGTH = 2000
+@@ -11,14 +13,37 @@ import * as Tool from "./tool"
+ // #138：工具输出匹配上限（有界搜索）
+ // #138：工具默认 64 条匹配上限（与 source 一致）
  const RESULT_LIMIT = 64
-+// 默认 10 秒覆盖常规代码库检索；它替代 grep 工具原先的 5000 文件硬拒绝，
-+// 让“小文件很多但搜索很快”的仓库能完成，同时仍给低命中大扫描一个确定边界。
++// #244：默认 10 秒覆盖常规代码库检索；它替代原先的 5000 文件硬拒绝，
++// 让「小文件很多但搜索很快」的仓库能完成，同时仍给低命中大扫描一个确定边界
 +const DEFAULT_TIMEOUT = 10_000
-+// 允许用户显式放宽时间预算，但保留 2 分钟上限，避免模型把 grep 当成长时间后台任务。
++// #244：允许显式放宽时间预算，但保留 2 分钟上限，避免把 grep 当成长时间后台任务
 +const MAX_TIMEOUT = 120_000
-+// include/exclude 都允许单个 glob 或 glob 列表；保持一个小 schema 常量，
-+// 避免两个参数定义分叉后出现 include 支持数组而 exclude 不支持的回归。
++// #244：include/exclude 都允许单个 glob 或 glob 列表；共用一个 schema 常量，
++// 避免两参数定义分叉后出现 include 支持数组而 exclude 不支持的回归
 +const PatternList = Schema.Union([Schema.String, Schema.Array(Schema.String)])
++
++// #244：空 glob 没有明确搜索语义，作为 no-op 忽略；pattern 必填校验仍在执行入口保留
++function patterns(input?: string | readonly string[]) {
++  if (!input) return []
++  return (Array.isArray(input) ? input : [input]).filter((item) => item.length > 0)
++}
  
  export const Parameters = Schema.Struct({
    pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
@@ -192,33 +432,36 @@ index 91b87a24b20cb69bf9ac264ecc476ac3d3c3039a..9660033280524bbe14ae5067db372c0d
 +    description: 'File pattern(s) to exclude from the search (e.g. "node_modules/**", ["dist/**", "*.lock"])',
 +  }),
 +  timeout: Schema.optional(
-+    // 机器可读 schema 和描述文字保持同一上限；这样模型/客户端在提交工具调用前
-+    // 就能看到 120 秒边界，而不是依赖执行阶段再静默截断。
++    // #244：机器可读 schema 和描述文字保持同一上限；调用方在提交前就能看到 120 秒边界
 +    PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_TIMEOUT)),
 +  ).annotate({
 +    description: `Optional timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT}, maximum ${MAX_TIMEOUT}.`,
    }),
  })
  
-+function patterns(input?: string | readonly string[]) {
-+  if (!input) return []
-+  // 空 glob 没有明确搜索语义，作为 no-op 忽略；真实的 pattern 必填校验仍在执行入口保留。
-+  return (Array.isArray(input) ? input : [input]).filter((item) => item.length > 0)
-+}
-+
- export const GrepTool = Tool.define(
-   "grep",
-   Effect.gen(function* () {
-@@ -32,7 +57,7 @@ export const GrepTool = Tool.define(
+@@ -30,10 +55,14 @@ export const GrepTool = Tool.define(
      return {
        description: DESCRIPTION,
        parameters: Parameters,
 -      execute: (params: { pattern: string; path?: string; include?: string }, ctx: Tool.Context) =>
 +      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
++        // #244：参数类型直接引用 Parameters 推断——新增字段自动进入 execute 类型，
++        // 避免手写注解与 schema 漂移
          Effect.gen(function* () {
            const empty = {
              title: params.pattern,
-@@ -51,6 +76,8 @@ export const GrepTool = Tool.define(
++            // #244：确定性空结果（搜索完整执行且无匹配）与 timedOut 路径的
++            // emptyTimedOut 在 metadata 上必须可区分，下游据此决定是否建议重试
+             metadata: { matches: 0, truncated: false },
+             output: "No files found",
+           }
+@@ -45,10 +74,14 @@ export const GrepTool = Tool.define(
+             permission: "grep",
+             patterns: [params.pattern],
+             always: ["*"],
++            // #244：审计元数据记录全部搜索参数（含过滤与预算），
++            // 便于事后复盘为什么某次搜索被超时终止或结果被收窄
+             metadata: {
                pattern: params.pattern,
                path: params.path,
                include: params.include,
@@ -227,45 +470,24 @@ index 91b87a24b20cb69bf9ac264ecc476ac3d3c3039a..9660033280524bbe14ae5067db372c0d
              },
            })
  
-@@ -69,37 +96,34 @@ export const GrepTool = Tool.define(
+@@ -65,46 +98,80 @@ export const GrepTool = Tool.define(
+           const search = FSUtil.resolve(requested)
            const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
            const cwd = info?.type === "Directory" ? search : path.dirname(search)
-           const file = info?.type === "Directory" ? undefined : [path.relative(cwd, search)]
-+          const timeout = params.timeout ?? DEFAULT_TIMEOUT
-+          const glob = [
-+            ...patterns(params.include),
-+            ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
-+          ]
-+          const emptyTimedOut = () => ({
-+            title: params.pattern,
-+            metadata: { matches: 0, truncated: true, timedOut: true },
-+            output: [
-+              `Search timed out after ${timeout} ms before finding matches.`,
-+              "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.",
-+            ].join("\n"),
-+          })
- 
--          const result = yield* rg
--            .search({
+-          const result = yield* ripgrep
+-            .grep({
 -              cwd,
 -              pattern: params.pattern,
--              glob: params.include ? [params.include] : undefined,
--              file,
+-              include: params.include,
+-              // #138：多取 1 条以检测截断
 -              limit: RESULT_LIMIT + 1,
--              signal: ctx.abort,
 -            })
 -            .pipe(
--              Effect.catchIf(
--                SearchTooBroadError.isInstance,
--                (err) =>
--                  Effect.succeed({
--                    items: [],
--                    partial: false,
--                    truncated: false,
--                    tooBroad: err.data.maxFiles,
--                  }),
+-              Effect.catchTag("Ripgrep.SearchTooBroadError", (err) =>
+-                Effect.succeed({ tooBroad: err.maxFiles as number }),
 -              ),
 -            )
+-          // #138：过宽候选转用户可读输出，不抛到工具崩溃
 -          if ("tooBroad" in result) {
 -            return {
 -              title: params.pattern,
@@ -275,69 +497,123 @@ index 91b87a24b20cb69bf9ac264ecc476ac3d3c3039a..9660033280524bbe14ae5067db372c0d
 -                "Use a narrower path or include pattern before searching file contents.",
 -              ].join("\n"),
 -            }
-+          const result = yield* rg.search({
+-          }
+-          if (result.length === 0) return empty
++          // #244：显式文件目标转成相对单文件参数，rg 只扫该文件而不受 glob 收窄影响
++          const file = info?.type === "Directory" ? undefined : path.relative(cwd, search)
++          // #244：用户未传 timeout 也启用默认预算——grep 工具是需要时间边界的交互入口；
++          // 默认值在执行层而非 schema 层兜底，避免 wire schema 对未传字段产生隐式值
++          const timeout = params.timeout ?? DEFAULT_TIMEOUT
++          // #244：glob 顺序即匹配优先级：include 先展开、exclude 补 ! 负向；
++          // 已带 ! 的 exclude 原样透传，避免双重取反
++          const globs = [
++            ...patterns(params.include),
++            ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
++          ]
++          const emptyTimedOut = () => ({
++            // #244：title 沿用 pattern 与普通结果对齐，调用方按 title 聚合时不受影响
++            title: params.pattern,
++            // #244：timedOut 必须同时置 truncated——下游消费者只看 truncated 判断结果不完整
++            metadata: { matches: 0, truncated: true, timedOut: true },
++            // #244：文案同时说明「结果不完整」与「下一步怎么办」，
++            // 让模型能自主选择收窄范围或加大预算重试
++            output: [
++              `Search timed out after ${timeout} ms before finding matches.`,
++              "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.",
++            ].join("\n"),
++          })
++
++          // #244：search 通道替代 grep()：工具需要 timedOut/truncated 元数据来区分
++          // 「确认无匹配」与「受控截断」两种空结果，避免向模型谎报 No files found
++          const result = yield* ripgrep.search({
 +            cwd,
 +            pattern: params.pattern,
-+            glob: glob.length ? glob : undefined,
++            // #244：exclude 单独透传（不经 globs 预组合），数组展开由 core 统一处理
++            exclude: params.exclude,
++            include: params.include,
 +            file,
++            // #244：显式单文件目标与 glob 过滤互斥，core 侧保证 file 优先
 +            limit: RESULT_LIMIT + 1,
-+            // grep 用真实执行时间做保护，不再用候选文件数粗暴拒绝；
-+            // 小文件多的仓库应允许快速完成，低命中大搜索由 timeout 受控终止。
++            // #244：用真实执行时间做保护，不再用候选文件数粗暴拒绝；
++            // 小文件多的仓库应允许快速完成，低命中大搜索由 timeout 受控终止
 +            maxFiles: false,
++            // #244：预算取用户显式值或默认值，与 schema 上限共同构成三层防线
 +            timeout,
++            // #244：用户主动取消优先于时间预算——ctx.abort 失败必须保持可区分，
++            // 调用方用 signal 的错误通道区分「我取消」与「预算耗尽」
 +            signal: ctx.abort,
 +          })
-+          if (result.items.length === 0 && result.timedOut) {
-+            return emptyTimedOut()
-           }
-           if (result.items.length === 0) return empty
++          if (result.items.length === 0 && result.timedOut) return emptyTimedOut()
++          // #244：非超时的空结果是完整搜索的确定性结果；两种空结果（确认无匹配 vs
++          // 受控截断）的输出必须可区分，否则模型会把超时误读为全量确认无匹配
++          if (result.items.length === 0) return empty
  
-@@ -135,11 +159,19 @@ export const GrepTool = Tool.define(
+-          const rows = result.map((item) => ({
++          // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文
++          // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文；
++          // path.resolve 锚点是 rg 的实际扫描 cwd，两者必须同一基准输出才稳定
++          const rows = result.items.map((item) => ({
+             path: path.resolve(cwd, item.entry.path),
+             line: item.line,
+             text: item.text,
+           }))
  
-           matches.sort((a, b) => b.mtime - a.mtime)
- 
--          const truncated = result.truncated || matches.length > RESULT_LIMIT
--          const final = truncated ? matches.slice(0, RESULT_LIMIT) : matches
-+          const resultLimitTruncated = result.truncated || matches.length > RESULT_LIMIT
+-          // #138：超出 RESULT_LIMIT 截断展示
+-          const truncated = rows.length > RESULT_LIMIT
++          // #138：超出 RESULT_LIMIT 截断展示；#244：时间预算耗尽也标记截断；
++          // 两者分开记录是因为文案不同（条数上限提示 vs 超时提示可同时出现）
++          const resultLimitTruncated = result.truncated || rows.length > RESULT_LIMIT
 +          const truncated = resultLimitTruncated || result.timedOut === true
-+          const final = resultLimitTruncated ? matches.slice(0, RESULT_LIMIT) : matches
-+          // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
-+          // 阶段不可用，也不能把未完成搜索降级成确定性的 “No files found”。
+           // #138：只返回前 RESULT_LIMIT 条匹配
+-          const final = truncated ? rows.slice(0, RESULT_LIMIT) : rows
++          const final = resultLimitTruncated ? rows.slice(0, RESULT_LIMIT) : rows
++          // #244：超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
++          // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"
 +          if (final.length === 0 && result.timedOut) return emptyTimedOut()
            if (final.length === 0) return empty
  
--          const output = [`Found ${truncated ? `${RESULT_LIMIT}+` : final.length} matches${truncated ? ` (showing first ${RESULT_LIMIT})` : ""}`]
-+          const output = [
+           const output = [
+-            `Found ${truncated ? `${RESULT_LIMIT}+` : final.length} matches${truncated ? ` (showing first ${RESULT_LIMIT})` : ""}`,
++            // #244：RESULT_LIMIT 截断与 timeout 截断独立计数，同一结果可能两者同时标注
 +            `Found ${resultLimitTruncated ? `${RESULT_LIMIT}+` : final.length} matches${
 +              resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""
 +            }${result.timedOut ? ` before timing out after ${timeout} ms` : ""}`,
-+          ]
+           ]
  
            let current = ""
-           for (const match of final) {
-@@ -153,13 +185,20 @@ export const GrepTool = Tool.define(
-             output.push(`  Line ${match.line}: ${text}`)
+@@ -117,17 +184,37 @@ export const GrepTool = Tool.define(
+             output.push(`  Line ${match.line}: ${match.text}`)
            }
  
 -          if (truncated) {
 +          if (resultLimitTruncated) {
              output.push("")
-             output.push(
-               `(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`,
-             )
++            // #244：条数截断提示只在数量截断时出现，与超时提示分开措辞，
++            // 模型可依据措辞差异选择「收窄 pattern」还是「加大 timeout」
+             output.push(`(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`)
            }
  
 +          if (result.timedOut) {
 +            output.push("")
++            // #244：与条数截断分开成段——两段提示可同时出现，措辞需可区分归因；
++            // 该提示含具体预算数值，模型可据此判断加大到多少仍安全
 +            output.push(
 +              `(Search timed out after ${timeout} ms; results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.)`,
 +            )
 +          }
 +
-           if (result.partial) {
-             output.push("")
-             output.push("(Some paths were inaccessible and skipped)")
-@@ -170,6 +209,7 @@ export const GrepTool = Tool.define(
++          if (result.partial) {
++            output.push("")
++            // #244：partial 来自 rg exit code 2；部分路径不可访问不改变结果可信度，
++            // 但必须提示调用方结果集并非对所有候选路径完整
++            output.push("(Some paths were inaccessible and skipped)")
++          }
++
+           return {
+             title: params.pattern,
+-            // #138：metadata.matches 为展示条数
++            // #138：metadata.matches 为展示条数；
++            // #244：timedOut 用条件展开写入 metadata，未超时时保持旧 wire 形状（无该键）
              metadata: {
                matches: final.length,
                truncated,
@@ -346,10 +622,9 @@ index 91b87a24b20cb69bf9ac264ecc476ac3d3c3039a..9660033280524bbe14ae5067db372c0d
              output: output.join("\n"),
            }
 diff --git a/packages/opencode/src/tool/grep.txt b/packages/opencode/src/tool/grep.txt
-index 50c03fcffe3370585689c2df35181f8d0efb4b34..e27b75e5de91e69c3b74fd85fa4c479da54999da 100644
 --- a/packages/opencode/src/tool/grep.txt
 +++ b/packages/opencode/src/tool/grep.txt
-@@ -1,9 +1,10 @@
+@@ -2,9 +2,10 @@
  - Fast bounded content search tool for targeted codebase queries
  - Searches file contents using regular expressions
  - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
@@ -361,55 +636,294 @@ index 50c03fcffe3370585689c2df35181f8d0efb4b34..e27b75e5de91e69c3b74fd85fa4c479d
 +- For large workspaces, pass path, include, and exclude to narrow the candidate files before searching contents
 +- Searches are time-bounded; if the timeout is reached, partial results may be returned instead of claiming there are no matches
  - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
- - For open-ended search, use grep/glob/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
-diff --git a/packages/opencode/test/file/ripgrep.test.ts b/packages/opencode/test/file/ripgrep.test.ts
-index d71ce205ea7b271ac83e0fa58134a41a725046a8..48a0cee158a306266f7af8d17ef93a58080862f5 100644
---- a/packages/opencode/test/file/ripgrep.test.ts
-+++ b/packages/opencode/test/file/ripgrep.test.ts
-@@ -143,6 +143,38 @@ describe("file.ripgrep", () => {
+ - For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
+diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
+--- a/packages/core/test/ripgrep.test.ts
++++ b/packages/core/test/ripgrep.test.ts
+@@ -96,4 +96,54 @@ describe("Ripgrep", () => {
+     ),
+   )
+ 
++  // #244：真实 rg 进程需要足够大的输入才能稳定越过 1ms 预算；该测试验证公开
++  // Ripgrep.search 行为，不断言内部 kill 调用形状，避免和进程实现耦合
++  it.live("search timeout returns a bounded partial result instead of failing", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) =>
++        Effect.gen(function* () {
++          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "large.txt"), "x".repeat(4 * 1024 * 1024)))
++
++          const result = yield* (yield* Ripgrep.Service).search({
++            cwd: tmp.path,
++            pattern: "needle",
++            limit: 10,
++            timeout: 1,
++          })
++
++          // #244：truncated=false 锁定「时间截断≠条数截断」，避免误报上限提示
++          // #244：timedOut 必须置位且 truncated 不置位——两者语义独立：
++          // 时间预算耗尽 ≠ 结果条数达到上限，调用方依赖这个区别生成提示
++          expect(result.items).toEqual([])
++          expect(result.timedOut).toBe(true)
++          expect(result.truncated).toBe(false)
++          // #244：partial 恒为 false 的契约——受控截断不等于路径不可访问，
++          // 两者语义正交，调用方需分别提示
++        }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
++  // #244：timeout 存在时，正则语法错误仍是 rg 的真实失败，
++  // 不能被降级成「超时后的空部分结果」
++  it.live("search timeout does not hide invalid regex errors", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) =>
++        Effect.gen(function* () {
++          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.txt"), "needle\n"))
++
++          const exit = yield* (yield* Ripgrep.Service)
++            .search({ cwd: tmp.path, pattern: "(", limit: 10, timeout: 1000 })
++            .pipe(Effect.exit)
++
++          // #244：1000ms 预算远长于正则错误浮出时间——确保失败来自真实正则错误
++          // 而非超时路径，锁定错误语义优先级：真实失败 > 受控截断
++          expect(exit._tag).toBe("Failure")
++        }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+ })
+diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
+--- a/packages/opencode/test/tool/grep.test.ts
++++ b/packages/opencode/test/tool/grep.test.ts
+@@ -13,6 +13,8 @@ import { Global } from "@opencode-ai/core/global"
+ import { Truncate } from "@/tool/truncate"
+ import { Agent } from "../../src/agent/agent"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
++import { Entry, Match } from "@opencode-ai/schema/filesystem"
++import { RelativePath } from "@opencode-ai/core/schema"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { testEffect } from "../lib/effect"
+ import { Permission } from "../../src/permission"
+@@ -114,6 +116,182 @@ describe("tool.grep", () => {
      }),
    )
  
-+  it.live("search timeout returns a bounded partial result instead of failing", () =>
++  // #244：搜索路径包含空格，覆盖参数数组传递到 rg 时不能依赖 shell 引号的边界；
++  // include/exclude 同时存在时，exclude 必须继续收窄 include 已选中的候选文件
++  it.instance("supports include and exclude filters together", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdir((dir) =>
-+        Effect.gen(function* () {
-+          // 真实 rg 进程需要足够大的输入才能稳定越过 1ms 预算；该测试验证公开
-+          // Ripgrep.search 行为，不断言内部 kill 调用形状，避免和进程实现耦合。
-+          yield* write(path.join(dir, "large.txt"), "x".repeat(32 * 1024 * 1024))
-+        }),
++      const test = yield* TestInstance
++      const search = path.join(test.directory, "space dir")
++      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
++      yield* Effect.promise(() => Bun.write(path.join(search, "keep.ts"), "const value = 'needle'\n"))
++      yield* Effect.promise(() => Bun.write(path.join(search, "keep.tsx"), "const value = 'needle'\n"))
++      yield* Effect.promise(() => Bun.write(path.join(search, "skip.test.ts"), "const value = 'needle'\n"))
++      yield* Effect.promise(() => fs.mkdir(path.join(search, "dist"), { recursive: true }))
++      yield* Effect.promise(() => Bun.write(path.join(search, "dist", "skip.ts"), "const value = 'needle'\n"))
++
++      const info = yield* GrepTool
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: search,
++          // #244：include/exclude 同传是本测试的核心场景，
++          // 数组形态直接覆盖 legacy 单字符串入参的升级路径
++          include: ["*.ts", "*.tsx"],
++          exclude: ["*.test.ts", "dist/**"],
++        },
++        ctx,
 +      )
 +
-+      const result = yield* Ripgrep.Service.use((rg) => rg.search({ cwd: dir, pattern: "needle", timeout: 1 }))
-+
-+      expect(result.items).toEqual([])
-+      expect(result.timedOut).toBe(true)
-+      expect(result.truncated).toBe(false)
++      // #244：四个候选文件各覆盖一条过滤分支；
++      // #244：两个断言组分别验证 include 并集与 exclude 收窄——
++      // skip.test.ts 命中 include 但被 exclude 剔除，dist 目录同理；
++      // 路径参数含空格，验证参数数组传递不依赖 shell 引号
++      expect(result.metadata.matches).toBe(2)
++      expect(result.output).toContain(path.join(search, "keep.ts"))
++      expect(result.output).toContain(path.join(search, "keep.tsx"))
++      expect(result.output).not.toContain("skip.test.ts")
++      expect(result.output).not.toContain("dist")
 +    }),
 +  )
 +
-+  it.live("search timeout does not hide invalid regex errors", () =>
++  // #244：大量空文件会触发旧的候选文件硬上限；现在 grep 依赖时间预算，
++  // 因此「小文件很多但搜索很快」的场景应返回真实匹配而不是 scope-too-broad
++  it.instance("searches more than the legacy candidate file limit when work is fast", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdir((dir) => write(path.join(dir, "match.txt"), "needle\n"))
++      const test = yield* TestInstance
++      const search = path.join(test.directory, "many-small-files")
++      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
++      yield* Effect.forEach(
++        Array.from({ length: 5_001 }, (_, index) => path.join(search, `empty-${index}.txt`)),
++        (file) => Effect.promise(() => Bun.write(file, "")),
++        // #244：并发 64 模拟真实仓库的文件创建节奏，避免串行写入放大慢盘抖动
++        { concurrency: 64, discard: true },
++      )
++      yield* Effect.promise(() => Bun.write(path.join(search, "match.txt"), "needle\n"))
 +
-+      // timeout 存在时，正则语法错误仍是 rg 的真实失败，
-+      // 不能被降级成“超时后的空部分结果”。
-+      const exit = yield* Ripgrep.Service.use((rg) => rg.search({ cwd: dir, pattern: "(", timeout: 1000 })).pipe(
-+        Effect.exit,
++      const info = yield* GrepTool
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: search,
++          include: "*.txt",
++        },
++        ctx,
 +      )
 +
-+      expect(exit._tag).toBe("Failure")
++      // #244：单值 include 走 string 兼容分支，与数组共用同一展开逻辑；
++      // #244：核心断言是「真匹配被返回」而非仅「不再报错」——
++      // 防止未来把 maxFiles 预扫加回导致静默恢复硬拒绝；
++      // include 单值形态同步验证 string 兼容分支；
++      // 5001 个空文件全部命中 include glob，预扫若存在必然拒绝
++      expect(result.metadata.matches).toBe(1)
++      expect(result.output).toContain("match.txt")
++      expect(result.output).not.toContain("Search scope is too broad")
++    }),
++    undefined,
++    // #244：Windows 慢盘写入 5001 个空文件远超 bun 默认 5 秒预算，放宽墙钟上限
++    60_000,
++  )
++
++  it.instance("reports timeout without claiming no files were found", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      yield* Effect.promise(() => Bun.write(path.join(test.directory, "match.txt"), "needle\n"))
++
++      const info = yield* GrepTool.pipe(
++        Effect.provide(
++          // #244：Layer.mock 覆盖 toolLayer 里的真实 Ripgrep.node——内层 provide 优先，
++          // 未触达的方法用 die 占位：测试若意外调用会立即暴露
++          Layer.mock(Ripgrep.Service)({
++            find: () => Effect.die("unused in timeout test"),
++            glob: () => Effect.die("unused in timeout test"),
++            grep: () => Effect.die("unused in timeout test"),
++            // #244：mock 直接返回 timedOut——搜索层与工具层的超时语义在此解耦验证；
++      // #244：timedOut-only 形态：items 为空时工具必须返回超时提示而非空结果
++            search: () =>
++              Effect.succeed({
++                items: [],
++                partial: false,
++                truncated: false,
++                timedOut: true,
++              }),
++          }),
++        ),
++      )
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: test.directory,
++          // #244：timeout:1 仅用于触发参数透传路径，实际结果由 mock 决定
++          timeout: 1,
++        },
++        ctx,
++      )
++
++      // #244：空结果 + timedOut 必须走 emptyTimedOut 而不是 empty——
++      // metadata.truncated 与输出文案是调用方区分两种空结果的唯一信号；
++      // mock 注入免受真实磁盘速度影响，专注验证输出分支
++      expect(result.metadata.matches).toBe(0)
++      expect(result.metadata.truncated).toBe(true)
++      expect(result.output).toContain("timed out")
++      expect(result.output).not.toBe("No files found")
 +    }),
 +  )
 +
-   it.live("files returns empty when glob matches no files", () =>
++  it.instance("keeps partial matches when search times out", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      yield* Effect.promise(() => Bun.write(path.join(test.directory, "match.txt"), "needle\n"))
++
++      const info = yield* GrepTool.pipe(
++        Effect.provide(
++          Layer.mock(Ripgrep.Service)({
++            find: () => Effect.die("unused in timeout test"),
++            glob: () => Effect.die("unused in timeout test"),
++            grep: () => Effect.die("unused in timeout test"),
++            search: () =>
++              Effect.succeed({
++                items: [
++                  // #244：真实 Match 实例（schema 构造）保证工具端 rows 映射与
++                  // 真实执行路径同构，mock 只替换进程层不替换数据形状
++                  Match.make({
++                    entry: Entry.make({ path: RelativePath.make("match.txt"), type: "file" }),
++                    line: 1,
++                    offset: 0,
++                    text: "needle",
++                    submatches: [],
++                  }),
++                ],
++                partial: false,
++                truncated: false,
++                timedOut: true,
++              }),
++          }),
++        ),
++      )
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: test.directory,
++          // #244：timeout:1 仅用于触发参数透传路径，实际结果由 mock 决定
++          timeout: 1,
++        },
++        ctx,
++      )
++
++      // #244：部分匹配场景验证「受控截断不丢弃已解析结果」——
++      // matches 计数与行内容都保留，仅追加截断与超时提示
++      expect(result.metadata.matches).toBe(1)
++      expect(result.metadata.truncated).toBe(true)
++      expect(result.output).toContain("Line 1: needle")
++      expect(result.output).toContain("timed out")
++    }),
++  )
++
+   it.instance("finds matches in tmp instance", () =>
      Effect.gen(function* () {
-       const dir = yield* tmpdir((dir) =>
+       const test = yield* TestInstance
+diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
+--- a/packages/opencode/test/tool/parameters.test.ts
++++ b/packages/opencode/test/tool/parameters.test.ts
+@@ -158,6 +158,26 @@ describe("tool parameters", () => {
+       expect(parsed.path).toBe("/tmp")
+       expect(parsed.include).toBe("*.ts")
+     })
++    test("accepts include and exclude arrays plus timeout", () => {
++      // #244：grep 的过滤参数需要表达「包含这些文件、排除这些文件」的搜索语义；
++      // 这里固定 wire-level 行为，避免后续重构退回只能传单个 include 的窄接口
++      const parsed = parse(Grep, {
++        pattern: "TODO",
++        include: ["*.ts", "*.tsx"],
++        exclude: ["dist/**", "*.test.ts"],
++        timeout: 5000,
++      })
++      // #244：数组形态必须原样保留到 decode 结果，任何 branded/默认值转换都是回归
++      expect(parsed.include).toEqual(["*.ts", "*.tsx"])
++      expect(parsed.exclude).toEqual(["dist/**", "*.test.ts"])
++      expect(parsed.timeout).toBe(5000)
++    })
++    test("rejects timeout beyond the documented maximum", () => {
++      // #244：timeout 的 schema 上限必须和工具说明一致，避免调用方以为能提交
++      // 超过 120 秒的长搜索，实际执行时又被内部逻辑改变；
++      // 边界值 120_001 恰好越界一个单位，锁定检查是闭区间上限而非舍入
++      expect(accepts(Grep, { pattern: "TODO", timeout: 120_001 })).toBe(false)
++    })
+     test("rejects missing pattern", () => {
+       expect(accepts(Grep, {})).toBe(false)
+     })
 diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-index bb764f7e3eda919048fe3064e524b330a0ba45c8..c462f9c4095350348368c9bae90c78cd10e5b607 100644
 --- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
 +++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-@@ -119,9 +119,33 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
+@@ -101,9 +101,33 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
  {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "properties": {
@@ -445,7 +959,7 @@ index bb764f7e3eda919048fe3064e524b330a0ba45c8..c462f9c4095350348368c9bae90c78cd
      },
      "path": {
        "description": "The directory to search in. Defaults to the current working directory.",
-@@ -131,6 +155,12 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
+@@ -113,6 +137,12 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
        "description": "The regex pattern to search for in file contents",
        "type": "string",
      },
@@ -458,187 +972,3 @@ index bb764f7e3eda919048fe3064e524b330a0ba45c8..c462f9c4095350348368c9bae90c78cd
    },
    "required": [
      "pattern",
-diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 29b5a60db2d75f2dde02bf084d05218b06732c20..484f5f790e5394ce837b2ba9f45d6391f8d82de6 100644
---- a/packages/opencode/test/tool/grep.test.ts
-+++ b/packages/opencode/test/tool/grep.test.ts
-@@ -115,6 +115,150 @@ describe("tool.grep", () => {
-     }),
-   )
- 
-+  it.instance("supports include and exclude filters together", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const search = path.join(test.directory, "space dir")
-+      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
-+      // 搜索路径包含空格，覆盖参数数组传递到 rg 时不能依赖 shell 引号的边界；
-+      // include/exclude 同时存在时，exclude 必须继续收窄 include 已经选中的候选文件。
-+      yield* Effect.promise(() => Bun.write(path.join(search, "keep.ts"), "const value = 'needle'\n"))
-+      yield* Effect.promise(() => Bun.write(path.join(search, "keep.tsx"), "const value = 'needle'\n"))
-+      yield* Effect.promise(() => Bun.write(path.join(search, "skip.test.ts"), "const value = 'needle'\n"))
-+      yield* Effect.promise(() => fs.mkdir(path.join(search, "dist"), { recursive: true }))
-+      yield* Effect.promise(() => Bun.write(path.join(search, "dist", "skip.ts"), "const value = 'needle'\n"))
-+
-+      const info = yield* GrepTool
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute(
-+        {
-+          pattern: "needle",
-+          path: search,
-+          include: ["*.ts", "*.tsx"],
-+          exclude: ["*.test.ts", "dist/**"],
-+        },
-+        ctx,
-+      )
-+
-+      expect(result.metadata.matches).toBe(2)
-+      expect(result.output).toContain(path.join(search, "keep.ts"))
-+      expect(result.output).toContain(path.join(search, "keep.tsx"))
-+      expect(result.output).not.toContain("skip.test.ts")
-+      expect(result.output).not.toContain("dist")
-+    }),
-+  )
-+
-+  it.instance("searches more than the legacy candidate file limit when work is fast", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const search = path.join(test.directory, "many-small-files")
-+      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
-+      // 5001 个空文件会触发旧的候选文件硬上限；现在 grep 依赖时间预算，
-+      // 因此“小文件很多但搜索很快”的场景应返回真实匹配而不是 scope-too-broad。
-+      yield* Effect.forEach(
-+        Array.from({ length: 5_001 }, (_, index) => path.join(search, `empty-${index}.txt`)),
-+        (file) => Effect.promise(() => Bun.write(file, "")),
-+        { concurrency: 64, discard: true },
-+      )
-+      yield* Effect.promise(() => Bun.write(path.join(search, "match.txt"), "needle\n"))
-+
-+      const info = yield* GrepTool
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute(
-+        {
-+          pattern: "needle",
-+          path: search,
-+          include: "*.txt",
-+        },
-+        ctx,
-+      )
-+
-+      expect(result.metadata.matches).toBe(1)
-+      expect(result.output).toContain("match.txt")
-+      expect(result.output).not.toContain("Search scope is too broad")
-+    }),
-+  )
-+
-+  it.instance("reports timeout without claiming no files were found", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const file = path.join(test.directory, "match.txt")
-+      yield* Effect.promise(() => Bun.write(file, "needle\n"))
-+
-+      const info = yield* GrepTool.pipe(
-+        Effect.provide(
-+          Layer.mock(Ripgrep.Service)({
-+            search: () =>
-+              Effect.succeed({
-+                items: [],
-+                partial: false,
-+                truncated: false,
-+                timedOut: true,
-+              }),
-+          }),
-+        ),
-+      )
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute(
-+        {
-+          pattern: "needle",
-+          path: test.directory,
-+          timeout: 1,
-+        },
-+        ctx,
-+      )
-+
-+      expect(result.metadata.matches).toBe(0)
-+      expect(result.metadata.truncated).toBe(true)
-+      expect(result.output).toContain("timed out")
-+      expect(result.output).not.toBe("No files found")
-+    }),
-+  )
-+
-+  it.instance("keeps partial matches when search times out", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const file = path.join(test.directory, "match.txt")
-+      yield* Effect.promise(() => Bun.write(file, "needle\n"))
-+
-+      const info = yield* GrepTool.pipe(
-+        Effect.provide(
-+          Layer.mock(Ripgrep.Service)({
-+            search: () =>
-+              Effect.succeed({
-+                items: [
-+                  {
-+                    path: { text: "match.txt" },
-+                    lines: { text: "needle" },
-+                    line_number: 1,
-+                    absolute_offset: 0,
-+                    submatches: [],
-+                  },
-+                ],
-+                partial: false,
-+                truncated: false,
-+                timedOut: true,
-+              }),
-+          }),
-+        ),
-+      )
-+      const grep = yield* info.init()
-+      const result = yield* grep.execute(
-+        {
-+          pattern: "needle",
-+          path: test.directory,
-+          timeout: 1,
-+        },
-+        ctx,
-+      )
-+
-+      expect(result.metadata.matches).toBe(1)
-+      expect(result.metadata.truncated).toBe(true)
-+      expect(result.output).toContain("Line 1: needle")
-+      expect(result.output).toContain("timed out")
-+    }),
-+  )
-+
-   it.instance("does not ask for external_directory when alias path is allowed", () =>
-     Effect.gen(function* () {
-       if (process.platform === "win32") return
-diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
-index 3a124be81b0c591adb48f2484d0ab13f77752c0f..4573d6b48ca9fa1607c032147b0c50e8a59907c3 100644
---- a/packages/opencode/test/tool/parameters.test.ts
-+++ b/packages/opencode/test/tool/parameters.test.ts
-@@ -154,6 +154,24 @@ describe("tool parameters", () => {
-       expect(parsed.path).toBe("/tmp")
-       expect(parsed.include).toBe("*.ts")
-     })
-+    test("accepts include and exclude arrays plus timeout", () => {
-+      // grep 的过滤参数需要表达“包含这些文件、排除这些文件”的搜索语义；
-+      // 这里固定 wire-level 行为，避免后续重构退回只能传单个 include 的窄接口。
-+      const parsed = parse(Grep, {
-+        pattern: "TODO",
-+        include: ["*.ts", "*.tsx"],
-+        exclude: ["dist/**", "*.test.ts"],
-+        timeout: 5000,
-+      })
-+      expect(parsed.include).toEqual(["*.ts", "*.tsx"])
-+      expect(parsed.exclude).toEqual(["dist/**", "*.test.ts"])
-+      expect(parsed.timeout).toBe(5000)
-+    })
-+    test("rejects timeout beyond the documented maximum", () => {
-+      // timeout 的 schema 上限必须和工具说明保持一致，避免调用方以为能提交
-+      // 超过 120 秒的长搜索，实际执行时又被内部逻辑改变。
-+      expect(accepts(Grep, { pattern: "TODO", timeout: 120_001 })).toBe(false)
-+    })
-     test("rejects missing pattern", () => {
-       expect(accepts(Grep, {})).toBe(false)
-     })
