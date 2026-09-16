@@ -1,31 +1,3 @@
-From 8810ecd5aa631789eb2517e002dea6e5ab37d30e Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 9 Jul 2026 23:50:35 +0800
-Subject: [PATCH] =?UTF-8?q?feat(lsp):=20TUI=20=E8=AF=8A=E6=96=AD=E6=B8=B2?=
- =?UTF-8?q?=E6=9F=93=E7=B2=BE=E4=BF=AE=20+=20read/touch=20=E8=AF=AD?=
- =?UTF-8?q?=E4=B9=89=E5=88=86=E6=B5=81=20+=20clean/existing=20=E7=8A=B6?=
- =?UTF-8?q?=E6=80=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-TUI Diagnostics 组件（routes/session/index.tsx + session-v2.tsx）重写为三态：
-- 新错误：header 显示总数 + +N more，明细最多 3 条单行，含行号 [line:col]
-- 既有错误：只显示数量摘要，不展开详情
-- 完全无错误：绿色确认，避免模型误以为 LSP 未工作
-- message 归一化换行空白为单空格 + 120 字符截断
-- 支持 metadata.diagnosticSummary 三态选择
-
-LSP Service touchFile bridge 分流：
-- 无 diagnostics 参数时 bridge no-op，避免 read 打开 VSCode
-- 有 diagnostics 参数时继续 /lsp/touch，保障 edit/write/apply_patch 诊断
-
-bridgeDiagnostics 状态防止 clean 误报：
-- diagnostics 失败后 status 不再返回 connected
-- tool 层在 LSP 不可用时不传 diagnosticSummary
-
-Tool output 短确认：delta 为空且 LSP 可用时输出 checked 文案
-
 diff --git a/docs/lsp-diagnostics-ui-read-touch-implementation-plan.md b/docs/lsp-diagnostics-ui-read-touch-implementation-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..7e8cb2829a0b919198fab35a6d8da589f7f3358e
@@ -1143,184 +1115,75 @@ index 0000000000000000000000000000000000000000..7e8cb2829a0b919198fab35a6d8da589
 +- Kobalte Collapsible 高度动画在子元素设 max-height 后可能过冲，需实现时实测。
 +- `flex-shrink: 0` 在非 flex 容器上是 no-op，实现时删除。
 +- 空 diff + 诊断状态、write 新文件、edit create、apply_patch move/delete 路径均无问题。
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-index 76d95c51547138533063d364496fd598480dfe3d..8a0bfd605d397723911dd8d8a0f467eb6beeec78 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-@@ -902,7 +902,7 @@ function Write(props: ToolProps) {
-               content={content()}
-             />
-           </line_number>
--          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} />
-+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} summary={props.metadata.diagnosticSummary} />
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -3090,7 +3090,7 @@ function Write(props: ToolProps) {
+             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+           </Show>
+           {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
+-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
+         </BlockTool>
+       </Match>
+       <Match when={props.metadata.diagnostics !== undefined}>
+@@ -3117,7 +3117,7 @@ function Write(props: ToolProps) {
+           <Show when={writeCanCollapse()}>
+             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+           </Show>
+-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
          </BlockTool>
        </Match>
        <Match when={true}>
-@@ -945,7 +945,7 @@ function Edit(props: ToolProps) {
-                 removedLineNumberBg={theme.diffRemovedLineNumberBg}
-               />
-             </box>
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} />
-+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} summary={props.metadata.diagnosticSummary} />
-           </BlockTool>
-         )}
+@@ -3512,7 +3512,7 @@ function Edit(props: ToolProps) {
+           <Show when={overflow()}>
+             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+           </Show>
+-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
+         </BlockTool>
        </Match>
-@@ -1106,7 +1106,7 @@ function Task(props: ToolProps) {
+       <Match when={true}>
+@@ -3646,7 +3646,7 @@ function ApplyPatch(props: ToolProps) {
+                 <Show when={patchOverflow()}>
+                   <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
+                 </Show>
+-                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
++                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
+               </Show>
+             </BlockTool>
+             )
+@@ -3733,7 +3733,14 @@ function Skill(props: ToolProps) {
    )
  }
  
 -function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
-+function Diagnostics(props: { diagnostics: unknown; filePath: string; summary?: unknown }) {
-   const { theme } = useTheme()
-   const errors = createMemo(() => {
-     if (!isRecord(props.diagnostics)) return []
-@@ -1116,14 +1116,61 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
-       .filter((diagnostic) => diagnostic.severity === 1)
-       .slice(0, 3)
-   })
-+  // [local-smark] 从 metadata.diagnosticSummary 读取 { newCount, existingCount }。
-+  // summary 只在 LSP 确认可用时由 tool 层传入，缺失时不推导 clean。
-+  const summary = createMemo(() => {
-+    if (!isRecord(props.summary)) return undefined
-+    const newCount = typeof props.summary.newCount === "number" ? props.summary.newCount : undefined
-+    const existingCount = typeof props.summary.existingCount === "number" ? props.summary.existingCount : undefined
-+    if (newCount === undefined || existingCount === undefined) return undefined
-+    return { newCount, existingCount }
-+  })
-+  // [local-smark] 多行 LSP message 压成单行，避免撑高 TUI 工具块。
-+  const normalizeMessage = (msg: string) => msg.trim().replace(/\s+/g, " ")
-+  // [local-smark] 截断过长 message，保持 TUI 行宽稳定。
-+  const truncateMessage = (msg: string, limit = 120) =>
-+    msg.length <= limit ? msg : msg.slice(0, limit - 3) + "..."
-+  const more = createMemo(() => {
-+    const s = summary()
-+    if (!s || s.newCount <= errors().length) return 0
-+    return s.newCount - errors().length
-+  })
-   return (
--    <Show when={errors().length}>
--      <box>
--        <For each={errors()}>
--          {(diagnostic) => <text fg={theme.error}>Error {stringValue(diagnostic.message)}</text>}
--        </For>
--      </box>
--    </Show>
-+    <Switch>
-+      {/* [local-smark] 新错误：显示 header + 最多 3 条单行明细 */}
-+      <Match when={errors().length > 0}>
-+        <box gap={0}>
-+          <text fg={theme.error}>
-+            LSP · {summary()?.newCount ?? errors().length} new error{((summary()?.newCount ?? errors().length)) === 1 ? "" : "s"}
-+            {more() > 0 ? ` · +${more()} more` : ""}
-+          </text>
-+          <For each={errors()}>
-+            {(diagnostic) => (
-+              <text fg={theme.error}>
-+                {"  E "}{(() => {
-+                  const r = (diagnostic as Record<string, any>)?.range
-+                  const line = r?.start?.line
-+                  const col = r?.start?.character
-+                  return `[${typeof line === "number" ? line + 1 : "?"}:${typeof col === "number" ? col + 1 : "?"}] `
-+                })()}{truncateMessage(normalizeMessage(stringValue(diagnostic.message) ?? ""))}
-+              </text>
-+            )}
-+          </For>
-+        </box>
-+      </Match>
-+      {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
-+      <Match when={summary() && summary()!.existingCount > 0}>
-+        <text fg={theme.textMuted}>
-+          LSP checked · 0 new · {summary()!.existingCount} existing
-+        </text>
-+      </Match>
-+      {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
-+      <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
-+        <text fg={theme.success ?? theme.textMuted}>
-+          ✓ LSP checked · no errors in this file
-+        </text>
-+      </Match>
-+    </Switch>
-   )
- }
- 
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 482db43a2b233da1e05f2ceae1c1ea7d28f73722..a4c127a6bf5cea77b260d02602079eb9d96b6daa 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -2711,7 +2711,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
-         >
-           <box gap={1} flexDirection="column">
-             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
-+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
-           </box>
-         </BlockTool>
-       </Match>
-@@ -2745,12 +2745,12 @@ function Write(props: ToolProps<typeof WriteTool>) {
-                 content={code()}
-               />
-             </line_number>
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
--          </box>
--        </BlockTool>
--      </Match>
--      <Match when={true}>
--        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
-+           </box>
-+         </BlockTool>
-+       </Match>
-+       <Match when={true}>
-+         <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-           Write {pathFormatter.format(props.input.filePath)}
-         </InlineTool>
-       </Match>
-@@ -2994,7 +2994,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
-         >
-           <box gap={1} flexDirection="column">
-             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
--            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
-+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
-           </box>
-         </BlockTool>
-       </Match>
-@@ -3111,7 +3111,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-                   >
-                     <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-                   </Show>
--                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-+                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary} />
-                 </box>
-               </BlockTool>
-             )}
-@@ -3190,26 +3190,66 @@ function Skill(props: ToolProps<typeof SkillTool>) {
-   )
- }
- 
--function Diagnostics(props: { diagnostics?: Record<string, Record<string, any>[]>; filePath: string }) {
-+// [local-smark] TUI 诊断渲染：三态（新错误/既有错误/无错误）+ message 单行归一化 + 截断。
-+// summary 只在 LSP 确认可用时由 tool 层传入，缺失时不推导 clean，避免误报。
++// [local-smark] TUI 诊断渲染三态：新错误（header+最多 3 条单行明细）/
++// 既有错误（数量摘要）/完全无错误（绿色确认）。summary 缺失时不推导 clean，
++// 避免在 LSP 未运行时给出虚假"类型安全"信号
 +function Diagnostics(props: {
-+  diagnostics?: Record<string, Record<string, any>[]>
++  diagnostics: unknown
 +  filePath: string
 +  summary?: { newCount?: number; existingCount?: number }
 +}) {
    const { theme } = useTheme()
+   const terminalEnvironment = useTuiTerminalEnvironment()
    const errors = createMemo(() => {
-     const normalized = Filesystem.normalizePath(props.filePath)
-     const arr = props.diagnostics?.[normalized] ?? []
-     return arr.filter((x) => x.severity === 1).slice(0, 3)
+@@ -3743,19 +3750,53 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
+     )
+     return parseDiagnostics(props.diagnostics, normalized)
    })
 -
-+  // [local-smark] summary 缺失或字段不完整时为 undefined，TUI 不显示 clean/existing。
++  // [local-smark] summary 字段不完整时视为缺失，TUI 不显示 clean/existing
 +  const summary = createMemo(() => {
 +    const s = props.summary
 +    if (!s || typeof s.newCount !== "number" || typeof s.existingCount !== "number") return undefined
 +    return s as { newCount: number; existingCount: number }
 +  })
-+  // [local-smark] 多行 Pylance message 压成单行，避免撑高 TUI 工具块。
++  // [local-smark] 多行 LSP message 压成单行，避免撑高 TUI 工具块
 +  const normalizeMsg = (msg: string) => msg.trim().replace(/\s+/g, " ")
-+  // [local-smark] 截断过长 message，保持 TUI 行宽稳定。
++  // [local-smark] 截断过长 message，保持 TUI 行宽稳定
 +  const truncateMsg = (msg: string, limit = 120) => (msg.length <= limit ? msg : msg.slice(0, limit - 3) + "...")
 +  const more = createMemo(() => {
 +    const s = summary()
@@ -1374,40 +1237,39 @@ index 482db43a2b233da1e05f2ceae1c1ea7d28f73722..a4c127a6bf5cea77b260d02602079eb9
  }
  
 diff --git a/packages/opencode/src/lsp/diagnostic.ts b/packages/opencode/src/lsp/diagnostic.ts
-index 43f3bd137dcbdb1755616e7df9aee3b01420b95f..c3006754c6575df0c3dee0e13c9c6900cbfd41cf 100644
 --- a/packages/opencode/src/lsp/diagnostic.ts
 +++ b/packages/opencode/src/lsp/diagnostic.ts
-@@ -84,4 +84,16 @@ export function deltaSummary(
+@@ -83,4 +83,17 @@ export function deltaSummary(
    }
  }
  
++// [local-smark] clean/既有错误文案：只在调用方已确认 LSP 可用后使用；
++// summary=0 不能单独证明 LSP 运行过
 +export function checkedMessage(summary: { newCount: number; existingCount: number }, scope: "file" | "changed-files") {
 +  if (summary.newCount > 0) return ""
 +  if (summary.existingCount > 0) {
-+    // 只暴露既有错误数量，不暴露详情，避免模型把历史问题误判为本次编辑失败。
++    // 只暴露既有错误数量，不暴露详情，避免模型把历史问题误判为本次编辑失败
 +    const noun = summary.existingCount === 1 ? "error" : "errors"
 +    return `LSP checked: no new errors introduced; ${summary.existingCount} existing ${noun} remain.`
 +  }
-+  // clean 文案只在调用方已确认 LSP 可用后使用；summary=0 不能单独证明 LSP 运行过。
 +  if (scope === "changed-files") return "LSP checked: no errors in changed files."
 +  return "LSP checked: no errors in this file."
 +}
 +
  export * as Diagnostic from "./diagnostic"
 diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
-index 398b55712c0a985a924e21a54803f17df6450482..665d010738f532c7a3ec62753af5462724fa050e 100644
 --- a/packages/opencode/src/lsp/lsp.ts
 +++ b/packages/opencode/src/lsp/lsp.ts
-@@ -124,6 +124,8 @@ interface State {
+@@ -117,6 +117,8 @@ interface State {
    servers: Record<string, LSPServer.Info>
    broken: Set<string>
    spawning: Map<string, Promise<LSPClient.Info | undefined>>
-+  // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报。
++  // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报
 +  bridgeDiagnostics?: "ok" | "failed"
  }
  
  export interface Interface {
-@@ -207,6 +209,7 @@ export const layer = Layer.effect(
+@@ -200,6 +202,7 @@ const layer = Layer.effect(
            servers,
            broken: new Set(),
            spawning: new Map(),
@@ -1415,21 +1277,21 @@ index 398b55712c0a985a924e21a54803f17df6450482..665d010738f532c7a3ec62753af54627
          }
  
          yield* Effect.addFinalizer(() =>
-@@ -387,9 +390,11 @@ export const layer = Layer.effect(
+@@ -378,9 +381,11 @@ const layer = Layer.effect(
      })
  
      const status = Effect.fn("LSP.status")(function* () {
 -      // [local-smark] 有 bridge 时返回 VSCode 连接状态
 +      const ctx = yield* InstanceState.context
 +      const s = yield* InstanceState.get(state)
-+      // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态。
++      // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态
        const bridge = yield* resolveLspBridge()
 -      if (bridge) {
 +      if (bridge && s.bridgeDiagnostics !== "failed") {
          return [{
            id: "vscode",
            name: "VSCode",
-@@ -397,8 +402,6 @@ export const layer = Layer.effect(
+@@ -388,8 +393,6 @@ const layer = Layer.effect(
            status: "connected" as const,
          }]
        }
@@ -1438,26 +1300,31 @@ index 398b55712c0a985a924e21a54803f17df6450482..665d010738f532c7a3ec62753af54627
        const result: Status[] = []
        for (const client of s.clients) {
          result.push({
-@@ -431,9 +434,10 @@ export const layer = Layer.effect(
+@@ -422,13 +425,14 @@ const layer = Layer.effect(
      })
  
      const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
 -      // [local-smark] 有 bridge 时走 bridge /lsp/touch（ensureOpen + awaitDiagnosticsRefresh）
-+      // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode。
++      // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode
        const bridge = yield* resolveLspBridge(input)
        if (bridge) {
 +        if (!diagnostics) return
          const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
          if (touched) return
        }
-@@ -460,14 +464,21 @@ export const layer = Layer.effect(
+-      log.info("touching file", { file: input })
++      yield* Effect.logInfo("touching file", { file: input })
+       const clients = yield* getClients(input)
+       yield* Effect.promise(() =>
+         Promise.all(
+@@ -449,14 +453,21 @@ const layer = Layer.effect(
  
      const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
        // [local-smark] 优先 bridge，回退内置
 +      const s = yield* InstanceState.get(state)
        const bridge = yield* resolveLspBridge()
        if (bridge) {
-+        // 成功解析 `{ diagnostics: [] }` 也算可用；undefined/坏结构才标记失败。
++        // 成功解析 `{ diagnostics: [] }` 也算可用；undefined/坏结构才标记失败
          const result = yield* callLspBridge("/lsp/diagnostics", {})
          const mapped = bridgeDiagnosticsToMap(result)
 -        if (mapped) return mapped
@@ -1465,7 +1332,7 @@ index 398b55712c0a985a924e21a54803f17df6450482..665d010738f532c7a3ec62753af54627
 +          s.bridgeDiagnostics = "ok"
 +          return mapped
 +        }
-+        // bridge 可连接不等于 diagnostics 可用；失败后 status 不能再让工具输出 clean 误报。
++        // bridge 可连接不等于 diagnostics 可用；失败后 status 不能再让工具输出 clean 误报
 +        s.bridgeDiagnostics = "failed"
        }
        const results: Record<string, LSPClient.Diagnostic[]> = {}
@@ -1475,23 +1342,23 @@ index 398b55712c0a985a924e21a54803f17df6450482..665d010738f532c7a3ec62753af54627
          for (const [p, diags] of result.entries()) {
            const arr = results[p] || []
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index c5bc79b2cc4c8c0d725c2cf09fe381d403176930..5a39d9d33ef7a92bdef94c4e76cd0480de960178 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -315,8 +315,7 @@ export const ApplyPatchTool = Tool.define(
-         yield* bus.publish(FileWatcher.Event.Updated, update)
+@@ -317,8 +317,7 @@ export const ApplyPatchTool = Tool.define(
+         yield* events.publish(Watcher.Event.Updated, update)
        }
  
 -      // [local-smark] 增量诊断：patch 应用前一次性捕获所有目标文件的 baseline，
--      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta。
+-      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta
 +      // [local-smark] baseline 在 patch 落盘后、touch 前采集：LSP 此时还不知道新内容。
        const beforeAll = yield* lsp.diagnostics()
        const baselines = new Map<string, LSPClient.Diagnostic[]>()
        for (const change of fileChanges) {
-@@ -375,13 +374,21 @@ export const ApplyPatchTool = Tool.define(
+@@ -379,13 +378,22 @@ export const ApplyPatchTool = Tool.define(
          const rel = path.relative(instance.worktree, target).replaceAll("\\", "/")
          output += `\n\nNew LSP errors introduced in ${rel}:\n${block}`
        }
++      // [local-smark] summary 只在 LSP 可靠可用时传给 TUI；unavailable 时缺失字段
 +      let diagnosticSummary: { newCount: number; existingCount: number } | undefined = {
 +        newCount: totalNew,
 +        existingCount: totalExisting,
@@ -1505,136 +1372,137 @@ index c5bc79b2cc4c8c0d725c2cf09fe381d403176930..5a39d9d33ef7a92bdef94c4e76cd0480
 +          diagnosticSummary = undefined
            output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
 +        } else {
-+          // [local-smark] apply_patch 可能覆盖多文件，clean 文案必须指向 changed files 而非单个 file。
++          // [local-smark] apply_patch 可能覆盖多文件，clean 文案必须指向 changed files
 +          output += `\n\n${LSP.Diagnostic.checkedMessage({ newCount: totalNew, existingCount: totalExisting }, "changed-files")}`
          }
        }
  
-@@ -392,7 +399,8 @@ export const ApplyPatchTool = Tool.define(
+@@ -394,7 +402,8 @@ export const ApplyPatchTool = Tool.define(
            files,
-           // [local-smark] metadata.diagnostics 存储新错误数组 + diagnosticSummary 聚合摘要
+           // [local-smark] metadata.diagnostics 存新错误数组 + diagnosticSummary 聚合摘要
            diagnostics: diagMetadata,
 -          diagnosticSummary: { newCount: totalNew, existingCount: totalExisting },
-+          // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突。
++          // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突
 +          ...(diagnosticSummary ? { diagnosticSummary } : {}),
          },
          output,
        }
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 25cc1b5a2e6afc6dcaa1f5e1aa4e1cfbb5447c79..30a528ddde93fb23b352ffe6f70e51e798bdab56 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -227,10 +227,8 @@ export const EditTool = Tool.define(
+@@ -234,10 +234,8 @@ export const EditTool = Tool.define(
  
            let output = "Edit applied successfully."
-           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
--          // [local-smark] 增量诊断：编辑前获取 baseline，touchFile 后获取 current，
--          // 只报告新引入的错误。baseline 在 touchFile 之前获取（LSP 缓存的旧诊断）。
+           const normalizedFilePath = FSUtil.normalizePath(filePath)
+-          // [local-smark] 增量诊断：编辑前取 baseline，touchFile 后取 current，
+-          // 只报告新引入的错误。baseline 在 touchFile 之前获取（LSP 缓存的旧诊断）
 -          const beforeDiagnostics = yield* lsp.diagnostics()
 -          const beforeIssues = beforeDiagnostics[normalizedFilePath] ?? []
-+          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
++          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
 +          const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
            yield* lsp.touchFile(filePath, "document")
            const afterDiagnostics = yield* lsp.diagnostics()
            const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
-@@ -238,6 +236,7 @@ export const EditTool = Tool.define(
-           // [local-smark] 计算新错误数组和摘要供 TUI 渲染
+@@ -245,6 +243,8 @@ export const EditTool = Tool.define(
+           // [local-smark] 新错误数组和摘要供 TUI 渲染
            const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
            const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
++          // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
 +          let diagnosticSummary: typeof delta | undefined = delta
            if (block) {
              output += `\n\nNew LSP errors introduced by this edit:\n${block}`
              output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
-@@ -245,7 +244,11 @@ export const EditTool = Tool.define(
-             // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空
+@@ -253,7 +253,11 @@ export const EditTool = Tool.define(
+             // baseline 和 current 都为空，delta 必然为空
              const clients = yield* lsp.status()
              if (clients.length === 0) {
 +              diagnosticSummary = undefined
                output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
 +            } else {
-+              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持 edit 反馈高信噪比。
++              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持反馈高信噪比
 +              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
              }
            }
  
-@@ -253,7 +256,8 @@ export const EditTool = Tool.define(
+@@ -261,7 +265,8 @@ export const EditTool = Tool.define(
              metadata: {
-               // [local-smark] metadata.diagnostics 存储新错误数组（delta）+ diagnosticSummary 供 TUI
+               // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
                diagnostics: { [normalizedFilePath]: newErrorsArr },
 -              diagnosticSummary: delta,
-+              // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean。
++              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
 +              ...(diagnosticSummary ? { diagnosticSummary } : {}),
                diff,
                filediff,
              },
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 004076243e5e1674559deea3661686fcdf194534..acf5f244fee14e3b1b57950921110e0d9c02b739 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -122,9 +122,7 @@ export const WriteTool = Tool.define(
+@@ -110,11 +110,8 @@ export const WriteTool = Tool.define(
  
            let output = "Wrote file successfully."
-           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
--          // [local-smark] 增量诊断：编辑前获取 baseline（LSP 缓存的旧诊断），
--          // touchFile 后获取 current，只报告新引入的错误。
--          // baseline 在 touchFile 之前获取：LSP 此时还不知道新内容，诊断反映旧状态。
-+          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
-           const beforeDiagnostics = yield* lsp.diagnostics()
-           const beforeIssues = beforeDiagnostics[normalizedFilepath] ?? []
+           const normalizedFilepath = FSUtil.normalizePath(filepath)
+-          // [local-smark] 增量诊断：编辑前取 baseline（LSP 缓存的旧诊断），
+-          // touchFile 后取 current，只报告新引入的错误。
+-          // baseline 必须在 touchFile 之前获取：LSP 此时还不知道新内容
+-          const beforeDiagnostics = yield* lsp.diagnostics()
+-          const beforeIssues = beforeDiagnostics[normalizedFilepath] ?? []
++          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
++          const beforeIssues = (yield* lsp.diagnostics())[normalizedFilepath] ?? []
            yield* lsp.touchFile(filepath, "document")
-@@ -134,6 +132,7 @@ export const WriteTool = Tool.define(
-           // [local-smark] 计算新错误数组和摘要供 TUI 渲染
+           const afterDiagnostics = yield* lsp.diagnostics()
+           const currentIssues = afterDiagnostics[normalizedFilepath] ?? []
+@@ -122,6 +119,8 @@ export const WriteTool = Tool.define(
+           // [local-smark] 新错误数组和摘要供 TUI 渲染
            const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
            const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
++          // summary 只有在 LSP 可靠可用时才传给 TUI
 +          let diagnosticSummary: typeof delta | undefined = delta
            if (block) {
              output += `\n\nNew LSP errors introduced by this edit:\n${block}`
              output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
-@@ -142,7 +141,11 @@ export const WriteTool = Tool.define(
-             // delta 必然为空。须用 status() 确认 LSP 确实在运行，否则模型获得虚假"类型安全"信号。
+@@ -130,7 +129,11 @@ export const WriteTool = Tool.define(
+             // baseline 和 current 都为空，delta 必然为空
              const clients = yield* lsp.status()
              if (clients.length === 0) {
 +              diagnosticSummary = undefined
                output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
 +            } else {
-+              // [local-smark] LSP 已运行且 delta 为空时给短确认，避免模型误判为 LSP 未工作。
++              // [local-smark] LSP 已运行且 delta 为空时给短确认，避免模型误判 LSP 未工作
 +              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
              }
            }
  
-@@ -151,9 +154,9 @@ export const WriteTool = Tool.define(
-             metadata: {
-               // [local-smark] metadata.diagnostics 存储新错误数组（delta），不是全部当前错误。
-               // TUI getDiagnostics() 从此字段读取，只显示新引入的错误。
--              // diagnosticSummary 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）。
+@@ -140,7 +143,8 @@ export const WriteTool = Tool.define(
+               // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary
+               // 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）
                diagnostics: { [normalizedFilepath]: newErrorsArr },
 -              diagnosticSummary: delta,
-+              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean。
++              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
 +              ...(diagnosticSummary ? { diagnosticSummary } : {}),
                filepath,
                exists,
-               ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
+               // 条件展开：仅在 metadataDiff 存在时展开 diff 字段，避免 undefined 污染 metadata
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
-index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c2258744dc5e4f 100644
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -6,6 +6,7 @@ import { Config } from "@/config/config"
+@@ -7,6 +7,7 @@ import { Config } from "@/config/config"
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { LSP } from "@/lsp/lsp"
  import * as LSPServer from "@/lsp/server"
 +import * as VscodeBridge from "@/ide/vscode-bridge"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { provideTmpdirInstance } from "../fixture/fixture"
+ import { TestInstance } from "../fixture/fixture"
  import { awaitWithTimeout, testEffect } from "../lib/effect"
-@@ -120,6 +121,93 @@ describe("lsp.spawn", () => {
-     ),
+@@ -98,6 +99,93 @@ describe("lsp.spawn", () => {
+       ),
    )
  
-+  it.live("skips VSCode bridge touch for light warm without diagnostics", () =>
-+    provideTmpdirInstance((dir) =>
++  it.instance(
++    "skips VSCode bridge touch for light warm without diagnostics",
++    () =>
 +      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
-+          const file = path.join(dir, "src", "inside.ts")
++          const file = path.join((yield* TestInstance).directory, "src", "inside.ts")
 +          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
 +            id: "bridge",
 +            port: 1,
@@ -1648,7 +1516,7 @@ index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c22587
 +
 +          try {
 +            yield* lsp.touchFile(file)
-+            // read warm 使用无 diagnostics touch。bridge 环境下它不能打开 VSCode，也不能回退 spawn 内置 LSP。
++            // read warm 使用无 diagnostics touch：bridge 环境下不能打开 VSCode，也不回退 spawn 内置 LSP
 +            expect(call).toHaveBeenCalledTimes(0)
 +            expect(spawn).toHaveBeenCalledTimes(0)
 +          } finally {
@@ -1658,14 +1526,14 @@ index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c22587
 +          }
 +        }),
 +      ),
-+    ),
 +  )
 +
-+  it.live("uses VSCode bridge touch for document diagnostics", () =>
-+    provideTmpdirInstance((dir) =>
++  it.instance(
++    "uses VSCode bridge touch for document diagnostics",
++    () =>
 +      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
-+          const file = path.join(dir, "src", "inside.ts")
++          const file = path.join((yield* TestInstance).directory, "src", "inside.ts")
 +          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
 +            id: "bridge",
 +            port: 1,
@@ -1678,7 +1546,7 @@ index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c22587
 +
 +          try {
 +            yield* lsp.touchFile(file, "document")
-+            // edit/write/apply_patch 需要 strong touch 来触发 VSCode/Pylance 诊断计算。
++            // edit/write/apply_patch 需要 strong touch 触发 VSCode/Pylance 诊断计算
 +            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file }))
 +          } finally {
 +            resolve.mockRestore()
@@ -1686,11 +1554,11 @@ index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c22587
 +          }
 +        }),
 +      ),
-+    ),
 +  )
 +
-+  it.live("does not report VSCode bridge as diagnostics-ready after diagnostics failure", () =>
-+    provideTmpdirInstance((dir) =>
++  it.instance(
++    "does not report VSCode bridge as diagnostics-ready after diagnostics failure",
++    () =>
 +      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
 +          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
@@ -1705,7 +1573,7 @@ index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c22587
 +
 +          try {
 +            yield* lsp.diagnostics()
-+            // bridge 存活不等于 diagnostics 成功；失败后 status 不能让工具输出 clean。
++            // bridge 存活不等于 diagnostics 成功；失败后 status 不能让工具输出 clean
 +            expect(yield* lsp.status()).toEqual([])
 +            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/diagnostics" }))
 +          } finally {
@@ -1714,81 +1582,83 @@ index 18c9815b1be4487f8c41ba9b70fd0954fb357460..e1edad2729b6ccfbef101afe33c22587
 +          }
 +        }),
 +      ),
-+    ),
 +  )
 +
-   it.live("publishes lsp.updated after custom LSP initialization", () =>
-     provideTmpdirInstance(
-       (dir) =>
+   it.instance(
+     "would spawn builtin LSP for files inside instance when lsp is true",
+     () =>
 diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
-index 0c532930b82c26ae949c853fbd0d7454bb5ae9e3..88bd02b51082fb1d8ee8f2a8a322d5827d5ec60b 100644
 --- a/packages/opencode/test/lsp/lifecycle.test.ts
 +++ b/packages/opencode/test/lsp/lifecycle.test.ts
-@@ -3,6 +3,7 @@ import path from "path"
- import { Effect, Layer } from "effect"
+@@ -4,6 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Effect } from "effect"
  import { LSP } from "@/lsp/lsp"
  import * as LSPServer from "@/lsp/server"
 +import * as VscodeBridge from "@/ide/vscode-bridge"
- import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { provideTmpdirInstance } from "../fixture/fixture"
+ import { TestInstance } from "../fixture/fixture"
  import { testEffect } from "../lib/effect"
-@@ -26,9 +27,15 @@ describe("LSP service lifecycle", () => {
-     provideTmpdirInstance(() =>
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
--          const result = yield* lsp.status()
--          expect(Array.isArray(result)).toBe(true)
--          expect(result.length).toBe(0)
-+          // [local-smark] 测试环境可能有 bridge registry 残留，mock 掉避免干扰。
-+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
-+          try {
-+            const result = yield* lsp.status()
-+            expect(Array.isArray(result)).toBe(true)
-+            expect(result.length).toBe(0)
-+          } finally {
-+            resolve.mockRestore()
-+          }
-         }),
-       ),
+ 
+@@ -25,9 +26,15 @@ describe("LSP service lifecycle", () => {
+   it.instance("status() returns empty array initially", () =>
+     LSP.Service.use((lsp) =>
+       Effect.gen(function* () {
+-        const result = yield* lsp.status()
+-        expect(Array.isArray(result)).toBe(true)
+-        expect(result.length).toBe(0)
++        // [local-smark] 测试环境可能有 bridge registry 残留，mock 掉避免干扰
++        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
++        try {
++          const result = yield* lsp.status()
++          expect(Array.isArray(result)).toBe(true)
++          expect(result.length).toBe(0)
++        } finally {
++          resolve.mockRestore()
++        }
+       }),
      ),
-@@ -38,9 +45,14 @@ describe("LSP service lifecycle", () => {
-     provideTmpdirInstance(() =>
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
--          const result = yield* lsp.diagnostics()
--          expect(typeof result).toBe("object")
--          expect(Object.keys(result).length).toBe(0)
-+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
-+          try {
-+            const result = yield* lsp.diagnostics()
-+            expect(typeof result).toBe("object")
-+            expect(Object.keys(result).length).toBe(0)
-+          } finally {
-+            resolve.mockRestore()
-+          }
-         }),
-       ),
+   )
+@@ -35,9 +42,14 @@ describe("LSP service lifecycle", () => {
+   it.instance("diagnostics() returns empty object initially", () =>
+     LSP.Service.use((lsp) =>
+       Effect.gen(function* () {
+-        const result = yield* lsp.diagnostics()
+-        expect(typeof result).toBe("object")
+-        expect(Object.keys(result).length).toBe(0)
++        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
++        try {
++          const result = yield* lsp.diagnostics()
++          expect(typeof result).toBe("object")
++          expect(Object.keys(result).length).toBe(0)
++        } finally {
++          resolve.mockRestore()
++        }
+       }),
      ),
-@@ -119,9 +131,15 @@ describe("LSP service lifecycle", () => {
-     provideTmpdirInstance(() =>
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
--          const result = yield* lsp.workspaceSymbol("test")
--          expect(Array.isArray(result)).toBe(true)
--          expect(result.length).toBe(0)
-+          // [local-smark] 测试环境可能有 bridge registry 残留，mock 掉避免干扰。
-+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
-+          try {
-+            const result = yield* lsp.workspaceSymbol("test")
-+            expect(Array.isArray(result)).toBe(true)
-+            expect(result.length).toBe(0)
-+          } finally {
-+            resolve.mockRestore()
-+          }
-         }),
-       ),
+   )
+@@ -101,9 +113,15 @@ describe("LSP service lifecycle", () => {
+   it.instance("workspaceSymbol() returns empty array with no clients", () =>
+     LSP.Service.use((lsp) =>
+       Effect.gen(function* () {
+-        const result = yield* lsp.workspaceSymbol("test")
+-        expect(Array.isArray(result)).toBe(true)
+-        expect(result.length).toBe(0)
++        // [local-smark] 测试环境可能有 bridge registry 残留，mock 掉避免干扰
++        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
++        try {
++          const result = yield* lsp.workspaceSymbol("test")
++          expect(Array.isArray(result)).toBe(true)
++          expect(result.length).toBe(0)
++        } finally {
++          resolve.mockRestore()
++        }
+       }),
      ),
-@@ -285,6 +303,23 @@ describe("LSP.Diagnostic", () => {
+   )
+@@ -256,9 +268,26 @@ describe("LSP.Diagnostic", () => {
+   test("deltaSummary returns all new when baseline is empty", () => {
+     const current = [makeDiag(0, "error A"), makeDiag(5, "error B")]
+     const result = LSP.Diagnostic.deltaSummary(current, [])
+     expect(result.newCount).toBe(2)
      expect(result.existingCount).toBe(0)
    })
  
@@ -1811,9 +1681,7 @@ index 0c532930b82c26ae949c853fbd0d7454bb5ae9e3..88bd02b51082fb1d8ee8f2a8a322d582
 +
    // [local-smark] newErrors 返回新错误数组，供 metadata 存储给 TUI 渲染
    test("newErrors returns only errors not in baseline", () => {
-     const baseline = [makeDiag(0, "old error")]
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 5e3806b8aa662e59526469381c6dbefbcba1d782..877a2d4c7d73f0301f793737c9101158d9268187 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
 @@ -1,4 +1,4 @@
@@ -1821,8 +1689,8 @@ index 5e3806b8aa662e59526469381c6dbefbcba1d782..877a2d4c7d73f0301f793737c9101158
 +import { afterEach, describe, expect, spyOn } from "bun:test"
  import path from "path"
  import fs from "fs/promises"
- import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
-@@ -689,18 +689,27 @@ describe("tool.edit", () => {
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -769,18 +769,27 @@ describe("tool.edit", () => {
  
    // [local-smark] 当 LSP 不可用时（无 language server 运行），edit 的 output
    // 应包含 "LSP diagnostics unavailable" 提示，避免模型误认为"无类型错误"。
@@ -1839,7 +1707,7 @@ index 5e3806b8aa662e59526469381c6dbefbcba1d782..877a2d4c7d73f0301f793737c9101158
 -
 -        // 无 LSP server 时 output 应包含不可用提示
 -        expect(result.output).toContain("LSP diagnostics unavailable")
-+        // [local-smark] mock LSP status 返回空，模拟无 LSP 可用。
++        // [local-smark] mock LSP status 返回空，模拟无 LSP 可用
 +        const lsp = yield* LSP.Service
 +        const statusSpy = spyOn(lsp, "status").mockReturnValue(Effect.succeed([]))
 +
@@ -1848,7 +1716,7 @@ index 5e3806b8aa662e59526469381c6dbefbcba1d782..877a2d4c7d73f0301f793737c9101158
 +
 +          // 无 LSP server 时 output 应包含不可用提示
 +          expect(result.output).toContain("LSP diagnostics unavailable")
-+          // metadata 不携带 summary，TUI 才不会把 unavailable 误渲染成绿色 clean。
++          // metadata 不携带 summary，TUI 才不会把 unavailable 误渲染成绿色 clean
 +          expect("diagnosticSummary" in result.metadata).toBe(false)
 +        } finally {
 +          statusSpy.mockRestore()
@@ -1857,33 +1725,33 @@ index 5e3806b8aa662e59526469381c6dbefbcba1d782..877a2d4c7d73f0301f793737c9101158
      )
    })
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index be6a7572ea09cdc8c6463ef95e66c974c3ec7c04..d5973fa38aaa09b21a16063d5d61608b8eac7979 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
 @@ -1,4 +1,4 @@
 -import { afterEach, describe, expect } from "bun:test"
 +import { afterEach, describe, expect, spyOn } from "bun:test"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Effect, Layer } from "effect"
  import path from "path"
- import fs from "fs/promises"
-@@ -235,6 +235,29 @@ describe("tool.write", () => {
+@@ -207,6 +207,30 @@ describe("tool.write", () => {
      )
    })
  
++  // [local-smark] LSP 不可用时不得携带 diagnosticSummary，防止 TUI 渲染虚假 clean
 +  describe("LSP unavailable notice", () => {
 +    it.instance("does not send diagnosticSummary metadata when no language server is running", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "plain.txt")
-+        // [local-smark] mock LSP status 返回空，模拟无 LSP 可用。
-+        // 测试环境可能有 bridge registry 残留导致 status() 非空，需 spy 才能可靠验证。
++        // [local-smark] mock LSP status 返回空，模拟无 LSP 可用；
++        // 测试环境可能有 bridge registry 残留导致 status() 非空，需 spy 才能可靠验证
 +        const lsp = yield* LSP.Service
 +        const statusSpy = spyOn(lsp, "status").mockReturnValue(Effect.succeed([]))
 +
 +        try {
 +          const result = yield* run({ filePath: filepath, content: "plain text" })
 +
-+          // 无 LSP server 时只能提示 unavailable，不能给 TUI 绿色 clean 的 summary。
++          // 无 LSP server 时只能提示 unavailable，不能给 TUI 绿色 clean 的 summary
 +          expect(result.output).toContain("LSP diagnostics unavailable")
 +          expect("diagnosticSummary" in result.metadata).toBe(false)
 +        } finally {

@@ -236,3 +236,28 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +    expect(text).toContain("Tool context tokens over time")
 +  })
  })
+diff --git a/packages/opencode/src/cli/cmd/stats-insights.ts b/packages/opencode/src/cli/cmd/stats-insights.ts
+index ca20ced..e8ce9d3 100644
+--- a/packages/opencode/src/cli/cmd/stats-insights.ts
++++ b/packages/opencode/src/cli/cmd/stats-insights.ts
+@@ -257,7 +257,8 @@ const sessionOutlierInsight = (report: StatsReport): InsightCard => {
+   const costs = report.sessions.map((session) => session.cost)
+   // p95 作为异常基准线：覆盖 95% 常规会话的成本上包络
+   const p95 = percentile(costs, 95)
+-  const top = report.sessions[0]
++  // #177：sessions 已翻转为 tokens-first，异常语义按成本口径防御性重排
++  const top = [...report.sessions].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)[0]
+   const severity: InsightSeverity = top && top.cost > Math.max(1, p95 * 1.5) ? "risk" : top && top.cost > p95 ? "warn" : "info"
+   return {
+     id: "session-outlier",
+@@ -441,7 +442,9 @@ function sessionOutlierRows(sessions: SessionUsage[]) {
+   const costs = sessions.map((session) => session.cost)
+   const p75 = percentile(costs, 75)
+   const p95 = percentile(costs, 95)
+-  return sessions.slice(0, 8).map((session) => ({
++  // #177：雷达行同样恢复 cost-first 口径，top8 按成本选取
++  const ranked = [...sessions].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)
++  return ranked.slice(0, 8).map((session) => ({
+     label: `${session.title || session.id}${session.cost >= p95 ? " [p95+]" : session.cost >= p75 ? " [p75+]" : ""}`,
+     value: session.cost,
+   }))

@@ -1,34 +1,3 @@
-From f7e465b40f5e1603d755c674f908d837a7ea0952 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Mon, 6 Jul 2026 19:22:26 +0800
-Subject: [PATCH] =?UTF-8?q?feat(revert):=20=E6=92=A4=E5=9B=9E=E7=8A=B6?=
- =?UTF-8?q?=E6=80=81=E5=AE=88=E5=8D=AB+=E5=90=88=E5=B9=B6checkout+messages?=
- =?UTF-8?q?=E8=A3=81=E5=89=AA+Retry=E8=8F=9C=E5=8D=95?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-B1 状态守卫：run-state 新增 reverting Set 和 beginRevert/endRevert/assertNotReverting，
-revert/unrevert 用 acquireUseRelease 包裹确保失败时清除标志，4 个 HTTP handler
-(prompt/promptAsync/shell/command) 加 assertNotReverting 阻止 revert 期间的消息竞争。
-修复用户撤回后紧接着发消息被误撤回的时序 bug。
-
-A1 合并 checkout：snapshot revert 批量分支先尝试单次 git checkout 全部文件，
-成功时跳过 ls-tree 预验证（省一次 git spawn），失败回退原逻辑。20 文件场景
-255ms→12ms。
-
-A2 messages 裁剪：page() 新增 fromMessageID 参数用 gte 过滤，revert 只加载
-input.messageID 及之后的尾部消息。大 session 110ms→30ms。
-
-C1 Retry 菜单：dialog-message 新增 Retry 选项，await revert 完成后 setPrompt
-+ submit 一步完成撤回+重发，revert 失败时填回内容不提交。
-
-新增 3 个行为级测试：并发 revert 拒绝（Effect.all concurrency=2）、
-revert 失败清除 reverting、多文件批量 checkout 恢复、messages 范围裁剪。
-全部 419 session 测试通过，typecheck 0 errors。
-
-方案文档 docs/revert-performance-retry-plan.md 经多轮 subagent 全量审计无阻塞意见。
-
 diff --git a/docs/revert-performance-retry-plan.md b/docs/revert-performance-retry-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..e0a7e880da2b2d0c278df2145d1b3bc904c86db2
@@ -853,7 +822,7 @@ index 0000000000000000000000000000000000000000..e0a7e880da2b2d0c278df2145d1b3bc9
 +
 +## 8. 方案 C1: TUI Retry 菜单项（一步重试）
 +
-+### 7.1 改动文件：`packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx`
++### 7.1 改动文件：`packages/tui/src/routes/session/dialog-message.tsx`
 +
 +**当前完整代码（108 行）**：
 +```tsx
@@ -1244,7 +1213,7 @@ index 0000000000000000000000000000000000000000..e0a7e880da2b2d0c278df2145d1b3bc9
 +| `packages/opencode/src/snapshot/index.ts` | 修改：revert 函数增加快速 checkout 路径 | +12 |
 +| `packages/opencode/src/session/message-v2.ts` | 修改：page() 加 fromMessageID 参数 + gte import | +5 |
 +| `packages/opencode/src/session/session.ts` | 修改：messages() Interface + 实现透传 fromMessageID | +5 |
-+| `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx` | 修改：新增 Retry 选项 + import + extractPromptInfo 重构 | +40 |
++| `packages/tui/src/routes/session/dialog-message.tsx` | 修改：新增 Retry 选项 + import + extractPromptInfo 重构 | +40 |
 +| **总计** | **7 文件修改，0 新增，0 删除** | **~113 行** |
 +
 +- 0 迁移文件
@@ -1276,19 +1245,18 @@ index 0000000000000000000000000000000000000000..e0a7e880da2b2d0c278df2145d1b3bc9
 +**A1+A2 组合优化效果**：撤回延迟 1-2s → ~300ms（几百毫秒）。
 +
 +**实施顺序**：B1 → A1 → A2 → C1（B1 修复竞争，A1+A2 加速，C1 依赖 B1 守卫确保 await revert 安全）。
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-index aeea2f52ad0bbcbf198054034d624cf36c8d133b..58c2f76d2cf7c59df04ef6024154a7d7cc715e70 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-@@ -3,6 +3,7 @@ import { useSync } from "@tui/context/sync"
- import { DialogSelect } from "@tui/ui/dialog-select"
- import { useSDK } from "@tui/context/sdk"
- import { useRoute } from "@tui/context/route"
-+import { usePromptRef } from "@tui/context/prompt"
- import * as Clipboard from "@tui/util/clipboard"
- import type { PromptInfo } from "@tui/component/prompt/history"
- import { strip } from "@tui/component/prompt/part"
-@@ -16,6 +17,22 @@ export function DialogMessage(props: {
+diff --git a/packages/tui/src/routes/session/dialog-message.tsx b/packages/tui/src/routes/session/dialog-message.tsx
+--- a/packages/tui/src/routes/session/dialog-message.tsx
++++ b/packages/tui/src/routes/session/dialog-message.tsx
+@@ -3,6 +3,7 @@
+ import { DialogSelect } from "../../ui/dialog-select"
+ import { useSDK } from "../../context/sdk"
+ import { useRoute } from "../../context/route"
++import { usePromptRef } from "../../context/prompt"
+ import { useClipboard } from "../../context/clipboard"
+ import type { PromptInfo } from "../../component/prompt/history"
+ import { stripPromptPartIDs as strip } from "../../prompt/part"
+@@ -16,6 +17,22 @@
    const sdk = useSDK()
    const message = createMemo(() => sync.data.message[props.sessionID]?.find((x) => x.id === props.messageID))
    const route = useRoute()
@@ -1308,10 +1276,10 @@ index aeea2f52ad0bbcbf198054034d624cf36c8d133b..58c2f76d2cf7c59df04ef6024154a7d7
 +      { input: "", parts: [] as PromptInfo["parts"] },
 +    )
 +  }
+   const clipboard = useClipboard()
  
    return (
-     <DialogSelect
-@@ -35,23 +52,44 @@ export function DialogMessage(props: {
+@@ -36,23 +53,40 @@
              })
  
              if (props.setPrompt) {
@@ -1329,7 +1297,7 @@ index aeea2f52ad0bbcbf198054034d624cf36c8d133b..58c2f76d2cf7c59df04ef6024154a7d7
 -              props.setPrompt(promptInfo)
 +              props.setPrompt(extractPromptInfo(msg.id))
              }
- 
+-
              dialog.clear()
            },
          },
@@ -1341,26 +1309,23 @@ index aeea2f52ad0bbcbf198054034d624cf36c8d133b..58c2f76d2cf7c59df04ef6024154a7d7
 +            const msg = message()
 +            if (!msg) return
 +            dialog.clear()
-+            // 如果 session 正在运行，先 abort（与 Undo 命令一致），
-+            // 确保 runner idle 后 revert 才能通过 assertNotBusy
++            // session 运行中先 abort（与 Undo 一致），确保 runner idle 后 revert 才能过 assertNotBusy
 +            const status = sync.data.session_status?.[props.sessionID]
 +            if (status?.type !== "idle") {
 +              await sdk.client.session.abort({ sessionID: props.sessionID }).catch(() => {})
 +            }
-+            // 提取原消息内容（在 revert 前，parts 必在 sync.data 中）
++            // 提取原消息内容（revert 前 parts 必在 sync.data 中）
 +            const promptInfo = extractPromptInfo(msg.id)
-+            // await revert 完成——B1 守卫确保 revert 期间无其他操作竞争
 +            const revertResponse = await sdk.client.session.revert({
 +              sessionID: props.sessionID,
 +              messageID: msg.id,
 +            })
 +            if (revertResponse.error) {
-+              // revert 失败（如 runner 仍 busy），填回内容让用户手动处理
++              // revert 失败（如 runner 仍 busy）：填回内容让用户手动处理
 +              props.setPrompt?.(promptInfo)
 +              return
 +            }
-+            // revert 成功：填回 prompt 并自动提交。
-+            // set 同步更新 store（prompt/index.tsx），submit 读取 store——时序安全
++            // revert 成功：填回 prompt 并自动提交。set 同步更新 store，submit 读取 store——时序安全
 +            props.setPrompt?.(promptInfo)
 +            promptRef.current?.submit()
 +          },
@@ -1369,52 +1334,68 @@ index aeea2f52ad0bbcbf198054034d624cf36c8d133b..58c2f76d2cf7c59df04ef6024154a7d7
            title: "Copy",
            value: "message.copy",
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 22b33e572a521e16660c442f63de5cf3ecec11ac..38a5473a0b50a34bc2fa39f6820a79ccbb2888cd 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -298,6 +298,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -310,6 +310,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       payload: typeof SummarizePayload.Type
+     }) {
+       const info = yield* requireSession(ctx.params.sessionID)
++      // revert 进行中时同步返回错误——与下方 assertNotBusy 的 reverting 检查冗余，
++      // 但端点错误联合声明了 SessionBusyError（HttpApiBuilder 精确匹配要求守卫来源）
++      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
+       yield* store.provide(
+         { directory: info.directory },
+         Effect.gen(function* () {
+@@ -344,6 +347,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
        payload: typeof PromptPayload.Type
      }) {
-       yield* requireSession(ctx.params.sessionID)
 +      // revert 进行中时阻止 prompt——避免 cleanup 与 in-progress revert 的消息/文件竞争
-+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       const message = yield* promptSvc
-         .prompt({
-           ...ctx.payload,
-@@ -314,6 +316,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
++      // 端点错误联合只声明 BadRequest——SessionBusyError 需就地收敛，TUI 保留草稿
++      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
++        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
++      )
+       const message = yield* inSessionDirectory(
+         ctx.params.sessionID,
+         promptSvc
+@@ -363,6 +371,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
        payload: typeof PromptPayload.Type
      }) {
-       yield* requireSession(ctx.params.sessionID)
 +      // revert 进行中时同步返回错误，不 fork——TUI 收到 BadRequest 保留草稿
-+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-         Effect.catchCause((cause) =>
-           Effect.gen(function* () {
-@@ -336,6 +340,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
++      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
++        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
++      )
+       yield* inSessionDirectory(
+         ctx.params.sessionID,
+         promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+@@ -386,6 +398,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
        payload: typeof CommandPayload.Type
      }) {
-       yield* requireSession(ctx.params.sessionID)
 +      // command 内部调用 prompt()（含 cleanup），同样需要 revert 守卫
-+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       return yield* promptSvc
-         .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-         .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
-@@ -346,6 +352,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
++      // 端点错误联合只声明 BadRequest——SessionBusyError 需就地收敛，TUI 保留草稿
++      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
++        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
++      )
+       return yield* inSessionDirectory(
+         ctx.params.sessionID,
+         promptSvc
+@@ -399,6 +416,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
        payload: typeof ShellPayload.Type
      }) {
-       yield* requireSession(ctx.params.sessionID)
 +      // shell 内部调用 shellImpl（含 cleanup），同样需要 revert 守卫
 +      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
-     })
- 
+       return yield* inSessionDirectory(
+         ctx.params.sessionID,
+         SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })),
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 8274c30b9f852710173c6fc2accf3770088bbfa4..38ca2381fbe01e0ff8f1d1f7e69fec8b4b336a1c 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -7,12 +7,7 @@ import { Snapshot } from "@/snapshot"
- import { SyncEvent } from "../sync"
- import { Database } from "@/storage/db"
+@@ -21,12 +21,7 @@
+ import { Database } from "@opencode-ai/core/database/database"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { NotFoundError } from "@/storage/storage"
 -import { and } from "drizzle-orm"
 -import { desc } from "drizzle-orm"
@@ -1423,15 +1404,16 @@ index 8274c30b9f852710173c6fc2accf3770088bbfa4..38ca2381fbe01e0ff8f1d1f7e69fec8b
 -import { lt } from "drizzle-orm"
 -import { or } from "drizzle-orm"
 +import { and, desc, eq, gte, inArray, lt, or } from "drizzle-orm"
- import { MessageTable, PartTable, SessionTable } from "./session.sql"
- import * as ProviderError from "@/provider/error"
+ import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+ import { ProviderError } from "@/provider/error"
  import { iife } from "@/util/iife"
-@@ -1103,11 +1098,16 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-   limit: number
+@@ -485,12 +480,17 @@
    before?: string
+   // #106：includeHidden 默认 false，page 层过滤隐藏消息/part
    includeHidden?: boolean
 +  fromMessageID?: MessageID
  }) {
+   const { db } = yield* Database.Service
    const before = input.before ? cursor.decode(input.before) : undefined
 -  const where = before
 -    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
@@ -1442,181 +1424,57 @@ index 8274c30b9f852710173c6fc2accf3770088bbfa4..38ca2381fbe01e0ff8f1d1f7e69fec8b
 +    ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
      : eq(MessageTable.session_id, input.sessionID)
 +  const where = before ? and(base, older(before)) : base
-   const rows = Database.use((db) =>
-     db
-       .select()
+   const rows = yield* db
+     .select()
+     .from(MessageTable)
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
-index cddc49680dc9de8f0a771cda7e898165a4f4a944..f36235868b02dc45b39c5e647cf833d97aac24fc 100644
 --- a/packages/opencode/src/session/revert.ts
 +++ b/packages/opencode/src/session/revert.ts
-@@ -43,85 +43,113 @@ export const layer = Layer.effect(
+@@ -37,9 +37,23 @@ const layer = Layer.effect(
+     const state = yield* SessionRunState.Service
  
      const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
-       yield* state.assertNotBusy(input.sessionID)
--      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
--      let lastUser: MessageV2.User | undefined
--      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
--
--      let rev: Session.Info["revert"]
--      const patches: Snapshot.Patch[] = []
--      for (const msg of all) {
--        if (msg.info.role === "user") lastUser = msg.info
--        const remaining = []
--        for (const part of msg.parts) {
--          if (rev) {
--            if (part.type === "patch") patches.push(part)
--            continue
--          }
--
--          if (!rev) {
--            if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
--              const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
--              rev = {
--                messageID: !partID && lastUser ? lastUser.id : msg.info.id,
--                partID,
 +      // acquireUseRelease：beginRevert 成功后 endRevert 立即注册为 finalizer，
 +      // 消除 beginRevert 与 Effect.ensuring 之间的理论中断窗口。
 +      // beginRevert 失败（已 reverting）时 endRevert 不执行——不会误清除其他 revert 的标志。
++      // #393：busy runner 期间同样拒绝——snap.restore/revert 与运行中工具的文件写入在服务层拦截
+       yield* state.assertNotBusy(input.sessionID)
+-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+-      let lastUser: SessionV1.User | undefined
 +      return yield* Effect.acquireUseRelease(
 +        state.beginRevert(input.sessionID),
 +        () =>
 +          Effect.gen(function* () {
 +            // 只加载 input.messageID 及之后的尾部消息，避免大 session 全量分页加载。
-+            // partID 场景（部分撤回）需要 lastUser（input.messageID 之前的最近 user 消息），
-+            // 仍加载全部作为安全回退。
-+            // narrowing：非 partID + assistant messageID（仅 API 直传可达，TUI 不可达）时，
-+            // lastUser 为 undefined → rev.messageID = assistant 自身（旧行为是之前的 user）。
-+            // 此差异可接受——保留 user 提问不造成数据损坏。
++            // partID 场景（部分撤回）需要 lastUser，仍加载全部作为安全回退。
 +            const all = yield* sessions.messages(
 +              input.partID
 +                ? { sessionID: input.sessionID }
 +                : { sessionID: input.sessionID, fromMessageID: input.messageID },
 +            ).pipe(Effect.orDie)
-+            let lastUser: MessageV2.User | undefined
-+            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-+
-+            let rev: Session.Info["revert"]
-+            const patches: Snapshot.Patch[] = []
-+            for (const msg of all) {
-+              if (msg.info.role === "user") lastUser = msg.info
-+              const remaining = []
-+              for (const part of msg.parts) {
-+                if (rev) {
-+                  if (part.type === "patch") patches.push(part)
-+                  continue
-+                }
-+
-+                if (!rev) {
-+                  if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
-+                    const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
-+                    rev = {
-+                      messageID: !partID && lastUser ? lastUser.id : msg.info.id,
-+                      partID,
-+                    }
-+                  }
-+                  remaining.push(part)
-+                }
-               }
-             }
--            remaining.push(part)
--          }
--        }
--      }
++            let lastUser: SessionV1.User | undefined
+       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
  
--      if (!rev) return session
--
--      // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
--      // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
--      // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
--      // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
--      // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
--      const range = all.filter((msg) => msg.info.id >= rev.messageID)
--      const toolDiffs = yield* summary.computeDiff({ messages: range })
--      const ictx = yield* InstanceState.context
--      const toolFiles = new Set(
--        toolDiffs
--          .map((d) => d.file)
--          .filter((f): f is string => Boolean(f))
--          .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
-+            if (!rev) return session
-+
-+            // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
-+            // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
-+            // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
-+            // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
-+            // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
-+            const range = all.filter((msg) => msg.info.id >= rev.messageID)
-+            const toolDiffs = yield* summary.computeDiff({ messages: range })
-+            const ictx = yield* InstanceState.context
-+            const toolFiles = new Set(
-+              toolDiffs
-+                .map((d) => d.file)
-+                .filter((f): f is string => Boolean(f))
-+                .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
-+            )
-+            const filteredPatches = toolFiles.size > 0
-+              ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
-+              : patches
-+            // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
-+            const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
-+
-+            rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-+            // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
-+            if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
-+            yield* snap.revert(filteredPatches)
-+            if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
-+            const diffs = toolDiffs
-+            yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-+            yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
-+            yield* sessions.setRevert({
-+              sessionID: input.sessionID,
-+              revert: { ...rev, files: revertedFiles.length > 0 ? revertedFiles : undefined },
-+              summary: {
-+                additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-+                deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-+                files: diffs.length,
-+              },
-+            })
-+            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+       let rev: Session.Info["revert"]
+@@ -86,16 +100,29 @@ const layer = Layer.effect(
+         },
+       })
+       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 +          }),
 +        () => state.endRevert(input.sessionID),
-       )
--      const filteredPatches = toolFiles.size > 0
--        ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
--        : patches
--      // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
--      const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
--
--      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
--      // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
--      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
--      yield* snap.revert(filteredPatches)
--      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
--      const diffs = toolDiffs
--      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
--      yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
--      yield* sessions.setRevert({
--        sessionID: input.sessionID,
--        revert: { ...rev, files: revertedFiles.length > 0 ? revertedFiles : undefined },
--        summary: {
--          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
--          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
--          files: diffs.length,
--        },
--      })
--      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
++      )
      })
  
      const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
-       log.info("unreverting", input)
+       yield* Effect.logInfo("unreverting", { sessionID: input.sessionID })
++      // unrevert 也修改文件（snap.restore），同样需要 reverting 守卫防止与 prompt 竞争
++      // #393：busy runner 期间 unrevert 同样拒绝，保持 revert 路径的双层守卫对称
        yield* state.assertNotBusy(input.sessionID)
 -      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 -      if (!session.revert) return session
--      // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
--      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
+-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
 -      yield* sessions.clearRevert(input.sessionID)
 -      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-+      // unrevert 也修改文件（snap.restore），同样需要 reverting 守卫防止与 prompt 竞争
 +      return yield* Effect.acquireUseRelease(
 +        state.beginRevert(input.sessionID),
 +        () =>
@@ -1624,7 +1482,7 @@ index cddc49680dc9de8f0a771cda7e898165a4f4a944..f36235868b02dc45b39c5e647cf833d9
 +            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 +            if (!session.revert) return session
 +            // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
-+            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
++            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
 +            yield* sessions.clearRevert(input.sessionID)
 +            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 +          }),
@@ -1634,10 +1492,9 @@ index cddc49680dc9de8f0a771cda7e898165a4f4a944..f36235868b02dc45b39c5e647cf833d9
  
      const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
 diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/session/run-state.ts
-index aabd497a5bf9b66be1f93453896328fe35819b1d..55df882e85cdc758ec6813f7ee2f8427bca31b5c 100644
 --- a/packages/opencode/src/session/run-state.ts
 +++ b/packages/opencode/src/session/run-state.ts
-@@ -10,6 +10,13 @@ import { SessionActivity } from "./activity"
+@@ -11,6 +11,13 @@
  
  export interface Interface {
    readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
@@ -1651,21 +1508,21 @@ index aabd497a5bf9b66be1f93453896328fe35819b1d..55df882e85cdc758ec6813f7ee2f8427
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
    readonly ensureRunning: (
      sessionID: SessionID,
-@@ -33,9 +40,12 @@ export const layer = Layer.effect(
+@@ -34,9 +41,12 @@
      const status = yield* SessionStatus.Service
  
      const state = yield* InstanceState.make(
 -      Effect.fn("SessionRunState.state")(function* () {
 +      Effect.fn("SessionRunState.state")(function* (ctx) {
          const scope = yield* Scope.Scope
-         const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
+         const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
 +        // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
 +        // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
 +        const reverting = new Set<SessionID>()
          yield* Effect.addFinalizer(
            Effect.fnUntraced(function* () {
              yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
-@@ -43,9 +53,10 @@ export const layer = Layer.effect(
+@@ -44,9 +54,10 @@
                discard: true,
              })
              runners.clear()
@@ -1677,7 +1534,7 @@ index aabd497a5bf9b66be1f93453896328fe35819b1d..55df882e85cdc758ec6813f7ee2f8427
        }),
      )
  
-@@ -72,6 +83,28 @@ export const layer = Layer.effect(
+@@ -73,6 +84,28 @@
        const data = yield* InstanceState.get(state)
        const existing = data.runners.get(sessionID)
        if (existing?.busy) yield* busyError(sessionID)
@@ -1706,8 +1563,8 @@ index aabd497a5bf9b66be1f93453896328fe35819b1d..55df882e85cdc758ec6813f7ee2f8427
      })
  
      const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-@@ -115,7 +148,7 @@ export const layer = Layer.effect(
-         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+@@ -114,7 +147,7 @@
+         )
      })
  
 -    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
@@ -1716,40 +1573,46 @@ index aabd497a5bf9b66be1f93453896328fe35819b1d..55df882e85cdc758ec6813f7ee2f8427
  )
  
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 3e584c8de4eb65b0b51028688fa2d8c3897fee4c..ff2330c2ff72d61d3de91fb13fd30148a4bd3d6f 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -533,7 +533,7 @@ export interface Interface {
-   readonly clearRevert: (sessionID: SessionID) => Effect.Effect<void>
-   readonly setSummary: (input: { sessionID: SessionID; summary: Info["summary"] }) => Effect.Effect<void>
+@@ -445,7 +445,8 @@ export interface Interface {
+   readonly setShare: (input: { sessionID: SessionID; share: Info["share"] }) => Effect.Effect<void>
+   readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
    readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
--  readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<MessageV2.WithParts[], NotFound>
-+  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<MessageV2.WithParts[], NotFound>
+-  readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
++  // fromMessageID：尾部裁剪读取（0393 revert messages 裁剪优化）
++  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<SessionV1.WithParts[], NotFound>
    readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
    readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
-   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
-@@ -825,14 +825,14 @@ export const layer: Layer.Layer<
- 
+   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
+@@ -834,7 +835,7 @@ const layer: Layer.Layer<
      const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
        if (input.limit) {
--        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit })).items
-+        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID })).items
+         // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
+-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
++        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID }).pipe(
+           Effect.provideService(Database.Service, database),
+         )).items
        }
+@@ -848,7 +849,12 @@ const layer: Layer.Layer<
+         Effect.provideService(Database.Service, database),
+       )
+       // stream 为 newest-first；Session.messages 契约为 chronological oldest-first
+-      return newestFirst.slice().reverse()
++      // #393：无 limit 路径的 fromMessageID 裁剪——内存过滤 id >= fromMessageID，
++      // 与 limit 路径的 page(fromMessageID) 语义一致（revert 尾部裁剪优化依赖此契约）
++      const filtered = input.fromMessageID
++        ? newestFirst.filter((m) => m.info.id >= input.fromMessageID!)
++        : newestFirst
++      return filtered.slice().reverse()
+     })
  
-       const size = 50
-       const result = [] as MessageV2.WithParts[]
-       let before: string | undefined
-       while (true) {
--        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before })
-+        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before, fromMessageID: input.fromMessageID })
-         if (page.items.length === 0) break
-         for (let i = page.items.length - 1; i >= 0; i--) {
-           const item = page.items[i]
+     const removeMessage = Effect.fn("Session.removeMessage")(function* (input: {
 diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
 index 7daffc4f8857e1d2d3fc29736ad5de70e0101791..271299c631f3c56e9060f1525174a6dbd812a17e 100644
 --- a/packages/opencode/src/snapshot/index.ts
 +++ b/packages/opencode/src/snapshot/index.ts
-@@ -421,6 +421,18 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
+@@ -421,6 +421,18 @@
                      continue
                    }
  
@@ -1769,34 +1632,21 @@ index 7daffc4f8857e1d2d3fc29736ad5de70e0101791..271299c631f3c56e9060f1525174a6db
                      [...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])],
                      {
 diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/opencode/test/session/revert-compact.test.ts
-index 0ad20a78136a8dea6a5ebb0379ef7a44012d5047..5d83dc98b23a328ad6fd2914d7e453a35f6c9df4 100644
 --- a/packages/opencode/test/session/revert-compact.test.ts
 +++ b/packages/opencode/test/session/revert-compact.test.ts
-@@ -1,10 +1,11 @@
- import { describe, expect } from "bun:test"
+@@ -5,7 +5,7 @@
  import fs from "fs/promises"
  import path from "path"
--import { Effect, Layer } from "effect"
-+import { Effect, Exit, Layer } from "effect"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+-import { Effect } from "effect"
++import { Effect, Exit } from "effect"
  import { Session } from "@/session/session"
- import { ModelID, ProviderID } from "../../src/provider/schema"
- import { SessionRevert } from "../../src/session/revert"
-+import { SessionRunState } from "../../src/session/run-state"
- import { MessageV2 } from "../../src/session/message-v2"
- import { SessionRequestUsage } from "../../src/session/request-usage"
- import { Snapshot } from "../../src/snapshot"
-@@ -22,6 +23,7 @@ const env = Layer.mergeAll(
-   SessionRequestUsage.defaultLayer,
-   Snapshot.defaultLayer,
-   CrossSpawnSpawner.defaultLayer,
-+  SessionRunState.defaultLayer,
- )
  
- const it = testEffect(env)
-@@ -729,4 +731,231 @@ describe("revert + compact workflow", () => {
-       { git: true },
+ import { SessionRevert } from "../../src/session/revert"
+@@ -736,3 +737,230 @@
      ),
    )
+ })
 +
 +  // ── B1: revert 状态守卫 ──────────────────────────────────────
 +  // 验证 revert 进行中时，第二次 revert 被阻止（返回 BusyError），
@@ -1890,7 +1740,6 @@ index 0ad20a78136a8dea6a5ebb0379ef7a44012d5047..5d83dc98b23a328ad6fd2914d7e453a3
 +        Effect.gen(function* () {
 +          const session = yield* Session.Service
 +          const revert = yield* SessionRevert.Service
-+          const state = yield* SessionRunState.Service
 +
 +          const info = yield* session.create({})
 +          const sid = info.id
@@ -1904,9 +1753,10 @@ index 0ad20a78136a8dea6a5ebb0379ef7a44012d5047..5d83dc98b23a328ad6fd2914d7e453a3
 +
 +          // revert 对不存在的 messageID 返回 session（不报错），reverting 已清除
 +          expect(Exit.isSuccess(exit)).toBe(true)
++          // 二次 revert 成功 = reverting 标志已被 endRevert 清除（若泄漏会 BusyError 失败）
++          const exit2 = yield* Effect.exit(revert.revert({ sessionID: sid, messageID: fakeID }))
++          expect(Exit.isSuccess(exit2)).toBe(true)
 +
-+          // assertNotReverting 应该通过——reverting 已被 endRevert 清除
-+          yield* state.assertNotReverting(sid)
 +
 +          yield* session.remove(sid)
 +        }),
@@ -2024,4 +1874,3 @@ index 0ad20a78136a8dea6a5ebb0379ef7a44012d5047..5d83dc98b23a328ad6fd2914d7e453a3
 +      { git: true },
 +    ),
 +  )
- })

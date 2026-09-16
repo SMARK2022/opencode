@@ -1,30 +1,7 @@
-From 720a02cb40beb4e00c03edb1cd9dc4739f6a5872 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Tue, 23 Jun 2026 18:48:08 +0800
-Subject: [PATCH] =?UTF-8?q?fix(compaction):=20=E5=8E=8B=E7=BC=A9=E5=9B=9E?=
- =?UTF-8?q?=E6=94=BE=E6=97=B6=20head+tail=20=E5=8F=8C=E5=90=91=E4=BF=9D?=
- =?UTF-8?q?=E7=95=99=20tool=20=E8=BE=93=E5=87=BA=EF=BC=8C=E9=81=BF?=
- =?UTF-8?q?=E5=85=8D=E4=B8=A2=E5=A4=B1=E6=81=A2=E5=A4=8D=E8=B7=AF=E5=BE=84?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-旧 truncateToolOutput 从头部单边截断，tool 工具层截断 notice 位于输出末尾
-会被整段丢弃，导致模型压缩后丢失恢复文件路径。改为 head(400)+tail(2000)
-双向保留：head 段保 shell 开头 notice 的 path 前缀，tail 段保 tool 末尾
-notice 完整含 path。
-
-兼容边界：headChars/tailChars 为 undefined 时（标题生成 / decide / 正常
-prompt / estimate 等非压缩路径均不传 option）原样返回，避免 NaN 污染；
-text.length <= head+tail 时不截断，避免 head/tail 区间重叠。option 字段
-toolOutputMaxChars 改名为 toolOutputTruncation: { head; tail }，全仓库仅
-compaction 一个调用点，无外部消费者，无兼容风险。
-
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index 461bd9f934a17377d2525066097d2fb323fb8b15..cff2b81dbfc629fe10529addcb0ee125a7eede66 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -43,7 +43,12 @@ export const Event = {
+@@ -30,7 +30,12 @@ export const Event = SessionCompactionEvent
  
  export const PRUNE_MINIMUM = 20_000
  export const PRUNE_PROTECT = 40_000
@@ -36,37 +13,39 @@ index 461bd9f934a17377d2525066097d2fb323fb8b15..cff2b81dbfc629fe10529addcb0ee125
 +const TOOL_OUTPUT_HEAD_CHARS = 400
 +const TOOL_OUTPUT_TAIL_CHARS = 2_000
  const PRUNE_PROTECTED_TOOLS = ["skill"]
- // Whole-turn tail retention keeps exact assistant/tool continuity when it fits.
- // The defaults deliberately preserve four recent user turns with a 4k-16k token
-@@ -864,7 +869,7 @@ export const layer = Layer.effect(
+ const DEFAULT_TAIL_TURNS = 4
+ // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
+@@ -444,7 +449,7 @@ const layer = Layer.effect(
        const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
-       // 压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
+       // #251：压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
        // 会保留已被 summary 覆盖的旧 head 作为审计/恢复数据，但这些旧 tool results 不能在
 -      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
 +      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 head/tail 预算
        // 重新截断并累计，导致本应压缩的可见会话膨胀成远超模型窗口的压缩请求。
        const history = MessageV2.filterCompacted(rawHistory)
        const prior = completedCompactions(history)
-@@ -896,7 +901,7 @@ export const layer = Layer.effect(
+@@ -476,7 +481,7 @@ const layer = Layer.effect(
        yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
        const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
          stripMedia: true,
 -        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
 +        toolOutputTruncation: { head: TOOL_OUTPUT_HEAD_CHARS, tail: TOOL_OUTPUT_TAIL_CHARS },
        })
-       const ctx = yield* InstanceState.context
-       const compactionMessages = [
+       // #194：compaction summary 上传估算——与 prompt.ts 同一 estimateUploadInput 路径
+       // #194：summary 绕过 prompt.ts，需在此处独立 seed pending upload snapshot
+
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index e0f601d256bd483f6f66f65f09712d80f1b6b590..4e29facb96c2bcfee306138b412f5c96a8bc5e71 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -387,10 +387,22 @@ export const ToolStateCompleted = Schema.Struct({
- }).annotate({ identifier: "ToolStateCompleted" })
- export type ToolStateCompleted = Types.DeepMutable<Schema.Schema.Type<typeof ToolStateCompleted>>
+@@ -78,11 +78,22 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
+ export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
+ export { isMedia }
  
 -function truncateToolOutput(text: string, maxChars?: number) {
 -  if (!maxChars || text.length <= maxChars) return text
 -  const omitted = text.length - maxChars
+-  // #282：机器可解析的省略标记（[... reason stats]），不再用面向人的英文句子
 -  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
 +// 压缩回放时对旧 tool 输出做 head+tail 双向保留。
 +// 不变量：tool 工具层（truncate.ts）的截断 notice 在输出末尾（head 方向），
@@ -86,8 +65,8 @@ index e0f601d256bd483f6f66f65f09712d80f1b6b590..4e29facb96c2bcfee306138b412f5c96
 +  return `${text.slice(0, headChars)}\n[... compaction truncated ${omitted} chars ...]\n${text.slice(text.length - tailChars)}`
  }
  
- export const ToolStateError = Schema.Struct({
-@@ -780,7 +792,7 @@ function providerMetaValue(input: unknown): input is ProviderMetadata[string] {
+ export const Event = {
+@@ -164,7 +175,7 @@ function providerMeta(metadata: Record<string, any> | undefined) {
  export const toModelMessagesEffect = Effect.fnUntraced(function* (
    input: WithParts[],
    model: Provider.Model,
@@ -96,7 +75,7 @@ index e0f601d256bd483f6f66f65f09712d80f1b6b590..4e29facb96c2bcfee306138b412f5c96
  ) {
    const result: UIMessage[] = []
    const toolNames = new Set<string>()
-@@ -950,7 +962,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -334,7 +345,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
            if (part.state.status === "completed") {
              const outputText = part.state.time.compacted
                ? formatCompactionClearedNotice()
@@ -109,33 +88,35 @@ index e0f601d256bd483f6f66f65f09712d80f1b6b590..4e29facb96c2bcfee306138b412f5c96
              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
  
              // For providers that don't support media in tool results, extract media files
-@@ -1076,7 +1092,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -459,7 +474,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
  export function toModelMessages(
    input: WithParts[],
    model: Provider.Model,
 -  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
 +  options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
  ): Promise<ModelMessage[]> {
-   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
+   return Effect.runPromise(toModelMessagesEffect(input, model, options))
  }
+
+
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 66aca15a7b030d4d4ea57c6d2d081c3b99679f84..09f3f91c16799760eda8b9546c882e8a2dd3d1c8 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -2375,7 +2375,7 @@ describe("session.compaction.process", () => {
+@@ -1780,7 +1780,7 @@ describe("session.compaction.process", () => {
          const oldReply = yield* createAssistantMessage(session.id, old.id, test.directory)
-         // 旧 head 里的大 tool result 模拟真实会话中已被 summary 覆盖的工具历史；
+         // #251：旧 head 里的大 tool result 模拟真实会话中已被 summary 覆盖的工具历史；
          // 第二次压缩必须只基于 compacted active window 更新 summary，不能把这段
 -        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
 +        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 head/tail 预算
          // 再次截断并累计，重新膨胀本应被压缩的上下文。
          yield* ssn.updatePart({
            id: PartID.ascending(),
+
+
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd856f8461 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -808,7 +808,11 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -754,7 +754,11 @@ describe("session.message-v2.toModelMessage", () => {
      ])
    })
  
@@ -148,7 +129,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
      const userID = "m-user"
      const assistantID = "m-assistant"
  
-@@ -844,7 +848,8 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -790,7 +794,8 @@ describe("session.message-v2.toModelMessage", () => {
        },
      ]
  
@@ -158,7 +139,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
        {
          role: "user",
          content: [{ type: "text", text: "run tool" }],
-@@ -870,7 +875,7 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -816,13 +821,361 @@ describe("session.message-v2.toModelMessage", () => {
              toolName: "bash",
              output: {
                type: "text",
@@ -167,16 +148,15 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
              },
            },
          ],
-@@ -878,6 +883,354 @@ describe("session.message-v2.toModelMessage", () => {
+       },
      ])
    })
- 
 +  // 等长边界：输入恰好等于 head+tail 时不应触发截断，也不应插入 marker
 +  test("does not truncate when text fits within head+tail budget", async () => {
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +
-+    const input: MessageV2.WithParts[] = [
++    const input: SessionV1.WithParts[] = [
 +      {
 +        info: userInfo(userID),
 +        parts: [
@@ -185,7 +165,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +            type: "text",
 +            text: "run tool",
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +      {
 +        info: assistantInfo(assistantID, userID),
@@ -204,7 +184,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +              time: { start: 0, end: 1 },
 +            },
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +    ]
 +
@@ -249,7 +229,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +
-+    const input: MessageV2.WithParts[] = [
++    const input: SessionV1.WithParts[] = [
 +      {
 +        info: userInfo(userID),
 +        parts: [
@@ -258,7 +238,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +            type: "text",
 +            text: "run tool",
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +      {
 +        info: assistantInfo(assistantID, userID),
@@ -278,7 +258,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +              time: { start: 0, end: 1 },
 +            },
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +    ]
 +
@@ -299,7 +279,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +    const notice = `<opencode_notice type="output_truncated" source="tool" total="500L/40000B" shown="head 1000L/16000B" path="${noticePath}" guidance="use grep on path first" />`
 +    const output = "PREVIEW_LINE\n".repeat(100) + "\n\n" + notice
 +
-+    const input: MessageV2.WithParts[] = [
++    const input: SessionV1.WithParts[] = [
 +      {
 +        info: userInfo(userID),
 +        parts: [
@@ -308,7 +288,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +            type: "text",
 +            text: "run tool",
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +      {
 +        info: assistantInfo(assistantID, userID),
@@ -327,7 +307,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +              time: { start: 0, end: 1 },
 +            },
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +    ]
 +
@@ -350,7 +330,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +    const execNotice = '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="1" />'
 +    const output = truncNotice + "\n\n" + "TAIL_LINE\n".repeat(100) + "\n\n" + execNotice
 +
-+    const input: MessageV2.WithParts[] = [
++    const input: SessionV1.WithParts[] = [
 +      {
 +        info: userInfo(userID),
 +        parts: [
@@ -359,7 +339,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +            type: "text",
 +            text: "run tool",
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +      {
 +        info: assistantInfo(assistantID, userID),
@@ -378,7 +358,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +              time: { start: 0, end: 1 },
 +            },
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +    ]
 +
@@ -399,10 +379,10 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +
-+    const input: MessageV2.WithParts[] = [
++    const input: SessionV1.WithParts[] = [
 +      {
 +        info: userInfo(userID),
-+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
++        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as SessionV1.Part[],
 +      },
 +      {
 +        info: assistantInfo(assistantID, userID),
@@ -421,7 +401,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +              time: { start: 0, end: 1 },
 +            },
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +    ]
 +
@@ -461,10 +441,10 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +
-+    const input: MessageV2.WithParts[] = [
++    const input: SessionV1.WithParts[] = [
 +      {
 +        info: userInfo(userID),
-+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
++        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as SessionV1.Part[],
 +      },
 +      {
 +        info: assistantInfo(assistantID, userID),
@@ -483,7 +463,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +              time: { start: 0, end: 1 },
 +            },
 +          },
-+        ] as MessageV2.Part[],
++        ] as SessionV1.Part[],
 +      },
 +    ]
 +
@@ -519,6 +499,7 @@ index f75173beff377b01a55aeb49d34ecd90f182154f..74ed65d3d13a088da7feb2d2db1a17fd
 +    ])
 +  })
 +
+ 
    test("converts assistant tool error into error-text tool result", async () => {
      const userID = "m-user"
-     const assistantID = "m-assistant"
+

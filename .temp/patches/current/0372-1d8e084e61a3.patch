@@ -1,62 +1,34 @@
-From 1d8e084e61a3aec08715acc7d3a956d2400a66a4 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Sat, 4 Jul 2026 20:38:35 +0800
-Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E4=B8=BA=20DialogPrompt=20?=
- =?UTF-8?q?=E5=92=8C=20QuestionPrompt=20=E6=B7=BB=E5=8A=A0=E8=AF=AD?=
- =?UTF-8?q?=E9=9F=B3=E8=BE=93=E5=85=A5=E6=94=AF=E6=8C=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-复用现有 createVoiceInputController 和 prompt.voice.toggle keybind，
-让 Goal 创建/编辑、Session 重命名、Provider 配置、Plugin API 等所有
-DialogPrompt 消费者以及模型提问的自定义回答 textarea 自动获得 alt+v
-（macOS f8）语音转写能力，零新增配置面。
-
-安全边界：
-- DialogPrompt onSubmit 和 QuestionPrompt return-cmd 增加转写中提交保护，
-  防止用户提交转写前的旧草稿（转写最长 90s）
-- QuestionPrompt 的 insertText 回调守卫 isDestroyed，防止 <Show> 销毁
-  textarea 后迟到转写结果写入 stale ref
-- QuestionPrompt 新增 createEffect(on(store.editing)) 在退出编辑模式时
-  abort 进行中录音，defer:true 避免挂载误触发
-- 两个组件均 onCleanup abort 释放麦克风，防止 native PvRecorder 悬挂
-- 补充 3 个 controller 回归测试覆盖 abort 幂等性、abort 后 insertText
-  安全性、insertText 文本完整性
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-index 46fc220bdc631a701751bb4da7cb6b877f825f4f..430687ecba51b39923a239539f9be147e4fc5b5c 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-@@ -1,20 +1,25 @@
+--- a/packages/tui/src/routes/session/question.tsx
++++ b/packages/tui/src/routes/session/question.tsx
+@@ -1,5 +1,5 @@
  import { createStore } from "solid-js/store"
--import { createMemo, createSignal, For, Show } from "solid-js"
-+import { createEffect, createMemo, createSignal, For, Show, on, onCleanup } from "solid-js"
+-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
++import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js"
  import { useRenderer } from "@opentui/solid"
  import type { TextareaRenderable } from "@opentui/core"
  import { selectedForeground, tint, useTheme } from "../../context/theme"
- import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
+@@ -7,7 +7,11 @@ import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
  import { useSDK } from "../../context/sdk"
-+import { useToast } from "../../ui/toast"
- import { SplitBorder } from "../../component/border"
- import { useDialog } from "../../ui/dialog"
- import { useTuiConfig } from "../../context/tui-config"
--import { useBindings } from "../../keymap"
-+import { useBindings, useCommandShortcut } from "../../keymap"
+ import { SplitBorder } from "../../ui/border"
+ import { useTuiConfig } from "../../config"
+-import { useBindings, useOpencodeModeStack } from "../../keymap"
++import { useBindings, useOpencodeModeStack, useCommandShortcut } from "../../keymap"
 +import { PromptVoiceInput } from "../../prompt-voice-input"
 +import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
 +import { Spinner } from "../../component/spinner"
++import { useToast } from "../../ui/toast"
  
- export function QuestionPrompt(props: { request: QuestionRequest }) {
-   const sdk = useSDK()
-   const { theme } = useTheme()
+ const QUESTION_MODE = "question"
+ 
+@@ -17,6 +21,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
    const renderer = useRenderer()
    const tuiConfig = useTuiConfig()
+   const modeStack = useOpencodeModeStack()
 +  const toast = useToast()
  
    const questions = createMemo(() => props.request.questions)
    const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
-@@ -30,6 +35,54 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
+@@ -32,6 +37,54 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
  
    let textarea: TextareaRenderable | undefined
  
@@ -111,7 +83,27 @@ index 46fc220bdc631a701751bb4da7cb6b877f825f4f..430687ecba51b39923a239539f9be147
    const question = createMemo(() => questions()[store.tab])
    const confirm = createMemo(() => !single() && store.tab === questions().length)
    const options = createMemo(() => question()?.options ?? [])
-@@ -154,6 +207,9 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
+@@ -147,8 +200,19 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
+           textarea?.setText("")
+         },
+       },
++      {
++        name: "prompt.voice.toggle",
++        title: "Toggle voice input",
++        category: "Question",
++        run() {
++          void voiceInput.toggle()
++        },
++      },
+     ],
+     bindings: [
++      // [local-smark] 复用 prompt.voice.toggle 绑定（与主 Prompt 同快捷键）；
++      // 仅 editing 模式生效——insertText 目标是 custom answer textarea，只在 editing 时存在
++      ...tuiConfig.keybinds.get("prompt.voice.toggle"),
+       {
+         key: "escape",
+         desc: "Cancel answer edit",
+@@ -163,6 +227,9 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
          desc: "Submit answer edit",
          group: "Question",
          cmd: () => {
@@ -121,36 +113,11 @@ index 46fc220bdc631a701751bb4da7cb6b877f825f4f..430687ecba51b39923a239539f9be147
            const text = textarea?.plainText?.trim() ?? ""
            const prev = store.custom[store.tab]
  
-@@ -197,6 +253,24 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
-     ],
-   }))
- 
-+  // [local-smark] voice toggle keybind：仅在 editing 模式下生效，
-+  // 因为 voice 的 insertText 目标是 custom answer textarea，只在 editing 时存在。
-+  // 复用 prompt.voice.toggle 命令和 prompt_voice_toggle 配置，保持与主 Prompt 一致的快捷键。
-+  useBindings(() => ({
-+    enabled: store.editing && !confirm(),
-+    commands: [
-+      {
-+        name: "prompt.voice.toggle",
-+        title: "Toggle voice input",
-+        category: "Question",
-+        run() {
-+          void voiceInput.toggle()
-+        },
-+      },
-+    ],
-+    bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
-+  }))
-+
-   useBindings(() => {
-     const opts = options()
-     const total = opts.length + (custom() ? 1 : 0)
-@@ -494,6 +568,23 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
+@@ -504,6 +571,22 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
              </span>
            </text>
  
-+          {/* 录音中显示红点 + 计时器和停止快捷键；editing 模式下显示 voice 快捷键提示 */}
++          {/* [local-smark] 录音中显示红点/spinner + 状态文本；editing 且已配置转写器且空闲时显示快捷键提示 */}
 +          <Show when={voiceInputBusy()}>
 +            <box flexDirection="row" gap={1}>
 +              <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
@@ -166,37 +133,35 @@ index 46fc220bdc631a701751bb4da7cb6b877f825f4f..430687ecba51b39923a239539f9be147
 +              {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
 +            </text>
 +          </Show>
-+
            <text fg={theme.text}>
              esc <span style={{ fg: theme.textMuted }}>dismiss</span>
            </text>
-diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-index 34ab9161f6a8e2cd9883ff00857d29de26bc9260..47c857cf4203b2d3f190cdc8c01e343a7c9429b6 100644
---- a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-@@ -1,8 +1,14 @@
+--- a/packages/tui/src/ui/dialog-prompt.tsx
++++ b/packages/tui/src/ui/dialog-prompt.tsx
+@@ -1,10 +1,14 @@
  import { TextareaRenderable, TextAttributes } from "@opentui/core"
-+import { useRenderer } from "@opentui/solid"
  import { useTheme } from "../context/theme"
-+import { useTuiConfig } from "../context/tui-config"
  import { useDialog, type DialogContext } from "./dialog"
--import { Show, createEffect, onMount, type JSX } from "solid-js"
-+import { useToast } from "./toast"
-+import { useBindings, useCommandShortcut } from "../keymap"
+-import { Show, createEffect, createSignal, onMount, type JSX } from "solid-js"
++import { Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js"
+ import { Spinner } from "../component/spinner"
+ import { useTuiConfig } from "../config"
+ import { useBindings, useCommandShortcut } from "../keymap"
++import { useRenderer } from "@opentui/solid"
 +import { PromptVoiceInput } from "../prompt-voice-input"
 +import { PromptVoiceRecorder } from "../prompt-voice-recorder"
- import { Spinner } from "../component/spinner"
-+import { Show, createEffect, onCleanup, onMount, createSignal, type JSX } from "solid-js"
++import { useToast } from "./toast"
  
  export type DialogPromptProps = {
    title: string
-@@ -18,8 +24,65 @@ export type DialogPromptProps = {
- export function DialogPrompt(props: DialogPromptProps) {
+@@ -21,12 +25,54 @@ export function DialogPrompt(props: DialogPromptProps) {
    const dialog = useDialog()
    const { theme } = useTheme()
-+  const tuiConfig = useTuiConfig()
+   const tuiConfig = useTuiConfig()
 +  const toast = useToast()
 +  const renderer = useRenderer()
+   const submitShortcut = useCommandShortcut("dialog.prompt.submit")
+   const [textareaTarget, setTextareaTarget] = createSignal<TextareaRenderable>()
    let textarea: TextareaRenderable
  
 +  // [local-smark] voice 输入：复用主 Prompt 的 createVoiceInputController，
@@ -210,7 +175,7 @@ index 34ab9161f6a8e2cd9883ff00857d29de26bc9260..47c857cf4203b2d3f190cdc8c01e343a
 +  const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
 +
 +  function insertVoiceText(text: string) {
-+    // isDestroyed 守卫：录音转写完成时 textarea 可能已被 busy/ESC 销毁，
++    // isDestroyed 守卫：转写完成时 textarea 可能已被 busy/ESC 销毁（dialog.replace），
 +    // 向已销毁的 renderable 插入文本会抛错或静默失败。
 +    if (!textarea || textarea.isDestroyed) return
 +    textarea.insertText(text)
@@ -236,11 +201,20 @@ index 34ab9161f6a8e2cd9883ff00857d29de26bc9260..47c857cf4203b2d3f190cdc8c01e343a
 +    void voiceInput.abort()
 +  })
 +
-+  // voice toggle keybind：复用 prompt.voice.toggle 命令和 prompt_voice_toggle 配置，
-+  // 保持与主 Prompt 相同的肌肉记忆。busy 状态下禁用，避免与消费者异步操作竞争。
-+  useBindings(() => ({
-+    enabled: !props.busy,
-+    commands: [
+   function confirm() {
+     if (props.busy) return
++    // voice 转写进行中时拦截提交，防止用户提交转写前的旧草稿。
++    // 转写最长 90s，期间用户按 Enter 不应触发 onConfirm。
++    if (voiceInputBusy()) return
+     props.onConfirm?.(textarea.plainText)
+   }
+ 
+@@ -42,8 +88,21 @@ export function DialogPrompt(props: DialogPromptProps) {
+         category: "Dialog",
+         run: confirm,
+       },
++      // [local-smark] voice toggle：busy 时 bindings enabled 已为 false，无需重复守卫；
++      // 复用 prompt.voice.toggle 配置，与主 Prompt 保持相同快捷键
 +      {
 +        name: "prompt.voice.toggle",
 +        title: "Toggle voice input",
@@ -250,27 +224,19 @@ index 34ab9161f6a8e2cd9883ff00857d29de26bc9260..47c857cf4203b2d3f190cdc8c01e343a
 +        },
 +      },
 +    ],
-+    bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
-+  }))
-+
++    bindings: [
++      ...tuiConfig.keybinds.gather("dialog.prompt", ["dialog.prompt.submit"]),
++      ...tuiConfig.keybinds.get("prompt.voice.toggle"),
+     ],
+-    bindings: tuiConfig.keybinds.gather("dialog.prompt", ["dialog.prompt.submit"]),
+   }))
+ 
    onMount(() => {
-     dialog.setSize("medium")
-     setTimeout(() => {
-@@ -61,6 +124,9 @@ export function DialogPrompt(props: DialogPromptProps) {
-         <textarea
-           onSubmit={() => {
-             if (props.busy) return
-+            // voice 转写进行中时拦截 submit，防止用户提交转写前的旧草稿。
-+            // 转写最长 90s，期间用户按 Enter 不应触发 onConfirm。
-+            if (voiceInputBusy()) return
-             props.onConfirm?.(textarea.plainText)
-           }}
-           height={3}
-@@ -80,9 +146,27 @@ export function DialogPrompt(props: DialogPromptProps) {
-       </box>
-       <box paddingBottom={1} gap={1} flexDirection="row">
-         <Show when={!props.busy} fallback={<text fg={theme.textMuted}>processing...</text>}>
-+          {/* 录音中显示红点 + 计时器和停止快捷键，让用户知道如何结束录音 */}
+@@ -108,6 +167,22 @@ export function DialogPrompt(props: DialogPromptProps) {
+               {submitShortcut()} <span style={{ fg: theme.textMuted }}>submit</span>
+             </text>
+           </Show>
++          {/* [local-smark] 录音状态栏 + 快捷键提示；对话框宽度固定，不复用 voiceHintVisible 的 140 列宽度门 */}
 +          <Show when={voiceInputBusy()}>
 +            <box flexDirection="row" gap={1}>
 +              <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
@@ -281,11 +247,6 @@ index 34ab9161f6a8e2cd9883ff00857d29de26bc9260..47c857cf4203b2d3f190cdc8c01e343a
 +              </text>
 +            </box>
 +          </Show>
-           <text fg={theme.text}>
-             enter <span style={{ fg: theme.textMuted }}>submit</span>
-           </text>
-+          {/* 对话框宽度远小于 140，不复用 voiceHintVisible；配置了转写器就始终露出快捷键提示。
-+              录音中隐藏提示，避免与录音状态栏的 "f8 stop" 冗余显示。 */}
 +          <Show when={tuiConfig.voice?.transcriber && !voiceInputBusy()}>
 +            <text fg={theme.text}>
 +              {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
@@ -294,23 +255,19 @@ index 34ab9161f6a8e2cd9883ff00857d29de26bc9260..47c857cf4203b2d3f190cdc8c01e343a
          </Show>
        </box>
      </box>
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-index 5af22be5affd58366b13641752986413c9d0ef0e..1472e38153d883d63d0b983e1e3c1715038ccf6c 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-@@ -512,4 +512,100 @@ describe("prompt voice input", () => {
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
+@@ -512,4 +512,103 @@ describe("prompt voice input", () => {
      expect(errors).toEqual([])
      expect(controller.status()).toEqual({ type: "idle" })
    })
 +
-+  // [local-smark] 以下测试覆盖 DialogPrompt / QuestionPrompt 新增 voice 接入所依赖的 controller 安全边界。
-+  // 这些边界在主 Prompt 组件中已隐含覆盖，但对话框场景的生命周期更复杂
-+  // （onCleanup + createEffect 可能先后触发 abort、textarea ref 可能已销毁），
-+  // 需要独立锁定以防止未来重构破坏对话框 voice 的安全假设。
++  // [local-smark] 以下测试覆盖 DialogPrompt / QuestionPrompt voice 接入所依赖的 controller 安全边界。
++  // 对话框场景生命周期更复杂（onCleanup + createEffect 可能先后触发 abort、
++  // textarea ref 可能已销毁），需独立锁定以防止重构破坏对话框 voice 的安全假设。
 +
 +  // abort 幂等性：onCleanup（组件卸载）和 createEffect（editing→false）可能在同一轮
 +  // 事件循环中先后调用 abort。第二次 abort 必须是无副作用 no-op，不能抛错或重复释放 native 资源。
-+  // 该边界保护 QuestionPrompt 中 createEffect + onCleanup 双重 cleanup 路径。
 +  test("abort is idempotent when called from both onCleanup and createEffect", async () => {
 +    let abortCount = 0
 +    const controller = createVoiceInputController({
@@ -318,7 +275,9 @@ index 5af22be5affd58366b13641752986413c9d0ef0e..1472e38153d883d63d0b983e1e3c1715
 +      startRecorder: async () => ({
 +        file: "voice.wav",
 +        stop: async () => {},
-+        abort: async () => { abortCount++ },
++        abort: async () => {
++          abortCount++
++        },
 +      }),
 +      transcribe: async () => "text",
 +      insertText: () => {},
@@ -329,19 +288,21 @@ index 5af22be5affd58366b13641752986413c9d0ef0e..1472e38153d883d63d0b983e1e3c1715
 +    await controller.abort()
 +    await controller.abort()
 +
-+    // recorder 只被 abort 一次：cancel() 在第一次 abort 后 status 已是 idle，
++    // recorder 只被 abort 一次：第一次 abort 后 status 已是 idle，
 +    // 第二次 abort 时 recorder 为 undefined，不会重复调用 abort()。
 +    expect(abortCount).toBe(1)
 +    expect(controller.status()).toEqual({ type: "idle" })
 +  })
 +
 +  // abort 期间转写可能已发出但尚未 resolve；abort 后迟到结果不能触发 insertText。
-+  // 这覆盖 QuestionPrompt 的 stale ref 场景：用户退出 editing 模式后 textarea 已销毁，
-+  // 此时迟到的转写文本不能尝试插入到已销毁的 renderable。
++  // 覆盖 QuestionPrompt 的 stale ref 场景：退出 editing 后 textarea 已销毁，
++  // 迟到的转写文本不能尝试插入到已销毁的 renderable。
 +  test("does not invoke insertText after abort during in-flight transcription", async () => {
 +    let transcribeSignal: AbortSignal | undefined
 +    let transcribeStarted: () => void
-+    const started = new Promise<void>((resolve) => { transcribeStarted = resolve })
++    const started = new Promise<void>((resolve) => {
++      transcribeStarted = resolve
++    })
 +    let lateResolve: ((text: string) => void) | undefined
 +    const inserted: string[] = []
 +    const controller = createVoiceInputController({
@@ -354,7 +315,10 @@ index 5af22be5affd58366b13641752986413c9d0ef0e..1472e38153d883d63d0b983e1e3c1715
 +        return new Promise<string>((resolve, reject) => {
 +          lateResolve = resolve
 +          const timer = setInterval(() => {
-+            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
++            if (signal.aborted) {
++              clearInterval(timer)
++              reject(new Error("aborted"))
++            }
 +          }, 5)
 +        })
 +      },
@@ -378,10 +342,9 @@ index 5af22be5affd58366b13641752986413c9d0ef0e..1472e38153d883d63d0b983e1e3c1715
 +    expect(controller.status()).toEqual({ type: "idle" })
 +  })
 +
-+  // insertText 回调中对已销毁 textarea 的守卫是 DialogPrompt/QuestionPrompt 的安全边界。
-+  // controller 本身不判断 textarea 状态，但 insertText 回调必须由消费方守卫。
-+  // 此测试验证 controller 在正常路径下调用 insertText 时传入的是转写文本，
-+  // 让消费方的 isDestroyed 守卫可以正确拦截——即 controller 不会跳过 insertText 或传入空值。
++  // insertText 回调中对已销毁 textarea 的守卫由消费方（DialogPrompt/QuestionPrompt）负责。
++  // 此测试验证 controller 在正常路径下把完整转写文本传给 insertText——
++  // 即 controller 不会跳过 insertText 或传入空值，消费方的 isDestroyed 守卫可以正确拦截。
 +  test("insertText receives the full transcribed text for consumer-side guards to check", async () => {
 +    const inserted: string[] = []
 +    const controller = createVoiceInputController({
@@ -394,8 +357,8 @@ index 5af22be5affd58366b13641752986413c9d0ef0e..1472e38153d883d63d0b983e1e3c1715
 +    await controller.toggle()
 +    await controller.toggle()
 +
-+    // 消费方（DialogPrompt/QuestionPrompt）的 insertText 回调会检查 textarea.isDestroyed；
-+    // controller 保证只在转写成功后调用一次 insertText，传入完整文本。
 +    expect(inserted).toEqual(["hello world"])
++    expect(controller.status()).toEqual({ type: "idle" })
 +  })
  })
+\ No newline at end of file

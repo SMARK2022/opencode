@@ -1,27 +1,3 @@
-From adb288a4cc532207a60290673ffc7549406ef6ec Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Mon, 6 Jul 2026 20:18:02 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20DialogMessage=20=E7=A7=BB=E9=99=A4?=
- =?UTF-8?q?=20usePromptRef=20=E6=94=B9=E7=94=A8=20submit=20prop=20?=
- =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E7=82=B9=E5=87=BB=E6=B6=88=E6=81=AF=E5=B4=A9?=
- =?UTF-8?q?=E6=BA=83?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-dialog.replace() 渲染上下文在 DialogProvider 层级，位于 PromptRefProvider
-之上，SolidJS context 不向兄弟节点传递。DialogMessage 在此上下文中调用
-usePromptRef() 导致 "PromptRef context must be used within a context
-provider" 崩溃。
-
-修复：移除 DialogMessage 中的 usePromptRef import 和调用，新增 submit
-可选 prop，由 session/index.tsx（PromptRefProvider 内）通过
-promptRef.current?.submit() 传入，经 DialogTimeline 透传。两处调用点
-（DialogTimeline 和 DialogMessage 直接渲染）均已覆盖。
-
-含方案文档 docs/promptref-context-fix-plan.md，经 subagent 全量审计
-无阻塞性意见。
-
 diff --git a/docs/promptref-context-fix-plan.md b/docs/promptref-context-fix-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..644a71bd734d1a665fae7f66469253ee26d77d8a
@@ -292,18 +268,17 @@ index 0000000000000000000000000000000000000000..644a71bd734d1a665fae7f66469253ee
 +
 +### 无开放问题
 +所有调用点（2 处 `DialogMessage`、1 处 `DialogTimeline`）均已确认，`promptRef` 在 `session/index.tsx` 中可用。
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-index 58c2f76d2cf7c59df04ef6024154a7d7cc715e70..1fa64b6a6b92434a0d9a620bdd73e8e1c6459804 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-@@ -3,7 +3,6 @@ import { useSync } from "@tui/context/sync"
- import { DialogSelect } from "@tui/ui/dialog-select"
- import { useSDK } from "@tui/context/sdk"
- import { useRoute } from "@tui/context/route"
--import { usePromptRef } from "@tui/context/prompt"
- import * as Clipboard from "@tui/util/clipboard"
- import type { PromptInfo } from "@tui/component/prompt/history"
- import { strip } from "@tui/component/prompt/part"
+diff --git a/packages/tui/src/routes/session/dialog-message.tsx b/packages/tui/src/routes/session/dialog-message.tsx
+--- a/packages/tui/src/routes/session/dialog-message.tsx
++++ b/packages/tui/src/routes/session/dialog-message.tsx
+@@ -3,7 +3,6 @@ import { useSync } from "../../context/sync"
+ import { DialogSelect } from "../../ui/dialog-select"
+ import { useSDK } from "../../context/sdk"
+ import { useRoute } from "../../context/route"
+-import { usePromptRef } from "../../context/prompt"
+ import { useClipboard } from "../../context/clipboard"
+ import type { PromptInfo } from "../../component/prompt/history"
+ import { stripPromptPartIDs as strip } from "../../prompt/part"
 @@ -12,12 +11,14 @@ export function DialogMessage(props: {
    messageID: string
    sessionID: string
@@ -320,19 +295,19 @@ index 58c2f76d2cf7c59df04ef6024154a7d7cc715e70..1fa64b6a6b92434a0d9a620bdd73e8e1
  
    // 从消息 parts 提取 PromptInfo（text 拼接 + file parts），供 Revert/Retry 复用
    function extractPromptInfo(messageID: string): PromptInfo {
-@@ -87,7 +88,7 @@ export function DialogMessage(props: {
-             // revert 成功：填回 prompt 并自动提交。
-             // set 同步更新 store（prompt/index.tsx），submit 读取 store——时序安全
+@@ -84,7 +85,7 @@ export function DialogMessage(props: {
+             }
+             // revert 成功：填回 prompt 并自动提交。set 同步更新 store，submit 读取 store——时序安全
              props.setPrompt?.(promptInfo)
 -            promptRef.current?.submit()
 +            props.submit?.()
            },
          },
          {
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-timeline.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-timeline.tsx
+diff --git a/packages/tui/src/routes/session/dialog-timeline.tsx b/packages/tui/src/routes/session/dialog-timeline.tsx
 index 87248a6a8ba6e6b0482c1acdd574d1872c0da88b..f85292d74a97f01712990014e036864bae99ddf3 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-timeline.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-timeline.tsx
+--- a/packages/tui/src/routes/session/dialog-timeline.tsx
++++ b/packages/tui/src/routes/session/dialog-timeline.tsx
 @@ -11,6 +11,9 @@ export function DialogTimeline(props: {
    sessionID: string
    onMove: (messageID: string) => void
@@ -352,10 +327,10 @@ index 87248a6a8ba6e6b0482c1acdd574d1872c0da88b..f85292d74a97f01712990014e036864b
            ))
          },
        })
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index 8c0259ebf852f4c60dbf2982d0ba6e2229325f3f..482db43a2b233da1e05f2ceae1c1ea7d28f73722 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
 @@ -646,6 +646,7 @@ export function Session() {
              }}
              sessionID={route.sessionID}

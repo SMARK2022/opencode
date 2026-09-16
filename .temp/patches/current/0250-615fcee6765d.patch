@@ -1,42 +1,24 @@
-From 615fcee6765dd521c56e3d97599ca0e308512940 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 28 May 2026 23:34:07 +0800
-Subject: [PATCH] =?UTF-8?q?feat(reviewer):=20=E6=B7=BB=E5=8A=A0=E6=9D=83?=
- =?UTF-8?q?=E9=99=90=E5=AE=A1=E6=9F=A5=E6=9C=8D=E5=8A=A1=E6=B5=8B=E8=AF=95?=
- =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=20OAuth=20=E5=92=8C=E9=9D=9E=20OAut?=
- =?UTF-8?q?h=20=E8=AF=B7=E6=B1=82=E7=9A=84=E8=A1=8C=E4=B8=BA=E4=B8=80?=
- =?UTF-8?q?=E8=87=B4=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index efadc905f391ea97fe2ce10a074e4d601bd856ce..d6edd7275895dcc7dc0bd575c7967f6b3da66314 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -1,5 +1,7 @@
- import { Config } from "@/config/config"
-+import { Auth } from "@/auth"
- import { Provider } from "@/provider/provider"
-+import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
- import { ProviderTransform } from "@/provider/transform"
- import { Session } from "@/session/session"
+@@ -7,3 +7,5 @@
  import { MessageV2 } from "@/session/message-v2"
-@@ -85,6 +87,7 @@ export const layer = Layer.effect(
-   Service,
-   Effect.gen(function* () {
++import { Auth } from "@/auth"
++import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
+ import { SessionRetry } from "@/session/retry"
+ import { MessageID, PartID, SessionID } from "@/session/schema"
+@@ -101,3 +103,5 @@
      const config = yield* Config.Service
++    // #250：auth.get(providerID) 判定凭据类型——只有 openai+oauth 才走 instructions 提升
 +    const auth = yield* Auth.Service
      const provider = yield* Provider.Service
-     const sessions = yield* Session.Service
-     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
-@@ -336,13 +339,31 @@ export const layer = Layer.effect(
-         Effect.sync(() => new AbortController()),
-         (abort) =>
+     // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
+@@ -372,12 +374,32 @@
            Effect.gen(function* () {
 -            const language = yield* provider.getLanguage(model)
 -            const providerInfo = yield* provider.getProvider(model.providerID)
++            // #250：四项依赖互不依赖，Effect.all unbounded 合并发射减少 reviewer 延迟；
++            // config 与 auth 是 OAuth 判定的新增输入
 +            const [language, providerInfo, cfg, authInfo] = yield* Effect.all(
 +              [
 +                provider.getLanguage(model),
@@ -46,7 +28,9 @@ index efadc905f391ea97fe2ce10a074e4d601bd856ce..d6edd7275895dcc7dc0bd575c7967f6b
 +              ],
 +              { concurrency: "unbounded" },
 +            )
+             // #209：无 persist 时用固定标识——ProviderTransform.options 需要一个 sessionID 做 provider 适配键，无子会话时用常量避免空值
              const sessionID = persist?.sessionID ?? "permission-reviewer"
+             // #209：合并 provider options 与 model.options——与 SessionPrompt 保持一致的 provider 适配，避免 reviewer 流缺少必要选项
 -            const options = mergeOptions(
 +            const baseOptions = mergeOptions(
                ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
@@ -63,52 +47,41 @@ index efadc905f391ea97fe2ce10a074e4d601bd856ce..d6edd7275895dcc7dc0bd575c7967f6b
 +              : undefined
 +            const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
 +            const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
+             // #209：wrapLanguageModel 注入 message 归一化中间件——reviewer 流与 SessionPrompt 共享同一 provider 适配层
              const result = streamText({
-               model: wrapLanguageModel({
-                 model: language,
-@@ -362,7 +383,7 @@ export const layer = Layer.effect(
-                   },
-                 ],
+@@ -399,3 +419,3 @@
                }),
 -              messages: [...messages],
 +              messages: [...reviewerMessages],
                tools: {
-                 permission_review_decision: tool({
-                   description: "Submit the structured allow/deny decision for this permission review.",
-@@ -718,7 +739,14 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string }
- }
+@@ -904,4 +930,6 @@
+ // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
+-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node] })
++// #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
++// node deps 显式加入 Auth.node，LayerNode 依赖图在编译期保持完整
++export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node] })
  
- export const defaultLayer = Layer.suspend(() =>
--  layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer)),
-+  layer.pipe(
-+    // reviewer 请求落点现在需要读取 auth，才能只在 OpenAI OAuth/Codex 路径把同一份
-+    // 可信策略放进 Responses `instructions`；默认层必须随现有 config/provider 一起
-+    // 提供 Auth，否则生产默认 wiring 会缺少这个 provider 判定边界。
-+    Layer.provide(Auth.defaultLayer),
-+    Layer.provide(Config.defaultLayer),
-+    Layer.provide(Provider.defaultLayer),
-+  ),
- )
- 
- // Permission.defaultLayer consumes this bundled reviewer layer before building
+ export * as PermissionReviewer from "./service"
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5a29c0a47
 --- /dev/null
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,266 @@
 +import { describe, expect } from "bun:test"
 +import { Effect, Layer } from "effect"
 +import { createOpenAI } from "@ai-sdk/openai"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
 +import { Auth } from "../../src/auth"
 +import { Config } from "../../src/config/config"
 +import { PermissionReviewer } from "../../src/permission/reviewer/service"
-+import { ModelID, ProviderID } from "../../src/provider/schema"
 +import { Session } from "../../src/session/session"
 +import { testEffect } from "../lib/effect"
 +import { TestConfig } from "../fixture/config"
 +import { ProviderTest } from "../fake/provider"
 +
++// #250：目标树无 src/provider/schema——ID 品牌类型来自 core 的 ModelV2/ProviderV2，
++// 与 test/fake/provider.ts 的既有用法一致
 +// 这个命令覆盖 reviewer 证据里最容易被回归破坏的 shell 形态：空格路径、引号、
 +// 环境变量、管道、重定向、子命令和危险删除意图都必须保留在 user evidence，
 +// 不能被提升到 OpenAI OAuth/Codex 的高优先级 instructions 中。
@@ -129,8 +102,10 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +  input: Array<{ role?: unknown; content?: unknown }>
 +}
 +
-+const OPENAI_PROVIDER_ID = ProviderID.make("openai")
-+const CUSTOM_PROVIDER_ID = ProviderID.make("custom-openai")
++// #250：三个 provider/凭据组合覆盖判定矩阵——openai+oauth 提升instructions，
++// openai+apiKey 与 custom+oauth 都不提升；判定错误方向任一都会被对应 fixture 抓住
++const OPENAI_PROVIDER_ID = ProviderV2.ID.make("openai")
++const CUSTOM_PROVIDER_ID = ProviderV2.ID.make("custom-openai")
 +const sessionLayer = Layer.mock(Session.Service)({})
 +
 +describe("permission reviewer service", () => {
@@ -149,6 +124,7 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +      const decision = yield* reviewer.review(reviewInput("review_openai_oauth"))
 +      const body = oauthFixture.bodies[0]
 +
++      // #250：decision 形状锁定 Assessment→ReviewDecision 的映射不被 OAuth 分支改变
 +      expect(decision).toMatchObject({
 +        action: "allow",
 +        reason: REVIEWER_ASSESSMENT.rationale,
@@ -156,9 +132,11 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +        risk_level: "medium",
 +        user_authorization: "medium",
 +      })
++      // #250：instructions 必须含 tool 定义（Codex 契约），但绝不能含 shell 证据
 +      expect(typeof body.instructions).toBe("string")
 +      expect(body.instructions).toContain("permission_review_decision")
 +      expect(JSON.stringify(body.instructions)).not.toContain(COMMAND_EVIDENCE)
++      // #250：system/developer input item 必须被剔除——提升后残留会双重提交策略
 +      expect(hasSystemLikeInput(body)).toBe(false)
 +      expectPreservedShellEvidence(inputText(body))
 +    }),
@@ -171,6 +149,7 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +      const body = apiKeyFixture.bodies[0]
 +
 +      expect(decision.action).toBe("allow")
++      // #250：非 OAuth 路径 instructions 必须缺席——写入会改变普通 Responses 的语义
 +      expect(body.instructions).toBeUndefined()
 +      expect(hasSystemLikeInput(body)).toBe(true)
 +      expectPreservedShellEvidence(inputText(body))
@@ -193,7 +172,7 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +
 +function reviewerFixture(
 +  authInfo: Auth.Info | undefined,
-+  options: { requireInstructions: boolean; providerID?: ProviderID } = { requireInstructions: false },
++  options: { requireInstructions: boolean; providerID?: ProviderV2.ID } = { requireInstructions: false },
 +) {
 +  const bodies: ReviewerRequestBody[] = []
 +  const model = reviewerModel(options.providerID ?? OPENAI_PROVIDER_ID)
@@ -220,6 +199,8 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +    },
 +    { preconnect: () => {} },
 +  )
++  // #250：getLanguage 覆盖返回真实 OpenAI Responses 客户端——fetch 拦截让请求
++  // 落到本地断言而不出网
 +  const provider = ProviderTest.fake({
 +    model,
 +    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
@@ -230,6 +211,8 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +
 +  return {
 +    bodies,
++    // #250：Layer.mock(Session) 不会被子会话路径触达（review 无 tool/sessionID 时
++    // updateToolAutoReview 返回 Effect.void）——空实现即安全
 +    layer: PermissionReviewer.layer.pipe(
 +      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
 +      Layer.provide(provider.layer),
@@ -239,15 +222,17 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +  }
 +}
 +
-+function reviewerModel(providerID: ProviderID) {
++function reviewerModel(providerID: ProviderV2.ID) {
 +  return ProviderTest.model({
-+    id: ModelID.make("gpt-5"),
++    id: ModelV2.ID.make("gpt-5"),
 +    providerID,
 +    api: { id: "gpt-5", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
 +  })
 +}
 +
 +function hasSystemLikeInput(body: ReviewerRequestBody) {
++  // #250：system 与 developer 都算高优先级指令通道——Responses API 两者都会
++  // 被 Codex 后端区别对待，漏检 developer 会让剔除逻辑半途而废
 +  return body.input.some((item) => item.role === "system" || item.role === "developer")
 +}
 +
@@ -264,6 +249,8 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +}
 +
 +function expectPreservedShellEvidence(text: string) {
++  // #250：逐 token 断言而非整串比较——证据格式变化不应掩盖丢失；rm/重定向/
++  // 环境变量是最容易被提升逻辑误删的高危片段
 +  expect(text).toContain("/tmp/path with spaces")
 +  expect(text).toContain("$HOME")
 +  expect(text).toContain("sed 's/a/b/'")
@@ -283,10 +270,13 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +  }
 +}
 +
-+function config(providerID: ProviderID): Config.Info {
++// #250：Config.Info 是 config 模块私有别名——测试直接用结构推断，避免依赖未导出类型
++function config(providerID: ProviderV2.ID) {
 +  return {
 +    permission: {
-+      approvals_reviewer: "auto_review",
++      // #250：approvals_reviewer=auto_review 绕过禁用分支；model 字符串走
++      // providerID/gpt-5 形态——与 fixture 的 provider id 严格对应
++      approvals_reviewer: "auto_review" as const,
 +      auto_review: {
 +        model: `${providerID}/gpt-5`,
 +        policy: "Reviewer service test policy: allow only the bounded fixture command.",
@@ -302,11 +292,15 @@ index 0000000000000000000000000000000000000000..223aec693b8bc6bbec08759a3659ecc5
 +}
 +
 +function oauthAuth(): Auth.Info {
++  // #250：expires 取未来时间——过期凭据类型仍为 oauth 但生产路径会先刷新，
++  // 本测试只关心判定输入不关心刷新协议
 +  return { type: "oauth", refresh: "refresh-token", access: "access-token", expires: Date.now() + 60_000 }
 +}
 +
 +function openAIReviewDecisionStream() {
 +  const args = JSON.stringify(REVIEWER_ASSESSMENT)
++  // #250：事件序列复刻真实 Responses function-call 流——created/added/delta/done/
++  // completed 缺一项 stream parser 都可能走不到 execute 分支
 +  return [
 +    { type: "response.created", response: { id: "resp_review", created_at: 0, model: "gpt-5", service_tier: null } },
 +    {

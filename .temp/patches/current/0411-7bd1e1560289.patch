@@ -1,23 +1,3 @@
-From 7bd1e1560289027a0eeab32886b94634d1f39ee2 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Sat, 11 Jul 2026 04:29:06 +0800
-Subject: [PATCH] =?UTF-8?q?feat(goal):=20=E5=A2=9E=E5=8A=A0=20continueOnEr?=
- =?UTF-8?q?ror=20=E7=AD=96=E7=95=A5=E6=8E=A7=E5=88=B6=E7=BB=88=E6=AD=A2?=
- =?UTF-8?q?=E9=94=99=E8=AF=AF=E5=90=8E=E7=9A=84=20GOAL=20=E7=BB=AD?=
- =?UTF-8?q?=E8=B7=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-为持久化 Session GOAL 增加默认关闭的 continueOnError 字段，允许用户在
-Manage Goal 菜单中通过 ✓/○ 勾选项控制 eligible 终止错误（APIError、
-UnknownError）后是否自动创建新的 GOAL continuation。错误内容不注入
-continuation prompt，SessionRetry 不变，正常续跑行为不回归。
-
-prompt loop 使用显式 terminal-error outcome 和一次性 assistantID marker
-隔离错误路径与 structured-output/compaction 退出。续跑复用现有 goalTurns、
-goal_max_turns 和全部安全 guard。迁移保证旧行升级为 false。
-
 diff --git a/docs/goal-error-continuation-control-plan.md b/docs/goal-error-continuation-control-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..56ffd8c187d8be8cdafff2979445c046153dbd5f
@@ -611,2399 +591,19 @@ index 0000000000000000000000000000000000000000..56ffd8c187d8be8cdafff2979445c046
 +在 `session_goal` 上增加默认关闭的 `continueOnError`，由现有 `Manage Goal` 菜单以勾选项管理。prompt loop 使用显式 `terminal-error` outcome 和一次性 assistant-ID marker，仅允许 `APIError`、`UnknownError` 进入现有 GOAL continuation 入口。正常和错误续跑共享 `goalTurns`、`goal_max_turns`、主 session、active status、非 decide agent 和 agent step 限制。错误内容不进入模型上下文，`SessionGoal.continuationPrompt(goal)` 保持不变。
 +
 +该方案不修改 `SessionRetry`，不新增全局配置、状态机、服务或手写 production module；预计修改 7 个既有源码文件、3 个既有测试文件，新增 1 个 migration compatibility 测试文件，并生成必要迁移和 SDK 产物，手写代码显著低于 1000 行。
-diff --git a/packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql b/packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql
-new file mode 100644
-index 0000000000000000000000000000000000000000..aeda0cbdd74a99f9231630735732bb8aa236202c
---- /dev/null
-+++ b/packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql
-@@ -0,0 +1 @@
-+ALTER TABLE `session_goal` ADD `continue_on_error` integer DEFAULT false NOT NULL;
-\ No newline at end of file
-diff --git a/packages/opencode/migration/20260710195446_goal_continue_on_error/snapshot.json b/packages/opencode/migration/20260710195446_goal_continue_on_error/snapshot.json
-new file mode 100644
-index 0000000000000000000000000000000000000000..12f3dc928ff7f097a6f2ce44beb26091bec28d10
---- /dev/null
-+++ b/packages/opencode/migration/20260710195446_goal_continue_on_error/snapshot.json
-@@ -0,0 +1,2364 @@
-+{
-+  "version": "7",
-+  "dialect": "sqlite",
-+  "id": "5c94f8a7-ef22-4c17-b563-bf580abc754f",
-+  "prevIds": [
-+    "6c404e38-c0a4-40fd-bf3f-30cfc9f263dc"
-+  ],
-+  "ddl": [
-+    {
-+      "name": "account_state",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "account",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "control_account",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "workspace",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "data_migration",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "project",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "session_goal",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "request_usage_assistant",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "request_usage",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "message",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "part",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "permission",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "session_message",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "session",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "todo",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "session_share",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "event_sequence",
-+      "entityType": "tables"
-+    },
-+    {
-+      "name": "event",
-+      "entityType": "tables"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "account_state"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "active_account_id",
-+      "entityType": "columns",
-+      "table": "account_state"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "active_org_id",
-+      "entityType": "columns",
-+      "table": "account_state"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "email",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "url",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "access_token",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "refresh_token",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "token_expiry",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "email",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "url",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "access_token",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "refresh_token",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "token_expiry",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "active",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "control_account"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "type",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "''",
-+      "generated": null,
-+      "name": "name",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "branch",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "directory",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "extra",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "project_id",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_used",
-+      "entityType": "columns",
-+      "table": "workspace"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "name",
-+      "entityType": "columns",
-+      "table": "data_migration"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_completed",
-+      "entityType": "columns",
-+      "table": "data_migration"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "worktree",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "vcs",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "name",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "icon_url",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "icon_url_override",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "icon_color",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_initialized",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "sandboxes",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "commands",
-+      "entityType": "columns",
-+      "table": "project"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "objective",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "status",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "token_budget",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_used",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "time_used_seconds",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "false",
-+      "generated": null,
-+      "name": "continue_on_error",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "session_goal"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "request_id",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "assistant_message_id",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "root_request_id",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "status",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "provider_id",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "model_id",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "variant",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "step_count",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_input",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_output",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_reasoning",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_cache_read",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_cache_write",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_total",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "cost_micros",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_completed",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "error_message",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "request_id",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "root_request_id",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "source",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "status",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "agent",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "provider_id",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "model_id",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "variant",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "assistant_count",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "step_count",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_input",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_output",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_reasoning",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_cache_read",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_cache_write",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_total",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "cost_micros",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_completed",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "error_message",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "request_usage"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "message"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "message"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "data",
-+      "entityType": "columns",
-+      "table": "message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "part"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "message_id",
-+      "entityType": "columns",
-+      "table": "part"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "part"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "part"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "part"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "data",
-+      "entityType": "columns",
-+      "table": "part"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "project_id",
-+      "entityType": "columns",
-+      "table": "permission"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "permission"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "permission"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "data",
-+      "entityType": "columns",
-+      "table": "permission"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "session_message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "session_message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "type",
-+      "entityType": "columns",
-+      "table": "session_message"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "session_message"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "session_message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "data",
-+      "entityType": "columns",
-+      "table": "session_message"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "project_id",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "workspace_id",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "parent_id",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "slug",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "directory",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "path",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "title",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "version",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "share_url",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "summary_additions",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "summary_deletions",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "summary_files",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "summary_diffs",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "real",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "cost",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_input",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_output",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_reasoning",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_cache_read",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": "0",
-+      "generated": null,
-+      "name": "tokens_cache_write",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "revert",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "permission",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "agent",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "model",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_compacting",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_archived",
-+      "entityType": "columns",
-+      "table": "session"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "content",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "status",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "priority",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "position",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "todo"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "session_id",
-+      "entityType": "columns",
-+      "table": "session_share"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "session_share"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "secret",
-+      "entityType": "columns",
-+      "table": "session_share"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "url",
-+      "entityType": "columns",
-+      "table": "session_share"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_created",
-+      "entityType": "columns",
-+      "table": "session_share"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "time_updated",
-+      "entityType": "columns",
-+      "table": "session_share"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "aggregate_id",
-+      "entityType": "columns",
-+      "table": "event_sequence"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "seq",
-+      "entityType": "columns",
-+      "table": "event_sequence"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "owner_id",
-+      "entityType": "columns",
-+      "table": "event_sequence"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": false,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "id",
-+      "entityType": "columns",
-+      "table": "event"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "aggregate_id",
-+      "entityType": "columns",
-+      "table": "event"
-+    },
-+    {
-+      "type": "integer",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "seq",
-+      "entityType": "columns",
-+      "table": "event"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "type",
-+      "entityType": "columns",
-+      "table": "event"
-+    },
-+    {
-+      "type": "text",
-+      "notNull": true,
-+      "autoincrement": false,
-+      "default": null,
-+      "generated": null,
-+      "name": "data",
-+      "entityType": "columns",
-+      "table": "event"
-+    },
-+    {
-+      "columns": [
-+        "active_account_id"
-+      ],
-+      "tableTo": "account",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "SET NULL",
-+      "nameExplicit": false,
-+      "name": "fk_account_state_active_account_id_account_id_fk",
-+      "entityType": "fks",
-+      "table": "account_state"
-+    },
-+    {
-+      "columns": [
-+        "project_id"
-+      ],
-+      "tableTo": "project",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_workspace_project_id_project_id_fk",
-+      "entityType": "fks",
-+      "table": "workspace"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_session_goal_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "session_goal"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_request_usage_assistant_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_request_usage_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "request_usage"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_message_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "message"
-+    },
-+    {
-+      "columns": [
-+        "message_id"
-+      ],
-+      "tableTo": "message",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_part_message_id_message_id_fk",
-+      "entityType": "fks",
-+      "table": "part"
-+    },
-+    {
-+      "columns": [
-+        "project_id"
-+      ],
-+      "tableTo": "project",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_permission_project_id_project_id_fk",
-+      "entityType": "fks",
-+      "table": "permission"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_session_message_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "session_message"
-+    },
-+    {
-+      "columns": [
-+        "project_id"
-+      ],
-+      "tableTo": "project",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_session_project_id_project_id_fk",
-+      "entityType": "fks",
-+      "table": "session"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_todo_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "todo"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "tableTo": "session",
-+      "columnsTo": [
-+        "id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_session_share_session_id_session_id_fk",
-+      "entityType": "fks",
-+      "table": "session_share"
-+    },
-+    {
-+      "columns": [
-+        "aggregate_id"
-+      ],
-+      "tableTo": "event_sequence",
-+      "columnsTo": [
-+        "aggregate_id"
-+      ],
-+      "onUpdate": "NO ACTION",
-+      "onDelete": "CASCADE",
-+      "nameExplicit": false,
-+      "name": "fk_event_aggregate_id_event_sequence_aggregate_id_fk",
-+      "entityType": "fks",
-+      "table": "event"
-+    },
-+    {
-+      "columns": [
-+        "email",
-+        "url"
-+      ],
-+      "nameExplicit": false,
-+      "name": "control_account_pk",
-+      "entityType": "pks",
-+      "table": "control_account"
-+    },
-+    {
-+      "columns": [
-+        "session_id",
-+        "assistant_message_id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "request_usage_assistant_pk",
-+      "entityType": "pks",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "columns": [
-+        "session_id",
-+        "request_id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "request_usage_pk",
-+      "entityType": "pks",
-+      "table": "request_usage"
-+    },
-+    {
-+      "columns": [
-+        "session_id",
-+        "position"
-+      ],
-+      "nameExplicit": false,
-+      "name": "todo_pk",
-+      "entityType": "pks",
-+      "table": "todo"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "account_state_pk",
-+      "table": "account_state",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "account_pk",
-+      "table": "account",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "workspace_pk",
-+      "table": "workspace",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "name"
-+      ],
-+      "nameExplicit": false,
-+      "name": "data_migration_pk",
-+      "table": "data_migration",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "project_pk",
-+      "table": "project",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "session_goal_pk",
-+      "table": "session_goal",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "message_pk",
-+      "table": "message",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "part_pk",
-+      "table": "part",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "project_id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "permission_pk",
-+      "table": "permission",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "session_message_pk",
-+      "table": "session_message",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "session_pk",
-+      "table": "session",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "session_id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "session_share_pk",
-+      "table": "session_share",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "aggregate_id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "event_sequence_pk",
-+      "table": "event_sequence",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        "id"
-+      ],
-+      "nameExplicit": false,
-+      "name": "event_pk",
-+      "table": "event",
-+      "entityType": "pks"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "status",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_goal_status_idx",
-+      "entityType": "indexes",
-+      "table": "session_goal"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "request_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "request_usage_assistant_session_request_idx",
-+      "entityType": "indexes",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "root_request_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "request_usage_assistant_session_root_idx",
-+      "entityType": "indexes",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "status",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "time_updated",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "request_usage_assistant_session_status_updated_idx",
-+      "entityType": "indexes",
-+      "table": "request_usage_assistant"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "time_created",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "request_usage_session_time_created_idx",
-+      "entityType": "indexes",
-+      "table": "request_usage"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "root_request_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "request_usage_session_root_idx",
-+      "entityType": "indexes",
-+      "table": "request_usage"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "status",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "time_updated",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "request_usage_session_status_updated_idx",
-+      "entityType": "indexes",
-+      "table": "request_usage"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "time_created",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "message_session_time_created_id_idx",
-+      "entityType": "indexes",
-+      "table": "message"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "message_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "part_message_id_id_idx",
-+      "entityType": "indexes",
-+      "table": "part"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "part_session_idx",
-+      "entityType": "indexes",
-+      "table": "part"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_message_session_idx",
-+      "entityType": "indexes",
-+      "table": "session_message"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        },
-+        {
-+          "value": "type",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_message_session_type_idx",
-+      "entityType": "indexes",
-+      "table": "session_message"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "time_created",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_message_time_created_idx",
-+      "entityType": "indexes",
-+      "table": "session_message"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "project_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_project_idx",
-+      "entityType": "indexes",
-+      "table": "session"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "workspace_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_workspace_idx",
-+      "entityType": "indexes",
-+      "table": "session"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "parent_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "session_parent_idx",
-+      "entityType": "indexes",
-+      "table": "session"
-+    },
-+    {
-+      "columns": [
-+        {
-+          "value": "session_id",
-+          "isExpression": false
-+        }
-+      ],
-+      "isUnique": false,
-+      "where": null,
-+      "origin": "manual",
-+      "name": "todo_session_idx",
-+      "entityType": "indexes",
-+      "table": "todo"
-+    }
-+  ],
-+  "renames": []
-+}
-\ No newline at end of file
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a22ad6e865 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-@@ -5,7 +5,7 @@ import { useSync } from "@tui/context/sync"
- import { useSDK } from "@tui/context/sdk"
- import { useToast } from "@tui/ui/toast"
- import { useTheme } from "@tui/context/theme"
--import { createMemo, onMount } from "solid-js"
-+import { createMemo, createSignal, onMount } from "solid-js"
- import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
- import { Locale } from "@/util/locale"
+diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
+--- a/packages/tui/src/component/dialog-goal.tsx
++++ b/packages/tui/src/component/dialog-goal.tsx
+@@ -4,7 +4,7 @@ import { useDialog } from "../ui/dialog"
+ import { useSync } from "../context/sync"
+ import { useSDK } from "../context/sdk"
+ import { useToast } from "../ui/toast"
+-import { createMemo } from "solid-js"
++import { createMemo, createSignal } from "solid-js"
+ import { useTheme } from "../context/theme"
+ import { Locale } from "../util/locale"
  
-@@ -34,7 +34,8 @@ function useGoalApi(sessionID: string) {
+@@ -38,7 +38,8 @@ function useGoalApi(sessionID: string) {
    }
  
    // POST /session/:id/goal — 设置或更新 goal
@@ -3013,7 +613,7 @@ index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a2
      // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
      // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
      // 提前拦截避免无效往返
-@@ -59,7 +60,10 @@ function useGoalApi(sessionID: string) {
+@@ -63,7 +64,10 @@ function useGoalApi(sessionID: string) {
          toast.show({ message: body?.data?.message ?? "Failed to update goal", variant: "error" })
          return
        }
@@ -3025,7 +625,7 @@ index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a2
      } catch {
        toast.show({ message: "Failed to update goal", variant: "error" })
      }
-@@ -109,6 +113,8 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+@@ -113,9 +117,27 @@ export function DialogGoalMenu(props: DialogGoalProps) {
    const sync = useSync()
    const { theme } = useTheme()
    const { setGoal, clearGoal } = useGoalApi(props.sessionID)
@@ -3034,11 +634,8 @@ index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a2
  
    const goal = createMemo(() => sync.data.session_goal[props.sessionID])
  
-@@ -116,6 +122,21 @@ export function DialogGoalMenu(props: DialogGoalProps) {
-   // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
-   onMount(() => dialog.setSize("large"))
- 
-+  // [local-smark] 切换 continueOnError：POST 成功后 reconcile 到 sync store，保持菜单打开
++  // [local-smark] 切换 continueOnError：POST 成功后 reconcile 到 sync store，
++  // 保持菜单打开
 +  const toggleContinueOnError = async () => {
 +    if (toggleLoading()) return
 +    const g = goal()
@@ -3053,15 +650,15 @@ index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a2
 +    setToggleLoading(false)
 +  }
 +
-   // header 显示 goal 摘要：每行用 wrapMode=none + overflow=hidden + Locale.truncate
+   // header 显示 goal 摘要：wrapMode=none + overflow=hidden + Locale.truncate
    // 保证可预测的行数，不依赖渲染器自动撑开容器
    const goalHeader = createMemo(() => {
-@@ -151,6 +172,18 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+@@ -148,6 +170,18 @@ export function DialogGoalMenu(props: DialogGoalProps) {
              dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)
            },
          },
-+        // [local-smark] Continue after errors toggle：复用 DialogTool 的 ✓/○ 模式
-+        // 开启时显示 ✓ Enabled，关闭时显示 ○ Disabled，保存中显示 ⋯ Saving
++        // [local-smark] Continue after errors toggle：开启显示 ✓ Enabled，
++        // 关闭显示 ○ Disabled，保存中显示 ⋯ Saving
 +        {
 +          title: "Continue after errors",
 +          description: toggleLoading()
@@ -3075,11 +672,10 @@ index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a2
          // active 状态下显示 Pause 选项
          ...(goal()?.status === "active"
            ? [{
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index a9e283d6d0ba68bf444b5a8dc560e60a4606be1c..0d71d5d2f8de6613a43d09a295fbb04def184a56 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -48,6 +48,8 @@ type SessionGoalInfo = {
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -47,6 +47,8 @@ type SessionGoalInfo = {
    tokenBudget: number | null
    tokensUsed: number
    timeUsedSeconds: number
@@ -3088,7 +684,7 @@ index a9e283d6d0ba68bf444b5a8dc560e60a4606be1c..0d71d5d2f8de6613a43d09a295fbb04d
    time: { created: number; updated: number }
  }
  
-@@ -1010,6 +1012,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -1075,6 +1077,12 @@ export const {
        sessionStatus: {
          refresh: refreshStatus,
        },
@@ -3102,65 +698,33 @@ index a9e283d6d0ba68bf444b5a8dc560e60a4606be1c..0d71d5d2f8de6613a43d09a295fbb04d
      }
      return result
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-index f0334567bf4b8d44568eb22ca6d767e9af154eaf..6de1de8f4eebe703fc15fbcc03cf87bcc49aefaa 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-@@ -142,10 +142,12 @@ export const PermissionResponsePayload = Schema.Struct({
- })
- // goal set/update payload：objective 缺省时仅更新 status/budget
- // tokenBudget: null = 清除预算，正数 = 设置预算，缺省 = 不改
-+// [local-smark] continueOnError: 缺省 = 不改，true/false = 设置错误后续跑策略
- export const GoalSetPayload = Schema.Struct({
+@@ -83,6 +83,8 @@ export const GoalSetPayload = Schema.Struct({
    objective: Schema.optional(Schema.String),
    status: Schema.optional(SessionGoal.Status),
    tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
++  // [local-smark] 缺省 = 不改；true/false = 设置错误后续跑策略
 +  continueOnError: Schema.optional(Schema.Boolean),
  })
  export const GoalResponse = Schema.Struct({
    goal: Schema.NullOr(SessionGoal.Goal),
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 38a5473a0b50a34bc2fa39f6820a79ccbb2888cd..0d610dce969d4f51ffa35d35d63e9171d272df3a 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -476,6 +476,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-         objective: ctx.payload.objective,
-         status: ctx.payload.status,
-         tokenBudget: ctx.payload.tokenBudget,
-+        // [local-smark] 透传错误续跑策略到 domain service
-+        continueOnError: ctx.payload.continueOnError,
-       }).pipe(
-         // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
-         // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"
-diff --git a/packages/opencode/src/session/goal.sql.ts b/packages/opencode/src/session/goal.sql.ts
-index c5fbdebb9bc26459574e945bdaebb712abf0cb89..ce34b9384d2bbd71dfbd79761bc5fd0e9ef1edbb 100644
---- a/packages/opencode/src/session/goal.sql.ts
-+++ b/packages/opencode/src/session/goal.sql.ts
-@@ -29,6 +29,10 @@ export const SessionGoalTable = sqliteTable(
-     token_budget: integer(),
-     tokens_used: integer().notNull().default(0),
-     time_used_seconds: integer().notNull().default(0),
-+    // [local-smark] 错误后续跑策略：false=终止型错误后停止（默认），
-+    // true=允许 GOAL continuation 在 eligible 错误后继续。
-+    // 默认 false 保证升级后旧 GOAL 行为不变。
-+    continue_on_error: integer({ mode: "boolean" }).notNull().default(false),
-     ...Timestamps,
-   },
-   (table) => [index("session_goal_status_idx").on(table.session_id, table.status)],
+@@ -537,6 +537,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       objective: ctx.payload.objective,
+       status: ctx.payload.status,
+       tokenBudget: ctx.payload.tokenBudget,
++      // [local-smark] 透传错误续跑策略到 domain service
++      continueOnError: ctx.payload.continueOnError,
+     }).pipe(
+       // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
+       // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
 diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
-index 9bfccb0f29d312b8ffd839514fb3a4eb57088d55..dea5bbdc71ab050938e326dfb2dc97289e3a996d 100644
 --- a/packages/opencode/src/session/goal.ts
 +++ b/packages/opencode/src/session/goal.ts
-@@ -25,6 +25,9 @@ export const Goal = Schema.Struct({
-   tokenBudget: optionalOmitUndefined(Schema.NullOr(Schema.Number)),
-   tokensUsed: Schema.Number,
-   timeUsedSeconds: Schema.Number,
-+  // [local-smark] 错误后续跑策略：用户通过 GUI/API 控制，模型不可修改。
-+  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续。
-+  continueOnError: Schema.Boolean,
-   time: Schema.Struct({
-     created: Schema.Number,
-     updated: Schema.Number,
-@@ -49,6 +52,8 @@ export interface SetInput {
+@@ -31,6 +31,8 @@ export interface SetInput {
    status?: Status
    // null = 清除预算；正数 = 设置预算；缺省 = 不改
    tokenBudget?: number | null
@@ -3168,8 +732,8 @@ index 9bfccb0f29d312b8ffd839514fb3a4eb57088d55..dea5bbdc71ab050938e326dfb2dc9728
 +  continueOnError?: boolean
  }
  
- export class GoalError extends Schema.TaggedErrorClass<GoalError>()("GoalError", {
-@@ -84,6 +89,8 @@ export const layer = Layer.effect(
+ // [local-smark] set 语义错误：无 objective 且无既有 goal 时抛出（无法凭空更新状态）
+@@ -68,6 +70,8 @@ const layer = Layer.effect(
        tokenBudget: row.token_budget,
        tokensUsed: row.tokens_used,
        timeUsedSeconds: row.time_used_seconds,
@@ -3178,223 +742,65 @@ index 9bfccb0f29d312b8ffd839514fb3a4eb57088d55..dea5bbdc71ab050938e326dfb2dc9728
        time: { created: row.time_created, updated: row.time_updated },
      })
  
-@@ -130,6 +137,8 @@ export const layer = Layer.effect(
+@@ -120,6 +124,8 @@ const layer = Layer.effect(
          if (input.objective !== undefined) updates.objective = input.objective.trim()
          if (input.status !== undefined) updates.status = input.status
          if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
 +        // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
 +        if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
-         Database.use((db) =>
-           db.update(SessionGoalTable).set(updates).where(eq(SessionGoalTable.session_id, sessionID)).run(),
-         )
-@@ -148,23 +157,25 @@ export const layer = Layer.effect(
-       }
- 
-       const goalId = ulid()
--      Database.use((db) =>
--        db
--          .insert(SessionGoalTable)
--          .values({
--            session_id: sessionID,
--            id: goalId,
--            objective: objective.trim(),
--            // 新建时 status 缺省为 active，立即进入续跑态
--            status: input.status ?? "active",
--            token_budget: input.tokenBudget ?? null,
--            tokens_used: 0,
--            time_used_seconds: 0,
--            time_created: now,
--            time_updated: now,
--          })
--          .run(),
--      )
-+        Database.use((db) =>
-+          db
-+            .insert(SessionGoalTable)
-+            .values({
-+              session_id: sessionID,
-+              id: goalId,
-+              objective: objective.trim(),
-+              // 新建时 status 缺省为 active，立即进入续跑态
-+              status: input.status ?? "active",
-+              token_budget: input.tokenBudget ?? null,
-+              tokens_used: 0,
-+              time_used_seconds: 0,
-+              // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
-+              continue_on_error: input.continueOnError ?? false,
-+              time_created: now,
-+              time_updated: now,
-+            })
-+            .run(),
-+        )
-       const row = Database.use((db) =>
-         db.select().from(SessionGoalTable).where(eq(SessionGoalTable.session_id, sessionID)).get(),
-       )!
+         yield* db
+           .update(SessionGoalTable)
+           .set(updates)
+@@ -155,6 +161,8 @@ const layer = Layer.effect(
+           token_budget: input.tokenBudget ?? null,
+           tokens_used: 0,
+           time_used_seconds: 0,
++          // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
++          continue_on_error: input.continueOnError ?? false,
+           time_created: now,
+           time_updated: now,
+         })
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 7825c95ce6d5357eb3362a4c6ceec4b2456f3835..2a74bba3ecfa25bf2fc941ab9c5c0328bff08d5f 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -64,7 +64,7 @@ import { AgentAttachment, FileAttachment, ReferenceAttachment, Source } from "@o
- import { Reference } from "@/reference/reference"
- import * as DateTime from "effect/DateTime"
- import { eq } from "@/storage/db"
--import { formatExecutionNotice } from "@/util/output-notice"
-+import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
- import * as Database from "@/storage/db"
- import { SessionTable } from "./session.sql"
- import { TokenEstimate } from "@/token/estimate"
-@@ -266,16 +266,19 @@ function referenceTextPart(input: {
-   }
- }
- 
-+// [local-smark] 保留原始 start 并传 elapsed 给 interruptedToolMetadata，
-+// 使下一轮模型回放能看到 user_abort + elapsed_ms
- function interruptedToolState(
-   state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
-   now: number,
- ): MessageV2.ToolStateError {
-+  const start = state.status === "running" ? state.time.start : now
-   return {
-     status: "error",
-     input: state.input,
-     error: SessionProcessor.TOOL_ABORTED_ERROR,
--    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined),
--    time: { start: state.status === "running" ? state.time.start : now, end: now },
-+    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined, now - start),
-+    time: { start, end: now },
-   }
- }
- 
-@@ -845,7 +848,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
-                 status: "running",
-                 input: args,
--                time: { start: Date.now() },
-+                // [local-smark] 保留原始 start 时间：progress metadata update 不应重置 start，
-+                // 否则 end-start 会变成"最后一次进度更新到结束"而不是完整执行时间
-+                time: { start: match.state.status === "running" ? match.state.time.start : Date.now() },
-               },
-             }
-           }),
-@@ -879,6 +884,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             return run.promise(
-               Effect.gen(function* () {
-                 const ctx = context(args, options)
-+                // [local-smark] 记录 Adapter 入口时间，用于计算完整 elapsed
-+                const adapterStartedAt = Date.now()
-                 const timing = {
-                   source: "local" as const,
-                   tool: item.id,
-@@ -906,8 +913,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
-                   output,
-                 )
-+                // [local-smark] Adapter 终态：abort 优先于 long completed
-+                // Bash 由 shell.ts 自己处理所有 outcome Notice，这里跳过避免重复
-+                const adapterElapsedMs = Date.now() - adapterStartedAt
-                 if (options.abortSignal?.aborted) {
-+                  // 工具正常返回但 abort signal 已触发：追加 user_abort Notice
-+                  // Bash 跳过：shell.ts 的 formatShellExecutionNotice 已包含 abort Notice
-+                  if (item.id !== ShellID.ToolID) {
-+                    output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: adapterElapsedMs })
-+                  }
-                   yield* input.processor.completeToolCall(options.toolCallId, output)
-+                } else if (item.id !== ShellID.ToolID) {
-+                  // 非 Bash 的 generic tool：长成功追加中性 completed Notice
-+                  const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
-+                  if (notice) output.output += "\n\n" + notice
-                 }
-                 return output
-               }),
-@@ -928,6 +947,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           run.promise(
-             Effect.gen(function* () {
-               const ctx = context(args, opts)
-+              // [local-smark] 记录 MCP Adapter 入口时间
-+              const mcpStartedAt = Date.now()
-               const timing = {
-                 source: "mcp" as const,
-                 tool: key,
-@@ -1006,7 +1027,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 content: result.content,
-               }
-               if (opts.abortSignal?.aborted) {
-+                // [local-smark] MCP 工具正常返回但已 abort：追加 user_abort Notice
-+                output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Date.now() - mcpStartedAt })
-                 yield* input.processor.completeToolCall(opts.toolCallId, output)
-+              } else {
-+                // [local-smark] MCP 长成功：在 truncation 后追加 completed Notice
-+                const notice = formatLongExecutionNotice("tool", Date.now() - mcpStartedAt)
-+                if (notice) output.output += "\n\n" + notice
-               }
-               return output
-             }),
-@@ -1165,6 +1192,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-       yield* sessions.updateMessage(assistantMessage)
- 
-       if (result && part.state.status === "running") {
-+        // [local-smark] Task 长成功：在持久化前追加 completed Notice
-+        const taskElapsedMs = Date.now() - (part.state.time.start ?? Date.now())
-+        const taskNotice = formatLongExecutionNotice("tool", taskElapsedMs)
-         yield* sessions.updatePart({
-           ...part,
-           state: {
-@@ -1172,7 +1202,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             input: part.state.input,
-             title: result.title,
-             metadata: result.metadata,
--            output: result.output,
-+            output: taskNotice ? result.output + "\n\n" + taskNotice : result.output,
-             attachments,
-             time: { ...part.state.time, end: Date.now() },
-           },
-@@ -1322,10 +1352,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
- 
-           const finish = Effect.uninterruptible(
-             Effect.gen(function* () {
-+              // [local-smark] direct shell 终态 elapsed；started 在内部 gen 作用域，
-+              // 这里用 part.state.time.start 获取原始开始时间（status 可能已被 cancel 改为 error）
-+              const shellStart = "time" in part.state ? part.state.time.start : Date.now()
-+              const shellElapsedMs = Date.now() - shellStart
-               if (aborted) {
-                 // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
-                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
--                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
-+                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
-+              } else {
-+                // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice
-+                const notice = formatLongExecutionNotice("shell", shellElapsedMs)
-+                if (notice) output += "\n\n" + notice
-               }
-               const completed = Date.now()
-               if (flags.experimentalEventSystem) {
-@@ -2106,6 +2144,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         // [local-smark] goal 续跑计数器：独立于 step，
+@@ -1,1 +1,4 @@
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
++// [local-smark] 直接从定义 owner 导入 APIError：message-v2 仅导入未 re-export，
++// 本 index 独立编译不依赖后续 patch 的 re-export
++import { APIError } from "@opencode-ai/core/v1/session"
+@@ -1470,6 +1470,11 @@ const layer = Layer.effect(
+         // #364：goal 续跑计数器：独立于 step，
          // 防止 step++ 在 continue 路径被跳过导致无限循环
          let goalTurns = 0
 +        // [local-smark] 一次性 terminal-error marker：只在 eligible 错误发生时设置，
-+        // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于 provenance 校验。
-+        // marker 消费后立即清空，防止历史错误在新 iteration 或新 runLoop 中残留。
++        // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于
++        // provenance 校验。消费后立即清空，防止历史错误在新 iteration 或新
++        // runLoop 中残留
 +        let pendingTerminalError: { assistantID: string } | undefined
          // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
          // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
          // 使后续再次达到 85% 时可以重新提示。
-@@ -2134,7 +2176,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           const hasToolCalls =
-             lastAssistantMsg?.parts.some((part) => part.type === "tool" && !part.metadata?.providerExecuted) ?? false
+@@ -1501,16 +1506,33 @@ const layer = Layer.effect(
+               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
+             ) ?? false
  
 -          if (
+-            lastAssistant?.finish &&
+-            // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
+-            // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
+-            // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
 +          // [local-smark] 消费一次性 terminal-error marker：只在下一条 iteration 生效，
-+          // 之后立即清空防止历史错误残留。marker 不携带错误内容。
++          // 之后立即清空防止历史错误残留。marker 不携带错误内容
 +          const terminalError = pendingTerminalError
 +          pendingTerminalError = undefined
 +
-+          // 正常完成路径：assistant 有 finish 且无 error
++          // 正常完成路径：assistant 有 finish 且无 error。
++          // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
++          // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
++          // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
 +          const normalCompletion =
-             lastAssistant?.finish &&
-             // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
-             // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
-@@ -2143,7 +2191,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
++            lastAssistant?.finish !== undefined &&
+             !lastAssistant.error &&
              !["tool-calls"].includes(lastAssistant.finish) &&
              !hasToolCalls &&
              lastUser.id < lastAssistant.id
@@ -3402,19 +808,19 @@ index 7825c95ce6d5357eb3362a4c6ceec4b2456f3835..2a74bba3ecfa25bf2fc941ab9c5c0328
 +
 +          // [local-smark] 错误续跑路径：marker 证明来源是 eligible terminal error，
 +          // 且 latest assistant 仍是对应的 errored message。
-+          // 使用同一个精确 allowlist predicate 重新验证，防止 assistant 被意外修改后误触发。
++          // 使用同一个精确 allowlist predicate 重新验证，防止 assistant 被意外修改后误触发
 +          const errorCompletion =
 +            terminalError !== undefined &&
 +            lastAssistant?.error !== undefined &&
 +            lastAssistant.id === terminalError.assistantID &&
-+            (MessageV2.APIError.isInstance(lastAssistant.error) ||
++            (APIError.isInstance(lastAssistant.error) ||
 +              NamedError.Unknown.isInstance(lastAssistant.error))
 +
 +          if (normalCompletion || errorCompletion) {
-             // [local-smark] goal 续跑检查：assistant 正常结束后，
-             // 如果 session 有 active goal 且未达上限，注入续跑 prompt 并 continue。
-             // 续跑 prompt 作为 synthetic user message 注入，保留 synthetic=true
-@@ -2171,7 +2230,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             const orphan = lastAssistantMsg?.parts.find(
+               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
+             )
+@@ -1551,7 +1573,10 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
                    goal.status === "active" &&
                    goalAgent &&
                    !isDecideAgent(goalAgent) &&
@@ -3426,7 +832,7 @@ index 7825c95ce6d5357eb3362a4c6ceec4b2456f3835..2a74bba3ecfa25bf2fc941ab9c5c0328
                  ) {
                    goalTurns++
                    // 注入 synthetic user message 作为续跑 prompt
-@@ -2276,7 +2338,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1647,7 +1672,8 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
              })
              .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
  
@@ -3435,37 +841,38 @@ index 7825c95ce6d5357eb3362a4c6ceec4b2456f3835..2a74bba3ecfa25bf2fc941ab9c5c0328
 +          const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
              const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
              const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
-             const decide = isDecideAgent(agent)
-@@ -2527,7 +2590,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             // [local-smark] 事前提醒：当历史记录中使用了当前被 disable 的工具时，
+@@ -1904,7 +1930,21 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
                }
              }
  
 -            if (result === "stop") return "break" as const
 +            if (result === "stop") {
-+              // [local-smark] eligible terminal error 检查：只有 APIError 和 UnknownError
-+              // 才允许进入错误续跑路径。其他错误（Abort/Auth/Overflow/StructuredOutput）
-+              // 仍返回普通 break，保持现有行为不变。
-+              // APIError 覆盖 provider API 终止错误，UnknownError 覆盖 cyber_policy 等未分类错误。
++              // [local-smark] eligible terminal error 检查：只有 APIError 和
++              // UnknownError 才允许进入错误续跑路径。其他错误
++              //（Abort/Auth/Overflow/StructuredOutput）仍返回普通 break。
++              // APIError 覆盖 provider API 终止错误，UnknownError 覆盖
++              // cyber_policy 等未分类错误
 +              const err = handle.message.error
 +              if (
 +                err &&
-+                (MessageV2.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
++                (APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
 +              ) {
 +                return "terminal-error" as const
 +              }
 +              return "break" as const
 +            }
-             // [local-smark] goal token/time 计费：assistant message 完成后，
+             // #364：goal token/time 计费：assistant message 完成后，
              // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
              if (handle.message.tokens && handle.message.time.completed) {
-@@ -2566,6 +2642,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1944,6 +1984,14 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
              Effect.onInterrupt(() => finalizeInterruptedAssistant),
            )
            if (outcome === "break") break
 +          // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。
-+          // 下一次 iteration 的 continuation block 会检查 continueOnError、goalTurns、
-+          // active status 等条件。不满足条件时自然 fall through 到 break，
-+          // 达到 maxGoalTurns 时按现有逻辑 pause。不在此处重复任何 guard。
++          // 下一次 iteration 的 continuation block 会检查 continueOnError、
++          // goalTurns、active status 等条件。不满足条件时自然 fall through 到
++          // break；达到 maxGoalTurns 时按现有逻辑 pause。不在此处重复任何 guard
 +          if (outcome === "terminal-error") {
 +            pendingTerminalError = { assistantID: handle.message.id }
 +            continue
@@ -3474,24 +881,12 @@ index 7825c95ce6d5357eb3362a4c6ceec4b2456f3835..2a74bba3ecfa25bf2fc941ab9c5c0328
          }
  
 diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
-index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d18702243485 100644
 --- a/packages/opencode/test/server/httpapi-goal.test.ts
 +++ b/packages/opencode/test/server/httpapi-goal.test.ts
-@@ -181,14 +181,112 @@ describe("session goal HttpApi", () => {
-         })
-         expect(res.status).toBe(404)
-         const parsed = yield* responseJson(res)
--        expect(parsed).toEqual({
-+      expect(parsed).toEqual({
-           name: "NotFoundError",
-           data: { message: `Session not found: ${missing}` },
-         })
-       }),
-     { git: true, config: { formatter: false, lsp: false } },
--    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
--    // 默认 5s 在冷启动（首个用例）时可能超时
-+    30000,
-+  )
+@@ -226,4 +226,103 @@ describe("session goal HttpApi", () => {
+     // 默认 5s 在冷启动（首个用例）时可能超时
+     30000,
+   )
 +
 +  // [local-smark] continueOnError HTTP 契约测试：验证 boolean 透传、保留和拒绝
 +  it.instance(
@@ -3508,14 +903,14 @@ index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d187
 +        })
 +        expect(res.status).toBe(200)
 +        const parsed = yield* responseJson(res)
-+        expect(parsed.goal.continueOnError).toBe(true)
++        expect((parsed as { goal?: { continueOnError?: boolean } }).goal?.continueOnError).toBe(true)
 +
 +        // GET 也返回 true
 +        const getRes = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
 +          headers: { "x-opencode-directory": test.directory },
 +        })
 +        const getParsed = yield* responseJson(getRes)
-+        expect(getParsed.goal.continueOnError).toBe(true)
++        expect((getParsed as { goal?: { continueOnError?: boolean } }).goal?.continueOnError).toBe(true)
 +      }),
 +    { git: true, config: { formatter: false, lsp: false } },
 +    30000,
@@ -3527,7 +922,6 @@ index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d187
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const session = yield* createSession()
-+        // 先创建带 objective 的 goal
 +        yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
 +          method: "POST",
 +          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
@@ -3541,9 +935,9 @@ index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d187
 +        })
 +        expect(res.status).toBe(200)
 +        const parsed = yield* responseJson(res)
-+        expect(parsed.goal.continueOnError).toBe(true)
-+        expect(parsed.goal.objective).toBe("original")
-+        expect(parsed.goal.status).toBe("active")
++        expect((parsed as { goal?: { continueOnError?: boolean } }).goal?.continueOnError).toBe(true)
++        expect((parsed as { goal?: { objective?: string } }).goal?.objective).toBe("original")
++        expect((parsed as { goal?: { status?: string } }).goal?.status).toBe("active")
 +      }),
 +    { git: true, config: { formatter: false, lsp: false } },
 +    30000,
@@ -3568,8 +962,8 @@ index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d187
 +          body: JSON.stringify({ objective: "updated" }),
 +        })
 +        const parsed = yield* responseJson(res)
-+        expect(parsed.goal.continueOnError).toBe(true)
-+        expect(parsed.goal.objective).toBe("updated")
++        expect((parsed as { goal?: { continueOnError?: boolean } }).goal?.continueOnError).toBe(true)
++        expect((parsed as { goal?: { objective?: string } }).goal?.objective).toBe("updated")
 +      }),
 +    { git: true, config: { formatter: false, lsp: false } },
 +    30000,
@@ -3590,125 +984,121 @@ index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d187
 +        expect(res.status).toBe(400)
 +      }),
 +    { git: true, config: { formatter: false, lsp: false } },
-     30000,
-   )
++    30000,
++  )
  })
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
-index 1e109490fdbdd4f39ab7f768584099ced668f69c..0bd047f92e4868566741544d143d3ba7a8391198 100644
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -432,3 +432,99 @@ it.instance(
-     }),
-   { git: true },
- )
+@@ -457,3 +457,99 @@ it.instance(
+       }),
+     { git: true },
+   )
 +
-+// [local-smark] continueOnError 字段测试：验证错误后续跑策略的持久化行为。
-+// 默认 false 保证升级后旧 GOAL 行为不变；局部更新不得重置该字段。
-+it.instance(
-+  "new goal defaults to continueOnError false",
-+  () =>
-+    Effect.gen(function* () {
-+      const goalSvc = yield* SessionGoal.Service
-+      const sessions = yield* SessionNs.Service
-+      const session = yield* sessions.create({})
++  // [local-smark] continueOnError 字段测试：验证错误后续跑策略的持久化行为。
++  // 默认 false 保证升级后旧 GOAL 行为不变；局部更新不得重置该字段
++  it.instance(
++    "new goal defaults to continueOnError false",
++    () =>
++      Effect.gen(function* () {
++        const goalSvc = yield* SessionGoal.Service
++        const sessions = yield* SessionNs.Service
++        const session = yield* sessions.create({})
 +
-+      // 新建 GOAL 不传 continueOnError，默认必须为 false
-+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
-+      expect(goal.continueOnError).toBe(false)
-+    }),
-+  { git: true },
-+)
++        // 新建 GOAL 不传 continueOnError，默认必须为 false
++        const goal = yield* goalSvc.set(session.id, { objective: "test" })
++        expect(goal.continueOnError).toBe(false)
++      }),
++    { git: true },
++  )
 +
-+it.instance(
-+  "create goal with continueOnError true",
-+  () =>
-+    Effect.gen(function* () {
-+      const goalSvc = yield* SessionGoal.Service
-+      const sessions = yield* SessionNs.Service
-+      const session = yield* sessions.create({})
++  it.instance(
++    "create goal with continueOnError true",
++    () =>
++      Effect.gen(function* () {
++        const goalSvc = yield* SessionGoal.Service
++        const sessions = yield* SessionNs.Service
++        const session = yield* sessions.create({})
 +
-+      // 显式开启错误续跑策略
-+      const goal = yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
-+      expect(goal.continueOnError).toBe(true)
++        // 显式开启错误续跑策略
++        const goal = yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
++        expect(goal.continueOnError).toBe(true)
 +
-+      // 持久化后读取仍为 true
-+      const result = yield* goalSvc.get(session.id)
-+      if (Option.isSome(result)) {
-+        expect(result.value.continueOnError).toBe(true)
-+      }
-+    }),
-+  { git: true },
-+)
++        // 持久化后读取仍为 true
++        const result = yield* goalSvc.get(session.id)
++        if (Option.isSome(result)) {
++          expect(result.value.continueOnError).toBe(true)
++        }
++      }),
++    { git: true },
++  )
 +
-+it.instance(
-+  "toggle continueOnError between true and false",
-+  () =>
-+    Effect.gen(function* () {
-+      const goalSvc = yield* SessionGoal.Service
-+      const sessions = yield* SessionNs.Service
-+      const session = yield* sessions.create({})
++  it.instance(
++    "toggle continueOnError between true and false",
++    () =>
++      Effect.gen(function* () {
++        const goalSvc = yield* SessionGoal.Service
++        const sessions = yield* SessionNs.Service
++        const session = yield* sessions.create({})
 +
-+      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
-+      // 关闭：false 应覆盖 true
-+      const disabled = yield* goalSvc.set(session.id, { continueOnError: false })
-+      expect(disabled.continueOnError).toBe(false)
++        yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
++        // 关闭：false 应覆盖 true
++        const disabled = yield* goalSvc.set(session.id, { continueOnError: false })
++        expect(disabled.continueOnError).toBe(false)
 +
-+      // 再次开启
-+      const enabled = yield* goalSvc.set(session.id, { continueOnError: true })
-+      expect(enabled.continueOnError).toBe(true)
-+    }),
-+  { git: true },
-+)
++        // 再次开启
++        const enabled = yield* goalSvc.set(session.id, { continueOnError: true })
++        expect(enabled.continueOnError).toBe(true)
++      }),
++    { git: true },
++  )
 +
-+it.instance(
-+  "objective update preserves continueOnError",
-+  () =>
-+    Effect.gen(function* () {
-+      const goalSvc = yield* SessionGoal.Service
-+      const sessions = yield* SessionNs.Service
-+      const session = yield* sessions.create({})
++  it.instance(
++    "objective update preserves continueOnError",
++    () =>
++      Effect.gen(function* () {
++        const goalSvc = yield* SessionGoal.Service
++        const sessions = yield* SessionNs.Service
++        const session = yield* sessions.create({})
 +
-+      yield* goalSvc.set(session.id, { objective: "original", continueOnError: true })
-+      // 编辑 objective 不传 continueOnError，策略必须保留
-+      const updated = yield* goalSvc.set(session.id, { objective: "revised" })
-+      expect(updated.objective).toBe("revised")
-+      expect(updated.continueOnError).toBe(true)
-+    }),
-+  { git: true },
-+)
++        yield* goalSvc.set(session.id, { objective: "original", continueOnError: true })
++        // 编辑 objective 不传 continueOnError，策略必须保留
++        const updated = yield* goalSvc.set(session.id, { objective: "revised" })
++        expect(updated.objective).toBe("revised")
++        expect(updated.continueOnError).toBe(true)
++      }),
++    { git: true },
++  )
 +
-+it.instance(
-+  "status update preserves continueOnError",
-+  () =>
-+    Effect.gen(function* () {
-+      const goalSvc = yield* SessionGoal.Service
-+      const sessions = yield* SessionNs.Service
-+      const session = yield* sessions.create({})
++  it.instance(
++    "status update preserves continueOnError",
++    () =>
++      Effect.gen(function* () {
++        const goalSvc = yield* SessionGoal.Service
++        const sessions = yield* SessionNs.Service
++        const session = yield* sessions.create({})
 +
-+      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
-+      // Pause 不传 continueOnError，策略必须保留
-+      const paused = yield* goalSvc.set(session.id, { status: "paused" })
-+      expect(paused.status).toBe("paused")
-+      expect(paused.continueOnError).toBe(true)
++        yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
++        // Pause 不传 continueOnError，策略必须保留
++        const paused = yield* goalSvc.set(session.id, { status: "paused" })
++        expect(paused.status).toBe("paused")
++        expect(paused.continueOnError).toBe(true)
 +
-+      // Resume 也不传 continueOnError
-+      const resumed = yield* goalSvc.set(session.id, { status: "active" })
-+      expect(resumed.continueOnError).toBe(true)
-+    }),
-+  { git: true },
-+)
++        // Resume 也不传 continueOnError
++        const resumed = yield* goalSvc.set(session.id, { status: "active" })
++        expect(resumed.continueOnError).toBe(true)
++      }),
++    { git: true },
++  )
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 0855bb41ab64959cacd22876239c737d3a2e3e7f..49f8e0addde0be7866c582c4551e27578b5ee20d 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3374,3 +3374,85 @@ it.instance(
-   { git: true },
-   15_000,
+@@ -3768,4 +3768,83 @@ it.instance(
+   30_000,
  )
-+
+ 
 +// [local-smark] GOAL 错误后续跑测试：验证 continueOnError 策略控制
-+// 终止型错误后是否自动创建新的 GOAL continuation turn。
-+
++// 终止型错误后是否自动创建新的 GOAL continuation turn
 +it.instance(
 +  "goal error continuation disabled by default — terminal APIError stops loop",
 +  () =>
@@ -3728,7 +1118,7 @@ index 0855bb41ab64959cacd22876239c737d3a2e3e7f..49f8e0addde0be7866c582c4551e2757
 +
 +      yield* prompt.loop({ sessionID: chat.id })
 +
-+      // 默认 false：错误后不创建 continuation。验证不存在 synthetic continuation 消息
++      // 默认 false：错误后不创建 continuation
 +      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
 +      const continuations = msgs.filter(
 +        (m) =>
@@ -3757,16 +1147,14 @@ index 0855bb41ab64959cacd22876239c737d3a2e3e7f..49f8e0addde0be7866c582c4551e2757
 +      yield* goalSvc.set(chat.id, { objective: "complete the task", continueOnError: true })
 +      yield* user(chat.id, "start working")
 +
-+      // 第一次：400 错误（APIError），触发 terminal-error → 错误续跑
-+      // 第二次：续跑后再次 400 错误 → goalTurns=1 >= maxGoalTurns=1 → pause + break
-+      // 注意：400 非重试，AI SDK 不重试，SessionRetry 也不重试
++      // 第一次 400 触发 terminal-error → 错误续跑；第二次 400 时
++      // goalTurns=1 >= maxGoalTurns=1 → pause + break。400 非重试
 +      yield* llm.error(400, { error: { message: "bad request" } })
 +      yield* llm.error(400, { error: { message: "bad request" } })
 +
 +      yield* prompt.loop({ sessionID: chat.id })
 +
-+      // 验证存在 system_continue 消息：source 字段被 schema decoder 剥离，
-+      // 改为检查 synthetic text part 中的 continuation prompt 标记
++      // source 字段被 schema decoder 剥离，改为检查 synthetic continuation 标记
 +      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
 +      const continuations = msgs.filter(
 +        (m) =>
@@ -3787,78 +1175,50 @@ index 0855bb41ab64959cacd22876239c737d3a2e3e7f..49f8e0addde0be7866c582c4551e2757
 +  { git: true },
 +  30_000,
 +)
++
+ 
 diff --git a/packages/opencode/test/storage/goal-migration.test.ts b/packages/opencode/test/storage/goal-migration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b79796a114a218529ee89e1d322256df60e496a0
 --- /dev/null
 +++ b/packages/opencode/test/storage/goal-migration.test.ts
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,49 @@
 +import { describe, expect, test } from "bun:test"
 +import { Database } from "bun:sqlite"
-+import { drizzle } from "drizzle-orm/bun-sqlite"
-+import { migrate } from "drizzle-orm/bun-sqlite/migrator"
-+import { readFileSync, readdirSync } from "fs"
-+import path from "path"
 +
 +// [local-smark] goal_continue_on_error 迁移兼容性测试
 +// 验证旧 session_goal 行在添加 continue_on_error 列后：
-+// 1. 迁移不抛错
-+// 2. 新列默认 false
-+// 3. 原有字段（id, objective, status, budget, usage, timestamps）不变
-+// 复用 workspace-time-migration.test.ts 的按 timestamp 分段应用 migration 模式
-+
-+// 新 migration 的目录名前缀，生成后实际名称可能不同
-+const target = "20260710195446_goal_continue_on_error"
-+
-+function migrations() {
-+  return readdirSync(path.join(import.meta.dirname, "../../migration"), { withFileTypes: true })
-+    .filter((entry) => entry.isDirectory())
-+    .map((entry) => ({
-+      name: entry.name,
-+      timestamp: Number(entry.name.split("_")[0]),
-+      sql: readFileSync(path.join(import.meta.dirname, "../../migration", entry.name, "migration.sql"), "utf-8"),
-+    }))
-+    .sort((a, b) => a.timestamp - b.timestamp)
-+}
-+
++// 1. 迁移不抛错 2. 新列默认 false 3. 原有字段不变。
++// 目标架构：core 使用 TS migration（migration.gen），无 drizzle sql 目录，
++// 因此这里直接复现 20260726100000 建表 + 20260812100000 ALTER 的组合语义
 +describe("goal continue_on_error migration", () => {
 +  test("migrates existing session_goal rows with default false", () => {
 +    const sqlite = new Database(":memory:")
-+    const db = drizzle({ client: sqlite })
-+    const entries = migrations()
-+    const index = entries.findIndex((entry) => entry.name === target)
-+
-+    // 确认新 migration 存在
-+    expect(index).toBeGreaterThan(0)
-+
-+    // 只应用到新 migration 之前（不含新 migration）
-+    migrate(db, entries.slice(0, index))
-+
-+    // 插入满足 FK 约束的 project 和 session
-+    sqlite.run(
-+      "INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-+      ["proj_test", "/tmp/project", "git", "test", 1, 1, "[]"],
-+    )
-+    sqlite.run(
-+      "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-+      ["ses_test", "proj_test", "test", "/tmp", "Test", "1.0.0", 1, 1],
-+    )
-+
-+    // 插入旧结构 session_goal 行（无 continue_on_error 列）
++    // 建表（等价 20260726100000_session_goal 的 CREATE TABLE）
++    sqlite.run(`CREATE TABLE \`session_goal\` (
++      \`session_id\` text PRIMARY KEY,
++      \`id\` text NOT NULL,
++      \`objective\` text NOT NULL,
++      \`status\` text NOT NULL,
++      \`token_budget\` integer,
++      \`tokens_used\` integer DEFAULT 0 NOT NULL,
++      \`time_used_seconds\` integer DEFAULT 0 NOT NULL,
++      \`time_created\` integer NOT NULL,
++      \`time_updated\` integer NOT NULL
++    )`)
++    // 插入旧结构行（无 continue_on_error 列）
 +    sqlite.run(
 +      "INSERT INTO session_goal (session_id, id, objective, status, token_budget, tokens_used, time_used_seconds, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 +      ["ses_test", "goal_1", "test objective", "active", 50000, 1000, 30, 1, 1],
 +    )
 +
-+    // 应用新 migration 及其后的剩余 migrations
-+    expect(() => migrate(db, entries.slice(index))).not.toThrow()
++    // 应用新 migration（20260812100000_goal_continue_on_error 的 ALTER）
++    expect(() =>
++      sqlite.run(`ALTER TABLE \`session_goal\` ADD \`continue_on_error\` integer DEFAULT false NOT NULL`),
++    ).not.toThrow()
 +
-+    // 验证新列默认 false
-+    const row = sqlite
-+      .query("SELECT * FROM session_goal WHERE session_id = ?")
-+      .get("ses_test") as any
-+
-+    expect(row.continue_on_error).toBe(0) // SQLite boolean: 0 = false
++    // 验证新列默认 false（SQLite boolean: 0 = false）
++    const row = sqlite.query("SELECT * FROM session_goal WHERE session_id = ?").get("ses_test") as any
++    expect(row.continue_on_error).toBe(0)
 +
 +    // 验证原有字段不变
 +    expect(row.id).toBe("goal_1")
@@ -3871,3 +1231,57 @@ index 0000000000000000000000000000000000000000..b79796a114a218529ee89e1d322256df
 +    expect(row.time_updated).toBe(1)
 +  })
 +})
+diff --git a/packages/schema/src/session-goal.ts b/packages/schema/src/session-goal.ts
+--- a/packages/schema/src/session-goal.ts
++++ b/packages/schema/src/session-goal.ts
+@@ -20,6 +20,9 @@ export const Goal = Schema.Struct({
+   tokenBudget: optional(Schema.NullOr(Schema.Number)),
+   tokensUsed: Schema.Number,
+   timeUsedSeconds: Schema.Number,
++  // [local-smark] 错误后续跑策略：用户通过 GUI/API 控制，模型不可修改。
++  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续
++  continueOnError: Schema.Boolean,
+   time: Schema.Struct({
+     created: Schema.Number,
+     updated: Schema.Number,
+diff --git a/packages/core/src/session/goal.sql.ts b/packages/core/src/session/goal.sql.ts
+--- a/packages/core/src/session/goal.sql.ts
++++ b/packages/core/src/session/goal.sql.ts
+@@ -26,6 +26,10 @@ export const SessionGoalTable = sqliteTable(
+     token_budget: integer(),
+     tokens_used: integer().notNull().default(0),
+     time_used_seconds: integer().notNull().default(0),
++    // [local-smark] 错误后续跑策略：false=终止型错误后停止（默认），
++    // true=允许 GOAL continuation 在 eligible 错误后继续。
++    // 默认 false 保证升级后旧 GOAL 行为不变
++    continue_on_error: integer({ mode: "boolean" }).notNull().default(false),
+     ...Timestamps,
+   },
+   (table) => [index("session_goal_status_idx").on(table.session_id, table.status)],
+diff --git a/packages/core/src/database/migration/20260812100000_goal_continue_on_error.ts b/packages/core/src/database/migration/20260812100000_goal_continue_on_error.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/database/migration/20260812100000_goal_continue_on_error.ts
+@@ -0,0 +1,12 @@
++import { Effect } from "effect"
++import type { DatabaseMigration } from "../migration"
++// [local-smark] session_goal 增加 continue_on_error 列：错误后续跑策略。
++// NOT NULL DEFAULT false 保证升级后旧 GOAL 行为不变（终止型错误后停止）
++export default {
++  id: "20260812100000_goal_continue_on_error",
++  up(tx) {
++    return Effect.gen(function* () {
++      yield* tx.run(`ALTER TABLE \`session_goal\` ADD \`continue_on_error\` integer DEFAULT false NOT NULL;`)
++    })
++  },
++} satisfies DatabaseMigration.Migration
+diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
+--- a/packages/core/src/database/migration.gen.ts
++++ b/packages/core/src/database/migration.gen.ts
+@@ -44,5 +44,6 @@ export const migrations = (
+     import("./migration/20260723100000_normalize_global_session_path"),
+     import("./migration/20260725100000_migrate_review_agent"),
+     import("./migration/20260726100000_session_goal"),
++    import("./migration/20260812100000_goal_continue_on_error"),
+   ])
+ ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

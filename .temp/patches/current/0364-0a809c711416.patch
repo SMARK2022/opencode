@@ -28,7 +28,7 @@ diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/dat
 index 8b15632c3..22161b587 100644
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -43,5 +43,6 @@ export const migrations = (
+@@ -43,5 +43,6 @@
      import("./migration/20260422130633_request_usage_tracking"),
      import("./migration/20260723100000_normalize_global_session_path"),
      import("./migration/20260725100000_migrate_review_agent"),
@@ -39,7 +39,7 @@ diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config
 index 26e6b5808..b1d3ae727 100644
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -186,6 +186,14 @@ export const Info = Schema.Struct({
+@@ -186,6 +186,14 @@
        continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
          description: "Continue the agent loop when a tool call is denied",
        }),
@@ -55,10 +55,9 @@ index 26e6b5808..b1d3ae727 100644
          description: "Timeout in milliseconds for model context protocol (MCP) requests",
        }),
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-index b8688275c..bba63df6b 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-@@ -3,6 +3,7 @@ import { Permission } from "@/permission"
+@@ -3,6 +3,7 @@
  import { SessionV1 } from "@opencode-ai/core/v1/session"
  
  import { Session } from "@/session/session"
@@ -66,7 +65,7 @@ index b8688275c..bba63df6b 100644
  import { MessageV2 } from "@/session/message-v2"
  import { SessionRequestUsage } from "@/session/request-usage"
  import { SessionPrompt } from "@/session/prompt"
-@@ -76,6 +77,19 @@ export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput
+@@ -76,6 +77,19 @@
  export const PermissionResponsePayload = Schema.Struct({
    response: PermissionV1.Reply,
  })
@@ -86,7 +85,7 @@ index b8688275c..bba63df6b 100644
  
  export const SessionPaths = {
    list: root,
-@@ -104,6 +118,8 @@ export const SessionPaths = {
+@@ -104,6 +118,8 @@
    deleteMessage: `${root}/:sessionID/message/:messageID`,
    deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
    updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
@@ -95,8 +94,8 @@ index b8688275c..bba63df6b 100644
  } as const
  
  export const SessionApi = HttpApi.make("session")
-@@ -468,6 +484,46 @@ export const SessionApi = HttpApi.make("session")
-           error: [HttpApiError.BadRequest, ApiNotFoundError],
+@@ -470,6 +486,47 @@
+           error: [HttpApiError.BadRequest, ApiNotFoundError, HttpApiError.NotFound],
          }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" })),
        )
 +      .add(
@@ -123,19 +122,20 @@ index b8688275c..bba63df6b 100644
 +          OpenApi.annotations({
 +            identifier: "session.goal.set",
 +            summary: "Set session goal",
-+            description: "Create or update the persistent goal for a session.",
++            description: "Create or update the persistent goal for a session. If objective is omitted, only status/budget are updated.",
 +          }),
 +        ),
++        // [local-smark] DELETE 幂等：goal 不存在时仍返回 cleared=false 而非 404
 +        HttpApiEndpoint.delete("goalClear", SessionPaths.goal, {
 +          params: { sessionID: SessionID },
 +          query: WorkspaceRoutingQuery,
-+          success: described(GoalClearResponse, "Goal clear result"),
++          success: described(GoalClearResponse, "Cleared session goal"),
 +          error: [HttpApiError.BadRequest, ApiNotFoundError],
 +        }).annotateMerge(
 +          OpenApi.annotations({
 +            identifier: "session.goal.clear",
 +            summary: "Clear session goal",
-+            description: "Remove the persistent goal from a session.",
++            description: "Clear the persistent goal for a session.",
 +          }),
 +        ),
 +      )
@@ -146,7 +146,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 index 23e871453..7a8b5695f 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -7,6 +7,7 @@ import { Command } from "@/command"
+@@ -7,6 +7,7 @@
  import { Permission } from "@/permission"
  import { SessionShare } from "@/share/session"
  import { Session } from "@/session/session"
@@ -154,7 +154,7 @@ index 23e871453..7a8b5695f 100644
  import { MessageV2 } from "@/session/message-v2"
  import { SessionRequestUsage } from "@/session/request-usage"
  import { SessionPrompt } from "@/session/prompt"
-@@ -27,6 +28,7 @@ import {
+@@ -27,6 +28,7 @@
    CommandPayload,
    DiffQuery,
    ForkPayload,
@@ -162,7 +162,7 @@ index 23e871453..7a8b5695f 100644
    InitPayload,
    ListQuery,
    MessagesQuery,
-@@ -60,6 +62,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -60,6 +62,7 @@
      const permissionSvc = yield* Permission.Service
      const statusSvc = yield* SessionStatus.Service
      const todoSvc = yield* Todo.Service
@@ -170,7 +170,7 @@ index 23e871453..7a8b5695f 100644
      const summary = yield* SessionSummary.Service
      const events = yield* EventV2Bridge.Service
      const scope = yield* Scope.Scope
-@@ -496,6 +499,41 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -496,6 +499,45 @@
      return rows.map(mapAssistant)
    })
  
@@ -178,6 +178,7 @@ index 23e871453..7a8b5695f 100644
 +  const goalGet = Effect.fn("SessionHttpApi.goalGet")(function* (ctx: {
 +    params: { sessionID: SessionID }
 +  }) {
++    // requireSession 先校验 session 存在性，未命中直接 404
 +    yield* requireSession(ctx.params.sessionID)
 +    const result = yield* goalSvc.get(ctx.params.sessionID)
 +    // Option → null 映射，便于 JSON 序列化
@@ -197,10 +198,13 @@ index 23e871453..7a8b5695f 100644
 +      status: ctx.payload.status,
 +      tokenBudget: ctx.payload.tokenBudget,
 +    }).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
++    // [local-smark] GoalError→400 映射保持错误面契约：校验失败不伪装成 5xx
 +    return { goal }
 +  })
 +
 +  // #364：goal clear handler：删除 goal
++  // [local-smark] DELETE 幂等：goal 不存在时 cleared=false 而非报错，
++  // 使客户端重复清除或竞态清除不产生用户可见失败
 +  const goalClear = Effect.fn("SessionHttpApi.goalClear")(function* (ctx: {
 +    params: { sessionID: SessionID }
 +  }) {
@@ -212,7 +216,7 @@ index 23e871453..7a8b5695f 100644
    return handlers
        .handle("list", list)
        .handle("status", status)
-@@ -527,5 +565,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -527,5 +565,9 @@
      .handle("requestUsageList", requestUsageList)
      .handle("requestUsageGet", requestUsageGet)
      .handle("requestUsageAssistants", requestUsageAssistants)
@@ -226,7 +230,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/pa
 index 1dd29e7d8..179ef3630 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/server.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/server.ts
-@@ -29,6 +29,7 @@ import { ProviderAuth } from "@/provider/auth"
+@@ -29,6 +29,7 @@
  import { Provider } from "@/provider/provider"
  import { Question } from "@/question"
  import { SessionCompaction } from "@/session/compaction"
@@ -234,7 +238,7 @@ index 1dd29e7d8..179ef3630 100644
  import { Instruction } from "@/session/instruction"
  import { LLM } from "@/session/llm"
  import { SessionProcessor } from "@/session/processor"
-@@ -233,6 +234,7 @@ const app = LayerNode.group([
+@@ -233,6 +234,7 @@
    Permission.node,
    PermissionSaved.node,
    Todo.node,
@@ -243,10 +247,9 @@ index 1dd29e7d8..179ef3630 100644
    SessionProjector.node,
    SessionStatus.node,
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index cb94facdb..54c4307a3 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -14,6 +14,7 @@ import { Provider } from "@/provider/provider"
+@@ -14,6 +14,7 @@
  import { type Tool as AITool, tool, jsonSchema } from "ai"
  import type { JSONSchema7 } from "@ai-sdk/provider"
  import { SessionCompaction } from "./compaction"
@@ -254,7 +257,7 @@ index cb94facdb..54c4307a3 100644
  import { SystemPrompt } from "./system"
  import { Instruction } from "./instruction"
  import { Plugin } from "../plugin"
-@@ -299,6 +300,8 @@ const layer = Layer.effect(
+@@ -302,6 +303,8 @@
      const llm = yield* LLM.Service
      const events = yield* EventV2Bridge.Service
      const flags = yield* RuntimeFlags.Service
@@ -263,7 +266,7 @@ index cb94facdb..54c4307a3 100644
      // #173：同 session 并发 cancel 串行，避免双写终态竞态
      const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
      const database = yield* Database.Service
-@@ -1428,6 +1431,9 @@ const layer = Layer.effect(
+@@ -1455,6 +1458,9 @@
          const ctx = yield* InstanceState.context
          let structured: unknown
          let step = 0
@@ -273,7 +276,7 @@ index cb94facdb..54c4307a3 100644
          // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
          // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
          // 使后续再次达到 85% 时可以重新提示。
-@@ -1476,6 +1482,56 @@ const layer = Layer.effect(
+@@ -1503,6 +1509,56 @@
                  callID: orphan.callID,
                })
              }
@@ -330,7 +333,7 @@ index cb94facdb..54c4307a3 100644
              yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
              break
            }
-@@ -1587,6 +1643,7 @@ const layer = Layer.effect(
+@@ -1609,6 +1665,7 @@
                    bypassAgentCheck,
                    messages: msgs,
                    promptOps,
@@ -338,7 +341,7 @@ index cb94facdb..54c4307a3 100644
                  }).pipe(
                    Effect.provideService(Plugin.Service, plugin),
                    Effect.provideService(Permission.Service, permission),
-@@ -1809,6 +1866,19 @@ const layer = Layer.effect(
+@@ -1833,6 +1890,19 @@
              }
  
              if (result === "stop") return "break" as const
@@ -356,9 +359,9 @@ index cb94facdb..54c4307a3 100644
 +              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
 +            }
              if (result === "compact") {
-               // #242：改用 compaction.run——create+process 一步完成
-               const compacted = yield* compaction.run({
-@@ -2149,6 +2219,7 @@ export const node = LayerNode.make({
+               // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
+               // 执行 compaction，不留可重放标记给下一轮 loop
+@@ -2131,6 +2201,7 @@
      Provider.node,
      SessionProcessor.node,
      SessionCompaction.node,
@@ -367,26 +370,27 @@ index cb94facdb..54c4307a3 100644
      Command.node,
      Config.node,
 diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
-index 1ed060c8e..ed2c1b486 100644
 --- a/packages/opencode/src/session/tools.ts
 +++ b/packages/opencode/src/session/tools.ts
-@@ -18,6 +18,7 @@ import { Effect, Exit } from "effect"
+@@ -17,6 +17,7 @@
+ import { Effect, Exit } from "effect"
  import { MessageV2 } from "./message-v2"
- import { _testTimingLog } from "./processor"
  import { Session } from "./session"
 +import { SessionGoal } from "./goal"
  import { SessionProcessor } from "./processor"
  import { PartID } from "./schema"
  import { EffectBridge } from "@/effect/bridge"
-@@ -96,6 +97,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+@@ -89,6 +90,9 @@
    bypassAgentCheck: boolean
    messages: SessionV1.WithParts[]
    promptOps: TaskPromptOps
 +  goalSvc: SessionGoal.Interface
++  // [local-smark] goalSvc 由 prompt 层注入而非 tools 层自取——
++  // SessionGoal 依赖 Database，经 prompt 的 layer 传递可避免 tools 层重复接线
  }) {
    const tools: Record<string, AITool> = {}
    const run = yield* EffectBridge.make()
-@@ -111,7 +113,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+@@ -104,7 +106,8 @@
      abort: options.abortSignal!,
      messageID: input.processor.message.id,
      callID: options.toolCallId,
@@ -400,15 +404,16 @@ diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool
 index 42a2153c7..8c766dc76 100644
 --- a/packages/opencode/src/tool/registry.ts
 +++ b/packages/opencode/src/tool/registry.ts
-@@ -30,6 +30,7 @@ import { WebSearchTool } from "./websearch"
+@@ -30,6 +30,8 @@
  import { LspTool } from "./lsp"
  import * as Truncate from "./truncate"
  import { ApplyPatchTool } from "./apply_patch"
++// #364：goal tool 注册进 V2 registry——受 tools 配置开关与 selection 过滤约束
 +import { GoalTool } from "./goal"
  import { Glob } from "@opencode-ai/core/util/glob"
  import path from "path"
  import { pathToFileURL } from "url"
-@@ -46,6 +47,7 @@ import { Instruction } from "../session/instruction"
+@@ -46,6 +47,7 @@
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { EventV2Bridge } from "@/event-v2-bridge"
  import { Agent } from "../agent/agent"
@@ -416,7 +421,7 @@ index 42a2153c7..8c766dc76 100644
  import { Skill } from "../skill"
  import { Permission } from "@/permission"
  import { BackgroundJob } from "@/background/job"
-@@ -112,6 +114,8 @@ const layer = Layer.effect(
+@@ -112,6 +114,8 @@
      const greptool = yield* GrepTool
      const patchtool = yield* ApplyPatchTool
      const skilltool = yield* SkillTool
@@ -425,7 +430,7 @@ index 42a2153c7..8c766dc76 100644
      const agent = yield* Agent.Service
      const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
      const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
-@@ -201,7 +205,9 @@ const layer = Layer.effect(
+@@ -201,7 +205,9 @@
            }
          }
  
@@ -436,7 +441,7 @@ index 42a2153c7..8c766dc76 100644
          const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
  
          const tool = yield* Effect.all({
-@@ -219,6 +225,8 @@ const layer = Layer.effect(
+@@ -219,6 +225,8 @@
            skill: Tool.init(skilltool),
            patch: Tool.init(patchtool),
            question: Tool.init(question),
@@ -445,7 +450,7 @@ index 42a2153c7..8c766dc76 100644
            lsp: Tool.init(lsptool),
            plan: Tool.init(plan),
            permission_review_decision: Tool.init(permissionReviewDecision),
-@@ -245,6 +253,8 @@ const layer = Layer.effect(
+@@ -245,6 +253,8 @@
              tool.patch,
              tool.permission_review_decision,
              ...(tool.execute ? [tool.execute] : []),
@@ -454,7 +459,7 @@ index 42a2153c7..8c766dc76 100644
              ...(flags.experimentalLspTool ? [tool.lsp] : []),
              ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
            ],
-@@ -441,6 +451,7 @@ export const node = LayerNode.make({
+@@ -441,6 +451,7 @@
      Plugin.node,
      Question.node,
      Todo.node,
@@ -466,7 +471,7 @@ diff --git a/packages/opencode/test/fixture/tui-plugin.ts b/packages/opencode/te
 index 5d93139f0..a71e26311 100644
 --- a/packages/opencode/test/fixture/tui-plugin.ts
 +++ b/packages/opencode/test/fixture/tui-plugin.ts
-@@ -321,6 +321,8 @@ export function createTuiPluginApi(opts: Opts = {}): HostPluginApi {
+@@ -321,6 +321,8 @@
          status: opts.state?.session?.status ?? (() => undefined),
          permission: opts.state?.session?.permission ?? (() => []),
          question: opts.state?.session?.question ?? (() => []),
@@ -479,7 +484,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 index b5a8b0119..66739ae92 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -35,6 +35,7 @@ import { LLM } from "../../src/session/llm"
+@@ -35,6 +35,7 @@
  import { MessageV2 } from "../../src/session/message-v2"
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { SessionCompaction } from "../../src/session/compaction"
@@ -487,7 +492,7 @@ index b5a8b0119..66739ae92 100644
  import { SessionSummary } from "../../src/session/summary"
  import { Instruction } from "../../src/session/instruction"
  import { SessionProcessor } from "../../src/session/processor"
-@@ -221,6 +222,7 @@ const promptRoot = LayerNode.group([
+@@ -221,6 +222,7 @@
    SessionProcessor.node,
    Image.node,
    SessionCompaction.node,
@@ -499,7 +504,7 @@ diff --git a/packages/opencode/test/session/snapshot-tool-race.test.ts b/package
 index 126523784..02451d89c 100644
 --- a/packages/opencode/test/session/snapshot-tool-race.test.ts
 +++ b/packages/opencode/test/session/snapshot-tool-race.test.ts
-@@ -19,6 +19,7 @@ import path from "path"
+@@ -19,6 +19,7 @@
  import { Session } from "@/session/session"
  import { SessionPrompt } from "../../src/session/prompt"
  import { SessionSummary } from "../../src/session/summary"
@@ -507,7 +512,7 @@ index 126523784..02451d89c 100644
  import { MessageV2 } from "../../src/session/message-v2"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
  import { Database } from "@opencode-ai/core/database/database"
-@@ -81,6 +82,7 @@ const root = LayerNode.group([
+@@ -81,6 +82,7 @@
    SessionPrompt.node,
    Session.node,
    SessionProjector.node,
@@ -519,7 +524,7 @@ diff --git a/packages/plugin/src/tui.ts b/packages/plugin/src/tui.ts
 index 678121694..72500ce0d 100644
 --- a/packages/plugin/src/tui.ts
 +++ b/packages/plugin/src/tui.ts
-@@ -392,6 +392,8 @@ export type TuiState = {
+@@ -392,6 +392,8 @@
      status: (sessionID: string) => SessionStatus | undefined
      permission: (sessionID: string) => ReadonlyArray<PermissionRequest>
      question: (sessionID: string) => ReadonlyArray<QuestionRequest>
@@ -528,7 +533,7 @@ index 678121694..72500ce0d 100644
    }
    part: (messageID: string) => ReadonlyArray<Part>
    lsp: () => ReadonlyArray<TuiSidebarLspItem>
-@@ -446,6 +448,18 @@ export type TuiSidebarLspItem = Pick<LspStatus, "id" | "root" | "status">
+@@ -446,6 +448,18 @@
  
  export type TuiSidebarTodoItem = Pick<Todo, "content" | "status">
  
@@ -551,7 +556,7 @@ diff --git a/packages/schema/src/event-manifest.ts b/packages/schema/src/event-m
 index b681362e8..0fc963627 100644
 --- a/packages/schema/src/event-manifest.ts
 +++ b/packages/schema/src/event-manifest.ts
-@@ -23,6 +23,7 @@ import { Reference } from "./reference"
+@@ -23,6 +23,7 @@
  import { ServerEvent } from "./server-event"
  import { SessionCompactionEvent } from "./session-compaction-event"
  import { SessionEvent } from "./session-event"
@@ -559,7 +564,7 @@ index b681362e8..0fc963627 100644
  import { SessionStatusEvent } from "./session-status-event"
  import { SessionTodo } from "./session-todo"
  import { SessionV1 } from "./session-v1"
-@@ -58,6 +59,7 @@ export const ServerDefinitions = Event.inventory(
+@@ -58,6 +59,7 @@
    ...foundationDefinitions,
    ...featureDefinitions,
    ...SessionTodo.Event.Definitions,
@@ -567,7 +572,7 @@ index b681362e8..0fc963627 100644
  )
  
  export const Definitions = Event.inventory(
-@@ -66,6 +68,7 @@ export const Definitions = Event.inventory(
+@@ -66,6 +68,7 @@
    ...InstallationEvent.Definitions,
    ...featureDefinitions,
    ...SessionTodo.Event.Definitions,
@@ -579,7 +584,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 index 8a4231da6..52841ca60 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -37,6 +37,19 @@ import { useKV } from "./kv"
+@@ -37,6 +37,19 @@
  import { usePermission } from "./permission"
  import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
  
@@ -599,7 +604,7 @@ index 8a4231da6..52841ca60 100644
  const emptyConsoleState: ConsoleState = {
    consoleManagedProviders: [],
    switchableOrgCount: 0,
-@@ -94,6 +107,10 @@ export const {
+@@ -94,6 +107,10 @@
        todo: {
          [sessionID: string]: Todo[]
        }
@@ -610,7 +615,7 @@ index 8a4231da6..52841ca60 100644
        message: {
          [sessionID: string]: Message[]
        }
-@@ -132,6 +149,8 @@ export const {
+@@ -132,6 +149,8 @@
        session_status: {},
        session_diff: {},
        todo: {},
@@ -619,7 +624,7 @@ index 8a4231da6..52841ca60 100644
        message: {},
        part: {},
        lsp: [],
-@@ -578,6 +597,16 @@ export const {
+@@ -578,6 +597,16 @@
            setStore("todo", event.properties.sessionID, event.properties.todos)
            break
  
@@ -636,7 +641,7 @@ index 8a4231da6..52841ca60 100644
          case "session.diff":
            setStore("session_diff", event.properties.sessionID, event.properties.diff)
            break
-@@ -592,6 +621,8 @@ export const {
+@@ -592,6 +621,8 @@
                }),
              )
            }
@@ -645,7 +650,7 @@ index 8a4231da6..52841ca60 100644
            break
          }
          case "session.updated": {
-@@ -964,6 +995,17 @@ export const {
+@@ -964,6 +995,17 @@
                sdk.client.session.diff({ sessionID }),
                sdk.client.session.status({ workspace: project.workspace.current() }),
              ])
@@ -667,7 +672,7 @@ diff --git a/packages/tui/src/feature-plugins/builtins.ts b/packages/tui/src/fea
 index b67923f3c..d9345bf8e 100644
 --- a/packages/tui/src/feature-plugins/builtins.ts
 +++ b/packages/tui/src/feature-plugins/builtins.ts
-@@ -3,6 +3,7 @@ import HomeFooter from "./home/footer"
+@@ -3,6 +3,7 @@
  import HomeTips from "./home/tips"
  import SidebarContext from "./sidebar/context"
  import SidebarFiles from "./sidebar/files"
@@ -675,7 +680,7 @@ index b67923f3c..d9345bf8e 100644
  import SidebarFooter from "./sidebar/footer"
  import SidebarLsp from "./sidebar/lsp"
  import SidebarMcp from "./sidebar/mcp"
-@@ -23,6 +24,7 @@ export function createBuiltinPlugins(options: { experimentalEventSystem: boolean
+@@ -23,6 +24,7 @@
      HomeFooter,
      HomeTips,
      SidebarContext,
@@ -687,7 +692,7 @@ diff --git a/packages/tui/src/plugin/adapters.tsx b/packages/tui/src/plugin/adap
 index fef0ec8eb..4fa1a2adf 100644
 --- a/packages/tui/src/plugin/adapters.tsx
 +++ b/packages/tui/src/plugin/adapters.tsx
-@@ -143,6 +143,10 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
+@@ -143,6 +143,10 @@
        question(sessionID) {
          return sync.data.question[sessionID] ?? []
        },
@@ -702,7 +707,7 @@ diff --git a/packages/tui/src/routes/session/footer.tsx b/packages/tui/src/route
 index c3a96254e..fdaed091c 100644
 --- a/packages/tui/src/routes/session/footer.tsx
 +++ b/packages/tui/src/routes/session/footer.tsx
-@@ -17,6 +17,12 @@ export function Footer() {
+@@ -17,6 +17,12 @@
      if (route.data.type !== "session") return []
      return sync.data.permission[route.data.sessionID] ?? []
    })
@@ -715,7 +720,7 @@ index c3a96254e..fdaed091c 100644
    const directory = useDirectory()
    const connected = useConnected()
  
-@@ -60,6 +66,12 @@ export function Footer() {
+@@ -60,6 +66,12 @@
              </text>
            </Match>
            <Match when={connected()}>
@@ -732,7 +737,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 3f3c76b6d..0d12889d7 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1582,6 +1582,19 @@ function UserMessage(props: {
+@@ -1582,6 +1582,19 @@
        .filter(Boolean)
      return texts.join("\n\n")
    })
@@ -752,7 +757,7 @@ index 3f3c76b6d..0d12889d7 100644
    const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
    const { theme } = useTheme()
    const [hover, setHover] = createSignal(false)
-@@ -1594,6 +1607,33 @@ function UserMessage(props: {
+@@ -1594,6 +1607,35 @@
  
    return (
      <>
@@ -777,6 +782,8 @@ index 3f3c76b6d..0d12889d7 100644
 +            <text fg={theme.textMuted}>
 +              <b>↻ Goal continuation</b>
 +            </text>
++            {/* [local-smark] 续跑 prompt 内容来自 SessionGoal.continuationPrompt， */}
++            {/* 含 objective、剩余预算与已用量，模型无需回读历史 goal 记录 */}
 +            <text fg={theme.textMuted} wrapMode="word">
 +              {goalText()}
 +            </text>
@@ -791,13 +798,15 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..e2884f6ea4095a14b78184ce82ce582aab437a7e
 --- /dev/null
 +++ b/packages/schema/src/session-goal.ts
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,47 @@
 +export * as SessionGoal from "./session-goal"
 +import { Schema } from "effect"
 +import { define, inventory } from "./event"
 +import { optional } from "./schema"
 +import { SessionID } from "./session-id"
 +
++// [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
++// 由 tool 或用户显式切换——loop 不自动迁移状态，避免与用户意图冲突。
 +export const Status = Schema.Literals(["active", "paused", "complete", "blocked"] as const)
 +export type Status = Schema.Schema.Type<typeof Status>
 +
@@ -808,6 +817,7 @@ index 0000000000000000000000000000000000000000..e2884f6ea4095a14b78184ce82ce582a
 +  id: Schema.String,
 +  objective: Schema.String,
 +  status: Status,
++  // tokenBudget 三态：缺省=不改、null=unbounded、正数=预算上限
 +  tokenBudget: optional(Schema.NullOr(Schema.Number)),
 +  tokensUsed: Schema.Number,
 +  timeUsedSeconds: Schema.Number,
@@ -818,6 +828,8 @@ index 0000000000000000000000000000000000000000..e2884f6ea4095a14b78184ce82ce582a
 +}).annotate({ identifier: "SessionGoal" })
 +export interface Goal extends Schema.Schema.Type<typeof Goal> {}
 +
++// [local-smark] goal.updated 事件：TUI sidebar 与 footer 依赖此事件实时刷新 goal 面板；
++// 事件载荷携带完整 Goal 快照，消费方无需二次查询。
 +const Updated = define({
 +  type: "session.goal.updated",
 +  schema: {
@@ -825,6 +837,8 @@ index 0000000000000000000000000000000000000000..e2884f6ea4095a14b78184ce82ce582a
 +    goal: Goal,
 +  },
 +})
++// [local-smark] goal.cleared 事件：清除后 sidebar 隐藏 goal 区块；
++// 事件仅带 sessionID——goal 数据已物理删除，无需携带快照。
 +const Cleared = define({
 +  type: "session.goal.cleared",
 +  schema: {
@@ -906,7 +920,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da907914eee4
 --- /dev/null
 +++ b/packages/opencode/src/session/goal.ts
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,311 @@
 +import { ulid } from "ulid"
 +import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 +import { Database } from "@opencode-ai/core/database/database"
@@ -923,6 +937,8 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +
 +// #364：goal 状态：只有 active 会触发自动续跑；
 +// paused/blocked/complete 均为停止态，loop 正常退出不续跑
++// [local-smark] 状态机：active → paused/blocked（用户干预）→ active（恢复）；
++// exhausted/complete 为终态——只有显式 set 新 objective 才能回到 active。
 +export const Status = SessionGoalSchema.Status
 +export type Status = SessionGoalSchema.Status
 +
@@ -939,6 +955,7 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +  tokenBudget?: number | null
 +}
 +
++// [local-smark] set 语义错误：无 objective 且无既有 goal 时抛出（无法凭空更新状态）
 +export class GoalError extends Schema.TaggedErrorClass<GoalError>()("GoalError", {
 +  message: Schema.String,
 +}) {}
@@ -1096,6 +1113,9 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +    })
 +
 +    // 仅在 goal 为 active 时会计费，非 active 直接跳过
++    // [local-smark] 计费累加：token/time 以增量方式写入（单 writer 串行化保证并发安全）；
++    // tokensUsed 达到 tokenBudget 时 status 自动置 exhausted，续跑循环据此停止；
++    // status 非 active 时调用方应跳过计费（本函数不重复校验，调用点已保证）。
 +    const accountUsage = Effect.fn("SessionGoal.accountUsage")(function* (
 +      sessionID: SessionID,
 +      tokenDelta: number,
@@ -1135,6 +1155,8 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +  }),
 +)
 +
++// [local-smark] LayerNode 装配：deps 提供 EventV2Bridge（goal.updated 事件发布）与 Database（goal 表）；
++// 编译期由 LayerNode.group 解析依赖，测试可用 Layer.mock(SessionGoal.Service) 替换。
 +export const node = LayerNode.make({ service: Service, layer, deps: [EventV2Bridge.node, Database.node] })
 +
 +export * as SessionGoal from "./goal"
@@ -1143,6 +1165,8 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +// 以保持 provider prefix cache 稳定。文本对齐 Codex continuation.md，
 +// 仅做最小适配：thread goal → session goal，update_goal → the goal tool，
 +// 去掉 update_plan 段（OpenCode 无此工具）。
++// [local-smark] 续跑 prompt 构造：纯函数，输出作为 synthetic user message 文本；
++// 内容引用 objective 与剩余预算，使模型无需额外上下文即可自主决定下一步。
 +export function continuationPrompt(goal: Goal): string {
 +  const budget = goal.tokenBudget ?? "unbounded"
 +  const remaining = goal.tokenBudget != null ? Math.max(0, goal.tokenBudget - goal.tokensUsed) : "unbounded"
@@ -1793,7 +1817,7 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
 index 3afdf03a0..1d28b547b 100644
 --- a/packages/core/src/database/schema.gen.ts
 +++ b/packages/core/src/database/schema.gen.ts
-@@ -278,6 +278,10 @@ export default {
+@@ -278,6 +278,10 @@
        yield* tx.run(`CREATE INDEX \`request_usage_assistant_session_request_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`request_id\`);`)
        yield* tx.run(`CREATE INDEX \`request_usage_assistant_session_root_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`root_request_id\`);`)
        yield* tx.run(`CREATE INDEX \`request_usage_assistant_session_status_updated_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`status\`,\`time_updated\`);`)

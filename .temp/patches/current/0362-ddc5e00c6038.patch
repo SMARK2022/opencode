@@ -266,20 +266,21 @@ index 0fd51e3c1..d45384f30 100644
          if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
            toast.show({
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
-index d89cbcabb..8a4231da6 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -461,10 +461,15 @@ export const {
+@@ -461,11 +461,16 @@ export const {
        switch (event.type) {
          case "global.disposed":
            // #273：仅响应 daemon 主动关闭，其他崩溃走重连
 -          if ((event.properties as { reason?: string }).reason !== "daemon-stop") break
 -          daemonStopSeen = true
 -          // #273：直接调用 exit 函数，原因作为参数传递
+-          // #273：void 前缀——exit 触发卸载流程，不阻塞事件循环处理后续帧
 -          void exit("opencode daemon stopped.")
 +          if ((event.properties as { reason?: string }).reason === "daemon-stop") {
 +            daemonStopSeen = true
 +            // #273：直接调用 exit 函数，原因作为参数传递
++            // #273：void 前缀——exit 触发卸载流程，不阻塞事件循环处理后续帧
 +            void exit("opencode daemon stopped.")
 +          } else {
 +            // #362：非 daemon-stop 的 global.disposed 来自 auth 变更后的 Provider 缓存刷新。

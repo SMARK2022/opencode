@@ -15,8 +15,9 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee83163d4a0dd8
 --- /dev/null
 +++ b/.github/workflows/test.yml
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,565 @@
 +name: test
++# #263：触发面收敛到 dev-smark——fork 分支的自有 CI，不随上游 dev 分支空转
 +
 +on:
 +  push:
@@ -30,6 +31,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +concurrency:
 +  group: ${{ github.ref == 'refs/heads/dev-smark' && format('{0}-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
 +  cancel-in-progress: true
++# #263：同分支 run 串行、PR 按 PR 号互斥并取消旧 run——避免并发写共享缓存与抢占 runner
 +
 +permissions:
 +  contents: read
@@ -39,6 +41,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 +
 +jobs:
++# #263：核心必过/上游警告的分层契约——只有 core/httpapi/vscode 挡合并，上游兼容性只出告警
 +  core-required:
 +    name: 必过核心测试 / ${{ matrix.label }} / ${{ matrix.os_label }}
 +    runs-on: ${{ matrix.runner }}
@@ -46,6 +49,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +    strategy:
 +      fail-fast: false
 +      matrix:
++# #263：fail-fast 关闭——一个 OS 失败不取消其余矩阵，保证单平台问题可独立定位
 +        include:
 +          - id: opencode-linux
 +            label: packages/opencode
@@ -160,6 +164,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +          } >> "$GITHUB_STEP_SUMMARY"
 +
 +  httpapi-required:
++# #263：HttpApi gate 是 wire 契约的机器可校验入口——缺场景/跳过场景一律视为失败，
 +    name: 必过 HttpApi gate / ${{ matrix.mode }}
 +    runs-on: ubuntu-latest
 +    timeout-minutes: 30
@@ -214,6 +219,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +          } >> "$GITHUB_STEP_SUMMARY"
 +
 +  vscode-required:
++# #263：VSCode SDK 编译/打包必过——扩展市场的发布面不允许回归
 +    name: 必过 VSCode SDK 检查
 +    runs-on: ubuntu-latest
 +    timeout-minutes: 30
@@ -272,6 +278,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +    runs-on: ${{ matrix.runner }}
 +    timeout-minutes: 75
 +    continue-on-error: true
++# #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
 +    strategy:
 +      fail-fast: false
 +      matrix:
@@ -351,6 +358,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +    runs-on: ubuntu-latest
 +    timeout-minutes: 45
 +    continue-on-error: true
++# #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
 +    strategy:
 +      fail-fast: false
 +      matrix:
@@ -460,6 +468,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +    runs-on: ${{ matrix.runner }}
 +    timeout-minutes: 45
 +    continue-on-error: true
++# #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
 +    strategy:
 +      fail-fast: false
 +      matrix:

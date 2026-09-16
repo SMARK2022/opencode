@@ -1,127 +1,118 @@
 From ad4e0d983c19c5dd226ac045233c497039116d04 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 28 May 2026 00:50:15 +0800
-Subject: [PATCH] =?UTF-8?q?feat(compaction):=20=E9=87=8D=E6=9E=84=E4=BC=9A?=
- =?UTF-8?q?=E8=AF=9D=E5=8E=8B=E7=BC=A9=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BC=98?=
- =?UTF-8?q?=E5=8C=96=E7=8A=B6=E6=80=81=E7=AE=A1=E7=90=86=E5=92=8C=E9=94=99?=
- =?UTF-8?q?=E8=AF=AF=E5=A4=84=E7=90=86=EF=BC=8C=E6=B7=BB=E5=8A=A0=E6=96=B0?=
- =?UTF-8?q?=E7=9A=84=E5=8E=8B=E7=BC=A9=E6=8E=A5=E5=8F=A3?=
+Date: Wed, 27 May 2026 18:49:32 +0800
+Subject: [PATCH] feat(session): compaction direct-run orchestration
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 21edccdba674e9d21bb262de30e1974ee25de99c..00ccf4b8a8f8c6d4758649eaeb00ca69d2d76a29 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -7,7 +7,6 @@ import { PermissionID } from "@/permission/schema"
- import { SessionRequestUsage } from "@/session/request-usage"
+@@ -7,7 +7,6 @@ import { Command } from "@/command"
+ import { Permission } from "@/permission"
  import { SessionShare } from "@/share/session"
  import { Session } from "@/session/session"
 -import { SessionCompaction } from "@/session/compaction"
  import { MessageV2 } from "@/session/message-v2"
+ import { SessionRequestUsage } from "@/session/request-usage"
  import { SessionPrompt } from "@/session/prompt"
- import { SessionRevert } from "@/session/revert"
-@@ -50,7 +49,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-     const shareSvc = yield* SessionShare.Service
-     const promptSvc = yield* SessionPrompt.Service
+@@ -56,7 +55,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+   // 请求用量追踪服务
+   const usageSvc = yield* SessionRequestUsage.Service
      const revertSvc = yield* SessionRevert.Service
 -    const compactSvc = yield* SessionCompaction.Service
      const runState = yield* SessionRunState.Service
      const agentSvc = yield* Agent.Service
      const permissionSvc = yield* Permission.Service
-@@ -260,21 +258,29 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-       params: { sessionID: SessionID }
-       payload: typeof SummarizePayload.Type
-     }) {
-+      // Reject busy sessions before revert cleanup or model selection so a
-+      // manual compact cannot mutate session state and then no-op behind an
-+      // already-running prompt.
-+      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-       yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
-       const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
-       const defaultAgent = yield* agentSvc.defaultAgent()
-       const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
+@@ -304,21 +302,27 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       yield* store.provide(
+         { directory: info.directory },
+         Effect.gen(function* () {
++          // #242：busy 会话先拒绝——revert 清理或模型选择前拦截，避免手动 compact
++          // 改完状态后又在进行中的 prompt 后面空转
++          yield* SessionError.mapBusy(runState.assertNotBusy(info.id))
+           yield* revertSvc.cleanup(info)
+           const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+           const defaultAgent = yield* agentSvc.defaultAgent()
+           const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
  
--      yield* compactSvc.create({
--        sessionID: ctx.params.sessionID,
--        agent: currentAgent,
--        model: {
--          providerID: ctx.payload.providerID,
--          modelID: ctx.payload.modelID,
--        },
--        auto: ctx.payload.auto ?? false,
--      })
--      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
-+      // Summarize executes compaction directly through SessionPrompt so the
-+      // runner owns cancellation and no pending compact command is left in
-+      // history for a later request to replay.
-+      yield* SessionError.mapBusy(
-+        promptSvc.compact({
-+          sessionID: ctx.params.sessionID,
-+          agent: currentAgent,
-+          model: {
-+            providerID: ctx.payload.providerID,
-+            modelID: ctx.payload.modelID,
-+          },
-+          auto: ctx.payload.auto ?? false,
-+        }),
-+      )
+-          yield* compactSvc.create({
+-            sessionID: ctx.params.sessionID,
+-            agent: currentAgent,
+-            model: {
+-              providerID: ctx.payload.providerID,
+-              modelID: ctx.payload.modelID,
+-            },
+-            auto: ctx.payload.auto ?? false,
+-          })
+-          yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
++          // #242：Summarize 直接经 SessionPrompt 执行 compaction——取消归属 runner，
++          // 历史中不再遗留可被后续请求重放的 pending compact 命令
++          yield* SessionError.mapBusy(
++            promptSvc.compact({
++              sessionID: ctx.params.sessionID,
++              agent: currentAgent,
++              model: {
++                providerID: ctx.payload.providerID,
++                modelID: ctx.payload.modelID,
++              },
++              auto: ctx.payload.auto ?? false,
++            }),
++          )
+         }),
+       )
        return true
-     })
- 
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e07edfb595 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
+@@ -1,5 +1,6 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+-import { SessionV1 } from "@opencode-ai/core/v1/session"
++import { AbortedError, SessionV1 } from "@opencode-ai/core/v1/session"
++// #242：AbortedError 随取消语义从 core 错误模型直接引入，避免经 MessageV2 间接引用
+ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+ import { Session } from "./session"
+ import { SessionID, MessageID, PartID } from "./schema"
+@@ -13,7 +14,7 @@ import { Plugin } from "@/plugin"
  import { Config } from "@/config/config"
  import { NotFoundError } from "@/storage/storage"
- import { ModelID, ProviderID } from "@/provider/schema"
--import { Effect, Layer, Context, Option, Schema } from "effect"
-+import { Effect, Layer, Context, Option, Schema, Exit } from "effect"
- import * as DateTime from "effect/DateTime"
+ 
+-import { Effect, Option, Layer, Context } from "effect"
++import { Effect, Exit, Option, Layer, Context } from "effect"
  import { InstanceState } from "@/effect/instance-state"
  import { isOverflow as overflow, usable } from "./overflow"
-@@ -208,6 +208,13 @@ export interface Interface {
+ import { serviceUse } from "@opencode-ai/core/effect/service-use"
+@@ -141,6 +142,13 @@ export interface Interface {
      model: Provider.Model
    }) => Effect.Effect<boolean>
    readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
 +  readonly run: (input: {
 +    sessionID: SessionID
 +    agent: string
-+    model: { providerID: ProviderID; modelID: ModelID }
++    model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
 +    auto: boolean
 +    overflow?: boolean
 +  }) => Effect.Effect<"continue" | "stop">
    readonly process: (input: {
      parentID: MessageID
-     messages: MessageV2.WithParts[]
-@@ -221,7 +228,7 @@ export interface Interface {
-     model: { providerID: ProviderID; modelID: ModelID }
+     messages: SessionV1.WithParts[]
+@@ -154,7 +162,7 @@ export interface Interface {
+     model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
      auto: boolean
      overflow?: boolean
 -  }) => Effect.Effect<void>
-+  }) => Effect.Effect<MessageV2.User>
++  }) => Effect.Effect<SessionV1.User>
  }
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
-@@ -671,6 +678,10 @@ export const layer = Layer.effect(
-       auto: boolean
-       overflow?: boolean
-     }) {
-+      // The user marker is written before the summary assistant so streaming and
-+      // legacy tests can observe the same persisted boundary shape. It remains
-+      // scratch state until processCompaction writes a successful summary; prompt
-+      // consumers deliberately ignore incomplete markers.
-       const msg = yield* session.updateMessage({
-         id: MessageID.ascending(),
-         role: "user",
-@@ -694,11 +705,79 @@ export const layer = Layer.effect(
-           reason: input.auto ? "auto" : "manual",
-         })
-       }
+@@ -570,11 +578,79 @@ const layer = Layer.effect(
+         auto: input.auto,
+         overflow: input.overflow,
+       })
++      // user 标记先于摘要 assistant 落库，流式与旧测试可观察同一持久化边界形态；
++      // processCompaction 写入成功摘要前它仍是 scratch 状态，prompt 消费端刻意忽略未完成标记
 +      return msg
 +    })
 +
@@ -129,12 +120,11 @@ index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e0
 +      sessionID: SessionID
 +      parentID: MessageID
 +    }) {
-+      // Interrupts can happen after the scratch marker is visible but before the
-+      // summary request starts. Hide only this compaction pair, and only if no
-+      // successful summary exists, so completed boundaries keep anchoring history.
++      // 中断可能发生在 scratch 标记可见后、摘要请求开始前。只隐藏这对 compaction，
++      // 且仅当无成功摘要存在——完成的边界继续锚定历史
 +      const messages = yield* session
 +        .messages({ sessionID: input.sessionID })
-+        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as MessageV2.WithParts[])))
++        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as SessionV1.WithParts[])))
 +      const completed = messages.some(
 +        (msg) =>
 +          msg.info.role === "assistant" &&
@@ -155,7 +145,7 @@ index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e0
 +        }
 +        if (next.role === "assistant" && !next.time.completed) {
 +          next.time.completed = now
-+          next.error ??= new MessageV2.AbortedError({ message: "Aborted by compact cancellation" }).toObject()
++          next.error ??= new AbortedError({ message: "Aborted by compact cancellation" }).toObject()
 +        }
 +        yield* session.updateMessage(next)
 +      }
@@ -164,7 +154,7 @@ index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e0
 +    const run = Effect.fn("SessionCompaction.run")(function* (input: {
 +      sessionID: SessionID
 +      agent: string
-+      model: { providerID: ProviderID; modelID: ModelID }
++      model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
 +      auto: boolean
 +      overflow?: boolean
 +    }) {
@@ -181,10 +171,9 @@ index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e0
 +        })
 +      }).pipe(
 +        Effect.onExit((exit) => {
-+          // Compact markers are scratch state until a successful summary assistant
-+          // exists. Interrupt cleanup keeps visible history tidy for Ctrl-C/abort,
-+          // while MessageV2.filterCompacted remains the correctness guard for hard
-+          // process exits where finalizers cannot run.
++          // compact 标记在成功摘要 assistant 出现前都是 scratch 状态。中断清理保持
++          // 可见历史整洁（Ctrl-C/abort），而 MessageV2.filterCompacted 仍是硬退出时
++          // finalizer 无法运行场景下的正确性护栏
 +          if (Exit.isSuccess(exit) || !parentID) return Effect.void
 +          return hideIncomplete({ sessionID: input.sessionID, parentID })
 +        }),
@@ -199,50 +188,29 @@ index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e0
        create,
      })
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index a58643aa9609ff93c397cab95315a677dd6cc379..05ab443a37dc4715a55fcdefb797afb6a21c51b4 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -69,11 +69,19 @@ export { isMedia }
- // Hidden messages remain persisted for audit/recovery, but are removed from
- // normal prompt replay and visible history. Each reason names the workflow that
- // owns the invisibility boundary: undo hides reverted turns, repair hides empty
--// dangling assistants, and permission-reviewer protocol retry hides malformed
--// reviewer attempts before the same permission request is retried once.
-+// dangling assistants, permission-reviewer protocol retry hides malformed
-+// reviewer attempts before the same permission request is retried once, and
-+// compaction-cancelled hides scratch compact markers that never became a
-+// completed summary boundary. The last case must stay distinct from undo so a
-+// cancelled maintenance operation cannot be mistaken for user-request rollback.
- const Hidden = Schema.Struct({
-   time: NonNegativeInt,
--  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
-+  reason: Schema.Literals([
-+    "undo",
-+    "repair-empty-dangling-assistant",
-+    "permission-reviewer-protocol-retry",
-+    "compaction-cancelled",
-+  ]),
- })
- 
- // OutputLengthError is re-exported from ./message-error above
-@@ -1136,10 +1144,13 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
-   const completed = new Set<string>()
+@@ -585,13 +585,14 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
    let retain: MessageID | undefined
-   // Hidden messages can still be structural compaction anchors, but they must
--  // never be replayed to providers after undo/repair.  Keep them during the
--  // boundary walk and strip them only from the returned prompt window.
-+  // never be replayed to providers after undo/repair. Keep them during the
-+  // boundary walk and strip them only from the returned prompt window. A
-+  // compaction marker is replayable only after a successful summary exists;
-+  // dangling markers are maintenance scratch state and would otherwise revive a
-+  // stale compact or inject "What did we do so far?" into later user prompts.
-   const visible = (items: WithParts[]) =>
--    items
-+    visibleCompactions(items)
+   // #205：hidden 消息仍可作结构压缩锚点，但 undo/repair 后绝不能重放给 provider
+   // #205：边界遍历时保留它们，仅从返回的 prompt 窗口剔除
+-  const visible = (items: WithParts[]) =>
++  // #242：悬挂 compaction 清理链在 #205 hidden 剔除之后执行——hidden 锚点参与边界遍历、
++// 但与被取消的压缩标记一样绝不能出现在返回的 prompt 窗口
++const visible = (items: SessionV1.WithParts[]) =>
++  visibleCompactions(
+     items
        .filter((msg) => !msg.info.hidden)
-       .map((msg) => ({
-         ...msg,
-@@ -1159,8 +1170,6 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+-      .map((msg) => ({
+-        ...msg,
+-        parts: msg.parts.filter((part) => !part.hidden),
+-      }))
++      .map((msg) => ({ ...msg, parts: msg.parts.filter((part) => !part.hidden) })),
++  )
+   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
+   for (const msg of ordered) {
+     result.push(msg)
+@@ -607,8 +608,6 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
        if (msg.info.id === retain) break
        continue
      }
@@ -251,15 +219,14 @@ index a58643aa9609ff93c397cab95315a677dd6cc379..05ab443a37dc4715a55fcdefb797afb6
      if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
        completed.add(msg.info.parentID)
      }
-@@ -1195,6 +1204,35 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+@@ -643,6 +642,34 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
    return visible(result)
  }
  
-+function visibleCompactions(items: WithParts[]) {
-+  // Only a user(compaction) paired with a finished, non-errored summary assistant
-+  // is a durable boundary. Failed or abandoned markers are local maintenance
-+  // debris: keep unrelated messages, but remove the marker/summary pair before
-+  // prompt replay and latest-task detection see it.
++function visibleCompactions(items: SessionV1.WithParts[]) {
++  // #242：只有 user(compaction) 与已完成且无错的摘要 assistant 配对才是持久边界；
++  // 悬挂标记/摘要是本地维护残渣——在 prompt 重放与 latest 任务检测看到它们之前剔除，
++  // 否则会复活旧 compact 或把「What did we do so far?」注入后续 user prompt
 +  const compactions = new Set(
 +    items
 +      .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
@@ -285,22 +252,22 @@ index a58643aa9609ff93c397cab95315a677dd6cc379..05ab443a37dc4715a55fcdefb797afb6
 +}
 +
  export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-   return filterCompacted(stream(sessionID))
- })
-@@ -1203,9 +1241,9 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
+   // #205：压缩恢复需要 hidden 结构锚点作为边界；visible() 会从返回的 prompt 窗口剔除它们
+   return filterCompacted(yield* stream(sessionID, { includeHidden: true }))
+@@ -652,9 +679,9 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
  // ([compaction-user, summary, ...retained tail..., continue-user]), so array
  // position is not chronological. Derive each binding by max id (MessageID
  // is monotonic via MessageID.ascending) so a pre-compaction overflowing tail
 -// assistant doesn't get mistaken for the most recent turn. tasks are
 -// compaction/subtask parts attached to user messages newer than the latest
 -// finished assistant — i.e. unprocessed work.
-+// assistant doesn't get mistaken for the most recent turn. Compaction is not a
-+// replayable task anymore: producers run it directly, and consumers only keep
-+// completed boundaries, which prevents stale compact markers from restarting.
++// assistant doesn't get mistaken for the most recent turn.
++// #242：compaction 不再是可重放任务——生产者直接执行，消费端只保留已完成边界，
++// 这防止旧 compact 标记重启压缩。tasks 因此只剩 subtask
  export function latest(msgs: WithParts[]) {
    let user: User | undefined
    let assistant: Assistant | undefined
-@@ -1219,7 +1257,7 @@ export function latest(msgs: WithParts[]) {
+@@ -668,7 +695,7 @@ export function latest(msgs: WithParts[]) {
    const tasks = msgs.flatMap((m) =>
      finished && m.info.id <= finished.id
        ? []
@@ -309,44 +276,62 @@ index a58643aa9609ff93c397cab95315a677dd6cc379..05ab443a37dc4715a55fcdefb797afb6
    )
    return { user, assistant, finished, tasks }
  }
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -80,10 +80,17 @@ export const Format = Schema.Union([OutputFormatText, OutputFormatJsonSchema]).a
+ export type OutputFormat = Schema.Schema.Type<typeof Format>
+ 
+ // #98：撤销软隐藏元数据
++// #242：compaction-cancelled 是独立的维护操作取消原因——不能与 undo（用户主动回滚）混同，
++// 否则被取消的压缩会误判为用户请求回滚
+ export const Hidden = Schema.Struct({
+   time: NonNegativeInt,
+-  // #153：soft-hide 原因扩展 cancel 空 dangling
+-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
++  // #153：soft-hide 原因扩展 cancel 空 dangling；#242：再加压缩取消的 scratch 标记
++  reason: Schema.Literals([
++    "undo",
++    "repair-empty-dangling-assistant",
++    "permission-reviewer-protocol-retry",
++    "compaction-cancelled",
++  ]),
+ })
+ export type Hidden = Schema.Schema.Type<typeof Hidden>
+ 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1ee01be389 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -297,6 +297,13 @@ export interface Interface {
+@@ -212,6 +212,13 @@ export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
-   readonly loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts>
+   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
 +  readonly compact: (input: {
 +    sessionID: SessionID
 +    agent: string
-+    model: { providerID: ProviderID; modelID: ModelID }
++    model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
 +    auto?: boolean
 +    overflow?: boolean
-+  }) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
-   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
-   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
++  }) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
+   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
+   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
    readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
-@@ -1928,6 +1935,34 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1311,6 +1318,30 @@ const layer = Layer.effect(
        throw new Error("Impossible")
      })
  
++    // #242：compact 走与普通 prompt 相同的 runner/cancel 边界，但直调生产者——
++    // 持久化 compact 标记只会是已完成边界，不会成为后续 loop 从旧历史拾取的排队命令
 +    const compact: Interface["compact"] = Effect.fn("SessionPrompt.compact")(function* (input) {
 +      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-+      // Runner.ensureRunning joins an existing prompt instead of queueing new
-+      // work. Compact must reject busy sessions explicitly so the caller sees a
-+      // real busy response rather than a successful no-op, while still avoiding
-+      // the old persisted pending-marker queue.
++      // Runner.ensureRunning 会加入既有 prompt 而非排队新工作；compact 必须显式
++      // 拒绝 busy 会话，调用方看到真实 busy 响应而非成功空操作
 +      yield* state.assertNotBusy(input.sessionID)
 +      yield* revert.cleanup(session)
 +      return yield* state.ensureRunning(
 +        input.sessionID,
 +        lastAssistant(input.sessionID),
 +        Effect.gen(function* () {
-+          // Manual compact uses the same runner/cancel boundary as normal prompts,
-+          // but it invokes the producer directly. The persisted compaction marker
-+          // is therefore a completed boundary only, never a queued command that a
-+          // future loop can pick up from stale history.
 +          yield* compaction.run({
 +            sessionID: input.sessionID,
 +            agent: input.agent,
@@ -359,10 +344,10 @@ index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1e
 +      )
 +    })
 +
+     // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 #194 TokenEstimate
      const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
-       messages: MessageV2.WithParts[]
-       model: Provider.Model
-@@ -2025,27 +2060,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+       messages: SessionV1.WithParts[]
+@@ -1427,22 +1458,6 @@ const layer = Layer.effect(
              continue
            }
  
@@ -375,29 +360,22 @@ index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1e
 -              overflow: task.overflow,
 -            })
 -            if (result === "stop") break
--            // Manual compaction is a terminal maintenance action: the user asked only
--            // to rewrite history into a summary.  After compaction, filterCompacted()
--            // intentionally appends the retained tail after the summary so the next
--            // model request can still see recent context.  If we immediately loop
--            // again for a manual compaction, that retained tail can look like the
--            // newest build turn and resume old tool-call work without a user prompt.
--            // Auto-compaction keeps looping because it may have created an explicit
--            // synthetic follow-up message to continue the interrupted request.
+-            // #137：手动压缩是终态维护；filterCompacted 保留 tail 后不得继续当新 build 回合
+-            // #137：自动压缩可 continue（可能有合成 follow-up 续跑）
+-            // #137：!task.auto 时立即 break，防止旧 tool tail 被当新请求
 -            if (!task.auto) break
 -            continue
 -          }
 -
+           // #140：overflow 改到 assembled prompt 的 estimatedInput 之后，避免 tail 旧用量连环压缩
+ 
            const agent = yield* agents.get(lastUser.agent)
-           if (!agent) {
-             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-@@ -2257,12 +2271,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 model,
+@@ -1642,12 +1657,14 @@ const layer = Layer.effect(
                })
              ) {
+               // #140：auto compact 使用 estimatedInput 窗口
 -              yield* compaction.create({
-+              // Auto-compaction is executed directly instead of queued as a
-+              // history task. This keeps the producer side from persisting a
-+              // stale compact command that a later prompt or undo could replay.
++              // #242：auto compact 直接执行而非排队为历史任务，避免留下可重放的 compact 命令
 +              const compacted = yield* compaction.run({
                  sessionID,
                  agent: lastUser.agent,
@@ -407,15 +385,14 @@ index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1e
 +              if (compacted === "stop") return "break" as const
                return "continue" as const
              }
-             handle.message.tokens.input = estimatedInput
-@@ -2310,13 +2328,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
+@@ -1707,13 +1724,16 @@ const layer = Layer.effect(
  
              if (result === "stop") return "break" as const
              if (result === "compact") {
 -              yield* compaction.create({
-+              // Provider overflow happens after a real assistant attempt, so run
-+              // compaction immediately against the current session snapshot rather
-+              // than leaving a replayable marker behind for the next loop pass.
++              // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
++              // 执行 compaction，不留可重放标记给下一轮 loop
 +              const compacted = yield* compaction.run({
                  sessionID,
                  agent: lastUser.agent,
@@ -427,7 +404,7 @@ index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1e
              }
              return "continue" as const
            }).pipe(
-@@ -2467,6 +2489,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1875,6 +1895,7 @@ const layer = Layer.effect(
        cancel,
        prompt,
        loop,
@@ -435,103 +412,23 @@ index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1e
        shell,
        command,
        resolvePromptParts,
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index bb9fe1d76868a388ed5f27d53cdde4107c31672f..3157038806a9de3968dce2f15b4679926124a488 100644
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -830,6 +830,69 @@ describe("session.compaction.prune", () => {
- })
- 
- describe("session.compaction.process", () => {
-+  itCompaction.instance(
-+    "runs compaction as a completed boundary without a runnable task",
-+    () => {
-+      const stub = llm()
-+      stub.push(reply("summary"))
-+      return Effect.gen(function* () {
-+        const ssn = yield* SessionNs.Service
-+        const session = yield* ssn.create({})
-+        yield* createUserMessage(session.id, "hello")
-+
-+        const result = yield* SessionCompaction.use.run({
-+          sessionID: session.id,
-+          agent: "build",
-+          model: ref,
-+          auto: false,
-+        })
-+
-+        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
-+        const latest = MessageV2.latest(filtered)
-+
-+        expect(result).toBe("continue")
-+        expect(filtered.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(true)
-+        expect(
-+          filtered.some((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")),
-+        ).toBe(true)
-+        expect(latest.tasks).toEqual([])
-+      }).pipe(withCompaction({ llm: stub.layer }))
-+    },
-+    { git: true },
-+  )
-+
-+  itCompaction.instance(
-+    "hides visible compaction state when interrupted before summary request starts",
-+    () =>
-+      Effect.gen(function* () {
-+        const ready = yield* Deferred.make<void>()
-+        return yield* Effect.gen(function* () {
-+          const ssn = yield* SessionNs.Service
-+          const session = yield* ssn.create({})
-+          yield* createUserMessage(session.id, "hello")
-+          const fiber = yield* SessionCompaction.use
-+            .run({
-+              sessionID: session.id,
-+              agent: "build",
-+              model: ref,
-+              auto: false,
-+            })
-+            .pipe(Effect.forkChild)
-+
-+          yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
-+          yield* Fiber.interrupt(fiber)
-+          const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
-+          const all = yield* ssn.messages({ sessionID: session.id })
-+
-+          expect(Exit.isFailure(exit)).toBe(true)
-+          if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
-+          expect(all.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
-+          expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
-+        }).pipe(withCompaction({ plugin: plugin(ready) }))
-+      }),
-+    { git: true },
-+  )
-+
-   it.instance(
-     "throws when parent is not a user message",
-     Effect.gen(function* () {
-@@ -1512,7 +1575,7 @@ describe("session.compaction.process", () => {
-         yield* createUserMessage(session.id, "latest turn")
-         yield* createCompactionMarker(session.id)
- 
--        msgs = MessageV2.filterCompacted(MessageV2.stream(session.id))
-+        msgs = yield* ssn.messages({ sessionID: session.id })
-         parent = msgs.at(-1)?.info.id
-         expect(parent).toBeTruthy()
-         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
-@@ -1548,7 +1611,7 @@ describe("session.compaction.process", () => {
-       const u4 = yield* createUserMessage(session.id, "four")
-       yield* createCompactionMarker(session.id)
- 
--      msgs = MessageV2.filterCompacted(MessageV2.stream(session.id))
-+      msgs = yield* ssn.messages({ sessionID: session.id })
-       parent = msgs.at(-1)?.info.id
-       expect(parent).toBeTruthy()
-       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+@@ -307,7 +307,8 @@ export const SessionApi = HttpApi.make("session")
+           query: WorkspaceRoutingQuery,
+           payload: SummarizePayload,
+           success: described(Schema.Boolean, "Summarized session"),
+-          error: [HttpApiError.BadRequest, ApiNotFoundError],
++          // #242：手动 summarize 走 compact 主路径后会以 busy 拒绝并发触发，需与 prompt 等端点同声明
++          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
+         }).annotateMerge(
+           OpenApi.annotations({
+             identifier: "session.summarize",
 diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
-index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa5155c5b5 100644
 --- a/packages/opencode/test/session/messages-pagination.test.ts
 +++ b/packages/opencode/test/session/messages-pagination.test.ts
-@@ -653,20 +653,20 @@ describe("MessageV2.filterCompacted", () => {
+@@ -651,20 +651,20 @@ describe("MessageV2.filterCompacted", () => {
      }),
    )
  
@@ -544,7 +441,7 @@ index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa
 -        yield* addUser(sessionID, "world")
 +        const u2 = yield* addUser(sessionID, "world")
  
-         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 -        expect(result).toHaveLength(2)
 +        expect(result.map((item) => item.info.id)).toEqual([u2])
        }),
@@ -556,14 +453,14 @@ index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa
      withSession(({ sessionID }) =>
        Effect.gen(function* () {
          const u1 = yield* addUser(sessionID, "hello")
-@@ -677,16 +677,15 @@ describe("MessageV2.filterCompacted", () => {
+@@ -675,16 +675,15 @@ describe("MessageV2.filterCompacted", () => {
            isRetryable: true,
-         }).toObject() as MessageV2.Assistant["error"]
+         }).toObject() as SessionV1.Assistant["error"]
          yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
 -        yield* addUser(sessionID, "retry")
 +        const retry = yield* addUser(sessionID, "retry")
  
-         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 -        // Error assistant doesn't add to completed, so compaction boundary never triggers
 -        expect(result).toHaveLength(3)
 +        expect(result.map((item) => item.info.id)).toEqual([retry])
@@ -576,14 +473,14 @@ index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa
      withSession(({ sessionID }) =>
        Effect.gen(function* () {
          const u1 = yield* addUser(sessionID, "hello")
-@@ -694,10 +693,25 @@ describe("MessageV2.filterCompacted", () => {
+@@ -692,10 +691,25 @@ describe("MessageV2.filterCompacted", () => {
  
          // summary=true but no finish
          yield* addAssistant(sessionID, u1, { summary: true })
 -        yield* addUser(sessionID, "next")
 +        const next = yield* addUser(sessionID, "next")
  
-         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 -        expect(result).toHaveLength(3)
 +        expect(result.map((item) => item.info.id)).toEqual([next])
 +      }),
@@ -597,7 +494,7 @@ index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa
 +        yield* addCompactionPart(sessionID, u1)
 +        const u2 = yield* addUser(sessionID, "world")
 +
-+        const result = MessageV2.latest(MessageV2.filterCompacted(MessageV2.stream(sessionID)))
++        const result = MessageV2.latest(MessageV2.filterCompacted(yield* MessageV2.stream(sessionID)))
 +
 +        expect(result.user?.id).toBe(u2)
 +        expect(result.tasks).toEqual([])
@@ -605,11 +502,10 @@ index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa
      ),
    )
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index cee22baa9493fdad3ed7ad796f9b1a8565b19c0d..a3de60b7ef96819a0b12dc6cf24253936671601c 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2002,6 +2002,40 @@ it.instance(
-   { git: true },
+@@ -2614,6 +2614,40 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>
+   }),
  )
  
 +it.instance(
@@ -648,4 +544,4 @@ index cee22baa9493fdad3ed7ad796f9b1a8565b19c0d..a3de60b7ef96819a0b12dc6cf2425393
 +
  // Shell semantics
  
- it.instance(
+ it.instance("shell rejects with BusyError when loop running", () =>

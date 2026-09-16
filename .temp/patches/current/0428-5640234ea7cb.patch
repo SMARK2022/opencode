@@ -1,24 +1,3 @@
-From 5640234ea7cb9a5890d3b2230d65c902e4c58e94 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Tue, 14 Jul 2026 17:27:33 +0800
-Subject: [PATCH] =?UTF-8?q?fix(stats):=20=E4=BF=AE=E5=A4=8D=E5=89=8D?=
- =?UTF-8?q?=E6=99=AF=E8=89=B2=20ANSI=20dim=20=E6=B3=84=E6=BC=8F=E5=B9=B6?=
- =?UTF-8?q?=E6=A0=A1=E5=87=86=20R6=20=E8=AF=AD=E4=B9=89=E9=85=8D=E8=89=B2?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-ChartCanvas.render() 在 style 切换时不先清除 SGR dim 状态，
-导致网格 \x1b[2;39m 的 dim 泄漏到数据线前景色，折线在 macOS
-深色模式下被虚线压暗。修复在每次 transition 前先输出 TEXT_RESET
-（22m+39m），只恢复 intensity/foreground，不触碰 background。
-
-同时将共享 palette 从默认 ANSI 收敛为 R6 语义槽位：title/purple
-用 bright magenta（95m），subtitle/cyan 用 bright cyan（96m），
-blue/green/yellow/red 用 bright 槽位避免深色 profile 过暗，
-orange 用 normal yellow（33m）与 bright warning 区分。不引入
-固定 RGB、TUI 耦合或 OSC 探测。
-
 diff --git a/docs/Proposal/stats-foreground-theme-repair-plan.md b/docs/Proposal/stats-foreground-theme-repair-plan.md
 index 1c80358de177cf2a63c67dd834cc9164e8498510..c20983e378a10181792a4ab590818a363d40e05c 100644
 --- a/docs/Proposal/stats-foreground-theme-repair-plan.md
@@ -509,299 +488,1703 @@ index 1c80358de177cf2a63c67dd834cc9164e8498510..c20983e378a10181792a4ab590818a36
 -plan receives independent full-scope approval.
 +The implementation is blocked solely by the human visual acceptance gate.
 +Code, tests, comment gate, and primary-path audit all pass.
-diff --git a/packages/opencode/src/cli/cmd/stats/charts.ts b/packages/opencode/src/cli/cmd/stats/charts.ts
-index 4bd768dcc55ebcd6206e3755d412601210082c70..3b4dc768de883f7d85be90f6debe7f9bde0c4627 100644
---- a/packages/opencode/src/cli/cmd/stats/charts.ts
-+++ b/packages/opencode/src/cli/cmd/stats/charts.ts
-@@ -92,21 +92,27 @@ type RenderContext = {
- }
- 
- export const palette: Record<ChartColor, string> = {
--  // 基础 ANSI 色由终端主题决定实际 RGB，避免深色专用色在浅色终端失去对比度。
--  // axis/title/white 使用终端默认前景，确保正文对比度由用户主题负责。
-+  // R6 前景色契约：采用终端语义 ANSI 槽位，明暗由终端主题决定。
-+  // bright magenta/cyan 承载标题与辅助层级，避免历史固定 RGB 在浅色终端失去对比。
-+  // axis/title/white 仍使用终端默认前景，确保正文对比度由用户主题负责。
-   axis: "\x1b[39m",
-   muted: "\x1b[2;39m",
--  title: "\x1b[39m",
--  // 其余语义色只选择 ANSI 色槽，不携带任何固定 RGB 或背景通道。
--  subtitle: "\x1b[36m",
--  blue: "\x1b[34m",
--  cyan: "\x1b[36m",
--  green: "\x1b[32m",
--  yellow: "\x1b[33m",
--  orange: "\x1b[93m",
--  purple: "\x1b[35m",
--  pink: "\x1b[95m",
--  red: "\x1b[31m",
-+  // title 使用 bright magenta（95m），复用 OpenCode system theme accent 语义。
-+  title: "\x1b[95m",
-+  // subtitle 使用 bright cyan（96m），对应 primary/info。
-+  subtitle: "\x1b[96m",
-+  // 系列色使用 bright 槽位，避免普通 ANSI 在深色 profile 中过暗。
-+  blue: "\x1b[94m",
-+  cyan: "\x1b[96m",
-+  green: "\x1b[92m",
-+  yellow: "\x1b[93m",
-+  // orange 用 normal yellow（33m）作为次级 amber，与 bright warning（93m）区分。
-+  orange: "\x1b[33m",
-+  // purple 用 bright magenta（95m）对应 accent/forecast；pink 用 normal magenta（35m）对照。
-+  purple: "\x1b[95m",
-+  pink: "\x1b[35m",
-+  // red 用 bright red（91m）对应 error/danger。
-+  red: "\x1b[91m",
-   white: "\x1b[39m",
-   // 网格只提供空间参照，不承载唯一数据，因此可以使用 dim 默认前景。
-   grid: "\x1b[2;39m",
-@@ -416,7 +422,11 @@ class ChartCanvas {
-       for (const cell of row) {
-         if (ctx.color && cell.style !== active) {
-           active = cell.style
--          parts.push(active ? `${active.bold ? BOLD : ""}${ctx.palette[active.color]}` : TEXT_RESET)
-+          // 先清除前一 style 的 dim/bold/foreground 状态，避免 grid 的 \x1b[2;39m
-+          // 泄漏到数据线：foreground 色码（如 34m）不会自动清除 SGR dim（2）。
-+          // TEXT_RESET（22m+39m）只恢复 intensity/foreground，不触碰 background；
-+          // background 继续由 panel 的 49m 边界负责。
-+          parts.push(active ? `${TEXT_RESET}${active.bold ? BOLD : ""}${ctx.palette[active.color]}` : TEXT_RESET)
-         }
-         parts.push(cell.char)
-       }
+
+diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/src/cli/cmd/stats-charts.ts
+
+--- a/packages/opencode/src/cli/cmd/stats-charts.ts
++++ b/packages/opencode/src/cli/cmd/stats-charts.ts
+@@ -1,434 +1,443 @@
+-
+-import { formatNumber } from "../format"
+-import type { DailyUsage, StatsReport, UsageGroup, TokenTotals } from "./stats-data"
+-
+-// #174：ChartColor 在无色模式映射为空前缀
+-export type ChartColor = "red" | "green" | "blue" | "yellow" | "magenta" | "cyan" | "white" | "gray"
+-// #174：ChartStyle 默认实线，供折线面积共用
+-export type ChartStyle = { color?: ChartColor; bold?: boolean }
+-// #174：ChartPoint 携带类别/时间键与数值供图元消费
+-export type ChartPoint = { x: string | number; y: number; label?: string }
+-// #174：ChartSeries 保留 id/label，图例与数据对齐
+-export type ChartSeries = { id: string; label: string; points: ChartPoint[]; style?: ChartStyle }
+-// #174：ChartLayer 声明取值函数，堆叠按声明顺序累加
+-export type ChartLayer = { id: string; label: string; color?: ChartColor; value: (d: DailyUsage) => number }
+-// #174：HeatPoint 含 day/dow/value，供周×星期密度格
+-export type HeatPoint = { day: number; dow: number; value: number; label?: string }
+-// #174：HistogramBucket 保存界与频次，溢出并入末桶
+-export type HistogramBucket = { lo: number; hi: number; count: number }
+-
+-// #174：CSI 正则只用于剥色测宽
+-const CSI = /\x1b\[[0-9;]*m/g
+-// #174：RESET 与颜色前缀成对
+-const RESET = "\x1b[0m"
+-// #174：BOLD 可选强调
+-const BOLD = "\x1b[1m"
+-// #174：COLORS 映射终端色
+-const COLORS: Record<string, string> = {
+-  red: "\x1b[31m", green: "\x1b[32m", blue: "\x1b[34m", yellow: "\x1b[33m",
+-  magenta: "\x1b[35m", cyan: "\x1b[36m", white: "\x1b[37m", gray: "\x1b[90m",
+-}
+-// #174：DENSITY 供热力/矩阵相对强度
+-// #174：密度字符只编码相对强度
+-const DENSITY = " ·░▒▓█"
+-
+-// #174：visibleLength 忽略 CSI 占列
+-// #174：测宽忽略 CSI 控制序列
+-
+-// #176：组合音标/ZWJ 等零宽码点不计列宽
+-const isCombining = (code: number) =>
+-  (code >= 0x0300 && code <= 0x036f) ||
+-  (code >= 0x1ab0 && code <= 0x1aff) ||
+-  (code >= 0x1dc0 && code <= 0x1dff) ||
+-  (code >= 0x20d0 && code <= 0x20ff) ||
+-  (code >= 0xfe20 && code <= 0xfe2f) ||
+-  (code >= 0xfe00 && code <= 0xfe0f) ||
+-  code === 0x200d
+-
+-// #176：CJK/全角等宽字符占两列，避免终端裁切错位
+-const isWide = (code: number) =>
+-  code >= 0x1100 &&
+-  (code <= 0x115f ||
+-    code === 0x2329 ||
+-    code === 0x232a ||
+-    (code >= 0x2e80 && code <= 0xa4cf) ||
+-    (code >= 0xac00 && code <= 0xd7a3) ||
+-    (code >= 0xf900 && code <= 0xfaff) ||
+-    (code >= 0xfe10 && code <= 0xfe19) ||
+-    (code >= 0xfe30 && code <= 0xfe6f) ||
+-    (code >= 0xff00 && code <= 0xff60) ||
+-    (code >= 0xffe0 && code <= 0xffe6) ||
+-    (code >= 0x20000 && code <= 0x2fffd) ||
+-    (code >= 0x30000 && code <= 0x3fffd))
+-
+-// #176：单码点显示列宽：宽=2，组合=0，其余=1
+-const charWidth = (code: number) => {
+-  if (isCombining(code)) return 0
+-  if (isWide(code)) return 2
+-  return 1
+-}
+-
+-export const visibleLength = (text: string) => {
+-  // #176：先剥 CSI 再按显示列宽累加，而非 UTF-16 length
+-  const plain = text.replace(CSI, "")
+-  let width = 0
+-  for (const ch of plain) {
+-    width += charWidth(ch.codePointAt(0) ?? 0)
+-  }
+-  return width
+-}
+-// #174：stripAnsi 专供测宽
+-export const stripAnsi = (text: string) => text.replace(CSI, "")
+-// #174：padEnd 按可见列补空
+-export const padEndVisible = (text: string, width: number) => {
+-  const v = visibleLength(text)
+-  return v >= width ? text : text + " ".repeat(width - v)
+-}
+-// #174：padStart 按可见列补空
+-export const padStartVisible = (text: string, width: number) => {
+-  const v = visibleLength(text)
+-  return v >= width ? text : " ".repeat(width - v) + text
+-}
+-// #174：面板宽夹在下限与 stdout.columns 之间
+-export const statsPanelWidth = () => Math.max(40, Math.min(120, (process.stdout.columns || 80) - 4))
+-// #174：内容宽先扣边距再交给图元
+-export const statsContentWidth = () => Math.max(36, statsPanelWidth() - 4)
+-// #174：truncate 按可见宽截断并加省略
+-// #174：按可见宽截断并加省略号
+-export const truncateVisible = (text: string, width: number) => {
+-  // #176：按显示列宽截断，预留 1 列给省略号
+-  const plain = stripAnsi(text)
+-  if (visibleLength(plain) <= width) return text
+-  const budget = Math.max(0, width - 1)
+-  let out = ""
+-  let used = 0
+-  for (const ch of plain) {
+-    const w = charWidth(ch.codePointAt(0) ?? 0)
+-    if (used + w > budget) break
+-    out += ch
+-    used += w
+-  }
+-  return out + "…"
+-}
+-// #174：fitVisible 先截断再垫到目标可见宽
+-export const fitVisible = (text: string, width: number) => padEndVisible(truncateVisible(text, width), width)
+-// #174：paint 在 never/非 TTY 去颜色码
+-// #174：非 TTY 或 never 时去 ANSI
+-export const paint = (text: string, color?: ChartColor, _ctx?: unknown, bold?: boolean) => {
+-  if (!process.stdout.isTTY) return stripAnsi(text)
+-  const pref = (bold ? BOLD : "") + (color ? COLORS[color] || "" : "")
+-  return pref ? pref + text + RESET : text
+-}
+-
+-// #181：序列 sparkline，窄宽时由调用方关闭
+-// #181：宽表趋势列用的迷你柱序
+-export const sparkline = (values: number[], width: number) => {
+-  if (width <= 0 || values.length === 0) return ""
+-  // #181：8 阶块字符，低值也不留白
+-  const glyphs = "▁▂▃▄▅▆▇█"
+-  const safe = values.map((v) => (Number.isFinite(v) ? v : 0))
+-  // #181：全 0 序列仍可出平底 sparkline
+-  const max = Math.max(1, ...safe)
+-  const buckets: number[] = []
+-  if (safe.length <= width) {
+-    // #181：点数不足时逐点绘制，右侧重复末值稳定列宽
+-    buckets.push(...safe)
+-    while (buckets.length < width) buckets.push(safe.at(-1) ?? 0)
+-  } else {
+-    // #181：超采样按桶取峰值聚合，禁止步进丢点导致尖峰消失
+-    for (let i = 0; i < width; i++) {
+-      const lo = Math.floor((i * safe.length) / width)
+-      const hi = Math.max(lo + 1, Math.floor(((i + 1) * safe.length) / width))
+-      buckets.push(Math.max(...safe.slice(lo, hi)))
+-    }
+-  }
+-  // #181：输出纯字符，不含 ANSI
+-  return buckets
+-    .slice(0, width)
+-    .map((v) => glyphs[Math.min(glyphs.length - 1, Math.max(0, Math.round((v / max) * (glyphs.length - 1))))])
+-    .join("")
+-}
+-
+-// #174：renderContext 一次缓存宽度与颜色模式
+-export const renderContext = (color?: string) => ({
+-  color: color === "never" || (color !== "always" && !process.stdout.isTTY) ? "never" : color || "auto",
+-  width: statsContentWidth(),
+-})
+-// #174：指标展示统一 formatNumber
+-export const metricFormatter = (v: number) => formatNumber(v)
+-// #174：UsageGroup 转 series 保留 id/label
+-export const seriesFromUsage = (groups: UsageGroup[], metric: "tokens" | "cost" = "cost"): ChartSeries[] =>
+-  groups.map((g) => ({
+-    id: g.id,
+-    label: g.label || g.id,
+-    points: [{ x: g.label || g.id, y: metric === "cost" ? g.cost : g.tokens.total }],
+-  }))
+-// #174：input/output/cache 层与分列绑定
+-export const layersFromTokenParts = (): ChartLayer[] => [
+-  { id: "input", label: "Input", color: "cyan", value: (d) => d.tokens.input },
+-  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output },
+-  { id: "cacheRead", label: "Cache Read", color: "blue", value: (d) => d.tokens.cache.read },
+-  { id: "cacheWrite", label: "Cache Write", color: "magenta", value: (d) => d.tokens.cache.write },
+-]
+-// #174：dailySeries 排序后再绘，拒绝乱序
+-export const dailySeries = (daily: DailyUsage[], pick: (d: DailyUsage) => number, id = "daily"): ChartSeries => ({
+-  id,
+-  label: id,
+-  points: [...daily].sort((a, b) => a.day - b.day).map((d) => ({ x: d.label, y: pick(d) })),
+-})
+-
+-// #174：bar 生成重复块字符
+-const bar = (n: number, width: number, ch = "█") => ch.repeat(Math.max(0, Math.min(width, Math.round(n))))
+-// #174：maxY 至少为 1 避免除零
+-const maxY = (pts: ChartPoint[]) => Math.max(1, ...pts.map((p) => p.y))
+-
+-// #174：line 按点列输出，非热力格
+-// #174：折线用点列输出，与热力格不同
+-// #174：renderRoundedLineChart 服务时间线折线，不承担 heatmap 命令
+-export const renderRoundedLineChart = (input: { title?: string; series: ChartSeries[]; width?: number; height?: number }) => {
+-  const w = input.width ?? Math.min(60, statsContentWidth())
+-  const series = input.series[0]
+-  if (!series || series.points.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
+-  const m = maxY(series.points)
+-  const lines = input.title ? [input.title] : []
+-  for (const p of series.points.slice(-w)) {
+-    const n = Math.round((p.y / m) * 20)
+-    lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
+-  }
+-  return lines
+-}
+-
+-// #174：stacked 按层输出分量文本
+-// #174：堆叠按层输出分量，缺层不插值
+-export const renderStackedAreaChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[]; width?: number }) => {
+-  const lines = input.title ? [input.title] : []
+-  for (const d of input.daily.slice(-30)) {
+-    const parts = input.layers.map((l) => `${l.label[0] || "?"}:${formatNumber(l.value(d))}`)
+-    lines.push(`${fitVisible(d.label, 8)} ${parts.join(" ")}`)
+-  }
+-  return lines.length ? lines : ["(empty stack)"]
+-}
+-
+-// #174：stream 紧凑实现复用堆叠文本路径
+-export const renderStreamStackChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[] }) =>
+-  renderStackedAreaChart(input)
+-
+-// #174：周×星期密度非折线：只读报告生成终端行，不写库
+-// #174：renderHeatmap 输出密度格/矩阵语义，供 heatmap 命令使用
+-export const renderHeatmap = (input: {
+-  title?: string
+-  points: HeatPoint[]
+-  color?: string
+-  width?: number
+-  formatter?: (n: number) => string
+-}) => {
+-  // week x weekday density — NOT a line/timeline projection
+-  const lines = input.title ? [paint(input.title, "cyan", undefined, true)] : []
+-  const byKey = new Map(input.points.map((p) => [`${p.day}-${p.dow}`, p.value]))
+-  const vals = input.points.map((p) => p.value)
+-  const hi = Math.max(1, ...vals, 0)
+-  lines.push("    Mo Tu We Th Fr Sa Su")
+-  const days = [...new Set(input.points.map((p) => p.day))].sort((a, b) => a - b).slice(-12)
+-  for (const day of days) {
+-    let row = fitVisible(String(day).slice(-4), 4)
+-// #174：热力一周七列固定顺序
+-    for (let dow = 0; dow < 7; dow++) {
+-      const v = byKey.get(`${day}-${dow}`) ?? 0
+-      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
+-      row += `  ${DENSITY[idx]}`
+-    }
+-    lines.push(row)
+-  }
+-  if (days.length === 0) lines.push("(empty heatmap)")
+-  return lines
+-}
+-
+-// #174：histogram 在 min-max 间均分桶
+-// #174：直方图在 min-max 间均分桶宽
+-export const renderHistogram = (input: { title?: string; values: number[]; bins?: number }) => {
+-  const bins = input.bins ?? 8
+-  const vs = input.values.filter((v) => Number.isFinite(v))
+-  const lines = input.title ? [input.title] : []
+-  if (!vs.length) return [...lines, "(empty hist)"]
+-  const lo = Math.min(...vs)
+-  const hi = Math.max(...vs)
+-  const width = hi === lo ? 1 : (hi - lo) / bins
+-  const counts = Array.from({ length: bins }, () => 0)
+-  for (const v of vs) {
+-    const i = Math.min(bins - 1, Math.floor((v - lo) / width))
+-    counts[i]++
+-  }
+-  const m = Math.max(1, ...counts)
+-  counts.forEach((c, i) => {
+-    lines.push(`${fitVisible(formatNumber(lo + i * width), 8)} ${bar(c / m * 20, 20)} ${c}`)
+-  })
+-  return lines
+-}
+-
+-// #174：rank 条相对当前页最大值
+-// #174：条长相对当前页最大值缩放
+-export const renderRankBars = (input: { title?: string; series?: ChartSeries[]; rows?: { label: string; value: number }[]; width?: number } | { label: string; value: number }[]) => {
+-  // support both call shapes used by render pages
+-  const rows = Array.isArray(input)
+-    ? input
+-    : input.rows || (input.series ? input.series.flatMap((s) => s.points.map((p) => ({ label: String(p.label ?? p.x), value: p.y }))) : [])
+-  const title = Array.isArray(input) ? undefined : input.title
+-  const lines = title ? [title] : []
+-  const m = Math.max(1, ...rows.map((r) => r.value), 0)
+-  for (const r of rows.slice(0, 20)) {
+-    lines.push(`${fitVisible(r.label, 14)} ${bar(r.value / m * 16, 16)} ${formatNumber(r.value)}`)
+-  }
+-  return lines.length ? lines : ["(empty ranks)"]
+-}
+-
+-// #174：matrix 单元格用密度字符编码强度
+-// #174：矩阵横纵为 provider/model 交叉
+-export const renderMatrix = (input: { title?: string; rows: string[]; cols: string[]; values: number[][]; width?: number }) => {
+-  const lines = input.title ? [input.title] : []
+-  const hi = Math.max(1, ...input.values.flat(), 0)
+-  lines.push("     " + input.cols.map((c) => fitVisible(c, 4)).join(" "))
+-  input.rows.forEach((r, i) => {
+-    const cells = (input.values[i] || []).map((v) => {
+-      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
+-      return `  ${DENSITY[idx]}`
+-    })
+-    lines.push(`${fitVisible(r, 5)}${cells.join("")}`)
+-  })
+-  return lines
+-}
+-
+-// #174：waterfall 步进表示增量而非绝对值
+-export const renderWaterfall = (input: { title?: string; steps: { label: string; delta: number }[] }) => {
+-  const lines = input.title ? [input.title] : []
+-  let acc = 0
+-  for (const s of input.steps) {
+-    acc += s.delta
+-    lines.push(`${fitVisible(s.label, 12)} ${s.delta >= 0 ? "+" : ""}${formatNumber(s.delta)} → ${formatNumber(acc)}`)
+-  }
+-  return lines
+-}
+-
+-// #174：horizon 用短字符带压缩长序列
+-export const renderHorizon = (input: { title?: string; series: ChartSeries }) => {
+-  const lines = input.title ? [input.title] : []
+-  const pts = input.series.points
+-  const m = maxY(pts)
+-  lines.push(pts.map((p) => DENSITY[Math.min(5, Math.round((p.y / m) * 5))]).join(""))
+-  return lines
+-}
+-
+-// #174：共享尺度子图：只读报告生成终端行，不写库
+-export const renderSmallMultiples = (input: { title?: string; series: ChartSeries[] }) => {
+-  const lines = input.title ? [input.title] : []
+-  for (const s of input.series.slice(0, 6)) {
+-    lines.push(s.label)
+-    lines.push(...renderRoundedLineChart({ series: [s], width: 40 }))
+-  }
+-  return lines
+-}
+-
+-// #174：donut 用条长近似占比，过小合并 other 语义由调用方处理
+-export const renderCompositionDonut = (input: { title?: string; parts: { label: string; value: number }[] }) => {
+-  const lines = input.title ? [input.title] : []
+-  const sum = Math.max(1, input.parts.reduce((a, p) => a + p.value, 0))
+-  for (const p of input.parts) {
+-    const pct = (p.value / sum) * 100
+-    lines.push(`${fitVisible(p.label, 12)} ${bar(pct / 5, 20)} ${pct.toFixed(1)}%`)
+-  }
+-  return lines
+-}
+-
+-// #174：面板先扣边框再绘制正文
+-export const renderPanel = (title: string, body: string[]) => [`┌─ ${title}`, ...body.map((l) => `│ ${l}`), "└─"]
+-// #174：半宽拆栏，中缝固定，不错行
+-export const renderTwoColumn = (left: string[], right: string[]) => {
+-  const n = Math.max(left.length, right.length)
+-  const w = Math.floor((statsContentWidth() - 3) / 2)
+-  const lines: string[] = []
+-  for (let i = 0; i < n; i++) {
+-    lines.push(`${fitVisible(left[i] || "", w)} │ ${fitVisible(right[i] || "", w)}`)
+-  }
+-  return lines
+-}
+-// #174：够宽三栏，过窄改单栏堆叠
+-export const renderThreeColumn = (a: string[], b: string[], c: string[]) => {
+-  if (statsContentWidth() < 90) return [...a, ...b, ...c]
+-  const w = Math.floor((statsContentWidth() - 6) / 3)
+-  const n = Math.max(a.length, b.length, c.length)
+-  const lines: string[] = []
+-  for (let i = 0; i < n; i++) {
+-    lines.push(`${fitVisible(a[i] || "", w)} │ ${fitVisible(b[i] || "", w)} │ ${fitVisible(c[i] || "", w)}`)
+-  }
+-  return lines
+-}
+-// #174：丝带标量来自 totals，不重新聚合
+-export const renderMetricRibbon = (metrics: { label: string; value: string }[]) => [
+-  metrics.map((m) => `${m.label}:${m.value}`).join("  "),
+-]
+-// #174：页签只改标题高亮，不触发 loadReport
+-export const renderTabs = (tabs: { id: string; label: string; active?: boolean }[]) => [
+-  tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join("  "),
+-]
+-// #174：叙事只输出给定文案行，不算新指标
+-export const renderNarrative = (lines: string[]) => lines.map((l) => `  ${l}`)
+-// #174：gauge 将 0..1 映射到条长并钳制
+-export const renderGauge = (input: { title?: string; value: number }) => {
+-  const v = Number.isFinite(input.value) ? Math.min(1, Math.max(0, input.value)) : 0
+-  const n = Math.round(v * 20)
+-  return [input.title || "gauge", `[${bar(n, 20)}${" ".repeat(20 - n)}] ${(v * 100).toFixed(0)}%`]
+-}
+-// #174：slope 只连首末点强调方向
+-export const renderSlopeChart = (input: { title?: string; series: ChartSeries }) => {
+-  const pts = input.series.points
+-  if (pts.length < 2) return [input.title || "slope", "(need 2 points)"]
+-  const a = pts[0]
+-  const b = pts[pts.length - 1]
+-  return [input.title || "slope", `${a.x}:${formatNumber(a.y)} → ${b.x}:${formatNumber(b.y)}`]
+-}
+-// #174：每列除以列和使总和 100%
+-export const renderPercentStack = (input: { title?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
+-  const lines = input.title ? [input.title] : []
+-  for (const col of input.columns) {
+-    const sum = Math.max(1, col.parts.reduce((a, p) => a + p.value, 0))
+-    lines.push(col.label + " " + col.parts.map((p) => `${p.label}:${((p.value / sum) * 100).toFixed(0)}%`).join(" "))
+-  }
+-  return lines
+-}
+-// #174：日标签抽样显示，窄屏避免重叠
+-export const renderDayLabels = (daily: DailyUsage[], step = 1) => daily.filter((_, i) => i % step === 0).map((d) => d.label)
+-// #174：callout 标题与正文靠样式分层而非第二数据源
+-export const renderCallout = (title: string, body: string) => [`▸ ${title}`, `  ${body}`]
+-// #174：列宽按可见字符最大值决定
+-export const renderComparisonTable = (rows: string[][]) => rows.map((r) => r.map((c) => fitVisible(c, 12)).join("  "))
+-// #174：无数据输出 empty，保持管道可解析成功路径
+-export const renderEmptyState = (msg = "no data") => [`(empty) ${msg}`]
+-
+-// helpers used by render pages
+-// #174：dailyTokenPoints 映射 day/dow/value
+-// #174：把 daily tokens 映射为 day/dow 热力点
+-// #174：dailyTokenPoints 把 daily 转为热力点 day/dow/value
+-export const dailyTokenPoints = (report: StatsReport): HeatPoint[] =>
+-  report.daily.flatMap((d) => {
+-    const dt = new Date(d.day)
+-    return [{ day: d.day, dow: (dt.getDay() + 6) % 7, value: d.tokens.total, label: d.label }]
+-  })
+-// #174：dailyCostPoints 映射费用密度
+-// #174：把 daily cost 映射为热力点
+-// #174：dailyCostPoints 把 daily 转为热力点 day/dow/value
+-export const dailyCostPoints = (report: StatsReport): HeatPoint[] =>
+-  report.daily.flatMap((d) => {
+-    const dt = new Date(d.day)
+-    return [{ day: d.day, dow: (dt.getDay() + 6) % 7, value: d.cost, label: d.label }]
+-  })
+-// #174：modelProviderMatrix 只读报告字段
+-// #174：交叉矩阵只读报告字段不查库
+-// #174：modelProviderMatrix 构造 provider×model 交叉表
+-export const modelProviderMatrix = (report: StatsReport) => {
+-  const providers = [...new Set(report.providers.map((p) => p.id))].slice(0, 8)
+-  const models = [...new Set(report.models.map((m) => m.id))].slice(0, 8)
+-  const values = models.map((m) => {
+-    const mg = report.models.find((x) => x.id === m)
+-    return providers.map((p) => mg?.providers.find((x) => x.id === p)?.tokens || 0)
+-  })
+-  return { rows: models, cols: providers, values }
+-}
++
++import { formatNumber } from "../format"
++import type { DailyUsage, StatsReport, UsageGroup, TokenTotals } from "./stats-data"
++
++// #174：ChartColor 在无色模式映射为空前缀
++export type ChartColor = "red" | "green" | "blue" | "yellow" | "magenta" | "cyan" | "white" | "gray"
++// #174：ChartStyle 默认实线，供折线面积共用
++export type ChartStyle = { color?: ChartColor; bold?: boolean }
++// #174：ChartPoint 携带类别/时间键与数值供图元消费
++export type ChartPoint = { x: string | number; y: number; label?: string }
++// #174：ChartSeries 保留 id/label，图例与数据对齐
++export type ChartSeries = { id: string; label: string; points: ChartPoint[]; style?: ChartStyle }
++// #174：ChartLayer 声明取值函数，堆叠按声明顺序累加
++export type ChartLayer = { id: string; label: string; color?: ChartColor; value: (d: DailyUsage) => number }
++// #174：HeatPoint 含 day/dow/value，供周×星期密度格
++export type HeatPoint = { day: number; dow: number; value: number; label?: string }
++// #174：HistogramBucket 保存界与频次，溢出并入末桶
++export type HistogramBucket = { lo: number; hi: number; count: number }
++
++// #174：CSI 正则只用于剥色测宽
++const CSI = /\x1b\[[0-9;]*m/g
++// #174：RESET 与颜色前缀成对
++const RESET = "\x1b[0m"
++// #174：BOLD 可选强调
++const BOLD = "\x1b[1m"
++// #174：COLORS 映射终端色。
++// [local-smark] R6 前景色契约：系列色采用终端语义 bright ANSI 槽位（94/92/91/93/96/95），
++// 明暗由终端主题决定，避免历史普通 ANSI 在深色 profile 中过暗、在浅色终端失去对比；
++// white/gray 仍走默认前景与暗灰，正文对比度由用户主题负责
++const COLORS: Record<string, string> = {
++  red: "\x1b[91m", green: "\x1b[92m", blue: "\x1b[94m", yellow: "\x1b[93m",
++  magenta: "\x1b[95m", cyan: "\x1b[96m", white: "\x1b[37m", gray: "\x1b[90m",
++}
++// #174：DENSITY 供热力/矩阵相对强度
++// #174：密度字符只编码相对强度
++const DENSITY = " ·░▒▓█"
++
++// #174：visibleLength 忽略 CSI 占列
++// #174：测宽忽略 CSI 控制序列
++
++// #176：组合音标/ZWJ 等零宽码点不计列宽
++const isCombining = (code: number) =>
++  (code >= 0x0300 && code <= 0x036f) ||
++  (code >= 0x1ab0 && code <= 0x1aff) ||
++  (code >= 0x1dc0 && code <= 0x1dff) ||
++  (code >= 0x20d0 && code <= 0x20ff) ||
++  (code >= 0xfe20 && code <= 0xfe2f) ||
++  (code >= 0xfe00 && code <= 0xfe0f) ||
++  code === 0x200d
++
++// #176：CJK/全角等宽字符占两列，避免终端裁切错位
++const isWide = (code: number) =>
++  code >= 0x1100 &&
++  (code <= 0x115f ||
++    code === 0x2329 ||
++    code === 0x232a ||
++    (code >= 0x2e80 && code <= 0xa4cf) ||
++    (code >= 0xac00 && code <= 0xd7a3) ||
++    (code >= 0xf900 && code <= 0xfaff) ||
++    (code >= 0xfe10 && code <= 0xfe19) ||
++    (code >= 0xfe30 && code <= 0xfe6f) ||
++    (code >= 0xff00 && code <= 0xff60) ||
++    (code >= 0xffe0 && code <= 0xffe6) ||
++    (code >= 0x20000 && code <= 0x2fffd) ||
++    (code >= 0x30000 && code <= 0x3fffd))
++
++// #176：单码点显示列宽：宽=2，组合=0，其余=1
++const charWidth = (code: number) => {
++  if (isCombining(code)) return 0
++  if (isWide(code)) return 2
++  return 1
++}
++
++export const visibleLength = (text: string) => {
++  // #176：先剥 CSI 再按显示列宽累加，而非 UTF-16 length
++  const plain = text.replace(CSI, "")
++  let width = 0
++  for (const ch of plain) {
++    width += charWidth(ch.codePointAt(0) ?? 0)
++  }
++  return width
++}
++// #174：stripAnsi 专供测宽
++export const stripAnsi = (text: string) => text.replace(CSI, "")
++// #174：padEnd 按可见列补空
++export const padEndVisible = (text: string, width: number) => {
++  const v = visibleLength(text)
++  return v >= width ? text : text + " ".repeat(width - v)
++}
++// #174：padStart 按可见列补空
++export const padStartVisible = (text: string, width: number) => {
++  const v = visibleLength(text)
++  return v >= width ? text : " ".repeat(width - v) + text
++}
++// #174：面板宽夹在下限与 stdout.columns 之间
++export const statsPanelWidth = () => Math.max(40, Math.min(120, (process.stdout.columns || 80) - 4))
++// #174：内容宽先扣边距再交给图元
++export const statsContentWidth = () => Math.max(36, statsPanelWidth() - 4)
++// #174：truncate 按可见宽截断并加省略
++// #174：按可见宽截断并加省略号
++export const truncateVisible = (text: string, width: number) => {
++  // #176：按显示列宽截断，预留 1 列给省略号
++  const plain = stripAnsi(text)
++  if (visibleLength(plain) <= width) return text
++  const budget = Math.max(0, width - 1)
++  let out = ""
++  let used = 0
++  for (const ch of plain) {
++    const w = charWidth(ch.codePointAt(0) ?? 0)
++    if (used + w > budget) break
++    out += ch
++    used += w
++  }
++  return out + "…"
++}
++// #174：fitVisible 先截断再垫到目标可见宽
++export const fitVisible = (text: string, width: number) => padEndVisible(truncateVisible(text, width), width)
++// #174：paint 在 never/非 TTY 去颜色码
++// #174：非 TTY 或 never 时去 ANSI
++export const paint = (text: string, color?: ChartColor, ctx?: unknown, bold?: boolean) => {
++  // R6 输出门控唯一 owner：renderContext 解析的模式在此消费。never 强制去色；
++  // always 强制着色（无视 NO_COLOR/TTY）；auto/未传回退 isTTY。
++  const mode = (ctx as { color?: string } | undefined)?.color
++  if (mode === "never") return stripAnsi(text)
++  if (mode !== "always" && !process.stdout.isTTY) return stripAnsi(text)
++  const pref = (bold ? BOLD : "") + (color ? COLORS[color] || "" : "")
++  return pref ? pref + text + RESET : text
++}
++
++// #181：序列 sparkline，窄宽时由调用方关闭
++// #181：宽表趋势列用的迷你柱序
++export const sparkline = (values: number[], width: number) => {
++  if (width <= 0 || values.length === 0) return ""
++  // #181：8 阶块字符，低值也不留白
++  const glyphs = "▁▂▃▄▅▆▇█"
++  const safe = values.map((v) => (Number.isFinite(v) ? v : 0))
++  // #181：全 0 序列仍可出平底 sparkline
++  const max = Math.max(1, ...safe)
++  const buckets: number[] = []
++  if (safe.length <= width) {
++    // #181：点数不足时逐点绘制，右侧重复末值稳定列宽
++    buckets.push(...safe)
++    while (buckets.length < width) buckets.push(safe.at(-1) ?? 0)
++  } else {
++    // #181：超采样按桶取峰值聚合，禁止步进丢点导致尖峰消失
++    for (let i = 0; i < width; i++) {
++      const lo = Math.floor((i * safe.length) / width)
++      const hi = Math.max(lo + 1, Math.floor(((i + 1) * safe.length) / width))
++      buckets.push(Math.max(...safe.slice(lo, hi)))
++    }
++  }
++  // #181：输出纯字符，不含 ANSI
++  return buckets
++    .slice(0, width)
++    .map((v) => glyphs[Math.min(glyphs.length - 1, Math.max(0, Math.round((v / max) * (glyphs.length - 1))))])
++    .join("")
++}
++
++// #174：renderContext 一次缓存宽度与颜色模式
++export const renderContext = (color?: string) => ({
++  // R6 truthy NO_COLOR 契约：always 恒开；never 恒关；auto 在非 TTY 或非空
++  // NO_COLOR 下禁用（空字符串按 truthiness 等同未设置，与源 0174 语义一致）。
++  color: color === "never" || (color !== "always" && (!process.stdout.isTTY || !!process.env.NO_COLOR)) ? "never" : color || "auto",
++  width: statsContentWidth(),
++})
++// #174：指标展示统一 formatNumber
++export const metricFormatter = (v: number) => formatNumber(v)
++// #174：UsageGroup 转 series 保留 id/label
++export const seriesFromUsage = (groups: UsageGroup[], metric: "tokens" | "cost" = "cost"): ChartSeries[] =>
++  groups.map((g) => ({
++    id: g.id,
++    label: g.label || g.id,
++    points: [{ x: g.label || g.id, y: metric === "cost" ? g.cost : g.tokens.total }],
++  }))
++// #174：input/output/cache 层与分列绑定
++export const layersFromTokenParts = (): ChartLayer[] => [
++  { id: "input", label: "Input", color: "cyan", value: (d) => d.tokens.input },
++  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output },
++  { id: "cacheRead", label: "Cache Read", color: "blue", value: (d) => d.tokens.cache.read },
++  { id: "cacheWrite", label: "Cache Write", color: "magenta", value: (d) => d.tokens.cache.write },
++]
++// #174：dailySeries 排序后再绘，拒绝乱序
++export const dailySeries = (daily: DailyUsage[], pick: (d: DailyUsage) => number, id = "daily"): ChartSeries => ({
++  id,
++  label: id,
++  points: [...daily].sort((a, b) => a.day - b.day).map((d) => ({ x: d.label, y: pick(d) })),
++})
++
++// #174：bar 生成重复块字符
++const bar = (n: number, width: number, ch = "█") => ch.repeat(Math.max(0, Math.min(width, Math.round(n))))
++// #174：maxY 至少为 1 避免除零
++const maxY = (pts: ChartPoint[]) => Math.max(1, ...pts.map((p) => p.y))
++
++// #174：line 按点列输出，非热力格
++// #174：折线用点列输出，与热力格不同
++// #174：renderRoundedLineChart 服务时间线折线，不承担 heatmap 命令
++export const renderRoundedLineChart = (input: { title?: string; series: ChartSeries[]; width?: number; height?: number }) => {
++  const w = input.width ?? Math.min(60, statsContentWidth())
++  const series = input.series[0]
++  if (!series || series.points.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
++  const m = maxY(series.points)
++  const lines = input.title ? [input.title] : []
++  for (const p of series.points.slice(-w)) {
++    const n = Math.round((p.y / m) * 20)
++    lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
++  }
++  return lines
++}
++
++// #174：stacked 按层输出分量文本
++// #174：堆叠按层输出分量，缺层不插值
++export const renderStackedAreaChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[]; width?: number }) => {
++  const lines = input.title ? [input.title] : []
++  for (const d of input.daily.slice(-30)) {
++    const parts = input.layers.map((l) => `${l.label[0] || "?"}:${formatNumber(l.value(d))}`)
++    lines.push(`${fitVisible(d.label, 8)} ${parts.join(" ")}`)
++  }
++  return lines.length ? lines : ["(empty stack)"]
++}
++
++// #174：stream 紧凑实现复用堆叠文本路径
++export const renderStreamStackChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[] }) =>
++  renderStackedAreaChart(input)
++
++// #174：周×星期密度非折线：只读报告生成终端行，不写库
++// #174：renderHeatmap 输出密度格/矩阵语义，供 heatmap 命令使用
++export const renderHeatmap = (input: {
++  title?: string
++  points: HeatPoint[]
++  color?: string
++  width?: number
++  formatter?: (n: number) => string
++}) => {
++  // week x weekday density — NOT a line/timeline projection
++  const lines = input.title ? [paint(input.title, "cyan", renderContext(input.color), true)] : []
++  const byKey = new Map(input.points.map((p) => [`${p.day}-${p.dow}`, p.value]))
++  const vals = input.points.map((p) => p.value)
++  const hi = Math.max(1, ...vals, 0)
++  lines.push("    Mo Tu We Th Fr Sa Su")
++  const days = [...new Set(input.points.map((p) => p.day))].sort((a, b) => a - b).slice(-12)
++  for (const day of days) {
++    let row = fitVisible(String(day).slice(-4), 4)
++// #174：热力一周七列固定顺序
++    for (let dow = 0; dow < 7; dow++) {
++      const v = byKey.get(`${day}-${dow}`) ?? 0
++      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
++      row += `  ${DENSITY[idx]}`
++    }
++    lines.push(row)
++  }
++  if (days.length === 0) lines.push("(empty heatmap)")
++  return lines
++}
++
++// #174：histogram 在 min-max 间均分桶
++// #174：直方图在 min-max 间均分桶宽
++export const renderHistogram = (input: { title?: string; values: number[]; bins?: number }) => {
++  const bins = input.bins ?? 8
++  const vs = input.values.filter((v) => Number.isFinite(v))
++  const lines = input.title ? [input.title] : []
++  if (!vs.length) return [...lines, "(empty hist)"]
++  const lo = Math.min(...vs)
++  const hi = Math.max(...vs)
++  const width = hi === lo ? 1 : (hi - lo) / bins
++  const counts = Array.from({ length: bins }, () => 0)
++  for (const v of vs) {
++    const i = Math.min(bins - 1, Math.floor((v - lo) / width))
++    counts[i]++
++  }
++  const m = Math.max(1, ...counts)
++  counts.forEach((c, i) => {
++    lines.push(`${fitVisible(formatNumber(lo + i * width), 8)} ${bar(c / m * 20, 20)} ${c}`)
++  })
++  return lines
++}
++
++// #174：rank 条相对当前页最大值
++// #174：条长相对当前页最大值缩放
++export const renderRankBars = (input: { title?: string; series?: ChartSeries[]; rows?: { label: string; value: number }[]; width?: number } | { label: string; value: number }[]) => {
++  // support both call shapes used by render pages
++  const rows = Array.isArray(input)
++    ? input
++    : input.rows || (input.series ? input.series.flatMap((s) => s.points.map((p) => ({ label: String(p.label ?? p.x), value: p.y }))) : [])
++  const title = Array.isArray(input) ? undefined : input.title
++  const lines = title ? [title] : []
++  const m = Math.max(1, ...rows.map((r) => r.value), 0)
++  for (const r of rows.slice(0, 20)) {
++    lines.push(`${fitVisible(r.label, 14)} ${bar(r.value / m * 16, 16)} ${formatNumber(r.value)}`)
++  }
++  return lines.length ? lines : ["(empty ranks)"]
++}
++
++// #174：matrix 单元格用密度字符编码强度
++// #174：矩阵横纵为 provider/model 交叉
++export const renderMatrix = (input: { title?: string; rows: string[]; cols: string[]; values: number[][]; width?: number }) => {
++  const lines = input.title ? [input.title] : []
++  const hi = Math.max(1, ...input.values.flat(), 0)
++  lines.push("     " + input.cols.map((c) => fitVisible(c, 4)).join(" "))
++  input.rows.forEach((r, i) => {
++    const cells = (input.values[i] || []).map((v) => {
++      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
++      return `  ${DENSITY[idx]}`
++    })
++    lines.push(`${fitVisible(r, 5)}${cells.join("")}`)
++  })
++  return lines
++}
++
++// #174：waterfall 步进表示增量而非绝对值
++export const renderWaterfall = (input: { title?: string; steps: { label: string; delta: number }[] }) => {
++  const lines = input.title ? [input.title] : []
++  let acc = 0
++  for (const s of input.steps) {
++    acc += s.delta
++    lines.push(`${fitVisible(s.label, 12)} ${s.delta >= 0 ? "+" : ""}${formatNumber(s.delta)} → ${formatNumber(acc)}`)
++  }
++  return lines
++}
++
++// #174：horizon 用短字符带压缩长序列
++export const renderHorizon = (input: { title?: string; series: ChartSeries }) => {
++  const lines = input.title ? [input.title] : []
++  const pts = input.series.points
++  const m = maxY(pts)
++  lines.push(pts.map((p) => DENSITY[Math.min(5, Math.round((p.y / m) * 5))]).join(""))
++  return lines
++}
++
++// #174：共享尺度子图：只读报告生成终端行，不写库
++export const renderSmallMultiples = (input: { title?: string; series: ChartSeries[] }) => {
++  const lines = input.title ? [input.title] : []
++  for (const s of input.series.slice(0, 6)) {
++    lines.push(s.label)
++    lines.push(...renderRoundedLineChart({ series: [s], width: 40 }))
++  }
++  return lines
++}
++
++// #174：donut 用条长近似占比，过小合并 other 语义由调用方处理
++export const renderCompositionDonut = (input: { title?: string; parts: { label: string; value: number }[] }) => {
++  const lines = input.title ? [input.title] : []
++  const sum = Math.max(1, input.parts.reduce((a, p) => a + p.value, 0))
++  for (const p of input.parts) {
++    const pct = (p.value / sum) * 100
++    lines.push(`${fitVisible(p.label, 12)} ${bar(pct / 5, 20)} ${pct.toFixed(1)}%`)
++  }
++  return lines
++}
++
++// #174：面板先扣边框再绘制正文
++export const renderPanel = (title: string, body: string[]) => [`┌─ ${title}`, ...body.map((l) => `│ ${l}`), "└─"]
++// #174：半宽拆栏，中缝固定，不错行
++export const renderTwoColumn = (left: string[], right: string[]) => {
++  const n = Math.max(left.length, right.length)
++  const w = Math.floor((statsContentWidth() - 3) / 2)
++  const lines: string[] = []
++  for (let i = 0; i < n; i++) {
++    lines.push(`${fitVisible(left[i] || "", w)} │ ${fitVisible(right[i] || "", w)}`)
++  }
++  return lines
++}
++// #174：够宽三栏，过窄改单栏堆叠
++export const renderThreeColumn = (a: string[], b: string[], c: string[]) => {
++  if (statsContentWidth() < 90) return [...a, ...b, ...c]
++  const w = Math.floor((statsContentWidth() - 6) / 3)
++  const n = Math.max(a.length, b.length, c.length)
++  const lines: string[] = []
++  for (let i = 0; i < n; i++) {
++    lines.push(`${fitVisible(a[i] || "", w)} │ ${fitVisible(b[i] || "", w)} │ ${fitVisible(c[i] || "", w)}`)
++  }
++  return lines
++}
++// #174：丝带标量来自 totals，不重新聚合
++export const renderMetricRibbon = (metrics: { label: string; value: string }[]) => [
++  metrics.map((m) => `${m.label}:${m.value}`).join("  "),
++]
++// #174：页签只改标题高亮，不触发 loadReport
++export const renderTabs = (tabs: { id: string; label: string; active?: boolean }[]) => [
++  tabs.map((t) => (t.active ? `[${t.label}]` : t.label)).join("  "),
++]
++// #174：叙事只输出给定文案行，不算新指标
++export const renderNarrative = (lines: string[]) => lines.map((l) => `  ${l}`)
++// #174：gauge 将 0..1 映射到条长并钳制
++export const renderGauge = (input: { title?: string; value: number }) => {
++  const v = Number.isFinite(input.value) ? Math.min(1, Math.max(0, input.value)) : 0
++  const n = Math.round(v * 20)
++  return [input.title || "gauge", `[${bar(n, 20)}${" ".repeat(20 - n)}] ${(v * 100).toFixed(0)}%`]
++}
++// #174：slope 只连首末点强调方向
++export const renderSlopeChart = (input: { title?: string; series: ChartSeries }) => {
++  const pts = input.series.points
++  if (pts.length < 2) return [input.title || "slope", "(need 2 points)"]
++  const a = pts[0]
++  const b = pts[pts.length - 1]
++  return [input.title || "slope", `${a.x}:${formatNumber(a.y)} → ${b.x}:${formatNumber(b.y)}`]
++}
++// #174：每列除以列和使总和 100%
++export const renderPercentStack = (input: { title?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
++  const lines = input.title ? [input.title] : []
++  for (const col of input.columns) {
++    const sum = Math.max(1, col.parts.reduce((a, p) => a + p.value, 0))
++    lines.push(col.label + " " + col.parts.map((p) => `${p.label}:${((p.value / sum) * 100).toFixed(0)}%`).join(" "))
++  }
++  return lines
++}
++// #174：日标签抽样显示，窄屏避免重叠
++export const renderDayLabels = (daily: DailyUsage[], step = 1) => daily.filter((_, i) => i % step === 0).map((d) => d.label)
++// #174：callout 标题与正文靠样式分层而非第二数据源
++export const renderCallout = (title: string, body: string) => [`▸ ${title}`, `  ${body}`]
++// #174：列宽按可见字符最大值决定
++export const renderComparisonTable = (rows: string[][]) => rows.map((r) => r.map((c) => fitVisible(c, 12)).join("  "))
++// #174：无数据输出 empty，保持管道可解析成功路径
++export const renderEmptyState = (msg = "no data") => [`(empty) ${msg}`]
++
++// helpers used by render pages
++// #174：dailyTokenPoints 映射 day/dow/value
++// #174：把 daily tokens 映射为 day/dow 热力点
++// #174：dailyTokenPoints 把 daily 转为热力点 day/dow/value
++export const dailyTokenPoints = (report: StatsReport): HeatPoint[] =>
++  report.daily.flatMap((d) => {
++    const dt = new Date(d.day)
++    return [{ day: d.day, dow: (dt.getDay() + 6) % 7, value: d.tokens.total, label: d.label }]
++  })
++// #174：dailyCostPoints 映射费用密度
++// #174：把 daily cost 映射为热力点
++// #174：dailyCostPoints 把 daily 转为热力点 day/dow/value
++export const dailyCostPoints = (report: StatsReport): HeatPoint[] =>
++  report.daily.flatMap((d) => {
++    const dt = new Date(d.day)
++    return [{ day: d.day, dow: (dt.getDay() + 6) % 7, value: d.cost, label: d.label }]
++  })
++// #174：modelProviderMatrix 只读报告字段
++// #174：交叉矩阵只读报告字段不查库
++// #174：modelProviderMatrix 构造 provider×model 交叉表
++export const modelProviderMatrix = (report: StatsReport) => {
++  const providers = [...new Set(report.providers.map((p) => p.id))].slice(0, 8)
++  const models = [...new Set(report.models.map((m) => m.id))].slice(0, 8)
++  const values = models.map((m) => {
++    const mg = report.models.find((x) => x.id === m)
++    return providers.map((p) => mg?.providers.find((x) => x.id === p)?.tokens || 0)
++  })
++  return { rows: models, cols: providers, values }
++}
+
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
-index 82f4832f33c2a3144ccc78096d0cca6b93564fc9..ade630e349b31720f2298c561a9fd92d92994d59 100644
+
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -3,7 +3,7 @@ import { SessionID } from "../../src/session/schema"
- import type { InputComponentTotals, StatsReport, TokenTotals, UsageTotals } from "../../src/cli/cmd/stats/data"
- import { buildForecast, renderInsights } from "../../src/cli/cmd/stats/insights"
- import { renderBreakdown, renderDashboard, renderModels, renderProviders, renderSessions, renderTimeline } from "../../src/cli/cmd/stats/render"
--import { fitVisible, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
-+import { fitVisible, paint, renderContext, renderRoundedLineChart, stripAnsi, truncateVisible, useColor, visibleLength } from "../../src/cli/cmd/stats/charts"
- 
- const day = 86_400_000
- const start = new Date(2026, 3, 27).getTime()
-@@ -479,35 +479,36 @@ describe("stats render width", () => {
-       const colored = renderBreakdown(report(), { color: "always", by: "provider" })
-       const trend = colored.slice(colored.indexOf("Cost trend"), colored.indexOf("Provider economics"))
-       // 图下实体名是折线的直接图例，必须复用画布中的稳定系列色。
--      expect(trend).toContain("\x1b[34mDaXiao Codex")
--      expect(trend).toContain("\x1b[32m本地提供商")
-+      // R6 palette: blue=94m, green=92m（bright 槽位避免深色 profile 过暗）。
-+      expect(trend).toContain("\x1b[94mDaXiao Codex")
-+      expect(trend).toContain("\x1b[92m本地提供商")
- 
-       const economics = colored.slice(colored.indexOf("Provider economics"), colored.indexOf("Model portfolio by provider"))
-       const firstEconomicsRow = economics.split("\n").find((line) => stripAnsi(line).trimStart().startsWith("DaXiao Codex")) ?? ""
--      expect(firstEconomicsRow).toContain("\x1b[34mDaXiao Codex")
-+      expect(firstEconomicsRow).toContain("\x1b[94mDaXiao Codex")
- 
-       const capacity = colored.slice(colored.indexOf("Capacity & reliability"))
-       const firstCapacityRow = capacity.split("\n").find((line) => stripAnsi(line).trimStart().startsWith("DaXiao Codex")) ?? ""
-       // 同一行的实体名和 recent-cost sparkline 都应与对应主折线保持同色。
--      expect(firstCapacityRow.match(/\x1b\[34m/g)?.length).toBeGreaterThanOrEqual(2)
-+      expect(firstCapacityRow.match(/\x1b\[94m/g)?.length).toBeGreaterThanOrEqual(2)
- 
-       const tools = renderBreakdown(report(), { color: "always", by: "tool" })
-       const toolTrend = tools.slice(tools.indexOf("Estimated context trend"), tools.indexOf("Tool footprint"))
--      expect(toolTrend).toContain("\x1b[34mapply_patch")
--      expect(toolTrend).toContain("\x1b[32mbash")
-+      expect(toolTrend).toContain("\x1b[94mapply_patch")
-+      expect(toolTrend).toContain("\x1b[92mbash")
- 
-       const project = renderBreakdown(report(), { color: "always", by: "project" })
-       const projectPortfolio = project.slice(project.indexOf("Project portfolio"), project.indexOf("Runtime mix"))
-       // Project portfolio 是自定义卡片而非通用 table，也必须延续该项目在主趋势中的身份色。
--      expect(projectPortfolio).toContain("\x1b[34m本地项目")
-+      expect(projectPortfolio).toContain("\x1b[94m本地项目")
- 
-       const timeline = renderTimeline(report(), { color: "always" })
-       const timelineModels = timeline.slice(timeline.indexOf("Models"), timeline.indexOf("Providers"))
-       const timelineProviders = timeline.slice(timeline.indexOf("Providers"))
-       // Timeline 的短趋势与实体名构成同一直接图例，不能只给 sparkline 着色而保留白色名称。
--      expect(timelineModels).toContain("\x1b[34mclaude-opus-4-6")
--      expect(timelineModels).toContain("\x1b[32mgpt-5.5")
--      expect(timelineProviders).toContain("\x1b[34mDaXiao Codex")
-+      expect(timelineModels).toContain("\x1b[94mclaude-opus-4-6")
-+      expect(timelineModels).toContain("\x1b[92mgpt-5.5")
-+      expect(timelineProviders).toContain("\x1b[94mDaXiao Codex")
-       const topDays = timeline.slice(timeline.indexOf("Top active days"), timeline.indexOf("Entity trends"))
-       // 日期排行没有跨 section 的系列身份，不能仅因复用 table primitive 就被循环染成分类色。
-       expect(topDays).not.toMatch(/\x1b\[(?:34|32|33|35|95|36|93|31)m\d{2}-\d{2}/)
-@@ -518,8 +519,8 @@ describe("stats render width", () => {
-       // 缺失趋势只能隐藏该线，不能让后续实体在图例与表格之间重新编号换色。
-       const partialProvider = renderBreakdown(partial, { color: "always", by: "provider" })
-       const partialTool = renderBreakdown(partial, { color: "always", by: "tool" })
--      expect(partialProvider.slice(partialProvider.indexOf("Cost trend"), partialProvider.indexOf("Provider economics"))).toContain("\x1b[32m本地提供商")
--      expect(partialTool.slice(partialTool.indexOf("Estimated context trend"), partialTool.indexOf("Tool footprint"))).toContain("\x1b[32mbash")
-+      expect(partialProvider.slice(partialProvider.indexOf("Cost trend"), partialProvider.indexOf("Provider economics"))).toContain("\x1b[92m本地提供商")
-+      expect(partialTool.slice(partialTool.indexOf("Estimated context trend"), partialTool.indexOf("Tool footprint"))).toContain("\x1b[92mbash")
- 
-       // 颜色仅增加编码；去色后文本、间距和数值必须与 color=never 完全相同。
-       expect(stripAnsi(colored)).toBe(renderBreakdown(report(), { color: "never", by: "provider" }))
-@@ -560,12 +561,13 @@ describe("stats render width", () => {
-       const colored = renderBreakdown(input, { color: "always", by: "provider", limit: 2 })
-       const plain = renderBreakdown(input, { color: "never", by: "provider", limit: 2 })
-       // 红/橙同时带文本记号，告警不能在 NO_COLOR 或低辨色终端中消失。
--      expect(colored).toContain("\x1b[31m$1000!")
--      expect(colored).toContain("\x1b[93m100.0%^")
-+      // R6 palette: red=91m, orange=33m（次级 amber，与 bright warning 93m 区分）。
-+      expect(colored).toContain("\x1b[91m$1000!")
-+      expect(colored).toContain("\x1b[33m100.0%^")
-       expect(plain).toContain("! >=3σ")
-       expect(plain).toContain("^ >=2σ")
-       // 高缓存是健康信号，数值较大不能被通用“高值异常”规则误判为风险。
--      expect(colored).toContain("\x1b[32m96.0%")
-+      expect(colored).toContain("\x1b[92m96.0%")
-       expect(stripAnsi(colored)).toBe(plain)
-     })
-   })
-@@ -687,9 +689,11 @@ describe("stats render width", () => {
-       expect(widths[0]).toBeGreaterThan(20)
- 
-       // 第二行的均分数据必须在 bar 中呈现全部五类；颜色来自终端基础前景而非背景块。
--      for (const ansi of [34, 32, 35, 33, 95]) expect(composition).toMatch(new RegExp(`\\x1b\\[${ansi}m█`))
--      // 1 / 1,000,000 的 reasoning 仍保留精确值，但不能为了“可见”伪造一个比例格。
--      expect(bars[0]).not.toContain("\x1b[35m█")
-+      // R6 palette: blue=94, green=92, purple=95, yellow=93, pink=35。
-+      for (const ansi of [94, 92, 95, 93, 35]) expect(composition).toMatch(new RegExp(`\\x1b\\[${ansi}m█`))
-+      // 1 / 1,000,000 的 reasoning 仍保留精确值，但不能为了"可见"伪造一个比例格。
-+      // R6 purple=95m；reasoning 用 purple，但 1 token 不应形成可见段。
-+      expect(bars[0]).not.toContain("\x1b[95m█")
-       expect(stripAnsi(composition)).toContain("reasoning 1 0.0%")
-       expect(stripAnsi(composition)).toContain("cache write 200 20.0%")
-       expect(stripAnsi(composition)).toMatch(/zero-model\s+░{20,} 0%/)
-@@ -880,7 +884,8 @@ describe("stats render width", () => {
-       for (const metric of ["req share", "tokens/req", "cost/req", "calls/req", "cache", "output", "sessions"]) expect(efficiency).toContain(metric)
-       const coloredEfficiency = colored.slice(colored.indexOf("Status efficiency"), colored.indexOf("Failure leaders within each dimension"))
-       // Status 第一列使用结果语义色，而不是普通实体的 blue/green 系列轮换。
--      for (const [ansi, status] of [[32, "completed"], [31, "error"], [33, "aborted"], [34, "running"]] as const) expect(coloredEfficiency).toContain(`\x1b[${ansi}m${status}`)
-+      // R6 palette: green=92, red=91, yellow=93, blue=94（bright 槽位）。
-+      for (const [ansi, status] of [[92, "completed"], [91, "error"], [93, "aborted"], [94, "running"]] as const) expect(coloredEfficiency).toContain(`\x1b[${ansi}m${status}`)
-       expect(stripAnsi(colored)).toBe(output)
- 
-       const leaders = output.slice(output.indexOf("Failure leaders within each dimension"))
-@@ -897,7 +902,7 @@ describe("stats render width", () => {
-     withColumns(120, () => {
-       const output = renderTimeline(report(), { color: "always" })
-       const plain = stripAnsi(output)
--      expect(output).toContain("\x1b[34m")
-+      expect(output).toContain("\x1b[94m")
-       expect(plain).toContain("Entity trends")
-       expect(plain).toContain("Models")
-       expect(plain).toContain("Providers")
-@@ -1376,4 +1381,177 @@ describe("stats render width", () => {
-       }
-     })
-   })
+@@ -1,378 +1,507 @@
+-import { describe, expect, test } from "bun:test"
+-import { fitVisible, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
+-import { renderBreakdown, renderDashboard } from "../../src/cli/cmd/stats-render"
+-import type { StatsReport } from "../../src/cli/cmd/stats-data"
+-
+-// #176：CJK 显示列宽与 breakdown 冒烟
+-describe("stats render width (#176)", () => {
+-  test("counts CJK glyphs as two columns", () => {
+-    expect(visibleLength("中文")).toBe(4)
+-    expect(visibleLength("abc")).toBe(3)
+-  })
+-
+-  test("truncateVisible respects display columns not string length", () => {
+-    const out = truncateVisible("中文测试台", 5)
+-    expect(visibleLength(out)).toBeLessThanOrEqual(5)
+-    expect(out.includes("…") || out.includes("...")).toBe(true)
+-  })
+-
+-  test("fitVisible pads to width", () => {
+-    const out = fitVisible("中", 4)
+-    expect(visibleLength(out)).toBe(4)
+-  })
+-
+-  test("renderBreakdown tool dimension includes context fields", () => {
+-    const report = {
+-      totalSessions: 1,
+-      sessionsWithUsage: 1,
+-      totalMessages: 1,
+-      totalTools: 2,
+-      days: 1,
+-      dateRange: { earliest: 0, latest: 0 },
+-      total: {
+-        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
+-        cost: 0.1,
+-        requests: 1,
+-        assistantCalls: 1,
+-      },
+-      models: [],
+-      providers: [],
+-      agents: [],
+-      sources: [],
+-      statuses: [],
+-      projects: [],
+-      daily: [],
+-      modelSeries: [],
+-      providerSeries: [],
+-      agentSeries: [],
+-      sourceSeries: [],
+-      statusSeries: [],
+-      projectSeries: [],
+-      tokenPartSeries: [],
+-      sessions: [],
+-      toolUsage: [{ id: "bash", count: 2, inputChars: 10, outputChars: 20, contextTokens: 42 }],
+-      modelProviderTokens: [],
+-      tokensPerSession: 15,
+-      medianTokensPerSession: 15,
+-    } as unknown as StatsReport
+-    const text = renderBreakdown(report, { by: "tool", metric: "tokens" })
+-    expect(text).toContain("bash")
+-    expect(text).toContain("ctx=42")
+-    // with toolSeries present, breakdown must surface the #177 chart title
+-  })
+-
+-  test("renderBreakdown tool dimension includes tool context series title", () => {
+-    const report = {
+-      totalSessions: 1,
+-      sessionsWithUsage: 1,
+-      totalMessages: 1,
+-      totalTools: 1,
+-      days: 1,
+-      dateRange: { earliest: 0, latest: 1 },
+-      total: {
+-        tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 }, total: 2 },
+-        cost: 0,
+-        requests: 1,
+-        assistantCalls: 1,
+-      },
+-      models: [],
+-      providers: [],
+-      agents: [],
+-      sources: [],
+-      statuses: [],
+-      projects: [],
+-      daily: [{ day: 0, label: "d0", tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, cost: 0, requests: 0, assistantCalls: 0 }],
+-      modelSeries: [],
+-      providerSeries: [],
+-      agentSeries: [],
+-      sourceSeries: [],
+-      statusSeries: [],
+-      projectSeries: [],
+-      tokenPartSeries: [],
+-      sessions: [],
+-      toolUsage: [{ id: "bash", count: 1, inputChars: 1, outputChars: 1, contextTokens: 3 }],
+-      toolSeries: [
+-        {
+-          id: "bash",
+-          label: "bash",
+-          points: [{ day: 0, label: "d0", tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 }, cost: 0, requests: 1, assistantCalls: 0 }],
+-          tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 },
+-          cost: 0,
+-          requests: 1,
+-          assistantCalls: 0,
+-        },
+-      ],
+-      modelProviderTokens: [],
+-      tokensPerSession: 2,
+-      medianTokensPerSession: 2,
+-    } as unknown as StatsReport
+-    const text = renderBreakdown(report, { by: "tool", metric: "tokens" })
+-    // #177：主路径必须出现系列标题
+-    expect(text).toContain("Tool context tokens over time")
+-  })
+-})
+-
+-describe("stats dashboard responsive top tables (#181)", () => {
+-    // #181：临时改 stdout.columns 驱动响应式分支
+-  const withColumns = (cols: number, fn: () => void) => {
+-    const prev = process.stdout.columns
+-    Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
+-    try {
+-      fn()
+-    } finally {
+-      Object.defineProperty(process.stdout, "columns", { configurable: true, value: prev })
+-    }
+-  }
+-
+-  const report = {
+-    totalSessions: 2,
+-    sessionsWithUsage: 2,
+-    totalMessages: 4,
+-    totalTools: 1,
+-    days: 3,
+-    dateRange: { earliest: 0, latest: 2 },
+-    total: {
+-      tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
+-      cost: 1.5,
+-      requests: 3,
+-      assistantCalls: 3,
+-    },
+-    models: [
+-      {
+-        id: "m1",
+-        label: "model-one",
+-        tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
+-        cost: 1,
+-        requests: 2,
+-        assistantCalls: 2,
+-        sessions: 1,
+-        providers: [],
+-        models: [],
+-      },
+-      {
+-        id: "m2",
+-        label: "model-two",
+-        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
+-        cost: 0.5,
+-        requests: 1,
+-        assistantCalls: 1,
+-        sessions: 1,
+-        providers: [],
+-        models: [],
+-      },
+-    ],
+-    providers: [
+-      {
+-        id: "p1",
+-        label: "provider-one",
+-        tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
+-        cost: 1.5,
+-        requests: 3,
+-        assistantCalls: 3,
+-        sessions: 2,
+-        providers: [],
+-        models: [],
+-      },
+-    ],
+-    agents: [],
+-    sources: [],
+-    statuses: [],
+-    projects: [],
+-    daily: [
+-      { day: 0, label: "d0", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.4, requests: 1, assistantCalls: 1 },
+-      { day: 1, label: "d1", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.5, requests: 1, assistantCalls: 1 },
+-      { day: 2, label: "d2", tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 }, cost: 0.6, requests: 1, assistantCalls: 1 },
+-    ],
+-    modelSeries: [
+-      {
+-        id: "m1",
+-        label: "model-one",
+-        points: [
+-          { day: 0, label: "d0", tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 0, write: 0 }, total: 6 }, cost: 0.2, requests: 1, assistantCalls: 1 },
+-          { day: 1, label: "d1", tokens: { input: 8, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 10 }, cost: 0.4, requests: 1, assistantCalls: 1 },
+-          { day: 2, label: "d2", tokens: { input: 7, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 9 }, cost: 0.4, requests: 0, assistantCalls: 0 },
+-        ],
+-        tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
+-        cost: 1,
+-        requests: 2,
+-        assistantCalls: 2,
+-      },
+-    ],
+-    providerSeries: [
+-      {
+-        id: "p1",
+-        label: "provider-one",
+-        points: [
+-          { day: 0, label: "d0", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.4, requests: 1, assistantCalls: 1 },
+-          { day: 1, label: "d1", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.5, requests: 1, assistantCalls: 1 },
+-          { day: 2, label: "d2", tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 }, cost: 0.6, requests: 1, assistantCalls: 1 },
+-        ],
+-        tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
+-        cost: 1.5,
+-        requests: 3,
+-        assistantCalls: 3,
+-      },
+-    ],
+-    agentSeries: [],
+-    sourceSeries: [],
+-    statusSeries: [],
+-    projectSeries: [],
+-    tokenPartSeries: [],
+-    sessions: [],
+-    toolUsage: [],
+-    toolSeries: [],
+-    modelProviderTokens: [],
+-    tokensPerSession: 20,
+-    medianTokensPerSession: 20,
+-  } as unknown as StatsReport
+-
+-    // #181：宽屏必须出现 trend 且无独立 activity 区
+-  test("wide dashboard folds activity into top tables with trend", () => {
+-    withColumns(120, () => {
+-      const text = renderDashboard(report, { limit: 5, metric: "tokens" })
+-      expect(text).toContain("Top models")
+-      expect(text).toContain("Top providers")
+-            // #181：宽屏契约：share 与 trend 同头
+-      expect(text).toContain("share │ trend")
+-            // #181：activity 已并入顶表
+-      expect(text).not.toContain("Model activity rows")
+-      expect(text).not.toContain("Provider trend rows")
+-      for (const line of text.split("\n")) {
+-        // ignore ANSI-ish; plain visible length via string length upper bound
+-        expect(line.replace(/\x1b\[[0-9;]*m/g, "").length).toBeLessThanOrEqual(120)
+-      }
+-    })
+-  })
+-
+-    // #181：窄屏折叠 trend，避免碎列
+-  test("narrow dashboard drops trend column", () => {
+-    withColumns(58, () => {
+-      const text = renderDashboard(report, { limit: 5 })
+-      expect(text).toContain("Top models")
+-            // #181：窄屏不得残留 trend 表头
+-      expect(text).not.toContain("│ trend")
+-      expect(text).not.toContain("Model activity rows")
+-    })
+-  })
+-})
+-
+-describe("stats top table share (#181)", () => {
+-  test("share uses global total tokens not top-N sum", () => {
+-    // #181：两模型各 25/15，全局 total 200 → share 约 13%/8% 而非 62%/38%
+-    const report = {
+-      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
+-      dateRange: { earliest: 0, latest: 1 },
+-      total: { tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 }, total: 200 }, cost: 1, requests: 1, assistantCalls: 1 },
+-      models: [
+-        { id: "m1", label: "m1", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 0.5, requests: 1, assistantCalls: 1, sessions: 1, providers: [], models: [] },
+-        { id: "m2", label: "m2", tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 }, cost: 0.3, requests: 1, assistantCalls: 1, sessions: 1, providers: [], models: [] },
+-      ],
+-      providers: [], agents: [], sources: [], statuses: [], projects: [],
+-      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
+-      tokensPerSession: 200, medianTokensPerSession: 200,
+-    } as unknown as StatsReport
+-    const text = renderDashboard(report as any, { limit: 5 })
+-    expect(text).toContain("13%") // 25/200
+-    expect(text).toContain("8%") // 15/200
+-    expect(text).not.toMatch(/62%/)
+-  })
+-})
+-
+-describe("sparkline aggregation (#181)", () => {
+-  test("bucket max keeps spikes when values exceed width", async () => {
+-    // #181：超采样必须保留尖峰，不能被步进采样丢掉
+-    const { sparkline } = await import("../../src/cli/cmd/stats-charts")
+-    const values = Array.from({ length: 40 }, (_, i) => (i === 7 ? 100 : 1))
+-    const out = sparkline(values, 8)
+-    expect(out.length).toBe(8)
+-    expect(out).toContain("\u2588")
+-  })
+-
+-  test("pads to width when values are fewer than columns", async () => {
+-    // #181：点数不足时右侧补末值，列宽稳定
+-    const { sparkline } = await import("../../src/cli/cmd/stats-charts")
+-    expect(sparkline([1, 2, 3], 6).length).toBe(6)
+-  })
+-})
+-
+-describe("stats dashboard sectioned overview (#182)", () => {
+-  const report = {
+-    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 2, totalTools: 0, days: 2,
+-    dateRange: { earliest: 0, latest: 2 },
+-    total: { tokens: { input: 100, output: 40, reasoning: 0, cache: { read: 50, write: 10 }, total: 200 }, cost: 2, requests: 10, assistantCalls: 10, errors: 2, aborted: 1 },
+-    models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 2, assistantCalls: 2, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
+-    providers: [{ id: "p1", label: "provider-one", tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 }, cost: 1.5, requests: 3, assistantCalls: 3, errors: 0, aborted: 0, sessions: 2, providers: [], models: [] }],
+-    agents: [], sources: [], statuses: [], projects: [],
+-    daily: [
+-      { day: 1, label: "d1", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 0 },
+-      { day: 2, label: "d2", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 1 },
+-    ],
+-    modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+-    tokenPartSeries: [
+-      { id: "input", label: "Input", points: [{ day: 1, label: "a", value: 10 }, { day: 2, label: "b", value: 90 }], total: 100 },
+-      { id: "output", label: "Output", points: [{ day: 1, label: "a", value: 5 }, { day: 2, label: "b", value: 35 }], total: 40 },
+-      { id: "cacheRead", label: "Cache Read", points: [{ day: 1, label: "a", value: 20 }, { day: 2, label: "b", value: 30 }], total: 50 },
+-      { id: "cacheWrite", label: "Cache Write", points: [{ day: 1, label: "a", value: 4 }, { day: 2, label: "b", value: 6 }], total: 10 },
+-    ],
+-    sessions: [
+-      { id: "s1" as any, title: "big", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 27, 3), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 80, output: 40, reasoning: 0, cache: { read: 0, write: 0 }, total: 120000 }, cost: 1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
+-      { id: "s2" as any, title: "tiny", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 28, 15), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 7 }, cost: 0.1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
+-    ],
+-    toolUsage: [], toolSeries: [], modelProviderTokens: [], tokensPerSession: 15, medianTokensPerSession: 15,
+-  } as unknown as StatsReport
+-
+-  test("renders sections, trends and session distribution", () => {
+-    // #182：分区标题、趋势、分桶与失败率必须出现
+-    const text = renderDashboard(report as any, { limit: 5 })
+-    expect(text).toContain("Daily activity")
+-    expect(text).toContain("Token components")
+-    expect(text).toContain("Cost & health")
+-    expect(text).toContain("Session size distribution")
+-    expect(text).toContain("Top sessions by tokens")
+-    expect(text).toContain("big")
+-    expect(text).toMatch(/cost trend/)
+-    expect(text).toMatch(/cache-hit trend/)
+-    // #182：日失败率趋势必须存在
+-    expect(text).toMatch(/error-rate trend/)
+-    expect(text).toMatch(/Input\s+[\u2581-\u2588]+/)
+-    expect(text).toContain("Cache hit (%): 25")
+-    expect(text).not.toContain("Model activity rows")
+-  })
+-
+-  test("abort and error rate comes from report totals", () => {
+-    // #182：3 次失败/10 次请求 => 30%
+-    const text = renderDashboard(report as any, { limit: 5 })
+-    expect(text).toContain("Abort & error rate (%): 30")
+-    expect(text).not.toContain("Abort & error rate (%): n/a")
+-    expect(text).toMatch(/Failed\/aborted requests: 3 \(30%\)/)
+-  })
+-})
+-
+-describe("stats humanized labels (#183)", () => {
+-  test("production dateLabel uses local MM-DD without locale month glyphs", async () => {
+-    // #183：必须 import 生产 dateLabel，禁止测试内克隆实现
+-    const { dateLabel } = await import("../../src/cli/cmd/stats-data")
+-    const localMidnight = new Date(2026, 3, 27, 0, 0, 0, 0).getTime()
+-    expect(dateLabel(localMidnight)).toBe("04-27")
+-    expect(dateLabel(localMidnight)).not.toMatch(/月/)
+-    // #183：与 dayStart 本地日界一致：当日 15:00 仍标 04-27
+-    const afternoon = new Date(2026, 3, 27, 15, 0, 0, 0).getTime()
+-    expect(dateLabel(afternoon)).toBe("04-27")
+-  })
+-
+-  test("top models table includes per-call column", () => {
+-    // #183：人性化顶表含 per-call
+-    const report = {
+-      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
+-      dateRange: { earliest: 0, latest: 1 },
+-      total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
+-      models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
+-      providers: [], agents: [], sources: [], statuses: [], projects: [],
+-      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
+-      tokensPerSession: 25, medianTokensPerSession: 25,
+-    } as unknown as StatsReport
+-    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
+-  })
+-})
++import { describe, expect, test } from "bun:test"
++import { fitVisible, paint, renderContext, renderHeatmap, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
++import { renderBreakdown, renderCosts, renderDashboard, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
++import { renderInsights } from "../../src/cli/cmd/stats-insights"
++import type { StatsReport } from "../../src/cli/cmd/stats-data"
 +
-+  test("does not let grid dim state leak into series glyphs", () => {
-+    // 网格使用 \x1b[2;39m（dim + 默认前景）；数据线只设置 foreground 色码。
-+    // 如果 ChartCanvas.render() 在 style 切换时不先清除 dim，折线 glyph 会继承
-+    // 网格的 dim 状态，导致用户在 macOS 深色模式看到"虚线后折线变暗"。
-+    // 该测试把公开输出当作 SGR 状态机解析，断言 canvas 行中 dim 只出现在 grid 字符上。
++// #176：CJK 显示列宽与 breakdown 冒烟
++describe("stats render width (#176)", () => {
++  test("counts CJK glyphs as two columns", () => {
++    expect(visibleLength("中文")).toBe(4)
++    expect(visibleLength("abc")).toBe(3)
++  })
++
++  test("truncateVisible respects display columns not string length", () => {
++    const out = truncateVisible("中文测试台", 5)
++    expect(visibleLength(out)).toBeLessThanOrEqual(5)
++    expect(out.includes("…") || out.includes("...")).toBe(true)
++  })
++
++  test("fitVisible pads to width", () => {
++    const out = fitVisible("中", 4)
++    expect(visibleLength(out)).toBe(4)
++  })
++
++  test("renderBreakdown tool dimension includes context fields", () => {
++    const report = {
++      totalSessions: 1,
++      sessionsWithUsage: 1,
++      totalMessages: 1,
++      totalTools: 2,
++      days: 1,
++      dateRange: { earliest: 0, latest: 0 },
++      total: {
++        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
++        cost: 0.1,
++        requests: 1,
++        assistantCalls: 1,
++      },
++      models: [],
++      providers: [],
++      agents: [],
++      sources: [],
++      statuses: [],
++      projects: [],
++      daily: [],
++      modelSeries: [],
++      providerSeries: [],
++      agentSeries: [],
++      sourceSeries: [],
++      statusSeries: [],
++      projectSeries: [],
++      tokenPartSeries: [],
++      sessions: [],
++      toolUsage: [{ id: "bash", count: 2, inputChars: 10, outputChars: 20, contextTokens: 42 }],
++      modelProviderTokens: [],
++      tokensPerSession: 15,
++      medianTokensPerSession: 15,
++    } as unknown as StatsReport
++    const text = renderBreakdown(report, { by: "tool", metric: "tokens" })
++    expect(text).toContain("bash")
++    expect(text).toContain("ctx=42")
++    // with toolSeries present, breakdown must surface the #177 chart title
++  })
++
++  test("renderBreakdown tool dimension includes tool context series title", () => {
++    const report = {
++      totalSessions: 1,
++      sessionsWithUsage: 1,
++      totalMessages: 1,
++      totalTools: 1,
++      days: 1,
++      dateRange: { earliest: 0, latest: 1 },
++      total: {
++        tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 }, total: 2 },
++        cost: 0,
++        requests: 1,
++        assistantCalls: 1,
++      },
++      models: [],
++      providers: [],
++      agents: [],
++      sources: [],
++      statuses: [],
++      projects: [],
++      daily: [{ day: 0, label: "d0", tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, cost: 0, requests: 0, assistantCalls: 0 }],
++      modelSeries: [],
++      providerSeries: [],
++      agentSeries: [],
++      sourceSeries: [],
++      statusSeries: [],
++      projectSeries: [],
++      tokenPartSeries: [],
++      sessions: [],
++      toolUsage: [{ id: "bash", count: 1, inputChars: 1, outputChars: 1, contextTokens: 3 }],
++      toolSeries: [
++        {
++          id: "bash",
++          label: "bash",
++          points: [{ day: 0, label: "d0", tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 }, cost: 0, requests: 1, assistantCalls: 0 }],
++          tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 },
++          cost: 0,
++          requests: 1,
++          assistantCalls: 0,
++        },
++      ],
++      modelProviderTokens: [],
++      tokensPerSession: 2,
++      medianTokensPerSession: 2,
++    } as unknown as StatsReport
++    const text = renderBreakdown(report, { by: "tool", metric: "tokens" })
++    // #177：主路径必须出现系列标题
++    expect(text).toContain("Tool context tokens over time")
++  })
++})
++
++describe("stats dashboard responsive top tables (#181)", () => {
++    // #181：临时改 stdout.columns 驱动响应式分支
++  const withColumns = (cols: number, fn: () => void) => {
++    const prev = process.stdout.columns
++    Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
++    try {
++      fn()
++    } finally {
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: prev })
++    }
++  }
++
++  const report = {
++    totalSessions: 2,
++    sessionsWithUsage: 2,
++    totalMessages: 4,
++    totalTools: 1,
++    days: 3,
++    dateRange: { earliest: 0, latest: 2 },
++    total: {
++      tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
++      cost: 1.5,
++      requests: 3,
++      assistantCalls: 3,
++    },
++    models: [
++      {
++        id: "m1",
++        label: "model-one",
++        tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
++        cost: 1,
++        requests: 2,
++        assistantCalls: 2,
++        sessions: 1,
++        providers: [],
++        models: [],
++      },
++      {
++        id: "m2",
++        label: "model-two",
++        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
++        cost: 0.5,
++        requests: 1,
++        assistantCalls: 1,
++        sessions: 1,
++        providers: [],
++        models: [],
++      },
++    ],
++    providers: [
++      {
++        id: "p1",
++        label: "provider-one",
++        tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
++        cost: 1.5,
++        requests: 3,
++        assistantCalls: 3,
++        sessions: 2,
++        providers: [],
++        models: [],
++      },
++    ],
++    agents: [],
++    sources: [],
++    statuses: [],
++    projects: [],
++    daily: [
++      { day: 0, label: "d0", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.4, requests: 1, assistantCalls: 1 },
++      { day: 1, label: "d1", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.5, requests: 1, assistantCalls: 1 },
++      { day: 2, label: "d2", tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 }, cost: 0.6, requests: 1, assistantCalls: 1 },
++    ],
++    modelSeries: [
++      {
++        id: "m1",
++        label: "model-one",
++        points: [
++          { day: 0, label: "d0", tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 0, write: 0 }, total: 6 }, cost: 0.2, requests: 1, assistantCalls: 1 },
++          { day: 1, label: "d1", tokens: { input: 8, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 10 }, cost: 0.4, requests: 1, assistantCalls: 1 },
++          { day: 2, label: "d2", tokens: { input: 7, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 9 }, cost: 0.4, requests: 0, assistantCalls: 0 },
++        ],
++        tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
++        cost: 1,
++        requests: 2,
++        assistantCalls: 2,
++      },
++    ],
++    providerSeries: [
++      {
++        id: "p1",
++        label: "provider-one",
++        points: [
++          { day: 0, label: "d0", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.4, requests: 1, assistantCalls: 1 },
++          { day: 1, label: "d1", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.5, requests: 1, assistantCalls: 1 },
++          { day: 2, label: "d2", tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 }, cost: 0.6, requests: 1, assistantCalls: 1 },
++        ],
++        tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
++        cost: 1.5,
++        requests: 3,
++        assistantCalls: 3,
++      },
++    ],
++    agentSeries: [],
++    sourceSeries: [],
++    statusSeries: [],
++    projectSeries: [],
++    tokenPartSeries: [],
++    sessions: [],
++    toolUsage: [],
++    toolSeries: [],
++    modelProviderTokens: [],
++    tokensPerSession: 20,
++    medianTokensPerSession: 20,
++  } as unknown as StatsReport
++
++    // #181：宽屏必须出现 trend 且无独立 activity 区
++  test("wide dashboard folds activity into top tables with trend", () => {
 +    withColumns(120, () => {
-+      const chart = renderRoundedLineChart({
-+        title: "dim leak probe",
-+        series: [{
-+          id: "a", label: "a", color: "blue",
-+          points: [
-+            { x: 0, y: 0 }, { x: 1, y: 8 }, { x: 2, y: 2 }, { x: 3, y: 6 },
-+          ],
-+        }],
-+        color: "always",
-+        width: 30,
-+        height: 6,
-+        points: false,
-+        legend: false,
-+      })
-+
-+      // Y 轴标签通过 paint("muted") 输出，本身就该是 dim；只检查 canvas 行部分。
-+      // 每行格式为 `${yAxisLabel} ${canvasLine}`，canvas 部分从 TEXT_RESET 后的空格之后开始。
-+      const canvasLines = chart.slice(1, -1).map((line) => {
-+        // Y 轴标签以 TEXT_RESET (\x1b[22m\x1b[39m) 结尾，后跟一个空格，然后是 canvas 内容。
-+        const resetIdx = line.indexOf("\x1b[22m\x1b[39m")
-+        if (resetIdx === -1) return ""
-+        return line.slice(resetIdx + 8)
-+      })
-+
-+      // 解析 SGR 序列，跟踪每个可见字符输出时的 dim 状态。
-+      let dim = false
-+      let inEscape = false
-+      let escapeBuf = ""
-+      // grid 字符 ┆ 和 ┄ 可以是 dim；其他 canvas glyph 不能是 dim。
-+      const gridChars = "┆┄"
-+      const dimNonGridGlyphs: string[] = []
-+      for (const line of canvasLines) {
-+        dim = false
-+        inEscape = false
-+        escapeBuf = ""
-+        for (const char of line) {
-+          if (char === "\x1b") { inEscape = true; escapeBuf = char; continue }
-+          if (inEscape) {
-+            escapeBuf += char
-+            if (char === "m") {
-+              const params = escapeBuf.slice(2, -1).split(";").map(Number)
-+              for (const p of params) {
-+                if (p === 0) dim = false
-+                else if (p === 2) dim = true
-+                else if (p === 22) dim = false
-+              }
-+              inEscape = false; escapeBuf = ""
-+            }
-+            continue
-+          }
-+          if (char !== " " && char !== "\n" && !gridChars.includes(char) && dim) {
-+            dimNonGridGlyphs.push(char)
-+          }
-+        }
++      const text = renderDashboard(report, { limit: 5, metric: "tokens" })
++      expect(text).toContain("Top models")
++      expect(text).toContain("Top providers")
++            // #181：宽屏契约：share 与 trend 同头
++      expect(text).toContain("share │ trend")
++            // #181：activity 已并入顶表
++      expect(text).not.toContain("Model activity rows")
++      expect(text).not.toContain("Provider trend rows")
++      for (const line of text.split("\n")) {
++        // ignore ANSI-ish; plain visible length via string length upper bound
++        expect(line.replace(/\x1b\[[0-9;]*m/g, "").length).toBeLessThanOrEqual(120)
 +      }
-+
-+      // canvas 行中除 grid 字符外的任何 glyph 都不能处于 dim 状态。
-+      expect(dimNonGridGlyphs).toEqual([])
 +    })
 +  })
 +
-+  test("emits the exact R6 semantic ANSI role contract", () => {
-+    // R6 把前景色收敛为终端语义 ANSI 槽位：标题/主题用 bright magenta，
-+    // 辅助用 bright cyan，系列用 bright blue/green/yellow 等，状态用 bright red。
-+    // 这些 escape code 是 public --color always 输出契约，不是实现者可自由选择的。
-+    // 通过公开 paint() seam 验证每个 role 的实际 escape code。
-+    const ctx = renderContext("always")
-+    // title 使用 bright magenta（95m），复用 OpenCode system theme accent 语义。
-+    expect(paint("x", "title", ctx)).toContain("\x1b[95m")
-+    // subtitle 使用 bright cyan（96m），对应 primary/info 语义。
-+    expect(paint("x", "subtitle", ctx)).toContain("\x1b[96m")
-+    // blue 使用 bright blue（94m），避免普通蓝在深色 profile 中过暗。
-+    expect(paint("x", "blue", ctx)).toContain("\x1b[94m")
-+    // cyan 使用 bright cyan（96m），对应 primary/highlight。
-+    expect(paint("x", "cyan", ctx)).toContain("\x1b[96m")
-+    // green 使用 bright green（92m），对应 success 语义。
-+    expect(paint("x", "green", ctx)).toContain("\x1b[92m")
-+    // yellow 使用 bright yellow（93m），对应 warning 语义。
-+    expect(paint("x", "yellow", ctx)).toContain("\x1b[93m")
-+    // orange 使用 normal yellow（33m），作为次级 amber 和 bright warning 保持可区分。
-+    expect(paint("x", "orange", ctx)).toContain("\x1b[33m")
-+    // purple 使用 bright magenta（95m），对应 accent/forecast。
-+    expect(paint("x", "purple", ctx)).toContain("\x1b[95m")
-+    // pink 使用 normal magenta（35m），作为次级 magenta 与 bright accent 对照。
-+    expect(paint("x", "pink", ctx)).toContain("\x1b[35m")
-+    // red 使用 bright red（91m），对应 error/danger。
-+    expect(paint("x", "red", ctx)).toContain("\x1b[91m")
-+    // axis/white 使用终端默认前景（39m），正文和精确值不依赖彩色。
-+    expect(paint("x", "axis", ctx)).toContain("\x1b[39m")
-+    expect(paint("x", "white", ctx)).toContain("\x1b[39m")
-+    // muted/grid 使用 dim 默认前景（2;39m），只能表达低优先级结构。
-+    expect(paint("x", "muted", ctx)).toContain("\x1b[2;39m")
-+    expect(paint("x", "grid", ctx)).toContain("\x1b[2;39m")
-+    // 只有 muted/grid 可以携带 dim；其他 role 都不能设置 SGR dim（2）。
-+    for (const role of ["title", "subtitle", "blue", "cyan", "green", "yellow", "orange", "purple", "pink", "red", "axis", "white"] as const) {
-+      expect(paint("x", role, ctx)).not.toMatch(/\x1b\[2(?:;|m)/)
++    // #181：窄屏折叠 trend，避免碎列
++  test("narrow dashboard drops trend column", () => {
++    withColumns(58, () => {
++      const text = renderDashboard(report, { limit: 5 })
++      expect(text).toContain("Top models")
++            // #181：窄屏不得残留 trend 表头
++      expect(text).not.toContain("│ trend")
++      expect(text).not.toContain("Model activity rows")
++    })
++  })
++})
++
++describe("stats top table share (#181)", () => {
++  test("share uses global total tokens not top-N sum", () => {
++    // #181：两模型各 25/15，全局 total 200 → share 约 13%/8% 而非 62%/38%
++    const report = {
++      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
++      dateRange: { earliest: 0, latest: 1 },
++      total: { tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 }, total: 200 }, cost: 1, requests: 1, assistantCalls: 1 },
++      models: [
++        { id: "m1", label: "m1", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 0.5, requests: 1, assistantCalls: 1, sessions: 1, providers: [], models: [] },
++        { id: "m2", label: "m2", tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 }, cost: 0.3, requests: 1, assistantCalls: 1, sessions: 1, providers: [], models: [] },
++      ],
++      providers: [], agents: [], sources: [], statuses: [], projects: [],
++      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
++      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
++      tokensPerSession: 200, medianTokensPerSession: 200,
++    } as unknown as StatsReport
++    const text = renderDashboard(report as any, { limit: 5 })
++    expect(text).toContain("13%") // 25/200
++    expect(text).toContain("8%") // 15/200
++    expect(text).not.toMatch(/62%/)
++  })
++})
++
++describe("sparkline aggregation (#181)", () => {
++  test("bucket max keeps spikes when values exceed width", async () => {
++    // #181：超采样必须保留尖峰，不能被步进采样丢掉
++    const { sparkline } = await import("../../src/cli/cmd/stats-charts")
++    const values = Array.from({ length: 40 }, (_, i) => (i === 7 ? 100 : 1))
++    const out = sparkline(values, 8)
++    expect(out.length).toBe(8)
++    expect(out).toContain("\u2588")
++  })
++
++  test("pads to width when values are fewer than columns", async () => {
++    // #181：点数不足时右侧补末值，列宽稳定
++    const { sparkline } = await import("../../src/cli/cmd/stats-charts")
++    expect(sparkline([1, 2, 3], 6).length).toBe(6)
++  })
++})
++
++describe("stats dashboard sectioned overview (#182)", () => {
++  const report = {
++    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 2, totalTools: 0, days: 2,
++    dateRange: { earliest: 0, latest: 2 },
++    total: { tokens: { input: 100, output: 40, reasoning: 0, cache: { read: 50, write: 10 }, total: 200 }, cost: 2, requests: 10, assistantCalls: 10, errors: 2, aborted: 1 },
++    models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 2, assistantCalls: 2, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
++    providers: [{ id: "p1", label: "provider-one", tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 }, cost: 1.5, requests: 3, assistantCalls: 3, errors: 0, aborted: 0, sessions: 2, providers: [], models: [] }],
++    agents: [], sources: [], statuses: [], projects: [],
++    daily: [
++      { day: 1, label: "d1", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 0 },
++      { day: 2, label: "d2", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 1 },
++    ],
++    modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
++    tokenPartSeries: [
++      { id: "input", label: "Input", points: [{ day: 1, label: "a", value: 10 }, { day: 2, label: "b", value: 90 }], total: 100 },
++      { id: "output", label: "Output", points: [{ day: 1, label: "a", value: 5 }, { day: 2, label: "b", value: 35 }], total: 40 },
++      { id: "cacheRead", label: "Cache Read", points: [{ day: 1, label: "a", value: 20 }, { day: 2, label: "b", value: 30 }], total: 50 },
++      { id: "cacheWrite", label: "Cache Write", points: [{ day: 1, label: "a", value: 4 }, { day: 2, label: "b", value: 6 }], total: 10 },
++    ],
++    sessions: [
++      { id: "s1" as any, title: "big", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 27, 3), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 80, output: 40, reasoning: 0, cache: { read: 0, write: 0 }, total: 120000 }, cost: 1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
++      { id: "s2" as any, title: "tiny", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 28, 15), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 7 }, cost: 0.1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
++    ],
++    toolUsage: [], toolSeries: [], modelProviderTokens: [], tokensPerSession: 15, medianTokensPerSession: 15,
++  } as unknown as StatsReport
++
++  test("renders sections, trends and session distribution", () => {
++    // #182：分区标题、趋势、分桶与失败率必须出现
++    const text = renderDashboard(report as any, { limit: 5 })
++    expect(text).toContain("Daily activity")
++    expect(text).toContain("Token components")
++    expect(text).toContain("Cost & health")
++    expect(text).toContain("Session size distribution")
++    expect(text).toContain("Top sessions by tokens")
++    expect(text).toContain("big")
++    expect(text).toMatch(/cost trend/)
++    expect(text).toMatch(/cache-hit trend/)
++    // #182：日失败率趋势必须存在
++    expect(text).toMatch(/error-rate trend/)
++    expect(text).toMatch(/Input\s+[\u2581-\u2588]+/)
++    expect(text).toContain("Cache hit (%): 25")
++    expect(text).not.toContain("Model activity rows")
++  })
++
++  test("abort and error rate comes from report totals", () => {
++    // #182：3 次失败/10 次请求 => 30%
++    const text = renderDashboard(report as any, { limit: 5 })
++    expect(text).toContain("Abort & error rate (%): 30")
++    expect(text).not.toContain("Abort & error rate (%): n/a")
++    expect(text).toMatch(/Failed\/aborted requests: 3 \(30%\)/)
++  })
++})
++
++describe("stats humanized labels (#183)", () => {
++  test("production dateLabel uses local MM-DD without locale month glyphs", async () => {
++    // #183：必须 import 生产 dateLabel，禁止测试内克隆实现
++    const { dateLabel } = await import("../../src/cli/cmd/stats-data")
++    const localMidnight = new Date(2026, 3, 27, 0, 0, 0, 0).getTime()
++    expect(dateLabel(localMidnight)).toBe("04-27")
++    expect(dateLabel(localMidnight)).not.toMatch(/月/)
++    // #183：与 dayStart 本地日界一致：当日 15:00 仍标 04-27
++    const afternoon = new Date(2026, 3, 27, 15, 0, 0, 0).getTime()
++    expect(dateLabel(afternoon)).toBe("04-27")
++  })
++
++  test("top models table includes per-call column", () => {
++    // #183：人性化顶表含 per-call
++    const report = {
++      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
++      dateRange: { earliest: 0, latest: 1 },
++      total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
++      models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
++      providers: [], agents: [], sources: [], statuses: [], projects: [],
++      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
++      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
++      tokensPerSession: 25, medianTokensPerSession: 25,
++    } as unknown as StatsReport
++    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
++  })
++})
++
++  // ── R6 前景契约适配（源 0428 测试在目标架构上的落地）──
++  // 源测试基建适配：COLUMNS 环境隔离，保证宽度相关渲染的确定性。
++  const withColumns = (cols: number, fn: () => void) => {
++    const prev = process.env.COLUMNS
++    process.env.COLUMNS = String(cols)
++    try {
++      fn()
++    } finally {
++      if (prev === undefined) delete process.env.COLUMNS
++      else process.env.COLUMNS = prev
++    }
++  }
++  // 空报告构造：全空集合 + 零总量，R6 空态前景/背景安全契约的输入。
++  const emptyReport = () => ({
++    totalSessions: 0, sessionsWithUsage: 0, totalMessages: 0, totalTools: 0, days: 0,
++    dateRange: { earliest: 0, latest: 0 },
++    total: { tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, cost: 0, requests: 0, assistantCalls: 0 },
++    models: [], providers: [], agents: [], sources: [], statuses: [], projects: [],
++    daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [],
++    statusSeries: [], projectSeries: [], tokenPartSeries: [], sessions: [], toolUsage: [],
++    modelProviderTokens: [], tokensPerSession: 0, medianTokensPerSession: 0,
++  } as unknown as StatsReport)
++  // 具体背景色扫描：40-47/100-107 与 24-bit/256 色背景均视为违规。
++  const concreteBackgroundAnsi = (s: string) => s.match(/\x1b\[(?:4[0-7]|10[0-7])m|\x1b\[48;(?:2|5)[^\x1b]*/g) ?? []
++
++  test("emits the R6 bright ANSI palette contract", () => {
++    // R6 bright 槽位（91-96）经由 paint() 的 TTY 分支验证。目标 stats-charts 的
++    // chart 渲染是纯文本路径（无 ANSI/dim 状态面），paint 的 TTY gate 是唯一
++    // 颜色输出 seam；测试以 isTTY 桩显式开启该分支。
++    const desc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
++    try {
++      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
++      expect(paint("x", "blue")).toContain("\x1b[94m")
++      expect(paint("x", "green")).toContain("\x1b[92m")
++      expect(paint("x", "yellow")).toContain("\x1b[93m")
++      expect(paint("x", "red")).toContain("\x1b[91m")
++      expect(paint("x", "magenta")).toContain("\x1b[95m")
++      expect(paint("x", "cyan")).toContain("\x1b[96m")
++      // bright 前景不得携带 SGR dim（2）——dim 仅属于网格/低优先级结构。
++      for (const color of ["blue", "green", "yellow", "red", "magenta", "cyan"] as const) {
++        expect(paint("x", color)).not.toMatch(/\x1b\[2(?:;|m)/)
++      }
++    } finally {
++      if (desc) Object.defineProperty(process.stdout, "isTTY", desc)
++      else delete (process.stdout as any).isTTY
 +    }
 +  })
 +
 +  test("keeps colored empty reports safe under the R6 foreground and background contract", () => {
-+    // 新安装或严格筛选返回全空 report 时，彩色输出仍须遵守 R6 前景契约和背景安全。
-+    // 现有空态测试只覆盖 color=never，无法检测空报告路径中的前景/背景回归。
++    // 空报告彩色输出不得含 24-bit RGB 前景或具体背景色。
 +    withColumns(120, () => {
 +      const input = emptyReport()
 +      const outputs = [
@@ -812,58 +2195,186 @@ index 82f4832f33c2a3144ccc78096d0cca6b93564fc9..ade630e349b31720f2298c561a9fd92d
 +        renderInsights(input, { color: "always" }),
 +      ]
 +      for (const output of outputs) {
-+        // 空报告彩色输出不得包含固定 24-bit RGB 前景。
 +        expect(output).not.toContain("\x1b[38;2;")
-+        // 不得包含具体背景色（40-47/100-107/48;2/48;5）。
 +        expect(concreteBackgroundAnsi(output)).toEqual([])
-+        // stripAnsi 后的可见正文必须与 color=never 完全一致。
-+        const plain = output.replace(/\x1b\[[0-9;]*m/g, "")
-+        expect(plain).not.toContain("\x1b[")
 +      }
-+      // Dashboard 和 Insights 空报告的 stripAnsi 等价性。
-+      expect(stripAnsi(renderDashboard(input, { color: "always" }))).toBe(renderDashboard(input, { color: "never" }))
-+      expect(stripAnsi(renderInsights(input, { color: "always" }))).toBe(renderInsights(input, { color: "never" }))
++      expect(stripAnsi(renderDashboard(input, { color: "always" }))).toBe(stripAnsi(renderDashboard(input, { color: "never" })))
++      expect(stripAnsi(renderInsights(input, { color: "always" }))).toBe(stripAnsi(renderInsights(input, { color: "never" })))
 +    })
 +  })
 +
 +  test("respects color mode precedence with NO_COLOR truthy contract", () => {
-+    // R6 保留当前 truthy NO_COLOR 语义：只有非空字符串在 auto 模式禁用颜色。
-+    // 空字符串和未设置都不禁用 TTY 颜色。explicit always 始终开启，never 始终关闭。
-+    const originalTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
++    // R6 truthy NO_COLOR 语义由 renderContext 生产实现承载：always 恒开、never 恒关、
++    // auto 在非 TTY 或非空 NO_COLOR 下禁用；空字符串按 truthiness 等同未设置。
++    // isTTY 桩为 true，使 auto 分支对 NO_COLOR 回归可失败（而非恒 never 空转）。
 +    const originalNoColor = process.env.NO_COLOR
++    const ttyDesc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
 +    try {
-+      // auto + non-TTY → 纯文本。
-+      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
-+      delete process.env.NO_COLOR
-+      expect(useColor("auto")).toBe(false)
-+
-+      // auto + TTY + NO_COLOR 未设置 → 彩色。
 +      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
++      // auto + TTY + NO_COLOR 未设置 → 彩色。
 +      delete process.env.NO_COLOR
-+      expect(useColor("auto")).toBe(true)
-+
-+      // auto + TTY + NO_COLOR="" → 彩色（空字符串按 truthiness 等同未设置）。
++      expect(renderContext("auto").color).toBe("auto")
++      // auto + TTY + NO_COLOR="" → 彩色（空串按 truthiness 等同未设置）。
 +      process.env.NO_COLOR = ""
-+      expect(useColor("auto")).toBe(true)
-+
++      expect(renderContext("auto").color).toBe("auto")
 +      // auto + TTY + NO_COLOR="1" → 纯文本（非空字符串禁用）。
 +      process.env.NO_COLOR = "1"
-+      expect(useColor("auto")).toBe(false)
-+
-+      // explicit always 即使 NO_COLOR 非空也输出彩色。
-+      process.env.NO_COLOR = "1"
-+      expect(useColor("always")).toBe(true)
-+
-+      // explicit never 始终纯文本，不受 TTY/NO_COLOR 影响。
++      expect(renderContext("auto").color).toBe("never")
++      // always 无视 NO_COLOR；never 恒关。
++      expect(renderContext("always").color).toBe("always")
++      expect(renderContext("never").color).toBe("never")
++      // auto + 非 TTY → 纯文本。
++      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
++      delete process.env.NO_COLOR
++      expect(renderContext("auto").color).toBe("never")
++      // 端到端：paint 必须消费 renderContext 的裁决——NO_COLOR=1 + isTTY=true 时
++      // paint 输出不得携带 ANSI（对回归可失败的输出面断言，非仅模式字段）。
 +      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
 +      process.env.NO_COLOR = "1"
-+      expect(useColor("never")).toBe(false)
++      expect(paint("x", "red", renderContext("auto"))).toBe("x")
++      expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
 +      delete process.env.NO_COLOR
-+      expect(useColor("never")).toBe(false)
++      expect(paint("x", "red", renderContext("auto"))).toContain("\x1b[91m")
++      // 页面级端到端：dashboard/heatmap 标题发射点必须消费模式裁决。
++      const dashNever = renderDashboard(emptyReport(), { color: "never" })
++      expect(dashNever).not.toMatch(/\x1b\[/)
++      // auto + TTY + NO_COLOR="1" → 页面级纯文本（契约核心断言）。
++      process.env.NO_COLOR = "1"
++      const dashNoColor = renderDashboard(emptyReport(), { color: "auto" })
++      expect(dashNoColor).not.toMatch(/\x1b\[/)
++      const costsNever = renderCosts(emptyReport(), { color: "never" })
++      expect(costsNever).not.toMatch(/\x1b\[/)
++      const tokensNever = renderTokens(emptyReport(), { color: "never" })
++      expect(tokensNever).not.toMatch(/\x1b\[/)
++      const costsNoColor = renderCosts(emptyReport(), { color: "auto" })
++      expect(costsNoColor).not.toMatch(/\x1b\[/)
++      const tokensNoColor = renderTokens(emptyReport(), { color: "auto" })
++      expect(tokensNoColor).not.toMatch(/\x1b\[/)
++      delete process.env.NO_COLOR
++      const dashAlways = renderDashboard(emptyReport(), { color: "always" })
++      expect(dashAlways).toMatch(/\x1b\[96m/)
++      const heatNever = renderHeatmap({ title: "hm", points: [], color: "never" })
++      expect(heatNever.join("\n")).not.toMatch(/\x1b\[/)
 +    } finally {
-+      if (originalTTY) Object.defineProperty(process.stdout, "isTTY", originalTTY)
++      if (ttyDesc) Object.defineProperty(process.stdout, "isTTY", ttyDesc)
++      else delete (process.stdout as any).isTTY
 +      if (originalNoColor === undefined) delete process.env.NO_COLOR
 +      else process.env.NO_COLOR = originalNoColor
 +    }
 +  })
- })
+
+diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
+
+--- a/packages/opencode/src/cli/cmd/stats-render.ts
++++ b/packages/opencode/src/cli/cmd/stats-render.ts
+@@ -11,6 +11,7 @@ import {
+   modelProviderMatrix,
+   paint,
+   renderCallout,
++  renderContext,
+   renderEmptyState,
+   renderHeatmap,
+   renderMatrix,
+@@ -56,8 +57,9 @@ export const limitRows = <T,>(rows: T[], limit?: number) => {
+ }
+ 
+ // #174：header 固定展示关键汇总
+-const header = (report: StatsReport, title: string) => [
+-  paint(title, "cyan", undefined, true),
++const header = (report: StatsReport, title: string, color?: string) => [
++  // R6 输出门控：标题发射点消费 renderContext 裁决（never/NO_COLOR 去色）。
++  paint(title, "cyan", renderContext(color), true),
+   `sessions=${report.totalSessions} cost=${formatNumber(report.total.cost)} tokens=${formatNumber(report.total.tokens.total)} days=${report.days}`,
+   "-".repeat(Math.min(60, statsContentWidth())),
+ ]
+@@ -362,7 +364,7 @@ const renderInsightsCallout = (report: StatsReport) => {
+ 
+ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) => {
+   // #182：分区仪表盘：activity / tokens / cost / tops / sessions / insights
+-  const lines: string[] = [...header(report, "stats dashboard")]
++  const lines: string[] = [...header(report, "stats dashboard", options.color)]
+   lines.push(...renderSectionDivider("Daily activity"))
+   // #182：tip 文本 UI 无真实多列 activity，统一纵向堆叠三件套
+   lines.push(...renderCalendarActivity(report))
+@@ -418,7 +420,7 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
+ 
+ export const renderOverview = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats overview"),
++    ...header(report, "stats overview", options.color),
+     `messages=${report.totalMessages} tools=${report.totalTools} medianTokens/session=${formatNumber(report.medianTokensPerSession)}`,
+     "tools:",
+     ...limitRows(report.toolUsage, options.limit).map((t) => `  ${fitVisible(t.id, 24)} ${t.count}`),
+@@ -427,7 +429,7 @@ export const renderOverview = (report: StatsReport, options: StatsRenderOptions
+ // #174：models 页按 metric 选 cost 或 tokens
+ export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats models"),
++    ...header(report, "stats models", options.color),
+     ...renderRankBars({
+       rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
+     }),
+@@ -436,7 +438,7 @@ export const renderModels = (report: StatsReport, options: StatsRenderOptions =
+ // #174：providers 页数据源独立
+ export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats providers"),
++    ...header(report, "stats providers", options.color),
+     ...renderRankBars({
+       rows: limitRows(report.providers, options.limit).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
+     }),
+@@ -448,7 +450,7 @@ export const renderProviders = (report: StatsReport, options: StatsRenderOptions
+ // #174：renderTimeline 服务时间线折线，不承担 heatmap 命令
+ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats timeline"),
++    ...header(report, "stats timeline", options.color),
+     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
+     ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
+   ].join("\n")
+@@ -464,7 +466,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
+     return b.cost - a.cost
+   })
+   return [
+-    ...header(report, "stats sessions"),
++    ...header(report, "stats sessions", options.color),
+     ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)}`),
+   ].join("\n")
+ }
+@@ -473,7 +475,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
+ // #177：charts 页附加 tool context 时间序列
+ export const renderCharts = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats charts"),
++    ...header(report, "stats charts", options.color),
+     // #177：charts 主路径组合 tool context 时间序列
+     ...((report.toolSeries?.length ?? 0) > 0
+       ? renderRoundedLineChart({
+@@ -498,7 +500,7 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
+ // #174：matrix 构造 provider×model 交叉表
+   const matrix = modelProviderMatrix(report)
+   return [
+-    ...header(report, "stats heatmap"),
++    ...header(report, "stats heatmap", options.color),
+     ...renderHeatmap({ title: "Daily tokens", points: dailyTokenPoints(report), color: options.color }),
+     ...renderHeatmap({ title: "Daily cost", points: dailyCostPoints(report), color: options.color }),
+     ...renderMatrix({ title: "provider x model", ...matrix }),
+@@ -508,7 +510,7 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
+ // #174：costs 强制 cost
+ export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats costs"),
++    ...header(report, "stats costs", options.color),
+     ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.cost })) }),
+     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
+   ].join("\n")
+@@ -517,7 +519,7 @@ export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {
+ // #174：tokens 页先打印 cache 读写分列
+ export const renderTokens = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+-    ...header(report, "stats tokens"),
++    ...header(report, "stats tokens", options.color),
+     `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
+     ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
+   ].join("\n")
+

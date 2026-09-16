@@ -1,16 +1,7 @@
-From 863b3787d3a90f095ac7b053cc1e56c5842b5d10 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 2 Jul 2026 21:18:37 +0800
-Subject: [PATCH] =?UTF-8?q?fix(config):=20=E7=A7=BB=E9=99=A4=E4=B8=8D?=
- =?UTF-8?q?=E5=BF=85=E8=A6=81=E7=9A=84=20mcp=20=E9=85=8D=E7=BD=AE=E9=A1=B9?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 diff --git a/.opencode/opencode.jsonc b/.opencode/opencode.jsonc
-index f1b54f0ad..d568c227c 100644
 --- a/.opencode/opencode.jsonc
 +++ b/.opencode/opencode.jsonc
-@@ -12,23 +12,6 @@
+@@ -12,22 +12,6 @@
        "description": "Contains opencode logs and data",
      },
    },
@@ -21,7 +12,6 @@ index f1b54f0ad..d568c227c 100644
 -      "type": "local",
 -      "command": [
 -        "D:\\Program Files\\nodejs\\node.exe",
--        // submodule 从 .temp 迁移到 thirdparty 后，MCP server 路径须同步更新指向新位置
 -        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\chatgpt-browser-agent\\mcp-server.js"
 -      ],
 -      // #278：enabled 显式开启；timeout 覆盖 MCP 连接与工具调用的总上限，

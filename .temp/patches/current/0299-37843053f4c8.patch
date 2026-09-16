@@ -1,46 +1,8 @@
-From 37843053f4c81e8880d854a004e3fc3770fd0b73 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 14 Jun 2026 00:38:25 +0800
-Subject: [PATCH] =?UTF-8?q?feat(voice):=20=E9=87=8D=E5=A4=A7=E6=9B=B4?=
- =?UTF-8?q?=E6=96=B0=EF=BC=9A=E6=B7=BB=E5=8A=A0WAV=E6=96=87=E4=BB=B6?=
- =?UTF-8?q?=E8=BE=93=E5=87=BA=E7=9A=84=E5=BD=95=E9=9F=B3=E4=BB=A5=E5=8F=8A?=
- =?UTF-8?q?=E5=AE=8C=E6=95=B4=E7=9A=84=E8=BD=AC=E5=BD=95=E5=8A=9F=E8=83=BD?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-- Implemented a new voice recorder module in `prompt-voice-recorder.ts` that captures audio input and saves it as a WAV file.
-- Introduced a `startPromptVoiceRecorder` function to handle the recording process, including error handling and file management.
-- Added tests for the voice recorder to ensure proper functionality and error handling in various scenarios.
-- Created a new test suite for `prompt-voice-input` to validate the integration of voice input and transcription features.
-- Updated TUI configuration tests to include voice transcriber settings and ensure proper command and argument handling.
-
-diff --git a/bun.lock b/bun.lock
-index d5c4f0d8e57588418005e16375add0d677c56298..a3e8239e7951684d382955d5be463499baea9167 100644
---- a/bun.lock
-+++ b/bun.lock
-@@ -518,6 +518,7 @@
-         "why-is-node-running": "3.2.2",
-       },
-       "optionalDependencies": {
-+        "@picovoice/pvrecorder-node": "1.2.9",
-         "sharp": "0.34.5",
-       },
-     },
-@@ -1787,6 +1788,8 @@
- 
-     "@parcel/watcher-win32-x64": ["@parcel/watcher-win32-x64@2.5.1", "https://registry.npmmirror.com/@parcel/watcher-win32-x64/-/watcher-win32-x64-2.5.1.tgz", { "os": "win32", "cpu": "x64" }, "sha512-9lHBdJITeNR++EvSQVUcaZoWupyHfXe1jZvGZ06O/5MflPcuPLtEphScIBL+AiCWBO46tDSHzWyD0uDmmZqsgA=="],
- 
-+    "@picovoice/pvrecorder-node": ["@picovoice/pvrecorder-node@1.2.9", "https://registry.npmmirror.com/@picovoice/pvrecorder-node/-/pvrecorder-node-1.2.9.tgz", {}, "sha512-e398ue4G8YihrnnyTpnVePvOiBEM5+R4D+ChoyyeC8J8KFBMuhGrZwrdmpIPqDqCjCA+YqO2mFaicHstVhEpcg=="],
-+
-     "@pierre/diffs": ["@pierre/diffs@1.1.0-beta.18", "https://registry.npmmirror.com/@pierre/diffs/-/diffs-1.1.0-beta.18.tgz", { "dependencies": { "@pierre/theme": "0.0.22", "@shikijs/transformers": "^3.0.0", "diff": "8.0.3", "hast-util-to-html": "9.0.5", "lru_map": "0.4.1", "shiki": "^3.0.0" }, "peerDependencies": { "react": "^18.3.1 || ^19.0.0", "react-dom": "^18.3.1 || ^19.0.0" } }, "sha512-7ZF3YD9fxdbYsPnltz5cUqHacN7ztp8RX/fJLxwv8wIEORpP4+7dHz1h/qx3o4EW2xUrIhmbM8ImywLasB787Q=="],
- 
-     "@pierre/theme": ["@pierre/theme@0.0.22", "https://registry.npmmirror.com/@pierre/theme/-/theme-0.0.22.tgz", {}, "sha512-ePUIdQRNGjrveELTU7fY89Xa7YGHHEy5Po5jQy/18lm32eRn96+tnYJEtFooGdffrx55KBUtOXfvVy/7LDFFhA=="],
 diff --git a/docs/prompts.md b/docs/prompts.md
-index 014be23077e8876bf01cbc59688116ea254458fc..06ac14c46060bd803f9e85538baeb4793103105b 100644
+index 30187c6..90128ea 100644
 --- a/docs/prompts.md
 +++ b/docs/prompts.md
-@@ -60,7 +60,7 @@
+@@ -65,7 +65,7 @@
  9. 真实风险与开放问题；没有必须用户决策的问题就不要阻塞。
  只输出方案，不要改代码。
  请你进行完整的调研而不是只进行简单的脱离底层实现以及边界情况的顶层规划。
@@ -49,234 +11,13 @@ index 014be23077e8876bf01cbc59688116ea254458fc..06ac14c46060bd803f9e85538baeb479
  
  
  -------------
-diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index 6709ef1491cfc871876fde6159c482ea9af58180..8f49c4e5585d395679cab06c45f343d52e3c7604 100644
---- a/packages/opencode/package.json
-+++ b/packages/opencode/package.json
-@@ -167,6 +167,7 @@
-     "drizzle-orm": "catalog:"
-   },
-   "optionalDependencies": {
-+    "@picovoice/pvrecorder-node": "1.2.9",
-     "sharp": "0.34.5"
+diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
+index 8f50375..eb3ce18 100644
+--- a/packages/opencode/src/config/tui.ts
++++ b/packages/opencode/src/config/tui.ts
+@@ -80,6 +80,39 @@ function dropUnknownKeybinds(input: Record<string, unknown>) {
    }
  }
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 389a799e0bff796612eb4adab168977a059e1367..9d0e2c75a8f2ecca79e548e6a64eadd09a1ce77c 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -67,6 +67,8 @@ import { useCommandPalette } from "../../context/command-palette"
- import { useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
- import { useTuiConfig } from "../../context/tui-config"
- import { promptOffsetWidth } from "@/cli/cmd/prompt-display"
-+import { PromptVoiceInput } from "../../prompt-voice-input"
-+import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
- 
- export type PromptProps = {
-   sessionID?: string
-@@ -166,6 +168,7 @@ export function Prompt(props: PromptProps) {
-   const keymap = useOpencodeKeymap()
-   const agentShortcut = useCommandShortcut("agent.cycle")
-   const paletteShortcut = useCommandShortcut("command.palette.show")
-+  const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
-   const renderer = useRenderer()
-   const dimensions = useTerminalDimensions()
-   // The bottom-right token meter shares space with prompt chrome and can be
-@@ -220,6 +223,7 @@ export function Prompt(props: PromptProps) {
-   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
-   const hasRightContent = createMemo(() => Boolean(props.right))
-   const defaultWorkspaceID = createMemo(() => props.workspaceID ?? project.workspace.current())
-+  const [voiceInputStatus, setVoiceInputStatus] = createSignal<PromptVoiceInput.VoiceInputStatus>({ type: "idle" })
- 
-   function selectWorkspace(selection: WorkspaceSelection | undefined) {
-     setWorkspaceSelection(selection)
-@@ -426,7 +430,32 @@ export function Prompt(props: PromptProps) {
-   })
- 
-   const running = createMemo(() => status().type !== "idle")
--  const now = createRefreshClock(running)
-+  // voice recording 也需要刷新时钟，否则 footer 的录音时长会停在开始时刻。
-+  const now = createRefreshClock(() => running() || voiceInputStatus().type === "recording")
-+  // busy 覆盖 starting/stopping/transcribing，避免用户在语音文本尚未落入 prompt 前提交旧草稿。
-+  const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
-+  const voiceInputStatusText = createMemo(() =>
-+    // shortcut 来自 keymap；缺省 alt+v 只用于展示兜底，实际绑定仍由 TuiKeybind 解析。
-+    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || "alt+v", now()),
-+  )
-+  const voiceInput = PromptVoiceInput.createVoiceInputController({
-+    // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
-+    transcriber: () => tuiConfig.voice?.transcriber,
-+    // recorder 单独放在 native 边界文件，Prompt 组件不直接加载 optional addon。
-+    startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
-+    insertText: insertVoiceText,
-+    onStatus: setVoiceInputStatus,
-+    onError: (message) =>
-+      toast.show({
-+        message,
-+        variant: "error",
-+      }),
-+  })
-+  onCleanup(() => {
-+    // [语音退出清理] Prompt 卸载时不能留下仍占用麦克风的 Node 子进程；这里只 abort
-+    // 已开始的录音，不触发转写，也不改动用户当前草稿。
-+    void voiceInput.abort()
-+  })
-   const activeDuration = createMemo(() => {
-     if (!props.sessionID) return 0
-     // 左下角耗时只复用 transcript 时间戳口径；now 只是刷新中的临时 end。
-@@ -982,6 +1011,31 @@ export function Prompt(props: PromptProps) {
-     }
-   })
- 
-+  useBindings(() => {
-+    return {
-+      target: inputTarget,
-+      enabled:
-+        inputTarget() !== undefined &&
-+        !props.disabled &&
-+        !auto()?.visible &&
-+        dialog.stack.length === 0 &&
-+        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
-+        (!running() || voiceInputStatus().type === "recording"),
-+      commands: [
-+        {
-+          name: "prompt.voice.toggle",
-+          title: "Toggle voice input",
-+          category: "Prompt",
-+          run() {
-+            void voiceInput.toggle()
-+            return true
-+          },
-+        },
-+      ],
-+      bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
-+    }
-+  })
-+
-   useBindings(() => {
-     return {
-       target: inputTarget,
-@@ -1132,6 +1186,8 @@ export function Prompt(props: PromptProps) {
-       syncExtmarksWithPromptParts()
-     }
-     if (props.disabled) return false
-+    // [语音提交边界] 正在录音、保存或转写时禁止发送 prompt；否则 Enter 会把尚未插入的旧草稿提交出去。
-+    if (voiceInputBusy()) return false
-     if (workspaceCreating()) return false
-     if (auto()?.visible) return false
-     if (!store.prompt.input) return false
-@@ -1488,6 +1544,24 @@ export function Prompt(props: PromptProps) {
-     }, 0)
-   }
- 
-+  function insertVoiceText(text: string) {
-+    if (!input || input.isDestroyed) return
-+    // insertText 保持当前光标位置语义：语音转写结果像用户手动输入一样进入 textarea。
-+    input.insertText(text)
-+    // 写入 renderable 后立即同步 store/extmarks，否则后续 submit 会读到插入前的旧 prompt。
-+    setStore("prompt", "input", input.plainText)
-+    syncExtmarksWithPromptParts()
-+    // cursorVersion 触发现有光标同步链路，不为语音输入新增独立光标状态。
-+    setCursorVersion((value) => value + 1)
-+
-+    setTimeout(() => {
-+      if (!input || input.isDestroyed) return
-+      // OpenTUI textarea 的布局在插入后需要下一 tick 标脏，避免转写文本显示滞后一帧。
-+      input.getLayoutNode().markDirty()
-+      renderer.requestRender()
-+    }, 0)
-+  }
-+
-   async function pasteAttachment(file: { filename?: string; filepath?: string; content: string; mime: string }) {
-     const currentOffset = input.visualCursor.offset
-     const extmarkStart = currentOffset
-@@ -1819,6 +1893,15 @@ export function Prompt(props: PromptProps) {
-         </box>
-         <box width="100%" flexDirection="row" justifyContent="space-between">
-           <Switch>
-+            <Match when={voiceInputBusy()}>
-+              <box paddingLeft={3} flexDirection="row" gap={1}>
-+                {/* 录音中显示红点，保存/转写阶段显示 spinner，让用户区分“仍在收音”和“正在处理”。 */}
-+                <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
-+                  <text fg={theme.error}>●</text>
-+                </Show>
-+                <text fg={theme.accent}>{voiceInputStatusText()}</text>
-+              </box>
-+            </Match>
-             <Match when={running()}>
-               <box
-                 flexDirection="row"
-@@ -1980,6 +2063,11 @@ export function Prompt(props: PromptProps) {
-                   <text fg={theme.text}>
-                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
-                   </text>
-+                  <Show when={tuiConfig.voice?.transcriber}>
-+                    <text fg={theme.text}>
-+                      {voiceShortcut() || "alt+v"} <span style={{ fg: theme.textMuted }}>voice</span>
-+                    </text>
-+                  </Show>
-                 </Match>
-                 <Match when={store.mode === "shell"}>
-                   <text fg={theme.text}>
-diff --git a/packages/opencode/src/cli/cmd/tui/config/keybind.ts b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-index 9635906b76ae081adbd47914e7609ff32ae6240f..193d8761f188735b5d137653cecf145332c9935e 100644
---- a/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-+++ b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-@@ -138,6 +138,9 @@ export const Definitions = {
-   prompt_stash: keybind("none", "Stash prompt"),
-   prompt_stash_pop: keybind("none", "Pop stashed prompt"),
-   prompt_stash_list: keybind("none", "List stashed prompts"),
-+  // 语音输入的默认键必须能在终端 textarea 内可靠收到，同时不能抢用户常用于 undo/redo 的 Ctrl+Y。
-+  // Alt+V 当前未被 TUI 默认绑定占用，且 V 与 voice 语义相连；不依赖终端通常收不到的系统级 Win+H 听写快捷键。
-+  prompt_voice_toggle: keybind("alt+v", "Toggle voice input recording"),
-   workspace_set: keybind("none", "Set workspace"),
- 
-   input_clear: keybind("ctrl+c", "Clear input field"),
-@@ -322,6 +325,7 @@ export const CommandMap = {
-   prompt_stash: "prompt.stash",
-   prompt_stash_pop: "prompt.stash.pop",
-   prompt_stash_list: "prompt.stash.list",
-+  prompt_voice_toggle: "prompt.voice.toggle",
-   workspace_set: "workspace.set",
-   input_clear: "prompt.clear",
-   input_paste: "prompt.paste",
-diff --git a/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts b/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts
-index 2c99f2a5ef6151203cfd587763eef10d47499aae..0d5ba37a2ea3c8398122df53ee1083d239ecc3e4 100644
---- a/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts
-+++ b/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts
-@@ -61,6 +61,17 @@ export const Attention = Schema.Struct({
-   sounds: Schema.optional(TuiAttentionSounds),
- }).annotate({ description: "Attention notification and sound settings" })
- 
-+const VoiceTranscriber = Schema.Struct({
-+  command: Schema.String.annotate({ description: "Executable used to transcribe a recorded WAV file" }),
-+  // args 是 argv 数组，不是 shell 字符串；其中一项必须包含 `{file}`，确保录音路径按字面量传递。
-+  // 这样即使路径包含空格、重定向符、管道或环境变量字符，也不会被解释成 shell 语法。
-+  args: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Arguments for the transcriber command; include {file} for the WAV path" }),
-+})
-+
-+export const Voice = Schema.Struct({
-+  transcriber: Schema.optional(VoiceTranscriber),
-+}).annotate({ description: "Prompt voice input settings" })
-+
- export const TuiInfo = Schema.Struct({
-   $schema: Schema.optional(Schema.String),
-   theme: Schema.optional(Schema.String),
-@@ -69,6 +80,7 @@ export const TuiInfo = Schema.Struct({
-   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
-   leader_timeout: Schema.optional(KeymapLeaderTimeout),
-   attention: Schema.optional(Attention),
-+  voice: Schema.optional(Voice),
-   scroll_speed: Schema.optional(ScrollSpeed).annotate({
-     description: "TUI scroll speed",
-   }),
-diff --git a/packages/opencode/src/cli/cmd/tui/config/tui.ts b/packages/opencode/src/cli/cmd/tui/config/tui.ts
-index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd6778dcc669 100644
---- a/packages/opencode/src/cli/cmd/tui/config/tui.ts
-+++ b/packages/opencode/src/cli/cmd/tui/config/tui.ts
-@@ -27,6 +27,15 @@ import { FormatError, FormatUnknownError } from "@/cli/error"
- 
- const log = Log.create({ service: "tui.config" })
  
 +const DefaultVoiceTranscriber = {
 +  // 默认值只假设用户通过安装脚本能找到 browser-agent CLI；显式 MCP 路径会在后面覆盖它。
@@ -287,13 +28,6 @@ index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd67
 +
 +type VoiceTranscriber = NonNullable<Info["voice"]>["transcriber"]
 +
- export const Info = TuiInfo
- export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>
- 
-@@ -96,6 +105,30 @@ function dropUnknownKeybinds(input: Record<string, unknown>, configFilepath: str
-   }
- }
- 
 +function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber | undefined {
 +  if (!isRecord(input) || !isRecord(input.mcp)) return
 +  for (const [key, server] of Object.entries(input.mcp)) {
@@ -319,9 +53,9 @@ index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd67
 +}
 +
  const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string }) {
-   const afs = yield* AppFileSystem.Service
+   const afs = yield* FSUtil.Service
    let appliedOrder = 0
-@@ -170,6 +203,44 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+@@ -146,6 +179,44 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
        return yield* load(text, filepath)
      })
  
@@ -344,7 +78,7 @@ index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd67
 +        Effect.sync(() => {
 +          const error = Cause.squash(cause)
 +          const reason = FormatError(error) ?? FormatUnknownError(error)
-+          log.warn("skipping invalid mcp config while resolving voice transcriber", { path: filepath, reason })
++          Effect.logWarning("skipping invalid mcp config while resolving voice transcriber", { path: filepath, reason })
 +          return undefined
 +        }),
 +      ),
@@ -366,7 +100,7 @@ index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd67
    const mergeFile = (acc: Acc, file: string) =>
      Effect.gen(function* () {
        const data = yield* loadFile(file)
-@@ -195,6 +266,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+@@ -174,6 +245,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
    yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
  
    const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
@@ -374,7 +108,7 @@ index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd67
  
    const acc: Acc = {
      result: {},
-@@ -230,6 +302,15 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+@@ -209,9 +281,25 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
      }
    }
  
@@ -387,31 +121,375 @@ index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd67
 +      ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
 +    ])) ?? DefaultVoiceTranscriber
 +
-   const keybinds = { ...acc.result.keybinds }
-   if (process.platform === "win32") {
-     // Native Windows terminals do not support POSIX suspend, so prefer prompt undo.
-@@ -248,6 +329,13 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
-       sound_pack: acc.result.attention?.sound_pack ?? "opencode.default",
-       sounds: acc.result.attention?.sounds ?? {},
+   const result = TuiConfig.resolve(
+     {
+       ...acc.result,
++      // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
++      // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
++      voice: {
++        ...acc.result.voice,
++        // 显式 tui.voice.transcriber 优先；MCP 推导和固定默认值只填补未配置场景。
++        transcriber: acc.result.voice?.transcriber ?? defaultVoiceTranscriber,
++      },
      },
-+    // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
-+    // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
-+    voice: {
-+      ...acc.result.voice,
-+      // 显式 tui.voice.transcriber 优先；MCP 推导和固定默认值只填补未配置场景。
-+      transcriber: acc.result.voice?.transcriber ?? defaultVoiceTranscriber,
-+    },
-     keybinds: createBindingLookup(TuiKeybind.toBindingConfig(parsedKeybinds), {
-       commandMap: TuiKeybind.CommandMap,
-       bindingDefaults: TuiKeybind.bindingDefaults(),
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+     {
+       terminalSuspend: process.platform !== "win32",
+diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
+index cc43cf4..77ca65a 100644
+--- a/packages/opencode/test/config/tui.test.ts
++++ b/packages/opencode/test/config/tui.test.ts
+@@ -509,6 +509,12 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
+       expect(config.keybinds.get("dialog.mcp.toggle")?.[0]?.key).toBe("ctrl+t")
+       expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
+       expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
++      // voice 默认值属于 TUI 配置解析结果，必须和其它 canonical keybind 一起进入 lookup。
++      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
++      // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
++      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
++      // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
++      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
+       expect(
+         config.keybinds.gather("plugins.dialog", ["dialog.plugins.install"]).map((binding) => binding.cmd),
+       ).toEqual(["dialog.plugins.install"])
+@@ -545,6 +551,98 @@ it.instance("keybinds accept OpenTUI binding specs", () =>
+   ),
+ )
+ 
++// 这个用例覆盖用户显式写 tui.voice.transcriber 的正常路径。
++// 配置层只负责保留 command/args，不解释 shell，也不验证外部程序是否存在。
++// 这样用户可以把转写器替换成其它本地工具，同时保持 controller 侧统一安全校验。
++// 测试落在 TuiConfig 服务层，保证 JSON 解析、schema 和默认合并一起生效。
++it.instance("loads voice transcriber command from tui config", () =>
++  withCleanState(
++    Effect.gen(function* () {
++      const fs = yield* FSUtil.Service
++      const test = yield* TestInstance
++      yield* fs.writeJson(path.join(test.directory, "tui.json"), {
++        voice: {
++          transcriber: {
++            command: "chatgpt-browser-agent",
++            args: ["transcribe-file", "--file", "{file}", "--json"],
++          },
++        },
++      })
++
++      const config = yield* getTuiConfig(test.directory)
++      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
++      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
++    }),
++  ),
++)
++
++// 这个用例覆盖推荐路径：从本地 ChatGPT MCP 配置推导同目录 chatgpt.js。
++// 复用 MCP 的安装位置，但返回的是普通 CLI transcriber，不新增 MCP tool 或 HTTP surface。
++// agentDir 带空格，用来锁定路径 join/resolve 不会因为 shell 拆分而失效。
++// chatgpt.js 必须存在才启用默认转写器，避免用户录音后才遇到脚本缺失错误。
++it.instance("infers the default voice transcriber from the local ChatGPT MCP command", () =>
++  withCleanState(
++    Effect.gen(function* () {
++      const fs = yield* FSUtil.Service
++      const test = yield* TestInstance
++      const agentDir = path.join(test.directory, "tools", "chatgpt browser agent")
++      const mcpServer = path.join(agentDir, "mcp-server.js")
++      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
++      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
++        mcp: {
++          chatgpt: {
++            type: "local",
++            command: [process.execPath, mcpServer],
++            enabled: true,
++          },
++        },
++      })
++
++      const config = yield* getTuiConfig(test.directory)
++      expect(config.voice?.transcriber?.command).toBe(process.execPath)
++      expect(config.voice?.transcriber?.args).toEqual([
++        path.join(agentDir, "chatgpt.js"),
++        "transcribe-file",
++        "--file",
++        "{file}",
++        "--json",
++      ])
++    }),
++  ),
++)
++
++// 这个用例保护 MCP 扫描边界：只有 key/name 明确指向 ChatGPT 的本地 server 才能作为语音后端。
++// unrelated server 即使目录里有 chatgpt.js，也不能被误当作语音转写器来源。
++// 同时保留多个 server 时的选择行为，防止未来遍历顺序改动导致错用其它工具目录。
++// 断言最终脚本路径来自 chatgpt server，说明过滤条件和路径解析都生效。
++it.instance("does not infer the voice transcriber from unrelated local MCP servers", () =>
++  withCleanState(
++    Effect.gen(function* () {
++      const fs = yield* FSUtil.Service
++      const test = yield* TestInstance
++      const otherDir = path.join(test.directory, "tools", "other-agent")
++      const chatgptDir = path.join(test.directory, "tools", "chatgpt-agent")
++      yield* fs.writeWithDirs(path.join(otherDir, "chatgpt.js"), "")
++      yield* fs.writeWithDirs(path.join(chatgptDir, "chatgpt.js"), "")
++      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
++        mcp: {
++          other: {
++            type: "local",
++            command: [process.execPath, path.join(otherDir, "mcp-server.js")],
++          },
++          chatgpt: {
++            type: "local",
++            command: [process.execPath, path.join(chatgptDir, "mcp-server.js")],
++          },
++        },
++      })
++
++      const config = yield* getTuiConfig(test.directory)
++      expect(config.voice?.transcriber?.args?.[0]).toBe(path.join(chatgptDir, "chatgpt.js"))
++    }),
++  ),
++)
++
+ winIt("defaults Ctrl+Z to input undo on Windows", () =>
+   withCleanState(
+     Effect.gen(function* () {
+@@ -566,6 +664,8 @@ winIt("keeps explicit input undo overrides on Windows", () =>
+       const config = yield* getTuiConfig(test.directory)
+       expect(config.keybinds.get("terminal.suspend")).toEqual([])
+       expect(config.keybinds.get("input.undo")?.[0]?.key).toBe("ctrl+y")
++      // Windows 用户显式保留 Ctrl+Y 给 undo 时，语音仍应使用不冲突的 Alt+V 默认键。
++      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
+     }),
+   ),
+ )
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 88486f2..7b913fc 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -65,6 +65,9 @@
+     "strip-ansi": "7.1.2",
+     "solid-js": "catalog:"
+   },
++  "optionalDependencies": {
++    "@picovoice/pvrecorder-node": "1.2.9"
++  },
+   "devDependencies": {
+     "@tsconfig/bun": "catalog:",
+     "@types/bun": "catalog:",
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index a280d50..ff2f5a0 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -36,6 +36,8 @@ import { computePromptTraits } from "../../prompt/traits"
+ import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
+ import { usePromptStash } from "../../prompt/stash"
+ import { DialogStash } from "../dialog-stash"
++import { PromptVoiceInput } from "../../prompt-voice-input"
++import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
+ import { type AutocompleteRef, Autocomplete } from "./autocomplete"
+ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
+@@ -173,6 +175,7 @@ export function Prompt(props: PromptProps) {
+   const keymap = useOpencodeKeymap()
+   const agentShortcut = useCommandShortcut("agent.cycle")
+   const paletteShortcut = useCommandShortcut("command.palette.show")
++  const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+   const renderer = useRenderer()
+   const exit = useExit()
+   const dimensions = useTerminalDimensions()
+@@ -224,6 +227,7 @@ export function Prompt(props: PromptProps) {
+   const [cursorVersion, setCursorVersion] = createSignal(0)
+   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
+   const hasRightContent = createMemo(() => Boolean(props.right))
++  const [voiceInputStatus, setVoiceInputStatus] = createSignal<PromptVoiceInput.VoiceInputStatus>({ type: "idle" })
+ 
+   function promptModelWarning() {
+     toast.show({
+@@ -370,7 +370,32 @@
+   // #243：耗时口径统一——运行中 footer 用 transcript 时间戳（parent user.created）+
+   // 刷新时钟，重挂载/重连不重新起算
+   // 时钟仅绑定 isRunning：idle 后停 tick，重进 busy 重新起 tick（口径边界不变）
+-  const now = createRefreshClock(isRunning)
++  // voice recording 也需要刷新时钟，否则 footer 的录音时长会停在开始时刻。
++  const now = createRefreshClock(() => isRunning() || voiceInputStatus().type === "recording")
++  // busy 覆盖 starting/stopping/transcribing，避免用户在语音文本尚未落入 prompt 前提交旧草稿。
++  const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
++  const voiceInputStatusText = createMemo(() =>
++    // shortcut 来自 keymap；缺省 alt+v 只用于展示兜底，实际绑定仍由 TuiKeybind 解析。
++    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || "alt+v", now()),
++  )
++  const voiceInput = PromptVoiceInput.createVoiceInputController({
++    // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
++    transcriber: () => tuiConfig.voice?.transcriber,
++    // recorder 单独放在 native 边界文件，Prompt 组件不直接加载 optional addon。
++    startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
++    insertText: insertVoiceText,
++    onStatus: setVoiceInputStatus,
++    onError: (message) =>
++      toast.show({
++        message,
++        variant: "error",
++      }),
++  })
++  onCleanup(() => {
++    // [语音退出清理] Prompt 卸载时不能留下仍占用麦克风的 Node 子进程；这里只 abort
++    // 已开始的录音，不触发转写，也不改动用户当前草稿。
++    void voiceInput.abort()
++  })
+   // activeDuration 派生自 now 信号：now 不变时 memo 不重算，tick 成本仅为一次比较
+   const activeDuration = createMemo(() => {
+     // 无 sessionID 时组件尚未绑定会话，耗时无意义；0 让 Show 直接隐藏 footer 计时
+@@ -1030,6 +1059,31 @@ export function Prompt(props: PromptProps) {
+     }
+   })
+ 
++  useBindings(() => {
++    return {
++      target: inputTarget,
++      enabled:
++        inputTarget() !== undefined &&
++        !props.disabled &&
++        !auto()?.visible &&
++        !dialog.stack.length &&
++        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
++        (!isRunning() || voiceInputStatus().type === "recording"),
++      commands: [
++        {
++          name: "prompt.voice.toggle",
++          title: "Toggle voice input",
++          category: "Prompt",
++          run() {
++            void voiceInput.toggle()
++            return true
++          },
++        },
++      ],
++      bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
++    }
++  })
++
+   let submitting = false
+   async function submit() {
+     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
+@@ -1058,6 +1112,8 @@ export function Prompt(props: PromptProps) {
+       syncExtmarksWithPromptParts()
+     }
+     if (props.disabled) return false
++    // [语音提交边界] 正在录音、保存或转写时禁止发送 prompt；否则 Enter 会把尚未插入的旧草稿提交出去。
++    if (voiceInputBusy()) return false
+     if (workspace.creating() || move.creating()) return false
+     if (auto()?.visible) return false
+     if (!store.prompt.input) return false
+@@ -1397,6 +1453,24 @@ export function Prompt(props: PromptProps) {
+     return
+   }
+ 
++  function insertVoiceText(text: string) {
++    if (!input || input.isDestroyed) return
++    // insertText 保持当前光标位置语义：语音转写结果像用户手动输入一样进入 textarea。
++    input.insertText(text)
++    // 写入 renderable 后立即同步 store/extmarks，否则后续 submit 会读到插入前的旧 prompt。
++    setStore("prompt", "input", input.plainText)
++    syncExtmarksWithPromptParts()
++    // cursorVersion 触发现有光标同步链路，不为语音输入新增独立光标状态。
++    setCursorVersion((value) => value + 1)
++
++    setTimeout(() => {
++      if (!input || input.isDestroyed) return
++      // OpenTUI textarea 的布局在插入后需要下一 tick 标脏，避免转写文本显示滞后一帧。
++      input.getLayoutNode().markDirty()
++      renderer.requestRender()
++    }, 0)
++  }
++
+   function clearPrompt() {
+     if (store.prompt.input.trim().length >= DRAFT_RETENTION_MIN_CHARS || store.prompt.parts.length > 0) {
+       history.append({
+@@ -1646,6 +1720,15 @@ export function Prompt(props: PromptProps) {
+         </box>
+         <box width="100%" flexDirection="row" justifyContent="space-between">
+           <Switch>
++            <Match when={voiceInputBusy()}>
++              <box paddingLeft={3} flexDirection="row" gap={1}>
++                {/* 录音中显示红点，保存/转写阶段显示 spinner，让用户区分“仍在收音”和“正在处理”。 */}
++                <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
++                  <text fg={theme.error}>●</text>
++                </Show>
++                <text fg={theme.accent}>{voiceInputStatusText()}</text>
++              </box>
++            </Match>
+             <Match when={isRunning()}>
+               <box
+                 flexDirection="row"
+@@ -1831,6 +1914,11 @@ export function Prompt(props: PromptProps) {
+                   <text fg={theme.text}>
+                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
+                   </text>
++                  <Show when={tuiConfig.voice?.transcriber}>
++                    <text fg={theme.text}>
++                      {voiceShortcut() || "alt+v"} <span style={{ fg: theme.textMuted }}>voice</span>
++                    </text>
++                  </Show>
+                 </Match>
+                 <Match when={store.mode === "shell"}>
+                   <text fg={theme.text}>
+diff --git a/packages/tui/src/config/index.tsx b/packages/tui/src/config/index.tsx
+index df92397..d239f4c 100644
+--- a/packages/tui/src/config/index.tsx
++++ b/packages/tui/src/config/index.tsx
+@@ -50,6 +50,17 @@ export const Prompt = Schema.Struct({
+   }),
+ }).annotate({ description: "Prompt size settings" })
+ 
++const VoiceTranscriber = Schema.Struct({
++  command: Schema.String.annotate({ description: "Executable used to transcribe a recorded WAV file" }),
++  // args 是 argv 数组，不是 shell 字符串；其中一项必须包含 `{file}`，确保录音路径按字面量传递。
++  // 这样即使路径包含空格、重定向符、管道或环境变量字符，也不会被解释成 shell 语法。
++  args: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Arguments for the transcriber command; include {file} for the WAV path" }),
++})
++
++export const Voice = Schema.Struct({
++  transcriber: Schema.optional(VoiceTranscriber),
++}).annotate({ description: "Prompt voice input settings" })
++
+ export const Info = Schema.Struct({
+   $schema: Schema.optional(Schema.String),
+   theme: Schema.optional(Schema.String),
+@@ -58,6 +69,7 @@ export const Info = Schema.Struct({
+   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+   leader_timeout: Schema.optional(LeaderTimeout),
+   attention: Schema.optional(Attention),
++  voice: Schema.optional(Voice),
+   prompt: Schema.optional(Prompt),
+   scroll_speed: Schema.optional(ScrollSpeed).annotate({ description: "TUI scroll speed" }),
+   scroll_acceleration: Schema.optional(ScrollAcceleration),
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+index 126b7c2..d1c6a91 100644
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -156,6 +156,9 @@ export const Definitions = {
+   prompt_stash: keybind("none", "Stash prompt"),
+   prompt_stash_pop: keybind("none", "Pop stashed prompt"),
+   prompt_stash_list: keybind("none", "List stashed prompts"),
++  // 语音输入的默认键必须能在终端 textarea 内可靠收到，同时不能抢用户常用于 undo/redo 的 Ctrl+Y。
++  // Alt+V 当前未被 TUI 默认绑定占用，且 V 与 voice 语义相连；不依赖终端通常收不到的系统级 Win+H 听写快捷键。
++  prompt_voice_toggle: keybind("alt+v", "Toggle voice input recording"),
+   workspace_set: keybind("none", "Set workspace"),
+ 
+   input_clear: keybind("ctrl+c", "Clear input field"),
+@@ -366,6 +369,7 @@ export const CommandMap = {
+   prompt_stash: "prompt.stash",
+   prompt_stash_pop: "prompt.stash.pop",
+   prompt_stash_list: "prompt.stash.list",
++  prompt_voice_toggle: "prompt.voice.toggle",
+   workspace_set: "workspace.set",
+   input_clear: "prompt.clear",
+   input_paste: "prompt.paste",
+diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9dbd2e0ee05ed9941053426fbd6760ccd91022ad
+index 0000000..709a0e0
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-@@ -0,0 +1,230 @@
-+import { Process } from "@/util/process"
-+import { which } from "@/util/which"
++++ b/packages/tui/src/prompt-voice-input.ts
+@@ -0,0 +1,248 @@
++import { spawn } from "node:child_process"
++import { which } from "@opencode-ai/core/util/which"
 +import path from "path"
 +
 +export const VOICE_FILE_PLACEHOLDER = "{file}"
@@ -420,7 +498,7 @@ index 0000000000000000000000000000000000000000..9dbd2e0ee05ed9941053426fbd6760cc
 +
 +export type VoiceTranscriber = {
 +  command: string
-+  args?: string[]
++  args?: readonly string[]
 +}
 +
 +export type VoiceInputStatus =
@@ -561,11 +639,9 @@ index 0000000000000000000000000000000000000000..9dbd2e0ee05ed9941053426fbd6760cc
 +
 +  // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
 +  // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
-+  const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
++  const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
 +    // AbortSignal 是整体转写上限，Process timeout 只限制单次 wait 粒度，保持既有进程工具的轮询语义。
 +    abort: AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS),
-+    nothrow: true,
-+    timeout: 1_000,
 +  })
 +  // stderr 优先展示外部转写器自己的诊断；没有 stderr 时才落回退出码。
 +  if (result.code !== 0) throw new Error(result.stderr.toString().trim() || `Voice transcriber exited with code ${result.code}`)
@@ -639,12 +715,33 @@ index 0000000000000000000000000000000000000000..9dbd2e0ee05ed9941053426fbd6760cc
 +  return transcriber
 +}
 +
++// child_process spawn 的最小封装：收集 stdout/stderr，返回退出码。与 source 的
++// Process.run 语义对齐（nothrow + abort 信号），但 tui 包没有跨包 run 工具。
++function runProcess(
++  commandArgs: string[],
++  options: { abort: AbortSignal },
++): Promise<{ code: number; stdout: Buffer; stderr: Buffer }> {
++  return new Promise((resolve, reject) => {
++    const child = spawn(commandArgs[0], commandArgs.slice(1), {
++      stdio: ["ignore", "pipe", "pipe"],
++      signal: options.abort,
++    })
++    const stdout: Buffer[] = []
++    const stderr: Buffer[] = []
++    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
++    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
++    child.on("error", reject)
++    child.on("close", (code) => resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }))
++  })
++}
++
 +export * as PromptVoiceInput from "./prompt-voice-input"
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+\ No newline at end of file
+diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..90f89acd9b0a4c7f4d57ee0a25d36aa72bcc7211
+index 0000000..8232b91
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
++++ b/packages/tui/src/prompt-voice-recorder.ts
 @@ -0,0 +1,167 @@
 +import fs from "fs/promises"
 +import path from "path"
@@ -813,22 +910,23 @@ index 0000000000000000000000000000000000000000..90f89acd9b0a4c7f4d57ee0a25d36aa7
 +}
 +
 +export * as PromptVoiceRecorder from "./prompt-voice-recorder"
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+\ No newline at end of file
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9ae040eeca53aecc02f94c07c9ce4f9ff3f3aa13
+index 0000000..5b86e4b
 --- /dev/null
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
 @@ -0,0 +1,428 @@
 +import { describe, expect, test } from "bun:test"
 +import path from "path"
-+import { tmpdir } from "../../fixture/fixture"
++import { tmpdir } from "../fixture/fixture"
 +import {
 +  createVoiceInputController,
 +  transcribeVoiceFile,
 +  voiceInputStatusText,
 +  type VoiceRecorderHandle,
 +  type VoiceTranscriber,
-+} from "../../../src/cli/cmd/tui/prompt-voice-input"
++} from "../../src/prompt-voice-input"
 +
 +const nodeJson = (script: string): VoiceTranscriber => ({
 +  command: process.execPath,
@@ -896,7 +994,7 @@ index 0000000000000000000000000000000000000000..9ae040eeca53aecc02f94c07c9ce4f9f
 +
 +  // footer 文案是用户判断当前语音状态的唯一 TUI 反馈。
 +  // starting/stopping/transcribing 需要短词提示，recording 必须保留停止快捷键。
-+  // 这里固定 alt+v 展示，防止未来改文案时隐藏“如何结束录音”。
++  // 这里固定 alt+v 展示，防止未来改文案时隐藏"如何结束录音"。
 +  // 使用传入 now 可以稳定测试计时显示，不依赖真实时间。
 +  test("formats active footer status without hiding the stop shortcut", () => {
 +    expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400)).toBe("Starting voice...")
@@ -968,7 +1066,7 @@ index 0000000000000000000000000000000000000000..9ae040eeca53aecc02f94c07c9ce4f9f
 +
 +  // command 缺失属于录音前校验：用户说话前就应知道转写器不可执行。
 +  // 这里不 mock which，而是使用明显不存在的命令走真实校验分支。
-+  // startRecorder 不能被调用，否则会出现“录完才 ENOENT”的坏体验。
++  // startRecorder 不能被调用，否则会出现"录完才 ENOENT"的坏体验。
 +  // 错误消息包含命令名，便于用户定位是哪一个配置项写错。
 +  test("does not start recording when the transcriber command is missing", async () => {
 +    let started = false
@@ -1247,11 +1345,12 @@ index 0000000000000000000000000000000000000000..9ae040eeca53aecc02f94c07c9ce4f9f
 +    expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
 +  })
 +})
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+\ No newline at end of file
+diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09d0a7d1dd
+index 0000000..3eaa9e0
 --- /dev/null
-+++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 @@ -0,0 +1,163 @@
 +import { beforeEach, describe, expect, mock, test } from "bun:test"
 +
@@ -1312,7 +1411,7 @@ index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09
 +  test("records a WAV file without requiring a system node executable", async () => {
 +    const previous = process.env.OPENCODE_NODE_PATH
 +    process.env.OPENCODE_NODE_PATH = "__opencode_missing_node_for_voice_test__"
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    try {
 +      const recorder = await startPromptVoiceRecorder()
@@ -1333,14 +1432,14 @@ index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09
 +    }
 +  })
 +
-+  // 这个回归用例锁定“按 stop 前读取循环必须追上 native 缓冲”的行为。
++  // 这个回归用例锁定"按 stop 前读取循环必须追上 native 缓冲"的行为。
 +  // 旧实现每 32ms sleep 后只读一帧，事件循环一旦落后就会把尾部帧留在 PvRecorder 缓冲里。
 +  // 70ms 内至少读到三帧用于证明 JS 侧没有再人为按帧节流。
 +  // WAV data size 断言最终写入的是真实读到的多帧 PCM，而不是只看 readCount。
 +  // finally 中 abort 是测试安全边界，红灯失败也不能留下后台录音循环。
 +  // 这个缺口对应用户观察到的最后约 1.6 到 2 秒音频未被转写。
 +  test("keeps native audio reads caught up before the stop key writes the WAV", async () => {
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    const recorder = await startPromptVoiceRecorder()
 +    try {
@@ -1362,7 +1461,7 @@ index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09
 +  // 该测试用 status=8 模拟底层库错误，不依赖真实硬件故障。
 +  test("releases the recorder and leaves no WAV file when native reading fails", async () => {
 +    FakePvRecorder.readStatus = 8
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    const recorder = await startPromptVoiceRecorder()
 +    await waitForFakeRead()
@@ -1382,7 +1481,7 @@ index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09
 +  // 该用例保护 Prompt 卸载和用户中断时的清理可靠性。
 +  test("abort is best-effort after native reading fails", async () => {
 +    FakePvRecorder.readStatus = 8
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    const recorder = await startPromptVoiceRecorder()
 +    await waitForFakeRead()
@@ -1416,128 +1515,5 @@ index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09
 +    wait()
 +  })
 +}
-diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
-index 4eb96b95761def3858fa003f9dc647f906cd7189..1ceb02cefb3fcc0cf261a289896c77811ea96b60 100644
---- a/packages/opencode/test/config/tui.test.ts
-+++ b/packages/opencode/test/config/tui.test.ts
-@@ -494,6 +494,12 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
-       expect(config.keybinds.get("dialog.mcp.toggle")?.[0]?.key).toBe("ctrl+t")
-       expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
-       expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
-+      // voice 默认值属于 TUI 配置解析结果，必须和其它 canonical keybind 一起进入 lookup。
-+      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
-+      // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
-+      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
-+      // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
-+      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
-       expect(
-         config.keybinds.gather("plugins.dialog", ["dialog.plugins.install"]).map((binding) => binding.cmd),
-       ).toEqual(["dialog.plugins.install"])
-@@ -530,6 +536,98 @@ it.instance("keybinds accept OpenTUI binding specs", () =>
-   ),
- )
- 
-+// 这个用例覆盖用户显式写 tui.voice.transcriber 的正常路径。
-+// 配置层只负责保留 command/args，不解释 shell，也不验证外部程序是否存在。
-+// 这样用户可以把转写器替换成其它本地工具，同时保持 controller 侧统一安全校验。
-+// 测试落在 TuiConfig 服务层，保证 JSON 解析、schema 和默认合并一起生效。
-+it.instance("loads voice transcriber command from tui config", () =>
-+  withCleanState(
-+    Effect.gen(function* () {
-+      const fs = yield* AppFileSystem.Service
-+      const test = yield* TestInstance
-+      yield* fs.writeJson(path.join(test.directory, "tui.json"), {
-+        voice: {
-+          transcriber: {
-+            command: "chatgpt-browser-agent",
-+            args: ["transcribe-file", "--file", "{file}", "--json"],
-+          },
-+        },
-+      })
-+
-+      const config = yield* getTuiConfig(test.directory)
-+      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
-+      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
-+    }),
-+  ),
-+)
-+
-+// 这个用例覆盖推荐路径：从本地 ChatGPT MCP 配置推导同目录 chatgpt.js。
-+// 复用 MCP 的安装位置，但返回的是普通 CLI transcriber，不新增 MCP tool 或 HTTP surface。
-+// agentDir 带空格，用来锁定路径 join/resolve 不会因为 shell 拆分而失效。
-+// chatgpt.js 必须存在才启用默认转写器，避免用户录音后才遇到脚本缺失错误。
-+it.instance("infers the default voice transcriber from the local ChatGPT MCP command", () =>
-+  withCleanState(
-+    Effect.gen(function* () {
-+      const fs = yield* AppFileSystem.Service
-+      const test = yield* TestInstance
-+      const agentDir = path.join(test.directory, "tools", "chatgpt browser agent")
-+      const mcpServer = path.join(agentDir, "mcp-server.js")
-+      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
-+      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
-+        mcp: {
-+          chatgpt: {
-+            type: "local",
-+            command: [process.execPath, mcpServer],
-+            enabled: true,
-+          },
-+        },
-+      })
-+
-+      const config = yield* getTuiConfig(test.directory)
-+      expect(config.voice?.transcriber?.command).toBe(process.execPath)
-+      expect(config.voice?.transcriber?.args).toEqual([
-+        path.join(agentDir, "chatgpt.js"),
-+        "transcribe-file",
-+        "--file",
-+        "{file}",
-+        "--json",
-+      ])
-+    }),
-+  ),
-+)
-+
-+// 这个用例保护 MCP 扫描边界：只有 key/name 明确指向 ChatGPT 的本地 server 才能作为语音后端。
-+// unrelated server 即使目录里有 chatgpt.js，也不能被误当作语音转写器来源。
-+// 同时保留多个 server 时的选择行为，防止未来遍历顺序改动导致错用其它工具目录。
-+// 断言最终脚本路径来自 chatgpt server，说明过滤条件和路径解析都生效。
-+it.instance("does not infer the voice transcriber from unrelated local MCP servers", () =>
-+  withCleanState(
-+    Effect.gen(function* () {
-+      const fs = yield* AppFileSystem.Service
-+      const test = yield* TestInstance
-+      const otherDir = path.join(test.directory, "tools", "other-agent")
-+      const chatgptDir = path.join(test.directory, "tools", "chatgpt-agent")
-+      yield* fs.writeWithDirs(path.join(otherDir, "chatgpt.js"), "")
-+      yield* fs.writeWithDirs(path.join(chatgptDir, "chatgpt.js"), "")
-+      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
-+        mcp: {
-+          other: {
-+            type: "local",
-+            command: [process.execPath, path.join(otherDir, "mcp-server.js")],
-+          },
-+          chatgpt: {
-+            type: "local",
-+            command: [process.execPath, path.join(chatgptDir, "mcp-server.js")],
-+          },
-+        },
-+      })
-+
-+      const config = yield* getTuiConfig(test.directory)
-+      expect(config.voice?.transcriber?.args?.[0]).toBe(path.join(chatgptDir, "chatgpt.js"))
-+    }),
-+  ),
-+)
-+
- winIt("defaults Ctrl+Z to input undo on Windows", () =>
-   withCleanState(
-     Effect.gen(function* () {
-@@ -618,6 +716,8 @@ it.instance("keeps explicit configured keybind input undo on Windows", () =>
- 
-         const config = yield* getTuiConfig(test.directory)
-         expect(config.keybinds.get("input.undo")?.[0]?.key).toBe("ctrl+y")
-+        // Windows 用户显式保留 Ctrl+Y 给 undo 时，语音仍应使用不冲突的 Alt+V 默认键。
-+        expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
-       }),
-     ),
-   ),
+\ No newline at end of file
+
