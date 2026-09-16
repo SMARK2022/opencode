@@ -170,7 +170,9 @@ describe("ApplyPatchTool", () => {
           const request = assertions[0]
           if (!request?.metadata) return yield* Effect.die("Missing edit precheck metadata")
           expect(request.metadata.files).toEqual([{ type: "update", relativePath: "update.txt" }, { type: "delete", relativePath: "remove.txt" }])
-          expect(PermissionPrecheck.evaluate({ permission: request.action, patterns: request.resources, metadata: request.metadata })).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+          // 共享grammar异步化后仍消费实际工具请求，不能把Promise当已完成的分类结果。
+          const input = { permission: request.action, patterns: request.resources, metadata: request.metadata }
+          expect(yield* Effect.promise(() => PermissionPrecheck.evaluate(input))).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
         }
       }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

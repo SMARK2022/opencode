@@ -7,6 +7,7 @@ import path from "path"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import type { Node } from "web-tree-sitter"
+import { ShellParse } from "@opencode-ai/core/shell/parse"
 
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Config } from "@/config/config"
@@ -290,8 +291,9 @@ function truncateWindow(text: string, maxLines: number, maxBytes: number, direct
   return { text: visible, cut: true, hidden }
 }
 
-const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
-  return yield* Effect.promise(() => Shell.parse(command, ps))
+const parse = Effect.fn("ShellTool.parse")(function* (command: string, dialect: ShellParse.Dialect) {
+  // 工具与预检共享同一grammar，原执行文本与Tree释放责任保持不变。
+  return yield* Effect.promise(() => ShellParse.parse(command, dialect))
 })
 
 const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string; inline_scripts?: string[] }) {
@@ -852,7 +854,7 @@ export const ShellTool = Tool.define(
               const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
               yield* Effect.scoped(
                 Effect.gen(function* () {
-                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
+                  const tree = yield* Effect.acquireRelease(parse(params.command, ps ? "powershell" : name === "cmd" ? "cmd" : "bash"), (tree) =>
                     Effect.sync(() => tree.delete()),
                   )
                   // 检查发生在权限与执行之前，tree 的 acquireRelease 仍负责失败释放。
