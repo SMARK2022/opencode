@@ -150,32 +150,32 @@ describe("permission auto routing", () => {
   test("reports the deterministic precheck boundary before reviewer completion", async () => {
     const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
 
-    await expect(
-      Effect.runPromise(
-        PermissionAuto.evaluate(
-          {
-            permission: "bash",
-            patterns: ["git push origin main"],
-            metadata: { command: "git push origin main" },
-          },
-          {
-            review: (input) =>
-              Effect.succeed({
-                action: "allow",
-                reason: "reviewer approved explicit push",
-                reviewID: input.reviewID,
-                risk_level: "high",
-                user_authorization: "high",
-              }),
-          },
-          (input) =>
-            Effect.sync(() => {
-              starts.push(input)
+    const decision = await Effect.runPromise(
+      PermissionAuto.evaluate(
+        {
+          permission: "bash",
+          patterns: ["git push origin main"],
+          metadata: { command: "git push origin main" },
+        },
+        {
+          review: (input) =>
+            Effect.succeed({
+              action: "allow",
+              reason: "reviewer approved explicit push",
+              reviewID: input.reviewID,
+              risk_level: "high",
+              user_authorization: "high",
             }),
-        ),
+        },
+        (input) =>
+          Effect.sync(() => {
+            starts.push(input)
+          }),
       ),
-    ).resolves.toMatchObject({ action: "allow", source: "reviewer", reviewID: starts[0]?.reviewID })
+    )
     expect(starts).toHaveLength(1)
+    // grammar加载完成后事件才发布；先等待结果，再核对返回值和事件的同一审计ID。
+    expect(decision).toMatchObject({ action: "allow", source: "reviewer", reviewID: starts[0].reviewID })
     expect(starts[0].precheck).toMatchObject({ level: "cautious" })
   })
 

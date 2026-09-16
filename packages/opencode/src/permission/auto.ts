@@ -60,7 +60,8 @@ export function evaluate(
   }) => Effect.Effect<void>,
 ) {
   return Effect.gen(function* () {
-    const precheck = PermissionPrecheck.evaluate(input)
+    // 等待共享grammar取得原level/reason，后续审批与授权政策保持原分支。
+    const precheck = yield* Effect.promise(() => PermissionPrecheck.evaluate(input))
     // [local-smark] auto 五级预审路由开始（R2 五级拆分）
     // safe/general/cautious/dangerous/forbidden 是 LLM 负载边界：safe 和 general
     // 默认直接允许；cautious 与 dangerous（可授权高风险）进入 reviewer/user
