@@ -95,9 +95,9 @@ index 1111111111..2222222222 100644
                                      <TuiConfigProvider config={input.config}>
                                        <PluginRuntimeProvider value={pluginRuntime}>
 -                                        <SDKProvider
-+                                        // #165：生产只挂 url/headers；禁止 fetch/events 生产注入
-+      <SDKProvider
-+        testTransport={input.testTransport}
++                                        {/* #165：生产只挂 url/headers；禁止 fetch/events 生产注入 */}
++                                        <SDKProvider
++                                          testTransport={input.testTransport}
                                            url={input.url}
                                            directory={input.directory}
 -                                          fetch={input.fetch}
