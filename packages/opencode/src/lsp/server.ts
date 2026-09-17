@@ -1,4 +1,9 @@
 import type { ChildProcessWithoutNullStreams } from "child_process"
+import { PassThrough } from "node:stream"
+import { fileURLToPath } from "node:url"
+import { createMessageConnection, StreamMessageReader, StreamMessageWriter, type MessageConnection } from "vscode-jsonrpc/node"
+import { Schema } from "effect"
+import * as VscodeBridge from "../ide/vscode-bridge"
 import path from "path"
 import os from "os"
 import { Global } from "@opencode-ai/core/global"
@@ -24,10 +29,11 @@ const pathExists = async (p: string) =>
 const run = (cmd: string[], opts: Process.RunOptions = {}) => Process.run(cmd, { ...opts, nothrow: true })
 const output = (cmd: string[], opts: Process.RunOptions = {}) => Process.text(cmd, { ...opts, nothrow: true })
 
-export interface Handle {
-  process: ChildProcessWithoutNullStreams
-  initialization?: Record<string, any>
-}
+// 外部宿主不归OpenCode所有；句柄只增加协议连接来源，配置schema保持原样。
+export type Handle = { initialization?: Record<string, any> } & (
+  | { process: ChildProcessWithoutNullStreams }
+  | { connection: MessageConnection; dispose(): void }
+)
 
 type RootFunction = (file: string, ctx: InstanceContext) => Promise<string | undefined>
 
@@ -61,6 +67,94 @@ export interface Info {
   global?: boolean
   root: RootFunction
   spawn(root: string, ctx: InstanceContext, flags: RuntimeFlags.Info): Promise<Handle | undefined>
+}
+
+// 作为普通注册项参与原有启用/disabled筛选；关闭LSP时连发现动作也不会执行。
+export const Vscode: Info = {
+  id: "vscode",
+  extensions: [],
+  // 复用已有global标记支持没有目标文件的工作区查询。
+  global: true,
+  async root(file, ctx) {
+    const bridge = await VscodeBridge.resolveBridge({ cwd: ctx.directory, filePath: file }).catch(() => undefined)
+    return bridge?.capabilities?.lsp ? ctx.directory : undefined
+  },
+  async spawn(root) {
+    return vscodeConnection(root)
+  },
+}
+
+function vscodeConnection(directory: string) {
+  // 两条本地流复用正式JSON-RPC实现；没有额外进程、网络监听或平行client缓存。
+  const requests = new PassThrough()
+  const responses = new PassThrough()
+  const connection = createMessageConnection(new StreamMessageReader(responses), new StreamMessageWriter(requests))
+  const service = createMessageConnection(new StreamMessageReader(requests), new StreamMessageWriter(responses))
+  // HTTP数据只在协议适配入口解码，原客户端继续消费标准诊断报告。
+  const diagnostics = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({
+    line: Schema.Number, column: Schema.Number, severity: Schema.String,
+    message: Schema.String, source: Schema.optional(Schema.String),
+  })))
+  const hovers = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ contents: Schema.Array(Schema.Unknown) })))
+  const symbols = (rows: unknown[]) => rows.map((row) => {
+    if (!row || typeof row !== "object" || !("kind" in row) || typeof row.kind !== "number") throw new Error("Invalid symbol kind")
+    // VS Code枚举从0开始，LSP从1开始；否则类符号会被原查询过滤器丢弃。
+    return { ...row, kind: row.kind + 1 }
+  })
+  const call = async (endpoint: string, key: string, body: Record<string, unknown>, filePath?: string): Promise<unknown[]> => {
+    // 复用现有鉴权和工作区匹配，不在LSP模块另建HTTP发现或请求队列。
+    // 只有诊断沿用1秒观察预算，其他语言查询保留传输层原有默认期限。
+    const result = await VscodeBridge.callBridge({ cwd: directory, filePath, path: `/lsp/${endpoint}`, body, timeoutMs: endpoint === "touch" ? 1000 : undefined }).catch((error) => {
+      // 失效连接交回现有退出清理，不能用另一个存活连接冒充本次检查成功。
+      connection.dispose()
+      throw error
+    })
+    if (!result || typeof result !== "object" || !(key in result)) throw new Error(`Invalid bridge ${endpoint} response`)
+    const value: unknown = Reflect.get(result, key)
+    if (!Array.isArray(value)) throw new Error(`Invalid bridge ${endpoint} result`)
+    return value
+  }
+  // 声明现有HTTP实际提供的能力，implementation/callHierarchy仍由原生注册项提供。
+  service.onRequest("initialize", () => ({ capabilities: {
+    textDocumentSync: 1,
+    diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
+    hoverProvider: true, definitionProvider: true, referencesProvider: true,
+    documentSymbolProvider: true, workspaceSymbolProvider: true,
+  } }))
+  // didOpen/didChange只更新原客户端；真正请求诊断时才让宿主隐藏打开文档。
+  service.onRequest("textDocument/diagnostic", async (input: { textDocument: { uri: string } }) => {
+    const filePath = fileURLToPath(input.textDocument.uri)
+    const items = diagnostics(await call("touch", "diagnostics", { filePath }, filePath))
+    // 空数组同样是完整报告，必须覆盖原缓存而不是等待第二次推送。
+    return { kind: "full", items: items.map((item) => ({
+      range: { start: { line: item.line - 1, character: item.column - 1 }, end: { line: item.line - 1, character: item.column } },
+      severity: ["Error", "Warning", "Information", "Hint"].indexOf(item.severity) + 1 || 1,
+      message: item.message, ...(item.source ? { source: item.source } : {}),
+    })) }
+  })
+  for (const [method, endpoint, key] of [
+    ["textDocument/hover", "hover", "hovers"],
+    ["textDocument/definition", "definition", "definitions"],
+    ["textDocument/references", "references", "references"],
+    ["textDocument/documentSymbol", "document-symbol", "symbols"],
+  ]) {
+    service.onRequest(method, async (input: { textDocument: { uri: string }; position?: { line: number; character: number } }) => {
+      const filePath = fileURLToPath(input.textDocument.uri)
+      const rows = await call(endpoint, key, { filePath, ...input.position }, filePath)
+      // SDK返回多个Hover，LSP单响应将其内容合并，位置仍沿用零起始坐标。
+      if (method === "textDocument/hover") return { contents: hovers(rows).flatMap((row) => row.contents) }
+      return method === "textDocument/documentSymbol" ? symbols(rows) : rows
+    })
+  }
+  service.onRequest("workspace/symbol", async (input: { query: string }) => symbols(await call("workspace-symbol", "symbols", input)))
+  service.listen()
+  return { connection, dispose() {
+    // 只销毁本地接入资源，绝不关闭用户VS Code或Notebook共用HTTP服务。
+    connection.dispose()
+    service.dispose()
+    requests.destroy()
+    responses.destroy()
+  } }
 }
 
 export const Deno: Info = {

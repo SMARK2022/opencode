@@ -1,6 +1,7 @@
 import { describe, expect, spyOn } from "bun:test"
 import fs from "node:fs/promises"
 import path from "path"
+import { pathToFileURL } from "node:url"
 import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
@@ -43,7 +44,126 @@ const disabledDownloadIt = testEffect(
   ),
 )
 
+// 未知扩展名隔离外部注册项，避免测试顺带启动机器上其他语言服务器。
+const vscodeFixture = (fn: (dir: string) => Effect.Effect<void, never, LSP.Service>, lsp: Config.Info["lsp"] = true) =>
+  provideTmpdirInstance((dir) => Effect.gen(function* () {
+    yield* Effect.promise(() => fs.mkdir(path.join(dir, "src"), { recursive: true }))
+    yield* Effect.promise(() => Bun.write(path.join(dir, "src", "inside.repro"), "content"))
+    return yield* fn(dir)
+  }), { config: { lsp } })
+
 describe("lsp.spawn", () => {
+  for (const mode of [false, undefined, { vscode: { disabled: true as const } }]) {
+    // 显式关闭、默认关闭、按注册项关闭必须复用同一配置schema。
+    it.live(`registered VSCode respects configuration ${JSON.stringify(mode)}`, () =>
+      provideTmpdirInstance((dir) => LSP.Service.use((lsp) => Effect.gen(function* () {
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("must not discover"))
+        const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ diagnostics: [] })
+        // 无需创建文件：禁用路径不应到达文档读取或服务器初始化。
+        const loc = { file: path.join(dir, "disabled.repro"), line: 0, character: 0 }
+        try {
+          // 各公开操作均从注册集合取连接；不能只修touch留下查询旁路。
+          yield* lsp.touchFile(loc.file, "document")
+          yield* lsp.hover(loc)
+          yield* lsp.definition(loc)
+          yield* lsp.references(loc)
+          yield* lsp.implementation(loc)
+          yield* lsp.documentSymbol(pathToFileURL(loc.file).href)
+          yield* lsp.workspaceSymbol("Example")
+          yield* lsp.prepareCallHierarchy(loc)
+          yield* lsp.incomingCalls(loc)
+          yield* lsp.outgoingCalls(loc)
+          expect(yield* lsp.status()).toEqual([])
+          expect(yield* lsp.hasClients(loc.file)).toBe(false)
+          expect(yield* lsp.diagnostics()).toEqual({})
+          expect(resolve).not.toHaveBeenCalled()
+          expect(call).not.toHaveBeenCalled()
+        } finally { resolve.mockRestore(); call.mockRestore() }
+      })), { config: { lsp: mode } }),
+    )
+  }
+
+  it.live("registered VSCode cold symbols use the real enum and exclude unsupported requests", () =>
+    vscodeFixture((dir) => LSP.Service.use((lsp) => Effect.gen(function* () {
+      const file = path.join(dir, "src", "inside.repro")
+      const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({ id: "bridge", host: "127.0.0.1", port: 1, token: "token", source: "registry", capabilities: { lsp: true } })
+      const call = spyOn(VscodeBridge, "callBridge").mockImplementation(async ({ path: route }) => {
+        // 夹具使用真实VS Code Class=4，不能用LSP的5自证转换正确。
+        const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }
+        if (route.endsWith("hover")) return { hovers: [{ contents: ["hover text"] }] }
+        if (route.endsWith("definition")) return { definitions: [{ uri: pathToFileURL(file).href, range }] }
+        if (route.endsWith("references")) return { references: [{ uri: pathToFileURL(file).href, range }] }
+        return { symbols: [{ name: "Example", kind: 4, range, selectionRange: range, location: { uri: pathToFileURL(file).href, range } }] }
+      })
+      const original = LSPClient.create
+      // 保留真实客户端和协议初始化，只观察已建立连接的公开请求接口。
+      const clients: LSPClient.Info[] = []
+      const create = spyOn(LSPClient, "create").mockImplementation(async (input) => {
+        const client = await original(input)
+        clients.push(client)
+        return client
+      })
+      try {
+        // 首次操作就是workspace查询，不能依赖之前编辑文件建立连接。
+        expect((yield* lsp.workspaceSymbol("Example"))[0]?.kind).toBe(5)
+        expect((yield* lsp.documentSymbol(pathToFileURL(file).href))[0]?.kind).toBe(5)
+        const loc = { file, line: 0, character: 0 }
+        expect(yield* lsp.hover(loc)).toEqual([{ contents: ["hover text"] }])
+        expect((yield* lsp.definition(loc)).length).toBe(1)
+        expect((yield* lsp.references(loc)).length).toBe(1)
+        // 非诊断查询仍用传输默认预算，不能误套诊断的1秒观察预算。
+        expect(call.mock.calls.every(([input]) => input.timeoutMs === undefined)).toBe(true)
+        const send = spyOn(clients[0].connection, "sendRequest")
+        try {
+          // 能力缺失必须在请求前决定，不通过MethodNotFound异常获得空结果。
+          expect(yield* lsp.implementation(loc)).toEqual([])
+          expect(yield* lsp.prepareCallHierarchy(loc)).toEqual([])
+          expect(yield* lsp.incomingCalls(loc)).toEqual([])
+          expect(yield* lsp.outgoingCalls(loc)).toEqual([])
+          expect(send).not.toHaveBeenCalled()
+        } finally { send.mockRestore() }
+      } finally { resolve.mockRestore(); call.mockRestore(); create.mockRestore() }
+    }))),
+  )
+
+  it.live("enabled native strong diagnostics succeed without a VSCode bridge", () =>
+    vscodeFixture((dir) => LSP.Service.use((lsp) => Effect.gen(function* () {
+      const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
+      const original = LSPClient.create
+      const create = spyOn(LSPClient, "create").mockImplementation(async (input) => {
+        const client = await original(input)
+        // 配置真实stdio夹具在didOpen注册pull能力，服务层必须实际打开并等待报告。
+        // 只设置远端行为，getClients、spawn、文档同步与等待仍为正式实现。
+        await client.connection.sendRequest("test/configure-pull-diagnostics", {
+          registerOn: "didOpen", registrations: [{ method: "textDocument/diagnostic", id: "native" }],
+          documentDiagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 1, message: "native failure" }],
+        })
+        return client
+      })
+      try {
+        const file = path.join(dir, "src", "inside.repro")
+        yield* lsp.touchFile(file, "document")
+        // 若恢复旧的“无bridge直接返回”，此处取不到诊断，变异实验已验证。
+        expect((yield* lsp.diagnostics())[AppFileSystem.normalizePath(file)]).toEqual([expect.objectContaining({ message: "native failure" })])
+        expect(yield* lsp.status()).toEqual([expect.objectContaining({ id: "fake", status: "connected" })])
+      } finally { resolve.mockRestore(); create.mockRestore() }
+    })), fakeConfig.lsp),
+  )
+
+  it.live("quiet stdio cannot mask failed registered VSCode diagnostics", () =>
+    // fake服务器可正常初始化但不发布诊断，覆盖两个来源同时注册的正常拓扑。
+    vscodeFixture((dir) => LSP.Service.use((lsp) => Effect.gen(function* () {
+      const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({ id: "bridge", host: "127.0.0.1", port: 1, token: "token", source: "registry", capabilities: { lsp: true } })
+      const call = spyOn(VscodeBridge, "callBridge").mockRejectedValue(new Error("diagnostic failure"))
+      try {
+        yield* lsp.touchFile(path.join(dir, "src", "inside.repro"), "document")
+        // 编辑工具消费的就是这两个接口：空诊断和仍存活的stdio不能生成clean。
+        expect(yield* lsp.diagnostics()).toEqual({})
+        expect(yield* lsp.status()).toEqual([])
+      } finally { resolve.mockRestore(); call.mockRestore() }
+    })), fakeConfig.lsp),
+  )
+
   it.live("does not spawn builtin LSP for files outside instance", () =>
     provideTmpdirInstance(
       (dir) =>
@@ -140,10 +260,10 @@ describe("lsp.spawn", () => {
   )
 
   it.live("skips VSCode bridge touch for light warm without diagnostics", () =>
-    provideTmpdirInstance((dir) =>
+    vscodeFixture((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const file = path.join(dir, "src", "inside.ts")
+          const file = path.join(dir, "src", "inside.repro")
           const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({ id: "bridge", port: 1, token: "token", host: "127.0.0.1", source: "registry", capabilities: { lsp: true } } satisfies VscodeBridge.BridgeRef)
           const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true, diagnostics: [] })
           const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
@@ -164,10 +284,10 @@ describe("lsp.spawn", () => {
   )
 
   it.live("uses VSCode bridge touch for document diagnostics", () =>
-    provideTmpdirInstance((dir) =>
+    vscodeFixture((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const file = path.join(dir, "src", "inside.ts")
+          const file = path.join(dir, "src", "inside.repro")
           const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
             id: "bridge",
             port: 1,
@@ -184,7 +304,7 @@ describe("lsp.spawn", () => {
             // 空数组是成功的“未发现错误”快照，必须保留文件 key，不能退化为 unavailable。
             expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file, timeoutMs: 1000 }))
             expect(yield* lsp.diagnostics()).toEqual({ [AppFileSystem.normalizePath(file)]: [] })
-            expect(yield* lsp.status()).toEqual([{ id: "vscode", name: "VSCode", root: ".", status: "connected" }])
+            expect(yield* lsp.status()).toEqual([{ id: "vscode", name: "vscode", root: "", status: "connected" }])
           } finally {
             resolve.mockRestore()
             call.mockRestore()
@@ -195,10 +315,10 @@ describe("lsp.spawn", () => {
   )
 
   it.live("returns diagnostics from the VSCode bridge touch without a second request", () =>
-    provideTmpdirInstance((dir) =>
+    vscodeFixture((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const file = path.join(dir, "src", "inside.ts")
+          const file = path.join(dir, "src", "inside.repro")
           const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
             id: "bridge",
             port: 1,
@@ -229,10 +349,10 @@ describe("lsp.spawn", () => {
   )
 
   it.live("does not report VSCode bridge as diagnostics-ready after diagnostics failure", () =>
-    provideTmpdirInstance((dir) =>
+    vscodeFixture((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const file = path.join(dir, "src", "inside.ts")
+          const file = path.join(dir, "src", "inside.repro")
           const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
             id: "bridge",
             port: 1,
@@ -261,10 +381,10 @@ describe("lsp.spawn", () => {
   )
 
   it.live("does not fall back to builtin LSP when VSCode bridge diagnostics fail", () =>
-    provideTmpdirInstance((dir) =>
+    vscodeFixture((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
-          const file = path.join(dir, "src", "inside.ts")
+          const file = path.join(dir, "src", "inside.repro")
           const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
             id: "bridge",
             port: 1,
@@ -392,9 +512,9 @@ describe("lsp.spawn", () => {
             yield* touchAs(lsp, sessionA.id, file)
             yield* touchAs(lsp, sessionB.id, file)
             // Bridge 只共享一条外部资源 row；退休 owner 不能关闭或复制它。
-            expect((yield* lsp.status())[0]?.sessionIDs).toEqual([sessionA.id, sessionB.id])
+            expect((yield* lsp.status()).find((row) => row.id === "vscode")?.sessionIDs).toEqual([sessionA.id, sessionB.id])
             yield* lsp.init().pipe(LSP.withSession(sessionA.id, Effect.void))
-            expect((yield* lsp.status())[0]?.sessionIDs).toEqual([sessionB.id])
+            expect((yield* lsp.status()).find((row) => row.id === "vscode")?.sessionIDs).toEqual([sessionB.id])
           } finally {
             resolve.mockRestore()
           }

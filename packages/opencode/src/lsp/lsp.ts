@@ -16,8 +16,6 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { SessionID } from "@/session/schema"
 import { EffectBridge } from "@/effect/bridge"
 import { GlobalBus, type GlobalEvent } from "@/bus/global"
-// [local-smark] VSCode Bridge LSP backend：优先通过 bridge 获取 VSCode 的 LSP 能力
-import * as VscodeBridge from "@/ide/vscode-bridge"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 
 const log = Log.create({ service: "lsp" })
@@ -134,12 +132,9 @@ interface State {
   broken: Set<string>
   spawning: Map<string, PendingClient>
   tokens: Map<SessionID, object>
-  bridgeOwners: Map<SessionID, object>
   closed: boolean
-  // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报。
-  bridgeDiagnostics?: "ok" | "failed"
-  // 保存最近一次 strong touch 的同请求快照，后续 diagnostics() 只读缓存，不再产生第二段等待。
-  bridgeSnapshot: Record<string, LSPClient.Diagnostic[]>
+  // 连接存活不代表诊断完成，所有参与连接的实际结果决定检查有效性。
+  diagnosticsFailed: boolean
 }
 
 export interface Interface {
@@ -235,10 +230,8 @@ export const layer = Layer.effect(
           broken: new Set(),
           spawning: new Map(),
           tokens: new Map(),
-          bridgeOwners: new Map(),
           closed: false,
-          bridgeDiagnostics: undefined,
-          bridgeSnapshot: {},
+          diagnosticsFailed: false,
         }
 
         states.add(s)
@@ -253,7 +246,7 @@ export const layer = Layer.effect(
       }),
     )
 
-    const getClients = Effect.fnUntraced(function* (file: string) {
+    const getClients = Effect.fnUntraced(function* (file: string, workspaceOnly = false) {
       const ctx = yield* InstanceState.context
       if (!containsPath(file, ctx)) return [] as LSPClient.Info[]
       const s = yield* InstanceState.get(state)
@@ -314,7 +307,8 @@ export const layer = Layer.effect(
             instance: ctx,
           }).catch(async (err) => {
             s.broken.add(key)
-            await Process.stop(handle.process)
+            if ("process" in handle) await Process.stop(handle.process)
+            else handle.dispose()
             log.error(`Failed to initialize LSP client ${server.id}`, { error: err })
             return undefined
           })
@@ -328,7 +322,7 @@ export const layer = Layer.effect(
 
           const existing = s.clients.find((x) => x.client.root === root && x.client.serverID === server.id)
           if (existing) {
-            await Process.stop(handle.process)
+            await client.shutdown()
             return existing
           }
 
@@ -337,12 +331,17 @@ export const layer = Layer.effect(
           // 监听后再检查退出码，同时覆盖“注册前已退出”和“注册后退出”；重复回调
           // 由 exact-entry detach 幂等吸收，不需要第二套进程状态判断。
           const exited = () => bridge.fork(removeExitedClient(s, entry))
-          handle.process.once("exit", exited)
-          if (handle.process.exitCode !== null || handle.process.signalCode !== null) exited()
+          // 外部连接共用退出清理，但不假定存在可结束的子进程。
+          if ("process" in handle) {
+            handle.process.once("exit", exited)
+            if (handle.process.exitCode !== null || handle.process.signalCode !== null) exited()
+          } else handle.connection.onDispose(exited)
           return entry
         }
 
         for (const server of Object.values(s.servers)) {
+          // 工作区请求没有扩展名，只获取声明支持global的注册项。
+          if (workspaceOnly && !server.global) continue
           if (server.extensions.length && !server.extensions.includes(extension)) continue
 
           const root = await server.root(file, ctx)
@@ -399,69 +398,6 @@ export const layer = Layer.effect(
       return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x.client))))
     })
 
-    // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存。
-    // 失败返回 undefined，调用方回退到内置 LSP。
-    const resolveLspBridge = Effect.fnUntraced(function* (filePath?: string) {
-      const ctx = yield* InstanceState.context
-      return yield* Effect.promise(async () => {
-        try {
-          const bridge = await VscodeBridge.resolveBridge({ cwd: ctx.directory, filePath })
-          if (!bridge.capabilities?.lsp) return undefined
-          return bridge
-        } catch {
-          return undefined
-        }
-      })
-    })
-
-    // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined，由诊断调用方保留真实失败状态。
-    // timeout 只由 strong diagnostic touch 传入；hover 等其他 bridge 能力保持各自原有上限。
-    const callLspBridge = Effect.fnUntraced(function* (
-      endpoint: string,
-      body: Record<string, unknown>,
-      filePath?: string,
-      timeoutMs?: number,
-    ) {
-      const ctx = yield* InstanceState.context
-      return yield* Effect.promise(async () => {
-        try {
-          return await VscodeBridge.callBridge({ cwd: ctx.directory, path: endpoint, body, filePath, timeoutMs })
-        } catch {
-          return undefined
-        }
-      })
-    })
-
-    // [local-smark] 将 bridge 诊断格式转换为内置 LSP 的 Record<string, Diagnostic[]> 格式。
-    // 对 key 做 normalizePath，与 write/edit/apply_patch 的查找 key 对齐。
-    function bridgeDiagnosticsToMap(result: unknown): Record<string, LSPClient.Diagnostic[]> | undefined {
-      if (!result || typeof result !== "object") return undefined
-      const diags = (result as { diagnostics?: unknown[] }).diagnostics
-      if (!Array.isArray(diags)) return undefined
-      const severityMap: Record<string, number> = { Error: 1, Warning: 2, Information: 3, Hint: 4 }
-      const results: Record<string, LSPClient.Diagnostic[]> = {}
-      for (const d of diags) {
-        if (!d || typeof d !== "object") continue
-        const item = d as { file?: string; line?: number; column?: number; severity?: string; message?: string; source?: string }
-        if (!item.file || typeof item.line !== "number" || typeof item.column !== "number") continue
-        const diagnostic: LSPClient.Diagnostic = {
-          range: {
-            start: { line: item.line - 1, character: item.column - 1 },
-            end: { line: item.line - 1, character: item.column },
-          },
-          message: item.message ?? "",
-          severity: (severityMap[item.severity ?? "Error"] ?? 1) as LSPClient.Diagnostic["severity"],
-          ...(item.source ? { source: item.source } : {}),
-        }
-        // [local-smark] 对 key 做 normalizePath，与 write/edit/apply_patch 的查找 key 对齐
-        const normalizedFile = AppFileSystem.normalizePath(item.file)
-        const arr = results[normalizedFile] ?? []
-        arr.push(diagnostic)
-        results[normalizedFile] = arr
-      }
-      return results
-    }
-
     const init = Effect.fn("LSP.init")(function* () {
       const s = yield* InstanceState.get(state)
       const owner = yield* CurrentOwner
@@ -500,10 +436,9 @@ export const layer = Layer.effect(
       // token 先失效再撤销 claim，仍在 initialize 的旧请求恢复后只能走
       // orphan detach；新 run 与删除共用这一条状态转换。
       s.tokens.delete(sessionID)
-      const bridgeChanged = s.bridgeOwners.delete(sessionID)
       // map 后再 some，确保同一 Session 跨多个 root 的 claims 全部撤销；
       // 直接 some(delete) 会在首个 true 后短路并留下后续 client。
-      const changed = s.clients.map((entry) => entry.owners.delete(sessionID)).some(Boolean) || bridgeChanged
+      const changed = s.clients.map((entry) => entry.owners.delete(sessionID)).some(Boolean)
       const unused = s.clients.filter((entry) => !entry.unscoped && entry.owners.size === 0)
       return { changed: changed || unused.length > 0, detached: detach(s, unused) }
     }
@@ -551,17 +486,8 @@ export const layer = Layer.effect(
       const ctx = yield* InstanceState.context
       const s = yield* InstanceState.get(state)
       yield* pruneMissingRoots(s)
-      // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态。
-      const bridge = yield* resolveLspBridge()
-      if (bridge && s.bridgeDiagnostics !== "failed") {
-        return [{
-          id: "vscode",
-          name: "VSCode",
-          root: ".",
-          status: "connected" as const,
-          ...(s.bridgeOwners.size ? { sessionIDs: [...s.bridgeOwners.keys()] } : {}),
-        }]
-      }
+      // 编辑工具消费status判断检查是否可靠，不能让其他存活连接掩盖失败。
+      if (s.diagnosticsFailed) return []
       const result: Status[] = []
       for (const entry of s.clients) {
         const client = entry.client
@@ -577,9 +503,6 @@ export const layer = Layer.effect(
     })
 
     const hasClients = Effect.fn("LSP.hasClients")(function* (file: string) {
-      // [local-smark] 有 bridge 时直接返回 true（VSCode 已有 LSP 扩展）
-      const bridge = yield* resolveLspBridge(file)
-      if (bridge) return true
       const ctx = yield* InstanceState.context
       const s = yield* InstanceState.get(state)
       return yield* Effect.promise(async () => {
@@ -597,45 +520,14 @@ export const layer = Layer.effect(
 
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
       const s = yield* InstanceState.get(state)
-      const owner = yield* CurrentOwner
-      // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode。
-      const bridge = yield* resolveLspBridge(input)
-      if (bridge) {
-        // Bridge 连接由外部进程拥有；这里只在异步解析后校验 token 并记录可见性，
-        // release 只删除 claim，绝不关闭或重连外部 Bridge。
-        if (owner && !s.closed && s.tokens.get(owner.sessionID) === owner.token) {
-          const changed = s.bridgeOwners.get(owner.sessionID) !== owner.token
-          s.bridgeOwners.set(owner.sessionID, owner.token)
-          if (changed) yield* s.updated
-        }
-        if (!diagnostics) return
-        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input, 1000)
-        const mapped = bridgeDiagnosticsToMap(touched)
-        if (mapped) {
-          const normalized = AppFileSystem.normalizePath(input)
-          // 空数组也覆盖旧快照，保证“未发现错误”不会保留上一次错误。
-          // 非空数组同样固定在本次 Tool 结果中，后到事件不能修改已经返回的输出。
-          s.bridgeSnapshot[normalized] = mapped[normalized] ?? []
-          s.bridgeDiagnostics = "ok"
-          return
-        }
-        s.bridgeDiagnostics = "failed"
-        // bridge 已被选中后失败属于真实失败，不允许再切换内置 LSP 改变诊断语义。
-        return
-      }
-      if (diagnostics) {
-        // strong touch 没有 bridge 时直接标记失败；仅 light warm 保留原有内置 LSP 兼容路径。
-        s.bridgeDiagnostics = "failed"
-        return
-      }
       log.info("touching file", { file: input })
       const clients = yield* getClients(input)
-      yield* Effect.promise(() =>
+      const ready = yield* Effect.promise(() =>
         Promise.all(
           clients.map(async (client) => {
             const after = Date.now()
             const version = await client.notify.open({ path: input })
-            if (!diagnostics) return
+            if (!diagnostics) return true
             return client.waitForDiagnostics({
               path: input,
               version,
@@ -645,31 +537,24 @@ export const layer = Layer.effect(
           }),
         ).catch((err) => {
           log.error("failed to touch file", { err, file: input })
+          return []
         }),
       )
+      // 成功空报告也有效；light warm不覆盖之前strong touch的检查结果。
+      if (diagnostics) s.diagnosticsFailed = !ready.length || ready.some((value) => !value)
     })
 
     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
-      // [local-smark] touch 已返回同一请求的快照；这里不再发第二个 bridge 请求。
-      // 空对象与 bridge 失败由 status 区分，成功的空文件快照则保留规范化文件 key 和空数组。
       const s = yield* InstanceState.get(state)
-      const bridge = yield* resolveLspBridge()
-      if (!bridge) {
-        s.bridgeDiagnostics = "failed"
-        return {}
+      const result: Record<string, LSPClient.Diagnostic[]> = {}
+      // 缓存只由原客户端持有，读取结果不再发现bridge或重复请求。
+      for (const { client } of s.clients) {
+        for (const [file, items] of client.diagnostics) result[file] = [...(result[file] ?? []), ...items]
       }
-      return s.bridgeDiagnostics === "failed" ? {} : s.bridgeSnapshot
+      return result
     })
 
     const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
-      // [local-smark] 优先 bridge，提取 bare array 与 tool 层对齐
-      const bridge = yield* resolveLspBridge(input.file)
-      if (bridge) {
-        const result = yield* callLspBridge("/lsp/hover", {
-          filePath: input.file, line: input.line, character: input.character,
-        }, input.file)
-        if (result) return (result as { hovers?: unknown[] }).hovers ?? []
-      }
       return yield* run(input.file, (client) =>
         client.connection
           .sendRequest("textDocument/hover", {
@@ -681,14 +566,6 @@ export const layer = Layer.effect(
     })
 
     const definition = Effect.fn("LSP.definition")(function* (input: LocInput) {
-      // [local-smark] 优先 bridge，提取 .definitions
-      const bridge = yield* resolveLspBridge(input.file)
-      if (bridge) {
-        const result = yield* callLspBridge("/lsp/definition", {
-          filePath: input.file, line: input.line, character: input.character,
-        }, input.file)
-        if (result) return (result as { definitions?: unknown[] }).definitions ?? []
-      }
       const results = yield* run(input.file, (client) =>
         client.connection
           .sendRequest("textDocument/definition", {
@@ -701,14 +578,6 @@ export const layer = Layer.effect(
     })
 
     const references = Effect.fn("LSP.references")(function* (input: LocInput) {
-      // [local-smark] 优先 bridge，提取 .references
-      const bridge = yield* resolveLspBridge(input.file)
-      if (bridge) {
-        const result = yield* callLspBridge("/lsp/references", {
-          filePath: input.file, line: input.line, character: input.character,
-        }, input.file)
-        if (result) return (result as { references?: unknown[] }).references ?? []
-      }
       const results = yield* run(input.file, (client) =>
         client.connection
           .sendRequest("textDocument/references", {
@@ -723,7 +592,7 @@ export const layer = Layer.effect(
 
     const implementation = Effect.fn("LSP.implementation")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
+        !client.supports("textDocument/implementation") ? Promise.resolve([]) : client.connection
           .sendRequest("textDocument/implementation", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
@@ -735,12 +604,6 @@ export const layer = Layer.effect(
 
     const documentSymbol = Effect.fn("LSP.documentSymbol")(function* (uri: string) {
       const file = fileURLToPath(uri)
-      // [local-smark] 优先 bridge，提取 .symbols
-      const bridge = yield* resolveLspBridge(file)
-      if (bridge) {
-        const result = yield* callLspBridge("/lsp/document-symbol", { filePath: file }, file)
-        if (result) return ((result as { symbols?: unknown[] }).symbols ?? []) as (DocumentSymbol | Symbol)[]
-      }
       const results = yield* run(file, (client) =>
         client.connection.sendRequest("textDocument/documentSymbol", { textDocument: { uri } }).catch(() => []),
       )
@@ -748,13 +611,9 @@ export const layer = Layer.effect(
     })
 
     const workspaceSymbol = Effect.fn("LSP.workspaceSymbol")(function* (query: string) {
-      // [local-smark] 优先 bridge，提取 .symbols
-      const bridge = yield* resolveLspBridge()
-      if (bridge) {
-        const result = yield* callLspBridge("/lsp/workspace-symbol", { query })
-        // [local-smark] workspaceSymbol bridge 返回需要类型断言
-        if (result) return ((result as { symbols?: unknown[] }).symbols ?? []) as Symbol[]
-      }
+      // CLI直接查询时尚未touch文件，仍须经已有注册集合取得工作区连接。
+      const ctx = yield* InstanceState.context
+      yield* getClients(ctx.directory, true)
       const results = yield* runAll((client) =>
         client.connection
           .sendRequest<Symbol[]>("workspace/symbol", { query })
@@ -766,7 +625,7 @@ export const layer = Layer.effect(
 
     const prepareCallHierarchy = Effect.fn("LSP.prepareCallHierarchy")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
+        !client.supports("textDocument/prepareCallHierarchy") ? Promise.resolve([]) : client.connection
           .sendRequest("textDocument/prepareCallHierarchy", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
@@ -781,6 +640,8 @@ export const layer = Layer.effect(
       direction: "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls",
     ) {
       const results = yield* run(input.file, async (client) => {
+        // 已知缺少能力的外部连接在请求前筛除，原生路径保持原有兼容性。
+        if (!client.supports("textDocument/prepareCallHierarchy")) return []
         const items = await client.connection
           .sendRequest<unknown[] | null>("textDocument/prepareCallHierarchy", {
             textDocument: { uri: pathToFileURL(input.file).href },

@@ -1,16 +1,62 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import path from "path"
+import { pathToFileURL } from "node:url"
 import { Effect, Layer } from "effect"
 import { LSP } from "@/lsp/lsp"
 import * as LSPServer from "@/lsp/server"
 import * as VscodeBridge from "@/ide/vscode-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { provideTmpdirInstance } from "../fixture/fixture"
+import { provideTmpdirInstance, tmpdirScoped, provideInstance } from "../fixture/fixture"
+import { Session } from "@/session/session"
 import { testEffect } from "../lib/effect"
 
-const it = testEffect(Layer.mergeAll(LSP.defaultLayer, CrossSpawnSpawner.defaultLayer))
+const it = testEffect(Layer.mergeAll(LSP.defaultLayer, Session.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 describe("LSP service lifecycle", () => {
+  it.live("registered external connection shares ownership and leaves its HTTP host alive", () => Effect.gen(function* () {
+    const dir = yield* tmpdirScoped({ config: { lsp: true } })
+    const registry = yield* tmpdirScoped()
+    const previous = process.env.OPENCODE_IDE_REGISTRY_DIR
+    process.env.OPENCODE_IDE_REGISTRY_DIR = registry
+    // 使用独立注册目录，既不依赖用户VS Code，也不改动其真实注册项。
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (previous === undefined) delete process.env.OPENCODE_IDE_REGISTRY_DIR
+      else process.env.OPENCODE_IDE_REGISTRY_DIR = previous
+    }))
+    const calls: string[] = []
+    // 真正的HTTP监听独立于LSP client，能检测释放时是否误关外部宿主。
+    const server = yield* Effect.acquireRelease(Effect.sync(() => Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(request) { calls.push(new URL(request.url).pathname); return Response.json({ ok: true, diagnostics: [] }) },
+    })), (server) => Effect.promise(() => server.stop(true)))
+    const file = path.join(dir, "ownership.repro")
+    yield* Effect.promise(() => Bun.write(file, "content"))
+    yield* Effect.promise(() => Bun.write(path.join(registry, "11111111-1111-1111-1111-111111111111.json"), JSON.stringify({
+      schema: 1, id: "11111111-1111-1111-1111-111111111111", pid: process.pid, port: server.port,
+      host: "127.0.0.1", token: "fixture", transport: "http", ideKind: "vscode", updatedAt: Date.now(),
+      workspaceFolders: [{ fsPath: dir, uri: pathToFileURL(dir).href }], capabilities: { lsp: true },
+    })))
+    yield* Effect.gen(function* () {
+      const lsp = yield* LSP.Service
+      const sessions = yield* Session.Service
+      const a = yield* sessions.create({ title: "first" })
+      const b = yield* sessions.create({ title: "second" })
+      for (const session of [a, b]) {
+        // init和touch属于同一generation，两个Session才会形成真实共享claim。
+        yield* Effect.gen(function* () { yield* lsp.init(); yield* lsp.touchFile(file, "document") })
+          .pipe(LSP.withSession(session.id, Effect.void))
+      }
+      expect((yield* lsp.status())[0]?.sessionIDs).toEqual([a.id, b.id])
+      expect(calls.filter((route) => route === "/lsp/touch")).toHaveLength(2)
+      yield* lsp.init().pipe(LSP.withSession(a.id, Effect.void))
+      expect((yield* lsp.status())[0]?.sessionIDs).toEqual([b.id])
+      yield* lsp.init().pipe(LSP.withSession(b.id, Effect.void))
+      expect(yield* lsp.status()).toEqual([])
+      // 最后claim释放只关闭内存连接，外部宿主仍服务其他功能。
+      expect((yield* Effect.promise(() => fetch(`http://127.0.0.1:${server.port}/health`))).ok).toBe(true)
+    }).pipe(provideInstance(dir))
+  }))
+
   let spawnSpy: ReturnType<typeof spyOn>
 
   beforeEach(() => {
