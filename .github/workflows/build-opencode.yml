@@ -70,6 +70,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
+        with:
+          cache-scope: cli
+          # 两个发布架构都在首次安装中准备，编译阶段复用同一依赖图。
+          install-flags: --filter './packages/opencode' --os=darwin --cpu='*'
 
       - name: Build macOS binaries
         shell: bash
@@ -79,6 +83,7 @@ jobs:
           bun run script/build.ts \
             --version=${{ needs.version.outputs.version }} \
             --os=darwin \
+            --skip-install \
             --skip-embed-web-ui
 
       - name: Sign and package macOS assets
@@ -137,6 +142,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
+        with:
+          cache-scope: cli
+          # ARM64 资源也由此安装；后面的 x64 宿主编译无需再次扩大 workspace 范围。
+          install-flags: --filter './packages/opencode' --os=linux --cpu='*'
 
       - name: Install Linux packaging tools
         shell: bash
@@ -153,6 +162,7 @@ jobs:
           bun run script/build.ts \
             --version=${{ needs.version.outputs.version }} \
             --os=linux \
+            --skip-install \
             --skip-embed-web-ui
 
       - name: Package Linux assets
@@ -274,14 +284,16 @@ jobs:
             python -m pip install setuptools
           }
 
-          bun install --linker hoisted
+          # 使用路径区分同名根包；只准备当前发布的 Windows x64 依赖闭包。
+          bun install --linker hoisted --filter './packages/opencode' --os=win32 --cpu=x64
 
       - name: Build Windows x64 binary
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           cd packages/opencode
-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
+          # 原生包已由首次安装准备，避免 build.ts 再进入未过滤的 workspace 安装。
+          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-install --skip-embed-web-ui
 
       - name: Package Windows assets
         shell: pwsh
@@ -340,6 +352,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
+        with:
+          cache-scope: cli
+          # fixture 静态加载 Solid/Core，保留 CLI 声明的 dev、peer 与 optional 依赖。
+          install-flags: --filter './packages/opencode'
 
       - name: Download macOS archive
         uses: actions/download-artifact@v4
@@ -367,6 +383,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
+        with:
+          cache-scope: cli
+          # 从与构建相同的 CLI 闭包准备 harness，验证对象仍是下载后的归档。
+          install-flags: --filter './packages/opencode'
 
       - name: Download Linux archives
         uses: actions/download-artifact@v4
@@ -394,6 +414,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
+        with:
+          cache-scope: cli
+          # ARM runner 按自身架构安装 harness；不复用 x64 的 node_modules。
+          install-flags: --filter './packages/opencode'
 
       - name: Download Linux archives
         uses: actions/download-artifact@v4
@@ -433,7 +457,8 @@ jobs:
           PUPPETEER_SKIP_DOWNLOAD: "1"
           CYPRESS_INSTALL_BINARY: "0"
           HUSKY: "0"
-        run: bun install --linker hoisted
+        # 独立 runner 保留干净产物验证，只减少源码 harness 的安装范围。
+        run: bun install --linker hoisted --filter './packages/opencode'
 
       - name: Download Windows archive
         uses: actions/download-artifact@v4

@@ -5,6 +5,11 @@ inputs:
     description: "Additional flags to pass to 'bun install'"
     required: false
     default: ""
+  # CLI 的过滤安装不能继承全仓缓存；默认 scope 保留现有调用方的完整依赖范围。
+  cache-scope:
+    description: "Dependency cache scope for the selected workspace graph"
+    required: false
+    default: "workspace"
 runs:
   using: "composite"
   steps:
@@ -37,7 +42,9 @@ runs:
       id: cache
       if: runner.os != 'Windows'
       shell: bash
-      run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+      run: |
+        echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+        echo "version=$(bun --version)" >> "$GITHUB_OUTPUT"
 
     - name: Restore Bun dependencies
       id: bun-cache
@@ -45,9 +52,11 @@ runs:
       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ steps.cache.outputs.dir }}
-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+        # v2 截断历史全仓缓存前缀，过滤安装才能从自己的依赖材料开始积累。
+        # 宿主架构和 Bun 版本限定原生包材料；根安装不消费 VSIX 或 submodule 的锁文件。
+        key: ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-${{ hashFiles('bun.lock', 'bunfig.toml', 'patches/**') }}
         restore-keys: |
-          ${{ runner.os }}-bun-
+          ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-
 
     - name: Install setuptools for distutils compatibility
       run: python3 -m pip install setuptools || pip install setuptools || true
@@ -84,4 +93,5 @@ runs:
       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ steps.cache.outputs.dir }}
-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+        # install 可重写 lock；保存必须复用恢复时的请求身份，不能重算成已存在的 matched key。
+        key: ${{ steps.bun-cache.outputs.cache-primary-key }}
