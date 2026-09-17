@@ -44,7 +44,7 @@ jobs:
             label: packages/opencode
             os_label: Linux
             runner: ubuntu-latest
-            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
+            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
             # opencode 分片产出 junit-core.xml 与 junit-tui.xml——消费侧一律 glob 拾取。
             junit: packages/opencode/.artifacts/unit/*.xml
           # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
@@ -97,7 +97,7 @@ jobs:
             label: packages/opencode
             os_label: macOS
             runner: macos-latest
-            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
+            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
             junit: packages/opencode/.artifacts/unit/*.xml
           - id: core-macos
             label: packages/core
@@ -142,6 +142,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # root 保留执行工具与 hooks；SDK 的 ^build 反向读取 CLI，安装图须覆盖其运行依赖。
+          install-flags: --filter './' --filter './${{ matrix.label }}' --filter './packages/opencode'
+          cache-scope: test-${{ matrix.label }}-opencode-root-v1
 
       - name: Configure git identity
         run: |
@@ -150,10 +154,14 @@ jobs:
 
       - name: Run required package tests
         id: test
+        # 预留 job 剩余时间上传证据；超时仍失败，不把收尾截止当作挂起修复。
+        timeout-minutes: 45
         run: |
           # Bun reporter不创建父目录；保留矩阵原有的JUnit产物路径。
           mkdir -p "$(dirname "${{ matrix.junit }}")"
-          ${{ matrix.command }}
+          mkdir -p "${{ matrix.label }}/.artifacts/ci"
+          # 默认 bash 启用 pipefail；tee 不覆盖测试真实失败，日志不依赖 JUnit 完成。
+          ${{ matrix.command }} 2>&1 | tee "${{ matrix.label }}/.artifacts/ci/test.log"
 
       - name: Check unit report
         id: junit
@@ -177,14 +185,17 @@ jobs:
           fail_on_failure: false
 
       - name: Upload required unit artifact
-        if: always() && steps.junit.outputs.exists == 'true'
+        # child 未退出时可能没有 XML，仍保留已输出的 build/测试进展。
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: required-unit-${{ matrix.id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
-          path: ${{ matrix.junit }}
+          path: |
+            ${{ matrix.junit }}
+            ${{ matrix.label }}/.artifacts/ci/test.log
 
       - name: Write required summary
         if: always()
@@ -270,6 +281,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # 三个 mode 共享 CLI 测试依赖图，不为路由检查安装桌面和文档工具。
+          install-flags: --filter './' --filter './packages/opencode'
+          cache-scope: test-packages/opencode-root-v1
 
       - name: Run HttpApi exerciser gate
         id: test
@@ -390,14 +405,9 @@ jobs:
           for package in packages/* packages/console/* packages/stats/*; do
             if [ -f "$package/package.json" ]; then mkdir -p "$package/.artifacts/unit"; fi
           done
-          # 其余包沿原test；opencode仅运行隔离runner，任一侧失败均传播且不阻止另一侧出报告。
-          status=0
-          GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml || status=$?
-          # Windows已由必过三片覆盖；其他包仍执行原test，不把它们误换为test:ci。
-          if [ '${{ matrix.runner }}' != 'windows-latest' ]; then
-            GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
-          fi
-          exit "$status"
+          # 只去掉同平台必过项，目标新增包继续走test与原有^build链，不误裁成App/UI。
+          # 单条串行命令保留真实退出码、JUnit和流式日志，安装图仍覆盖全部兼容消费者。
+          GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --filter='!@opencode-ai/core' --filter='!@opencode-ai/http-recorder' --filter='!@opencode-ai/tui' --continue=always --summarize --concurrency=1 --log-order=stream -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 
 
       - name: Warn on upstream unit failures
@@ -440,7 +450,7 @@ jobs:
             echo "### 警告 上游单元兼容性"
             echo "| 范围 | 平台 | 结果 | 说明 |"
             echo "| --- | --- | --- | --- |"
-            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
+            echo "| 其余包（OpenCode、Core、HTTP recorder、TUI由同平台必过job覆盖） | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   upstream-extra-warning:
@@ -489,6 +499,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # Console 测试经 resource 消费 root SST；保留 root 工具，不裁掉真实传递依赖。
+          install-flags: --filter './' --filter './${{ matrix.path }}'
+          cache-scope: test-${{ matrix.path }}-root-v1
 
       - name: Run upstream extra package tests
         id: upstream
@@ -588,6 +602,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # 保留自动浏览器/开发服务器兼容检查，与 App/UI warning 复用同一安装图。
+          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
+          cache-scope: test-app-cli-root-v1
 
       - name: Read Playwright version
         id: playwright-version

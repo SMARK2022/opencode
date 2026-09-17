@@ -10,6 +10,7 @@ import { Database as SQLite } from "bun:sqlite"
 import { Flock } from "@opencode-ai/core/util/flock"
 // #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
 import { ServerLock } from "../../src/cli/tui/server-lock"
+import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
 import { tmpdir } from "../fixture/fixture"
 // 测试只走公开 CLI/PTY seam；不导入 renderer 或调用维护私有函数，避免实现重构产生假绿。
 const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
@@ -419,7 +420,7 @@ describe("database maintenance CLI", () => {
           taskID = `dbm_hung_${crypto.randomUUID()}`
           const root = `${dbPath}.maintenance`
           await mkdir(path.join(root, "tasks"), { recursive: true })
-          const base = {
+          const base: MaintenanceTask = {
             version: 1,
             taskID,
             dbPath,
@@ -435,7 +436,8 @@ describe("database maintenance CLI", () => {
             createdAt: Date.now(),
             updatedAt: Date.now(),
           }
-          await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
+          // 真实 observer 可在任意时刻读取 checkpoint；fixture 也必须遵守原子发布协议。
+          await ServerLock.writeMaintenanceTask(base)
           // live owner 必须与 task 同时存在，否则首帧 reconcile 会直接降为 interrupted。
           await mkdir(path.join(root, "lock"), { recursive: true })
           await Bun.write(
@@ -460,11 +462,12 @@ describe("database maintenance CLI", () => {
               base.processed = processed
               base.rawBytes = processed * 1000
               base.updatedAt = Date.now()
-              await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
+              await ServerLock.writeMaintenanceTask(base)
             }
             base.status = "completed"
             base.updatedAt = Date.now()
-            await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
+            // 终态 checkpoint 同样原子提交；随后直接移除 lease 目录，不覆写虚假 owner。
+            await ServerLock.writeMaintenanceTask(base)
             // 终态后撤掉 owner，模拟 worker finally 释放 lease，settlement GET 可立即返回。
             await import("fs/promises").then((fs) => fs.rm(path.join(root, "lock"), { recursive: true, force: true }))
             terminal = true
