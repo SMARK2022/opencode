@@ -297,9 +297,43 @@ index c6000c109b..b70f7bce5b 100644
    display?: Display
  }
  
-@@ -426,25 +660,11 @@ export const ReadTool = Tool.define<
-         cacheSeeded = true
-       }
+@@ -392,59 +625,9 @@ export const ReadTool = Tool.define<
+-      // 首次读取时从会话历史预热缓存 — 扫描已有的非 stub、未压缩的读取记录
+-      if (!cacheSeeded) {
+-        for (let i = ctx.messages.length - 1; i >= 0; i--) {
+-          const msg = ctx.messages[i]
+-          if (msg.info.role !== "assistant") continue
+-          for (const part of msg.parts) {
+-            if (part.type !== "tool") continue
+-            if (part.tool !== "read") continue
+-            if (part.state.status !== "completed") continue
+-            if (part.state.time.compacted) continue
+-            if (part.state.output === FILE_UNCHANGED_STUB) continue
+-
+-            const seedInput = part.state.input as { filePath?: string; offset?: number; limit?: number }
+-            if (!seedInput.filePath) continue
+-
+-            const seedKey = cacheKey(seedInput.filePath, seedInput.offset ?? 1, seedInput.limit)
+-            if (readFileState.has(seedKey)) continue
+-
+-            const seedStat = yield* fs.stat(seedInput.filePath).pipe(
+-              Effect.catch(() => Effect.succeed(undefined)),
+-            )
+-            if (!seedStat || seedStat.type !== "File") continue
+-
+-            // V2 stat.mtime 是 Option<Date>，用 getOrElse 取毫秒时间戳
+-            const seedMtime = Math.floor(Option.getOrElse(seedStat.mtime, () => new Date(0)).getTime())
+-            // 仅当文件在读取后未被修改时才加入缓存（mtime ≤ 读取时间表示无后续修改）
+-            if (seedMtime <= part.state.time.end) {
+-              readFileState.set(seedKey, {
+-                content: part.state.output,
+-                timestamp: seedMtime,
+-              })
+-            }
+-          }
+-        }
+-        cacheSeeded = true
+-      }
  
 -      // 文件去重检查 - 使用复合键查找同范围的缓存
 +      // #142：重复可见读由 collectVisibleReads/findReadStub 处理，不在此提前 FILE_UNCHANGED 成功返回
@@ -372,7 +406,7 @@ index c6000c109b..b70f7bce5b 100644
          }
        }
  
-@@ -561,26 +786,98 @@ export const ReadTool = Tool.define<
+@@ -561,26 +786,93 @@ export const ReadTool = Tool.define<
          )
        }
  
@@ -441,12 +475,11 @@ index c6000c109b..b70f7bce5b 100644
 +        }
 +      }
 +
-       // 写入去重缓存 — 使用复合键，不同范围分别缓存
-       readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
-         content,
+-      // 写入去重缓存 — 使用复合键，不同范围分别缓存
+-      readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
+-        content,
 -        timestamp: Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime()),
-+        timestamp: mtimeMs,
-       })
+-      })
  
 -      let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
 -      output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")

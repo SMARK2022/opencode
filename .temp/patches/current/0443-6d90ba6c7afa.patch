@@ -162,7 +162,7 @@ index 7d05fa6ee..eea5c8ebd 100644
      await this.input.connection.sessionUpdate({
        sessionId,
        update: {
-@@ -333,9 +353,28 @@ export class Subscription {
+@@ -333,9 +353,36 @@ export class Subscription {
      })
    }
  
@@ -181,6 +181,14 @@ index 7d05fa6ee..eea5c8ebd 100644
 +    // version 只排序 running；terminal flag 跨 transport 无条件压过任何 late running。
 +    // terminal 的 version=0 不参与比较，避免为终态制造第二套递增版本来源。
 +    this.shellSnapshots.set(key, { version: 0, terminal: true })
++  }
++
++  // 0443 source 语义：close_session 时按 Session 前缀清理 lifecycle marker——
++  // 订阅为连接级而非会话级，长寿命连接上 marker 随每次调用单调累积（内存泄漏）。
++  clearSessionMarkers(sessionID: string) {
++    const prefix = `${sessionID}\0`
++    for (const key of this.shellSnapshots.keys()) if (key.startsWith(prefix)) this.shellSnapshots.delete(key)
++    for (const key of this.toolStarts) if (key.startsWith(prefix)) this.toolStarts.delete(key)
 +  }
 +
 +  private callKey(sessionID: string, callID: string) {
@@ -1411,3 +1419,13 @@ index e131b4cfd..d59eb96c0 100644
  // 构造 text part 测试 fixture，模拟 text-start 阶段的初始状态（text 可为空或短文本）
  function textPart(id = "part_text", text = ""): Part {
    return {
+diff --git a/packages/opencode/src/acp/service.ts b/packages/opencode/src/acp/service.ts
+--- a/packages/opencode/src/acp/service.ts
++++ b/packages/opencode/src/acp/service.ts
+@@ -341,4 +341,6 @@
+     registeredMcp.delete(params.sessionId)
+     sessionSnapshots.delete(params.sessionId)
++    // 0443：同步清理 ACP 事件侧 lifecycle marker（订阅为连接级，不随 session 释放）
++    events?.clearSessionMarkers(params.sessionId)
+     if (!removed) return {}
+ 

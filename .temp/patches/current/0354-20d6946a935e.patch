@@ -617,7 +617,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
    // #142：content 包裹可见行（#145 决定是否 escape 行文本）
    output.push("<content>")
    output.push(renderContentLines(input.raw, input.start))
-@@ -944,41 +976,52 @@ const stub = findReadStub(visibleReads, current)
+@@ -944,37 +976,49 @@ const stub = findReadStub(visibleReads, current)
        // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
        const overlapRange = findOverlapNote(visibleReads, current)
        if (overlapRange) {
@@ -696,10 +696,6 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +          // 正常 read 会带 overlap note（见 renderReadOutput 中的 overlap 渲染）
          }
        }
--
-       // 写入去重缓存 — 使用复合键，不同范围分别缓存
-       readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
-         content,
 diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt

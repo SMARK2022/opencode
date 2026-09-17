@@ -38,7 +38,7 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 +            else
 +              # 版本 bump commit：首个把当前版本号写进 package.json 的提交
 +              BUMPCOMMIT=$(git log "${PREV_TAG}..HEAD" --reverse --format="%H" \
-+                -S "\"version\": "${VERSION}\"" -- packages/opencode/package.json | head -1)
++                -S "\"version\": \"${VERSION}\"" -- packages/opencode/package.json | head -1)
 +
 +              if [ -n "$BUMPCOMMIT" ]; then
 +                # 有版本 bump：分两节，避免上个版本期间积累的 commit 与本版本新增混在一起
@@ -52,14 +52,14 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 +
 +                ACCUMULATED=$(git log "${PREV_TAG}..${BUMPCOMMIT}" --format="%h %s" --reverse)
 +                if [ -n "$ACCUMULATED" ]; then
-+                  echo "### 自 `${PREV_TAG}` 积累"
++                  echo "### 自 \`${PREV_TAG}` 积累"
 +                  echo ""
 +                  echo "$ACCUMULATED"
 +                  echo ""
 +                fi
 +              else
 +                # 无版本 bump（同版本重新 push 或手动覆盖版本号）：单节展示全部增量
-+                echo "自 `${PREV_TAG}` 以来的变更："
++                echo "自 \`${PREV_TAG}` 以来的变更："
 +                echo ""
 +                git log "${PREV_TAG}..HEAD" --format="%h %s" --reverse
 +                echo ""

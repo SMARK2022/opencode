@@ -8,7 +8,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 -    limit: search ? 30 : 100,
 +    // #306：与 sync 侧一致使用 90 天窗口，避免全历史检索拖慢预览；搜索态保持窄结果集。
 +        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
-+        limit: search ? 30 : 100,
++        limit: 100,
      ...(search ? { search } : {}),
      ...input.filter,
    }

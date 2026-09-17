@@ -347,3 +347,14 @@ index 0000000000000000000000000000000000000000..40349c2bab19910ae29b307054c94d40
 +  })
 +})
 
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1358,5 +1358,6 @@
+     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
+     { name: "Skills", tokens: skillTokens, color: "success" },
+-    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
++  // 049 source 语义：Tool definitions 与 Input Messages 需视觉区分（secondary，非同色 warning）
++    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
+     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
+     // Conversation 组细分为四桶：工具结果/调用单独可见

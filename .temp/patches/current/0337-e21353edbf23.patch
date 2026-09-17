@@ -51,8 +51,6 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
        }
  
        if (input.noReply === true) {
-
-
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
@@ -124,3 +122,39 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  15_000,
 +)
 
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -2182,24 +2182,30 @@
+ noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
+   Effect.gen(function* () {
+     const prompt = yield* SessionPrompt.Service
+     const sessions = yield* Session.Service
+     const session = yield* sessions.create({ title: "Prompt tools" })
+ 
+     yield* prompt.prompt({
+       sessionID: session.id,
+       agent: "build",
+       noReply: true,
+       tools: { bash: false },
+       parts: [{ type: "text", text: "first" }],
+     })
+     yield* prompt.prompt({
+       sessionID: session.id,
+       agent: "build",
+       noReply: true,
+       tools: { read: true },
+       parts: [{ type: "text", text: "second" }],
+     })
+ 
+     const reloaded = yield* sessions.get(session.id)
+-    expect(reloaded.permission).toEqual([{ permission: "read", pattern: "*", action: "allow" }])
++    // 0337 SMARK 语义：tool override 追加而非替换整体 ruleset——保住 TaskTool 派生的
++    // 子会话 auto ceiling。两次 prompt 的 rules 以 last-match-wins 累积：bash deny 保留，read allow 生效。
++    expect(reloaded.permission).toEqual([
++      { permission: "bash", pattern: "*", action: "deny" },
++      { permission: "read", pattern: "*", action: "allow" },
++    ])
+-    expect(Permission.evaluate("bash", "anything", reloaded.permission ?? []).action).toBe("ask")
++    // 0337 融合语义：bash deny 经 last-match-wins 累积保留，不随第二次 prompt 消失
++    expect(Permission.evaluate("bash", "anything", reloaded.permission ?? []).action).toBe("deny")

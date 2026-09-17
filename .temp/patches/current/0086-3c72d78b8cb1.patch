@@ -10,7 +10,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc424245592735cfdded8 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2222,10 +2222,66 @@
+@@ -2222,10 +2222,69 @@
    const limited = createMemo(() => {
      if (expanded() || !collapsed().overflow) return code()
      return collapsed().output
@@ -30,9 +30,12 @@ index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc42424559273
 +  const diffStats = createMemo(() => {
 +    const d = diff()
 +    if (!d) return { added: 0, removed: 0, total: 0 }
-+    const added = (d.match(/^\+[^+]/gm) || []).length
-+    const removed = (d.match(/^-[^-]/gm) || []).length
-+    return { added, removed, total: added + removed }
++    // 0086 source 语义：+/- 计数用 startsWith（内容首字符为 +/- 的行也计入），
++    // total=diff 全部行数——大上下文覆写 diff 以 ctx 行为主，不得永久折叠
++    const lines = d.split("\n")
++    const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length
++    const removed = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length
++    return { added, removed, total: lines.length }
 +  })
 +  const diffOverflow = createMemo(() => diffStats().total > 20)
  
