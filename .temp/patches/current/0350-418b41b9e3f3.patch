@@ -1061,7 +1061,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
  
  // #142：区间元数据写入 metadata.read，供后续 stub 比对
  type ReadRangeMeta = {
-@@ -933,6 +938,47 @@ const stub = findReadStub(visibleReads, current)
+@@ -933,3 +938,44 @@ const stub = findReadStub(visibleReads, current)
          }
        }
  
@@ -1106,9 +1106,6 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +        }
 +      }
 +
-       // 写入去重缓存 — 使用复合键，不同范围分别缓存
-       readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
-         content,
 @@ -941,7 +987,9 @@ const stub = findReadStub(visibleReads, current)
  
        // #142：异步大纲，失败不应阻断主读取（promise 内自处理）

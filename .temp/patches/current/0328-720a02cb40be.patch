@@ -503,3 +503,22 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
    test("converts assistant tool error into error-text tool result", async () => {
      const userID = "m-user"
 
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -14,3 +14,6 @@
+ // 工具输出截断限制：避免单个工具输出占用过多摘要空间
+ const TOOL_OUTPUT_MAX_CHARS = 2_000
++// 0328：head/tail 双向截断——ToolOutputStore 的恢复路径 marker 位于截断文本中部，
++// 单边 head 截断会丢 marker 与尾部错误信息（与 V1 truncateToolOutput 同语义）。
++const TOOL_OUTPUT_TAIL_CHARS = 2_000
+ // 摘要输出 token 上限：控制摘要长度避免占用过多上下文
+@@ -85,4 +85,6 @@
+ 
+-const truncate = (value: string) =>
+-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
++const truncate = (value: string) =>
++  value.length <= TOOL_OUTPUT_MAX_CHARS + TOOL_OUTPUT_TAIL_CHARS
++    ? value
++    : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]\n${value.slice(-TOOL_OUTPUT_TAIL_CHARS)}`
+ 

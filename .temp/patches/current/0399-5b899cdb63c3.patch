@@ -1348,3 +1348,28 @@ diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
      }
      results.push(result)
    }
+diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
+--- a/sdks/vscode/src/bridge.ts
++++ b/sdks/vscode/src/bridge.ts
+@@ -146,4 +146,8 @@
+         if (!body || !isRecord(body)) throw new Error("Expected JSON object body")
+         const filePath = stringProp(body, "filePath") ?? url.pathname
+-        const result = await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
++      // 0399 source 语义：只读路由（summary/source/output 等）不加锁直行，
++      // 避免与同文档写操作互相阻塞（长 run 期间 agent 无法检查 notebook 状态）。
++      const result = READONLY_ROUTES.has(url.pathname)
++        ? await routeRequest(url.pathname, body, output)
++        : await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
+         if (result !== undefined) return writeJson(response, 200, result)
+@@ -285,5 +285,10 @@
+         resolve(body ? JSON.parse(body) : {})
+       } catch (error) {
+-        reject(error)
++        // 0399：截断/畸形请求体给出长度与连接中断提示，保留原始错误便于诊断
++        reject(
++          new Error(
++            `Failed to parse ${body.length} byte request body as JSON. The connection may have been interrupted. Original error: ${error instanceof Error ? error.message : String(error)}`,
++          ),
++        )
+       }
+     })

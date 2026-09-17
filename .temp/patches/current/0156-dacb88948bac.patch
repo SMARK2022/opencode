@@ -10,7 +10,7 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 index 1111111111..2222222222 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -1,107 +1,231 @@
+@@ -1,107 +1,230 @@
 -# 构建工作流：手动触发或 dev-smark 推送自动触发，编译打包 OpenCode CLI
 -# #104：版本从 packages/opencode/package.json 自动提取；GitHub Release 直传资产
 +# #156：SMARK CLI 构建与 GitHub Release 工作流
@@ -162,7 +162,6 @@ index 1111111111..2222222222 100644
 +          bun run script/build.ts \
 +            --version=${{ needs.version.outputs.version }} \
 +            --os=darwin \
-+            # #156：CLI 资产跳过 web UI 嵌入以保持精简
 +            --skip-embed-web-ui
 +
 +      - name: Sign and package macOS assets
@@ -313,7 +312,7 @@ index 1111111111..2222222222 100644
            Package: opencode
            Version: ${VERSION}
            Section: utils
-@@ -111,100 +235,209 @@
+@@ -111,100 +235,208 @@
            Description: opencode AI-powered development tool (smark build)
             A standalone AI coding assistant with TUI, version ${VERSION}.
            EOF
@@ -579,7 +578,6 @@ index 1111111111..2222222222 100644
 +              # #156：统一上传点，配合重试
 +              if gh release upload "$TAG" "$file" \
 +                --repo "$GITHUB_REPOSITORY" \
-+                # #156：允许覆盖同名资产以支持重跑
 +                --clobber; then
 +                echo "Uploaded ${file}"
 +                return 0
