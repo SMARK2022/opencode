@@ -26,7 +26,7 @@ export const VOICE_HARVEST_TIMEOUT_MS = 240_000
 export const VOICE_REFRESH_TIMEOUT_MS = 60_000
 export const VOICE_DIRECT_TIMEOUT_MS = 30_000
 
-export const VOICE_SESSION_URL = "https://chatgpt.com/api/auth/session"
+export const VOICE_SESSION_URL = "https://chatgpt.com/api/auth/session?refresh=true"
 // 与 agent 页面路径同一私有端点（chatgpt-dom.js:796）；请求形态变化时两处必须同源更新。
 export const VOICE_TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe"
 // 刷新授权链只由 NextAuth 会话令牌族承载；其它 cookie（如 __cf_bm）无授权语义，不参与状态机门控。

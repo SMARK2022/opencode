@@ -6,6 +6,7 @@ import { ConfigMCP } from "../../../src/config/mcp"
 import {
   authFromHarvest,
   buildDirectTranscribeRequest,
+  buildSessionRequest,
   ensureVoiceCredential,
   jwtExpiresAt,
   mergeSetCookieCookies,
@@ -43,6 +44,11 @@ const handwritten = `{
 `
 
 describe("voice auth node", () => {
+  // 普通 session 查询可能返回已被转录服务拒绝的旧 token；刷新必须显式使用 true。
+  test("requests a forced session refresh", () => {
+    expect(buildSessionRequest(auth).input).toBe("https://chatgpt.com/api/auth/session?refresh=true")
+  })
+
   // 写入方唯一合同：只替换 mcp.<key>.auth 节点，注释、缩进与兄弟字段逐字保留。
   // 手写内容含 trailing comma 与嵌套缩进，是注释保真写入的最严输入域。
   test("writes only the auth node and preserves comments and sibling fields", async () => {
