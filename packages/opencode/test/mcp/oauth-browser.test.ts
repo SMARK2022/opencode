@@ -123,6 +123,11 @@ const serveOAuthMcp = Effect.acquireRelease(
   (server) => Effect.promise(server.close),
 )
 
+// OS分配的端口避开本机保留区，仍走真正的callback监听与关闭流程。
+const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+const redirectUri = `http://127.0.0.1:${reservation.port}/mcp/oauth/callback`
+await reservation.stop(true)
+
 const withCallbackStop = Effect.addFinalizer(() => Effect.promise(() => McpOAuthCallback.stop()).pipe(Effect.ignore))
 
 const trackBrowserOpen = (url: string, fail = false) =>
@@ -148,7 +153,7 @@ const trackBrowserOpenFailed = Effect.gen(function* () {
 
 const addServer = Effect.fnUntraced(function* (name: string, url: string, headers?: Record<string, string>) {
   const mcp = yield* MCP.Service
-  const result = yield* mcp.add(name, { type: "remote", url, headers })
+  const result = yield* mcp.add(name, { type: "remote", url, headers, oauth: { redirectUri } })
   expect(result.status).toMatchObject({ [name]: { status: "needs_auth" } })
   return mcp
 })

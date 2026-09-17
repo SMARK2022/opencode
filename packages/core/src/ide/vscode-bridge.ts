@@ -252,7 +252,11 @@ export async function callBridge(input: CallInput): Promise<unknown> {
 
 // 发现、鉴权、期限和错误传播仍由原调用路径承担。
 async function callBridgeOnce(input: CallInput): Promise<unknown> {
-  await assertExistingLocalFilePath(input.filePath)
+  input.signal?.throwIfAborted()
+  // 创建的目标本来就可不存在；实际冲突保护由SDK的create入口负责。
+  if (input.path !== "/notebook/env" || input.body.operation !== "create") {
+    await assertExistingLocalFilePath(input.filePath)
+  }
 // 解析桥接：通过工作区和文件路径匹配最佳桥接
   const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
 // HTTP 响应：fetchWithTimeout 支持 AbortController 中止

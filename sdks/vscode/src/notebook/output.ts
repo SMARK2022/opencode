@@ -125,7 +125,7 @@ function outputItemText(item: vscode.NotebookCellOutputItem) {
   return undefined
 }
 
-async function writeArtifact(
+export async function writeArtifact(
   notebook: vscode.NotebookDocument,
   cell: vscode.NotebookCell,
   item: vscode.NotebookCellOutputItem,

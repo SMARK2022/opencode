@@ -115,6 +115,11 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
   // crypto 已由输出模块静态加载；此处同步生成实例 token，不再引入额外的 import 等待。
 
   const httpServer = http.createServer(async (request, response) => {
+    const controller = new AbortController()
+    // 正常finish后的close不算断开，未完成响应的请求才取消调度。
+    response.once("close", () => {
+      if (!response.writableFinished) controller.abort(new Error("Notebook request disconnected"))
+    })
     try {
       if (!safeLocalRequest(request)) {
         return writeJson(response, 403, { ok: false, error: "Forbidden" })
@@ -148,7 +153,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
       if (!isRecord(body)) {
         return writeJson(response, 400, { ok: false, error: "Expected JSON object body" })
       }
-      const result = await routeRequest(request.method ?? "", url.pathname, body, output)
+      const result = await routeRequest(request.method ?? "", url.pathname, body, output, controller.signal)
       // notebook 处理器只返回结果，不能自行结束 response；HTTP owner 在此统一决定成功状态与序列化。
       if (result !== undefined) {
         return writeJson(response, 200, result)
@@ -212,6 +217,7 @@ async function routeRequest(
   pathname: string,
   body: unknown,
   output: { appendLine(value: string): void },
+  signal: AbortSignal,
 ) {
   if (method !== "POST" || !NOTEBOOK_ROUTES.has(pathname)) return undefined
   // undefined 是未匹配路由的判别值，不能被 HTTP 层序列化成成功的空结果。
@@ -225,6 +231,8 @@ async function routeRequest(
   if (!filePath) throw new Error("filePath is required")
 
   const handler = async () => {
+    // 在唯一队列授予执行权后再检查，入队期间断开的编辑不能迟到写入。
+    signal.throwIfAborted()
     switch (pathname) {
       case "/notebook/env":
         return await notebookEnv(body)
@@ -236,10 +244,10 @@ async function routeRequest(
         return await notebookSource(body)
 
       case "/notebook/run":
-        return await runNotebook(body)
+        return await runNotebook(body, signal)
 
       case "/notebook/edit":
-        return await editNotebook(body)
+        return await editNotebook(body, signal)
 
       case "/notebook/output":
       case "/notebook/cell-output": {
@@ -255,7 +263,9 @@ async function routeRequest(
     return undefined
   }
   // 只旁路source列出的四类读取；其余变更继续复用原文档锁。
-  return await (READONLY_ROUTES.has(pathname) ? handler() : withFileLock(filePath, handler))
+  // stop/info必须能到达长run占用的文档；变更仍由同一文档锁串行。
+  const control = pathname === "/notebook/env" && (body.operation === "stop" || body.operation === "info")
+  return await (READONLY_ROUTES.has(pathname) || control ? handler() : withFileLock(filePath, handler))
 }
 
 function authorized(request: http.IncomingMessage, url: URL, token: string) {

@@ -36,11 +36,13 @@ const EDIT_SYNC_TIMEOUT_MS = 10_000
 const AFTER_SOURCE_PREVIEW_LINES = 10
 const AFTER_SOURCE_PREVIEW_MAX_CHARS = 4 * 1024
 
-export async function editNotebook(input: Record<string, unknown>) {
+export async function editNotebook(input: Record<string, unknown>, signal?: AbortSignal) {
   const filePath = stringProp(input, "filePath")
   // 编辑的新契约要求明确文档，缺失路径不能沿 resolve 的只读缺省规则选中活动文件。
   if (!filePath) throw new Error("filePath is required")
   const notebook = await resolveNotebook(filePath)
+  // 打开文档是异步边界，返回后先检查断开，再构造实际编辑。
+  signal?.throwIfAborted()
   const editType = stringProp(input, "editType")
   if (!editType || !EDIT_TYPES.has(editType)) {
     throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Expected one of: insert, edit, delete.`)
@@ -198,6 +200,12 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
     const oldKind = cellTypeLabel(targetCell.kind)
     const oldLang = targetCell.document.languageId
     return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
+  }
+
+  // 源码字段省略才是语言幂等操作；显式空字符串仍代表清空源码。
+  if (language !== undefined && input.oldCode === undefined && input.newCode === undefined) {
+    const source = targetCell.document.getText()
+    return compactEditResult(notebook, { applied: true, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language, sourcePreview: source, beforeSource: source, afterSource: source })
   }
 
   if (oldCodeRaw) {
