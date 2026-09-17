@@ -95,11 +95,13 @@ diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-out
 diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
 --- a/packages/core/src/tool/read-filesystem.ts
 +++ b/packages/core/src/tool/read-filesystem.ts
-@@ -10,8 +10,9 @@ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
+@@ -10,8 +10,10 @@ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
  
- // V2 read 默认行上限与 SMARK DEFAULT_READ_LIMIT 对齐 1000
- export const MAX_READ_LINES = 1_000
--// V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 24KB
+-// V2 read 默认行上限与 SMARK DEFAULT_READ_LIMIT 对齐 1000
+-export const MAX_READ_LINES = 1_000
++// V2 read 行上限跟随 SMARK V1 演进终值（#78 400 → #142 200），消除 V1/V2 行为分裂
++export const MAX_READ_LINES = 200
+ // V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 24KB
 -export const MAX_READ_BYTES = 24 * 1024
 +// V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 16KB
 +// #178：V2 读路径对齐 16KiB
