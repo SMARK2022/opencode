@@ -16,6 +16,7 @@ import * as vscode from "vscode"
 import { stringProp, numberProp, quoteForSummary } from "../util"
 import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, runtimeLabel, notebookHeader, cellRef } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
+import { writeArtifact } from "./output"
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -82,6 +83,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   // must not consume the same budget because they do not have real line numbers.
   let renderedLines = 0
   let bytesCut = false
+  let sourceArtifact: string | undefined
   let lastRenderedLine = 0
   const outputCells: string[] = []
 
@@ -128,12 +130,13 @@ export async function notebookSource(input: Record<string, unknown>) {
           bytesCut = true
           break
         }
-        // A single notebook source line can be wider than the entire 16 KB tool
-        // response budget. Returning only the cell header gives the agent no
-        // source anchor and can produce invalid pagination such as offset=0.
-        // Keep the line-number prefix and a UTF-8 bounded prefix of the source,
-        // then mark the response truncated; the tool remains line-paginated, so
-        // the next offset still advances to the following virtual source line.
+        // 行内尾段不能用offset+1恢复，导出当前dirty cell而不是磁盘旧版。
+        // 每300码点JSON最坏1802字符，低于通用read的2000字符逐行上限。
+        const chunks = Array.from(cell.document.getText().matchAll(/[\s\S]{1,300}/gu), (match) => JSON.stringify(match[0]))
+        sourceArtifact = (await writeArtifact(notebook, cell, {
+          mime: "application/json",
+          data: Buffer.from(chunks.join("\n")),
+        }, 0, 0)).fsPath
         const prefix = `${globalLineNum}: `
         const prefixBytes = Buffer.byteLength(prefix, "utf8")
         const available = maxBytes - bytes - prefixBytes
@@ -182,7 +185,10 @@ export async function notebookSource(input: Record<string, unknown>) {
     ) + "\n"
   output += outputCells.join("\n")
 
-  if (bytesCut) {
+  if (sourceArtifact) {
+    // 每行是独立JSON字符串；按顺序解析再连接，不引入额外换行。
+    output += `\n\n(Full current cell source: ${sourceArtifact}. Read this artifact with offset/limit; JSON-decode each line and concatenate the strings to recover the exact source.)`
+  } else if (bytesCut) {
     output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
@@ -201,6 +207,7 @@ export async function notebookSource(input: Record<string, unknown>) {
       returned: renderedLines,
       totalLines,
       truncated: bytesCut || more,
+      sourceArtifact,
     },
   }
 }

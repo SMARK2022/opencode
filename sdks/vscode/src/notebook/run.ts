@@ -32,7 +32,8 @@ import { serializeNotebookOutputItem } from "./output"
  * Accepts `cellId` and optional `endCellId`.
  * Default timeout: 300 000 ms (5 minutes).
  */
-export async function runNotebook(input: Record<string, unknown>) {
+export async function runNotebook(input: Record<string, unknown>, signal?: AbortSignal) {
+  signal?.throwIfAborted()
   const filePath = stringProp(input, "filePath")
   if (!filePath) throw new Error("filePath is required")
   const type = stringProp(input, "type")
@@ -55,49 +56,7 @@ export async function runNotebook(input: Record<string, unknown>) {
     )
   }
 
-  // 执行前检查 kernel 是否可用。configure 的 "selected" 状态下 getKernel 返回 undefined
-  // 是正常的（kernel 已选定但未启动），此时 kernelspec metadata 存在，预检应放行。
-  // 只在"既无活跃 kernel 又无 kernelspec metadata"时才阻断，引导 agent 先 configure。
-  const jupyterExt = vscode.extensions.getExtension("ms-toolsai.jupyter")
-  if (jupyterExt) {
-    if (!jupyterExt.isActive) await jupyterExt.activate()
-    const jupApi = jupyterExt.exports as { kernels?: { getKernel?(uri: vscode.Uri): Promise<unknown> } } | undefined
-    const kernel = await jupApi?.kernels?.getKernel?.(notebook.uri)
-    if (!kernel) {
-      // getKernel 返回 undefined 可能是"已选定但未启动"（正常）或"完全未选定"。
-      // 检查 metadata 是否有 kernelspec：有则允许继续（kernel 会在执行时启动）
-      const meta = notebook.metadata as Record<string, unknown>
-      const hasKernelspec = meta && typeof meta === "object" &&
-        (meta.kernelspec !== undefined || meta.language_info !== undefined)
-      if (!hasKernelspec) {
-        return {
-          ran: false,
-          summary: [
-            ...notebookHeader(notebook, "Run", [
-              `target=${quoteForSummary(describeRunTarget(resolveRunTarget(notebook, cellId, endCellId)))}`,
-              `status="no-active-kernel"`,
-              `dirty=${notebook.isDirty}`,
-              `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
-            ]),
-            "",
-            "No active kernel and no kernelspec metadata. " +
-            "Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
-          ].join("\n"),
-          data: {
-            path: notebook.uri.fsPath || notebook.uri.toString(),
-            dirty: notebook.isDirty,
-            runtime: runtimeLabel(notebook),
-            completed: false,
-            stoppedAt: undefined,
-            cells: [],
-            noActiveKernel: true,
-          },
-        }
-      }
-      // kernelspec 存在但 kernel 未启动：继续执行，notebook.cell.execute 会启动 kernel
-    }
-  }
-
+  // 冷启动由原生执行入口负责，metadata和已启动kernel都不是执行资格。
   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
 
   // Resolve target cells via stable cell IDs. No cellIndex or "all" mode is accepted.
@@ -115,6 +74,8 @@ export async function runNotebook(input: Record<string, unknown>) {
   let failedIndex: number | undefined
 
   for (const cell of cells) {
+    // 断开只取消本请求；不得继续调度下一cell，也不擅自中断其他运行。
+    signal?.throwIfAborted()
     if (cell.kind !== vscode.NotebookCellKind.Code) {
       results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", existing_outs: [], artifacts: [] })
       continue
@@ -128,11 +89,18 @@ export async function runNotebook(input: Record<string, unknown>) {
     editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
     editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
 
-    const wait = waitForSingleCell(cell, timeoutMs)
+    const wait = waitForSingleCell(cell, timeoutMs, signal)
     let executionSummary: vscode.NotebookCellExecutionSummary | undefined
     try {
-      await vscode.commands.executeCommand("notebook.cell.execute")
-      executionSummary = await wait.promise
+      // 命令本身可能不返回；期限覆盖命令等待，不能只覆盖后续事件等待。
+      // 显式文档与范围保证活动编辑器变化不会把代码执行到另一个notebook。
+      executionSummary = await Promise.race([
+        wait.promise,
+        vscode.commands.executeCommand("notebook.cell.execute", {
+          document: notebook.uri, ranges: [{ start: cell.index, end: cell.index + 1 }], autoReveal: false,
+        }).then(() => wait.promise),
+      ])
+      signal?.throwIfAborted()
     } finally {
       wait.dispose()
     }
@@ -254,11 +222,15 @@ function runSummaryText(
  * The waiter is created before invoking `notebook.cell.execute`, matching the
  * VS Code/Copilot pattern so fast executions are not missed.
  */
-function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
+function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number, signal?: AbortSignal) {
   const targetUri = cell.document.uri.toString()
   let subscription: vscode.Disposable | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
+  let abort: (() => void) | undefined
   const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
+    abort = () => resolve(undefined)
+    signal?.addEventListener("abort", abort, { once: true })
+    if (signal?.aborted) abort()
     timer = setTimeout(() => {
       subscription?.dispose()
       resolve(undefined)
@@ -278,6 +250,8 @@ function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
   return {
     promise,
     dispose() {
+      // 成功、失败和超时均移除请求监听，避免后续取消影响已完成cell。
+      if (abort) signal?.removeEventListener("abort", abort)
       if (timer) {
         clearTimeout(timer)
         timer = undefined

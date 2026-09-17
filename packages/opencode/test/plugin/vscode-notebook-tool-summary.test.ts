@@ -1,12 +1,15 @@
 import { beforeEach, expect, mock, spyOn, test } from "bun:test"
+import { tmpdir } from "../fixture/fixture"
 
 const NotebookCellKind = { Markup: 1, Code: 2 } as const
 const EndOfLine = { LF: 1, CRLF: 2 } as const
 const notebookPath = "/tmp/notebook tool demo.ipynb"
+const artifacts = new Map<string, Uint8Array>()
 
 let activeNotebook: ReturnType<typeof createNotebook>
 let cellSequence = 0
 let executionOrder = 0
+let restartConfirmation = false
 // The fake VS Code command registry intentionally separates public commands
 // (`getCommands(true)`) from the full extension-host surface (`getCommands(false)`).
 // Jupyter contributes some commands as hidden/internal commands, so this fixture
@@ -33,6 +36,7 @@ const textListeners = new Set<(event: { document: NotebookCell["document"] }) =>
 // `vscode` module. The fake owns only stable API surface used by notebook tools;
 // it intentionally avoids reaching into private helper functions.
 mock.module("vscode", () => ({
+  env: { appName: "Notebook test" },
   NotebookCellKind,
   EndOfLine,
   ConfigurationTarget: { Global: 1 },
@@ -72,7 +76,7 @@ mock.module("vscode", () => ({
     workspaceFolders: [{ uri: createUri("/tmp") }],
     fs: {
       createDirectory: async () => undefined,
-      writeFile: async () => undefined,
+      writeFile: async (uri: UriLike, data: Uint8Array) => { artifacts.set(uri.fsPath, data.slice()) },
       readFile: async () => new Uint8Array(),
       // stat 对不存在的文件抛错（模拟 ENOENT），对已打开的 notebook 路径也抛错
       // 因为 mock 的 fs 不跟踪实际磁盘文件
@@ -97,8 +101,8 @@ mock.module("vscode", () => ({
       return { dispose: () => textListeners.delete(listener) }
     },
     getConfiguration: () => ({
-      get: () => false,
-      update: async () => undefined,
+      get: () => restartConfirmation,
+      update: async () => { throw new Error("settings must remain unchanged") },
     }),
   },
   window: {
@@ -144,7 +148,7 @@ const vscodeMock = (await import(vscodeModule)) as {
 const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as { notebookSummary: (filePath: string) => Promise<ToolResult> }
 const { notebookSource } = (await import(sdkNotebookUrl("source"))) as { notebookSource: (input: Record<string, unknown>) => Promise<ToolResult> }
 const { editNotebook } = (await import(sdkNotebookUrl("edit"))) as { editNotebook: (input: Record<string, unknown>) => Promise<ToolResult> }
-const { runNotebook } = (await import(sdkNotebookUrl("run"))) as { runNotebook: (input: Record<string, unknown>) => Promise<ToolResult> }
+const { runNotebook } = (await import(sdkNotebookUrl("run"))) as { runNotebook: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolResult> }
 const { readNotebookCellOutput } = (await import(sdkNotebookUrl("output"))) as {
   readNotebookCellOutput: (filePath: string, index?: number, cellId?: string) => Promise<ToolResult>
 }
@@ -153,6 +157,7 @@ const { notebookEnv } = (await import(sdkNotebookUrl("env"))) as { notebookEnv: 
 beforeEach(() => {
   cellSequence = 0
   executionOrder = 0
+  restartConfirmation = false
   activeNotebook = createNotebook()
   vscodeMock.workspace.notebookDocuments = [activeNotebook]
   vscodeMock.window.activeNotebookEditor = undefined
@@ -166,6 +171,75 @@ beforeEach(() => {
   extensionLookup = new Map()
   notebookListeners.clear()
   textListeners.clear()
+  artifacts.clear()
+})
+
+test("summary never reports failed or unknown execution as successful", async () => {
+  // 从真实执行字段构造失败，避免测试复刻展示字符串的判定错误。
+  activeNotebook.cellAt(1).executionSummary = { success: false }
+  expect((await notebookSummary(notebookPath)).summary).toContain('status="1 failed"')
+  activeNotebook.cellAt(1).executionSummary = { executionOrder: 1 }
+  expect((await notebookSummary(notebookPath)).summary).not.toContain("All code cells report successful")
+})
+
+test("same-language edit preserves source identity and outputs", async () => {
+  const cell = activeNotebook.cellAt(1)
+  const before = { source: cell.document.getText(), outputs: cell.outputs, version: activeNotebook.version }
+  // 幂等编辑不应以replaceCells实现，否则输出与稳定ID会丢失。
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", language: "python" })
+  expect(result.data.applied).toBe(true)
+  expect(activeNotebook.cellAt(1)).toBe(cell)
+  expect({ source: cell.document.getText(), outputs: cell.outputs, version: activeNotebook.version }).toEqual(before)
+})
+
+test("output keeps earlier bytes across same-name notebooks and reruns", async () => {
+  await readNotebookCellOutput(notebookPath, 1)
+  const first = new Map(artifacts)
+  // 两份同名文档与同一cell重跑都必须保留已交给调用者的产物。
+  activeNotebook.uri = createUri("/other/notebook tool demo.ipynb")
+  await readNotebookCellOutput(activeNotebook.uri.fsPath, 1)
+  activeNotebook.cellAt(1).outputs[0].items[0].data = new TextEncoder().encode("different")
+  await readNotebookCellOutput(activeNotebook.uri.fsPath, 1)
+  expect(artifacts.size).toBe(3)
+  for (const [key, bytes] of first) expect(artifacts.get(key)).toEqual(bytes)
+})
+
+test("output from a long notebook name writes to the real filesystem", async () => {
+  await using tmp = await tmpdir()
+  activeNotebook.uri = createUri(`/tmp/${"n".repeat(200)}.ipynb`)
+  await readNotebookCellOutput(activeNotebook.uri.fsPath, 1)
+  expect(artifacts.size).toBe(1)
+  // 文档名合法不代表派生文件名合法；真实写入检验文件系统单段长度约束。
+  for (const [name, bytes] of artifacts) {
+    const file = `${tmp.path}/${name.split("/").at(-1)}`
+    await Bun.write(file, bytes)
+    expect(await Bun.file(file).text()).toBe("ready\n")
+  }
+})
+
+test.each(["info", "configure"])("%s reads kernel status without executing code and preserves lookup errors", async (operation) => {
+  let executed = false
+  const api = { kernels: { getKernel: async () => ({ language: "python", status: "idle", executeCode: () => { executed = true; throw new Error("hidden execution") } }) } }
+  const extension = { isActive: false, exports: api, async activate() { this.isActive = true; return api } }
+  extensionLookup.set("ms-toolsai.jupyter", extension)
+  // 读取状态不应改变内核命名空间或引发额外执行授权。
+  const result = await notebookEnv({ filePath: notebookPath, operation })
+  expect(extension.isActive).toBe(true)
+  expect(result.summary).toContain(operation === "info" ? "kernelStatus=idle" : "status=configured")
+  expect(executed).toBe(false)
+  api.kernels.getKernel = async () => { throw new Error("kernel lookup failed") }
+  await expect(notebookEnv({ filePath: notebookPath, operation })).rejects.toThrow("kernel lookup failed")
+})
+
+test.each([true, false])("restart preserves confirmation=%s and never claims verification", async (confirmation) => {
+  restartConfirmation = confirmation
+  const api = { kernels: { getKernel: async () => ({ language: "python", status: "idle" }) } }
+  extensionLookup.set("ms-toolsai.jupyter", { isActive: true, exports: api, activate: async () => api })
+  // 活跃kernel在请求前已存在，不能拿其可访问性当作重启成功证据。
+  const result = await notebookEnv({ filePath: notebookPath, operation: "restart" })
+  expect(result.data.requested).toBe(!confirmation)
+  expect(result.data.verified).toBe(false)
+  expect(restartConfirmation).toBe(confirmation)
 })
 
 test("notebook tools expose a consistent Notebook plus tool header before details", async () => {
@@ -256,6 +330,19 @@ test("source includes a bounded preview for a single oversized source line", asy
   expect(result.summary).toContain("visible-prefix")
   expect(result.summary).not.toContain("hidden-suffix")
   expect(result.summary).not.toContain("Use offset=0")
+})
+
+test("oversized dirty source exports lossless read-safe JSON lines", async () => {
+  // JSON转义与非BMP字符都能突破字符数粗估，必须验证下游每行上限。
+  const source = `${"\\\u0001😀".repeat(6000)}END_SENTINEL`
+  activeNotebook.cellAt(1).document.setText(source)
+  const result = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2) })
+  const bytes = artifacts.get(String(result.data.sourceArtifact))
+  expect(bytes).toBeDefined()
+  const lines = new TextDecoder().decode(bytes).split("\n")
+  expect(lines.every((line) => line.length < 2000)).toBe(true)
+  expect(lines.map((line) => JSON.parse(line)).join("")).toBe(source)
+  expect(result.summary).toContain(String(result.data.sourceArtifact))
 })
 
 test("source does not consume a normal line that only overflows the current page", async () => {
@@ -529,7 +616,7 @@ test("env create returns already-exists when notebook is already open", async ()
 // 此时 kernelspec metadata 存在，预检应放行。
 // ---------------------------------------------------------------------------
 
-test("run returns no-active-kernel when no kernel and no kernelspec metadata", async () => {
+test("run permits native cold start without metadata or an active kernel", async () => {
   // 移除 kernelspec metadata，模拟完全未配置的 notebook
   ;(activeNotebook as { metadata: Record<string, unknown> }).metadata = {}
   // 安装 Jupyter 扩展但 getKernel 返回 undefined（无活跃 kernel）
@@ -543,8 +630,8 @@ test("run returns no-active-kernel when no kernel and no kernelspec metadata", a
   const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
   const data = result.data as Record<string, unknown>
 
-  expect(data.noActiveKernel).toBe(true)
-  expect(result.summary).toContain("configure")
+  expect(data.completed).toBe(true)
+  expect(data.noActiveKernel).toBeUndefined()
 })
 
 test("run proceeds when kernel not started but kernelspec metadata exists", async () => {
@@ -567,6 +654,15 @@ test("run proceeds when kernel not started but kernelspec metadata exists", asyn
 // ---------------------------------------------------------------------------
 // run 超时消息：超时后引导 agent 调用 env stop 中断或 env info 检查状态。
 // ---------------------------------------------------------------------------
+
+test("run deadline includes a command that never resolves", async () => {
+  const original = vscodeMock.commands.executeCommand
+  // 未返回的原生命令不能遮住已经到期的cell等待器。
+  vscodeMock.commands.executeCommand = () => new Promise(() => {})
+  try {
+    expect((await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 20 })).data.completed).toBe(false)
+  } finally { vscodeMock.commands.executeCommand = original }
+}, 1000)
 
 test("run timeout message guides agent to env stop and env info", async () => {
   // 设置极短超时，模拟 cell 执行不完成
@@ -765,7 +861,7 @@ function executeSelectedCell() {
 }
 
 type UriLike = { fsPath: string; fragment: string; scheme: string; toString(): string }
-type ToolResult = { summary: string; data?: unknown }
+type ToolResult = { summary: string; data: Record<string, unknown> }
 type NotebookEditor = { notebook: typeof activeNotebook; selection: { start: number; end: number }; revealRange(range: { start: number; end: number }): void }
 type NotebookCell = {
   index: number

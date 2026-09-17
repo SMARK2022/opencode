@@ -6,7 +6,7 @@
  * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
  */
 import * as vscode from "vscode"
-import * as path from "node:path"
+import { createHash } from "node:crypto"
 import { quoteForSummary } from "../util"
 import {
   existingOuts,
@@ -108,7 +108,7 @@ function outputItemText(item: vscode.NotebookCellOutputItem) {
 // Artifact writing
 // ---------------------------------------------------------------------------
 
-async function writeArtifact(
+export async function writeArtifact(
   notebook: vscode.NotebookDocument,
   cell: vscode.NotebookCell,
   item: vscode.NotebookCellOutputItem,
@@ -119,10 +119,12 @@ async function writeArtifact(
   await vscode.workspace.fs.createDirectory(root)
   const filename =
     [
-      path.basename(notebook.uri.fsPath || "untitled", path.extname(notebook.uri.fsPath || "untitled")),
+      // URI已进入摘要，不再拼接原文件名，避免合法长文档名使产物超过单段长度上限。
       `cell-${cell.index}`,
       `output-${outputIndex}`,
       `item-${itemIndex}`,
+      // URI隔离同名文档，内容身份使重跑不会覆盖先前已返回的路径。
+      createHash("sha256").update(notebook.uri.toString()).update("\0").update(item.data).digest("hex"),
     ].join("-") + extensionForMime(item.mime)
   const uri = vscode.Uri.joinPath(root, filename)
   await vscode.workspace.fs.writeFile(uri, item.data)

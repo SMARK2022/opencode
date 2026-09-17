@@ -1,0 +1,679 @@
+# Canonical Investigation Report: VS Code Notebook Bridge 工具链可靠性与兼容性
+
+> Status: verified
+>
+> Revision: R5
+>
+> Approved revision: R5
+
+> Audit mode: full-scope
+>
+> Investigation date: 2026-09-13 至 2026-09-14
+>
+> Requirement source: 2026-09-16 Session GOAL 及后续范围调整
+>
+> Implementation allowed: verified; commit task files only
+>
+> Last updated: 2026-09-17
+
+**需求**：修复运行等待挂起、冷启动预检误拦、范围超时后继续执行；create被存在性检查阻断、stop被执行锁阻塞、运行状态探针隐藏执行或授权且吞错、restart改变全局设置并误报验证成功；edit取消后仍写入、同语言编辑报缺源码；summary将失败报成功；output同名文档产物覆盖；source超长行尾部不可读；测试遗漏上述故障。取消后不得启动排队写入和后续单元格，结果须与实际状态一致。生产文件≤8个，代码增删合计≤1200行；仅修改这些问题及OpenCode既有红测。真实场景与本次修改涉及的测试、类型检查和构建通过，不得跳过或弱化相关测试。
+
+**验收**：运行本次修改的六个测试文件、packages/opencode类型检查及SDK构建门禁；验证Notebook真实场景。远端macOS/Linux未验证如实记录；不push，不以旧提交CI作为本次实现的证据。
+
+**无法实现项**：提供实证原因并单独报告，继续完成其余可实现项的TDD、验证、独立审计与提交。当前环境限制包括远端macOS/Linux验证及上游独立restart授权。
+
+目标终态为 `verified-implementation-and-commit`。独立方案审计批准后执行TDD；通过独立实现审计后，仅提交本任务文件，不push、amend或跳过hook。
+
+本文档是 VS Code IDE Bridge 扩展（`sdks/vscode`，扩展 ID `SMARK2022.opencode-ide-bridge`）notebook 工具链（`vscode_notebook_summary/source/edit/run/output/env`）的完整调研报告，涵盖：静态源码审计、动态实测（扩展开发宿主 + 直调桥 HTTP）、opencode.db 数据库取证、VS Code 日志审计、既有测试 harness 保真度审查。
+
+---
+
+## 1. 实证环境
+
+| 项目 | 值 |
+|---|---|
+| 用户 VS Code 版本 | **1.137.0**（扩展 `engines.vscode` 声明 `^1.94.0`） |
+| 用户已装扩展版本 | `smark2022.opencode-ide-bridge@1.15.10`（装于 2026/7/23） |
+| 仓库源码版本 | 1.15.11（与 1.15.10 的 notebook 代码**完全相同**；1.15.10→1.15.11 之间 `sdks/vscode/src` 仅有一个 LSP 修复 `7695cccd2c`，无 notebook 变更） |
+| 仓库 `sdks/vscode/dist/extension.js` | **陈旧**：构建于 2026/7/5，落后于源码（notebook 源码最后修改 7/9，lsp.ts 7/17） |
+| Jupyter 扩展 | `ms-toolsai.jupyter@2025.9.1`（engines `^1.105.0`），`jupyter.restartkernel`/`jupyter.interruptkernel` 命令确认存在 |
+| Python 扩展 | `ms-python.python@2026.7.2026082601` |
+| 参照用 VS Code 源码 | `.temp/thirdparty/vscode`（code-oss-dev **1.123.0**，用于 API 考古；实际运行时为 1.137.0） |
+| 实验隔离 | 手写脚本、夹具、构建、独立 profile/扩展副本均在 `.temp/testing/`；生产源码未修改。前轮工具 artifact 和真实 Jupyter 默认 runtime 的例外见第 7 节 |
+| 实验宿主 | 早期为 `.temp/testing/extdev/bridge` 插桩副本；复核使用 `.temp/testing/notebook-r1-review/` 独立 profile、extensions-dir、开发扩展及直接 bundle 的未修改生产 handlers；真实 Jupyter 作为普通安装扩展加载 |
+
+### 调研方法说明
+
+**2026-09-16 当前仓库基线**：重新读取根/package/test AGENTS、CONTEXT、ADR 索引、policy/template、CLI/plugin/SDK 调用链及既有测试。ADR 索引仅有 triage 决策，不约束 Notebook。当前用户工作区 permission/auto、precheck、shell 及其测试有既有修改，本 GOAL 不覆盖这些改动。当前 VS Code 已升级 **1.138.0**，因此下面 1.137.0 是历史证据，不能当作当前版本。新 `goal-baseline-profile` 对未修改生产 handlers 重建并运行，七个行为断言再次全部 red，range HTTP 6003ms、stop 等待 850ms，进程 PID 52804。
+
+当前反馈与验证命令（cwd 为根目录，另有注明除外）：
+
+| 命令/证据 | 当前结果 | 含义 |
+|---|---|---|
+| `node .temp/testing/notebook-r1-review/build.cjs` 后用独立 `goal-baseline-profile`、`extensionDevelopmentPath` 和 `extensionTestsPath` 启动 `code` | suite 运行后产出新 results | 真实 VS Code serializer/controller/HTTP，测试控制器不等于真实 Jupyter |
+| `node .temp/testing/notebook-r1-review/check.cjs` | exit 1；failedSummary/immutableArtifact/languageNoop/cancelledQueuedEdit/controlNotQueued/rangeBudget/recoverableLongLine 均 false | 重现用户症状，非成功验证 |
+| `bun test test/plugin/vscode-notebook-tool-summary.test.ts test/plugin/vscode-bridge.test.ts`，cwd `packages/opencode` | 41 pass，0 fail，154 assertions | 既有窄测试仍漏报实际缺陷 |
+| `bun typecheck`，cwd `packages/opencode` | exit 0 | 当前包类型检查基线 |
+| `bun run script/test-ci.ts`，cwd `packages/opencode` | core 233 files 启动；20 分钟外层执行超时，未生成 JUnit，未完成 TUI shard | 不得记为全套已通过；日志 `tool_0a99b012c0011EO12C80QfX1BE` |
+| `bun test test/mcp/oauth-auto-connect.test.ts test/mcp/oauth-browser.test.ts`，cwd `packages/opencode` | 4 pass / 3 fail | 既有红测：19876 EADDRINUSE、两项 browser open 等待超时 |
+| `bun test test/mcp/oauth-browser.test.ts`，cwd `packages/opencode` | 0 pass / 3 fail | 独立运行同样失败，不能只归因于跨文件 mock |
+| `netsh interface ipv4 show excludedportrange protocol=tcp` + `Get-NetTCPConnection -LocalPort 19876` | 19819–19918 为系统排除范围；无 listener | 当前 callback 端口失败有具体环境证据，不终止旧进程、不改系统网络配置 |
+| GitHub run `35072303771` | OpenCode macOS job `104716421223` 失败；Windows/Linux、SDK gate 成功 | 唯一报告红测 `test/tool/shell.test.ts:2156` preserves output when aborted，15000ms timeout；4374 tests，4353 pass、20 原有 skip、1 fail |
+| `bun test test/tool/shell.test.ts --test-name-pattern "preserves output when aborted"`，cwd `packages/opencode` | Windows 1 pass / 0 fail | 不能代替 macOS 验证或据此撤销 CI 红测 |
+| 独立 `goal-jupyter-baseline-profile` 重建运行现有 `jupyter-suite.ts` | VS Code 1.138.0、PID 16096；生产 run 111ms 返回 no-active-kernel；原生执行 15742ms 得到 `42` | 当前版本重复确认冷启动误拦 |
+| 同次真实 kernel `executeCode` | 19ms 得到测试模式拒绝授权 dialog 的异常；生产 info 6ms 返回 idle 并继续声称 executeCode probe | 当前版本重复确认隐藏授权/吞错；不把测试模式拒绝等同于普通窗口超时 |
+
+上游 `notebookCommandListener.ts` 的公开 restart 注册没有 `disableUI` 参数；`restart_notebook_kernel` LM tool 声明 confirmationMessages，VS Code `languageModelToolsService.ts:645-657` 的无 chat context 调用仍需确认。
+
+既有红测的当前假设：OAuth 的固定 19876 被系统排除，`startAuth` 在 browser open 之前失败；`oauth-browser` 的 fork 捕获 cause 后使真实 bind 错误变成等待超时。验证应在测试的既有 `oauth.redirectUri` 配置 seam 使用可绑定临时端口并保留原业务断言，不更改系统保留端口或扩展产品自动换端口行为。macOS shell abort 只有远端 15s 超时证据，本机通过；需要继续检查生产中止/输出消费 owner 及可重复信号，不能只加 timeout 或改断言消红。
+
+- 用户约束：不为我点击任何 UI；不使用 mock 鼠标点击；不操作/不结束任何实验前已存在的进程；实验全部在 `.temp/testing`；工作区只读（除注册表目录与本文档获明确授权）。
+- 驱动方式：直接 HTTP 调桥（token 由脚本进程内读取、从不打印、不落盘）；结果全量记录于 `.temp/testing/extdev/drive-results.jsonl` 与 `edge-results.jsonl`。
+- 证据边界：早期 `extdev` 的 run 副本改过 metadata 预检，探针只回显文本，其通过不能证明未修改生产 run 或真实 Python 成功。复核 `suite.ts` 使用真实 VS Code controller/serializer/event 验证桥生命周期；`jupyter-suite.ts` 则使用真正 Python/Jupyter 执行 `print(6 * 7)`，使用真实Python进程。
+- 测试模式边界：Jupyter 本身按正常安装模式加载，受限 API 发布者检查仍生效；但 VS Code 的 `--extensionTestsPath` 会拒绝显示 modal。授权弹窗异常能证明隐藏交互存在，不能作为普通开发宿主中的等待时长实测。上游 GitHub main 源码仅用于定位机制，已安装 2025.9.1 的动态结果才是本机兼容性依据。
+
+---
+
+## 2. 实测矩阵结果总览
+
+### 2.1 第一轮：主矩阵（扩展开发宿主，仓库代码）
+
+| 调用 | 结果 |
+|---|---|
+| `summary` | 基本 cell map 正常；复核发现失败 cell 的总标题会误报全部成功，见修复表 D7 |
+| `source`（按 cellId / 全文分页） | ✅ 正常 |
+| `edit` insert | ✅ 正常（2→3 cells，返回新 `#VSC-` ID 与 AfterSource 预览） |
+| `env info` | ✅ 正常（但 `runtime="unknown"`，见 D2） |
+| `run`（探针 kernel） | 插桩副本通过（349ms）；不能外推未修改生产代码 |
+| `run`（命令未返回） | 超过配置期限仍挂起（见 D1） |
+| `run`（真实 Jupyter 冷启动预检） | 误拦截 "No active kernel and no kernelspec metadata"（见 D2） |
+| `output` | ✅ 正常（4 artifacts，stdout/text，inline + 落盘混合） |
+| `env save` | ✅ 正常（dirty true→false） |
+| `env create`（经插件工具） | ❌ **必现失败**（见 D4）；直调 HTTP 则 200 成功 |
+| 负例：run/source/edit 用伪造 cellId | ✅ 全部返回清晰 500 错误与恢复指引 |
+
+### 2.2 第二轮：边界矩阵
+
+| 用例 | 结果 |
+|---|---|
+| run markdown cell | ✅ 正确跳过（"skipped (not code)"，completed=true） |
+| 无 metadata notebook（`no-metadata-probe.ipynb`）+ 探针 kernel | ✅ run 正常（257ms）；同时实证序列化器自动补 `language_info`（见 D2 补充） |
+| cell 内 oldCode 精确替换（含 `print(` 片段） | ✅ 正常（AfterSource 回读正确） |
+| 中文内容 insert + source 回读（`中文变量 = '你好，世界'`） | ✅ 编解码无损 |
+| 空 notebook（0 cells）TOP 插入 | ✅ 正常（0→1） |
+| 单行 >16KB（9000 个中文字符）source 读取 | 前缀 UTF-8 安全；续读指引错误，尾部不可达，复核见 D9 |
+| 探针 kernel 下 `env restart` / `env stop` | ✅ 优雅返回 `requested`（`verified=false`，非 Jupyter kernel 下无法验证，属预期） |
+
+2026-09-14 独立复核（未修改生产 handler，具体记录见 `notebook-r1-review/results.json`、`jupyter-results.json`）：
+
+| 用例 | 实际结果与证据边界 |
+|---|---|
+| controller 明确 `end(false)` 后 summary | cell 行显示 failed，总标题却显示 All code cells report successful；D7 |
+| `a/same.ipynb` 与 `b/same.ipynb` 导出 | artifact 路径完全相同，首份 artifact 再读已变成 `different-b`；D8 |
+| 已为 Python 的 cell 仅传 `language=python` | 报 `newCode is required for edit`，违反语言专用编辑幂等性；D10 |
+| run 和排队 edit 的 HTTP 客户端均在 100ms 取消 | 原 run 完成后仍插入 `abandoned-edit`；取消响应等待未取消排队写，D1 |
+| 同 notebook run 期间请求 stop | 等约 859ms 才返回。该隔离组无 Jupyter，证明 stop 被锁排队，不证明真实中断成功 |
+| 8 个约 800ms cell，per-cell=1000ms，HTTP=6000ms | 客户端 6002ms timeout，最终 8 个 cell 全部执行成功；D5 |
+| 20000 字符单行尾部 `END_SENTINEL` | 首次和 offset=2 都读不到尾部，offset 被夹回 1；D9 |
+| 另一 notebook 活动时显式 `{document,ranges,autoReveal:false}` 执行 | 目标执行，活动的另一 notebook 未执行；支持移除活动选择依赖 |
+| 真实 Jupyter 冷启动调用生产 run | 返回 `ran=false/no-active-kernel`；随后同 notebook 原生执行成功，直接确认 D2 |
+| 已启动 kernel 的 `executeCode('print(42)')` | 测试宿主报 `DialogService: refused to show dialog in tests`，内容为 kernel 访问授权。生产 info 吞掉探针异常，只有 language/status，仍声称 runtime 已探测；D11 |
+
+`check.cjs` 的七个预期行为断言全部失败，表示七项回归已复现，并非测试套件崩溃。尚未完成其他 VS Code/Jupyter 版本、remote kernel、R/Julia、普通窗口真实授权等待、真实并发 restart/interrupt 的动态矩阵；这些边界不能用自有 controller 代替验证。
+
+---
+
+## 3. 数据库取证（`C:\Users\Lenovo\.local\share\opencode\opencode.db`，只读）
+
+数据库约 3.4GB。只读查询 `part` 的 Notebook 工具行；2026-09-14 用 `bun:sqlite` 的 readonly 与 `PRAGMA query_only=ON` 恢复了 1040 条冷载荷，校验 27 个 zstd 包的 raw size、owner/hash 及 entry key，在内存恢复 input/error/output，未调用会回填数据库的 storage 服务。总样本 **1134 = 1029 completed + 105 error**；1040 是冷行数，不是总调用数。脱敏聚合与可追踪 part/session ID 位于 `notebook-r1-review/cold-forensics.json`。这是历史样本，不能假设各行都来自当前 SDK 版本。
+
+### 3.1 全部项目历史调用量与失败率
+
+| 工具 | 完成 | 失败 | 失败率 |
+|---|---|---|---|
+| `vscode_notebook_edit` | 370 | 57 | **13.3%** |
+| `vscode_notebook_run` | 202 | 20 | 9.0% |
+| `vscode_notebook_env` | 60 | 15 | **20.0%** |
+| `vscode_notebook_summary` | 64 | 9 | 12.3% |
+| `vscode_notebook_output` | 59 | 3 | 4.8% |
+| `vscode_notebook_source` | 274 | 1 | 0.4% |
+
+### 3.2 失败时长聚类（与机理的对应关系）
+
+| 工具 | <20s | 20–125s（插件 ~120s 中止） | >125s（cell ~300s 超时） |
+|---|---|---|---|
+| `run` | 5 | 3 | **12** |
+| `env` | 2 | **13** | 0 |
+
+- 上表仅为时长分桶，不能据此识别 cell timeout、网络等待或用户取消。恢复后 run 的 20 个 error 按文本分类为 timeout 8、abort 8、path 2、transport 1、cell identity 1；这些分类仍不是具体时序根因。
+- 可读错误文本的热行样本：`The operation timed out.`（250.2s、286.9s）、`The operation was aborted.`（125s）、`Tool execution aborted`（105.1s、84s、64.8s）。
+- env 的 15 个 error 分属 restart 6、info 4、configure 3、create 2；13 个错误文本包含 abort，另有 transport 1、待归类 1。旧报告将近期 info/restart 错误写成 configure 卡住循环的归因撤回。历史反复中止确实存在，具体原因需要逐次关联日志。
+- edit 的 57 个 error 文本分类为匹配/目标 24、abort 13、cell identity 6、参数 6、transport 2、path 2、待归类 4。分类正则只是排查索引，不能把所有匹配失败都定性为实现 bug；15 个 edit error 仍没有 editType，不应替其猜测操作。
+
+### 3.3 结论
+
+数据库证明问题涉及执行、编辑、环境查询与控制多个入口，不能归约为单一故障。202 条 run completed 中，按 `Run:` 标题解析有 **157 completed=true、40 completed=false、5 no-active-kernel**；工具调用完成与 Notebook 执行成功必须区分。40 条失败也可能包含用户代码错误，不能直接计为 bridge 故障率。全文关键词 `failed` 会匹配用户输出，不能拿关键词计数代替结构化结果。env 部分旧版本输出没有当前标题，保留不可分类，不推测。
+
+---
+
+## 4. 缺陷清单（原 D1–D6 原位修订；新增 D7–D12 列于第 6 节）
+
+### D1 —【高/P1】执行等待、请求取消与文档写队列职责混合，控制操作被阻塞
+
+**位置**：`sdks/vscode/src/notebook/run.ts:131-138`
+
+```ts
+const wait = waitForSingleCell(cell, timeoutMs)
+try {
+  await vscode.commands.executeCommand("notebook.cell.execute")  // 该Promise可能长期不返回
+  executionSummary = await wait.promise                          // timer 已启动，但其结果被前面的 await 阻挡
+} finally {
+  wait.dispose()
+}
+```
+
+**机理**：`waitForSingleCell` 的计时器已经启动，但 handler 先等待可能阻塞的 `executeCommand`，无法及时消费 timeout。`withFileLock(filePath)`（`bridge.ts:53-64`）又把 run 的整个执行等待、edit、所有 env 操作串到同一个 raw-path 队列。stop/info 因而不能服务正在执行的 notebook；HTTP 断开也未使排队写失效。这是队首阻塞，不是已证明的循环死锁。raw path 也不是可靠的文档身份，大小写/URI 别名是否绕过串行需补跨路径测试。
+
+**实证**：早期无 kernel 场景 `timeoutMs=8000` 仍等待约 181s。未修改 handler 复核又证实 100ms 取消的排队 edit 后续仍写入、stop 等待约 859ms。历史 DB 的长等待不能仅按时长归因到这些机制。
+
+**用户可感知症状**：工具"卡住"，且同一 notebook 后续操作全部卡住；只能等插件 120s/305s 中止，或用户手动关弹窗。
+
+**修复方向**：
+1. 把现有通用文件锁替换为按 notebook URI 归属的短文档写串行段；执行由一次请求拥有其目标 cell 引用、监听器、期限与取消。stop 和无副作用 info 不排在执行等待之后；禁止另建 controller registry 或镜像 Jupyter 的 kernel 状态机。
+2. 采用已实测的 `{document,ranges,autoReveal:false}` 显式执行目标，去掉依赖 `editor.selection` 的正确性。每 cell 的当前执行事件与期限共同完成等待；超时或请求取消后不再调度范围中的后续 cell。客户端断开必须传到队列入口，已取消且未开始的 edit 不应执行。
+3. `Promise.race` 只能解除本请求等待，不能取消 VS Code 命令或底层 kernel；明确报告当前 cell 可能仍在运行，保留用户显式 stop 语义。监听器在全部退出路径释放，不把全局 UI 的所有权归给 bridge，**删除自动 closeQuickOpen 建议**。
+
+---
+
+### D2 —【高/P1】metadata 展示被当作执行资格，且读取层级错误
+
+**位置**：
+- `sdks/vscode/src/notebook/run.ts:69-71`（run 预检）
+- `sdks/vscode/src/notebook/format.ts:207-217`（`runtimeLabel`，所有工具响应的 `runtime=` 字段）
+- `sdks/vscode/src/notebook/env.ts:229`（configure 诊断 `metadataKernelSpec`）
+
+**实证**（`/notebook/meta` 探针，VS Code 1.137.0，`kernelspec` 明确存在于文件的 notebook）：
+
+```json
+{
+  "vscodeVersion": "1.137.0",
+  "flatHit": false,
+  "nestedHit": true,
+  "metadataKeys": ["cells","metadata","nbformat","nbformat_minor","indentAmount"],
+  "metadataDump": { "cells": [], "metadata": { "kernelspec": {"display_name":"Python 3","language":"python","name":"python3"}, "language_info": {"name":"python","version":"3.12"} }, "nbformat": 4, "nbformat_minor": 5, "indentAmount": " " }
+}
+```
+
+**根因**：VS Code 内置 ipynb 序列化器把**整个 ipynb JSON（去掉 cells）**塞进 `NotebookData.metadata`（`.temp/thirdparty/vscode/extensions/ipynb/src/deserializers.ts:361-371`：`notebookData.metadata = notebookContentWithoutCells`，另加 `indentAmount`）。因此正确路径是 `notebook.metadata.metadata.kernelspec`，而不是扩展代码读取的 `notebook.metadata.kernelspec`。
+
+**后果**：
+1. run 预检：在本次真实 Jupyter 冷启动样本中，误判并阻断；随后同文档原生执行得到 42。结论限定在该冷启动路径，不声称所有 provider 的首次运行必失败。
+2. 所有工具响应中 `runtime="unknown"`（实测 configure 响应中 `metadataKernelSpec: null`，尽管文件里 kernelspec 存在）。
+
+**重要补充**：无 metadata 的 notebook 会被 serializer 自动补 `language_info`。metadata 不能证明运行时可用；`getKernel` 返回 undefined 也只表示没有可返回的已启动内核。
+
+**修复方向**：删除基于 metadata 的执行资格预检；在已有 format/metadata 边界读取已证实的 ipynb nested 结构，用于展示并注明来源。没有已发布 flat serializer 消费者证据，不增加 flat/nested 双路 fallback。saved metadata与已启动kernel的language/status分开表达，不新增三套缓存互相校准。
+
+---
+
+### D4 —【高/P1】`env create` 被 CLI 侧存在性守卫拦截，经插件工具永远不可用
+
+**位置**：`packages/opencode/src/ide/vscode-bridge.ts:194`（`callBridgeOnce` 首行 `await assertExistingLocalFilePath(input.filePath)`）
+
+**症状**：`vscode_notebook_env operation=create` 对不存在的目标路径报 `Notebook filePath does not exist exactly: ... Reuse the exact path returned by vscode_notebook_summary.` —— 而该操作的整个语义就是创建不存在的文件。
+
+**实证**：经插件工具调用 100% 复现失败；同参数直调 HTTP `/notebook/env operation=create` → **200 成功创建**（`created: true`，13ms）。扩展侧 `createNotebook`（`env.ts:142-144`）有完整的不走 `resolveNotebook` 的专用路径，被 CLI 守卫挡死在门外。
+
+**修复方向**：在既有路径解析边界区分 create 目标与 existing notebook；create 验证父目录及目标冲突，既有读写操作继续要求文件存在，不让所有路由绕过校验。保留注册表工作区归属选择与用户权限检查；测试必须从真实工具入口贯穿 CLI 到 SDK，直调 HTTP 通过不等于修复完成。
+
+---
+
+### D5 —【中/P2】范围执行的客户端/服务端超时不匹配
+
+**位置**：
+- 插件侧：`packages/opencode/src/plugin/vscode-bridge.ts:396-398` —— 客户端预算 `timeoutMs + 5_000`（**总额**）。
+- 服务端：`sdks/vscode/src/notebook/run.ts:101,131` —— `timeoutMs` 是**每个 cell** 的预算，范围执行逐 cell 串行。
+
+**后果**：8 个 800ms cell 的独立复核中，客户端 6002ms timeout，服务端最终执行全部 8 个 cell。历史 DB 的 250s/287s 不能单独证明也是范围预算问题。
+
+**修复方向**：保留已发布的 per-cell `timeoutMs` 语义，让 run 请求生命周期由服务端 cell 调度和调用者取消共同控制，删除插件对整个范围误套的单 cell `timeoutMs+5000` 总额；底层 transport 必须支持该请求的取消，不修改其他短请求的默认期限。禁止客户端预读 cell map 再计算 `N*timeoutMs`，那会复制目标解析并引入读后变更窗口。服务端期限要覆盖 command 等待而不仅是事件等待；若最终采用总期限，应作为明确的新契约而不是悄悄改旧参数。取消后停止后续 cell 调度，当前 kernel 执行是否中断仍遵守显式 stop 语义。
+
+---
+
+### D6 —【中/P2】测试 harness 失真：41/41 全绿但盖不住真实故障
+
+**实测**：`bun test test/plugin/vscode-notebook-tool-summary.test.ts test/plugin/vscode-bridge.test.ts` → **41 pass / 0 fail**。
+
+**失真点**：
+1. `packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts:658` 的 mock notebook 用**平铺** metadata（`{ kernelspec: ..., language_info: ... }`），与真实序列化器的嵌套形状（`{ metadata: { kernelspec ... } }`）不符 —— "run 预检拦截/放行"两个用例（529/550 行）测的都是假形状，D2 因此漏网。
+2. harness 不覆盖执行命令长期pending时的有界等待。
+3. harness 不覆盖范围执行的超时预算语义，D5 无覆盖。
+
+**修复方向**：单元夹具使用真实 serializer 形状；以本次独立开发扩展的真实文档/controller/HTTP 取消测试作为集成层，另用普通安装的真实 Jupyter 验证冷启动执行。测试结果必须区分自有 controller、真实 provider、VS Code modal 测试抑制三层。修复前保持七个 red 用例可重复，修复后断言业务结果，不以 HTTP200、ran 或工具 completed 代替成功；不往生产插件添加调试端点。
+
+---
+
+## 5. VS Code 日志审计结果
+
+审计范围：早期 `logs\20260913T040211\`，以及本轮 `notebook-r1-review/profile*/logs`、`jupyter-profile*/logs` 的 exthost、renderer、main、Python/Jupyter 输出。以下旧表只描述早期观察，不代表所有后续日志零异常。
+
+| 日志源 | 结果 |
+|---|---|
+| 扩展自身输出通道（`8-opencode.log`，当前窗口） | **干净**：启动横幅 + 请求流水 + 我故意触发的 3 条负例错误（bogus cellId）；token 脱敏正常（`[bridge] token <redacted>`） |
+| `window1\exthost.log` | 本扩展 `_doActivateExtension SMARK2022.opencode-ide-bridge ... onStartupFinished` 正常激活，**零 warning/error**；现存告警全部来自第三方（ms-python/ruff 配置作用域提示、copilot-chat 空 toolset、`mathematic.vscode-latex` 缺 `effection` 模块、两个扩展的 l10n 文件缺失等） |
+| `window2\exthost.log`（我的 Testing 宿主） | 本扩展正常激活；仅一条与本扩展无关的 `PendingMigrationError: navigator is now a global in nodejs`（1.13x 时代常见宿主级噪音） |
+| `renderer.log` | 与本扩展无关的第三方错误（vsliveshare 引用已废弃的 `notebookCellExecutionState` proposal、copilot-chat toolset 错误、DEP0169/DEP0040 deprecation）；无 notebook bridge 相关项 |
+| `notebook.rendering.log` | **0 条 error/warn** |
+| Jupyter 输出通道 | 未见与本扩展相关的异常 |
+
+日志记录：ipynb/Python/Jupyter 配置作用域 warning；VS Code main 的 `Error mutex already exists`；Node DEP0169/DEP0040；Python Environments 退出清理时 `Channel has been closed` 以及 `deactivate` 访问 undefined subscriptions 的 TypeError。这些分别归属宿主或上游扩展，不能算 bridge 的已定位根因。最终 api-shape 宿主 PID 30344 日志确认退出码 0，退出码不代表没有上游清理错误。`executeCode` 授权dialog与运行状态探针直接相关，见D11。真实 Jupyter 日志记录 `disableUI=true` 启动、kernel successfully started 与退出清理，stdout=42 与之对应。
+
+不能从“没有 bridge 崩溃日志”推断功能正常：生产 info 捕获探针错误后仍生成正面说明就是反例。本次没有读取或写入 Jupyter 授权密钥，也没有批准其 dialog。测试宿主自动退出仅清理其自身启动的 kernel；未向实验前进程发出结束指令。
+
+---
+
+## 6. 修复方向汇总（建议按此优先级实施）
+
+**R5 实施契约**：本节以下实施契约取代所有历史候选修复建议。其余原需求见文首。非目标：不改 LSP、权限策略、registry 清理、数据库、UI renderer、上游 Jupyter、CI workflow 或无证据风险；不覆盖已有 shell/permission 工作区改动。既有红测修复必须先定位其原始失败，不变成一般重构授权。B-02经复议撤销blocking，保留现有transport总期限，只修断开后继续执行；旧D5取消总期限建议不在范围。
+
+**当前调用链、输入域和 first divergence**：模型输入经 plugin 的 Zod 与既有 tool/edit Permission 到 CLI `callBridge`，再经 bearer HTTP 到 SDK queue/handler；CLI 负责 existing/create 文件语义，SDK bridge 负责请求连接及写入调度，run 负责 cell 调度，env 负责 Jupyter/Python 适配，source/output/summary/edit 各自负责其表示或 mutation。HTTP 是独立可调用入口；参数验证沿用现有 owner，不复制 plugin 的全部 schema。当前受支持的本机真实场景是 Windows VS Code 1.138 + Jupyter 2025.9.1 + Python 2026.7及Python运行环境；现有 controller fixture 用于通用执行/取消语义而不伪装 Python。缺少扩展/缺少可运行环境/独立 Jupyter 授权未授予属于真实能力边界，不应返回成功。
+
+| ID / invariant | 首次分歧及 owner | 主路径修复与实际行为测试（forward mapping） |
+|---|---|---|
+| N1 冷启动不误拦，执行等待有界 | run用metadata否决冷启动，command等待阻挡cell计时器结果 | `run.ts` 删除metadata/getKernel资格预检，使用显式document/ranges原生执行；等待事件和command拒绝均受同一cell期限与请求取消约束，超时停止后续cells并如实报告当前cell可能仍在运行。真实Jupyter冷启动输出42；command保持pending时仍按期限返回 |
+| N2 取消不启动排队写和后续 cells，stop 不受执行队列阻塞 | HTTP断开未传播；stop 与 run 共用写队列 | `bridge.ts` 每请求 AbortController，response 未完成即 close 时 abort；队列获执行权后检查 signal；stop/info 跳过 notebook 写队列。`run.ts` 每 cell 调度前检查 signal，把 command wait 与事件/期限共同等待，超时停止余下 cells。保留已有 run/edit 写串行防止执行目标在请求内被 bridge 编辑改变，不另造执行注册表；真实 HTTP取消+文档内容+执行次数断言 |
+| N3 create 经真实工具入口可创建 | CLI对全部请求强制 existing | `ide/vscode-bridge.ts` 仅 env.create 不执行 existing guard，重用 SDK 已有冲突检查；SDK env.create 复用 workspace.fs.writeFile 的父目录创建能力，权限错误不转换为成功。真实 plugin→HTTP→SDK 新文件、重复 create 不覆盖 |
+| N4 info/configure 无隐藏执行/授权/吞错 | env.getActiveRuntime 调 executeCode 后 catch null | `env.ts` 删除 Python runtime probe 与 configure 前后探针；只报告读取到的 language/status/关联解释器及各来源，扩展 activation/getKernel 错误原样传播。fixture executeCode 抛错哨兵永不触发，真实 kernel 中用户变量不变 |
+| N5 restart 不改全局设置，不误报 verified | effective配置写入Global并回写；可访问被当完成 | `env.ts` 删除设置update与isKernelAccessible验证；若现有 Jupyter 设置要求确认，在调用前明确返回需要上游授权且未请求，不能冒用权限。已有免确认设置时用原公开命令显式目标，返回 requested 且不宣称完成/清空；真实测试随后执行检查旧变量不存在，设置inspect前后完全一致。API无单次免确认通路的证据见第1节，不绕过此真实授权限制 |
+| N6 同语言编辑是保持内容的幂等操作 | edit.typeChange=false 后误落newCode必填 | `edit.ts` 仅language存在而源码字段均省略且kind/lang相同则生成现有compactEditResult成功no-op，不applyEdit；ID/source/outputs保持；显式空字符串仍清空 |
+| N7 summary成功必须对应真实success | summary解析展示字符串startsWith(fail) | `summary.ts` 直接从原始NotebookCell.executionSummary计算failed与success，不解析展示文字；end(false)样本标题与行一致，未执行/未知不计成功 |
+| N8 产物不会跨同名文档或重跑互相覆盖 | output使用basename+index | `output.ts` 名称使用cell/output/item索引、URI和内容的digest及MIME后缀；同一内容可复用，不同内容不可覆盖旧引用。a/same与b/same回读首artifact保持原内容；200字符合法Notebook名可导出，避免复制原名导致派生文件名超限 |
+| N9 单行超过16KB仍可完整取得当前dirty source | source部分行算完整并offset+1 | `source.ts` 超长行分支自动导出当前cell的完整source快照，使用output现有artifact写入owner；每物理行一个JSON字符串chunk，每chunk最多300 Unicode码点，JSON最坏每码点6个UTF-16 code units，含引号最多1802，严格小于read.ts的2000上限。顺序JSON解析后join恢复原source；不得按1024码点分块。响应提供artifact路径与读取/拼接格式，不再称offset+1能恢复尾段；正常行分页不变。经真实read分页读取反斜杠、控制字符、非BMP字符以及END_SENTINEL，比较完整源字节而非只验证artifact存在 |
+| N10 测试捕获全部原症状，现有红测不跳过 | 现有mock平铺metadata、缺少取消/产物/长行断言 | SDK真实测试、package public handler tests、CLI HTTP tests分层；原断言只在已明确改正的契约处改为更严格的新行为，不能删用例隐藏失败。OAuth测试用既有redirectUri配置及OS动态端口取代被系统保留的常量，保留真实callback；其他红测按实测根因修复 |
+
+**单一主路径与责任边界（reverse mapping）**：
+
+| concept | 必要性 / 不可复用原因 | 分类及处理 |
+|---|---|---|
+| 请求级AbortSignal参数 | N2：已有ToolContext.abort只终止HTTP等待，SDK没有该信号；只能在连接owner创建并传递，不依赖全局状态 | primary contract；run/edit/env可选第二参数兼容现有SDK命令调用；不放入不可信JSON body |
+| 只读运行状态 | N4：info所需language/status由Jupyter getKernel提供 | 删除executeCode运行探针，读取失败正常传播 |
+| 控制操作免排队 | N2：stop必须能服务正持有run锁的文档；现有readonly dispatch足够承载 | supported operation branch；只加stop/info，不改LSP或全部写串行语义 |
+| 无损分块source artifact | N9：现有offset只表达行，16KB内无法表达单行全部内容；既有artifact owner与通用read提供分页能力，不新增工具schema/状态游标 | supported wide-line representation；不是读取磁盘旧ipynb的fallback，必须来自当前TextDocument |
+| 真实状态统计 | N7/N5：现有数据已足够，不需要新状态机或验证探针 | 直接修复producer，展示最后格式化 |
+| 固定测试端口替换 | N10：19876当前确在系统排除段；已有oauth.redirectUri支持指定端口 | test fixture only；不改MCP生产行为/系统网络 |
+| SDK测试局部配置覆盖 | N10：`test/server/httpapi-sdk.test.ts:60` 用完整ConfigProvider替换模拟认证值，丢失preload设定的runtime flags；raw HTTP先构建的服务经AppRuntime共享memoMap影响后续默认路由 | test fixture only；改用现有`ConfigProvider.layerAdd`表达局部覆盖，不改生产服务图、不增加失败重试 |
+| SSE停流测试阶段稳定性 | N10：`test/session/llm.test.ts:637` 的25ms配置也约束响应头到达，Windows负载下用例进入首chunk之前的错误分支，未测到命名的首chunk之后停流 | test fixture only；该用例的chunkTimeout配置及相应provenance/idle下界断言统一为1000ms；保留reject、fetch.response、sse.timeout、chunkCount=1及全部6条断言，保留测试执行期限，生产不改 |
+
+没有新增备用成功路径；诊断只保留现有失败结果，新增拒绝仅上游要求但尚未授予的restart确认，估算新增诊断decision surface <10%。删除env的执行探针及无调用者的Python JSON probe helpers、restart临时Global设置和伪verified，以及run metadata资格检查；不删除不相关save逻辑或既有匹配算法。
+
+**文件计划和预算**（新增/删除之和而非净减少；实现时用实际diff重新计数，超过上限不得提交）：
+
+| 生产文件（恰8个，均modify） | 责任 | 预估增删 |
+|---|---|---|
+| `packages/opencode/src/ide/vscode-bridge.ts` | create现有路径豁免；pre-aborted信号在发起fetch前生效 | 18 |
+| `sdks/vscode/src/bridge.ts` | 请求取消、队列入口检查、stop/info免执行锁 | 48 |
+| `sdks/vscode/src/notebook/run.ts` | 删除metadata预检；显式document/ranges；取消/期限停止调度 | 140 |
+| `sdks/vscode/src/notebook/env.ts` | 只读运行状态；移除全局设置/执行探针；create父目录 | 610 |
+| `sdks/vscode/src/notebook/edit.ts` | mutation前取消检查与语言no-op | 18 |
+| `sdks/vscode/src/notebook/summary.ts` | 原始执行状态统计 | 12 |
+| `sdks/vscode/src/notebook/output.ts` | URI/content身份与共享artifact写入 | 20 |
+| `sdks/vscode/src/notebook/source.ts` | 超长行可读取完整快照及诚实续读提示 | 35 |
+
+当前生产与测试增删609行，总计≤1200；不以minify、挪文件或保留dead code规避预算。测试复用 `test/plugin/vscode-notebook-tool-summary.test.ts`、`test/ide/vscode-bridge.test.ts` 现有夹具以及 `.temp/testing/notebook-r1-review/` 的实际host loop；既有OAuth红测仅修改对应两个test文件夹具；新增 `test/server/httpapi-sdk.test.ts` 的局部配置覆盖修复，保留全部业务断言。没有新增生产文件、依赖、配置或migration。
+
+**SDK红测反馈**：cwd `packages/opencode`，`bun test test/server/httpapi-sdk.test.ts test/server/httpapi-workspace.test.ts -t "uses the generated SDK for safe instance routes|serves mutation endpoints" --timeout 30000`：1 pass/1 fail，workspace创建应200实际400。单独workspace及仅加载SDK模块均通过；完整两文件18 pass/6 fail，远程代理还误入本地模型执行，后续实验只用创建接口避免外部请求。Testing `sdk-config-experiment.ts` 的原样副本同样1 pass/1 fail；唯一改变为`ConfigProvider.layer`→`ConfigProvider.layerAdd`后2 pass/0 fail。证据为 `sdk-config-baseline.log`、`sdk-config-experiment.log`；根因链为SDK测试认证覆盖→共享服务初始化读取缺失flags→workspace创建/路由语义失真。原测试文件已实施该替换；最终回归包含完整SDK测试文件。
+
+**SSE红测反馈**：原CI最新完整运行core 3763 pass/46 skip/1 fail，TUI 731 pass/13 skip/0 fail；唯一失败为`logs SSE timeout when a streaming response stalls after the first raw chunk`，没有ENOSPC。Testing `llm-stall-experiment.ts --delay`对真实HTTP响应头施加40ms延迟，原用例稳定重现相同的“expected reject / resolved”，同时观察到公开error事件`SSE read timed out`及`chunkCount=0`。`--delay --budget`只将该用例配置和两条对应断言的25改为1000，结果1 pass/6 assertions，响应60ms、首chunk62ms、idle1013ms后超时且chunkCount=1。证据为`llm-stall-delayed.log`、`llm-stall-budget.log`。新增测试文件修改仅`test/session/llm.test.ts`，预计增删≤10行，总代码仍≤1200。最终回归包含完整LLM测试文件；不改前一个明确测试headers前超时的25ms用例。
+
+**TDD行为切片**：批准后按 N7→N6→N8→N9→N3→N2→N1/N4→N5→N10 顺序，每次先补一个能在原代码失败的公共行为断言，运行red，然后最小实现，再回归同模块。采用源/输出的独立字面量、真实文档状态和真实HTTP取消作为expect依据，不测私有函数或源码文本。取消用已开始事件同步而非猜测sleep；真正timeout测试可使用时钟。Permission deny的现有回归必须保留。旧七项loop的range用例还要断言超时断开后后续cells未执行；HTTP200不能当成功。
+
+**中文注释预算**：估算新增/实质修改有效代码 E=260（删除不计E；包括tests；排除空行/import-only/纯格式/纯移动/generated），C至少39，实际必须 `C >= max(1,ceil(E*0.15))`。解释分布在断开与正常finish区别、已取消任务获得锁后不写、command完成与cell完成区别、探针授权副作用、UTF-8/chunk无损契约、artifact不可变身份、restart请求不等于完成、测试真实端口与独立预期处；不翻译identifier或拆行凑数。
+
+**验证命令/工作目录**：`bun test test/plugin/vscode-notebook-tool-summary.test.ts test/ide/vscode-bridge.test.ts test/mcp/oauth-auto-connect.test.ts test/mcp/oauth-browser.test.ts test/server/httpapi-sdk.test.ts test/session/llm.test.ts --timeout 30000`、`bun typecheck` 均在 `packages/opencode`；`bun run compile-tests`、`bun run package` 在 `sdks/vscode`。Notebook验收保留实际host loop、真实Python执行/stop/restart、source artifact经ReadTool回读及日志归因；结果只覆盖实际执行的检查。
+
+**真实风险与未验证项**：本请求取消/超时不能代替上游执行中断；必须如实报告当前cell状态且不调度后续cells。restart上游确认不能自动授予，现有免确认设置可执行但不得由bridge改变。源快照须经通用read验证完整性；macOS无本地runner，如实记录未验证。
+
+**审计合同与记录**：只允许独立adversarial-auditor按文首原始需求及最新补充全范围审计，handoff仅需求、路径、root、mode；primary不自审。Plan审计最多6轮，implementation最多6轮，连续调用失败最多3次。额外边界场景不纳入修复范围。阻断复议依据仓库证据，不以文件/行预算为理由删需求。
+
+**R1 审计记录**（`ses_f564d0a4affeUNuoBBpz9IQXJM`）：
+
+**R5 审计记录**（`ses_f54454085ffedA6Zh3ohpC1a54`，全范围方案审计）：
+
+> No blocking findings.
+>
+> **APPROVE — `docs/plans/vscode-notebook-bridge-reliability-investigation.md`，Revision R5，全范围方案审计。**
+
+Non-blocking findings：N3复用现有workspace.fs.writeFile父目录能力；最终验收为六个修改涉及的测试文件、包类型检查、SDK构建门禁及Notebook真实场景，本轮方案审计未重新执行测试或构建。
+
+**R4 审计记录**（`ses_f5486fc80ffeHeX1fi8HALH9N1`，全范围方案审计）：
+
+> No blocking findings.
+>
+> **APPROVE — `docs/plans/vscode-notebook-bridge-reliability-investigation.md`，Revision R4，全范围方案审计。**
+
+Non-blocking findings：本地CI仍待完整分片复验；SSE的40ms延迟和1000ms配置实验直接支持测试阶段修复，保留6条断言及测试执行期限；N3应复用已验证的workspace.fs.writeFile父目录行为，避免重复目录逻辑，历史建议以当前契约为准。
+
+**R3 审计记录**（`ses_f552aa650fferBEpX7dH0uRb5O`，全范围方案审计）：
+
+> No blocking findings.
+>
+> **APPROVE — `docs/plans/vscode-notebook-bridge-reliability-investigation.md`，Revision R3，全范围方案审计。**
+
+Non-blocking findings：
+- **本地 CI 验证仍未闭合。** R3 明确保留原 `test-ci.ts` 分片验证，并承认逐文件通过不能替代原分片通过。这符合方案阶段要求；现有记录不支持实现完成或提交放行。
+- **新增 SDK 测试修复的证据支持局部修复，尚不支持全套已恢复。** 已直接核对实验脚本、失败日志和通过日志；实验保留测试主体及断言，通过调整 ConfigProvider 组合恢复环境配置。R3 要求继续运行完整两文件及原 CI 分片，验收范围没有被缩小。
+- **历史建议与当前契约应继续区分。** 文档保留了短写锁、删除 transport 总期限、source 字节偏移等旧建议；第 6 节明确撤销其实施效力。当前授权范围以 R3 的 N1–N10 和文件计划为准。
+
+**R2 审计记录**（`ses_f5630c52dffeCBmZYNMCsxPKGZ`）：
+
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- 历史调研段落仍包含删除范围总期限、改为短写锁、增加 source 字节偏移等旧建议。R2 已在第 6 节明确其失效，当前实施契约可执行；实施和验收应引用 N1–N10，避免沿用历史断言。
+- 现有真实 host fixture 仍用固定等待同步取消，并以范围全部完成作为旧观察目标，见 `.temp/testing/notebook-r1-review/suite.ts:58`、`.temp/testing/notebook-r1-review/suite.ts:69`。R2 已明确要求改成事件同步及“断开后不调度后续 cell”的断言；原 fixture 全绿不能直接作为新契约的验收证据。
+- 生产八文件、总增删≤1200行目前只是预算。计划没有以预算授权删测试或保留死代码；是否满足上限须在实现审计按实际 diff 核算。
+
+## Rejected speculation
+
+- 不将既有 transport 总期限自动认定为本次必须删除的行为。原始需求要求修复超时后的继续执行，R2 在 HTTP 连接和 cell 调度 owner 修复取消链，覆盖该要求。
+- 不要求 bridge 绕过上游 restart 确认，也不要求把命令已请求转换为重启已完成。
+- 不将路径别名锁、无工作区 artifact、无关 save 分支及其他未被本次引入或恶化的旧问题扩展为 blocker。
+- 不凭测试行数估算认定充分覆盖必然无法实现。
+
+## Requirement and traceability coverage
+
+本轮重新读取 R2 全文、八个计划生产文件及直接调用者和消费者、相关测试与真实 host 结果，并核对工程政策、仓库指令、领域文档、ADR 索引和相关 CI 入口。
+
+| 范围 | 独立核对结果 |
+|---|---|
+| N1 冷启动、执行等待 | `run.ts` 的资格预检与先等待 command 的首次分歧明确；删除预检、显式目标、共同期限与取消路径对应原症状。 |
+| N2 取消、排队写、范围调度、stop | plugin→CLI signal→HTTP→SDK queue→handler 链成立；连接取消、获锁后检查、mutation 前检查及每 cell 调度检查各有 owner。stop/info 免执行锁覆盖队首阻塞。 |
+| N3 create | CLI 无条件 existing guard 确实阻断 SDK 已有 create 分支；局部豁免保留权限、工作区归属及既有文件保护。计划要求真实工具入口验证。 |
+| N4 info/configure | `getActiveRuntime` 隐藏 `executeCode` 并吞错的路径明确；删除执行探针、标明状态来源及传播读取失败覆盖需求。 |
+| N5 restart | 全局配置改写和“可访问即 verified”的错误均位于 env owner；删除二者、区分未请求与 requested 的计划成立。 |
+| N6–N7 编辑与摘要 | 同语言源码省略落入必填错误、展示字符串误判失败均已从源码确认；对应 no-op 状态保持和原始 success 统计测试具备敏感性。 |
+| N8 artifact | basename/index 命名能跨文档覆盖；URI/content 身份与旧引用回读断言对应实际故障。 |
+| N9 超长 source | R2 每块≤300 Unicode 码点，JSON 字符串行最坏≤1802 UTF-16 code units，低于真实 read 的2000上限；完整 dirty source 经真实 read 往返的验收覆盖原 B-03。 |
+| N10 测试及既有红测 | 分层测试、原行为 red、权限断言保留、本地完整检查均有映射；OAuth 使用既有 redirectUri seam，未扩大 MCP 生产行为。 |
+
+**B-03 在 R2 中已解决。** 依据是当前表示契约与 `packages/opencode/src/tool/read.ts:25`、`packages/opencode/src/tool/read.ts:320` 的直接核对，不依赖上一轮结论。
+
+本轮未运行测试或构建；读取的历史结果仅用于确认故障与验证路径，不构成本次实现通过证据。
+
+## Primary-path and fallback verdict
+
+R2 保持每项职责的一条权威路径：
+
+- run 使用原生 notebook 执行，事件、拒绝、期限和取消共同决定请求结果。
+- bridge 管理连接取消与队列入口，handler 管理实际 mutation 和 cell 调度。
+- env 读取真实可见状态，移除隐藏执行、全局设置 workaround 和虚假验证。
+- source 对超长行使用明确的无损 artifact 表示；它来自当前文档，不在失败后改读磁盘旧数据。
+- output 在既有 artifact owner 修复身份，不新增第二套存储路径。
+
+未发现新增备用成功算法。计划对诊断路径的分类及低于10%的估算在方案阶段可接受，实际比例待 diff 审计。
+
+代码质量承诺符合当前方案门禁。中文解释性注释估算 **E=260、C≥39，比例≥15%**，并明确要求实际满足 `C >= max(1, ceil(E*0.15))`；实际 E/C 尚不适用。
+
+## Release verdict
+
+**APPROVE — `docs/plans/vscode-notebook-bridge-reliability-investigation.md`，Revision R2，全范围方案审计。**
+
+此结论仅批准当前 R2，不代表实现、真实场景或 CI 已通过。记录本次独立 verdict 后可进入该 revision 的实施；完成与提交仍须满足实际预算、red-green、本地验证、中文注释门禁及独立全范围实现审计。
+
+**R1 findings**：
+
+## Blocking findings
+
+### B-02 范围请求总超时的修复没有进入可实施文件计划
+
+- Violated invariant: N2/D5；`timeoutMs` 保持 per-cell 语义，合法范围不能被一个 cell 的客户端预算截断。
+- Evidence class: reachable
+- Producer and execution path: plugin 接收 `endCellId` 和 per-cell `timeoutMs` → 计算 `timeoutMs + 5000` → `callRaw` → CLI `callBridgeOnce` → `fetchWithTimeout` 创建整个 HTTP 请求的定时器。
+- Source evidence: `packages/opencode/src/plugin/vscode-bridge.ts:398`、`packages/opencode/src/plugin/vscode-bridge.ts:129`、`packages/opencode/src/ide/vscode-bridge.ts:208`、`packages/opencode/src/ide/vscode-bridge.ts:313`。
+- Canonical-plan evidence: D5 要求删除 plugin 总额，`docs/plans/vscode-notebook-bridge-reliability-investigation.md:276`；第 6 节精确八文件计划及 CLI 职责，`docs/plans/vscode-notebook-bridge-reliability-investigation.md:346`、`docs/plans/vscode-notebook-bridge-reliability-investigation.md:348`。
+- Responsibility owner: plugin 的请求预算生产点及 CLI transport 的期限接口。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 八文件计划不包含 plugin，CLI 的明确修改也只有 create 豁免和 pre-aborted 信号处理。按该计划实施，八个各耗时约 800ms、per-cell=1000ms 的合法范围仍会在约六秒被客户端终止。服务端传播取消只能阻止余下执行，不能修复正常范围被错误中止。
+- Why this is not speculative: 当前调用链明确把 per-cell 值转换成总期限；现有真实 host fixture 也包含该输入组合，见 `.temp/testing/notebook-r1-review/suite.ts:67`。
+- Minimal correction direction: 将预算生产点、transport 无总期限契约及端到端范围测试纳入同一可执行文件计划，并重新满足八文件限制。不能只修取消后的症状，也不能在 transport 隐式忽略调用者预算而不定义契约。
+
+### B-03 source 的 1024 Unicode 字符分块仍可能被通用 read 截断
+
+- Violated invariant: N9；超长 dirty source 必须通过计划指定的读取路径完整、无损恢复。
+- Evidence class: reachable
+- Producer and execution path: Notebook 当前源码 → source 按最多 1024 Unicode 字符生成 JSON 字符串行 → artifact → 通用 read 按 JavaScript 字符串长度截断每行 → 调用者无法 JSON 解码或恢复被截去的尾部。
+- Source evidence: `sdks/vscode/src/notebook/source.ts:119` 接受任意当前源码行；`packages/opencode/src/tool/read.ts:25` 设置 2000 字符上限，`packages/opencode/src/tool/read.ts:320` 实施逐行截断。源码可由正常编辑入口产生，见 `sdks/vscode/src/notebook/edit.ts:117`。
+- Canonical-plan evidence: 第 6 节 N9，`docs/plans/vscode-notebook-bridge-reliability-investigation.md:328`；无损分块说明，`docs/plans/vscode-notebook-bridge-reliability-investigation.md:338`。
+- Responsibility owner: source artifact 的序列化表示边界。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 1024 个反斜杠经 JSON 编码形成 2050 个字符；1024 个非 BMP 字符也可能形成 2050 个 UTF-16 code units 的 JSON 行。两者都会被现有 read 截去尾部及闭合引号。改 offset 只能读取下一行，原缺陷因此迁移到了 artifact。
+- Why this is not speculative: Markdown/code cell 可合法包含这些字符，现有输入没有排除它们；JSON 转义与 read 截断规则均已确定。无需假设损坏文件。
+- Minimal correction direction: 以实际序列化后的物理行满足下游 read 上限为无损契约，并通过真实 read 验证转义字符、非 BMP 字符及完整源文本往返；无需修改通用 read 的无关行为。
+
+## Non-blocking findings
+
+- 已有 macOS shell abort 红测的根因尚未确定。当前保持未验证、禁止凭 Windows 通过宣称已修复的处理是诚实的；后续任何实质修复仍须进入 canonical revision，不能使用“其他红测按根因修复”授权任意改动。
+
+## Rejected speculation
+
+- 不要求 bridge 绕过 Jupyter restart 的独立确认，也不将 `requested` 强制解释为重启完成。
+- 不把 raw-path 锁别名、既有 save 分支、无工作区 artifact 限制等未纳入本次修复的旧风险升级为 blocker。
+- 不凭估算认定必然超过 1200 行；实际预算必须在实现审计重算。
+
+## Requirement and traceability coverage
+
+本轮覆盖 R1 全文、八个计划生产文件、plugin/CLI 调用链、相关测试、真实 host fixture 与已有结果文件；并核对仓库指令、领域文档、ADR 索引及工程政策。
+
+| 范围 | 判定 |
+|---|---|
+| 请求取消、排队 edit、stop/info 免执行锁 | owner 与基本修复路径成立；范围预算另见 B-02 |
+| create 真实入口及已有文件保护 | CLI/SDK 边界映射成立 |
+| info/configure 删除隐藏探针和吞错 | 主路径方向成立 |
+| restart 不改全局设置、诚实报告 requested | 映射成立 |
+| language-only no-op、summary 原始状态统计 | 修复点及敏感断言成立 |
+| output URI/content 身份 | 映射成立 |
+| 超长 source 完整读取 | B-03：表示契约尚不能保证无损 |
+| OAuth 既有红测 | 已核对 redirectUri 到 callback bind 的实际路径；测试夹具修复方向成立 |
+| 本地验证、远端未验证、提交边界 | 已明确；本轮未执行测试或构建，不声称取得新的通过证据 |
+
+计划承诺 `E=260、C≥39`，达到 **15%**，并要求实现时按实际 diff 重算，符合计划阶段注释门禁。当前没有本任务实现 diff，实际 E/C 不适用。代码质量约束、无新增依赖及保留权限断言的方向可接受。
+
+## Primary-path and fallback verdict
+
+局部修复以现有 owner 为中心，删除 metadata 执行资格、隐藏探针及伪 verified 的方向正确；未发现明确新增的失败后备用成功算法。
+
+source artifact表示不能保证下游无损读取。
+
+## Release verdict
+
+**BLOCK — canonical plan R1。**
+
+实现授权维持 `no`，修订后重新进行独立审计。
+
+**B-02 复议**：
+
+## Blocking findings
+
+**复核结论：撤销 B-02 的 blocking 分类；B-03 保持 blocking。**
+
+### B-03 source 分块未保证序列化后的行可被 read 完整读取
+
+- Violated invariant: N9；当前 dirty source 可以无损恢复。
+- Evidence class: reachable
+- Producer and execution path: 当前源码 → 最多 1024 Unicode 字符的 JSON 字符串行 → artifact → read 的 2000 字符逐行截断。
+- Source evidence: `sdks/vscode/src/notebook/source.ts:119`、`packages/opencode/src/tool/read.ts:25`、`packages/opencode/src/tool/read.ts:320`。
+- Canonical-plan evidence: 第 6 节 N9，`docs/plans/vscode-notebook-bridge-reliability-investigation.md:328`。
+- Responsibility owner: source artifact 序列化边界。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 1024 个反斜杠 JSON 编码后为 2050 字符，闭合引号及尾部会被 read 截断，分页不能恢复。
+- Why this is not speculative: 正常 Notebook 源码允许这些字符；编码和截断规则均明确。
+- Minimal correction direction: 约束序列化后的物理行长度，使用真实 read 验证转义字符及非 BMP 字符的完整往返。
+
+## Non-blocking findings
+
+### B-02 复核：撤销阻断，保留为范围外既有行为记录
+
+重新核对原始需求、R1契约和实际调用链后，前轮 B-02 的阻断依据不充分：
+
+- **原始需求要求修复超时后的继续调度。** `docs/plans/vscode-notebook-bridge-reliability-investigation.md:19` 明确列出“范围超时后继续执行”和“取消后不得启动……后续单元格”，并限制其他风险不得修改。
+- **per-cell 契约没有单独排除 transport 总期限。** `packages/opencode/src/plugin/vscode-bridge.ts:80` 定义 cell 执行期限；`:398` 另设 HTTP 请求预算。两层期限存在不理想的既有耦合，但仅凭 per-cell 描述，不能推出本次必须保证任意长度范围都不受请求期限限制。
+- **R1没有承诺实施旧D5的预算删除建议。** `docs/plans/vscode-notebook-bridge-reliability-investigation.md:314` 明确撤销历史建议的实施效力；当前 N2 在 `:321` 承诺连接断开传播、队列取消和停止后续 cell 调度。
+- **N2 修复的是本次症状的直接责任边界。** 当前 CLI 定时器在 `packages/opencode/src/ide/vscode-bridge.ts:313` 中止请求，SDK `sdks/vscode/src/bridge.ts:118` 却没有把断开传递给 handler。补全这条取消链能够修复超时后继续执行，无需先删除请求期限。
+- **没有证据表明R1新增或缩短总期限。** 停止原先在客户端超时后仍继续执行的 cell，是用户要求的修复，不能将其视为必须删除总期限的新回归。
+
+因此，前轮要求“必须修改 plugin 或重排八文件预算”应撤回。撤销依据是范围与契约判断修正，**不是八文件预算对正确性的豁免**。
+
+
+## Rejected speculation
+
+- 不将“per-cell timeout”自动扩展为“整个请求不得有独立期限”。
+- 不要求修复本次未引入、未恶化且未被原始需求明确纳入的全部既有行为。
+- 不因撤销 B-02 而放宽取消验证：真实请求超时后，服务端必须停止后续 cell 调度，取消的排队写入不得启动。
+
+## Requirement and traceability coverage
+
+保持原始全范围：N1–N10、八文件计划及其直接调用者、消费者、权限和测试边界。沿用本会话已直接读取的未变源码与测试证据，并重新核对R1实施契约和调用链。
+
+- N2：取消链与停止调度的 owner 映射成立；不再附加删除 transport 总期限的要求。
+- N3–N8：前轮结论保持。
+- N9：B-03 未解决。
+- N10、预算、验证和提交约束：前轮结论保持；本次未运行测试或构建。
+
+## Primary-path and fallback verdict
+
+R1的N2通过请求owner 传播取消，再由 run owner 停止调度，是原始需求对应的主路径修复。保留现有 transport 期限不构成新增 fallback。
+
+source无损表示仍未闭合。计划的代码质量约束和 **15% 中文解释性注释承诺**保持可接受；实际代码质量及 E/C 待实现 diff 审计。
+
+## Release verdict
+
+**BLOCK — R1。B-03 保持 blocking。**
+
+**B-02：withdrawn as blocking，保留为范围外既有行为说明。** 本次复核不授权修改请求总期限，不改变其余验收条件，也不授权实施。
+
+**实施证据**：
+
+| 项目 | 结果 |
+|---|---|
+| 生产文件 | 8个：CLI `src/ide/vscode-bridge.ts`；SDK `src/bridge.ts`、`src/notebook/{run,edit,env,summary,source,output}.ts` |
+| 测试文件 | `test/ide/vscode-bridge.test.ts`、`test/plugin/vscode-notebook-tool-summary.test.ts`、`test/mcp/oauth-auto-connect.test.ts`、`test/mcp/oauth-browser.test.ts`、`test/server/httpapi-sdk.test.ts`、`test/session/llm.test.ts` |
+| 变更预算 | 生产与测试当前增删合计609行；文档和Testing实验产物不计入代码diff |
+| Red→green | summary误报、language-only报缺源码、同名artifact覆盖、超长source尾部丢失、create存在性拦截、pre-aborted请求继续执行、冷启动误拦、command等待无期限、隐藏executeCode、restart设置写入和伪verified均先观察到对应失败，再通过定向回归 |
+| 最终回归 | 第6节完整六文件命令：96 pass、0 fail、265 assertions，99.36秒；`bun typecheck`通过，cwd packages/opencode。SSE测试单独1 pass/6 assertions、完整LLM文件23 pass/67 assertions；长文件名真实写入先出现ENAMETOOLONG，返工后通过 |
+| OAuth既有红测 | 原4 pass/3 fail；动态端口后7 pass/0 fail，browser单独3 pass/0 fail，未改MCP生产代码 |
+| 类型与SDK CI | `bun typecheck`（packages/opencode）；`bun run compile-tests && bun run package`（sdks/vscode，含类型、lint、esbuild）均exit 0 |
+| SDK红测实装回归 | 批准后仅改原测试的ConfigProvider组合和一行约束说明；最小两用例2 pass，完整SDK/workspace两文件24 pass、0 fail、74 assertions，169.54秒 |
+| 原CI分片入口 | 空间恢复后再次完整执行`bun run script/test-ci.ts`：core 3763 pass/46 skip/1 fail（4137秒），TUI 731 pass/13 skip/0 fail（418秒），exit 1。唯一失败为SSE首chunk后停流用例；日志`tool_0ab37dac7001NHbY5aMzRo6zOd`，不再有ENOSPC或InstanceRuntime清理超时 |
+| 失败重跑 | 原TEMP和原超时值：db-maintenance/ripgrep/stale-turn/cold/repo_clone对应5用例全部通过；truncation/filesystem/log完整3文件87 pass；daemon对应5用例全部通过。未改其生产代码、断言或超时；单测结果不能代替分片放行 |
+| 临时存储 | 较早完整日志`tool_0aae7b967001GkJqXtFnpNcVD9`含ENOSPC/SQLITE_FULL；随后只读复查D盘可用增至24.4GB，已用原TEMP重跑。Testing内F盘TMP因改变Git发现语义被弃用；迁移旧实验目录被权限拒绝后未执行。两个旧目录实测合计仅45MB，不足以解释或解除早先容量问题 |
+| 完整逐文件检查 | Testing `run-all-tests.ts` 按同一glob枚举全部310个测试文件，无文件过滤，3个独立进程并发；310/310进程exit 0、无外层超时。308份JUnit共4554 tests、0 failures、59个原有skip、18160 assertions；另2个文件原本为空或全部注释。未新增skip/only或弱化断言。该结果不等于原单进程CI分片已通过 |
+| 原生HTTP验证 | 实际SDK Node HTTP server/队列/handler。等待Node公开HTTP连接close事件后让当前cell正常完成，再以排队编辑屏障确认后续cell未启动。Testing `cancellation-mutation.ts`仅在构建副本断开run的signal后断言失败`2 !== 1`，原实现10 pass，故障敏感性已实测 |
+| VS Code实机 | 最终`artifact-length-profile`，VS Code1.138.0，PID74024，9项检查全true，包含200字符文件名的执行输出导出和长行source快照；范围断开后通过编辑屏障核对dispatch数量保持。stop约7ms，客户端期限约6002ms；真实ReadTool再次回读1 pass/2 assertions |
+| 创建完整调用链 | 实际plugin→CLI→registry→HTTP→SDK，缺失父目录下创建成功；专属env和通用edit权限均被调用。SDK既有workspace.fs.writeFile已创建父目录，未重复增加mkdir逻辑 |
+| 真正ReadTool | `bun test .temp/testing/notebook-r1-review/read-artifact.test.ts`（传绝对路径，cwd packages/opencode）：1 pass；通过ReadTool每次10行读取当前dirty cell的artifact，JSON解码拼接与原始完整文本逐字相同，涵盖反斜杠、控制字符、非BMP字符及END_SENTINEL |
+| 真实Jupyter | `jupyter-control-profile`：生产run冷启动7359ms返回42；info约7ms；restart确认要求下requested=false且设置未变；允许请求时约2237ms，后续执行证明旧marker不存在且设置未变；两次stop约1107/1028ms，Python循环收到KeyboardInterrupt |
+| 上游运行限制 | 先前time.sleep负载中断超过Jupyter的10秒期限；并发负载下的一轮restart观察45秒未完成。保留对应profile日志，不以requested或API可访问宣称重启/中断完成；未修改上游行为 |
+| 最终宿主日志 | main记录启动mutex冲突；AgentHost记录copilotcli关闭时的catalog警告及DEP0169；内置git/ipynb记录resource-scoped配置提示。来自VS Code/内置扩展，8项bridge行为断言均通过，未据此修改其他组件 |
+| 未验证 | 原CI分片已完整执行但未通过；新提交远端Linux/macOS未执行。本地分文件与定向回归、SDK门禁通过，不能承诺完整CI零红测 |
+
+**实际主路径**：连接断开→请求AbortSignal→获锁后检查→edit异步文档边界检查/run逐cell检查；执行事件与command拒绝受同一期限；超长source是当前TextDocument的无损分块artifact，复用output存储。没有新增备用成功算法。删除run metadata资格预检、运行状态Python探针与JSON解码辅助、restart全局设置改写及可访问性伪验证。保存和既有权限门禁保留。
+
+**注释计数**：E=262，C=42，C/E=16.03%，最低40。E按新增/实质修改非空代码行统计，包含测试fixture字符串代码；排除7行import、14行空白及注释，不计删除。C仅计邻近变更点的中文解释；代表性约束为正常finish不等于取消、获锁后检查过期写、JSON最坏1802字符须低于read上限、重启前的可访问kernel不能证明重启成功。计算脚本为Testing `count-diff.cjs`。
+
+证据位置：`.temp/testing/notebook-r1-review/{results.json,jupyter-results.json,isolated-tests/results.json}`、各独立profile日志及308份JUnit。生成的SDK `out/` 为验证产物，不纳入提交。
+
+**R2 实现审计**（`ses_f559289d8ffeW8FSENmL4tuDe5`，全范围）：
+
+> B-01 必需的本地 CI 验证尚未通过，逐文件运行不能证明等价通过。
+>
+> B-02 范围取消验证仍可漏过“取消后继续调度”的回归。
+>
+> **BLOCK — canonical plan R2 与本次 557 行实现 diff。**
+
+B-01继续定位并修复原CI模型中的真实失败；B-02返工已取得Node变异失败和实机编辑屏障证据，待全范围实现复审。最新CI日志 `ci-rework.stderr.log` 还出现prompt proof回收及snapshot超时，两项分别单测通过，未将单测绿当作CI绿。
+
+**R3 实现审计**（`ses_f54d82702ffeOvqi04m2JmsFGg`，全范围）：
+
+> **BLOCK — canonical plan R3 与本次585行实现 diff。**
+>
+> 本轮未发现其他有证据支持的新增生产行为 blocker。B-01 保持阻断；当前不能标记为 `verified-implementation-and-commit` 或据此放行提交。
+
+Blocking finding：**B-01 必需的本地 CI 分片仍未通过，无法放行完成与提交。** 已核对core 18 failures、TUI 5 failures，环境错误及其他断言失败尚未在原分片模型下闭合。
+
+Non-blocking findings：前轮范围取消验证问题已有实质返工，变异明确触发`2 !== 1`，不再保留该blocker；真实Jupyter记录支持执行和控制行为，其info文案早于最终简化响应；本轮审计未重新运行测试或构建。实际8生产文件、5测试文件，新增313/删除272，E=248、C=39，中文注释门禁通过。
+
+**R5 实现审计**（`ses_f543f9a02ffeWsZA6vPv7TpuqU`，第三轮，全范围）：
+
+> **BLOCK — canonical plan R5 与本次 592 行实现 diff。**
+>
+> B-01 阻止实现放行。修复后须对原始完整范围重新审计；当前不能据此标记 `verified-implementation-and-commit`。
+
+Blocking finding：**B-01 新 artifact 命名使原本可导出的合法长文件名失败。** 200字符stem加摘要后派生文件名单段达到292字符，影响output、run和source。Non-blocking findings：Jupyter历史记录的info文案早于最终版本；审计未重新执行测试或构建。审计时8生产/6测试文件、592行、E251/C40，注释门禁通过。
+
+返工：真实文件系统回归复现ENAMETOOLONG；删除artifact名称中的完整原文档名及失去用途的path import，保持同一URI/content摘要命名路径。返工后96项修改范围测试、SDK构建、9项真实宿主检查及ReadTool回读通过。
+
+**R5 最终实现审计**（`ses_f529bf9abffeJZFy0skUU3fDh5`，第四轮，全范围）：
+
+> No blocking findings.
+>
+> **APPROVE — `docs/plans/vscode-notebook-bridge-reliability-investigation.md`，Revision R5，与本轮审查的 14 文件、609 行实现差异。**
+>
+> 此前待核验的验证门禁已全部通过。该结论允许记录 clean implementation audit，并继续约定的提交流程；本审计未执行提交。
+
+Non-blocking findings：
+- 真实 Jupyter 记录中的 info 文案、artifact 前缀早于最终版本；最新真实宿主记录已覆盖最终命名，本轮 ReadTool 回读也通过。
+- 远端 Linux/macOS 未验证。此次放行覆盖 R5 约定的本地修改范围，不代表完整 CI 或跨平台结果。
+
+审计员独立执行六文件96 pass/0 fail/265 assertions（90.88秒）、packages/opencode类型检查、SDK compile-tests/package及ReadTool回读1 pass/2 assertions。核对全部diff及N1–N10调用链；主路径和fallback门禁通过。独立统计8生产/6测试文件、新增332/删除277、E262/C42；源码与索引未被审计修改。
+
+以下为历史缺陷索引与方向摘要；发生冲突时以本节当前R5实施契约及最新用户要求为准：
+
+| 序号 | 缺陷 | 等级 | 修复方向 |
+|---|---|---|---|
+| 1 | D1 队列与取消职责混合 | P1 | 短文档写串行与执行等待分开；取消使未启动写失效，stop/info 可达；显式 document/ranges；不自动关闭全局 UI |
+| 2 | D2 metadata 预检 | P1 | 删除执行资格猜测；metadata 仅展示，按真实 serializer 读取；不新增无消费者证据的 flat fallback |
+| 3 | D4 create 路径语义 | P1 | existing 与 create 在同一解析边界分支，create 验证父目录和冲突；真实工具入口回归 |
+| 5 | D5 范围执行预算 | P2 | 保留 per-cell 期限，移除客户端误套单 cell 总额；直接传播取消，服务端停止后续调度；不预读 cell 数 |
+| 6 | D6 harness 失真 | P2 | 真实 serializer、HTTP 取消、控制请求与真实 Jupyter 分层测试；modal 测试抑制不得冒充普通窗口行为 |
+| 7 | D7 失败摘要误报成功 | P1 | `summary.ts:46-53` 把 `executionText` 当状态源：当前格式以 `current-run` 开头，`startsWith('fail')` 永不命中该失败样本。直接使用 cell.executionSummary 的 success/order/timing 构造统计，最后才格式化；不再解析展示字符串 |
+| 8 | D8 output artifact 跨文档覆盖 | P1 | `output.ts:111-129` 文件名只有 basename/index。按规范 notebook URI 与输出内容身份生成不可变 artifact 路径，同 cell 重跑也不覆盖已交给模型的旧 artifact；读取/导出不用全局锁，写内容与返回路径必须对应。动态 a/same 与 b/same 覆盖已证实 |
+| 9 | D9 超长行尾部不可达 | P1 | `source.ts:131-146,185-186` 把部分行算完整行并建议 offset+1；`76` 再把越界 offset 夹回末行。保留行分页，为超长行增加无状态的行内字节偏移输入/下一偏移反馈，在 UTF-8 边界截断，尾段读完才推进行号；取当前 dirty document。仅导出 artifact 而通用 read 仍无法分页单行不构成修复；不引入有状态游标服务器 |
+| 10 | D10 language-only 编辑不幂等 | P2 | `edit.ts` 先按输入有无决定源码/语言意图，再应用差异。相同语言且未传源码是成功 no-op，保持源码/输出/ID；不要因未发生类型变化而落入 newCode 必填分支。覆盖 code→code、code↔markdown 及空字符串显式清空 |
+| 11 | D11 info/configure 隐藏执行与静默吞错 | P1 | `env.ts:1003-1071` 的 info 在同一 kernel 注入 import/变量及 JSON 探针，可能排队、请求授权；catch 抹掉失败后仍声称已探测。默认 info 只读取 kernel language/status、Jupyter 关联 Python 环境及 saved metadata，各标来源；删除默认 executeCode 探针和 configure 前后探针。需要 sys.executable 等真实值时由模型显式 run 可见 cell，不用后台执行制造第二条权限/取消路径 |
+| 12 | D12 restart 修改全局设置及虚假 verified | P1 | 静态证据 `env.ts:656-706`：读取 effective config 后写 Global false，再把 effective 原值写 Global，不能恢复原先未显式设置的状态；多个 notebook 的锁不保护共享设置。删除临时全局设置改写；优先核实 provider 的单次调用免确认接口，若无此契约则把确认限制明确保留，不劫持用户设置。`isKernelAccessible` 仅证明可访问，不能标为 restart verified；命令请求与重启完成分开。真实并发 restart 尚待动态验证 |
+
+建议的收敛顺序是：先按 D6 固定真实回归，再一起替换 D1/D5 的请求生命周期边界、D2/D11的运行状态边界，随后修复展示/编辑/artifact 的局部纯逻辑。保持现有六个工具入口，复用 resolve/format/output 的既有边界；不新建“NotebookManager + KernelRegistry + ControllerStateMachine”多层系统。新增状态仅限一次请求的取消/完成资源，支持诊断的字段应为直接事实，避免重复保存 probeSucceeded 等互相推导的布尔值。
+
+验收必须同时满足：冷启动能执行；已取消排队 edit 不落地；run 未完成时 stop 不排队；范围不被单 cell 预算截断；失败总标题准确；不同文档/不同输出 artifact 可回读原内容；超长 dirty source 的尾部可取；language-only no-op 保持内容和 ID；info 无执行副作用；restart 不改全局设置。尚未核实的 Jupyter 跨版本/remote/控制操作契约列为实施前验证门，不以 fallback 状态机掩盖。此段为首次独立审计前的历史验收摘要，不代表当前范围或批准；实际审计次数和有效要求以文首及本节R2契约为准。
+
+---
+
+## 7. 现场遗留状态（实验结束时）
+
+1. **实验产物**（全部在 `.temp\testing\`）：
+   - `notebook-bridge-probe.ipynb`（2 cells，含探针 kernel 执行输出；当前在编辑器中 dirty，最后一组编辑未存盘）
+   - `no-metadata-probe.ipynb`、`longline-probe.ipynb`、`env-created-probe.ipynb`（边界夹具）
+   - `extdev\bridge\`（插桩扩展副本 + `dist/extension.js` 构建产物）、`extdev\build.mjs`、`extdev\drive.mjs`、`extdev\drive2.mjs`、`extdev\call.mjs`、`extdev\drive-results.jsonl`、`extdev\edge-results.jsonl`
+   - `db-forensics.ts`、`db-errors.ts`（DB 取证脚本）
+2. 早期插桩窗口状态属于 9 月 13 日快照，不能当作当前用户窗口状态。本轮宿主使用独立 profile/tests，suite 完成后自动退出；不要求用户重开其现有窗口。
+3. **工作区 `.opencode\cache\notebook-outputs\`** 下有 6 个实验产生的 `notebook-bridge-probe-cell-*.txt` artifact（2026-09-13 04:30:31）；删除操作被权限策略拦截，留用户处置。
+4. **`sdks\vscode\dist\extension.js` 为 2026/7/5 陈旧构建**，下次打包前需先 `bun run package`。
+5. 注册表目录残留若干历史 `.tmp` 孤儿文件（不影响功能；发现逻辑只认 UUID.json 命名）。
+6. 本轮产物在 `.temp/testing/notebook-r1-review/`：`suite.ts/build.cjs/check.cjs/results.json/bridge.log`、`cold-forensics.ts/cold-forensics.json`、`jupyter-suite.ts/jupyter-build.cjs/jupyter-results.json`，以及每轮独立 `profile*/jupyter-profile*` 日志。results 文件随实验复跑更新，比较精确毫秒数必须使用对应轮次；早期 stdout=42 的 8.416s 不是后续复跑的耗时。
+7. 真实 Jupyter 前几轮按默认路径在用户 `AppData/Roaming/jupyter/runtime` 创建过连接文件；这是上游 kernel 启动副作用，不能宣称所有间接产物都在 testing。最后两轮在实验 extension host 设置 `JUPYTER_RUNTIME_DIR` 到 testing，日志已确认；没有清理用户 runtime 目录、改用户扩展或终止用户旧进程。
+
+---
+
+## 8. 附：关键源码位置索引
+
+| 主题 | 位置 |
+|---|---|
+| 扩展 notebook 模块 | `sdks/vscode/src/notebook/{summary,source,edit,run,output,env,format,resolve,commands}.ts` |
+| 桥接服务器/锁 | `sdks/vscode/src/bridge.ts`（`withFileLock`、`READONLY_ROUTES`） |
+| 桥注册/发现 | `sdks/vscode/src/bridge-registry.ts`、`packages/opencode/src/ide/vscode-bridge.ts` |
+| 插件工具定义/超时/权限 | `packages/opencode/src/plugin/vscode-bridge.ts`（summary/source 10s、output/edit 30s、env 120s、run `timeoutMs+5s`） |
+| ipynb 序列化器 metadata 形状 | `.temp/thirdparty/vscode/extensions/ipynb/src/deserializers.ts:361-371`、`notebookSerializer.ts:64-67` |
+| 既有测试 harness | `packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts`（658 行平铺 metadata mock）、`vscode-bridge.test.ts` |
+| 冷载荷恢复格式 | `packages/opencode/src/storage/cold.ts:254-303,367,793-817`，只读实验不调用生产回填函数 |
+| 新增局部缺陷 | `summary.ts:46-53`；`source.ts:76,131-146,185-186`；`output.ts:111-135`；`env.ts:656-706,1003-1071` |
+| Jupyter API 访问控制 | https://github.com/microsoft/vscode-jupyter/blob/main/src/standalone/api/kernels/apiAccess.ts |

@@ -649,7 +649,8 @@ describe("session.llm.stream", () => {
             [providerID]: {
               npm: "@ai-sdk/openai-compatible",
               name: "Stalled Provider",
-              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 25 },
+              // 本例验证首chunk后的停流；给真实HTTP建连留余量，避免先命中headers前超时。
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 1000 },
               models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
             },
           },
@@ -696,8 +697,8 @@ describe("session.llm.stream", () => {
       expect(events.map((event) => event.phase)).toContain("fetch.response")
       expect(events.map((event) => event.phase)).toContain("sse.timeout")
       expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
-      expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
-      expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(25)
+      expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("1000")
+      expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(1000)
     })
   })
 

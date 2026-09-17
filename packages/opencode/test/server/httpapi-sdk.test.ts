@@ -57,7 +57,8 @@ function app(serverPath: ServerPath, input?: { password?: string; username?: str
   const handler = HttpRouter.toWebHandler(
     HttpApiApp.routes.pipe(
       Layer.provide(
-        ConfigProvider.layer(
+        // 认证只覆盖自己的配置项；共享服务仍须读取preload设定的runtime flags。
+        ConfigProvider.layerAdd(
           ConfigProvider.fromUnknown({
             OPENCODE_SERVER_PASSWORD: input?.password,
             OPENCODE_SERVER_USERNAME: input?.username,

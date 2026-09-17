@@ -123,11 +123,16 @@ const mcpTest = testEffect(
 )
 const service = MCP.Service as unknown as Effect.Effect<MCPNS.Interface, never, never>
 
+// OS分配的端口避开本机保留区，仍走真正的callback监听与关闭流程。
+const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+const redirectUri = `http://127.0.0.1:${reservation.port}/mcp/oauth/callback`
+await reservation.stop(true)
 const config = (name: string) => ({
   mcp: {
     [name]: {
       type: "remote" as const,
       url: "https://example.com/mcp",
+      oauth: { redirectUri },
     },
   },
 })

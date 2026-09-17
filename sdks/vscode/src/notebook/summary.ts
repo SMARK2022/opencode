@@ -43,9 +43,10 @@ export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: bo
 
 function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnType<typeof compactCell>[]) {
   const virtualRanges = computeVirtualRanges(notebook)
-  const code = cells.filter((cell) => cell.kind === "code")
-  const executed = code.filter((cell) => cell.exec !== "not-run")
-  const failed = code.filter((cell) => cell.exec.startsWith("fail"))
+  // 展示文本含来源和时间前缀，不能反向充当执行状态协议。
+  const code = notebook.getCells().filter((cell) => cell.kind === vscode.NotebookCellKind.Code)
+  const executed = code.filter((cell) => cell.executionSummary?.success !== undefined)
+  const failed = code.filter((cell) => cell.executionSummary?.success === false)
   const status = failed.length
     ? `${failed.length} failed`
     : executed.length === code.length && code.length > 0

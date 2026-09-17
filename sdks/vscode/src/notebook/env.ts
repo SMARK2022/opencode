@@ -9,17 +9,17 @@
  *
  * All operations accept an optional `reason` string briefly shown to the user.
  *
- * Info probes the active Jupyter kernel via the stable public API
- * (api.kernels.getKernel + executeCode). Saved .ipynb metadata is reported
+ * Info reads the active Jupyter kernel via the stable public API
+ * (api.kernels.getKernel). Saved .ipynb metadata is reported
  * separately and is not treated as the active runtime.
  *
- * Configure probes the Jupyter public API (api.kernels.getKernel + executeCode)
+ * Configure reads the Jupyter public API (api.kernels.getKernel)
  * before and after kernel selection to confirm readiness. A single probe after
  * notebook.selectKernel is sufficient — polling cannot detect a kernel that
  * only starts on first code-cell execution.
  *
  * Statuses:
- *   configured          — active kernel confirmed via executeCode probe
+ *   configured          — active kernel visible through the public API
  *   selected            — selectKernel returned true, kernel not yet active
  *                          (expected before first code-cell execution)
  *   needs-selection     — selectKernel returned false or did not run;
@@ -30,9 +30,8 @@
  * Returns diagnostic data for each flow node: notebook metadata, extension
  * state, visibility, pre-/post-selection kernel probes, and poll results.
  *
- * Restart temporarily disables jupyter.askForKernelRestart to suppress the
- * Jupyter confirmation modal, calls the public jupyter.restartkernel command,
- * then restores the original setting.
+ * Restart respects jupyter.askForKernelRestart and reports only whether the
+ * command was requested; command completion is not proof of a restarted kernel.
  *
  * Save persists the notebook via NotebookDocument.save(). Since save() returns
  * false for both "not dirty" and "genuine failure", success is determined by
@@ -48,13 +47,9 @@ import { notebookHeader, runtimeLabel } from "./format"
 // Types
 // ---------------------------------------------------------------------------
 
-type KernelOutputItem = { mime: string; data: Uint8Array }
-type KernelOutput = { items: KernelOutputItem[] }
-
 interface KernelLike {
   readonly language: string
   readonly status?: string
-  executeCode(code: string, token: vscode.CancellationToken): AsyncIterable<KernelOutput>
 }
 
 type JupyterLike = {
@@ -66,16 +61,6 @@ type JupyterLike = {
 type ActiveRuntime = {
   language: string
   kernelStatus: string
-  python?: {
-    version: string | null
-    executable: string | null
-    prefix: string | null
-    basePrefix: string | null
-    condaDefaultEnv: string | null
-    virtualEnv: string | null
-    envName: string | null
-    platform: string | null
-  }
 }
 
 type SavedMetadata = {
@@ -94,9 +79,6 @@ type ConfigureProbe = {
   configured: boolean
   kernelLanguage?: string
   kernelStatus?: string
-  probeSucceeded?: boolean
-  probeError?: string
-  probeDurationMs?: number
   elapsedMs: number
 }
 
@@ -112,7 +94,6 @@ const RESTART_CMD = "jupyter.restartkernel"
 const INTERRUPT_CMD = "jupyter.interruptkernel"
 const CONFIG_SECTION = "jupyter"
 const CONFIG_KEY = "askForKernelRestart"
-const PROBE_TIMEOUT_MS = 30_000
 // selectKernel 打开内核选择器 UI 后可能无限期阻塞等待用户交互。
 // 客户端 120s 超时会直接中止操作，agent 无法获得有用信息。
 // 服务端在 15s 内超时并返回 selection-requested，让 agent 继续工作。
@@ -189,9 +170,8 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
       `Python/Jupyter extensions: ${extensionState(PYTHON_ID)}/${extensionState(JUPYTER_ID)}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
-        ? "Runtime source: active kernel (api.kernels.getKernel + executeCode probe)."
+        ? "Runtime source: active kernel status."
         : "Runtime source: none. Jupyter public API only exposes kernels that have been started by executing at least one code cell.",
-      activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
       reason ? `Reason: ${reason}` : undefined,
     ].filter(Boolean).join("\n"),
     data: {
@@ -206,8 +186,6 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
         jupyter: extensionInfo(JUPYTER_ID),
       },
     },
-    note:
-      "Runtime is probed from the active kernel process; saved metadata is reported separately and is not treated as runtime fallback.",
   }
 }
 
@@ -308,7 +286,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
       path: primaryPath,
       reason,
       status: "configured",
-      summary: "Notebook already has an active kernel — runtime probe via executeCode succeeded.",
+      summary: "Notebook has an active kernel.",
       data: {
         notebook: notebookMeta,
         jupyter: jupyterInfo,
@@ -397,16 +375,14 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
       configured: preCheck.configured,
       kernelLanguage: preCheck.kernelLanguage,
       kernelStatus: preCheck.kernelStatus,
-      probeDurationMs: preCheck.probeDurationMs,
+      elapsedMs: preCheck.elapsedMs,
     },
     postSelect: {
       hasKernel: postProbe.hasKernel,
       configured: postProbe.configured,
       kernelLanguage: postProbe.kernelLanguage,
       kernelStatus: postProbe.kernelStatus,
-      probeSucceeded: postProbe.probeSucceeded,
-      probeError: postProbe.probeError,
-      probeDurationMs: postProbe.probeDurationMs,
+      elapsedMs: postProbe.elapsedMs,
     },
   }
 
@@ -462,7 +438,7 @@ function resolveConfigureStatus(
   if (postProbeConfigured) {
     return {
       status: "configured",
-      statusSummary: "Kernel is active — runtime probe via executeCode succeeded after selection.",
+      statusSummary: "Kernel is active.",
     }
   }
 
@@ -543,39 +519,23 @@ function configureResult(input: {
       status: input.status,
       ...input.data,
     },
-    note:
-      "Public-API configure. Uses api.kernels.getKernel + executeCode to confirm kernel readiness. Cannot access Jupyter internal controllerRegistration/kernelProvider.",
   }
 }
 
 /**
- * Probes kernel readiness through the Jupyter public API.
- * Uses getActiveRuntime which calls api.kernels.getKernel + optional executeCode.
+ * Reads kernel status through the Jupyter public API.
  */
 async function probeConfigureRuntime(uri: vscode.Uri, label?: string): Promise<ConfigureProbe> {
   const startedAt = Date.now()
   const result: ConfigureProbe = { hasKernel: false, configured: false, elapsedMs: 0 }
 
-  try {
-    const runtime = await getActiveRuntime(uri)
-    result.elapsedMs = Date.now() - startedAt
-    result.probeDurationMs = result.elapsedMs
-
-    if (!runtime) {
-      result.hasKernel = false
-      return result
-    }
-
-    result.hasKernel = true
-    result.kernelLanguage = runtime.language
-    result.kernelStatus = runtime.kernelStatus
-    result.probeSucceeded = true
-    result.configured = true
-  } catch (error) {
-    result.elapsedMs = Date.now() - startedAt
-    result.probeDurationMs = result.elapsedMs
-    result.probeError = error instanceof Error ? error.message : String(error)
-  }
+  // 获取失败必须保留原始错误；未知状态不能被后续流程解释成已就绪。
+  const runtime = await getActiveRuntime(uri)
+  result.elapsedMs = Date.now() - startedAt
+  result.hasKernel = runtime !== null
+  result.configured = runtime !== null
+  result.kernelLanguage = runtime?.language
+  result.kernelStatus = runtime?.kernelStatus
 
   void label // caller may inject a label for diagnostic tracing
   return result
@@ -650,15 +610,15 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     }
   }
 
-  // Temporarily suppress Jupyter's built-in restart confirmation modal.
-  // The public command internally reads jupyter.askForKernelRestart via
-  // shouldAskForRestart(); setting it to false skips the modal.
-  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+  // effective值不等于Global原值，临时写设置无法正确恢复作用域或并发修改。
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION, notebook.uri)
   const original = config.get<boolean>(CONFIG_KEY)
-  const needsRestore = original === true
-
-  if (needsRestore) {
-    await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
+  if (original === true) {
+    return {
+      ran: false,
+      summary: [...envSummaryHeader(notebook, "restart", "confirmation-required"), "Jupyter requires restart confirmation; no restart was requested and no settings were changed."].join("\n"),
+      data: { path: primaryPath, operation: "restart", requested: false, verified: false, reason },
+    }
   }
 
   try {
@@ -672,7 +632,7 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
       ran: true,
       summary: [
         ...envSummaryHeader(notebook, "restart", "requested"),
-        "Kernel restart requested. All runtime state from previous cell executions should be cleared.",
+        "Kernel restart requested; completion and state clearing have not been verified.",
         "Rerun setup or import cells before running dependent cells.",
         reason ? `Reason: ${reason}` : "",
       ].filter(Boolean).join("\n"),
@@ -682,11 +642,8 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
         reason,
         requested: true,
         askForKernelRestartOriginal: original,
-        askForKernelRestartSuppressed: needsRestore,
-        // 轻量级验证：只检查 kernel 是否仍可访问（不调 executeCode 避免 30s 延迟）。
-        // jupyter.restartkernel 内部 .catch(noop) 吞错误，不验证则不知道是否成功。
-        // 旧 kernel 尚未完全销毁时可能返回 true（假阳性），作为 best-effort 附加信息可接受。
-        verified: await isKernelAccessible(notebook.uri),
+        // 上游命令可在实际重启结束前返回；可访问的旧kernel不能作为验证。
+        verified: false,
         durationMs: Date.now() - startedAt,
       },
     }
@@ -699,11 +656,6 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
         `Kernel restart invocation failed: ${message}.`,
       ].join("\n"),
       data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt },
-    }
-  } finally {
-    // Restore the user's original setting so no permanent change is left behind
-    if (needsRestore) {
-      await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
     }
   }
 }
@@ -826,21 +778,6 @@ async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, time
 // ===========================================================================
 // stop — interrupt kernel, halt the currently executing cell
 // ===========================================================================
-
-// 轻量级 kernel 可访问性检查：只调 getKernel 不调 executeCode。
-// 用于 restart 验证等不需要 Python 运行时详情的场景，
-// 避免 probePythonRuntime 在重启过渡期执行代码导致的 30s 延迟和假阳性。
-async function isKernelAccessible(uri: vscode.Uri): Promise<boolean> {
-  try {
-    const ext = vscode.extensions.getExtension(JUPYTER_ID)
-    if (!ext) return false
-    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-    const kernel = await api?.kernels?.getKernel?.(uri)
-    return kernel !== undefined
-  } catch {
-    return false
-  }
-}
 
 async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
@@ -1001,74 +938,12 @@ async function createNotebook(filePath: string, reason?: string) {
 // ===========================================================================
 
 async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {
-  try {
-    const ext = vscode.extensions.getExtension(JUPYTER_ID)
-    if (!ext) return null
-
-    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-    const kernel = await api?.kernels?.getKernel?.(uri)
-    if (!kernel) return null
-
-    const base: ActiveRuntime = {
-      language: kernel.language,
-      kernelStatus: kernel.status ?? "unknown",
-    }
-
-    if (kernel.language.toLowerCase() !== "python") return base
-
-    const python = await probePythonRuntime(kernel).catch(() => null)
-    return python ? { ...base, python } : base
-  } catch {
-    return null
-  }
-}
-
-async function probePythonRuntime(kernel: KernelLike): Promise<ActiveRuntime["python"]> {
-  const code = `
-import os, sys, json, platform
-conda_env = os.environ.get("CONDA_DEFAULT_ENV")
-virtual_env = os.environ.get("VIRTUAL_ENV")
-env_name = conda_env
-if not env_name and virtual_env:
-    env_name = os.path.basename(virtual_env)
-if not env_name:
-    parts = (sys.executable or "").replace("\\\\", "/").split("/")
-    if "envs" in parts and parts.index("envs") + 1 < len(parts):
-        env_name = parts[parts.index("envs") + 1]
-    else:
-        env_name = os.path.basename(os.path.dirname(sys.executable or "")) or None
-print("__OPENCODE_RUNTIME_PROBE_START__")
-print(json.dumps({
-    "version": platform.python_version(),
-    "executable": sys.executable,
-    "prefix": sys.prefix,
-    "basePrefix": getattr(sys, "base_prefix", None),
-    "condaDefaultEnv": conda_env,
-    "virtualEnv": virtual_env,
-    "envName": env_name,
-    "platform": platform.platform(),
-}, ensure_ascii=False))
-print("__OPENCODE_RUNTIME_PROBE_END__")
-`.trim()
-
-  const cts = new vscode.CancellationTokenSource()
-  const timer = setTimeout(() => cts.cancel(), PROBE_TIMEOUT_MS)
-  const chunks: string[] = []
-
-  try {
-    for await (const output of kernel.executeCode(code, cts.token)) {
-      for (const item of output.items) {
-        const text = decoder.decode(item.data)
-        if (isErrorMime(item.mime)) throw new Error(text)
-        if (isReadableMime(item.mime)) chunks.push(text)
-      }
-    }
-  } finally {
-    clearTimeout(timer)
-    cts.dispose()
-  }
-
-  return JSON.parse(extractProbeJson(chunks.join("\n")))
+  const ext = vscode.extensions.getExtension(JUPYTER_ID)
+  if (!ext) return null
+  // 状态读取不能向用户kernel注入变量，也不能触发executeCode的独立授权。
+  const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
+  const kernel = await api?.kernels?.getKernel?.(uri)
+  return kernel ? { language: kernel.language, kernelStatus: kernel.status ?? "unknown" } : null
 }
 
 async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata | null> {
@@ -1099,11 +974,7 @@ async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata
 // ===========================================================================
 
 function formatActiveRuntime(runtime: ActiveRuntime) {
-  const p = runtime.python
-  if (!p) return `${runtime.language} kernelStatus=${runtime.kernelStatus}`
-  const env = p.envName ?? runtime.language
-  const version = p.version ? `${runtime.language} ${p.version}` : runtime.language
-  return `${env} (${version}) kernelStatus=${runtime.kernelStatus}`
+  return `${runtime.language} kernelStatus=${runtime.kernelStatus}`
 }
 
 function formatSavedMetadata(meta: SavedMetadata | null) {
@@ -1113,36 +984,4 @@ function formatSavedMetadata(meta: SavedMetadata | null) {
     ? `${meta.language ?? "unknown"} ${meta.languageVersion}`
     : meta.language ?? "unknown"
   return `${kernel} (${language}), kernelspec.name=${meta.kernelName ?? "unknown"}`
-}
-
-function isReadableMime(mime: string) {
-  return (
-    mime === "text/plain" ||
-    mime === "application/json" ||
-    mime === "application/x.notebook.stream.stdout" ||
-    mime === "application/vnd.code.notebook.stdout" ||
-    mime.startsWith("text/")
-  )
-}
-
-function isErrorMime(mime: string) {
-  return mime === "application/vnd.code.notebook.error"
-}
-
-function extractProbeJson(text: string) {
-  const startMarker = "__OPENCODE_RUNTIME_PROBE_START__"
-  const endMarker = "__OPENCODE_RUNTIME_PROBE_END__"
-  const start = text.indexOf(startMarker)
-  const end = text.indexOf(endMarker)
-
-  const body = start >= 0 && end > start
-    ? text.slice(start + startMarker.length, end)
-    : text
-
-  const jsonStart = body.indexOf("{")
-  const jsonEnd = body.lastIndexOf("}")
-  if (jsonStart < 0 || jsonEnd < jsonStart) {
-    throw new Error(`Runtime probe returned no JSON: ${text.slice(0, 500)}`)
-  }
-  return body.slice(jsonStart, jsonEnd + 1)
 }

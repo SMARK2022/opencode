@@ -191,7 +191,11 @@ export async function callBridge(input: CallInput): Promise<unknown> {
 }
 
 async function callBridgeOnce(input: CallInput): Promise<unknown> {
-  await assertExistingLocalFilePath(input.filePath)
+  input.signal?.throwIfAborted()
+  // 创建的目标本来就可不存在；实际冲突保护由SDK的create入口负责。
+  if (input.path !== "/notebook/env" || input.body.operation !== "create") {
+    await assertExistingLocalFilePath(input.filePath)
+  }
   const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
   let response: Response
   try {
@@ -310,6 +314,8 @@ async function fetchWithTimeout(
   signal?: AbortSignal,
 ) {
   const controller = new AbortController()
+  // 发现bridge期间也可能取消；注册监听之前检查已有状态，避免漏掉事件。
+  signal?.throwIfAborted()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const abort = () => controller.abort()
   signal?.addEventListener("abort", abort, { once: true })

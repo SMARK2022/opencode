@@ -87,6 +87,12 @@ export async function startBridge(output: { appendLine(value: string): void }): 
     const url = new URL(request.url ?? "/", `http://${BRIDGE_HOST}`)
     output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
 
+    // 正常finish后的close不是取消；只有响应未完成的断开才终止请求。
+    const controller = new AbortController()
+    response.once("close", () => {
+      if (!response.writableFinished) controller.abort(new Error("Notebook request disconnected"))
+    })
+
     try {
       if (!safeLocalRequest(request)) {
         return writeJson(response, 403, { ok: false, error: "Forbidden" })
@@ -115,8 +121,14 @@ export async function startBridge(output: { appendLine(value: string): void }): 
         // 它们只读取 VS Code 文档状态，不修改 notebook/kernel，
         // 50 分钟 run 期间 agent 仍可检查 notebook 状态。
         // cell-output 是 output 的别名（routeRequest 中 case fallthrough）。
-        const handler = () => routeRequest(url.pathname, body, output)
-        const result = READONLY_ROUTES.has(url.pathname)
+        const handler = () => {
+          // 在获得队列执行权后检查，而非只在入队时检查，防止过期写入。
+          controller.signal.throwIfAborted()
+          return routeRequest(url.pathname, body, output, controller.signal)
+        }
+        // 控制面必须能到达正在运行的文档，不能等待run持有的执行锁。
+        const control = url.pathname === "/notebook/env" && (body.operation === "stop" || body.operation === "info")
+        const result = READONLY_ROUTES.has(url.pathname) || control
           ? await handler()
           : await withFileLock(filePath, handler)
         if (result !== undefined) return writeJson(response, 200, result)
@@ -165,6 +177,7 @@ async function routeRequest(
   pathname: string,
   body: Record<string, unknown>,
   output: { appendLine(value: string): void },
+  signal: AbortSignal,
 ) {
 
   switch (pathname) {
@@ -178,10 +191,10 @@ async function routeRequest(
       return await notebookSource(body)
 
     case "/notebook/run":
-      return await runNotebook(body)
+      return await runNotebook(body, signal)
 
     case "/notebook/edit":
-      return await editNotebook(body)
+      return await editNotebook(body, signal)
 
     case "/notebook/output":
     case "/notebook/cell-output": {

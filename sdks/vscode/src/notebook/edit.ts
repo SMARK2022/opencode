@@ -40,10 +40,12 @@ const AFTER_SOURCE_PREVIEW_MAX_CHARS = 4 * 1024
 // Handler
 // ---------------------------------------------------------------------------
 
-export async function editNotebook(input: Record<string, unknown>) {
+export async function editNotebook(input: Record<string, unknown>, signal?: AbortSignal) {
   const filePath = stringProp(input, "filePath")
   if (!filePath) throw new Error("filePath is required")
   const notebook = await resolveNotebook(filePath)
+  // 打开文档是异步边界；之后的修改构造到applyEdit之间没有异步等待。
+  signal?.throwIfAborted()
   const editType = stringProp(input, "editType")
   if (!editType || !EDIT_TYPES.has(editType)) {
     throw new Error(
@@ -184,6 +186,12 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   }
 
   // --- TextEdit (no type change) ---
+
+  // 源码字段省略才是语言幂等操作；显式空字符串仍代表清空源码。
+  if (language !== undefined && input.oldCode === undefined && input.newCode === undefined) {
+    const source = targetCell.document.getText()
+    return compactEditResult(notebook, { applied: true, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language, sourcePreview: source, beforeSource: source, afterSource: source })
+  }
 
   // string-match edit (oldCode → newCode within cell)
   if (oldCodeRaw) {

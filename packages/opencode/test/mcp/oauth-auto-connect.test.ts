@@ -116,6 +116,7 @@ const { Bus } = await import("../../src/bus")
 const { Config } = await import("../../src/config/config")
 const { McpAuth } = await import("../../src/mcp/auth")
 const { McpOAuthProvider } = await import("../../src/mcp/oauth-provider")
+const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
 const { AppFileSystem } = await import("@opencode-ai/core/filesystem")
 const { CrossSpawnSpawner } = await import("@opencode-ai/core/cross-spawn-spawner")
 
@@ -132,11 +133,16 @@ const mcpTest = testEffect(
   ),
 )
 
+// 固定19876可能被Windows系统保留；由OS分配真实可绑定端口，不改生产默认值。
+const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+const redirectUri = `http://127.0.0.1:${reservation.port}/mcp/oauth/callback`
+await reservation.stop(true)
 const config = (name: string) => ({
   mcp: {
     [name]: {
       type: "remote" as const,
       url: "https://example.com/mcp",
+      oauth: { redirectUri },
     },
   },
 })
@@ -224,6 +230,9 @@ mcpTest.instance(
 
         simulateAuthFlow = false
         connectSucceedsImmediately = true
+
+        // 实例结束时释放真实监听端口，避免污染后续OAuth用例。
+        yield* Effect.addFinalizer(() => Effect.promise(() => McpOAuthCallback.stop()))
 
         const result = yield* mcp.authenticate("test-oauth-connect")
         expect(result.status).toBe("connected")
