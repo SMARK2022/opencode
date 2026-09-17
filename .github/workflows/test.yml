@@ -36,71 +36,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - id: opencode-linux
+          # 仅隔离诊断分支：重复完整 macOS 原执行链，不拿缩减后的成功冒充主分支门禁。
+          - id: macos-diagnostic-1
             label: packages/opencode
-            os_label: Linux
-            runner: ubuntu-latest
-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-            junit: packages/opencode/.artifacts/unit/*.xml
-          # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
-          # 分片 env 纳入测试缓存键，报告路径逐片唯一，失败不能互相覆盖。
-          - id: opencode-windows-integration
-            label: packages/opencode
-            os_label: Windows / 会话与服务集成
-            runner: windows-latest
-            command: OPENCODE_TEST_SHARD=integration bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
-            junit: packages/opencode/.artifacts/unit/junit-integration.xml
-          - id: opencode-windows-runtime
-            label: packages/opencode
-            os_label: Windows / 工具与基础模块
-            runner: windows-latest
-            command: OPENCODE_TEST_SHARD=runtime bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
-            junit: packages/opencode/.artifacts/unit/junit-runtime.xml
-          - id: opencode-windows-tui
-            label: packages/opencode
-            os_label: Windows / TUI
-            runner: windows-latest
-            command: OPENCODE_TEST_SHARD=tui bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
-            junit: packages/opencode/.artifacts/unit/junit-tui.xml
-          - id: core-linux
-            label: packages/core
-            os_label: Linux
-            runner: ubuntu-latest
-            command: bun run --cwd packages/core test:ci
-            junit: packages/core/.artifacts/unit/junit.xml
-          - id: core-windows
-            label: packages/core
-            os_label: Windows
-            runner: windows-latest
-            command: bun run --cwd packages/core test:ci
-            junit: packages/core/.artifacts/unit/junit.xml
-          - id: http-recorder-linux
-            label: packages/http-recorder
-            os_label: Linux
-            runner: ubuntu-latest
-            command: bun run --cwd packages/http-recorder test:ci
-            junit: packages/http-recorder/.artifacts/unit/junit.xml
-          - id: http-recorder-windows
-            label: packages/http-recorder
-            os_label: Windows
-            runner: windows-latest
-            command: bun run --cwd packages/http-recorder test:ci
-            junit: packages/http-recorder/.artifacts/unit/junit.xml
-          # macOS 覆盖：opencode 和 core 包的 64+ 处 process.platform 分支此前从未在 CI 上验证过。
-          # 不添加 http-recorder-macos：该包无原生依赖也无平台特定代码，Linux+Windows 覆盖已充分。
-          # OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER 对 macos-latest 正确求值为 'false'，无需额外配置。
-          - id: opencode-macos
-            label: packages/opencode
-            os_label: macOS
+            os_label: macOS / diagnostic 1
             runner: macos-latest
-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
             junit: packages/opencode/.artifacts/unit/*.xml
-          - id: core-macos
-            label: packages/core
-            os_label: macOS
+          - id: macos-diagnostic-2
+            label: packages/opencode
+            os_label: macOS / diagnostic 2
             runner: macos-latest
-            command: bun run --cwd packages/core test:ci
-            junit: packages/core/.artifacts/unit/junit.xml
+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+            junit: packages/opencode/.artifacts/unit/*.xml
+          - id: macos-diagnostic-3
+            label: packages/opencode
+            os_label: macOS / diagnostic 3
+            runner: macos-latest
+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+            junit: packages/opencode/.artifacts/unit/*.xml
     defaults:
       run:
         shell: bash
@@ -127,7 +81,29 @@ jobs:
 
       - name: Run required package tests
         id: test
-        run: ${{ matrix.command }}
+        # 仅诊断分支：预留上传时间，超时保留失败；不改变原测试或伪造退出成功。
+        timeout-minutes: 45
+        run: |
+          mkdir -p packages/opencode/.artifacts/ci
+          # 只采集 PID、父进程、状态与可执行名，不读取环境变量或完整命令参数。
+          (
+            while sleep 60; do
+              date -u
+              ps -axo pid,ppid,state,etime,comm
+              # 三分钟没有新增输出时采样 Bun 原生线程；采样本身不是测试进展信号。
+              if [ -f packages/opencode/.artifacts/ci/test.log ]; then
+                age=$(( $(date +%s) - $(stat -f %m packages/opencode/.artifacts/ci/test.log) ))
+                if [ "$age" -ge 180 ]; then
+                  for pid in $(pgrep -x bun || true); do
+                    sample "$pid" 2 -file "packages/opencode/.artifacts/ci/sample-${pid}-$(date +%s).txt" || true
+                  done
+                fi
+              fi
+            done
+          ) > packages/opencode/.artifacts/ci/processes.log 2>&1 &
+          monitor=$!
+          trap 'kill "$monitor" 2>/dev/null || true' EXIT
+          ${{ matrix.command }} 2>&1 | tee packages/opencode/.artifacts/ci/test.log
 
       - name: Check unit report
         id: junit
@@ -151,14 +127,17 @@ jobs:
           fail_on_failure: false
 
       - name: Upload required unit artifact
-        if: always() && steps.junit.outputs.exists == 'true'
+        # 即使 child 挂起没有 JUnit，也必须上传已写出的原始日志和 native 采样。
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: required-unit-${{ matrix.id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
-          path: ${{ matrix.junit }}
+          path: |
+            ${{ matrix.junit }}
+            packages/opencode/.artifacts/ci
 
       - name: Write required summary
         if: always()
@@ -179,6 +158,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   opentui-required:
+    if: github.ref == 'refs/heads/dev-smark'
     # closure、behavior test和consumer typecheck必须同一job执行，避免不同安装图互相掩盖peer漂移。
     name: 必过 OpenTUI 0.4.3 consumer gate
     runs-on: ubuntu-latest
@@ -221,6 +201,7 @@ jobs:
           done
 
   httpapi-required:
+    if: github.ref == 'refs/heads/dev-smark'
     name: 必过 HttpApi gate / ${{ matrix.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -275,6 +256,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   vscode-required:
+    if: github.ref == 'refs/heads/dev-smark'
     name: 必过 VSCode SDK 检查
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -329,6 +311,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   upstream-unit-warning:
+    if: github.ref == 'refs/heads/dev-smark'
     name: 警告 上游单元兼容性 / ${{ matrix.os_label }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -412,6 +395,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   upstream-extra-warning:
+    if: github.ref == 'refs/heads/dev-smark'
     name: 警告 上游额外包测试 / ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -523,6 +507,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   upstream-e2e-warning:
+    if: github.ref == 'refs/heads/dev-smark'
     name: 警告 上游 App E2E / ${{ matrix.os_label }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
