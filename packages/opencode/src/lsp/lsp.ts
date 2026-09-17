@@ -182,7 +182,8 @@ const layer = Layer.effect(
             instance: ctx,
           }).catch(async () => {
             s.broken.add(key)
-            await Process.stop(handle.process)
+            if ("process" in handle) await Process.stop(handle.process)
+            else handle.dispose()
             return undefined
           })
 
@@ -190,7 +191,8 @@ const layer = Layer.effect(
 
           const existing = s.clients.find((x) => x.root === root && x.serverID === server.id)
           if (existing) {
-            await Process.stop(handle.process)
+            // 重复初始化仅关闭新客户端的本地资源，保持目标flat客户端集合不变。
+            await client.shutdown()
             return existing
           }
 
@@ -360,7 +362,7 @@ const layer = Layer.effect(
 
     const implementation = Effect.fn("LSP.implementation")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
+        !client.supports("textDocument/implementation") ? Promise.resolve([]) : client.connection
           .sendRequest("textDocument/implementation", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
@@ -390,7 +392,7 @@ const layer = Layer.effect(
 
     const prepareCallHierarchy = Effect.fn("LSP.prepareCallHierarchy")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        client.connection
+        !client.supports("textDocument/prepareCallHierarchy") ? Promise.resolve([]) : client.connection
           .sendRequest("textDocument/prepareCallHierarchy", {
             textDocument: { uri: pathToFileURL(input.file).href },
             position: { line: input.line, character: input.character },
@@ -405,6 +407,8 @@ const layer = Layer.effect(
       direction: "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls",
     ) {
       const results = yield* run(input.file, async (client) => {
+        // 已知缺少能力的外部连接在请求前筛除，原生路径保持原有兼容性。
+        if (!client.supports("textDocument/prepareCallHierarchy")) return []
         const items = await client.connection
           .sendRequest<unknown[] | null>("textDocument/prepareCallHierarchy", {
             textDocument: { uri: pathToFileURL(input.file).href },

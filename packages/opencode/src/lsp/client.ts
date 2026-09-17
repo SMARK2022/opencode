@@ -129,11 +129,13 @@ export async function create(input: {
 }) {
   const instance = input.instance
 
-  const connection = createMessageConnection(
+  // 外部连接复用同一协议客户端，不伪造子进程或复制诊断缓存。
+  const connection = "connection" in input.server ? input.server.connection : createMessageConnection(
     new StreamMessageReader(input.server.process.stdout as any),
     new StreamMessageWriter(input.server.process.stdin as any),
   )
-  input.server.process.stderr?.resume()
+  // stderr 只存在于进程句柄；外部连接没有可订阅的宿主错误流，静默跳过。
+  if ("process" in input.server) input.server.process.stderr?.resume()
   // --- Connection state ---
 
   const pushDiagnostics = new Map<string, Diagnostic[]>()
@@ -211,7 +213,8 @@ export async function create(input: {
   const initialized = await withTimeout(
     connection.sendRequest<{ capabilities?: ServerCapabilities }>("initialize", {
       rootUri: pathToFileURL(input.root).href,
-      processId: input.server.process.pid,
+      // 外部连接以当前进程 PID 满足 initialize 协议，不伪造宿主进程身份。
+      processId: "process" in input.server ? input.server.process.pid : process.pid,
       workspaceFolders: [
         {
           name: "workspace",
@@ -507,15 +510,17 @@ export async function create(input: {
 
     while (Date.now() - startedAt < DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS) {
       const result = await requestDocumentDiagnostics(request.path)
-      if (result.matched) return
+      if (result.matched) return true
       const remaining = DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return
+      if (remaining <= 0) return false
       const next = await Promise.race([
         pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
         waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
       ])
-      if (next !== "registration") return
+      if (next !== "registration") return next === "push"
     }
+    // 等待结束不等于收到诊断；将事实交回管理层，避免存活连接冒充检查成功。
+    return false
   }
 
   async function waitForFullDiagnostics(request: { path: string; version: number; after?: number }) {
@@ -529,21 +534,29 @@ export async function create(input: {
 
     while (Date.now() - startedAt < DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS) {
       const result = await requestFullDiagnostics(request.path)
-      if (result.handled || result.matched) return
+      if (result.handled || result.matched) return true
       const remaining = DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return
+      if (remaining <= 0) return false
       const next = await Promise.race([
         pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
         waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
       ])
-      if (next !== "registration") return
+      if (next !== "registration") return next === "push"
     }
+    return false
   }
 
   // --- Public API ---
 
   const result = {
     root: input.root,
+    // HTTP接入明确声明能力；原生服务器保留既有动态能力兼容路径。
+    supports(method: string) {
+      if ("process" in input.server) return true
+      if (method === "textDocument/implementation") return Boolean(initialized.capabilities?.implementationProvider)
+      if (method === "textDocument/prepareCallHierarchy") return Boolean(initialized.capabilities?.callHierarchyProvider)
+      return true
+    },
     get serverID() {
       return input.serverID
     },
@@ -632,15 +645,16 @@ export async function create(input: {
         path.isAbsolute(request.path) ? request.path : path.resolve(input.directory, request.path),
       )
       if (request.mode === "document") {
-        await waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
-        return
+        return waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
       }
-      await waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
+      return waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
     },
     async shutdown() {
       connection.end()
       connection.dispose()
-      await Process.stop(input.server.process)
+      // 只结束本模块拥有的进程；外部VS Code仅释放本地协议资源。
+      if ("process" in input.server) await Process.stop(input.server.process)
+      else input.server.dispose()
     },
   }
 
