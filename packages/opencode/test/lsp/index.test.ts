@@ -201,6 +201,7 @@ describe("lsp.spawn", () => {
         Effect.gen(function* () {
           const dir = (yield* TestInstance).directory
           const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+          const external = spyOn(LSPServer.Vscode, "spawn").mockResolvedValue(undefined)
 
           try {
             yield* lsp.hover({
@@ -209,8 +210,13 @@ describe("lsp.spawn", () => {
               character: 0,
             })
             expect(spy).toHaveBeenCalledTimes(0)
+            // 普通外部注册定义也不能被true配置重新启用，产品仍没有诊断连接。
+            expect(external).toHaveBeenCalledTimes(0)
+            expect(yield* lsp.status()).toEqual([])
+            expect(yield* lsp.diagnostics()).toEqual({})
           } finally {
             spy.mockRestore()
+            external.mockRestore()
           }
         }),
       ),
