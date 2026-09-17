@@ -1264,8 +1264,8 @@ describe("session.llm.stream", () => {
         // 断言字符串值：结构化日志字段统一为字符串序列化形态
         expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
         // #240：chunkTimeoutMs 回显配置值 25——证明超时来自该 provider 的配置而非默认
-        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
-        expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(25)
+        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("1000")
+        expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(1000)
       })),
     {
       config: () => ({
@@ -1274,7 +1274,8 @@ describe("session.llm.stream", () => {
           "stalled-openai-compatible": {
             npm: "@ai-sdk/openai-compatible",
             name: "Stalled Provider",
-            options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 25 },
+            // 本例验证首chunk后的停流；给真实HTTP建连留余量，避免先命中headers前超时。
+            options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 1000 },
             models: {
               "gpt-test": {
                 name: "GPT Test",

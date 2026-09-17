@@ -131,11 +131,18 @@ function serveOAuthMcp(options: OAuthMcpOptions = {}) {
   )
 }
 
-const remote = (url: string, enabled = true) => ({
+const remote = (url: string, enabled = true, oauth?: { redirectUri: string }) => ({
   type: "remote" as const,
   url,
   enabled,
+  ...(oauth ? { oauth } : {}),
 })
+
+// OS分配可绑定端口，经config.redirectUri传给真实回调链，避开Windows固定端口保留区。
+const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+const redirectUri = `http://127.0.0.1:${reservation.port}/mcp/oauth/callback`
+// [0633] 立即释放端口：后续 MCP OAuth 回调服务器以相同端口真实监听。
+await reservation.stop(true)
 
 const stopOAuthCallback = Effect.addFinalizer(() => Effect.promise(() => McpOAuthCallback.stop()).pipe(Effect.ignore))
 
@@ -143,7 +150,7 @@ mcpTest.instance("first connect to OAuth server shows needs_auth instead of fail
   Effect.gen(function* () {
     const server = yield* serveOAuthMcp()
     const mcp = yield* MCP.Service
-    const result = yield* mcp.add("test-oauth", remote(server.url))
+    const result = yield* mcp.add("test-oauth", remote(server.url, true, { redirectUri }))
 
     expect((result.status as Record<string, { status: string }>)["test-oauth"]).toEqual({ status: "needs_auth" })
   }),
@@ -211,7 +218,7 @@ mcpTest.instance("failed reauthentication preserves existing credentials", () =>
 
     yield* auth.updateClientInfo(name, { clientId: "dynamic-client", clientSecret: "dynamic-secret" }, server.url)
     yield* auth.updateTokens(name, { accessToken: "working-token" }, server.url)
-    yield* mcp.add(name, remote(server.url))
+    yield* mcp.add(name, remote(server.url, true, { redirectUri }))
     expect((yield* mcp.startAuth(name)).authorizationUrl).toContain("/authorize")
 
     expect(yield* mcp.finishAuth(name, "invalid-code")).toEqual({
@@ -236,7 +243,7 @@ mcpTest.instance("successful reauthentication commits replacement credentials", 
 
     yield* auth.updateClientInfo(name, { clientId: "old-client" }, server.url)
     yield* auth.updateTokens(name, { accessToken: "old-token" }, server.url)
-    yield* mcp.add(name, remote(server.url))
+    yield* mcp.add(name, remote(server.url, true, { redirectUri }))
     expect((yield* mcp.startAuth(name)).authorizationUrl).toContain("/authorize")
     expect((yield* auth.get(name))?.tokens?.accessToken).toBe("old-token")
 
@@ -274,7 +281,7 @@ mcpTest.instance("authenticate() stores a connected client when auth completes w
     const server = yield* serveOAuthMcp()
     const mcp = yield* MCP.Service
     const name = "test-oauth-connect"
-    const added = yield* mcp.add(name, remote(server.url))
+    const added = yield* mcp.add(name, remote(server.url, true, { redirectUri }))
     expect((added.status as Record<string, { status: string }>)[name]?.status).toBe("needs_auth")
 
     server.allowAnonymous()
@@ -289,7 +296,7 @@ mcpTest.instance("authenticate() connects a resource-only server without listing
     const server = yield* serveOAuthMcp({ capabilities: "resources" })
     const mcp = yield* MCP.Service
     const name = "test-oauth-resources"
-    const added = yield* mcp.add(name, remote(server.url))
+    const added = yield* mcp.add(name, remote(server.url, true, { redirectUri }))
     expect((added.status as Record<string, { status: string }>)[name]?.status).toBe("needs_auth")
 
     server.allowAnonymous()

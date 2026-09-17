@@ -24,7 +24,8 @@ import { captureNotebookCellOutput, serializeNotebookOutputItem } from "./output
  * 每次执行后的元数据、MIME 和字节先同步捕获，再由 output owner 写入不可变 artifact。
  * summary 与 data 共享捕获值，并保留完整 artifactURI/artifactPath。
  */
-export async function runNotebook(input: Record<string, unknown>) {
+export async function runNotebook(input: Record<string, unknown>, signal?: AbortSignal) {
+  signal?.throwIfAborted()
   const filePath = stringProp(input, "filePath")
   if (!filePath) throw new Error("filePath is required")
   const type = input.type
@@ -54,26 +55,7 @@ export async function runNotebook(input: Record<string, unknown>) {
       "then call vscode_notebook_env with operation=configure to select a kernel."
     )
   }
-  // 预检不执行探针；等待后仍由下方既有身份校验检查已保留的目标格。
-  const jupyterExt = vscode.extensions.getExtension("ms-toolsai.jupyter")
-  if (jupyterExt && cells.some((cell) => cell.kind === vscode.NotebookCellKind.Code)) {
-    if (!jupyterExt.isActive) await jupyterExt.activate()
-    const jupApi = jupyterExt.exports as { kernels?: { getKernel?(uri: vscode.Uri): Promise<unknown> } } | undefined
-    const kernel = await jupApi?.kernels?.getKernel?.(notebook.uri)
-    const meta = notebook.metadata as Record<string, unknown>
-    const hasKernelspec = meta && typeof meta === "object" && (meta.kernelspec !== undefined || meta.language_info !== undefined)
-    if (!kernel && !hasKernelspec) {
-      // 复用现有Run格式，未执行必须保留completed=false及空cells，不能显示为完成。
-      const result = await compactRunResult(notebook, describeRunTarget(cells), false, cells, [])
-      return {
-        ...result,
-        ran: false,
-        summary: result.summary + "\nNo active kernel and no kernelspec metadata. Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
-        data: { ...result.data, noActiveKernel: true },
-      }
-    }
-  }
-
+  // 冷启动由原生执行入口负责，metadata和已启动kernel都不是执行资格。
   // 所有界面与能力查询结束后再校验目标，结构漂移时不调用命令或更新旧选区。
   if (notebook.isClosed || cells.some((cell, index) => notebook.getCells()[positions[index]] !== cell)) {
     // 按原范围核对对象，目标移位、删除或替换仍拒绝；不要求整份文档版本保持不变。
@@ -86,6 +68,8 @@ export async function runNotebook(input: Record<string, unknown>) {
   let failedIndex: number | undefined
 
   for (const cell of cells) {
+    // 断开只取消本请求；不得继续调度下一cell，也不擅自中断其他运行。
+    signal?.throwIfAborted()
     // Markup 保留在范围显示中，但不能提交给原生代码执行命令。
     if (cell.kind !== vscode.NotebookCellKind.Code) {
       results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", execution: executionState(cell), existing_outs: [], artifacts: [] })
@@ -104,12 +88,15 @@ export async function runNotebook(input: Record<string, unknown>) {
     editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
 
     // 提交前注册等待器，快速执行的完成事件不能落在命令 await 与订阅之间。
-    const wait = waitForSingleCell(notebook, cell, timeoutMs)
+    const wait = waitForSingleCell(notebook, cell, timeoutMs, signal)
     let executionSummary: vscode.NotebookCellExecutionSummary | undefined
     try {
-      // 每格仍显式传文档 URI 和半开范围，UI 聚焦只能辅助显示，不能成为执行身份。
-      await vscode.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cell.index, end: cell.index + 1 }], document: notebook.uri, autoReveal: false })
-      executionSummary = await wait.promise
+      // 命令可能不返回，deadline须覆盖原生命令等待；目标仍是已保留文档与格。
+      executionSummary = await Promise.race([
+        wait.promise,
+        vscode.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cell.index, end: cell.index + 1 }], document: notebook.uri, autoReveal: false }).then(() => wait.promise),
+      ])
+      signal?.throwIfAborted()
       // 等待器因目标失效唤醒时仍由原身份守卫报错，不把它降级成超时结果。
       if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target)) throw new Error("Notebook target cells changed during execution")
     } finally {
@@ -241,6 +228,7 @@ function waitForSingleCell(
   notebook: vscode.NotebookDocument,
   cell: vscode.NotebookCell,
   timeoutMs: number,
+  signal?: AbortSignal,
 ) {
   // 此 waiter 只观察提交时保留的格对象，不把插入到旧范围内的新格当执行目标。
   const valid = () => !notebook.isClosed && notebook.getCells()[cell.index] === cell
@@ -250,8 +238,13 @@ function waitForSingleCell(
   const version = notebook.version
   let subscription: vscode.Disposable | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
+  let abort: (() => void) | undefined
   // 目标失效交由命令结算后守卫抛错，避免命令 pending 时产生悬空拒绝。
   const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
+    // 请求断开结束本次等待，内核中断仍由显式stop负责。
+    abort = () => resolve(undefined)
+    signal?.addEventListener("abort", abort, { once: true })
+    if (signal?.aborted) abort()
     timer = setTimeout(() => {
       // 超时只结束摘要观察，不证明内核取消，也不能把旧结果标成这次完成。
       subscription?.dispose()
@@ -287,6 +280,8 @@ function waitForSingleCell(
   return {
     promise,
     dispose() {
+      // 正常、失败、期限与取消共用释放路径，后续请求不触发旧监听器。
+      if (abort) signal?.removeEventListener("abort", abort)
       if (timer) clearTimeout(timer)
       subscription?.dispose()
     },

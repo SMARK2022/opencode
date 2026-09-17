@@ -2,7 +2,7 @@
  * vscode_notebook_env 提供 info/configure/restart/save 环境操作。
  *
  * 运行时来源：Jupyter 稳定 API 的 api.kernels.getKernel(notebook.uri)，
- * Python 信息由该内核的 executeCode 探针取得。
+ * 仅读取语言与状态，不向用户内核注入执行探针。
  *
  * 元数据来源：保存的 .ipynb 中 metadata.kernelspec / metadata.language_info。
  *
@@ -15,15 +15,10 @@ import { extensionState, extensionInfo, stringProp, quoteForSummary, uriFromInpu
 import { resolveNotebook } from "./resolve"
 import { notebookHeader } from "./format"
 
-type KernelOutputItem = { mime: string; data: Uint8Array }
-type KernelOutput = { items: KernelOutputItem[] }
-
 interface KernelLike {
   readonly language: string
   // 稳定 API 的 status 可缺省，不能从 notebook 的保存状态补成 idle。
   readonly status?: string
-  // 探针消费异步内核输出流，CancellationToken 的所有权留在探针调用内。
-  executeCode(code: string, token: vscode.CancellationToken): AsyncIterable<KernelOutput>
 }
 
 type JupyterLike = {
@@ -36,19 +31,6 @@ type JupyterLike = {
 type ActiveRuntime = {
   language: string
   kernelStatus: string
-  // R 等非 Python 内核仍返回 base，不能用主机 Python 信息填充这个字段。
-  python?: {
-    version: string | null
-    executable: string | null
-    prefix: string | null
-    // basePrefix 与 prefix 分列，展示虚拟环境时不能把其基底解释器路径抹掉。
-    basePrefix: string | null
-    condaDefaultEnv: string | null
-    virtualEnv: string | null
-    // envName 是探针推导的显示标签，不能作为后续内核选择或解释器定位键。
-    envName: string | null
-    platform: string | null
-  }
 }
 
 type SavedMetadata = {
@@ -59,8 +41,6 @@ type SavedMetadata = {
   languageVersion: string | null
 }
 
-// 三十秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
-const PROBE_TIMEOUT_MS = 30_000
 // selectKernel 打开内核选择器 UI 后可能无限期阻塞等待用户交互。
 // 客户端 120s 超时会直接中止操作，agent 无法获得有用信息。
 // 服务端在 15s 内超时并返回 selection-requested，让 agent 继续工作。
@@ -121,9 +101,8 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) 
       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
-        ? "运行时来源：通过 api.kernels.getKernel 与 executeCode 查询实际活动的 Jupyter 内核进程。"
+        ? "运行时来源：公开API可见的活动内核状态。"
         : "运行时来源：无；Jupyter 稳定 API 仅暴露至少执行过一个代码格后启动的内核。",
-      activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
       reason ? `Reason: ${reason}` : undefined,
     ].filter(Boolean).join("\n"),
     data: {
@@ -139,8 +118,6 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) 
         jupyter: extensionInfo("ms-toolsai.jupyter"),
       },
     },
-    note:
-      "运行时通过实际内核进程探测；保存的元数据单独报告，不作为运行时回退。",
   }
 }
 
@@ -292,22 +269,20 @@ function configureResult(input: {
     ran: true,
     summary: [...envSummaryHeader(input.notebook, "configure", input.status), input.summary, guidance, input.reason ? `Reason: ${input.reason}` : undefined].filter(Boolean).join("\n"),
     data: { path: input.path, operation: "configure", reason: input.reason, status: input.status, ...input.data },
-    note: "Public-API configure. Uses api.kernels.getKernel and the existing Python executeCode probe; no internal controllerRegistration/kernelProvider access.",
   }
 }
 
 async function probeConfigureRuntime(uri: vscode.Uri) {
   const startedAt = Date.now()
   const runtime = await getActiveRuntime(uri)
-  // info 容忍 Python 探针失败并保留 base；configure 不能据此宣称探针就绪。
-  const configured = Boolean(runtime && (runtime.language.toLowerCase() !== "python" || runtime.python))
+  // 读取失败原样传播；可见性代表已关联内核，冷启动仍由首格原生命令负责。
+  const configured = runtime !== null
   return {
     hasKernel: Boolean(runtime),
     configured,
     kernelLanguage: runtime?.language,
     kernelStatus: runtime?.kernelStatus,
-    probeSucceeded: runtime?.language.toLowerCase() === "python" ? Boolean(runtime.python) : undefined,
-    probeDurationMs: Date.now() - startedAt,
+    elapsedMs: Date.now() - startedAt,
   }
 }
 
@@ -338,30 +313,34 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   if (!allCommands.includes(RESTART_CMD)) {
     return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "jupyter.restartkernel command is not registered."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
   }
-  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+  // effective值可能来自文档作用域，写回Global既不能恢复原作用域，也会覆盖并发修改。
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION, notebook.uri)
   const original = config.get<boolean>(CONFIG_KEY)
-  // 仅临时关闭已启用的确认，finally 恢复用户设置。
-  const needsRestore = original === true
-  if (needsRestore) await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
+  // 尊重用户确认策略，不代答或暂时改写设置；显式请求未发送。
+  if (original === true) {
+    return {
+      ran: false,
+      summary: [...envSummaryHeader(notebook, "restart", "confirmation-required"), "Jupyter requires restart confirmation; no restart was requested and no settings were changed."].join("\n"),
+      data: { path: primaryPath, operation: "restart", requested: false, verified: false, reason },
+    }
+  }
   try {
     // Jupyter 命令内部可能吞错，返回值只表示 requested。
     await vscode.commands.executeCommand(RESTART_CMD, { notebookEditor: { notebookUri: notebook.uri } })
     return {
       ran: true,
-      summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
+      summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested; completion and state clearing have not been verified.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
       data: {
         path: primaryPath, operation: "restart", reason, requested: true,
-        askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore,
-        // 只观察公开内核可访问性，不执行探针，也不把它升级为重启成功证据。
-        verified: await isKernelAccessible(notebook.uri),
+        askForKernelRestartOriginal: original,
+        // 可访问的旧内核不能证明已完成重启，保留requested而不虚报verified。
+        verified: false,
         durationMs: Date.now() - startedAt,
       },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), `Kernel restart invocation failed: ${message}.`].join("\n"), data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt } }
-  } finally {
-    if (needsRestore) await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
   }
 }
 
@@ -369,21 +348,7 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
 // stop — interrupt kernel, halt the currently executing cell
 // ===========================================================================
 
-// 轻量级 kernel 可访问性检查：只调 getKernel 不调 executeCode。
-// 用于 restart 验证等不需要 Python 运行时详情的场景，
-// 避免 probePythonRuntime 在重启过渡期执行代码导致的 30s 延迟和假阳性。
-async function isKernelAccessible(uri: vscode.Uri): Promise<boolean> {
-  try {
-    const ext = vscode.extensions.getExtension(JUPYTER_ID)
-    if (!ext) return false
-    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-    const kernel = await api?.kernels?.getKernel?.(uri)
-    return kernel !== undefined
-  } catch {
-    return false
-  }
-}
-
+// [0633] stop 不需要抑制确认弹窗：与 restart 不同，interrupt 是即发即收操作。
 async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
   const startedAt = Date.now()
@@ -642,89 +607,13 @@ async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, time
   })
 }
 
+// 只读公开内核状态；不注入代码、不吞查询错误，也不从保存元数据合成运行时。
 async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {
-  try {
-    // 扩展缺失是无运行时证据，不能从 Python 扩展的安装状态猜出 Jupyter 内核。
-    const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
-    if (!ext) return null
-
-    // 激活是源码本轮显式探测路径的副作用，只为读取此扩展自己的稳定 API。
-    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-    const kernel = await api?.kernels?.getKernel?.(uri)
-    // getKernel 不创建关联，未找到内核时不从盘上 kernelspec 合成 activeRuntime。
-    if (!kernel) return null
-
-    const base: ActiveRuntime = {
-      language: kernel.language,
-      // unknown 表示 API 没提供状态，不能把探针结束当成内核 idle 的证据。
-      kernelStatus: kernel.status ?? "unknown",
-    }
-
-    // 只给 Python 内核提交 Python 代码，其它语言的活动状态仍保留在 base。
-    if (kernel.language.toLowerCase() !== "python") return base
-
-    // Python 探针失败只缺少详细环境字段，已找到的内核语言与状态不被改写成磁盘声明。
-    const python = await probePythonRuntime(kernel).catch(() => null)
-    return python ? { ...base, python } : base
-  } catch {
-    // 扩展激活或内核查询失败保持 env 的容错报告，不启动其它执行入口重试。
-    return null
-  }
-}
-
-async function probePythonRuntime(kernel: KernelLike): Promise<ActiveRuntime["python"]> {
-  const code = `
-import os, sys, json, platform
-conda_env = os.environ.get("CONDA_DEFAULT_ENV")
-virtual_env = os.environ.get("VIRTUAL_ENV")
-env_name = conda_env
-# 环境标签优先取内核进程的 conda 声明，其次才从激活的虚拟环境路径提取。
-if not env_name and virtual_env:
-    env_name = os.path.basename(virtual_env)
-if not env_name:
-    # 解释器路径只补显示名称，不把这个推断回写进保存的 kernelspec。
-    parts = (sys.executable or "").replace("\\\\", "/").split("/")
-    if "envs" in parts and parts.index("envs") + 1 < len(parts):
-        env_name = parts[parts.index("envs") + 1]
-    else:
-        env_name = os.path.basename(os.path.dirname(sys.executable or "")) or None
-print("__OPENCODE_RUNTIME_PROBE_START__")
-# 标记界定本次探针的 JSON，避免内核已有输出或启动横幅混入环境对象。
-print(json.dumps({
-    "version": platform.python_version(),
-    "executable": sys.executable,
-    "prefix": sys.prefix,
-    "basePrefix": getattr(sys, "base_prefix", None),
-    "condaDefaultEnv": conda_env,
-    "virtualEnv": virtual_env,
-    "envName": env_name,
-    "platform": platform.platform(),
-}, ensure_ascii=False))
-print("__OPENCODE_RUNTIME_PROBE_END__")
-`.trim()
-
-  const cts = new vscode.CancellationTokenSource()
-  const timer = setTimeout(() => cts.cancel(), PROBE_TIMEOUT_MS)
-  // 按输出顺序积累文本，不能让并发拼接打乱 JSON 或起止标记。
-  const chunks: string[] = []
-
-  try {
-    for await (const output of kernel.executeCode(code, cts.token)) {
-      for (const item of output.items) {
-        const text = decoder.decode(item.data)
-        // 内核错误 MIME 拒绝本次探针，不能把 traceback 中的花括号当成有效环境 JSON。
-        if (isErrorMime(item.mime)) throw new Error(text)
-        // 图片及其它二进制表示不参与 JSON 提取，只有文本 MIME 进入 chunks。
-        if (isReadableMime(item.mime)) chunks.push(text)
-      }
-    }
-  } finally {
-    clearTimeout(timer)
-    // 成功、内核错误和取消都走同一释放路径，已完成探针不能继续持有取消源。
-    cts.dispose()
-  }
-
-  return JSON.parse(extractProbeJson(chunks.join("\n")))
+  const ext = vscode.extensions.getExtension(JUPYTER_ID)
+  if (!ext) return null
+  const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
+  const kernel = await api?.kernels?.getKernel?.(uri)
+  return kernel ? { language: kernel.language, kernelStatus: kernel.status ?? "unknown" } : null
 }
 
 async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata | null> {
@@ -754,12 +643,7 @@ async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata
 }
 
 function formatActiveRuntime(runtime: ActiveRuntime) {
-  const p = runtime.python
-  // 没有 Python 详情仍展示真实内核语言与状态，不能显示一个猜测的解释器版本。
-  if (!p) return `${runtime.language} kernelStatus=${runtime.kernelStatus}`
-  const env = p.envName ?? runtime.language
-  const version = p.version ? `${runtime.language} ${p.version}` : runtime.language
-  return `${env} (${version}) kernelStatus=${runtime.kernelStatus}`
+  return `${runtime.language} kernelStatus=${runtime.kernelStatus}`
 }
 
 function formatSavedMetadata(meta: SavedMetadata | null) {
@@ -770,38 +654,4 @@ function formatSavedMetadata(meta: SavedMetadata | null) {
     ? `${meta.language ?? "unknown"} ${meta.languageVersion}`
     : meta.language ?? "unknown"
   return `${kernel} (${language}), kernelspec.name=${meta.kernelName ?? "unknown"}`
-}
-
-function isReadableMime(mime: string) {
-  return (
-    mime === "text/plain" ||
-    mime === "application/json" ||
-    mime === "application/x.notebook.stream.stdout" ||
-    mime === "application/vnd.code.notebook.stdout" ||
-    mime.startsWith("text/")
-  )
-}
-
-function isErrorMime(mime: string) {
-  return mime === "application/vnd.code.notebook.error"
-}
-
-function extractProbeJson(text: string) {
-  const startMarker = "__OPENCODE_RUNTIME_PROBE_START__"
-  const endMarker = "__OPENCODE_RUNTIME_PROBE_END__"
-  const start = text.indexOf(startMarker)
-  const end = text.indexOf(endMarker)
-
-  // 起止标记必须有序，截出的 JSON 仍由 JSON.parse 验证，不能以找到标记宣称探针成功。
-  const body = start >= 0 && end > start
-    ? text.slice(start + startMarker.length, end)
-    : text
-
-  const jsonStart = body.indexOf("{")
-  const jsonEnd = body.lastIndexOf("}")
-  // 没有完整花括号区间时保留真实探针诊断，禁止返回一个空对象冒充环境信息。
-  if (jsonStart < 0 || jsonEnd < jsonStart) {
-    throw new Error(`Runtime probe returned no JSON: ${text.slice(0, 500)}`)
-  }
-  return body.slice(jsonStart, jsonEnd + 1)
 }
