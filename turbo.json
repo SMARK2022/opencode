@@ -4,6 +4,13 @@
   "globalPassThroughEnv": ["CI", "OPENCODE_DISABLE_SHARE"],
   "tasks": {
     "typecheck": {},
+    "@opencode-ai/app#typecheck": {
+      "cache": false
+    },
+    "@opencode-ai/desktop#typecheck": {
+      "dependsOn": ["@opencode-ai/app#typecheck"],
+      "cache": false
+    },
     "build": {
       "dependsOn": [],
       "outputs": ["dist/**"]

@@ -23,6 +23,7 @@ export function partitionTestFiles(files: readonly string[]) {
 
 async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFiles>, files: readonly string[]) {
   console.log(`Running ${name} test shard (${files.length} files)`)
+  const started = Date.now()
   // 每个 child 独占 JUnit 路径；复用同一文件会覆盖先完成 shard 的失败证据。
   const proc = Bun.spawn(
     [
@@ -39,7 +40,12 @@ async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFile
       stderr: "inherit",
     },
   )
-  return proc.exited
+  // PID 与阶段时间将最后一条测试输出关联到实际 child；不把父进程活着误报成测试进展。
+  console.log(JSON.stringify({ event: "test-shard-start", name, pid: proc.pid, files: files.length, time: started }))
+  const code = await proc.exited
+  // end 只在真实 child 退出后输出，区分测试摘要完成与原生句柄仍未释放。
+  console.log(JSON.stringify({ event: "test-shard-end", name, pid: proc.pid, code, elapsed: Date.now() - started }))
+  return code
 }
 
 async function main() {

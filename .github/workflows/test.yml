@@ -40,7 +40,7 @@ jobs:
             label: packages/opencode
             os_label: Linux
             runner: ubuntu-latest
-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
             junit: packages/opencode/.artifacts/unit/*.xml
           # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
           # 分片 env 纳入测试缓存键，报告路径逐片唯一，失败不能互相覆盖。
@@ -93,7 +93,7 @@ jobs:
             label: packages/opencode
             os_label: macOS
             runner: macos-latest
-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
             junit: packages/opencode/.artifacts/unit/*.xml
           - id: core-macos
             label: packages/core
@@ -119,6 +119,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # root 提供 Turbo 等执行工具；包路径过滤保留本 job 的声明闭包与原 root hooks。
+          install-flags: --filter './' --filter './${{ matrix.label }}'
+          cache-scope: test-${{ matrix.label }}-root-v1
 
       - name: Configure git identity
         run: |
@@ -127,7 +131,12 @@ jobs:
 
       - name: Run required package tests
         id: test
-        run: ${{ matrix.command }}
+        # 预留 job 剩余时间上传证据；超时仍失败，不把收尾截止当作挂起修复。
+        timeout-minutes: 45
+        run: |
+          mkdir -p "${{ matrix.label }}/.artifacts/ci"
+          # 默认 bash 启用 pipefail；tee 不覆盖测试真实失败，日志不依赖 JUnit 完成。
+          ${{ matrix.command }} 2>&1 | tee "${{ matrix.label }}/.artifacts/ci/test.log"
 
       - name: Check unit report
         id: junit
@@ -151,14 +160,17 @@ jobs:
           fail_on_failure: false
 
       - name: Upload required unit artifact
-        if: always() && steps.junit.outputs.exists == 'true'
+        # child 未退出时可能没有 XML，仍保留已输出的 build/测试进展。
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: required-unit-${{ matrix.id }}-${{ github.run_attempt }}
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
-          path: ${{ matrix.junit }}
+          path: |
+            ${{ matrix.junit }}
+            ${{ matrix.label }}/.artifacts/ci/test.log
 
       - name: Write required summary
         if: always()
@@ -250,6 +262,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # 三个 mode 共享 CLI 测试依赖图，不为路由检查安装桌面和文档工具。
+          install-flags: --filter './' --filter './packages/opencode'
+          cache-scope: test-packages/opencode-root-v1
 
       - name: Run HttpApi exerciser gate
         id: test
@@ -359,15 +375,17 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # SDK 的 ^build 会反向执行 OpenCode generate，排除 CLI 测试仍须保留其源码依赖。
+          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
+          cache-scope: test-app-cli-root-v1
 
       - name: Run upstream unit compatibility tests
         id: upstream
         continue-on-error: true
-        # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
-        # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
-        # Windows 的 OpenCode 已由必过三分片完整覆盖，此处只跑其余包，避免重复占据约 30m。
-        # 其余包仍在同机串行；Linux 保留原有全量兼容性检查，Windows 实时日志保留卡点。
-        run: bun turbo test:ci --continue=always --summarize --concurrency=1 ${{ matrix.runner == 'windows-latest' && '--filter=!opencode --log-order=stream' || '' }}
+        # 三个核心包在同平台 required job 验证；这里保留 App/UI 与原 SDK build 的兼容性链。
+        # 保持同机串行，避免在没有新生命周期证据时恢复历史有问题的并发方式。
+        run: bun turbo test:ci --filter=@opencode-ai/app --filter=@opencode-ai/ui --continue=always --summarize --concurrency=1 --log-order=stream
 
       - name: Warn on upstream unit failures
         if: always() && steps.upstream.outcome != 'success'
@@ -408,7 +426,7 @@ jobs:
             echo "### 警告 上游单元兼容性"
             echo "| 范围 | 平台 | 结果 | 说明 |"
             echo "| --- | --- | --- | --- |"
-            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
+            echo "| App/UI（OpenCode、Core、HTTP recorder 由同平台必过 job 覆盖） | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   upstream-extra-warning:
@@ -456,6 +474,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # Console 测试经 resource 消费 root SST；保留 root 工具，不裁掉真实传递依赖。
+          install-flags: --filter './' --filter './${{ matrix.path }}'
+          cache-scope: test-${{ matrix.path }}-root-v1
 
       - name: Run upstream extra package tests
         id: upstream
@@ -553,6 +575,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          # 保留自动浏览器/开发服务器兼容检查，与 App/UI warning 复用同一安装图。
+          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
+          cache-scope: test-app-cli-root-v1
 
       - name: Read Playwright version
         id: playwright-version

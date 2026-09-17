@@ -1,0 +1,36 @@
+diff --git a/dist/Deferred.js b/dist/Deferred.js
+--- a/dist/Deferred.js
++++ b/dist/Deferred.js
+@@ -438,11 +438,12 @@
+ export const doneUnsafe = (self, effect) => {
+   if (self.effect) return false;
+   self.effect = effect;
+   if (self.resumes) {
+-    for (let i = 0; i < self.resumes.length; i++) {
+-      self.resumes[i](effect);
++    // 中断恢复会同步移除等待者；遍历快照才能通知同一次完成的全部订阅者。
++    for (const resume of self.resumes.slice()) {
++      resume(effect);
+     }
+     self.resumes = undefined;
+   }
+   return true;
+ };
+diff --git a/src/Deferred.ts b/src/Deferred.ts
+--- a/src/Deferred.ts
++++ b/src/Deferred.ts
+@@ -1154,11 +1154,12 @@
+ export const doneUnsafe = <A, E>(self: Deferred<A, E>, effect: Effect<A, E>): boolean => {
+   if (self.effect) return false
+   self.effect = effect
+   if (self.resumes) {
+-    for (let i = 0; i < self.resumes.length; i++) {
+-      self.resumes[i](effect)
++    // 中断恢复会同步移除等待者；遍历快照才能通知同一次完成的全部订阅者。
++    for (const resume of self.resumes.slice()) {
++      resume(effect)
+     }
+     self.resumes = undefined
+   }
+   return true
+ }

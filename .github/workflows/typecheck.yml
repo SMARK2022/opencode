@@ -12,6 +12,8 @@ on:
 jobs:
   typecheck:
     runs-on: ubuntu-latest
+    # 热运行约一分钟，仍给冷安装充足余量；异常不得占满默认六小时 job。
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -20,4 +22,5 @@ jobs:
         uses: ./.github/actions/setup-bun
 
       - name: Run typecheck
-        run: bun typecheck
+        # 输出直接暴露当前 package；不把类型检查缓存或分片当作安装优化。
+        run: bun typecheck --log-order=stream
