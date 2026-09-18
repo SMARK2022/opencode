@@ -111,8 +111,10 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
       if (!(await Bun.file(file).exists())) throw new Error("Voice recorder did not write a WAV file")
     },
     abort: async () => {
-      if (!closePromise) await close(false)
-      await fs.rm(file, { force: true })
+      // stop 可能仍在写 WAV，复用其完成点后再删除，避免取消后出现迟到文件。
+      // stop 调用者已接收原始错误；abort 保持既有 best-effort 清理合同。
+      try { await close(false).catch(() => {}) }
+      finally { await fs.rm(file, { force: true }) }
     },
   }
 }

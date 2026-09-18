@@ -17,7 +17,8 @@
  * - `.json(...)` / `.jsonEffect(...)` assert response shape and optional side effects.
  * - `.mutating()` tells the runner to reset isolated state after destructive routes.
  */
-import { Effect } from "effect"
+import { ConfigProvider, Effect, Layer } from "effect"
+import { HttpRouter } from "effect/unstable/http"
 import { OpenApi } from "effect/unstable/httpapi"
 import { TestLLMServer } from "../../lib/llm-server"
 import path from "path"
@@ -1407,6 +1408,63 @@ const scenarios: Scenario[] = [
       check(body.done === true, "single seeded page should complete the scan")
       check(body.nextCursor === null, "completed scan should not return a cursor")
     }),
+  http.protected
+    .post("/tui/voice/transcribe", "tui.voiceTranscribe")
+    .inProject({ git: false })
+    // 普通 Builder 只编码 JSON；空体探针负责路由登记，二进制验收在下方走真实 HTTP 栈。
+    // protected 保留统一 auth 模式的 401 检查；effect 模式还精确验证二进制请求的认证结果。
+    .probe({ path: "/tui/voice/transcribe", headers: { "content-type": "audio/wav" } })
+    .at((ctx) => ({ path: "/tui/voice/transcribe", headers: ctx.headers({ "content-type": "audio/wav" }) }))
+    .jsonEffect(502, (body, ctx) =>
+      Effect.gen(function* () {
+        object(body)
+        check(body.message === "Voice input requires a user-configured ChatGPT MCP", "voice should report missing user MCP")
+        const modules = yield* Effect.promise(() => runtime())
+        // 沿用 backend 的完整路由和认证层；不直调业务函数，也不改生产代码绕过上传解码。
+        const app = HttpRouter.toWebHandler(
+          modules.HttpApiApp.routes.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({
+            OPENCODE_SERVER_PASSWORD: "secret",
+            OPENCODE_SERVER_USERNAME: "opencode",
+          })))),
+          { disableLogger: true },
+        )
+        // 请求无论成功或断言失败都释放 handler 的作用域，避免跨场景残留订阅和资源。
+        yield* Effect.addFinalizer(() => Effect.promise(() => app.dispose()))
+        // 单声道 16-bit PCM，8kHz，一个静音采样；合法 WAV 字节不能经 JSON.stringify 传输。
+        // RIFF 长度不包含前八字节，data 长度只包含两字节采样，避免伪 WAV 掩盖上传问题。
+        const wav = Buffer.alloc(46)
+        wav.write("RIFF", 0)
+        wav.writeUInt32LE(38, 4)
+        wav.write("WAVEfmt ", 8)
+        wav.writeUInt32LE(16, 16)
+        wav.writeUInt16LE(1, 20)
+        wav.writeUInt16LE(1, 22)
+        wav.writeUInt32LE(8000, 24)
+        wav.writeUInt32LE(16000, 28)
+        wav.writeUInt16LE(2, 32)
+        wav.writeUInt16LE(16, 34)
+        wav.write("data", 36)
+        wav.writeUInt32LE(2, 40)
+        // 两次请求共享音频和目录，只改变认证；不能把解码错误或任意非 401 当成成功。
+        for (const authenticated of [false, true]) {
+          const response = yield* Effect.promise(() => app.handler(new Request("http://localhost/tui/voice/transcribe", {
+            method: "POST",
+            headers: ctx.headers({
+              "content-type": "audio/wav",
+              ...(authenticated ? { authorization: `Basic ${Buffer.from("opencode:secret").toString("base64")}` } : {}),
+            }),
+            body: wav,
+          }), modules.HttpApiApp.context))
+          check(response.status === (authenticated ? 502 : 401), "binary voice upload should enforce authentication")
+          if (!authenticated) continue
+          // 隔离用户配置故意没有 ChatGPT MCP；精确错误证明请求已通过认证和二进制解码。
+          check(response.headers.get("content-type")?.includes("application/json") === true, "voice error should be JSON")
+          const error: unknown = yield* Effect.promise(() => response.json())
+          object(error)
+          check(error.message === "Voice input requires a user-configured ChatGPT MCP", "binary voice should report missing user MCP")
+        }
+      }).pipe(Effect.scoped),
+    ),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))

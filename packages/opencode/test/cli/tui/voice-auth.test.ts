@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import Http from "node:http"
+import fs from "node:fs/promises"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import * as TuiControl from "../../../src/server/shared/tui-control"
 import path from "path"
 import { tmpdir } from "../../fixture/fixture"
 import { ConfigParse } from "../../../src/config/parse"
@@ -6,25 +10,13 @@ import { ConfigMCP } from "../../../src/config/mcp"
 import {
   authFromHarvest,
   buildDirectTranscribeRequest,
-  buildSessionRequest,
-  ensureVoiceCredential,
-  jwtExpiresAt,
-  mergeSetCookieCookies,
   readVoiceAuth,
-  takeVoiceAuthNotice,
-  transcribeDirect,
-  VOICE_COOKIE_HARVEST_MARGIN_S,
-  VOICE_TOKEN_MARGIN_S,
   VOICE_TRANSCRIBE_URL,
   writeVoiceAuth,
   type VoiceAuth,
-  type VoiceAuthRuntime,
-} from "../../../src/cli/cmd/tui/util/voice-auth"
-import type { VoiceTranscriberDirect } from "../../../src/cli/cmd/tui/prompt-voice-input"
+} from "../../../src/server/shared/tui-control"
 
 const auth: VoiceAuth = {
-  access_token: "token-1",
-  token_expires_at: 1_800_000_000,
   fetched_at: "2026-09-06T00:00:00Z",
   cookies: { "oai-did": { value: "did-1", expires: 0 } },
 }
@@ -44,11 +36,6 @@ const handwritten = `{
 `
 
 describe("voice auth node", () => {
-  // 普通 session 查询可能返回已被转录服务拒绝的旧 token；刷新必须显式使用 true。
-  test("requests a forced session refresh", () => {
-    expect(buildSessionRequest(auth).input).toBe("https://chatgpt.com/api/auth/session?refresh=true")
-  })
-
   // 写入方唯一合同：只替换 mcp.<key>.auth 节点，注释、缩进与兄弟字段逐字保留。
   // 手写内容含 trailing comma 与嵌套缩进，是注释保真写入的最严输入域。
   test("writes only the auth node and preserves comments and sibling fields", async () => {
@@ -56,34 +43,37 @@ describe("voice auth node", () => {
     const config = path.join(tmp.path, "opencode.json")
     await Bun.write(config, handwritten)
 
-    await writeVoiceAuth(config, "chatgpt", auth)
+    await writeVoiceAuth(config, "chatgpt", auth, new AbortController().signal)
 
     const after = await Bun.file(config).text()
+    // JSON 语义相同不足以保护用户文件，这些原始片段会识别整文件重序列化的退化。
     expect(after).toContain("// 用户手写注释必须原样保留")
     expect(after).toContain('"model": "test/model"')
     expect(after).toContain('"command": ["node", "mcp-server.js"]')
     expect(await readVoiceAuth(config, "chatgpt")).toEqual(auth)
   })
 
-  // 重复收割必须原地替换而不是堆积重复键；旧 token 不能在文件中残留。
+  // 读取保留已有Bearer，成功的新快照整体替换旧值；退休的JWT期限元数据退出消费。
   test("replaces a stale auth node in place without duplicating keys", async () => {
     await using tmp = await tmpdir()
     const config = path.join(tmp.path, "opencode.jsonc")
     await Bun.write(config, handwritten)
 
-    await writeVoiceAuth(config, "chatgpt", auth)
-    const refreshed: VoiceAuth = { ...auth, access_token: "token-2" }
-    await writeVoiceAuth(config, "chatgpt", refreshed)
+    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "retired-token", token_expires_at: 1 } } } }))
+    expect(await readVoiceAuth(config, "chatgpt")).toEqual({ ...auth, access_token: "retired-token" })
+    const refreshed: VoiceAuth = { ...auth, cookies: { fresh: { value: "cookie-2", expires: 0 } } }
+    await writeVoiceAuth(config, "chatgpt", refreshed, new AbortController().signal)
 
     const after = await Bun.file(config).text()
-    // access_token 唯一性防止旧 token 残留：残留值会被状态机当作缓存继续消费。
-    expect((after.match(/"access_token"/g) ?? []).length).toBe(1)
+    // 字典必须整体替换，不能把已废弃 Cookie 或认证方式与新快照拼接。
+    expect((after.match(/"auth"/g) ?? []).length).toBe(1)
+    expect(after).not.toContain("access_token")
+    expect(after).not.toContain("token_expires_at")
     expect(await readVoiceAuth(config, "chatgpt")).toEqual(refreshed)
   })
 
-  // 读取边界：缺 auth 节点或文件不可解析时返回 undefined，不抛错破坏语音主路径。
-  // 文件不存在与解析失败同路径：都降级为无凭据，状态机自行进入收割。
-  test("returns undefined for missing auth node or unparsable config", async () => {
+  // 缺快照允许读取 profile；损坏的配置文件仍属于配置错误，不能伪装成认证缺失。
+  test("distinguishes missing auth from invalid or missing config", async () => {
     await using tmp = await tmpdir()
     const config = path.join(tmp.path, "opencode.json")
     await Bun.write(config, handwritten)
@@ -91,277 +81,25 @@ describe("voice auth node", () => {
 
     const broken = path.join(tmp.path, "broken.json")
     await Bun.write(broken, "{ not json")
-    expect(await readVoiceAuth(broken, "chatgpt")).toBeUndefined()
+    // 文件错误保持拒绝语义，避免后续认证写回覆盖用户尚未修好的配置。
+    await expect(readVoiceAuth(broken, "chatgpt")).rejects.toThrow()
 
-    expect(await readVoiceAuth(path.join(tmp.path, "absent.json"), "chatgpt")).toBeUndefined()
+    await expect(readVoiceAuth(path.join(tmp.path, "absent.json"), "chatgpt")).rejects.toThrow()
   })
 
-  // 形状校验：auth 节点缺关键字段时视为不存在，避免半写状态进入凭据状态机。
-  // 残缺凭据被拒绝后状态机重新收割，不尝试"部分可用"拼凑。
-  test("rejects malformed auth nodes instead of returning partial credentials", async () => {
+  // 磁盘输入没有 TypeScript 保护；一个坏 Cookie 也不能留下部分可用的快照。
+  test.each([{ access_token: 42 }, { cookies: {} }, { ...auth, cookies: { broken: { value: 42, expires: 0 } } }, { ...auth, cookies: { broken: { value: "x", expires: "0" } } }])("rejects malformed auth nodes %j", async (invalid) => {
     await using tmp = await tmpdir()
     const config = path.join(tmp.path, "opencode.json")
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "x"], auth: { access_token: 42 } } } }))
+    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "x"], auth: invalid } } }))
     expect(await readVoiceAuth(config, "chatgpt")).toBeUndefined()
   })
 })
 
-const SESSION_COOKIE = "__Secure-next-auth.session-token"
-const now = 1_800_000_000_000
-
-// 一次性提示是模块级队列：排空后断言，顺序无关且不受先前用例残留影响（controller 同款排水语义）。
-function drainNotices(): string[] {
-  const drained: string[] = []
-  for (let notice = takeVoiceAuthNotice(); notice !== undefined; notice = takeVoiceAuthNotice()) drained.push(notice)
-  return drained
-}
-
-// 直连变体 fixture：config 指向临时文件，interpreter/script 指向可执行假 CLI。
-async function directFixture(scope: "user" | "project", initAuth?: VoiceAuth) {
-  const tmp = await tmpdir()
-  const config = path.join(tmp.path, "opencode.json")
-  const script = path.join(tmp.path, "fake-agent.cjs")
-  await Bun.write(script, "")
-  await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "mcp-server.js"] } } }))
-  await writeVoiceAuth(config, "chatgpt", initAuth ?? validAuth())
-  const direct: VoiceTranscriberDirect = {
-    type: "chatgpt-direct",
-    config,
-    key: "chatgpt",
-    interpreter: process.execPath,
-    script,
-    scope,
-    transcriber: { command: "unused", args: ["transcribe-file", "--file", "{file}", "--json"] },
-  }
-  return { tmp, direct }
-}
-
-function validAuth() {
-  // 健康域 fixture：token 7 天、会话凭据 90 天，均远离两个 margin，任何路径都不应触发收割。
-  return {
-    access_token: "alive-token",
-    token_expires_at: (now + 7 * 86_400_000) / 1000,
-    fetched_at: "2026-09-06T00:00:00Z",
-    cookies: { [SESSION_COOKIE]: { value: "sess", expires: (now + 90 * 86_400_000) / 1000 } },
-  }
-}
-
-function expiredTokenAuth(sessionExpiresMs: number, extraCookies: Record<string, { value: string; expires: number }> = {}) {
-  // 过期域 fixture：token 已死，会话凭据剩余寿命由参数钉定，驱动状态机在刷新与收割间分岔。
-  return {
-    access_token: "expired-token",
-    token_expires_at: (now - 1000) / 1000,
-    fetched_at: "2026-09-06T00:00:00Z",
-    cookies: {
-      [SESSION_COOKIE]: { value: "sess", expires: sessionExpiresMs / 1000 },
-      ...extraCookies,
-    },
-  }
-}
-
-function spyRuntime(overrides: Partial<VoiceAuthRuntime> = {}): VoiceAuthRuntime & { counts: { fetchSession: number; harvest: number } } {
-  // spy 基线默认全部失败路径；成功场景由用例按需覆盖，counts 是零网络/零收割断言的独立证据。
-  const counts = { fetchSession: 0, harvest: 0 }
-  return {
-    counts,
-    now: () => now,
-    fetchSession: async () => {
-      counts.fetchSession++
-      return undefined
-    },
-    harvest: async () => {
-      counts.harvest++
-      throw new Error("harvest spy must be overridden")
-    },
-    directFetch: async () => new Response("{}"),
-    ...overrides,
-  }
-}
-
-describe("ensure voice credential", () => {
-  // 懒收割合同：token 有效时零网络零收割，浏览器绝不为刷新而被启动。
-  test("uses a valid cached token without any network or harvest", async () => {
-    const { tmp, direct } = await directFixture("user", validAuth())
-    const runtime = spyRuntime()
-    const auth = await ensureVoiceCredential(direct, { runtime })
-    expect(auth.access_token).toBe("alive-token")
-    expect(runtime.counts).toEqual({ fetchSession: 0, harvest: 0 })
-    await tmp[Symbol.asyncDispose]()
-  })
-
-  // token 过期但会话凭据健康：走 /api/auth/session 刷新并写回 auth 节点，不开浏览器。
-  test("refreshes an expired token from cookies and persists the result", async () => {
-    const { tmp, direct } = await directFixture("user", expiredTokenAuth(now + 90 * 86_400_000))
-    const refreshed = { ...validAuth(), access_token: "refreshed-token" }
-    const runtime = spyRuntime({ fetchSession: async () => {
-      runtime.counts.fetchSession++
-      return refreshed
-    } })
-    const auth = await ensureVoiceCredential(direct, { runtime })
-    expect(auth.access_token).toBe("refreshed-token")
-    expect(runtime.counts.harvest).toBe(0)
-    // 直接读文件断言持久化真实发生，而不是仅内存返回值。
-    expect(await readVoiceAuth(direct.config, "chatgpt")).toEqual(refreshed)
-    await tmp[Symbol.asyncDispose]()
-  })
-
-  // 无可用凭据：真实 spawn agent CLI 收割（假脚本输出 JSON），并写回 auth 节点。
-  // 假脚本不启动任何 daemon：收割协议只依赖 stdout JSON 合同。
-  test("harvests through the agent CLI when no credential is usable", async () => {
-    await using tmp = await tmpdir()
-    const config = path.join(tmp.path, "opencode.json")
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "mcp-server.js"] } } }))
-    const script = path.join(tmp.path, "fake-agent.cjs")
-    const payload = JSON.stringify({
-      authStatus: "logged_in",
-      accessToken: "harvested-token",
-      cookies: [{ name: "oai-did", value: "did-9", expires: -1 }],
-      fetchedAt: "2026-09-06T01:00:00Z",
-    })
-    await Bun.write(script, `process.stdout.write(${JSON.stringify(payload)})`)
-    const direct: VoiceTranscriberDirect = {
-      type: "chatgpt-direct",
-      config,
-      key: "chatgpt",
-      interpreter: process.execPath,
-      script,
-      scope: "user",
-      transcriber: { command: "unused", args: [] },
-    }
-    const auth = await ensureVoiceCredential(direct, { runtime: { now: () => now } })
-    expect(auth.access_token).toBe("harvested-token")
-    // CDP 会话 cookie expires=-1 归一为 0
-    expect(auth.cookies["oai-did"]).toEqual({ value: "did-9", expires: 0 })
-    expect(await readVoiceAuth(config, "chatgpt")).toEqual(auth)
-  })
-
-  // 并发去重：同一凭据键的并发 ensure 只触发一次收割 spawn。
-  test("deduplicates concurrent ensures into a single harvest", async () => {
-    await using tmp = await tmpdir()
-    const config = path.join(tmp.path, "opencode.json")
-    await Bun.write(config, JSON.stringify({ mcp: {} }))
-    const counter = path.join(tmp.path, "count")
-    const script = path.join(tmp.path, "fake-agent.cjs")
-    const payload = JSON.stringify({ authStatus: "logged_in", accessToken: "harvested-token", cookies: [], fetchedAt: "2026-09-06T01:00:00Z" })
-    await Bun.write(script, `require('fs').writeFileSync(${JSON.stringify(counter)}, String(Number(require('fs').readFileSync(${JSON.stringify(counter)}, 'utf8') || '0') + 1)); setTimeout(() => process.stdout.write(${JSON.stringify(payload)}), 50)`)
-    await Bun.write(counter, "0")
-    const direct: VoiceTranscriberDirect = { type: "chatgpt-direct", config, key: "chatgpt", interpreter: process.execPath, script, scope: "user", transcriber: { command: "unused", args: [] } }
-    const runtime: Partial<VoiceAuthRuntime> = { now: () => now }
-    const [a, b] = await Promise.all([
-      ensureVoiceCredential(direct, { runtime }),
-      ensureVoiceCredential(direct, { runtime }),
-    ])
-    // 计数文件是真实 spawn 次数的磁盘证据，不依赖 promise 身份或实现内部锁。
-    expect(a).toEqual(b)
-    expect(await Bun.file(counter).text()).toBe("1")
-  })
-
-  // 收割失败：agent CLI 非零退出时上抛其诊断（不含凭据），不合成成功。
-  test("rejects with the agent diagnostics when the harvest CLI fails", async () => {
-    await using tmp = await tmpdir()
-    const config = path.join(tmp.path, "opencode.json")
-    await Bun.write(config, JSON.stringify({ mcp: {} }))
-    const script = path.join(tmp.path, "fail-agent.cjs")
-    await Bun.write(script, "process.stderr.write('login required'); process.exit(3)")
-    const direct: VoiceTranscriberDirect = { type: "chatgpt-direct", config, key: "chatgpt", interpreter: process.execPath, script, scope: "user", transcriber: { command: "unused", args: [] } }
-    await expect(ensureVoiceCredential(direct, { runtime: { now: () => now } })).rejects.toThrow(/login required/)
-  })
-
-  // B-01 回归锁：临期谓词只看会话凭据 cookie；短 TTL __cf_bm 不得禁用刷新。
-  // 双向 fixture：24h 剩余必须收割，90d 剩余必须刷新——两种解读只能同时满足一种。
-  test("skips refresh only when the session credential itself is near death", async () => {
-    const nearDeath = await directFixture("user", expiredTokenAuth(now + 24 * 3_600_000, { __cf_bm: { value: "cf", expires: (now + 1_800_000) / 1000 } }))
-    const skipRuntime = spyRuntime({ harvest: async () => {
-      skipRuntime.counts.harvest++
-      return validAuth()
-    } })
-    await ensureVoiceCredential(nearDeath.direct, { runtime: skipRuntime })
-    expect(skipRuntime.counts.fetchSession).toBe(0)
-    expect(skipRuntime.counts.harvest).toBe(1)
-    await nearDeath.tmp[Symbol.asyncDispose]()
-
-    const healthy = await directFixture("user", expiredTokenAuth(now + 90 * 86_400_000, { __cf_bm: { value: "cf", expires: (now + 1_800_000) / 1000 } }))
-    const refreshRuntime = spyRuntime({ fetchSession: async () => {
-      refreshRuntime.counts.fetchSession++
-      return { ...validAuth(), access_token: "refreshed" }
-    } })
-    await ensureVoiceCredential(healthy.direct, { runtime: refreshRuntime })
-    expect(refreshRuntime.counts.fetchSession).toBe(1)
-    expect(refreshRuntime.counts.harvest).toBe(0)
-    await healthy.tmp[Symbol.asyncDispose]()
-  })
-
-  // B-01 安全网：写回失败（如目标不可读/被锁且非等价冲突）必须降级为内存态+一次性提示，绝不破坏用户配置。
-  test("degrades to memory with a one-time notice when the write-back fails", async () => {
-    await using tmp = await tmpdir()
-    const direct: VoiceTranscriberDirect = {
-      type: "chatgpt-direct",
-      config: path.join(tmp.path, "absent", "opencode.json"),
-      key: "chatgpt",
-      interpreter: process.execPath,
-      script: path.join(tmp.path, "agent.cjs"),
-      scope: "user",
-      transcriber: { command: "unused", args: [] },
-    }
-    const runtime = spyRuntime({ harvest: async () => {
-      runtime.counts.harvest++
-      return validAuth()
-    } })
-    const auth = await ensureVoiceCredential(direct, { runtime })
-    expect(auth.access_token).toBe("alive-token")
-    expect(drainNotices().some((notice) => notice.includes("写回失败"))).toBe(true)
-    // 内存降级后第二次 ensure 不再收割：凭据在本进程内仍然可用。
-    await ensureVoiceCredential(direct, { runtime })
-    expect(runtime.counts.harvest).toBe(1)
-  })
-
-  // 写回范围（slice 18）：project 来源只驻内存并一次性提示；user 来源正常落盘。
-  // 提示文案本身不含任何凭据字段（INV-05）。
-  test("keeps project-scope credentials in memory with a one-time notice", async () => {
-    const { tmp, direct } = await directFixture("project", expiredTokenAuth(0))
-    const runtime = spyRuntime({ harvest: async () => {
-      runtime.counts.harvest++
-      return validAuth()
-    } })
-    const auth = await ensureVoiceCredential(direct, { runtime })
-    expect(auth.access_token).toBe("alive-token")
-    const notices = drainNotices()
-    expect(notices.some((notice) => notice.includes("用户级配置"))).toBe(true)
-    expect(takeVoiceAuthNotice()).toBeUndefined()
-    // 内存驻留：第二次 ensure 不再收割；project 作用域也读不到磁盘凭据（磁盘无该键）。
-    await ensureVoiceCredential(direct, { runtime })
-    expect(runtime.counts.harvest).toBe(1)
-    await tmp[Symbol.asyncDispose]()
-  })
-})
-
 describe("voice auth helpers", () => {
-  // JWT exp 独立期望值：payload {"exp":1800000200} 手工构造。
-  test("parses the exp claim from a harvested access token", () => {
-    const payload = Buffer.from(JSON.stringify({ exp: 1_800_000_200 })).toString("base64url")
-    expect(jwtExpiresAt(`h.${payload}.s`)).toBe(1_800_000_200)
-    expect(jwtExpiresAt("not-a-jwt")).toBe(0)
-  })
-
-  // set-cookie 合并：新值覆盖旧值，无 Expires 属性的条目保持 expires=0（会话语义）。
-  test("merges set-cookie updates into stored cookies", () => {
-    const cookies = { [SESSION_COOKIE]: { value: "old", expires: 1_900_000 }, other: { value: "keep", expires: 0 } }
-    const merged = mergeSetCookieCookies(cookies, [
-      `${SESSION_COOKIE}=new; Path=/; Expires=Fri, 01 Jan 2027 00:00:00 GMT; Secure; HttpOnly`,
-      "oai-sc=1; Path=/",
-    ])
-    expect(merged[SESSION_COOKIE]?.value).toBe("new")
-    expect(merged[SESSION_COOKIE]?.expires).toBe(Date.parse("Fri, 01 Jan 2027 00:00:00 GMT") / 1000)
-    expect(merged.other).toEqual({ value: "keep", expires: 0 })
-    expect(merged["oai-sc"]).toEqual({ value: "1", expires: 0 })
-  })
-
-  // agent 导出 JSON → auth 节点的映射：CDP expires=-1 归 0，JWT exp 驱动 token_expires_at。
+  // 导出数组转换为持久化字典，CDP 的 -1 是会话 Cookie，不是已过期时间。
   test("maps the agent export payload onto the auth node shape", () => {
-    const payload = Buffer.from(JSON.stringify({ exp: 1_800_000_500 })).toString("base64url")
     const auth = authFromHarvest({
-      authStatus: "logged_in",
-      accessToken: `h.${payload}.s`,
       cookies: [
         { name: "a", value: "1", expires: -1 },
         { name: "b", value: "2", expires: 1_900_000 },
@@ -369,8 +107,6 @@ describe("voice auth helpers", () => {
       fetchedAt: "2026-09-06T02:00:00Z",
     })
     expect(auth).toEqual({
-      access_token: `h.${payload}.s`,
-      token_expires_at: 1_800_000_500,
       fetched_at: "2026-09-06T02:00:00Z",
       cookies: { a: { value: "1", expires: 0 }, b: { value: "2", expires: 1_900_000 } },
     })
@@ -382,121 +118,412 @@ describe("voice auth helpers", () => {
     await using tmp = await tmpdir()
     const config = path.join(tmp.path, "opencode.json")
     await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "mcp-server.js"] } } }))
-    await writeVoiceAuth(config, "chatgpt", auth)
+    await writeVoiceAuth(config, "chatgpt", auth, new AbortController().signal)
     const data = ConfigParse.jsonc(await Bun.file(config).text(), config)
     const server = (data as { mcp: { chatgpt: unknown } }).mcp.chatgpt
     const decoded = ConfigParse.schema(ConfigMCP.Info, server, config)
+    // 普通 MCP 消费者继续使用同一 schema，语音快照不能变成启动参数或影响注册。
     expect(decoded.type).toBe("local")
     expect("auth" in decoded).toBe(false)
   })
 
-  // 分块会话凭据（.0/.1 变体）各自携带 expires：族内最早过期者决定可刷新性。
-  test("uses the earliest expiry across chunked session cookies", async () => {
-    const chunked = {
-      access_token: "expired-token",
-      token_expires_at: (now - 1000) / 1000,
-      fetched_at: "2026-09-06T00:00:00Z",
-      cookies: {
-        [`${SESSION_COOKIE}.0`]: { value: "a", expires: (now + 90 * 86_400_000) / 1000 },
-        [`${SESSION_COOKIE}.1`]: { value: "b", expires: (now + 24 * 3_600_000) / 1000 },
-      },
-    }
-    const { tmp, direct } = await directFixture("user", chunked)
-    const runtime = spyRuntime({ harvest: async () => {
-      runtime.counts.harvest++
-      return validAuth()
-    } })
-    await ensureVoiceCredential(direct, { runtime })
-    expect(runtime.counts.fetchSession).toBe(0)
-    expect(runtime.counts.harvest).toBe(1)
-    await tmp[Symbol.asyncDispose]()
+  // 私有 CLI 输出仍是不可信协议输入；缺时间或坏条目不能产生可写回快照。
+  test.each([null, { cookies: [] }, { fetchedAt: "now", cookies: [null] }, { fetchedAt: "now", cookies: [{ name: "a", value: 1, expires: 0 }] }])("rejects invalid Cookie exports %j", (payload) => {
+    expect(() => authFromHarvest(payload)).toThrow(/Invalid voice Cookie/)
+  })
+})
+
+// 只替换网络目的地址；正文解析、请求取消和 CLI 生命周期全部由生产入口负责。
+async function backendFixture(dir: string, handler: Http.RequestListener, command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))") {
+  const config = path.join(dir, "opencode.json")
+  const file = path.join(dir, "voice.wav")
+  const script = path.join(dir, "agent.cjs")
+  const log = path.join(dir, "commands")
+  await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth } } }))
+  await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
+  await Bun.write(log, "")
+  // 子进程自己写调用日志，区别真正执行过的命令与仅被构造的 argv。
+  await Bun.write(script, `const stage = process.argv[2]; require('fs').appendFileSync(${JSON.stringify(log)}, stage+'\\n');
+const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'profile' : 'browser',expires:-1}],fetchedAt:'2026-09-18T00:00:00Z'};
+(async () => { ${command} })().catch(error => { console.error(error.message); process.exitCode = 1 });`)
+  const server = Http.createServer(handler)
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("Fixture listener missing")
+  const url = `http://127.0.0.1:${address.port}`
+  const headers = Promise.withResolvers<void>()
+  const requests: { url: string; cookie: string | null; signal: AbortSignal | null | undefined }[] = []
+  // 记录原始 URL，额外 session 刷新或绕路请求不能被重定向偷偷掩盖。
+  const fetch = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
+    requests.push({ url: String(input), cookie: new Headers(init?.headers).get("cookie"), signal: init?.signal })
+    const response = await globalThis.fetch(url, init)
+    // 只发布响应头就绪，不预读正文，否则会把生产解析阶段的超时缺陷藏到 fixture 里。
+    headers.resolve()
+    return response
+  })
+  const target = { config, key: "chatgpt", interpreter: process.execPath, script, environment: { FIXTURE_URL: url } }
+  return {
+    config, file, target, requests, headers: headers.promise,
+    run: (signal = new AbortController().signal) => TuiControl.transcribeVoiceFile(file, target, signal),
+    commands: () => Bun.file(log).text(),
+    async [Symbol.asyncDispose]() {
+      fetch.mockRestore()
+      // 取消测试会刻意留下未结束的正文；关闭连接后再释放监听端口，防止污染下个用例。
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    },
+  }
+}
+
+describe("backend Cookie attempts", () => {
+  // Cookie-only 429属于匿名额度，成功浏览器返回的实际Bearer必须在下一轮直接复用。
+  test("reuses the browser account snapshot after anonymous dictation is rejected", async () => {
+    await using tmp = await tmpdir()
+    const seen: (string | undefined)[] = []
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      seen.push(request.headers.authorization)
+      // 只认独立已知的账户值，避免Cookie单独成功掩盖授权字段在持久化中丢失。
+      const account = request.headers.authorization === "Bearer browser-token" && request.headers.cookie === "oai-did=browser"
+      response.writeHead(account ? 200 : 429).end(JSON.stringify({ text: "authenticated transcript" }))
+    }, "console.log(JSON.stringify({text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))")
+    expect(await fixture.run()).toBe("browser transcript")
+    // 第二轮从文件读取，经真实HTTP发送；仅检查转换helper不足以覆盖完整消费链。
+    expect(await fixture.run()).toBe("authenticated transcript")
+    expect(seen).toEqual([undefined, "Bearer browser-token"])
+    expect(await fixture.commands()).toBe("transcribe-file\n")
+    expect(await readVoiceAuth(fixture.config, "chatgpt")).toMatchObject({ access_token: "browser-token" })
   })
 
-  // 预警常量锁定：token margin 6h（EchoPaper 实证）、cookie margin 48h（用户"一两天"语义）。
-  test("keeps the documented margin constants", () => {
-    expect(VOICE_TOKEN_MARGIN_S).toBe(6 * 3_600)
-    expect(VOICE_COOKIE_HARVEST_MARGIN_S).toBe(48 * 3_600)
+  // 401 与 403 都是凭据恢复入口，其余 HTTP 失败跳过 profile，直接进入完整浏览器转录。
+  test.each([401, 403, 400, 429, 500])("routes HTTP %i to the contracted next step", async (status) => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      response.writeHead(request.headers.cookie === "oai-did=profile" ? 200 : status)
+      response.end(JSON.stringify({ text: "profile transcript" }))
+    })
+    expect(await fixture.run()).toBe(status === 401 || status === 403 ? "profile transcript" : "browser transcript")
+    expect(await fixture.commands()).toBe(status === 401 || status === 403 ? "auth-export\n" : "transcribe-file\n")
+    // 每次请求都必须是转录 POST；没有 session 刷新，也没有同凭据隐藏重试。
+    expect(fixture.requests.map((entry) => entry.url)).toEqual(Array(status === 401 || status === 403 ? 2 : 1).fill(VOICE_TRANSCRIBE_URL))
+    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(status === 401 || status === 403 ? ["oai-did=did-1", "oai-did=profile"] : ["oai-did=did-1"])
+  })
+
+  // 未写入快照和格式错误的旧节点都不可用于直连，不能先发一个空凭据请求。
+  test.each([undefined, { access_token: "old" }])("reads profile when cache is unavailable: %j", async (cached) => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      response.end(JSON.stringify({ text: "profile transcript" }))
+    })
+    await Bun.write(fixture.config, JSON.stringify({ mcp: { chatgpt: { auth: cached } } }))
+    expect(await fixture.run()).toBe("profile transcript")
+    expect(await fixture.commands()).toBe("auth-export\n")
+    // 请求上的 Cookie 值来自真实子进程导出，而非预设的内存认证对象。
+    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(["oai-did=profile"])
+  })
+
+  // profile 的读取错误、协议错误和 POST 错误都进入末级；不允许重复离线读取。
+  test.each(["exit", "json", "shape", "post"])("advances after profile %s failure", async (failure) => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      response.writeHead(403).end("{}")
+    }, `if (stage === 'auth-export') { if (${JSON.stringify(failure)} === 'exit') process.exit(3); console.log(${JSON.stringify(failure)} === 'json' ? 'invalid JSON' : JSON.stringify(${JSON.stringify(failure)} === 'shape' ? {} : exported)); return; } console.log(JSON.stringify({text:'browser transcript',auth:exported}));`)
+    expect(await fixture.run()).toBe("browser transcript")
+    expect(await fixture.commands()).toBe("auth-export\ntranscribe-file\n")
+    // 只有拿到完整导出才允许 profile POST，失败导出不产生半可用凭据。
+    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(failure === "post" ? ["oai-did=did-1", "oai-did=profile"] : ["oai-did=did-1"])
+  })
+
+  // 静音的空串是成功；缺 text、类型错误和无效 JSON 是可观察的协议失败。
+  test.each(['{"text":""}', '{}', 'null', '{"text":7}', 'not JSON'])("consumes direct response %s", async (body) => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => { request.resume(); response.end(body) })
+    expect(await fixture.run()).toBe(body === '{"text":""}' ? "" : "browser transcript")
+    expect(await fixture.commands()).toBe(body === '{"text":""}' ? "" : "transcribe-file\n")
+    // 即使解析失败也不能把它改判为认证失败，从而触发未批准的 profile 分支。
+    expect(fixture.requests).toHaveLength(1)
+  })
+
+  // 末级失败结束整轮；固定错误消息也防止把含凭据的无效 stdout 泄露出去。
+  test.each([
+    ["process.stderr.write('login required'); process.exit(3)", "login required"],
+    ["console.log('secret-invalid-json')", "Voice command did not return JSON"],
+    ["console.log(JSON.stringify({text:7,auth:exported}))", "Voice response must contain text"],
+    ["console.log(JSON.stringify({text:'text',auth:{}}))", "Invalid voice Cookie export"],
+  ])("propagates terminal CLI failure %s", async (command, message) => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => { request.resume(); response.writeHead(500).end("{}") }, command)
+    const before = await Bun.file(fixture.config).text()
+    await expect(fixture.run()).rejects.toThrow(message)
+    expect(await fixture.commands()).toBe("transcribe-file\n")
+    // 失败结果不落盘，也不能向调用者伪造可插入的文字。
+    expect(await Bun.file(fixture.config).text()).toBe(before)
+    expect(fixture.requests).toHaveLength(1)
+  })
+
+  // 写回属于提交阶段，不在恢复 catch 内；真实文件消失必须导致失败，不能返回内存态成功。
+  test("propagates writeback failure without advancing to browser", async () => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      if (request.headers.cookie !== "oai-did=profile") { response.writeHead(401).end("{}"); return }
+      void fs.unlink(path.join(tmp.path, "opencode.json")).then(() => response.end(JSON.stringify({ text: "must not deliver" })))
+    })
+    await expect(fixture.run()).rejects.toThrow(/ENOENT/)
+    expect(await fixture.commands()).toBe("auth-export\n")
+    expect(await Bun.file(fixture.config).exists()).toBe(false)
+  })
+})
+
+describe("backend cancellation and deadlines", () => {
+  // 请求级取消高于恢复策略；无论当前处于哪个外部边界，都不能再推进下一步。
+  test.each(["before", "cache", "profile", "profile-post", "browser"])("never advances after cancellation during %s", async (stage) => {
+    await using tmp = await tmpdir()
+    const ready = Promise.withResolvers<void>()
+    const closed = Promise.withResolvers<void>()
+    const controller = new AbortController()
+    const reason = new Error("cancel voice transaction")
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      // CLI 用就绪握手证明已经启动；不靠固定 sleep 猜测进程是否到达取消点。
+      if (request.url === "/ready" || stage === "cache" || stage === "profile-post") {
+        // Bun 的 HTTP 兼容层在请求已被排空后不发 aborted；保留未读请求以观察真实断开。
+        request.once("aborted", () => closed.resolve())
+        if (request.url !== "/ready") response.write('{"text":"')
+        ready.resolve()
+        return
+      }
+      request.resume()
+      response.writeHead(stage === "profile" ? 401 : 500).end("{}")
+    }, stage === "profile-post" ? "console.log(JSON.stringify(exported))" : "await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify({text:'late',auth:exported}));")
+    // 无缓存使 profile POST 成为第一条直连，避免把缓存的响应头误作正文就绪。
+    if (stage === "profile-post") await Bun.write(fixture.config, handwritten)
+    const before = await Bun.file(fixture.config).text()
+    if (stage === "before") controller.abort(reason)
+    const pending = fixture.run(controller.signal)
+    // 先附拒绝处理再触发取消，避免异步失败在就绪握手期间成为未处理异常。
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
+    try {
+      if (stage !== "before") { await ready.promise; controller.abort(reason) }
+      expect(await outcome).toEqual({ error: reason })
+      // 服务端观察请求被中断，避免只丢弃 Promise 的假取消；不依赖兼容层的响应 close 事件。
+      if (stage !== "before") await closed.promise
+      expect(await fixture.commands()).toBe(stage === "profile" || stage === "profile-post" ? "auth-export\n" : stage === "browser" ? "transcribe-file\n" : "")
+      expect(fixture.requests).toHaveLength(stage === "before" ? 0 : 1)
+      expect(await Bun.file(fixture.config).text()).toBe(before)
+    } finally { controller.abort(reason); await pending.catch(() => {}) }
+  })
+
+  // rename 是提交点：之前取消不得改配置，之后取消保留快照但绝不交付本轮文字。
+  test.each(["before", "after"])("cancels %s atomic rename without delivering text", async (when) => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      response.writeHead(request.headers.cookie === "oai-did=profile" ? 200 : 401).end(JSON.stringify({ text: "must not deliver" }))
+    })
+    const controller = new AbortController()
+    const reason = new Error(`cancel ${when} rename`)
+    const before = await Bun.file(fixture.config).text()
+    const write = Bun.write
+    const rename = fs.rename
+    const commits: string[] = []
+    // 包装真实文件系统操作只安排取消时刻，不伪造写入、移动或内部 helper 的结果。
+    const writing = spyOn(Bun, "write").mockImplementation(async (destination, data, options) => {
+      if (typeof destination !== "string" || typeof data !== "string") throw new Error("Fixture expects JSONC filesystem writes")
+      // 先落地临时 JSONC 再取消，确保 finally 确实有文件要清理，而非只测预取消入口。
+      const result = await write(destination, data, options)
+      if (destination.startsWith(`${fixture.config}.tmp-`) && when === "before") controller.abort(reason)
+      return result
+    })
+    const renaming = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+      await rename(source, destination)
+      if (destination !== fixture.config) return
+      commits.push(String(destination))
+      // 取消发生在真正 rename 完成后，不能通过跳过磁盘提交来满足丢弃文字的断言。
+      if (when === "after") controller.abort(reason)
+    })
+    try {
+      await expect(fixture.run(controller.signal)).rejects.toBe(reason)
+      // 字节级比较保护提交前的注释与格式；提交后则通过公开读接口确认新快照。
+      if (when === "before") expect(await Bun.file(fixture.config).text()).toBe(before)
+      if (when === "after") expect(await readVoiceAuth(fixture.config, "chatgpt")).toEqual({ fetched_at: "2026-09-18T00:00:00Z", cookies: { "oai-did": { value: "profile", expires: 0 } } })
+      expect(commits).toHaveLength(when === "before" ? 0 : 1)
+      // 成功提交和中止提交都必须清理临时文件；取消不能被当作浏览器恢复理由。
+      expect((await fs.readdir(tmp.path)).filter((name) => name.includes(".tmp-"))).toEqual([])
+      expect(await fixture.commands()).toBe("auth-export\n")
+    } finally { writing.mockRestore(); renaming.mockRestore() }
+  })
+
+  // 受控时钟仅替换 timeout 信号，真实 fetch 收到响应头后仍须等待并取消真实正文。
+  test.each(["cache", "profile"])("keeps %s body consumption inside one fixed 40-second attempt", async (stage) => {
+    await using tmp = await tmpdir()
+    const readingProfile = Promise.withResolvers<Http.ServerResponse>()
+    const closed = Promise.withResolvers<void>()
+    const controllers: AbortController[] = []
+    const durations: number[] = []
+    const timeout = AbortSignal.timeout
+    const clock = spyOn(AbortSignal, "timeout").mockImplementation((duration) => {
+      if (duration !== 40_000) return timeout(duration)
+      durations.push(duration)
+      const controller = new AbortController()
+      controllers.push(controller)
+      return controller.signal
+    })
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      if (request.url === "/ready") { readingProfile.resolve(response); return }
+      // 不发送结束花括号，确保返回响应头并不等于完成转录正文解析。
+      request.once("aborted", () => closed.resolve())
+      response.writeHead(200, { "content-type": "application/json" })
+      response.write('{"text":"unfinished')
+    }, "if (stage === 'auth-export') await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));")
+    if (stage === "profile") await Bun.write(fixture.config, handwritten)
+    const request = new AbortController()
+    const pending = fixture.run(request.signal)
+    try {
+      // profile CLI 尚未结束时计时器就已存在，POST 不能另开一个新的 40 秒窗口。
+      if (stage === "profile") { const response = await readingProfile.promise; expect(durations).toEqual([40_000]); response.end("ready") }
+      await fixture.headers
+      expect(durations).toEqual([40_000])
+      expect(fixture.requests).toHaveLength(1)
+      const attempt = controllers[0]
+      if (!attempt) throw new Error("Missing fixed attempt deadline")
+      // 使用 TimeoutError 保持生产 timeout 的原因类型，同时避免测试真实等待四十秒。
+      attempt.abort(new DOMException("attempt timed out", "TimeoutError"))
+      // 单次超时仍允许下一契约步骤；整轮信号保持有效，浏览器获得独立完整窗口。
+      expect(await pending).toBe("browser transcript")
+      await closed.promise
+      expect(request.signal.aborted).toBe(false)
+      expect(fixture.requests[0]?.signal?.aborted).toBe(true)
+      expect(durations).toEqual([40_000, 40_000])
+      expect(await fixture.commands()).toBe(stage === "profile" ? "auth-export\ntranscribe-file\n" : "transcribe-file\n")
+    } finally { request.abort(); await pending.catch(() => {}); clock.mockRestore() }
+  })
+
+  // CLI 读取与浏览器执行都受各自尝试信号约束；只有末级超时终止整轮。
+  test.each(["profile", "browser"])("uses fixed deadlines when %s CLI times out", async (stage) => {
+    await using tmp = await tmpdir()
+    const ready = Promise.withResolvers<void>()
+    const controllers: AbortController[] = []
+    const durations: number[] = []
+    const timeout = AbortSignal.timeout
+    const clock = spyOn(AbortSignal, "timeout").mockImplementation((duration) => {
+      if (duration !== 40_000) return timeout(duration)
+      durations.push(duration)
+      const controller = new AbortController()
+      controllers.push(controller)
+      return controller.signal
+    })
+    await using fixture = await backendFixture(tmp.path, (request, response) => {
+      request.resume()
+      if (request.url === "/ready") { ready.resolve(); return }
+      response.writeHead(401).end("{}")
+    }, `if (stage === ${JSON.stringify(stage === "profile" ? "auth-export" : "transcribe-file")}) await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));`)
+    const request = new AbortController()
+    const reason = new DOMException("CLI deadline", "TimeoutError")
+    const pending = fixture.run(request.signal)
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
+    try {
+      await ready.promise
+      // 快速 401 必须立即推进，既不等满 40 秒，也不从末级扣除之前的耗时。
+      expect(durations).toEqual(stage === "profile" ? [40_000, 40_000] : [40_000, 40_000, 40_000])
+      const attempt = controllers[stage === "profile" ? 1 : 2]
+      if (!attempt) throw new Error("Missing CLI deadline")
+      attempt.abort(reason)
+      expect(await outcome).toEqual(stage === "profile" ? { value: "browser transcript" } : { error: reason })
+      expect(await fixture.commands()).toBe("auth-export\ntranscribe-file\n")
+      // 超时的 profile 绝不能再 POST；浏览器成功写回，末级失败则保持旧快照。
+      expect(fixture.requests).toHaveLength(stage === "profile" ? 1 : 2)
+      expect(durations).toEqual([40_000, 40_000, 40_000])
+      expect(await readVoiceAuth(fixture.config, "chatgpt")).toEqual(stage === "profile" ? { fetched_at: "2026-09-18T00:00:00Z", cookies: { "oai-did": { value: "browser", expires: 0 } } } : auth)
+    } finally { request.abort(); await pending.catch(() => {}); clock.mockRestore() }
   })
 })
 
 describe("direct transcribe", () => {
-  // INV-07 请求形态锁：multipart 仅 file 字段（字节与文件名原样），Bearer/oai-device-id/oai-language 齐备。
+  // 来源和执行环境必须同一个条目；相对脚本以配置文件目录解析，多个 TUI 得到同一目标。
+  test("resolves the daemon voice target and honors disabled overrides", async () => {
+    await using tmp = await tmpdir()
+    const config = path.join(tmp.path, "opencode.json")
+    const override = path.join(tmp.path, "override.json")
+    await Bun.write(path.join(tmp.path, "chatgpt.js"), "")
+    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: [process.execPath, "./mcp-server.js"], environment: { CHATGPT_STATE_DIR: tmp.path } } } }))
+    expect(await TuiControl.resolveVoiceTarget([config])).toEqual({ config, key: "chatgpt", interpreter: process.execPath, script: path.join(tmp.path, "chatgpt.js"), environment: { CHATGPT_STATE_DIR: tmp.path } })
+    await Bun.write(override, JSON.stringify({ mcp: { chatgpt: { enabled: false } } }))
+    await expect(TuiControl.resolveVoiceTarget([config, override])).rejects.toThrow("Voice input requires a user-configured ChatGPT MCP")
+  })
+
+  // 从后端入口穿过真实HTTP；缓存携带已有Bearer，profile导出保持Cookie-only。
+  test.each(["cache", "profile", "browser"])("daemon transcribes through %s and persists its cookies", async (source) => {
+    await using tmp = await tmpdir()
+    const config = path.join(tmp.path, "opencode.json")
+    const file = path.join(tmp.path, "voice.wav")
+    const script = path.join(tmp.path, "chatgpt.cjs")
+    const commands = path.join(tmp.path, "commands")
+    const exported = { cookies: [{ name: "oai-did", value: source, expires: 0, domain: "chatgpt.com", path: "/" }], fetchedAt: "2026-09-18T00:00:00Z" }
+    // 旧期限字段退出决策，缓存是否有效由真实服务端响应决定。
+    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "cached-token", token_expires_at: 1 } } } }))
+    const initial = await Bun.file(config).text()
+    await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
+    await Bun.write(commands, "")
+    // 假 CLI 只模拟私有命令的外部协议；后端仍真实 spawn、消费 stdout 并写回 JSONC。
+    await Bun.write(script, `require('fs').appendFileSync(${JSON.stringify(commands)}, process.argv[2]+'\\n'); if(process.argv.includes('auth-export') && ${JSON.stringify(source)} === 'browser') process.exit(1); console.log(JSON.stringify(process.argv.includes('auth-export') ? ${JSON.stringify(exported)} : {text:'browser transcript',auth:${JSON.stringify(exported)}}));`)
+    const cookies: string[] = []
+    const server = Http.createServer((request, response) => {
+      request.resume()
+      request.on("end", () => {
+        cookies.push(request.headers.cookie ?? "")
+        const accepted = request.headers.cookie === `oai-did=${source === "cache" ? "did-1" : source}` && request.headers.authorization === (source === "cache" ? "Bearer cached-token" : undefined)
+        response.writeHead(accepted ? 200 : 401, { "content-type": "application/json" })
+        response.end(JSON.stringify(accepted ? { text: "cookie transcript" } : { error: "credentials" }))
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const address = server.address()
+    if (!address || typeof address === "string") throw new Error("Fixture listener missing")
+    const fetch = spyOn(NetworkProxy, "fetch").mockImplementation((_url, init) => globalThis.fetch(`http://127.0.0.1:${address.port}`, init))
+    try {
+      expect(await TuiControl.transcribeVoiceFile(file, { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} }, new AbortController().signal)).toBe(source === "browser" ? "browser transcript" : "cookie transcript")
+      if (source !== "cache") {
+        expect((await Bun.file(config).json()).mcp.chatgpt.auth).toEqual({ cookies: { "oai-did": { value: source, expires: 0 } }, fetched_at: exported.fetchedAt })
+      }
+      // 缓存命中不是新快照，不能为了更新时间戳而改写用户配置。
+      if (source === "cache") expect(await Bun.file(config).text()).toBe(initial)
+      // 第二次仍从公共后端入口读取文件；真实 CLI 日志不变才证明没有重新收割。
+      const before = await Bun.file(commands).text()
+      expect(before).toBe(source === "cache" ? "" : source === "profile" ? "auth-export\n" : "auth-export\ntranscribe-file\n")
+      expect(await TuiControl.transcribeVoiceFile(file, { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} }, new AbortController().signal)).toBe("cookie transcript")
+      expect(await Bun.file(commands).text()).toBe(before)
+      expect(cookies).toEqual(source === "cache" ? ["oai-did=did-1", "oai-did=did-1"] : source === "profile" ? ["oai-did=did-1", "oai-did=profile", "oai-did=profile"] : ["oai-did=did-1", "oai-did=browser"])
+    } finally {
+      fetch.mockRestore()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  // 此快照来自仅含Cookie的profile导出；SendIfAvailable在该输入域省略Authorization。
   test("builds the documented direct transcribe request shape", async () => {
-    const auth = { ...validAuth(), cookies: { ...validAuth().cookies, "oai-did": { value: "did-7", expires: 0 } } }
+    const snapshot = { ...auth, cookies: { "oai-did": { value: "did-7", expires: 0 }, expired: { value: "omit", expires: 1 }, live: { value: "keep", expires: Date.now() / 1000 + 86_400 } } }
     const bytes = new Uint8Array([1, 2, 3, 4])
-    const request = buildDirectTranscribeRequest({ file: "C:/tmp/voice .wav", bytes, auth })
+    const request = buildDirectTranscribeRequest({ file: "C:/tmp/voice .wav", bytes, auth: snapshot })
     expect(request.input).toBe(VOICE_TRANSCRIBE_URL)
     expect(request.init.method).toBe("POST")
     // 文件名带空格锁定 basename 原样进入 multipart，不发生任何 shell/路径改写。
-    const headers = request.init.headers as Record<string, string>
-    expect(headers["authorization"]).toBe("Bearer alive-token")
-    expect(headers["oai-device-id"]).toBe("did-7")
-    expect(headers["oai-language"]).toBe("en-US")
-    const form = request.init.body as FormData
-    const file = form.get("file") as File
+    const headers = new Headers(request.init.headers)
+    expect(headers.get("authorization")).toBeNull()
+    // 只过滤过期条目，不能用最短 TTL 把仍然有效的整个快照淘汰。
+    expect(headers.get("cookie")).toBe("oai-did=did-7; live=keep")
+    expect(headers.get("oai-device-id")).toBe("did-7")
+    expect(headers.get("oai-language")).toBe("en-US")
+    expect(headers.get("referer")).toBe("https://chatgpt.com/")
+    const form = request.init.body
+    expect([...form.keys()]).toEqual(["file"])
+    const file = form.get("file")
+    if (!(file instanceof File)) throw new Error("Missing multipart file")
     expect(file.name).toBe("voice .wav")
     expect(file.type).toBe("audio/wav")
     expect(new Uint8Array(await file.arrayBuffer())).toEqual(bytes)
   })
 
-  // 401 编排重试：第一次 401 后强制刷新凭据再重试一次；成功后不再有第三次请求。
-  test("retries once through a forced refresh after a 401", async () => {
-    const { tmp, direct } = await directFixture("user", validAuth())
-    const seen: number[] = []
-    let harvests = 0
-    let refreshes = 0
-    const runtime: Partial<VoiceAuthRuntime> = {
-      now: () => now,
-      fetchSession: async () => {
-        refreshes++
-        return { ...validAuth(), access_token: "refreshed-token" }
-      },
-      directFetch: async () => {
-        const status = seen.length === 0 ? 401 : 200
-        seen.push(status)
-        return new Response(status === 200 ? JSON.stringify({ text: "retried text" }) : "{}", { status })
-      },
-      harvest: async () => {
-        harvests++
-        return validAuth()
-      },
-    }
-    const text = await transcribeDirect("voice.wav", direct, { runtime })
-    expect(text).toBe("retried text")
-    // seen 顺序锁定第二次请求发生在强制刷新之后，而不是简单的同凭据重发。
-    expect(seen).toEqual([401, 200])
-    // forceRefresh 跳过缓存但会话凭据健康：一次刷新、零收割。
-    expect(refreshes).toBe(1)
-    expect(harvests).toBe(0)
-    await tmp[Symbol.asyncDispose]()
-  })
-
-  // 非 401 失败（如 Cloudflare 403）直接上抛，交给上层 argv 回退，不做第二算法。
-  test("rejects on non-401 failures without retry", async () => {
-    const { tmp, direct } = await directFixture("user", validAuth())
-    let calls = 0
-    const runtime: Partial<VoiceAuthRuntime> = {
-      now: () => now,
-      directFetch: async () => {
-        calls++
-        return new Response("{}", { status: 403 })
-      },
-    }
-    await expect(transcribeDirect("voice.wav", direct, { runtime })).rejects.toThrow(/HTTP 403/)
-    // 单次调用断言防止未来出现隐藏的自动重试或第二请求算法。
-    expect(calls).toBe(1)
-    await tmp[Symbol.asyncDispose]()
-  })
-
-  // 空文本合法（slice 17）：200 + "" 是端点对静音的合同结果，不当作错误。
-  test("returns an empty string for silent audio", async () => {
-    const { tmp, direct } = await directFixture("user", validAuth())
-    const runtime: Partial<VoiceAuthRuntime> = {
-      now: () => now,
-      // 200+空串（静音）与结构失败（无 text 字段）是两个不同合同：前者合法返回，后者必须抛错。
-      directFetch: async () => new Response(JSON.stringify({ text: "" }), { status: 200 }),
-    }
-    expect(await transcribeDirect("voice.wav", direct, { runtime })).toBe("")
-    await tmp[Symbol.asyncDispose]()
-  })
 })

@@ -564,12 +564,21 @@ test("keeps the constrained Prompt extension bar on one row across active states
       active: { textEditor: pathToFileURL(path.join(process.cwd(), `${"very-long-".repeat(8)}hotspots.md`)).toString() },
     }),
   )
-  // recorder 只隔离本机麦克风边界；状态切换仍走真实 controller、快捷键和挂起转写进程。
+  // recorder 只隔离本机麦克风边界；状态切换仍走真实 controller、快捷键和挂起 HTTP 提交。
   const recorder = spyOn(PromptVoiceRecorder, "startPromptVoiceRecorder").mockResolvedValue({ file: path.join(tmp.path, "voice.wav"), stop: async () => {}, abort: async () => {} })
 
   try {
     await withPrompt(
-      () => undefined,
+      // 后端连接是现有 transport seam；挂起到取消才能稳定观察真实 Transcribing 帧。
+      // 不再配置本地 argv，避免测试绕回 R9 已删除的前端转录路径。
+      (url, _request, init) => {
+        if (url.pathname !== "/tui/voice/transcribe") return
+        const signal = init?.signal
+        if (!signal) throw new Error("voice submission requires its cancellation signal")
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+        })
+      },
       async (_prompt, _route, app, context) => {
         // 160 列终端内限制真实 Prompt 为首页的 75 列，专门锁定“终端宽但 Prompt 窄”的首个偏差。
         // 断言最终字符帧而非复制 Yoga 算法，确保宽字符、flex 收缩和 renderer 换行都走生产路径。
@@ -595,7 +604,7 @@ test("keeps the constrained Prompt extension bar on one row across active states
         app.mockInput.pressKey("v", { meta: true })
         const transcribing = await waitForFrame((frame) => frame.includes("Transcribing"))
 
-        // 再次触发同一绑定必须先取消挂起转写，避免测试把子进程和 90 秒超时泄漏到后续用例。
+        // 再次触发同一绑定必须先取消挂起请求，避免旧提交污染后续 busy/retry 布局断言。
         app.mockInput.pressKey("v", { meta: true })
         await waitForFrame((frame) => !frame.includes("Transcribing"))
         emitSessionStatus(context, "evt-prompt-footer-busy", { type: "busy" })
@@ -625,7 +634,8 @@ test("keeps the constrained Prompt extension bar on one row across active states
       {
         width: 160,
         promptWidth: 75,
-        config: createTuiResolvedConfig({ voice: { transcriber: { command: process.execPath, args: ["-e", "await new Promise(() => {})", "{file}"] } } }),
+        // footer 的语音状态来自 controller，测试配置也沿用后端选择目标后的真实 TUI 形状。
+        config: createTuiResolvedConfig({}),
       },
     )
   } finally {

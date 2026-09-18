@@ -1,32 +1,27 @@
-import { Process } from "@/util/process"
-import { which } from "@/util/which"
-import path from "path"
-import { takeVoiceAuthNotice, transcribeDirect, type VoiceAuthRuntime } from "./util/voice-auth"
+import { isRecord } from "@/util/record"
 
-export const VOICE_FILE_PLACEHOLDER = "{file}"
-// 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
-export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
+// 整轮从 WAV 完成后计时，上传和锁等待也消耗同一份预算。
+export const VOICE_TRANSCRIBE_TIMEOUT_MS = 120_000
 // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
 // 比 usage 显示阈值(>90，见 Prompt 组件 showSplitFlow)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
 // 阈值由 140 下调至 120：usage 阈值由 100 降至 90 后，voice 仍需晚于 usage 出现，但 140 过晚导致中宽终端长期无 voice 引导。
 export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
 
-export type VoiceTranscriberDirect = {
-  type: "chatgpt-direct"
-  // auth 节点所在的 opencode 配置文件绝对路径与 mcp 键名；由 TuiConfig 推导时固定。
-  config: string
-  key: string
-  // 收割与浏览器回退共用的 agent CLI 入口：interpreter 是 MCP argv[0]（或 node），script 是 chatgpt.js 绝对路径。
-  interpreter: string
-  script: string
-  // "user"（全局 config 目录 / OPENCODE_CONFIG / OPENCODE_CONFIG_DIR）可写回；"project" 仅进程内存。
-  scope: "user" | "project"
-  // 与旧 MCP 推导公式完全一致的 transcribe-file argv，供直连失败后的用户批准回退使用。
-  transcriber: { command: string; args: string[] }
+export async function submitVoice(file: string, signal: AbortSignal, sdk: {
+  url: string; directory?: string; fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
+}): Promise<string> {
+  // 每次提交读取当前连接，重连后的端口与 attach 认证沿 SDK 一起生效。
+  const url = new URL("/tui/voice/transcribe", sdk.url)
+  if (sdk.directory) url.searchParams.set("directory", sdk.directory)
+  const response = await sdk.fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: Bun.file(file), signal })
+  // 响应正文仍归本轮信号；取消优先于响应解析和文字交付。
+  const body: unknown = await response.json().catch(() => undefined)
+  signal.throwIfAborted()
+  if (!response.ok) throw new Error(isRecord(body) && typeof body.message === "string" ? body.message : `Voice request returned HTTP ${response.status}`)
+  // 只接收文字，凭据始终停留在共享后端的响应处理和配置中。
+  if (!isRecord(body) || typeof body.text !== "string") throw new Error("Voice response must contain text")
+  return body.text
 }
-
-// argv 成员带 type?: undefined 使 TS 可判别联合：用户显式配置不带 type，direct 变体必带字面量。
-export type VoiceTranscriber = { type?: undefined; command: string; args?: string[] } | VoiceTranscriberDirect
 
 export type VoiceInputStatus =
   | { type: "idle" }
@@ -42,10 +37,9 @@ export type VoiceRecorderHandle = {
 }
 
 export function createVoiceInputController(input: {
-  transcriber: () => VoiceTranscriber | undefined
   startRecorder: () => Promise<VoiceRecorderHandle>
   // signal 让外部 controller 可以中断长时间挂起的转写（如空音频导致浏览器 hang）。
-  transcribe?: (file: string, transcriber: VoiceTranscriber, signal: AbortSignal) => Promise<string>
+  transcribe: (file: string, signal: AbortSignal) => Promise<string>
   insertText: (text: string) => void
   onStatus?: (status: VoiceInputStatus) => void
   onError?: (message: string) => void
@@ -53,12 +47,9 @@ export function createVoiceInputController(input: {
 }) {
   let status: VoiceInputStatus = { type: "idle" }
   let recorder: VoiceRecorderHandle | undefined
-  let activeTranscriber: VoiceTranscriber | undefined
   let generation = 0
   // 持有当前转写的 AbortController，让 toggle/abort 能中断卡死的外部转写器进程。
   let transcribeAbort: AbortController | undefined
-  const transcribe = input.transcribe ?? ((file, transcriber, signal) => transcribeVoiceFile({ file, transcriber, signal }))
-  const validateTranscriber = input.transcribe ? async () => {} : validateVoiceTranscriber
 
   const setStatus = (next: VoiceInputStatus) => {
     status = next
@@ -70,21 +61,27 @@ export function createVoiceInputController(input: {
     // 只有 recording 状态才拥有已启动的 native recorder；starting 的迟到 handle 会在启动分支自行清理。
     if (status.type === "recording") await recorder?.abort()
     recorder = undefined
-    activeTranscriber = undefined
     setStatus({ type: "idle" })
     // 错误统一在 controller 边界转成 message，避免 TUI toast 需要理解 unknown/Error 差异。
     input.onError?.(error instanceof Error ? error.message : String(error))
   }
 
-  // cancel 是 abort 和 toggle(transcribing) 共享的取消逻辑：bump generation 让迟到结果失效，
-  // abort signal 中断 in-flight transcribe 进程，清理 recorder 并回 idle。
+  // 先解除本轮共享引用，再等待清理；stop/上传中的局部句柄由原调用 finally 收尾。
+  // generation 使迟到结果自然退出，避免旧取消清空已经开始的新录音。
   const cancel = async () => {
-    generation++
-    transcribeAbort?.abort()
-    if (status.type !== "idle") await recorder?.abort().catch(() => {})
+    const current = ++generation
+    const active = recorder
+    const closeHere = status.type === "recording"
+    const abort = transcribeAbort
     recorder = undefined
-    activeTranscriber = undefined
-    setStatus({ type: "idle" })
+    transcribeAbort = undefined
+    setStatus({ type: closeHere ? "stopping" : "idle" })
+    abort?.abort()
+    try {
+      if (closeHere) await active?.abort()
+    } finally {
+      if (generation === current) setStatus({ type: "idle" })
+    }
   }
 
   return {
@@ -95,7 +92,7 @@ export function createVoiceInputController(input: {
     },
     toggle: async () => {
       if (status.type === "recording") {
-        // stop 使用当前 recorder 快照；finally 通过 identity 判断，避免旧 stop 清掉新录音。
+        // stop 固定本轮句柄；finally 只清理该录音，generation 保护后继录音状态。
         const active = recorder
         const stopGeneration = generation
         try {
@@ -107,23 +104,25 @@ export function createVoiceInputController(input: {
           setStatus({ type: "transcribing" })
           // 为本轮转写创建独立 AbortController，让 cancel/abort 能真正中断外部进程。
           transcribeAbort = new AbortController()
-          // transcriber 在开始录音时固定，停止时不重新读配置，防止录音期间配置变更导致错用后端。
-          const text = await transcribe(active.file, requireTranscriber(activeTranscriber), transcribeAbort.signal)
+          const signal = AbortSignal.any([transcribeAbort.signal, AbortSignal.timeout(VOICE_TRANSCRIBE_TIMEOUT_MS)])
+          const text = await input.transcribe(active.file, signal).catch((error) => {
+            signal.throwIfAborted()
+            throw error
+          })
+          signal.throwIfAborted()
           if (stopGeneration !== generation) return
-          // 空白文本由 transcribeVoiceFile 当错误处理；这里仍 trim 一次，保护自定义测试转写器和未来调用者。
+          // 静音返回空文字仍是成功，输入框只插入实际识别出的内容。
           if (text.trim()) input.insertText(text)
-          // voice-auth 的一次性提示（project 作用域不落盘/写回降级）借错误 toast 通道漏出，不阻断已成功的转写。
-          const notice = takeVoiceAuthNotice()
-          if (notice) input.onError?.(notice)
         } catch (error) {
           if (stopGeneration !== generation) return
-          input.onError?.(error instanceof Error ? error.message : String(error))
+          input.onError?.(error instanceof Error && error.name === "TimeoutError"
+            ? "语音转录超时（120 秒）" : error instanceof Error ? error.message : String(error))
         } finally {
           // stop 后也通过 abort 做最终清理：录音实现可能已停止，但临时 WAV 必须删除，避免转写后残留音频。
           await active?.abort().catch(() => {})
-          if (stopGeneration === generation || recorder === active) {
+          if (stopGeneration === generation) {
             recorder = undefined
-            activeTranscriber = undefined
+            transcribeAbort = undefined
             setStatus({ type: "idle" })
           }
         }
@@ -137,21 +136,9 @@ export function createVoiceInputController(input: {
       }
       if (status.type !== "idle") return
 
-      const transcriber = input.transcriber()
-      if (!transcriber) {
-        // 未配置时不启动麦克风，避免用户说完后才发现没有任何转写后端可用。
-        input.onError?.("Voice input is not configured")
-        return
-      }
-
       const startGeneration = ++generation
       try {
-        // 录音期间固定 transcriber，确保 stop 阶段使用的是启动时用户确认过的后端。
-        activeTranscriber = transcriber
         setStatus({ type: "starting" })
-        // 校验放在 startRecorder 前，避免 PATH/script 错误消耗一次用户录音。
-        await validateTranscriber(transcriber)
-        if (startGeneration !== generation || (status as VoiceInputStatus).type !== "starting") return
         const started = await input.startRecorder()
         const stillStarting = (status as VoiceInputStatus).type === "starting"
         if (startGeneration !== generation || !stillStarting) {
@@ -169,105 +156,9 @@ export function createVoiceInputController(input: {
   }
 }
 
-export async function transcribeVoiceFile(input: {
-  file: string
-  transcriber: VoiceTranscriber
-  timeout?: number
-  // 外部 signal 让 controller 的 cancel/abort 能真正中断转写（如空音频导致浏览器 hang）。
-  signal?: AbortSignal
-  // 调用方可注入直连运行时；生产路径缺省使用 voice-auth 的真实网络实现。
-  directRuntime?: Partial<VoiceAuthRuntime>
-}) {
-  if (input.transcriber.type === "chatgpt-direct") {
-    await validateVoiceTranscriber(input.transcriber)
-    try {
-      // 直连是主路径：凭据 ensure→POST→401 刷新重试在 voice-auth 内闭环。
-      return await transcribeDirect(input.file, input.transcriber, { runtime: input.directRuntime, signal: input.signal })
-    } catch (error) {
-      // 用户取消必须原样上抛：取消不是直连失败，回落浏览器会把已放弃的音频重新转写一遍。
-      if (input.signal?.aborted) throw error
-      // 用户批准的回退：直连（含收割）失败后回落同一 MCP 条目推导的 transcribe-file 浏览器页面 argv。
-      return await transcribeArgv(input.file, input.transcriber.transcriber, input)
-    }
-  }
-  return transcribeArgv(input.file, { command: input.transcriber.command, args: input.transcriber.args }, input)
-}
-
-async function transcribeArgv(file: string, transcriber: { command: string; args?: string[] }, input: { timeout?: number; signal?: AbortSignal }) {
-  // argv 合同与旧 transcribeVoiceFile 逐字一致：direct 回退与用户显式配置共用同一条 spawn 路径。
-  const command = transcriber.command.trim()
-  // command 允许用户配置时带空格，但进入 spawn 前必须归一成真正 argv[0]。
-  if (!command) throw new Error("Voice transcriber command is empty")
-  const args = transcriber.args ?? []
-  if (!args.some((arg) => arg.includes(VOICE_FILE_PLACEHOLDER))) {
-      // 没有占位符时转写器无法拿到本次录音文件，继续执行只会制造假成功。
-      throw new Error(`Voice transcriber args must include ${VOICE_FILE_PLACEHOLDER}`)
-  }
-  await validateVoiceTranscriber({ command, args })
-
-  // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
-  // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
-  // 用户取消只终止transcriber CLI；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
-  const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
-  const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, file))], {
-    abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
-    killTree: false,
-    nothrow: true,
-    timeout: 1_000,
-  })
-  // stderr 优先展示外部转写器自己的诊断；没有 stderr 时才落回退出码。
-  if (result.code !== 0) throw new Error(result.stderr.toString().trim() || `Voice transcriber exited with code ${result.code}`)
-
-  const parsed = parseTranscriberOutput(result.stdout.toString())
-  // 返回值保持原始转写文本，不在这里 trim，避免破坏模型返回的标点或用户口述的前后空白意图。
-  if (!parsed.text.trim()) throw new Error("Voice transcriber returned empty text")
-  return parsed.text
-}
-
-async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
-  if (transcriber.type === "chatgpt-direct") {
-    // direct 变体的收割与回退共用 agent CLI：解释器与脚本都必须在录音前存在。
-    if (!(await commandExists(transcriber.interpreter))) {
-      throw new Error(`Voice transcriber command not found: ${transcriber.interpreter}. Configure tui.voice.transcriber or enable a local ChatGPT MCP server.`)
-    }
-    if (!(await Bun.file(transcriber.script).exists())) {
-      throw new Error(`Voice transcriber script not found: ${transcriber.script}`)
-    }
-    return
-  }
-  const command = transcriber.command.trim()
-  if (!command) throw new Error("Voice transcriber command is empty")
-  // 这里只验证 argv[0] 是否存在，不解析 args，确保不会提前触发 shell 语义或环境变量展开。
-  if (!(await commandExists(command))) {
-    // 这里仅检查 argv[0] 是否可执行，不解释 args、不走 shell；缺失时在录音前失败，避免用户说完后才看到 spawn ENOENT。
-    throw new Error(
-      `Voice transcriber command not found: ${command}. Configure tui.voice.transcriber or enable a local ChatGPT MCP server.`,
-    )
-  }
-  const script = transcriber.args?.[0]
-  // ChatGPT 默认后端是 `runner chatgpt.js ...` 形态，脚本缺失需要在录音前给出明确错误。
-  if (
-    script &&
-    path.basename(script).toLowerCase() === "chatgpt.js" &&
-    (path.isAbsolute(script) || script.includes("/") || script.includes("\\")) &&
-    !(await Bun.file(script).exists())
-  ) {
-    // MCP 推导出的默认转写器形如 `node <agent-dir>/chatgpt.js ...`；脚本缺失时也要在录音前失败。
-    throw new Error(`Voice transcriber script not found: ${script}`)
-  }
-}
-
-async function commandExists(command: string) {
-  return (
-    Boolean(which(command)) ||
-    ((path.isAbsolute(command) || command.includes("/") || command.includes("\\")) && (await Bun.file(command).exists()))
-  )
-}
-
-// voice 提示是否在 footer 显示：仅当配置了转写器且 prompt 框足够宽时露出。
-// 纯显示判定，不影响 Alt+V 绑定本身——窄终端隐藏提示文案但快捷键仍可转录，避免引导文案挤占输入区。
-export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, promptWidth: number): boolean {
-  return transcriber !== undefined && promptWidth > VOICE_HINT_MIN_PROMPT_WIDTH
+// 语音后端由 daemon 统一选择；footer 只根据可用宽度展示快捷键。
+export function voiceHintVisible(promptWidth: number): boolean {
+  return promptWidth > VOICE_HINT_MIN_PROMPT_WIDTH
 }
 
 export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now(), options: { compact?: boolean } = {}) {
@@ -281,31 +172,10 @@ export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string,
   return ""
 }
 
-function parseTranscriberOutput(text: string): { text: string } {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    // 转写器协议必须是 JSON；直接插入原始 stdout 可能把诊断日志写进用户 prompt。
-    throw new Error("Voice transcriber did not return JSON")
-  }
-  if (!parsed || typeof parsed !== "object" || typeof (parsed as { text?: unknown }).text !== "string") {
-    // text 字段是唯一业务输出，额外字段留给后端诊断但不进入 TUI prompt。
-    throw new Error("Voice transcriber JSON must contain text")
-  }
-  return parsed as { text: string }
-}
-
 function formatClock(ms: number) {
-  // 计时只向下取整，避免录音开始后的首秒在 footer 中抖动。
+  // 计时只向下取整，避免录音开始瞬间出现负数或跳秒。
   const seconds = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`
-}
-
-function requireTranscriber(transcriber: VoiceTranscriber | undefined) {
-  // 这个错误只应在内部状态不一致时出现；正常未配置路径会在启动前被拦截。
-  if (!transcriber) throw new Error("Voice input is not configured")
-  return transcriber
 }
 
 export * as PromptVoiceInput from "./prompt-voice-input"

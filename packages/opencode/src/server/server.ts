@@ -5,7 +5,8 @@ import * as Log from "@opencode-ai/core/util/log"
 import { ConfigProvider, Context, Effect, Exit, Layer, Scope } from "effect"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { OpenApi } from "effect/unstable/httpapi"
-import { createServer } from "node:http"
+import { createServer, IncomingMessage, ServerResponse } from "node:http"
+import type { Socket } from "node:net"
 import { MDNS } from "./mdns"
 import { HttpApiApp } from "./routes/instance/httpapi/server"
 import { disposeMiddleware } from "./routes/instance/httpapi/lifecycle"
@@ -189,7 +190,40 @@ function forceClose(state: ListenerState) {
 }
 
 function serverLayer(opts: { port: number; hostname: string }) {
-  const server = createServer()
+  const server = createServer({
+    IncomingMessage: class extends IncomingMessage {
+      override _destroy(error: Error | null, callback: (error?: Error | null) => void) {
+        // 正常body EOF只结束读取；响应仍可能在转录，原清理留到响应完成点。
+        // 原运行时在这里同时移除断连回调，过早清理会使客户端abort停在传输层。
+        if (!error && this.complete && this.readableEnded) {
+          callback(null)
+          return
+        }
+        // 上传中断及读取错误仍沿原生销毁路径，保留其aborted/socket清理语义。
+        super._destroy(error, callback)
+      }
+    },
+    ServerResponse: class extends ServerResponse {
+      override assignSocket(socket: Socket) {
+        // 使用公开socket绑定路径，保留socket.close到response.close的标准传播。
+        super.assignSocket(socket)
+      }
+    },
+  })
+  server.on("request", (request, response) => {
+    // finish与close共同覆盖成功和断开；先解除双方监听，使原生清理只运行一次。
+    const finish = () => {
+      response.off("finish", finish)
+      response.off("close", finish)
+      // 响应可早于请求EOF结束；先归还原生方法，让稍后的读取完成仍有真实清理者。
+      request._destroy = IncomingMessage.prototype._destroy
+      // 只补做已经延期的正常EOF清理；主动销毁未消费GET会关闭可复用的连接。
+      if (request.destroyed && request.complete && request.readableEnded)
+        IncomingMessage.prototype._destroy.call(request, null, () => {})
+    }
+    response.once("finish", finish)
+    response.once("close", finish)
+  })
   const serverRef = { closeStarted: false, forceStop: false }
   const close = server.close.bind(server)
   // Keep shutdown owned by NodeHttpServer, but honor listener.stop(true) by

@@ -2,11 +2,18 @@ import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import { Session } from "@/session/session"
 import { getEndpointStatus } from "@/server/shared/tui-endpoint-status"
-import { Effect } from "effect"
+import { Effect, FileSystem, Layer } from "effect"
+import { HttpIncomingMessage } from "effect/unstable/http"
+import fs from "fs/promises"
+import path from "path"
+import os from "os"
+import { randomUUID } from "crypto"
+import { SessionActivity } from "@/session/activity"
+import { resolveVoiceTarget, transcribeVoiceFile } from "@/server/shared/tui-control"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { nextTuiRequest, submitTuiResponse } from "@/server/shared/tui-control"
 import { InstanceHttpApi } from "../api"
-import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload } from "../groups/tui"
+import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload, VoiceError, VoiceUpload } from "../groups/tui"
 import * as SessionError from "./session-errors"
 
 const commandAliases = {
@@ -125,6 +132,39 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
     })
 
     return handlers
+      // HTTP 只传音频字节；临时文件在 daemon 创建，使远程 attach 与本地 TUI 采用同一路径。
+      .handle("voiceTranscribe", ({ payload }) => Effect.callback<{ text: string }, VoiceError>((resume, signal) => {
+        const id = randomUUID()
+        const file = path.join(os.tmpdir(), "opencode", "voice", `${id}.wav`)
+        const operation = (async () => {
+          signal.throwIfAborted()
+          // activity 覆盖配置解析、等锁及收尾，后台空闲回收以实际操作寿命为准。
+          const release = SessionActivity.begin(`voice:${id}`)
+          try {
+            const target = await resolveVoiceTarget()
+            signal.throwIfAborted()
+            // 目录与 browser-agent 的默认语音准入一致，路径由本次请求持有。
+            await fs.mkdir(path.dirname(file), { recursive: true })
+            await fs.writeFile(file, payload)
+            signal.throwIfAborted()
+            // 字节写入完成后才进入锁内转录，返回前再次检查整轮取消。
+            const text = await transcribeVoiceFile(file, target, signal)
+            signal.throwIfAborted()
+            return { text }
+          } finally {
+            // 清理归原操作所有，即使删除文件失败也释放本次 activity。
+            try { await fs.rm(file, { force: true }) }
+            finally { release() }
+          }
+        })()
+        // Promise 结果只交付一次；取消 finalizer 继续等待这份 operation，而非另起任务。
+        void operation.then(
+          (value) => resume(Effect.succeed(value)),
+          (error) => resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
+        )
+        // 客户端 close 先 abort signal；finalizer 等待原操作收尾，文件和 activity 与工作同寿命。
+        return Effect.promise(() => operation.then(() => undefined, () => undefined))
+      }))
       .handle("appendPrompt", appendPrompt)
       .handle("openHelp", openHelp)
       .handle("openSessions", openSessions)
@@ -140,4 +180,7 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       .handle("controlNext", controlNext)
       .handle("controlResponse", controlResponse)
   }),
-)
+).pipe(Layer.provide(Layer.succeed(VoiceUpload, VoiceUpload.of((effect) =>
+  // 50MiB 与现有 MCP WAV 限额相同，大小限制作用于解码而非事后检查。
+  effect.pipe(Effect.provideService(HttpIncomingMessage.MaxBodySize, FileSystem.Size(50 * 1024 * 1024))),
+))))

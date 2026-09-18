@@ -139,10 +139,13 @@ describe("event HttpApi", () => {
         time: { start: 1, end: 2 },
       },
     }
+    // 两个全局流由本用例拥有；取消reader不保证raw Response的底层订阅一起退出。
+    const controller = new AbortController()
     const viewer = await app().request("/global/event", {
+      signal: controller.signal,
       headers: { "x-opencode-directory": tmp.path, "x-opencode-tui-message-projection": "viewer" },
     })
-    const complete = await app().request("/global/event", { headers: { "x-opencode-directory": tmp.path } })
+    const complete = await app().request("/global/event", { signal: controller.signal, headers: { "x-opencode-directory": tmp.path } })
     if (!viewer.body || !complete.body) throw new Error("missing response body")
     const viewerReader = viewer.body.getReader()
     const completeReader = complete.body.getReader()
@@ -182,6 +185,8 @@ describe("event HttpApi", () => {
       expect(viewerPart?.state.metadata.filediff as unknown).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
       expect((completePart?.state.metadata.filediff as { patch?: unknown }).patch).toBe(patch)
     } finally {
+      // 先沿请求signal释放heartbeat、GlobalBus订阅和连接计数，再结算两个reader。
+      controller.abort()
       await viewerReader.cancel()
       await completeReader.cancel()
     }

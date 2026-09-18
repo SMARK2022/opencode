@@ -2,6 +2,7 @@ import { TextareaRenderable, TextAttributes } from "@opentui/core"
 import { useRenderer } from "@opentui/solid"
 import { useTheme } from "../context/theme"
 import { useTuiConfig } from "../context/tui-config"
+import { useSDK } from "../context/sdk"
 import { useDialog, type DialogContext } from "./dialog"
 import { useToast } from "./toast"
 import { useBindings, useCommandShortcut } from "../keymap"
@@ -26,6 +27,7 @@ export function DialogPrompt(props: DialogPromptProps) {
   const dialog = useDialog()
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
+  const sdk = useSDK()
   const toast = useToast()
   const renderer = useRenderer()
   let textarea: TextareaRenderable
@@ -57,7 +59,8 @@ export function DialogPrompt(props: DialogPromptProps) {
   }
 
   const voiceInput = PromptVoiceInput.createVoiceInputController({
-    transcriber: () => tuiConfig.voice?.transcriber,
+    // 弹窗只持有录音与文本插入回调，目标选择和凭据事务复用当前 daemon。
+    transcribe: (file, signal) => PromptVoiceInput.submitVoice(file, signal, sdk),
     startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
     insertText: insertVoiceText,
     onStatus: setVoiceInputStatus,
@@ -173,9 +176,9 @@ export function DialogPrompt(props: DialogPromptProps) {
           <text fg={theme.text}>
             enter <span style={{ fg: theme.textMuted }}>submit</span>
           </text>
-          {/* 对话框宽度远小于 140，不复用 voiceHintVisible；配置了转写器就始终露出快捷键提示。
+          {/* 对话框直接展示统一语音入口；后端按用户配置选择实际执行目标。
               录音中隐藏提示，避免与录音状态栏的 "f8 stop" 冗余显示。 */}
-          <Show when={tuiConfig.voice?.transcriber && !voiceInputBusy()}>
+          <Show when={!voiceInputBusy()}>
             <text fg={theme.text}>
               {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
             </text>

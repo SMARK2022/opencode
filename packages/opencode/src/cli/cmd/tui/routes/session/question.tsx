@@ -72,7 +72,8 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
   }
 
   const voiceInput = PromptVoiceInput.createVoiceInputController({
-    transcriber: () => tuiConfig.voice?.transcriber,
+    // 问答输入与主输入框使用同一认证连接，取消信号随上传交给共享 daemon。
+    transcribe: (file, signal) => PromptVoiceInput.submitVoice(file, signal, sdk),
     startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
     insertText: insertVoiceText,
     onStatus: setVoiceInputStatus,
@@ -599,7 +600,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
               </text>
             </box>
           </Show>
-          <Show when={store.editing && tuiConfig.voice?.transcriber && !voiceInputBusy()}>
+          <Show when={store.editing && !voiceInputBusy()}>
             <text fg={theme.text}>
               {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
             </text>

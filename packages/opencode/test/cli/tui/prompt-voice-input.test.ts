@@ -1,29 +1,34 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "path"
 import { createRoot, createSignal } from "solid-js"
 import { tmpdir } from "../../fixture/fixture"
 import {
+  PromptVoiceInput,
   createVoiceInputController,
-  transcribeVoiceFile,
   VOICE_TRANSCRIBE_TIMEOUT_MS,
   voiceInputStatusText,
   voiceHintVisible,
   type VoiceRecorderHandle,
-  type VoiceTranscriber,
-  type VoiceTranscriberDirect,
 } from "../../../src/cli/cmd/tui/prompt-voice-input"
-import type { VoiceAuthRuntime } from "../../../src/cli/cmd/tui/util/voice-auth"
-import { readVoiceAuth } from "../../../src/cli/cmd/tui/util/voice-auth"
+import { readVoiceAuth, resolveVoiceTarget, transcribeVoiceFile, type VoiceTarget } from "../../../src/server/shared/tui-control"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import { Process } from "../../../src/util/process"
 import { createRefreshClock } from "../../../src/cli/cmd/tui/util/signal"
 
-const nodeJson = (script: string): VoiceTranscriber => ({
-  command: process.execPath,
-  args: ["-e", script, "{file}"],
-})
+// 后端 CLI 固定接收 transcribe-file/--file；测试只提供真实可执行脚本，不重建已退役的 argv 配置。
+// 空配置让 profile 步骤明确失败后进入浏览器协议 fixture，不向真实 ChatGPT 发送测试凭据。
+async function browserFixture(directory: string, source: string): Promise<VoiceTarget> {
+  const script = path.join(directory, "chatgpt.cjs")
+  const config = path.join(directory, "opencode.json")
+  await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local" } } }))
+  await Bun.write(script, `if (process.argv[2] === 'auth-export') process.exit(1);\n${source}`)
+  return { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} }
+}
 
 const voiceE2E = process.env.CHATGPT_VOICE_E2E === "1" ? test : test.skip
+const defaultProfileE2E = process.env.CHATGPT_VOICE_E2E === "1" && process.env.CHATGPT_VOICE_DEFAULT_PROFILE_E2E === "1" ? test : test.skip
 
 async function writeLateMarkerWav(source: string, target: string, seconds: number) {
   const input = Buffer.from(await Bun.file(source).arrayBuffer())
@@ -55,10 +60,214 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
 }
 
 describe("prompt voice input", () => {
-  // 四次完整daemon+HTTP预算之外还存在1/2/4秒退避；外层必须再留30秒完成CLI/core清理。
-  // 该值独立按产品合同计算，防止TUI在第四次合法attempt结束前抢先中止整个browser生命周期。
-  test("covers every voice attempt, retry delay, and cleanup window", () => {
-    expect(VOICE_TRANSCRIBE_TIMEOUT_MS).toBe(4 * (180_000 + 120_000) + 1_000 + 2_000 + 4_000 + 30_000)
+  // 录音句柄只交给上传函数文件和取消信号，后端目标已从 TUI 参数中移出。
+  test("controller submits the recording with its request signal", async () => {
+    let submitted: unknown
+    const text: string[] = []
+    const controller = createVoiceInputController({
+      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
+      transcribe: async (_file, signal) => { submitted = signal; return "recorded text" },
+      insertText: (value) => text.push(value),
+    })
+    await controller.toggle()
+    await controller.toggle()
+    expect(submitted).toBeInstanceOf(AbortSignal)
+    expect(text).toEqual(["recorded text"])
+  })
+
+  // 客户端只上传本地录音字节；认证 fetch、当前 daemon URL 和目录由 SDK 提供。
+  test("submits the WAV through the current authenticated daemon transport", async () => {
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(file, new Uint8Array([82, 73, 70, 70]))
+    const signal = new AbortController().signal
+    const text = await PromptVoiceInput.submitVoice(file, signal, {
+      url: "http://localhost:1234", directory: tmp.path,
+      fetch: async (url, init) => {
+        expect(new URL(String(url)).pathname).toBe("/tui/voice/transcribe")
+        expect(new URL(String(url)).searchParams.get("directory")).toBe(tmp.path)
+        expect(init?.signal).toBe(signal)
+        expect(await new Response(init?.body).arrayBuffer()).toEqual(await Bun.file(file).arrayBuffer())
+        return Response.json({ text: "daemon transcript" })
+      },
+    })
+    expect(text).toBe("daemon transcript")
+  })
+
+  // R9 将上传、等锁和转录合并为固定整轮预算，不再保留浏览器四轮重试窗口。
+  test("limits the complete submission to 120 seconds", () => {
+    expect(VOICE_TRANSCRIBE_TIMEOUT_MS).toBe(120_000)
+  })
+
+  // 使用真实计时器而非替换 timeout：常量正确但未接到提交信号的实现也必须报红。
+  // 两个 TUI 错开启动，首轮到点不能中断次轮；每轮必须从各自 WAV 完成时开始计时。
+  test("independently aborts each transcription at its real 120-second deadline", async () => {
+    const signals: AbortSignal[] = []
+    const elapsed: number[] = []
+    const errors: string[][] = [[], []]
+    const inserted: string[] = []
+    const cleaned: number[] = []
+    const controllers = errors.map((messages, index) => createVoiceInputController({
+      startRecorder: async () => ({ file: `${index}.wav`, stop: async () => {}, abort: async () => { cleaned.push(index) } }),
+      transcribe: (_file, signal) => {
+        signals.push(signal)
+        const start = performance.now()
+        return new Promise<string>((_resolve, reject) => signal.addEventListener("abort", () => {
+          elapsed[index] = performance.now() - start
+          reject(signal.reason)
+        }, { once: true }))
+      },
+      insertText: (text) => inserted.push(text),
+      onError: (message) => messages.push(message),
+    }))
+    // Bun 的未决 Promise 检测需要活跃句柄；此 interval 不参与生产 timeout 的触发。
+    const keepAlive = setInterval(() => {}, 1_000)
+    const first = controllers[0]
+    const second = controllers[1]
+    try {
+      await first.toggle()
+      const pending = first.toggle()
+      await Bun.sleep(1_000)
+      await second.toggle()
+      const next = second.toggle()
+      await pending
+      // 必须同时观察首轮超时原因和次轮仍在运行，才能排除多个 controller 共享取消源。
+      expect(signals[0].aborted).toBe(true)
+      expect(signals[0].reason.name).toBe("TimeoutError")
+      expect(signals[1].aborted).toBe(false)
+      expect(second.status().type).toBe("transcribing")
+      await next
+      expect(signals[1].reason.name).toBe("TimeoutError")
+      // 独立字面量来自 R9 合同；容忍调度延迟，但绝不能提前到点或沿用旧 1237 秒预算。
+      for (const duration of elapsed) {
+        expect(duration).toBeGreaterThanOrEqual(119_900)
+        expect(duration).toBeLessThan(125_000)
+      }
+      expect(errors).toEqual([["语音转录超时（120 秒）"], ["语音转录超时（120 秒）"]])
+      // 超时提示不能代替资源收尾；两轮都必须删除自己的录音且不向 prompt 交付任何文字。
+      expect(inserted).toEqual([])
+      expect(cleaned).toEqual([0, 1])
+      expect(controllers.map((controller) => controller.status().type)).toEqual(["idle", "idle"])
+    } finally {
+      await Promise.all(controllers.map((controller) => controller.abort()))
+      clearInterval(keepAlive)
+    }
+  }, 135_000)
+
+  // 真正的 HTTP 请求分别停在响应头之前与 JSON 正文中间，不能只验证 signal 参数相等。
+  // 部分正文保证 fetch 已成功而 json 仍挂起，覆盖容易被提前结束预算遗漏的阶段。
+  test.each(["submission", "body"])("cancels the HTTP %s without returning late text", async (phase) => {
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(file, "RIFF....WAVE")
+    const ready = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const abort = new AbortController()
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      async fetch(request) {
+        // 先确认完整 WAV 已到达再触发取消，避免仅测试到连接尚未建立的提前 abort。
+        expect(request.method).toBe("POST")
+        expect(request.headers.get("content-type")).toBe("audio/wav")
+        expect(await request.text()).toBe("RIFF....WAVE")
+        if (phase === "submission") {
+          ready.resolve()
+          await release.promise
+          return Response.json({ text: "late text" })
+        }
+        return new Response(new ReadableStream({
+          start(controller) { controller.enqueue(new TextEncoder().encode('{"text":"')) },
+        }), { headers: { "content-type": "application/json" } })
+      },
+    })
+    try {
+      const pending = PromptVoiceInput.submitVoice(file, abort.signal, {
+        url: server.url.href,
+        fetch: async (url, init) => {
+          const response = await fetch(url, init)
+          if (phase === "body") ready.resolve()
+          return response
+        },
+      })
+      // 先安装 rejection 观察者，避免真实 socket 取消被测试框架误报为未处理错误。
+      const outcome = pending.then((text) => ({ text }), (error: unknown) => ({ error }))
+      await ready.promise
+      abort.abort()
+      expect(await outcome).toMatchObject({ error: { name: "AbortError" } })
+    } finally {
+      // 即使取消断言失败也关闭本测试的 socket，防止悬挂正文影响下一条用例。
+      abort.abort()
+      release.resolve()
+      await server.stop(true)
+    }
+  })
+
+  // stop 仍在写入时不能删除 WAV，也不能在写入迟到完成后上传已被用户取消的录音。
+  test("waits for delayed stop before cleanup and never transcribes a cancelled recording", async () => {
+    const saving = Promise.withResolvers<void>()
+    const saved = Promise.withResolvers<void>()
+    const events: string[] = []
+    const controller = createVoiceInputController({
+      startRecorder: async () => ({
+        file: "voice.wav",
+        stop: async () => { saving.resolve(); await saved.promise; events.push("saved") },
+        abort: async () => { events.push("removed") },
+      }),
+      transcribe: async () => { events.push("uploaded"); return "stale text" },
+      insertText: () => { events.push("inserted") },
+    })
+    await controller.toggle()
+    const stopping = controller.toggle()
+    await saving.promise
+    await controller.abort()
+    expect(events).toEqual([])
+    // idle 只代表界面允许重新操作；保存句柄仍由原 stop 调用负责完成后清理。
+    expect(controller.status().type).toBe("idle")
+    saved.resolve()
+    await stopping
+    expect(events).toEqual(["saved", "removed"])
+  })
+
+  // 取消后旧上传与清理各有自己的完成点；新录音不能被旧 finally 的迟到状态覆盖。
+  test("starts a new recording while cancelled transcription cleanup is still pending", async () => {
+    const submitted = Promise.withResolvers<AbortSignal>()
+    const response = Promise.withResolvers<string>()
+    const cleaning = Promise.withResolvers<void>()
+    const cleaned = Promise.withResolvers<void>()
+    const inserted: string[] = []
+    const errors: string[] = []
+    let starts = 0
+    const controller = createVoiceInputController({
+      startRecorder: async () => {
+        const file = `${++starts}.wav`
+        return { file, stop: async () => {}, abort: async () => {
+          if (file !== "1.wav") return
+          cleaning.resolve()
+          await cleaned.promise
+        } }
+      },
+      transcribe: (_file, signal) => { submitted.resolve(signal); return response.promise },
+      insertText: (text) => inserted.push(text),
+      onError: (message) => errors.push(message),
+      now: () => 1_000,
+    })
+    await controller.toggle()
+    const old = controller.toggle()
+    const signal = await submitted.promise
+    await controller.abort()
+    expect(signal.aborted).toBe(true)
+    // 故意让上传忽略 abort 并迟到成功，验证 controller 自身的交付屏障而非 transport 的善意。
+    response.resolve("late text")
+    await cleaning.promise
+    await controller.toggle()
+    expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
+    cleaned.resolve()
+    await old
+    // 旧 finally 已实际返回后再次检查新录音，防止仅在清理前检查状态而漏掉覆盖竞态。
+    expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
+    expect(inserted).toEqual([])
+    expect(errors).toEqual([])
+    await controller.abort()
   })
 
   // transcriber只是TUI拥有的父进程；它启动的daemon/browser有独立生命周期，取消不能递归强杀后代。
@@ -68,18 +277,18 @@ describe("prompt voice input", () => {
     const marker = path.join(tmp.path, "grandchild-alive")
     const ready = path.join(tmp.path, "grandchild-started")
     const grandchild = path.join(tmp.path, "grandchild.cjs")
-    const parent = path.join(tmp.path, "parent.cjs")
     const file = path.join(tmp.path, "voice.wav")
     await Bun.write(file, "RIFF....WAVE")
     await Bun.write(grandchild, "require('fs').writeFileSync(process.argv[3], 'ready'); setTimeout(() => require('fs').writeFileSync(process.argv[2], 'alive'), 500)")
-    await Bun.write(parent, "require('child_process').spawn(process.execPath, [process.argv[2], process.argv[3], process.argv[4]], { detached: true, stdio: 'ignore' }).unref(); setInterval(() => {}, 1000)")
-
+    // 取消应由后端持有的 CLI 接收；浏览器后代仍按原 ownership 自行存活。
+    const target = await browserFixture(tmp.path, `require('child_process').spawn(process.execPath, [${JSON.stringify(grandchild)}, ${JSON.stringify(marker)}, ${JSON.stringify(ready)}], { detached: true, stdio: 'ignore' }).unref(); setInterval(() => {}, 1000)`)
     const abort = new AbortController()
-    const transcription = transcribeVoiceFile({ file, transcriber: { command: process.execPath, args: [parent, grandchild, marker, ready, "{file}"] }, signal: abort.signal })
+    const transcription = transcribeVoiceFile(file, target, abort.signal)
+    const cancelled = transcription.then((text) => ({ text }), (error: unknown) => ({ error }))
     for (let attempts = 0; attempts < 100 && !(await Bun.file(ready).exists()); attempts++) await Bun.sleep(25)
     expect(await Bun.file(ready).text()).toBe("ready")
     abort.abort()
-    await expect(transcription).rejects.toThrow()
+    expect(await cancelled).toMatchObject({ error: { name: "AbortError" } })
     await Bun.sleep(700)
     expect(await Bun.file(marker).text()).toBe("alive")
   })
@@ -94,52 +303,41 @@ describe("prompt voice input", () => {
     const file = path.join(tmp.path, "voice $HOME ; echo nope.wav")
     await Bun.write(file, "RIFF....WAVE")
 
-    const text = await transcribeVoiceFile({
-      file,
-      transcriber: nodeJson("process.stdout.write(JSON.stringify({ text: process.argv[1] }))"),
-    })
+    // 新协议同次返回 Cookie；只测路径字面量，不依赖旧的 {file} 替换器。
+    const target = await browserFixture(tmp.path, "process.stdout.write(JSON.stringify({ text: process.argv[4], auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))")
+    const text = await transcribeVoiceFile(file, target, new AbortController().signal)
 
     expect(text).toBe(file)
     expect(await Bun.file(path.join(tmp.path, "out.wav")).exists()).toBe(false)
   })
 
-  // `{file}` 是唯一允许把录音文件传给外部转写器的占位符。
-  // 缺少它时即使命令能运行，也不能证明实际录音被提交给后端。
-  // 提前拒绝可以避免用户录完才发现配置吞掉了音频文件。
-  // 这个错误路径也防止未来把默认转写命令简化成固定 stdin 或隐式路径。
-  // 测试只断言用户可见行为，不依赖参数解析内部结构。
-  test("requires a file placeholder so the transcriber cannot ignore the recording", async () => {
-    await expect(
-      transcribeVoiceFile({
-        file: "voice.wav",
-        transcriber: { command: process.execPath, args: ["-e", "process.stdout.write('{}')"] },
-      }),
-    ).rejects.toThrow(/\{file\}/)
-  })
-
-  // 外部转写器是独立进程，成功退出也可能返回非 JSON 或空文本。
+  // 外部转写器是独立进程，成功退出也可能返回非 JSON。
   // TUI 不能把这些输出直接插入 prompt，否则用户会看到不可诊断的脏文本。
-  // 非 JSON 和空白 text 是两个不同失败面：前者是协议错误，后者是转写失败。
+  // 非 JSON 是协议错误；R9 的静音空文本则应成功返回，由 controller 保持输入不变。
   // 这里分别覆盖它们，保证错误提示来自 controller 边界而不是后续 UI 崩溃。
   // 该测试保持真实子进程路径，覆盖 stdout 解析而不是 mock 解析器。
-  test("rejects invalid and empty transcriber output", async () => {
+  test("rejects invalid browser output and accepts silence without inserting text", async () => {
     await using tmp = await tmpdir()
     const file = path.join(tmp.path, "voice.wav")
     await Bun.write(file, "RIFF....WAVE")
 
-    await expect(
-      transcribeVoiceFile({
-        file,
-        transcriber: nodeJson("process.stdout.write('not json')"),
-      }),
-    ).rejects.toThrow(/JSON/)
-
-    await expect(
-      transcribeVoiceFile({
-        file,
-        transcriber: nodeJson("process.stdout.write(JSON.stringify({ text: '   ' }))"),
-      }),
-    ).rejects.toThrow(/empty/)
+    const invalid = await browserFixture(tmp.path, "process.stdout.write('not json')")
+    await expect(transcribeVoiceFile(file, invalid, new AbortController().signal)).rejects.toThrow(/JSON/)
+    const silent = await browserFixture(tmp.path, "process.stdout.write(JSON.stringify({ text: '   ', auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))")
+    const inserted: string[] = []
+    const errors: string[] = []
+    const controller = createVoiceInputController({
+      startRecorder: async () => ({ file, stop: async () => {}, abort: async () => {} }),
+      transcribe: (file, signal) => transcribeVoiceFile(file, silent, signal),
+      insertText: (text) => inserted.push(text),
+      onError: (message) => errors.push(message),
+    })
+    await controller.toggle()
+    await controller.toggle()
+    expect(inserted).toEqual([])
+    // 没有插入也可能是转录失败；无错误提示才能证明静音被当作成功处理。
+    expect(errors).toEqual([])
+    expect(controller.status()).toEqual({ type: "idle" })
   })
 
   // footer 文案是用户判断当前语音状态的唯一 TUI 反馈。
@@ -226,18 +424,16 @@ describe("prompt voice input", () => {
 
   // voice 提示是 footer 的引导文案，窄终端会挤占输入区，必须延迟到 prompt 足够宽才显示。
   // 阈值为开区间 ">120"：120 本身仍隐藏，与 usage 显示的 ">90" 同语义，避免边界行为漂移。
-  // 未配置转写器时无论多宽都不显示，避免引导用户使用未启用的能力。
+  // 后端配置由 daemon 解析，前端不再按本地转写器配置隐藏引导。
   // 该判定只管显示文案，不影响 Alt+V 绑定——窄终端仍可转录，测试只断言显示决策本身。
-  test("shows the voice hint only when a transcriber is configured and the prompt is wide enough", () => {
-    const transcriber: VoiceTranscriber = { command: "transcriber", args: ["{file}"] }
-    expect(voiceHintVisible(undefined, 999)).toBe(false)
+  test("shows the voice hint only when the prompt is wide enough", () => {
     // 100 低于 voice 阈值 120，仍隐藏(虽已过 usage 阈值 90，但 voice 需更晚露出)
-    expect(voiceHintVisible(transcriber, 100)).toBe(false)
+    expect(voiceHintVisible(100)).toBe(false)
     // 120 为开区间边界，本身不显示
-    expect(voiceHintVisible(transcriber, 120)).toBe(false)
+    expect(voiceHintVisible(120)).toBe(false)
     // 121 刚过阈值，开始显示
-    expect(voiceHintVisible(transcriber, 121)).toBe(true)
-    expect(voiceHintVisible(transcriber, 200)).toBe(true)
+    expect(voiceHintVisible(121)).toBe(true)
+    expect(voiceHintVisible(200)).toBe(true)
   })
 
   // 这是完整的正常路径：第一次 toggle 开始录音，第二次 toggle 停止并转写。
@@ -257,7 +453,6 @@ describe("prompt voice input", () => {
       },
     }
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => recorder,
       transcribe: async (file) => `text from ${file}`,
       insertText: (text) => inserted.push(text),
@@ -275,81 +470,6 @@ describe("prompt voice input", () => {
     expect(aborted).toBe(true)
   })
 
-  // 没有转写器时必须在录音前失败，不能占用麦克风后再报错。
-  // 这个边界保护未配置用户的体验，也避免产生无人消费的临时 WAV。
-  // startRecorder 被设成会抛错，用来证明 controller 没有进入录音层。
-  // 错误文本保持明确，方便用户知道需要配置 voice.transcriber。
-  test("does not start recording when no transcriber is configured", async () => {
-    let started = false
-    const errors: string[] = []
-    const controller = createVoiceInputController({
-      transcriber: () => undefined,
-      startRecorder: async () => {
-        started = true
-        throw new Error("should not start")
-      },
-      transcribe: async () => "text",
-      insertText: () => {},
-      onError: (message) => errors.push(message),
-    })
-
-    await controller.toggle()
-
-    expect(started).toBe(false)
-    expect(errors).toEqual(["Voice input is not configured"])
-  })
-
-  // command 缺失属于录音前校验：用户说话前就应知道转写器不可执行。
-  // 这里不 mock which，而是使用明显不存在的命令走真实校验分支。
-  // startRecorder 不能被调用，否则会出现“录完才 ENOENT”的坏体验。
-  // 错误消息包含命令名，便于用户定位是哪一个配置项写错。
-  test("does not start recording when the transcriber command is missing", async () => {
-    let started = false
-    const errors: string[] = []
-    const controller = createVoiceInputController({
-      transcriber: () => ({ command: "__opencode_missing_voice_transcriber__", args: ["{file}"] }),
-      startRecorder: async () => {
-        started = true
-        throw new Error("should not start")
-      },
-      insertText: () => {},
-      onError: (message) => errors.push(message),
-    })
-
-    await controller.toggle()
-
-    expect(started).toBe(false)
-    expect(errors[0]).toContain("Voice transcriber command not found")
-    expect(errors[0]).toContain("__opencode_missing_voice_transcriber__")
-  })
-
-  // 默认 ChatGPT 转写器由 MCP 目录推导，因此脚本文件缺失也要提前失败。
-  // 只检查 argv[0] 不够，chatgpt.js 本体丢失时 spawn 能启动但业务必然失败。
-  // 该测试覆盖带空格的相对路径形态，避免路径判断只适配简单文件名。
-  // 失败同样必须发生在录音前，不能消耗用户麦克风输入。
-  test("does not start recording when the inferred ChatGPT script is missing", async () => {
-    let started = false
-    const errors: string[] = []
-    const controller = createVoiceInputController({
-      transcriber: () => ({
-        command: process.execPath,
-        args: [path.join("missing chatgpt agent", "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
-      }),
-      startRecorder: async () => {
-        started = true
-        throw new Error("should not start")
-      },
-      insertText: () => {},
-      onError: (message) => errors.push(message),
-    })
-
-    await controller.toggle()
-
-    expect(started).toBe(false)
-    expect(errors[0]).toContain("Voice transcriber script not found")
-    expect(errors[0]).toContain("chatgpt.js")
-  })
-
   // 转写失败时 prompt 必须保持原样，不能插入部分文本或空字符串。
   // 即使转写器失败，临时录音文件仍需要通过 abort 清理。
   // stopped 证明 controller 先完成录音保存，再进入外部转写错误路径。
@@ -360,7 +480,6 @@ describe("prompt voice input", () => {
     let aborted = false
     const errors: string[] = []
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({
         file: "voice.wav",
         stop: async () => {
@@ -394,7 +513,6 @@ describe("prompt voice input", () => {
     let aborted = false
     let transcribed = false
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({
         file: "voice.wav",
         stop: async () => {},
@@ -429,7 +547,6 @@ describe("prompt voice input", () => {
       startPending = resolve
     })
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => {
         starts++
         return await new Promise<VoiceRecorderHandle>((resolve) => {
@@ -464,7 +581,6 @@ describe("prompt voice input", () => {
       startPending = resolve
     })
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () =>
         await new Promise<VoiceRecorderHandle>((resolve) => {
           resolveStart = resolve
@@ -504,7 +620,6 @@ describe("prompt voice input", () => {
       transcribeStarted = resolve
     })
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({
         file: "voice.wav",
         stop: async () => {},
@@ -546,14 +661,15 @@ describe("prompt voice input", () => {
       transcribeStarted = resolve
     })
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => {
         startCount++
+        // 文件身份属于创建时的录音，不能在旧 cleanup 中读取已被下一轮改变的计数。
+        const file = startCount === 1 ? "first.wav" : "second.wav"
         return {
-          file: startCount === 1 ? "first.wav" : "second.wav",
+          file,
           stop: async () => {},
           abort: async () => {
-            if (startCount === 1) firstAborted = true
+            if (file === "first.wav") firstAborted = true
           },
         }
       },
@@ -591,11 +707,11 @@ describe("prompt voice input", () => {
     })
     const inserted: string[] = []
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
-      transcribe: (_file, _transcriber, signal) => {
+      transcribe: (_file, signal) => {
         transcribeSignal = signal
         resolveTranscribe?.()
+        // R9 回调第二参数直接承载整轮取消，不能保留旧 transcriber 占位导致信号错位。
         // 模拟 Process.run 被 signal kill 后 promise reject 的真实行为。
         // 用 polling 而非 addEventListener 避免 bun:test 的 pending promise tracker 误判测试未结束。
         return new Promise<string>((_, reject) => {
@@ -628,10 +744,10 @@ describe("prompt voice input", () => {
       resolveTranscribe = resolve
     })
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
-      transcribe: (_file, _transcriber, signal) => {
+      transcribe: (_file, signal) => {
         resolveTranscribe?.()
+        // 网络错误仍应提示；这里仅由用户 signal 驱动拒绝，锁定主动取消静默的语义。
         return new Promise<string>((_, reject) => {
           const timer = setInterval(() => {
             if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
@@ -664,7 +780,6 @@ describe("prompt voice input", () => {
   test("abort is idempotent when called from both onCleanup and createEffect", async () => {
     let abortCount = 0
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({
         file: "voice.wav",
         stop: async () => {},
@@ -695,11 +810,11 @@ describe("prompt voice input", () => {
     let lateResolve: ((text: string) => void) | undefined
     const inserted: string[] = []
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
-      transcribe: (_file, _transcriber, signal) => {
+      transcribe: (_file, signal) => {
         transcribeSignal = signal
         transcribeStarted()
+        // 消费方卸载继续经过公开 controller 取消，不依赖已删除的本地命令选择器。
         // 模拟 Process.run 被 signal kill 后 reject 的真实行为
         return new Promise<string>((resolve, reject) => {
           lateResolve = resolve
@@ -735,7 +850,6 @@ describe("prompt voice input", () => {
   test("insertText receives the full transcribed text for consumer-side guards to check", async () => {
     const inserted: string[] = []
     const controller = createVoiceInputController({
-      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
       startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
       transcribe: async () => "hello world",
       insertText: (text) => inserted.push(text),
@@ -794,9 +908,15 @@ describe("prompt voice input", () => {
       let stopExitCode: number | null = null
       let daemonObserved = false
       let daemonExited = false
-      const transcriber = { command: "node", args: [script, "transcribe-file", "--file", "{file}", "--json"] }
+      // 复用后端公开事务入口，保留长音频末端 marker 与下一次录音隔离的真实验证。
+      // 测试配置独立于用户文件；profile/state 显式传入子进程，不依赖 TUI 的旧认证配置。
+      const config = path.join(root, `e2e-config-${process.pid}.json`)
+      await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", script] } } }))
+      const target: VoiceTarget = { config, key: "chatgpt", interpreter: "node", script, environment: {
+        CHATGPT_STATE_DIR: state, CHATGPT_BROWSER_USER_DATA_DIR: process.env.CHATGPT_BROWSER_USER_DATA_DIR,
+      } }
       const controller = createVoiceInputController({
-        transcriber: () => transcriber,
+        transcribe: (file, signal) => transcribeVoiceFile(file, target, signal),
         startRecorder: async () => {
           const file = files.shift()
           if (!file) throw new Error("voice E2E fixture queue is empty")
@@ -842,6 +962,7 @@ describe("prompt voice input", () => {
         await fs.rm(short, { force: true })
         await fs.rm(markerAiff, { force: true })
         await fs.rm(marker, { force: true })
+        await fs.rm(config, { force: true })
         try {
           const daemon = await Bun.file(path.join(state, "daemon.json")).json().catch(() => null) as { pid?: number } | null
           daemonObserved = typeof daemon?.pid === "number"
@@ -884,7 +1005,8 @@ describe("prompt voice input", () => {
               schemaVersion: 1,
               generatedAt: new Date().toISOString(),
               command: 'CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> bun test prompt-voice-input.test.ts --test-name-pattern "five-minute WAV"',
-              status: completed && stopExitCode === 0 && daemonObserved && daemonExited && stateRemoved ? "passed" : "failed",
+              // Cookie 直连成功不必启动 browser daemon；若曾启动，仍必须证明精确 PID 已退出。
+              status: completed && stopExitCode === 0 && daemonExited && stateRemoved ? "passed" : "failed",
               elapsedMs: Date.now() - startedAt,
               long: { durationSeconds: 300, markersMatched: longMarkersMatched, chars: inserted[0]?.trim().length ?? 0, wavRemoved: longRemoved },
               short: { markersMatched: shortMarkersMatched, chars: inserted.at(-1)?.trim().length ?? 0, wavRemoved: shortRemoved },
@@ -897,85 +1019,219 @@ describe("prompt voice input", () => {
     240_000,
   )
 
-  // ── chatgpt-direct 变体：直连主路径 + 用户批准的 argv 回退 ──
-
-  function directFixture(tmp: { path: string }, fallbackScript: string): VoiceTranscriberDirect {
-    // project 作用域避免测试凭据写回磁盘；收割路径由注入的 directRuntime 控制。
-    const script = path.join(tmp.path, "agent-chatgpt.js")
-    return {
-      type: "chatgpt-direct",
-      config: path.join(tmp.path, "opencode.json"),
-      key: "chatgpt",
-      interpreter: process.execPath,
-      script,
-      scope: "project",
-      transcriber: { command: process.execPath, args: [fallbackScript, "{file}"] },
-    }
-  }
-
-  // slice 9：direct 变体在录音前预检 script 存在性，缺失时给出指向 MCP 配置的明确错误；
-  // 预检必须在任何 spawn 之前，错误文案指向配置来源而不是运行时 ENOENT。
-  test("rejects a chatgpt-direct transcriber whose agent script is missing", async () => {
+  // 目标解析已归后端所有；缺失脚本仍须在 spawn 前明确报错，不能删除原来的诊断覆盖。
+  test("rejects a backend target whose agent script is missing", async () => {
     await using tmp = await tmpdir()
-    await Bun.write(path.join(tmp.path, "voice.wav"), "RIFF....WAVE")
-    const direct = directFixture(tmp, path.join(tmp.path, "unused.cjs"))
-    await expect(transcribeVoiceFile({ file: path.join(tmp.path, "voice.wav"), transcriber: direct })).rejects.toThrow(/script not found/)
+    const config = path.join(tmp.path, "opencode.json")
+    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: [process.execPath, path.join(tmp.path, "mcp-server.js")] } } }))
+    await expect(resolveVoiceTarget([config])).rejects.toThrow("Voice MCP executable is unavailable")
   })
 
-  // slice 1：直连失败（如 Cloudflare 403 或收割不可用）后回退内嵌 argv，仍返回浏览器页面路径的转写文本；
+  // slice 1：直连失败（如 Cloudflare 403 或收割不可用）后进入后端浏览器 CLI，仍返回浏览器页面路径的转写文本；
   // 回退成功不吞直连诊断：直连错误只影响本次请求的路径选择。
-  test("falls back to the embedded argv transcriber when the direct path fails", async () => {
+  test("falls back to the backend browser transcriber when the direct path fails", async () => {
     await using tmp = await tmpdir()
     const file = path.join(tmp.path, "voice.wav")
     await Bun.write(file, "RIFF....WAVE")
-    const direct = directFixture(tmp, path.join(tmp.path, "noop"))
-    await Bun.write(direct.script, "")
-    const fallback = path.join(tmp.path, "fallback.cjs")
-    await Bun.write(fallback, "process.stdout.write(JSON.stringify({ text: 'fallback browser text' }))")
+    const target = await browserFixture(tmp.path, "process.stdout.write(JSON.stringify({ text: 'fallback browser text', auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))")
+    await Bun.write(target.config, JSON.stringify({ mcp: { chatgpt: { auth: { cookies: {}, fetched_at: "2026-09-18T00:00:00Z" } } } }))
     // 直连 403 与收割不可用同时注入：两级失败都压到同一回退口，覆盖最坏链路。
-    direct.transcriber = { command: process.execPath, args: [fallback, "{file}"] }
-    const text = await transcribeVoiceFile({
-      file,
-      transcriber: direct,
-      directRuntime: {
-        directFetch: async () => new Response("{}", { status: 403 }),
-        harvest: async () => {
-          throw new Error("harvest unavailable")
-        },
-      },
-    })
-    expect(text).toBe("fallback browser text")
+    // 只隔离真实远端网络，profile 失败与浏览器协议解析仍执行实际子进程。
+    const transport = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response("{}", { status: 403 }))
+    try {
+      expect(await transcribeVoiceFile(file, target, new AbortController().signal)).toBe("fallback browser text")
+    } finally { transport.mockRestore() }
   })
 
-  // slice 2：直连成功时内嵌 argv 不得被调用（marker 文件是 argv 被调用的磁盘证据）。project 作用域产生的一次性提示经 onError 排出。
+  // slice 2：直连成功时浏览器 argv 不得被调用（marker 文件是 argv 被调用的磁盘证据）。
   // 该断言锁定"直连是主路径"：成功场景回落浏览器会浪费整段 daemon 生命周期。
   test("uses the direct path without spawning the fallback argv", async () => {
     await using tmp = await tmpdir()
     const file = path.join(tmp.path, "voice.wav")
     await Bun.write(file, "RIFF....WAVE")
     const marker = path.join(tmp.path, "argv-invoked")
-    const argvProbe = path.join(tmp.path, "probe.cjs")
-    await Bun.write(argvProbe, `require('fs').writeFileSync(${JSON.stringify(marker)}, '1')`)
-    const direct = directFixture(tmp, argvProbe)
-    await Bun.write(direct.script, "")
-    const text = await transcribeVoiceFile({
-      file,
-      transcriber: direct,
-      directRuntime: {
-        harvest: async () => ({
-          access_token: "tok",
-          token_expires_at: 0,
-          fetched_at: "2026-09-06T00:00:00Z",
-          cookies: {},
-        }),
-        directFetch: async () => new Response(JSON.stringify({ text: "direct text" }), { status: 200 }),
-      } as Partial<VoiceAuthRuntime>,
+    const target = await browserFixture(tmp.path, `require('fs').writeFileSync(${JSON.stringify(marker)}, '1')`)
+    // R12仍支持没有Bearer的Cookie快照；此fixture验证匿名成功时不启动浏览器。
+    await Bun.write(target.config, JSON.stringify({ mcp: { chatgpt: { auth: { cookies: { session: { value: "fixture", expires: 0 } }, fetched_at: "2026-09-18T00:00:00Z" } } } }))
+    const transport = spyOn(NetworkProxy, "fetch").mockImplementation(async (_url, init) => {
+      expect(new Headers(init?.headers).get("cookie")).toBe("session=fixture")
+      expect(new Headers(init?.headers).has("authorization")).toBe(false)
+      return Response.json({ text: "direct text" })
     })
-    expect(text).toBe("direct text")
-    expect(await Bun.file(marker).exists()).toBe(false)
+    try {
+      expect(await transcribeVoiceFile(file, target, new AbortController().signal)).toBe("direct text")
+      expect(await Bun.file(marker).exists()).toBe(false)
+    } finally { transport.mockRestore() }
   })
 
-  // 门禁 E2E（slice 12）：真实 profile 收割→直连转写→auth 节点写回，跨平台（无 darwin 音频工具依赖）。
+  // 双重 opt-in 才允许关闭真实默认 MCP；普通 CI 和旧隔离 profile 用例不改变生命周期。
+  defaultProfileE2E(
+    "accepts the actual default MCP profile and browser snapshots across subsequent requests",
+    async () => {
+      const userConfig = process.env.CHATGPT_VOICE_USER_CONFIG
+      if (process.platform !== "win32" || !userConfig || !process.env.LOCALAPPDATA) throw new Error("Default profile acceptance requires explicit Windows user config")
+      const configured = await resolveVoiceTarget([userConfig])
+      const environment = { ...process.env, ...configured.environment }
+      // 非默认 profile/CDP 不能借本测试获得关闭授权；配置读取只用于绑定真实 Node 和 CLI。
+      for (const key of ["CHATGPT_STATE_DIR", "CHATGPT_BROWSER_USER_DATA_DIR", "CHATGPT_BROWSER_PROFILE_DIRECTORY", "CHATGPT_BROWSER_CDP_URL", "CHATGPT_BROWSER_WS_ENDPOINT", "CHATGPT_BROWSER_DEBUG_PORT", "OPENCODE_DATA_DIR"]) {
+        if (environment[key]) throw new Error("Default profile acceptance refuses overridden browser ownership")
+      }
+      const state = path.join(process.env.LOCALAPPDATA, "opencode", "chatgpt-browser-agent", "state")
+      // 保留原字节用于最终比较，证明 fixture 写回没有误伤用户配置中的旧认证或其他设置。
+      const originalConfig = Buffer.from(await Bun.file(userConfig).arrayBuffer())
+      // 凭据只经过内存管道；CLI 的完整 stdout/stderr 不进入测试断言或错误报告。
+      const cli = (args: string[]) => Process.run([configured.interpreter, configured.script, ...args], {
+        env: configured.environment, nothrow: true, killTree: false, abort: AbortSignal.timeout(120_000),
+      })
+      const status = async () => {
+        const daemon = await Bun.file(path.join(state, "daemon.json")).json()
+        // 本地管理Bearer只发到回环地址；外部Bearer必须来自本次浏览器成功快照，不能混用。
+        const response = await fetch(`http://127.0.0.1:${daemon.port}/status`, {
+          headers: { authorization: `Bearer ${daemon.token}` }, signal: AbortSignal.timeout(5_000),
+        })
+        const body = await response.json()
+        // 重读状态文件并校验 daemonID，避免旧端口被复用后对错误进程执行生命周期操作。
+        if (!response.ok || body.daemonID !== daemon.daemonID) throw new Error("MCP status identity failed")
+        return { ...body, version: daemon.version }
+      }
+      const before = await status()
+      // ask 锁、pending 和 voice 队列都必须为空；仅 CLI 摘要的 Active locks 不足以证明可停。
+      expect(before.browserConnected === true && before.activeLocks === 0 && before.pendingPageCount === 0 && before.voiceActive === 0 && before.voiceQueued === 0).toBe(true)
+      const browser = await Bun.file(path.join(state, "browser-pid.json")).json()
+      expect(Number.isInteger(browser.pid) && Number.isInteger(before.pid)).toBe(true)
+      const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+      const root = path.join(os.tmpdir(), "opencode", "voice")
+      await fs.mkdir(root, { recursive: true })
+      const directory = await fs.mkdtemp(path.join(root, "default-profile-acceptance-"))
+      const wav = path.join(directory, "hello.wav")
+      const config = path.join(directory, "opencode.json")
+      // 只替换写回目的地，解释器、脚本和 MCP 环境全部沿真实配置，避免隔离 state 偷换实际 profile。
+      const target = { ...configured, config }
+      const failures: string[] = []
+      let stopped = false
+      let restored = before.browserConnected === true
+      try {
+        // Windows 不执行 POSIX mode；取消继承并仅授权当前账户，保证临时 auth 配置是私有文件。
+        const acl = await Process.run(["icacls", directory, "/inheritance:r", "/grant:r", `${os.userInfo().username}:(OI)(CI)F`], { nothrow: true })
+        expect(acl.code).toBe(0)
+        await fs.copyFile(path.join(path.dirname(configured.script), "test-voice-hello.wav"), wav)
+        expect((await cli(["--stop"])).code).toBe(0)
+        stopped = true
+        restored = false
+        const deadline = Date.now() + 35_000
+        // 等待精确记录的两个 PID 退出，不能把 stop 的 HTTP 接受当作 Cookie 已落盘。
+        while ((alive(before.pid) || alive(browser.pid)) && Date.now() < deadline) await Bun.sleep(100)
+        expect(alive(before.pid) || alive(browser.pid)).toBe(false)
+        console.log(JSON.stringify({ profileClosed: true }))
+        for (const scenario of ["profile", "browser"] as const) {
+          const evidence = { scenario, exportCode: -1, exportedCookies: 0, profileCookieOnly: false, directStatuses: [] as number[], bearerSent: [] as boolean[], snapshotReused: true, helloWorld: [] as boolean[], persistedCookies: 0, persistedBearer: false, browserSubmitted: 0, daemonVersion: 0, challenge: false, retryAfterSeconds: 0, proxyRouted: false, errorJson: false, rateLimited: false, authRejected: false }
+          // 前一个真实场景可能触发浏览器回退；只比较本场景增量，不把累计提交误判为重复发送。
+          const initialSubmitted = await status().then((value) => value.voiceSubmitted, () => 0)
+          // 原网络实现始终留存；仅 browser 场景首个外部请求注入 503，不伪造成功正文。
+          const originalFetch = NetworkProxy.fetch
+          let requests = 0
+          let saved: Awaited<ReturnType<typeof readVoiceAuth>>
+          const transport = spyOn(NetworkProxy, "fetch").mockImplementation(async (url, init) => {
+            requests++
+            const headers = new Headers(init?.headers)
+            evidence.bearerSent.push(headers.has("authorization"))
+            // R12同时比对Cookie和实际落盘Bearer；只断言布尔值，失败也不能打印认证头。
+            if (saved) evidence.snapshotReused &&= headers.get("cookie") === Object.entries(saved.cookies).filter(([, c]) => c.expires <= 0 || c.expires > Date.now() / 1000).map(([name, c]) => `${name}=${c.value}`).join("; ") && headers.get("authorization") === (saved.access_token ? `Bearer ${saved.access_token}` : null)
+            if (scenario === "browser" && requests === 1) { evidence.directStatuses.push(503); return new Response(null, { status: 503 }) }
+            const response = await originalFetch(url, init)
+            evidence.directStatuses.push(response.status)
+            evidence.challenge ||= response.headers.get("cf-mitigated") === "challenge"
+            evidence.retryAfterSeconds = Number(response.headers.get("retry-after")) || 0
+            // 只观察既有请求的错误副本，不增加远端重试；正文只转成已知类别布尔值。
+            if (!response.ok) {
+              const body = await response.clone().text()
+              evidence.proxyRouted = (await NetworkProxy.resolveProxyRoute(String(url), "provider")).type === "proxy"
+              evidence.errorJson ||= (response.headers.get("content-type") ?? "").includes("application/json")
+              evidence.rateLimited ||= /rate.limit|too many requests|quota|limit for dictation without an account/i.test(body)
+              evidence.authRejected ||= /unauthorized|invalid.token|expired.token|authentication.required/i.test(body)
+            }
+            return response
+          })
+          try {
+            // 绝不复制用户旧 auth：profile 从缺席开始，browser 从空节点进入受控 503。
+            await Bun.write(config, JSON.stringify({ mcp: { [target.key]: scenario === "profile" ? {} : { auth: { cookies: {}, fetched_at: new Date().toISOString() } } } }))
+            if (scenario === "profile") {
+              const exported = await cli(["auth-export", "--json"])
+              evidence.exportCode = exported.code
+              if (exported.code !== 0) {
+                // 只分类已知环境错误，避免 Node 或远端错误意外携带凭据正文。
+                failures.push(exported.stderr.includes("unable to open database") ? "profile:sqlite-open" : "profile:export-failed")
+                continue
+              }
+              // 独立导出只证明关闭后的 reader 可用；后端必须自行再次收割，测试不向它注入导出结果。
+              const payload = JSON.parse(exported.stdout.toString())
+              evidence.exportedCookies = payload.cookies.length
+              evidence.profileCookieOnly = payload.accessToken === undefined && payload.access_token === undefined
+              expect(evidence.exportedCookies > 0).toBe(true)
+              expect(evidence.profileCookieOnly).toBe(true)
+            }
+            for (let call = 0; call < 2; call++) {
+              const text = await transcribeVoiceFile(wav, target, AbortSignal.timeout(120_000))
+              // 独立已知音频 marker 排除空文字或错误页被视作成功，日志只保留匹配布尔值。
+              evidence.helloWorld.push(/hello/i.test(text) && /world/i.test(text))
+              expect(evidence.helloWorld.at(-1)).toBe(true)
+              const auth = await readVoiceAuth(config, target.key)
+              evidence.persistedCookies = Object.keys(auth?.cookies ?? {}).length
+              evidence.persistedBearer = typeof auth?.access_token === "string" && auth.access_token.length > 0
+              expect(evidence.persistedCookies > 0).toBe(true)
+              if (call === 0) saved = auth
+              // profile匿名额度不足可进入浏览器；后继请求必须只复用该次成功写回的完整快照。
+              if (await Bun.file(path.join(state, "daemon.json")).exists()) {
+                const current = await status()
+                evidence.browserSubmitted = current.voiceSubmitted - initialSubmitted
+                evidence.daemonVersion = current.version
+                restored = current.browserConnected === true
+                expect(evidence.daemonVersion).toBe(26)
+              }
+            }
+            // 保留R11的429红信号；R12修复的是后继账户请求，不把首次匿名失败伪装成200。
+            const recovered = scenario === "browser" || evidence.directStatuses[0] === 429
+            expect(evidence.browserSubmitted).toBe(recovered ? 1 : 0)
+            expect(evidence.snapshotReused).toBe(true)
+            expect(evidence.persistedBearer).toBe(recovered)
+            expect(evidence.bearerSent).toEqual([false, recovered])
+            // profile匿名额度尚可用时允许200；两种输入域的第二次实际直连都必须200且不再提交浏览器。
+            expect(evidence.directStatuses).toEqual(scenario === "profile" ? [recovered ? 429 : 200, 200] : [503, 200])
+          } catch {
+            // 测试失败仍继续另一条真实链路；不把凭据对象或响应文本放入 Bun 的失败快照。
+            failures.push(`${scenario}:acceptance-failed`)
+          } finally {
+            // 场景异常也恢复网络 seam，首个 503 注入不得污染后继场景或同进程普通测试。
+            transport.mockRestore()
+            console.log(JSON.stringify(evidence))
+          }
+        }
+      } finally {
+        // profile 失败也必须恢复正常 MCP；仅真实转录启动既有 CLI，不发送 ask 或改写登录状态。
+        try {
+          if (stopped && !restored) {
+            const result = await cli(["transcribe-file", "--file", wav, "--json"])
+            console.log(JSON.stringify({ restoreVoiceExitCode: result.code }))
+            restored = await status().then((value) => value.browserConnected === true, () => false)
+          }
+        } finally {
+          // 即使恢复命令超时也必须清除私有配置；真实 profile 和正常 daemon 始终保留。
+          await fs.rm(directory, { recursive: true, force: true })
+        }
+        const configUnchanged = originalConfig.equals(Buffer.from(await Bun.file(userConfig).arrayBuffer()))
+        const temporaryRemoved = !await Bun.file(config).exists() && !await Bun.file(wav).exists()
+        // 连接可用还不足以证明清理完成；voice队列和ask锁都归零才交还正常MCP。
+        const finalStatus = await status()
+        const idle = finalStatus.activeLocks === 0 && finalStatus.pendingPageCount === 0 && finalStatus.voiceActive === 0 && finalStatus.voiceQueued === 0
+        console.log(JSON.stringify({ restored, idle, configUnchanged, temporaryRemoved }))
+        expect(restored && idle && configUnchanged && temporaryRemoved).toBe(true)
+      }
+      expect(failures).toEqual([])
+    },
+    360_000,
+  )
+
+  // 此窄门禁保留profile匿名额度可用时的无浏览器断言；R12账户恢复由上方默认profile验收覆盖。
   // 运行：CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "direct harvest"
   voiceE2E(
     "harvests real credentials and transcribes directly without the browser page path",
@@ -996,24 +1252,25 @@ describe("prompt voice input", () => {
       await fs.mkdir(root, { recursive: true })
       await fs.copyFile(source, wav)
       await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", script] } } }))
-      const direct: VoiceTranscriberDirect = {
-        type: "chatgpt-direct",
+      // 真实 profile 收割由后端完成；TUI 不再持有 token 或嵌套转写器配置。
+      const direct: VoiceTarget = {
         config,
         key: "chatgpt",
         interpreter: "node",
         script,
-        scope: "user",
-        transcriber: { command: "node", args: [script, "transcribe-file", "--file", "{file}", "--json"] },
+        environment: { CHATGPT_STATE_DIR: state, CHATGPT_BROWSER_USER_DATA_DIR: process.env.CHATGPT_BROWSER_USER_DATA_DIR },
       }
       try {
-        const text = await transcribeVoiceFile({ file: wav, transcriber: direct })
+        const text = await transcribeVoiceFile(wav, direct, AbortSignal.timeout(120_000))
         const lowered = text.toLowerCase()
         // markers 与 darwin 五分钟 E2E 独立：hello/world 只能来自真实直连响应体。
         if (!lowered.includes("hello") || !lowered.includes("world")) throw new Error(`direct E2E markers missing: ${text.slice(0, 120)}`)
-        // 收割结果必须落在用户级 auth 节点（token + cookie 齐备），供下次请求零浏览器复用。
+        // 本用例限定profile匿名直连成功，落盘仍只有Cookie；浏览器成功快照在R12另附Bearer。
         const authNode = await readVoiceAuth(config, "chatgpt")
-        if (!authNode?.access_token) throw new Error("direct E2E did not persist the harvested auth node")
+        if (!authNode) throw new Error("direct E2E did not persist the harvested auth node")
         if (Object.keys(authNode.cookies).length === 0) throw new Error("direct E2E auth node has no cookies")
+        // 文字本身不能证明走了直连；隔离 state 中出现 daemon 则说明末级浏览器被启动。
+        expect(await Bun.file(path.join(state, "daemon.json")).exists()).toBe(false)
         expect(lowered).toContain("hello")
         expect(lowered).toContain("world")
       } finally {

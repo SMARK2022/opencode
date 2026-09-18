@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { randomUUID } from "crypto"
 import fs from "fs/promises"
 import path from "path"
@@ -156,6 +156,49 @@ describe("prompt voice recorder", () => {
     expect(wav.readInt16LE(44)).toBe(7_777)
     await recorder.abort()
     expect(await Bun.file(recorder.file).exists()).toBe(false)
+  })
+
+  // 用文件写入闸门制造真实 stop/abort 重叠；断言外部文件操作顺序及最终文件状态。
+  test("finishes an in-flight WAV write before abort removes it", async () => {
+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+    const recorder = await startPromptVoiceRecorder()
+    const entered = Promise.withResolvers<void>()
+    const finish = Promise.withResolvers<void>()
+    const events: string[] = []
+    const write = Bun.write
+    const remove = fs.rm
+    const writing = spyOn(Bun, "write").mockImplementation(async (destination, data, options) => {
+      // 该 seam 是录音器的本地路径写入，排除其他 Bun.write 重载以保留真实调用类型。
+      if (typeof destination !== "string") throw new Error("Expected a local recording path")
+      if (!(data instanceof Uint8Array)) throw new Error("Expected encoded WAV bytes")
+      if (destination === recorder.file) {
+        entered.resolve()
+        await finish.promise
+        events.push("write")
+      }
+      return write(destination, data, options)
+    })
+    const removing = spyOn(fs, "rm").mockImplementation(async (file, options) => {
+      // 记录真实删除入口，避免最终文件缺席掩盖一次“先删后写”的竞态。
+      if (file === recorder.file) events.push("remove")
+      return remove(file, options)
+    })
+    try {
+      const stopped = recorder.stop()
+      // 写入已进入而尚未完成，保证取消命中 closePromise 复用窗口。
+      await entered.promise
+      const cancelled = recorder.abort()
+      finish.resolve()
+      await Promise.all([stopped, cancelled])
+      expect(events).toEqual(["write", "remove"])
+      expect(await Bun.file(recorder.file).exists()).toBe(false)
+    } finally {
+      // 先放行生产写入，再恢复 spy；测试失败时也不留下悬停的录音操作。
+      finish.resolve()
+      writing.mockRestore()
+      removing.mockRestore()
+      await fs.rm(recorder.file, { force: true })
+    }
   })
 
   // compiled exe 不能在 native 资源缺失时回退到 @picovoice 包路径，否则会重新触发 CI 绝对路径加载错误。

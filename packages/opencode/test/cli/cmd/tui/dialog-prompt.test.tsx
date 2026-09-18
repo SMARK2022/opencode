@@ -8,17 +8,24 @@ import { DialogPrompt } from "@/cli/cmd/tui/ui/dialog-prompt"
 import { TuiConfigProvider } from "@/cli/cmd/tui/context/tui-config"
 import { ThemeProvider, useTheme } from "@/cli/cmd/tui/context/theme"
 import { KVProvider } from "@/cli/cmd/tui/context/kv"
+import { SDKProvider } from "@/cli/cmd/tui/context/sdk"
 import { ToastProvider } from "@/cli/cmd/tui/ui/toast"
 import { DialogProvider } from "@/cli/cmd/tui/ui/dialog"
 import { useDialog } from "@/cli/cmd/tui/ui/dialog"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "@/cli/cmd/tui/keymap"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
+import { createEventSource, createFetch, directory } from "./sync-fixture"
 
 function Harness() {
   // provider层和theme/KV层保持真实组合，避免用裸DialogPrompt掩盖owner缺少context的问题。
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
+  // 复用真实 SDK Provider，仅在传输边界隔离网络；Dialog 的语音依赖仍由正常 context 提供。
+  const calls = createFetch()
+  const events = createEventSource()
+  // 显式绑定 owner 清理，异步订阅即使没有及时注销也不会保留跨测试的事件回调。
+  onCleanup(() => events.dispose())
   // keymap注册的cleanup绑定renderer生命周期，测试结束不能留下全局intrinsic状态。
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
@@ -28,9 +35,11 @@ function Harness() {
         <KVProvider>
           <ThemeProvider mode="dark">
             <ToastProvider>
-              <DialogProvider>
-                <OpenPrompt />
-              </DialogProvider>
+              <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+                <DialogProvider>
+                  <OpenPrompt />
+                </DialogProvider>
+              </SDKProvider>
             </ToastProvider>
           </ThemeProvider>
         </KVProvider>

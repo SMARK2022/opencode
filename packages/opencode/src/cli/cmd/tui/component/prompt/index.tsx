@@ -451,8 +451,8 @@ export function Prompt(props: PromptProps) {
     PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), { compact: true }),
   )
   const voiceInput = PromptVoiceInput.createVoiceInputController({
-    // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
-    transcriber: () => tuiConfig.voice?.transcriber,
+    // 录音上传到当前共享连接，凭据与转录目标由 daemon 统一选择。
+    transcribe: (file, signal) => PromptVoiceInput.submitVoice(file, signal, sdk),
     // recorder 单独放在 native 边界文件，Prompt 组件不直接加载 optional addon。
     startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
     insertText: insertVoiceText,
@@ -2114,7 +2114,7 @@ export function Prompt(props: PromptProps) {
                   </text>
                   {/* 仅显示判定：promptWidth>120 才露出 voice 提示(比 usage 的 >90 更晚)，窄终端把 chrome 让给更高频信息；
                       不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
-                  <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
+                  <Show when={PromptVoiceInput.voiceHintVisible(promptWidth())}>
                     <text flexShrink={0} fg={theme.text} wrapMode="none">
                       {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
                     </text>

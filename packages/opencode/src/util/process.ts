@@ -121,28 +121,34 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
 }
 
 export async function run(cmd: string[], opts: RunOptions = {}): Promise<Result> {
+  // 管道消费失败也终止本次进程，避免调用已失败而 CLI 继续持有锁或页面。
+  const failed = new AbortController()
   const proc = spawn(cmd, {
     cwd: opts.cwd,
     env: opts.env,
     stdin: opts.stdin,
     shell: opts.shell,
-    abort: opts.abort,
+    abort: opts.abort ? AbortSignal.any([opts.abort, failed.signal]) : failed.signal,
     kill: opts.kill,
     killTree: opts.killTree,
     timeout: opts.timeout,
     stdout: "pipe",
     stderr: "pipe",
   })
+  // exit 早于 stdio close；调用者释放资源前需要等待实际关闭完成。
+  const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()))
 
   if (!proc.stdout || !proc.stderr) throw new Error("Process output not available")
 
-  const out = await Promise.all([proc.exited, buffer(proc.stdout), buffer(proc.stderr)])
+  const pending = [proc.exited, buffer(proc.stdout), buffer(proc.stderr)] as const
+  const out = await Promise.all(pending)
     .then(([code, stdout, stderr]) => ({
       code,
       stdout,
       stderr,
     }))
     .catch((err: unknown) => {
+      failed.abort(err)
       if (!opts.nothrow) throw err
       return {
         code: 1,
@@ -150,6 +156,8 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<Result>
         stderr: Buffer.from(errorMessage(err)),
       }
     })
+    // 保持原始错误/nothrow结果，仅把交付时间移动到全部资源结算之后。
+    .finally(async () => { await Promise.allSettled(pending); await closed })
   if (out.code === 0 || opts.nothrow) return out
   throw new RunFailedError(cmd, out.code, out.stdout, out.stderr)
 }

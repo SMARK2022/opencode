@@ -1,7 +1,7 @@
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import { TuiRequest as TuiRequestPayload } from "@/server/shared/tui-control"
 import { Schema } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
+import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import {
@@ -13,6 +13,9 @@ import { ApiNotFoundError } from "../errors"
 import { described } from "./metadata"
 
 const root = "/tui"
+// 二进制解码前约束录音大小；middleware 只附在语音端点，沿用其他 TUI 的既有合同。
+export class VoiceUpload extends HttpApiMiddleware.Service<VoiceUpload>()("@opencode/VoiceUpload") {}
+export class VoiceError extends Schema.ErrorClass<VoiceError>("VoiceError")({ message: Schema.String }, { httpApiStatus: 502 }) {}
 export const CommandPayload = Schema.Struct({ command: Schema.String })
 const EventTuiPromptAppend = Schema.Struct({
   type: Schema.Literal(TuiEvent.PromptAppend.type),
@@ -72,6 +75,7 @@ export const TuiPaths = {
   publish: `${root}/publish`,
   selectSession: `${root}/select-session`,
   providerEndpointStatus: `${root}/provider-endpoint-status`,
+  voiceTranscribe: `${root}/voice/transcribe`,
   controlNext: `${root}/control/next`,
   controlResponse: `${root}/control/response`,
 } as const
@@ -80,6 +84,13 @@ export const TuiApi = HttpApi.make("tui")
   .add(
     HttpApiGroup.make("tui")
       .add(
+        HttpApiEndpoint.post("voiceTranscribe", TuiPaths.voiceTranscribe, {
+          query: WorkspaceRoutingQuery,
+          // WAV 字节由客户端上传，后端只使用自己创建的临时音频路径。
+          payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "audio/wav" })),
+          success: Schema.Struct({ text: Schema.String }),
+          error: VoiceError,
+        }).middleware(VoiceUpload),
         HttpApiEndpoint.post("appendPrompt", TuiPaths.appendPrompt, {
           query: WorkspaceRoutingQuery,
           payload: TuiEvent.PromptAppend.properties,
