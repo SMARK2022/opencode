@@ -8,8 +8,10 @@ import path from "node:path"
 import { onCleanup, onMount } from "solid-js"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import { createEventSource, createFetch, directory } from "../../fixture/tui-sdk"
 import type { TuiKeybind } from "../../../src/config/keybind"
 import { TestTuiContexts } from "../../fixture/tui-environment"
+import { SDKProvider } from "../../../src/context/sdk"
 
 async function wait(fn: () => boolean, timeout = 2000) {
   // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
@@ -56,6 +58,11 @@ async function mountPrompt(input: {
     })
     const off = registerOpencodeKeymap(keymap, renderer, resolvedConfig)
     onCleanup(off)
+    // 复用真实 SDK Provider，仅在传输边界隔离网络；Dialog 的语音依赖仍由正常 context 提供。
+    const calls = createFetch()
+    const events = createEventSource()
+    // 显式绑定 owner 清理，异步订阅即使没有及时注销也不会保留跨测试的事件回调。
+    onCleanup(() => events.dispose())
 
     return (
       <TestTuiContexts
@@ -71,9 +78,11 @@ async function mountPrompt(input: {
             <KVProvider>
               <ThemeProvider mode="dark">
                 <ToastProvider>
-                  <DialogProvider>
-                    <DialogPrompt title="Rename Session" value="draft" onConfirm={input.onConfirm} />
-                  </DialogProvider>
+                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+                    <DialogProvider>
+                      <DialogPrompt title="Rename Session" value="draft" onConfirm={input.onConfirm} />
+                    </DialogProvider>
+                  </SDKProvider>
                 </ToastProvider>
               </ThemeProvider>
             </KVProvider>
@@ -200,6 +209,10 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
     const resolvedConfig = createTuiResolvedConfig()
     const off = registerOpencodeKeymap(keymap, renderer, resolvedConfig)
     onCleanup(off)
+    // DialogPrompt 读取 SDK context 组装语音上传；真实 Provider + 注入传输保持该依赖可见。
+    const calls = createFetch()
+    const events = createEventSource()
+    onCleanup(() => events.dispose())
 
     return (
       <TestTuiContexts
@@ -215,9 +228,11 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
             <KVProvider>
               <ThemeProvider mode="dark">
                 <ToastProvider>
-                  <DialogProvider>
-                    <OpenPrompt />
-                  </DialogProvider>
+                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+                    <DialogProvider>
+                      <OpenPrompt />
+                    </DialogProvider>
+                  </SDKProvider>
                 </ToastProvider>
               </ThemeProvider>
             </KVProvider>

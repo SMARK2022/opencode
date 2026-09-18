@@ -4,6 +4,7 @@ import { useDialog, type DialogContext } from "./dialog"
 import { Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js"
 import { Spinner } from "../component/spinner"
 import { useTuiConfig } from "../config"
+import { useSDK } from "../context/sdk"
 import { useBindings, useCommandShortcut } from "../keymap"
 import { useRenderer } from "@opentui/solid"
 import { createRefreshClock } from "../util/signal"
@@ -26,6 +27,7 @@ export function DialogPrompt(props: DialogPromptProps) {
   const dialog = useDialog()
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
+  const sdk = useSDK()
   const toast = useToast()
   const renderer = useRenderer()
   const submitShortcut = useCommandShortcut("dialog.prompt.submit")
@@ -58,7 +60,8 @@ export function DialogPrompt(props: DialogPromptProps) {
   }
 
   const voiceInput = PromptVoiceInput.createVoiceInputController({
-    transcriber: () => tuiConfig.voice?.transcriber,
+    // 弹窗只持有录音与文本插入回调，目标选择和凭据事务复用当前 daemon。
+    transcribe: (file, signal) => PromptVoiceInput.submitVoice(file, signal, sdk),
     startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
     insertText: insertVoiceText,
     onStatus: setVoiceInputStatus,
@@ -188,7 +191,7 @@ export function DialogPrompt(props: DialogPromptProps) {
               </text>
             </box>
           </Show>
-          <Show when={tuiConfig.voice?.transcriber && !voiceInputBusy()}>
+          <Show when={!voiceInputBusy()}>
             <text fg={theme.text}>
               {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
             </text>

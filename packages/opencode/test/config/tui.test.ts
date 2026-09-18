@@ -12,7 +12,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Config } from "@/config/config"
 import { ConfigParse } from "@/config/parse"
 import { ConfigV2Compat } from "@/config/v2-compat"
-import { readVoiceAuth, writeVoiceAuth } from "@opencode-ai/tui/util/voice-auth"
+import { readVoiceAuth, resolveVoiceTarget, writeVoiceAuth } from "@/server/shared/tui-control"
 import { isRecord } from "@opencode-ai/tui/util/record"
 import { ConfigPlugin } from "@/config/plugin"
 import { CurrentWorkingDirectory } from "@/config/tui-cwd"
@@ -523,8 +523,8 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
       expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(
         process.platform === "darwin" ? "f8" : "alt+v",
       )
-      // 默认转写器保持轻量 CLI 形态（无 MCP 配置时的兑底），`{file}` 保留在 argv 里按字面量替换。
-      expect(config.voice?.transcriber).toEqual({ command: "chatgpt-browser-agent", args: ["transcribe-file", "--file", "{file}", "--json"] })
+      // TUI 只保留快捷键，执行目标由共享后端用户配置提供。
+      expect("voice" in config).toBe(false)
       expect(
         config.keybinds.gather("plugins.dialog", ["dialog.plugins.install"]).map((binding) => binding.cmd),
       ).toEqual(["dialog.plugins.install"])
@@ -561,11 +561,8 @@ it.instance("keybinds accept OpenTUI binding specs", () =>
   ),
 )
 
-// 这个用例覆盖用户显式写 tui.voice.transcriber 的正常路径。
-// 配置层只负责保留 command/args，不解释 shell，也不验证外部程序是否存在。
-// 这样用户可以把转写器替换成其它本地工具，同时保持 controller 侧统一安全校验。
-// 测试落在 TuiConfig 服务层，保证 JSON 解析、schema 和默认合并一起生效。
-it.instance("loads voice transcriber command from tui config", () =>
+// 旧 TUI argv 配置退出解析结果，语音选择统一交给后端。
+it.instance("omits the retired local voice transcriber from tui config", () =>
   withCleanState(
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service
@@ -581,16 +578,13 @@ it.instance("loads voice transcriber command from tui config", () =>
 
       const config = yield* getTuiConfig(test.directory)
       // 用户显式配置永远是 argv 形态（schema 限制）；配置层只保留 command/args，不解释 shell。
-      expect(config.voice?.transcriber).toEqual({ command: "chatgpt-browser-agent", args: ["transcribe-file", "--file", "{file}", "--json"] })
+      expect("voice" in config).toBe(false)
     }),
   ),
 )
 
-// 这个用例覆盖推荐路径：从本地 ChatGPT MCP 配置推导同目录 chatgpt.js。
-// 有实体配置文件时产出 chatgpt-direct 变体（auth 节点可写回该文件），内嵌与旧公式一致的回退 argv。
-// agentDir 带空格，用来锁定路径 join/resolve 不会因为 shell 拆分而失效。
-// chatgpt.js 必须存在才启用默认转写器，避免用户录音后才遇到脚本缺失错误。
-it.instance("infers the default voice transcriber from the local ChatGPT MCP command", () =>
+// 项目 MCP 仍是普通工具配置；TUI 加载保持项目文件逐字一致。
+it.instance("leaves project MCP credentials unchanged while loading the TUI", () =>
   withCleanState(
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service
@@ -608,24 +602,16 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
         },
       })
 
+      const before = yield* fs.readFileString(path.join(test.directory, "opencode.json"))
       const config = yield* getTuiConfig(test.directory)
-      // instance 目录的 opencode.json 是 project 级来源：direct 可用但凭据不写回。
-      // toEqual 整体锁定变体形状：config/key/scope 任一漂移都会让 auth 节点写错位置。
-      expect(config.voice?.transcriber).toEqual({
-        type: "chatgpt-direct",
-        config: path.join(test.directory, "opencode.json"),
-        key: "chatgpt",
-        interpreter: process.execPath,
-        script: path.join(agentDir, "chatgpt.js"),
-        scope: "project",
-        transcriber: { command: process.execPath, args: [path.join(agentDir, "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] },
-      })
+      expect("voice" in config).toBe(false)
+      expect(yield* fs.readFileString(path.join(test.directory, "opencode.json"))).toBe(before)
     }),
   ),
 )
 
-// 直接脚本入口必须改用 node 执行转写 CLI，不能误启动会污染 stdout 的 MCP 协议服务。
-it.instance("infers voice transcriber when MCP command runs mcp-server.js directly via shebang", () =>
+// shebang 解释器识别移到后端，TUI 读取项目配置仍只取得界面设置。
+it.instance("keeps shebang MCP execution out of the TUI", () =>
   withCleanState(
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service
@@ -645,25 +631,13 @@ it.instance("infers voice transcriber when MCP command runs mcp-server.js direct
 
       // basename+toLowerCase 归一平台大小写与路径分隔差异：判定只看文件名，不关心安装目录前缀。
       const config = yield* getTuiConfig(test.directory)
-      // shebang 形态无显式解释器：direct 变体的 interpreter 回退到 node，回退 argv 同步使用 node。
-      expect(config.voice?.transcriber).toEqual({
-        type: "chatgpt-direct",
-        config: path.join(test.directory, "opencode.json"),
-        key: "chatgpt",
-        interpreter: "node",
-        script: path.join(agentDir, "chatgpt.js"),
-        scope: "project",
-        transcriber: { command: "node", args: [path.join(agentDir, "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] },
-      })
+      expect("voice" in config).toBe(false)
     }),
   ),
 )
 
-// 这个用例保护 MCP 扫描边界：只有 key/name 明确指向 ChatGPT 的本地 server 才能作为语音后端。
-// unrelated server 即使目录里有 chatgpt.js，也不能被误当作语音转写器来源。
-// 同时保留多个 server 时的选择行为，防止未来遍历顺序改动导致错用其它工具目录。
-// 断言最终脚本路径来自 chatgpt server，说明过滤条件和路径解析都生效。
-it.instance("does not infer the voice transcriber from unrelated local MCP servers", () =>
+// 多个项目 MCP 条目同样只参与普通工具配置，界面侧保持单一上传入口。
+it.instance("keeps project MCP selection out of TUI configuration", () =>
   withCleanState(
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service
@@ -686,17 +660,13 @@ it.instance("does not infer the voice transcriber from unrelated local MCP serve
       })
 
       const config = yield* getTuiConfig(test.directory)
-      const transcriber = config.voice?.transcriber
-      expect(transcriber?.type).toBe("chatgpt-direct")
-      // 只有 key/name 明确指向 ChatGPT 的 local server 才是语音后端：脚本路径必须来自 chatgpt 目录。
-      expect(transcriber?.type === "chatgpt-direct" ? transcriber.script : undefined).toBe(path.join(chatgptDir, "chatgpt.js"))
+      expect("voice" in config).toBe(false)
     }),
   ),
 )
 
-// OPENCODE_CONFIG_CONTENT 没有可写回的实体文件：推导保留旧 argv 形态（配置源域的合法分支），
-// 不产出 auth 节点无所依附的 direct 变体；env 在用例内设置并在 finally 恢复，避免泄漏到其它用例。
-it.instance("keeps the legacy argv form for content-only config sources", () =>
+// env-only MCP 继续服务普通 MCP，TUI 解析结果保持与所有项目一致。
+it.instance("keeps content-only MCP out of TUI voice selection", () =>
   withCleanState(
     Effect.gen(function* () {
       const fs = yield* FSUtil.Service
@@ -709,10 +679,7 @@ it.instance("keeps the legacy argv form for content-only config sources", () =>
       })
       try {
         const config = yield* getTuiConfig(test.directory)
-        expect(config.voice?.transcriber).toEqual({
-          command: process.execPath,
-          args: [path.join(agentDir, "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
-        })
+        expect("voice" in config).toBe(false)
       } finally {
         if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT
         else process.env.OPENCODE_CONFIG_CONTENT = previous
@@ -730,7 +697,6 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =
       const config = path.join(test.directory, "opencode.json")
       const authNode = {
         access_token: "token-1",
-        token_expires_at: 1_800_000_000,
         fetched_at: "2026-09-06T00:00:00Z",
         cookies: { "oai-did": { value: "did-1", expires: 0 } },
       }
@@ -745,7 +711,7 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =
         { mcp: { chatgpt: server, servers: { chatgpt: { ...server, disabled: true } } }, enabled: true },
       ]) {
         yield* fs.writeJson(config, { mcp: item.mcp })
-        yield* Effect.promise(() => writeVoiceAuth(config, "chatgpt", authNode))
+        yield* Effect.promise(() => writeVoiceAuth(config, "chatgpt", authNode, new AbortController().signal))
         expect(yield* Effect.promise(() => readVoiceAuth(config, "chatgpt"))).toEqual(authNode)
         const text = yield* fs.readFileStringSafe(config)
         const lowered = ConfigV2Compat.lower(ConfigParse.jsonc(text ?? "{}", config)).value
@@ -758,12 +724,12 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =
         if (!isRecord(native) || !isRecord(native.mcp)) throw new Error("expected raw MCP config")
         const rawServer = Object.hasOwn(native.mcp, "chatgpt") ? native.mcp.chatgpt : isRecord(native.mcp.servers) ? native.mcp.servers.chatgpt : undefined
         expect(Schema.decodeUnknownSync(ConfigMCP.Local)(rawServer)).not.toHaveProperty("auth")
-        const shared = yield* TuiConfigHost.loadMcpVoiceTranscriber([{ file: config, scope: "project" }], test.directory)
-        expect(shared?.type === "chatgpt-direct").toBe(item.enabled)
-        if (item.enabled) expect(shared).toMatchObject({ config, key: "chatgpt", scope: "project", script: path.join(agentDir, "chatgpt.js") })
+        // 前端已退休选择职责；布局、禁用和写回合同继续由真实后端验证。
+        if (item.enabled) expect(yield* Effect.promise(() => resolveVoiceTarget([config])))
+          .toMatchObject({ config, key: "chatgpt", script: path.join(agentDir, "chatgpt.js") })
+        if (!item.enabled) yield* Effect.promise(async () => { await expect(resolveVoiceTarget([config])).rejects.toThrow("Voice input requires a user-configured ChatGPT MCP") })
         const resolved = yield* getTuiConfig(test.directory)
-        expect(resolved.voice?.transcriber?.type === "chatgpt-direct").toBe(item.enabled)
-        if (item.enabled) expect(resolved.voice?.transcriber).toMatchObject({ config, key: "chatgpt", scope: "project", script: path.join(agentDir, "chatgpt.js") })
+        expect(resolved).not.toHaveProperty("voice")
       }
     }),
   ),

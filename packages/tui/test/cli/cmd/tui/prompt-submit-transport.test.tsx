@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 // #192：prompt 提交传输层行为测试——失败保留 draft / 成功清除 / shell 后台 / slash / 新会话
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -34,6 +34,7 @@ import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/
 import { EditorContextProvider } from "../../../../src/context/editor"
 import { DialogProvider } from "../../../../src/ui/dialog"
 import { ToastProvider } from "../../../../src/ui/toast"
+import { PromptVoiceRecorder } from "../../../../src/prompt-voice-recorder"
 import { createEventSource, createFetch, directory, json, wait, worktree } from "./sync-fixture"
 
 const sessionID = "ses_prompt_transport"
@@ -478,8 +479,8 @@ test("home TUI /goal creates session posts objective and navigates", async () =>
 })
 
 // #491：三态单行矩阵——160 列终端内限制真实 Prompt 为 75 列，锁定“终端宽但 Prompt 窄”的偏差。
-// IDE registry 腿经 env 播种确定化（不依赖宿主 IDE 会话）；voice 交互腿依赖宿主转写子进程，
-// 由 prompt-voice-input 单测覆盖 compact 文案矩阵。
+// IDE registry 腿经 env 播种确定化（不依赖宿主 IDE 会话）；voice 腿经真实 controller + 挂起
+// HTTP 提交覆盖 Transcribing 帧，compact 文案矩阵由 prompt-voice-input 单测覆盖。
 test("keeps the constrained Prompt extension bar on one row across active states", async () => {
   // #491：宽度选项经 withPrompt 注入，验证的是分栏布局下的真实 Yoga 宽度而非终端总宽。
   await using tmp = await tmpdir()
@@ -504,9 +505,23 @@ test("keeps the constrained Prompt extension bar on one row across active states
     }),
   )
 
+  // recorder 只隔离本机麦克风边界；状态切换仍走真实 controller、快捷键和挂起 HTTP 提交。
+  const voiceFile = path.join(tmp.path, "voice.wav")
+  await Bun.write(voiceFile, "RIFF....WAVE")
+  const recorder = spyOn(PromptVoiceRecorder, "startPromptVoiceRecorder").mockResolvedValue({ file: voiceFile, stop: async () => {}, abort: async () => {} })
+
   try {
     await withPrompt(
-      () => undefined,
+      (url, _request, init) => {
+        // 后端连接是现有 transport seam；挂起到取消才能稳定观察真实 Transcribing 帧。
+        // 不再配置本地 argv，避免测试绕回已退役的前端转录路径。
+        if (url.pathname !== "/tui/voice/transcribe") return
+        const signal = init?.signal
+        if (!signal) throw new Error("voice submission requires its cancellation signal")
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+        })
+      },
       async (_prompt, _route, app, context) => {
         // 断言最终字符帧而非复制 Yoga 算法，确保 flex 收缩和 renderer 换行都走生产路径。
         const waitForFrame = async (predicate: (frame: string) => boolean) => {
@@ -550,11 +565,24 @@ test("keeps the constrained Prompt extension bar on one row across active states
         expect(busy).toContain("interrupt")
         expect(retry).toContain("details")
         expect(retry).toContain("retry in 9s · #7")
+
+        // voice 腿：录音与挂起上传也必须保持单行扩展栏，取消后不污染后续布局。
+        // macOS默认F8使用mock键盘的大写符号名；小写f8会被当作普通文字输入。
+        const toggleVoice = () => app.mockInput.pressKey(process.platform === "darwin" ? "F8" : "v", { meta: process.platform !== "darwin" })
+        toggleVoice()
+        await waitForFrame((frame) => frame.includes("Rec 00:00"))
+        toggleVoice()
+        const transcribing = await waitForFrame((frame) => frame.includes("Transcribing"))
+        expect(extensionRows(transcribing)).toBe(1)
+        // 再次触发同一绑定必须先取消挂起请求，避免旧提交污染后续 busy/retry 布局断言。
+        toggleVoice()
+        await waitForFrame((frame) => !frame.includes("Transcribing"))
       },
       stateDir,
       { width: 160, promptWidth: 75 },
     )
   } finally {
+    recorder.mockRestore()
     // env 恢复保证同进程后续用例不会读到本用例的私有注册表。
     if (previousRegistry === undefined) delete process.env.OPENCODE_IDE_REGISTRY_DIR
     else process.env.OPENCODE_IDE_REGISTRY_DIR = previousRegistry

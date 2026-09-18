@@ -4,6 +4,7 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Server } from "../../src/server/server"
+import { EventClients } from "@opencode-ai/server/event-clients"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
 import { withTimeout } from "../../src/util/timeout"
 import { resetDatabase } from "../fixture/db"
@@ -37,12 +38,12 @@ async function startListener() {
   return Server.listen({ hostname: "127.0.0.1", port: 0 })
 }
 
-async function startNoAuthListener() {
+async function startNoAuthListener(eventClients?: EventClients.Interface) {
   Flag.OPENCODE_SERVER_PASSWORD = undefined
   Flag.OPENCODE_SERVER_USERNAME = auth.username
   delete process.env.OPENCODE_SERVER_PASSWORD
   process.env.OPENCODE_SERVER_USERNAME = auth.username
-  return Server.listen({ hostname: "127.0.0.1", port: 0 })
+  return Server.listen({ hostname: "127.0.0.1", port: 0, eventClients })
 }
 
 function authorization() {
@@ -167,6 +168,89 @@ async function openPtySocket(listener: Awaited<ReturnType<typeof startListener>>
 }
 
 describe("HttpApi Server.listen", () => {
+  test("keeps sequential health requests on one keepalive connection", async () => {
+    const listener = await startNoAuthListener()
+    // 固定使用同一个原始 socket，避免 fetch 连接池悄悄重连掩盖提前销毁。
+    const socket = net.connect(listener.port, "127.0.0.1")
+    const request = "GET /global/health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+    try {
+      const response = await withTimeout(
+        new Promise<string>((resolve, reject) => {
+          let received = ""
+          let sentSecond = false
+          socket.once("connect", () => socket.write(request))
+          socket.once("error", reject)
+          socket.on("data", (data) => {
+            // TCP 分包不代表响应边界；积累到实际健康正文后才发第二次请求。
+            received += data.toString()
+            const bodies = received.match(/"healthy":true/g) ?? []
+            if (!sentSecond && bodies.length === 1) {
+              sentSecond = true
+              socket.write(request)
+            }
+            // 第二份正文必须来自原 socket，不能用 listener 仍可接受新连接代替此断言。
+            if (bodies.length === 2) resolve(received)
+          })
+          // S12 在第一次 finish 处主动关连接；close 给出直接红信号而非等待总超时。
+          socket.once("close", () => reject(new Error("keepalive connection closed before both responses")))
+        }),
+        5_000,
+        "keepalive connection did not return both responses",
+      )
+      expect(response.match(/HTTP\/1\.1 200 OK/g)).toHaveLength(2)
+      expect(response.match(/"healthy":true/g)).toHaveLength(2)
+    } finally {
+      // 先结束测试持有的连接，再关闭 listener，避免把空闲 keepalive 计入 shutdown 等待。
+      socket.destroy()
+      await stop(listener, "timed out cleaning up keepalive listener")
+    }
+  }, 15_000)
+
+  test("drains the real SSE stream after its client disconnects", async () => {
+    let connected = false
+    const drained = Promise.withResolvers<void>()
+    // 注入生产已有的listener-scoped计数服务，不恢复模块全局测试钩子。
+    const eventClients = EventClients.make((count) => {
+      if (count === 1) connected = true
+      // 必须先观察建立再观察清零，避免初始零连接让清理断言空通过。
+      if (connected && count === 0) drained.resolve()
+    })
+    const listener = await startNoAuthListener(eventClients)
+    const socket = net.connect(listener.port, "127.0.0.1")
+    try {
+      const response = await withTimeout(
+        new Promise<string>((resolve, reject) => {
+          let received = ""
+          socket.once("error", reject)
+          socket.once("connect", () => {
+            socket.write("GET /global/event HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+          })
+          socket.on("data", (data) => {
+            // 收到真实 SSE 首事件才断开，覆盖响应已开始但没有 finish 的取消时序。
+            received += data.toString()
+            if (received.includes("server.connected")) resolve(received)
+          })
+        }),
+        5_000,
+        "SSE connection did not emit its initial event",
+      )
+      expect(response).toContain("HTTP/1.1 200 OK")
+      expect(response).toContain("text/event-stream")
+      socket.destroy()
+      // 等待生产收尾通知，不用固定 sleep 假定 fiber、heartbeat 与订阅已经释放。
+      await withTimeout(drained.promise, 5_000, "SSE client count did not return to zero")
+      expect(connected).toBe(true)
+      // 断开流式连接后 listener 仍服务普通请求；读取正文也完成后继请求的生命周期。
+      const health = await fetch(new URL("/global/health", listener.url))
+      expect(health.status).toBe(200)
+      expect(await health.json()).toMatchObject({ healthy: true })
+    } finally {
+      socket.destroy()
+      // 观察者随本listener服务释放，不修改其他连接持有的计数服务。
+      await stop(listener, "timed out cleaning up SSE listener")
+    }
+  }, 15_000)
+
   testPty("serves HTTP routes and upgrades PTY websocket through Server.listen", async () => {
     await using tmp = await tmpdir({ config: { formatter: false, lsp: false } })
     const listener = await startListener()

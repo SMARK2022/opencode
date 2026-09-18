@@ -1,12 +1,15 @@
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
 import { Session } from "@/session/session"
-import { Effect } from "effect"
+import { Effect, FileSystem, Layer } from "effect"
+import { HttpIncomingMessage } from "effect/unstable/http"
+import { randomUUID } from "crypto"
+import { SessionActivity } from "@/session/activity"
+import { nextTuiRequest, submitTuiResponse, transcribeVoiceUpload } from "@/server/shared/tui-control"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
-import { nextTuiRequest, submitTuiResponse } from "@/server/shared/tui-control"
 import { getEndpointStatus } from "@/server/shared/tui-endpoint-status"
 import { InstanceHttpApi } from "../api"
-import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload } from "../groups/tui"
+import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload, VoiceError, VoiceUpload } from "../groups/tui"
 import * as SessionError from "./session-errors"
 
 const commandAliases = {
@@ -126,7 +129,22 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       return true
     })
 
+    // 两代共用文件与转录事务；V1仅保留其空闲回收所需的activity生命周期。
+    const voiceTranscribe = (ctx: { payload: Uint8Array }) =>
+      Effect.callback<{ text: string }, VoiceError>((resume, signal) => {
+        const release = SessionActivity.begin(`voice:${randomUUID()}`)
+        const operation = transcribeVoiceUpload(ctx.payload, signal).finally(release)
+        // Promise 结果只交付一次；取消 finalizer 继续等待这份 operation，而非另起任务。
+        void operation.then(
+          (value) => resume(Effect.succeed(value)),
+          (error) => resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
+        )
+        // 客户端 close 先 abort signal；finalizer 等待原操作收尾，文件和 activity 与工作同寿命。
+        return Effect.promise(() => operation.then(() => undefined, () => undefined))
+      })
+
     return handlers
+      .handle("voiceTranscribe", voiceTranscribe)
       .handle("appendPrompt", appendPrompt)
       .handle("openHelp", openHelp)
       .handle("openSessions", openSessions)
@@ -142,4 +160,14 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       .handle("controlNext", controlNext)
       .handle("controlResponse", controlResponse)
   }),
+).pipe(
+  Layer.provide(
+    Layer.succeed(
+      VoiceUpload,
+      VoiceUpload.of((effect) =>
+        // 50MiB 与现有 MCP WAV 限额相同，大小限制作用于解码而非事后检查。
+        effect.pipe(Effect.provideService(HttpIncomingMessage.MaxBodySize, FileSystem.Size(50 * 1024 * 1024))),
+      ),
+    ),
+  ),
 )

@@ -205,11 +205,14 @@ describe("event HttpApi", () => {
           type: Schema.String,
           properties: Schema.optionalKey(Schema.Struct({ part: Schema.optionalKey(SessionV1.Part) })),
         }) })
+        // 两个全局流由本用例拥有；取消 reader 不保证 raw Response 的底层订阅一起退出，
+        // 请求 signal 才能释放 heartbeat、GlobalBus 订阅和连接计数。
+        const controller = new AbortController()
         const openGlobalStream = (viewer: boolean) =>
           Effect.gen(function* () {
             const headers = new Headers({ "x-opencode-directory": directory })
             if (viewer) headers.set("x-opencode-tui-message-projection", "viewer")
-            const response = yield* requestInDirectory("/global/event", directory, { headers })
+            const response = yield* requestInDirectory("/global/event", directory, { headers, signal: controller.signal })
             const reader = yield* Queue.unbounded<typeof Frame.Type["payload"]>()
             yield* response.stream.pipe(
               // 网络chunk可拆分/合并SSE帧，复用正式decoder后再读取完整事件。
@@ -258,6 +261,8 @@ describe("event HttpApi", () => {
             .toEqual({ file: "a.ts", additions: 64, deletions: 0 })
           expect(completePart).toMatchObject({ type: "tool", state: { metadata: { filediff: { patch } } } })
         } finally {
+          // 先沿请求 signal 释放 heartbeat、GlobalBus 订阅和连接计数，再结算两个 reader。
+          controller.abort()
           yield* Queue.shutdown(viewer.reader)
           yield* Queue.shutdown(complete.reader)
         }

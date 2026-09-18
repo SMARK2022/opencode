@@ -26,3 +26,6 @@ export function submitTuiResponse(body: unknown) {
 export function nextTuiResponse() {
   return response.next()
 }
+
+// 语音事务归Core所有，旧路由和Native入口消费同一实现及凭据锁。
+export * from "@opencode-ai/core/voice"
