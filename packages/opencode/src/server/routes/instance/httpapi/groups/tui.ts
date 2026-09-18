@@ -1,7 +1,9 @@
 import { TuiEvent } from "@/server/tui-event"
 import { TuiRequest as TuiRequestPayload } from "@/server/shared/tui-control"
 import { Schema } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
+import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
+import { VoiceError, VoiceUpload } from "@opencode-ai/protocol/groups/tui"
+export { VoiceError, VoiceUpload }
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import {
@@ -74,6 +76,7 @@ export const TuiPaths = {
   publish: `${root}/publish`,
   selectSession: `${root}/select-session`,
   providerEndpointStatus: `${root}/provider-endpoint-status`,
+  voiceTranscribe: `${root}/voice/transcribe`,
   controlNext: `${root}/control/next`,
   controlResponse: `${root}/control/response`,
 } as const
@@ -82,6 +85,21 @@ export const TuiApi = HttpApi.make("tui")
   .add(
     HttpApiGroup.make("tui")
       .add(
+        HttpApiEndpoint.post("voiceTranscribe", TuiPaths.voiceTranscribe, {
+          query: WorkspaceRoutingQuery,
+          // WAV 字节由客户端上传，后端只使用自己创建的临时音频路径。
+          payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "audio/wav" })),
+          success: described(Schema.Struct({ text: Schema.String }), "Transcribed text for the uploaded WAV"),
+          error: VoiceError,
+        })
+          .middleware(VoiceUpload)
+          .annotateMerge(
+            OpenApi.annotations({
+              identifier: "tui.voiceTranscribe",
+              summary: "Transcribe a TUI voice recording",
+              description: "Upload one WAV recording and return its daemon-side transcription.",
+            }),
+          ),
         HttpApiEndpoint.post("appendPrompt", TuiPaths.appendPrompt, {
           query: WorkspaceRoutingQuery,
           payload: TuiEvent.PromptAppend.data,

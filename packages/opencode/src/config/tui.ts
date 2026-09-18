@@ -124,7 +124,6 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
 
   const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
-  const projectOpencodeFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("opencode", ctx.directory)
 
   const acc: Acc = {
     result: {},
@@ -160,25 +159,9 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
     }
   }
 
-  const defaultVoiceTranscriber =
-    // 这里读取 opencode MCP 配置而不是 tui.json，复用用户已经安装好的 ChatGPT browser-agent 载体。
-    (yield* TuiConfigHost.loadMcpVoiceTranscriber([
-      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode").map(file => ({ file, scope: "user" as const })),
-      ...(Flag.OPENCODE_CONFIG ? [{ file: Flag.OPENCODE_CONFIG, scope: "user" as const }] : []),
-      ...projectOpencodeFiles.map(file => ({ file, scope: "project" as const })),
-      ...dirs.flatMap(dir => ConfigPaths.fileInDirectory(dir, "opencode").map(file => ({ file, scope: (dir === Flag.OPENCODE_CONFIG_DIR ? "user" : "project") as "user" | "project" }))),
-    ], ctx.directory)) ?? TuiConfigHost.DefaultVoiceTranscriber
-
   const result = TuiConfig.resolve(
     {
       ...acc.result,
-      // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
-      // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
-      voice: {
-        ...acc.result.voice,
-        // 显式 tui.voice.transcriber 优先；MCP 推导和固定默认值只填补未配置场景。
-        transcriber: acc.result.voice?.transcriber ?? defaultVoiceTranscriber,
-      },
     },
     {
       terminalSuspend: process.platform !== "win32",

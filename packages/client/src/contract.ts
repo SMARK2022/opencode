@@ -53,4 +53,5 @@ export const endpointNames = {
   "question.request.list": "listRequests",
 } as const
 
-export const omitEndpoints = new Set(["fs.read", "pty.connect", "pty.connectToken"])
+// WAV沿TUI已有认证fetch上传；与其他原始二进制入口一样，不交给仅支持Struct的JSON客户端生成器。
+export const omitEndpoints = new Set(["fs.read", "pty.connect", "pty.connectToken", "tui.voiceTranscribe"])

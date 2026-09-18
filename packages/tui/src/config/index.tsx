@@ -4,8 +4,7 @@ import { createBindingLookup } from "@opentui/keymap/extras"
 import { Schema } from "effect"
 import { createContext, type JSX, useContext } from "solid-js"
 import { TuiKeybind } from "./keybind"
-// type-only：Resolved.voice 的 transcriber 是 argv|chatgpt-direct 联合，但 schema 解析本身不依赖运行时模块。
-import type { VoiceTranscriber } from "../prompt-voice-input"
+
 
 export const AttentionSoundName = Schema.Literals([
   "default",
@@ -60,17 +59,6 @@ export const Prompt = Schema.Struct({
   }),
 }).annotate({ description: "Prompt size settings" })
 
-const VoiceTranscriber = Schema.Struct({
-  command: Schema.String.annotate({ description: "Executable used to transcribe a recorded WAV file" }),
-  // args 是 argv 数组，不是 shell 字符串；其中一项必须包含 `{file}`，确保录音路径按字面量传递。
-  // 这样即使路径包含空格、重定向符、管道或环境变量字符，也不会被解释成 shell 语法。
-  args: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Arguments for the transcriber command; include {file} for the WAV path" }),
-})
-
-export const Voice = Schema.Struct({
-  transcriber: Schema.optional(VoiceTranscriber),
-}).annotate({ description: "Prompt voice input settings" })
-
 export const Info = Schema.Struct({
   $schema: Schema.optional(Schema.String),
   theme: Schema.optional(Schema.String),
@@ -79,7 +67,6 @@ export const Info = Schema.Struct({
   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
   leader_timeout: Schema.optional(LeaderTimeout),
   attention: Schema.optional(Attention),
-  voice: Schema.optional(Voice),
   prompt: Schema.optional(Prompt),
   scroll_speed: Schema.optional(ScrollSpeed).annotate({ description: "TUI scroll speed" }),
   scroll_acceleration: Schema.optional(ScrollAcceleration),
@@ -89,7 +76,8 @@ export const Info = Schema.Struct({
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
-export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | "mouse" | "cursor" | "voice"> & {
+// 语音目标已归共享 daemon 解析：schema 与 Resolved 均不再携带本地 transcriber 配置。
+export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | "mouse" | "cursor"> & {
   attention: {
     enabled: boolean
     notifications: boolean
@@ -105,9 +93,6 @@ export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | 
     style: "block" | "underline" | "line" | "default"
     blinking: boolean
   }
-  // 解析后的 transcriber 是 argv|chatgpt-direct 联合：用户显式配置只能是 argv（schema 限制），
-  // direct 变体仅由 MCP 推导产生并内嵌回退 argv。保持可选以兼容不关心语音的测试 fixture。
-  voice?: { transcriber?: VoiceTranscriber }
 }
 
 export const ResolveOptions = Schema.Struct({
@@ -116,8 +101,8 @@ export const ResolveOptions = Schema.Struct({
 export type ResolveOptions = Schema.Schema.Type<typeof ResolveOptions>
 
 export function resolve(
-  // 入参放宽 voice 为联合：MCP 推导在 opencode 配置层产出 direct 变体后才传入 resolve，schema 本身仍只接受 argv。
-  input: Omit<Info, "voice"> & { voice?: { transcriber?: VoiceTranscriber } },
+  // 输入与 Info 同形：MCP 语音推导退役后不再需要放宽 voice 字段。
+  input: Info,
   options: ResolveOptions,
 ): Resolved {
   const keybinds: TuiKeybind.KeybindOverrides = { ...input.keybinds }
