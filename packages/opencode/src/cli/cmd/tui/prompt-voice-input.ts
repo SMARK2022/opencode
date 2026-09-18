@@ -10,10 +10,15 @@ export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
 export async function submitVoice(file: string, signal: AbortSignal, sdk: {
   url: string; directory?: string; fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
 }): Promise<string> {
+  signal.throwIfAborted()
+  // standalone + native addon 的 Bun.file 正文释放会触发运行时崩溃；先取得独立字节所有权保护上传完成点。
+  const bytes = await Bun.file(file).arrayBuffer()
+  // 文件读取本身不可中断，但读取完成后的取消必须阻止请求进入认证传输。
+  signal.throwIfAborted()
   // 每次提交读取当前连接，重连后的端口与 attach 认证沿 SDK 一起生效。
   const url = new URL("/tui/voice/transcribe", sdk.url)
   if (sdk.directory) url.searchParams.set("directory", sdk.directory)
-  const response = await sdk.fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: Bun.file(file), signal })
+  const response = await sdk.fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: bytes, signal })
   // 响应正文仍归本轮信号；取消优先于响应解析和文字交付。
   const body: unknown = await response.json().catch(() => undefined)
   signal.throwIfAborted()

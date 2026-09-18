@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
+import { createRequire } from "node:module"
 import os from "node:os"
 import path from "path"
 import { createRoot, createSignal } from "solid-js"
@@ -29,6 +30,59 @@ async function browserFixture(directory: string, source: string): Promise<VoiceT
 
 const voiceE2E = process.env.CHATGPT_VOICE_E2E === "1" ? test : test.skip
 const defaultProfileE2E = process.env.CHATGPT_VOICE_E2E === "1" && process.env.CHATGPT_VOICE_DEFAULT_PROFILE_E2E === "1" ? test : test.skip
+const compiledVoice = process.platform === "win32" ? test : test.skip
+
+// standalone 必须加载真实 native addon 后再走上传，才能覆盖 Bun.file 正文的实际所有权，而非只验证源码运行时。
+async function compileVoiceUploadFixture(directory: string, file: string, native: string) {
+  // 入口和产物都放在测试临时目录，避免编译测试依赖仓库外的音频或留下仓库文件。
+  const entry = path.join(directory, "compiled-submit-voice.ts")
+  const production = path.resolve(import.meta.dir, "../../../src/cli/cmd/tui/prompt-voice-input.ts")
+  // 入口绝对导入当前生产模块，不能复制 submitVoice 实现来制造假绿。
+  await Bun.write(entry, `
+    import { createRequire } from "node:module"
+    import { submitVoice } from ${JSON.stringify(production.replaceAll("\\", "/"))}
+    const require = createRequire(import.meta.url)
+    require(${JSON.stringify(native)})
+    const received = Promise.withResolvers<{ authorization: string | null; directory: string | null; bytes: number[] }>()
+    // 回环服务只观察真实上传协议，正文消费完成后才返回响应。
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        received.resolve({
+          authorization: request.headers.get("authorization"),
+          directory: new URL(request.url).searchParams.get("directory"),
+          bytes: [...new Uint8Array(await request.arrayBuffer())],
+        })
+        // 固定响应正文验证 compiled 请求完成后仍能交付文字。
+        return Response.json({ text: "standalone transcript" })
+      },
+    })
+    try {
+      const text = await submitVoice(${JSON.stringify(file)}, new AbortController().signal, {
+        url: server.url.href,
+        directory: "standalone-directory",
+        fetch: (input, init) => fetch(input, {
+          ...init,
+          // 认证从 SDK fetch 边界进入，submitVoice 不能绕过既有认证传输。
+          headers: { ...init?.headers, authorization: "Bearer standalone-token" },
+        }),
+      })
+      console.log(JSON.stringify({ text, ...(await received.promise) }))
+    } finally {
+      // 失败路径也关闭测试自己的 listener，避免污染后续测试。
+      await server.stop(true)
+    }
+  `)
+  const outfile = path.join(directory, process.platform === "win32" ? "compiled-submit-voice.exe" : "compiled-submit-voice")
+  const result = await Bun.build({
+    entrypoints: [entry],
+    // 不指定跨平台 target，直接使用当前 Bun 的 standalone runtime，避免下载不同版本掩盖回归。
+    compile: { outfile, autoloadBunfig: false, autoloadDotenv: false },
+  })
+  if (!result.success) throw new AggregateError(result.logs, "compiled submitVoice fixture failed to build")
+  return { outfile, entry }
+}
 
 async function writeLateMarkerWav(source: string, target: string, seconds: number) {
   const input = Buffer.from(await Bun.file(source).arrayBuffer())
@@ -92,6 +146,117 @@ describe("prompt voice input", () => {
       },
     })
     expect(text).toBe("daemon transcript")
+  })
+
+  // standalone 的 exe 只在 Windows 执行：native addon、真实生产 import 和本地回环必须处于同一进程。
+  // 回环服务独立检查认证、目录、响应和完整字节，避免测试重新实现 submitVoice 的正文逻辑。
+  compiledVoice("uploads bytes safely from a native-loaded standalone executable", async () => {
+    await using tmp = await tmpdir()
+    const file = path.join(tmp.path, "standalone.wav")
+    const wav = Buffer.alloc(48)
+    // fixture 使用独立已知 PCM 字节，不依赖麦克风、Worker 或未 checkout 的音频资源。
+    wav.write("RIFF", 0, "ascii")
+    wav.writeUInt32LE(40, 4)
+    wav.write("WAVE", 8, "ascii")
+    wav.write("fmt ", 12, "ascii")
+    wav.writeUInt32LE(16, 16)
+    wav.writeUInt16LE(1, 20)
+    wav.writeUInt16LE(1, 22)
+    // 单声道 8kHz、16-bit PCM 的 byteRate 为 16000；头部长度与两个 sample 的 data 长度一致。
+    wav.writeUInt32LE(8_000, 24)
+    wav.writeUInt32LE(16_000, 28)
+    wav.writeUInt16LE(2, 32)
+    wav.writeUInt16LE(16, 34)
+    wav.write("data", 36, "ascii")
+    wav.writeUInt32LE(4, 40)
+    wav.writeInt16LE(321, 44)
+    wav.writeInt16LE(-321, 46)
+    await Bun.write(file, wav)
+
+    const packageRoot = path.dirname(createRequire(import.meta.url).resolve("@picovoice/pvrecorder-node/package.json"))
+    const native = path.join(packageRoot, "lib", "windows", process.arch === "x64" ? "amd64" : "arm64", "pv_recorder.node")
+    // 缺少已安装 addon 时必须失败，不能回退到源码路径来绕过 native 输入域。
+    expect(await Bun.file(native).exists()).toBe(true)
+    const compiled = await compileVoiceUploadFixture(tmp.path, file, native)
+    // 子进程上界早于测试期限，挂起时先结束 exe，临时目录才不会因 Windows 文件占用而清理失败。
+    const child = Bun.spawn([compiled.outfile], { stdout: "pipe", stderr: "pipe", timeout: 10_000 })
+    const [exit, stdout, stderr] = await Promise.all([
+      // 同时消费两个管道，避免崩溃输出反压掩盖 standalone 的真实退出码。
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" })
+    // 期望值来自回环协议和 fixture 字面量，不从 submitVoice 重新计算。
+    expect(JSON.parse(stdout.trim())).toEqual({
+      text: "standalone transcript",
+      authorization: "Bearer standalone-token",
+      directory: "standalone-directory",
+      bytes: [...wav],
+    })
+  }, 30_000)
+
+  // 预取消必须在读取文件前结束，避免取消请求仍建立网络副作用。
+  test("does not read or fetch when submission is already cancelled", async () => {
+    const abort = new AbortController()
+    abort.abort()
+    let read = false
+    let fetched = false
+    const originalFile = Bun.file
+    const file = originalFile("voice.wav")
+    const reading = spyOn(file, "arrayBuffer").mockImplementation(async () => {
+      read = true
+      return new ArrayBuffer(0)
+    })
+    const fileCall = spyOn(Bun, "file").mockReturnValue(file)
+    // 只替代文件系统边界；被测入口仍是实际 submitVoice。
+    try {
+      await expect(PromptVoiceInput.submitVoice("voice.wav", abort.signal, {
+        url: "http://localhost:1234",
+        fetch: async () => {
+          fetched = true
+          return Response.json({ text: "unexpected" })
+        },
+      })).rejects.toMatchObject({ name: "AbortError" })
+      expect(read).toBe(false)
+      expect(fetched).toBe(false)
+    } finally {
+      // 还原全局文件入口，防止取消测试影响后续真实文件读取。
+      fileCall.mockRestore()
+      reading.mockRestore()
+    }
+  })
+
+  // 读取完成后取消仍不得进入 SDK fetch；该闸门直接保护“读取后再检查 signal”的批准顺序。
+  test("does not fetch when cancellation arrives after the file has been read", async () => {
+    await using tmp = await tmpdir()
+    const filePath = path.join(tmp.path, "voice.wav")
+    await Bun.write(filePath, "known wav bytes")
+    const abort = new AbortController()
+    const originalFile = Bun.file
+    const file = originalFile(filePath)
+    const reading = spyOn(file, "arrayBuffer").mockImplementation(async () => {
+      // 取消点位于真实字节读取完成之后，用来区分读后检查与 fetch 内检查。
+      const bytes = await originalFile(filePath).arrayBuffer()
+      abort.abort()
+      return bytes
+    })
+    const fileCall = spyOn(Bun, "file").mockReturnValue(file)
+    let fetched = false
+    try {
+      await expect(PromptVoiceInput.submitVoice(filePath, abort.signal, {
+        url: "http://localhost:1234",
+        fetch: async () => {
+          fetched = true
+          return Response.json({ text: "unexpected" })
+        },
+      })).rejects.toMatchObject({ name: "AbortError" })
+      expect(fetched).toBe(false)
+    } finally {
+      // 闸门结束后恢复文件边界，保持其它上传协议测试相互独立。
+      fileCall.mockRestore()
+      reading.mockRestore()
+    }
   })
 
   // R9 将上传、等锁和转录合并为固定整轮预算，不再保留浏览器四轮重试窗口。

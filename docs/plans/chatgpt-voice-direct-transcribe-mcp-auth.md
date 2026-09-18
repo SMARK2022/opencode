@@ -1,15 +1,15 @@
 # Canonical Plan：共享后端语音转录、Profile Cookie 与完整取消
 
 > Status: verified
-> Revision: R17
-> Approved revision: R17
+> Revision: R19
+> Approved revision: R19
 > Implementation allowed: no further material changes without revision or rework
 > Audit mode: full-scope
 > Requirement source: 本会话用户原文，见 §1
 > Target: verified-implementation-and-commit
-> Last updated: 2026-09-18
+> Last updated: 2026-09-19
 
-本文件是唯一实施规格。当前R17保持Bun1.3.14及完整语音、CI与HTTP生命周期修复范围，最新修订见§37。800行按增加侧计量，注释保持完整解释深度。历史批准、用户旧指令与交付记录保留其发生时语境，仅作历史证据；当前实施只执行R17批准范围，最终完整验证和独立实现审计通过后才可按最新授权提交。
+本文件是唯一实施规格。当前R19保持R18全部修复与行为范围，仅按用户最新原文采用等价平台检查替代远端macOS CI放行方式，见§43。Bun保持1.3.14，800行按增加侧计量，注释保持完整解释深度。R19方案及实现均获独立full-scope批准，最终验证与边界见§45-46；按最新授权仅本地提交，不push。
 
 ## 1. 用户原始要求
 
@@ -949,3 +949,271 @@ Non-blocking findings最终原文：
 全范围路径裁决：共享后端唯一编排、用户指定profile/浏览器恢复、浏览器认证所有权、固定120/40秒、完整取消及原fatal终止合同通过；无新增隐藏重发、替代成功算法、取消状态机。此前R16 B-01生产问题通过R17修复和敏感回归关闭。最终4425个OpenCode、360个core测试、HttpApi三门各158、73个MCP跨平台覆盖、构建/Worker smoke及独立typecheck已核验。真实账户验收保留历史运行时属性，其后listener与fatal差异由当前1.3.14回归覆盖。
 
 状态据本轮原文切为verified；按用户最新明确授权进入本地提交，保留hooks与无关工作区，不push。这次提交不宣称Windows MCP单次全套通过，不宣称已执行远端CI。
+
+## 39. R18 发布后回归证据与修正方案
+
+### 原始新证据与执行约束
+
+用户报告：“近期就只有你的改动”“之前的1.3.14都是正常的，只有你这次有问题”“每次只有进行alt+v的转录，结束的时候必定出crash”，并要求检查远端macOS testCI、禁止task、完整调查。当前已发布基线为父仓库5d1a74dea6、子仓库725cee4。调查不重启现用daemon、不修改账户配置、不升级Bun、不操作远端历史。曾出现的user_abort输出只反映工具abort状态；output-notice.ts:98不记录取消发起者，日志中daemon继续运行，尚无证据把该标记等同用户点击停止或daemon退出。
+
+### I12：编译版上传正文的有效所有权
+
+Observed：截图崩溃发生于Windows Bun1.3.14 standalone；解码链为FetchTasklet.clearData:246 → request_body.detach → Blob.InternalBlob.bytes.clearAndFree:4712 → allocator free。首次偏离在新增submitVoice:16将Bun.file直接交给fetch，进入文件转内部正文分配/释放分支。原native录音器可以保留，不能因native参与就改其生命周期。
+
+已实际运行的最小反馈：D:/Temp/opencode/actual-submit-voice.exe由Bun1.3.14编译，直接import当前生产submitVoice，仅加载已安装pv_recorder.node并向隔离回环HTTP上传已有fixture WAV。约195ms崩溃、exit3，堆栈与用户相同的Blob.detach/FetchTasklet.clearData，不调用用户daemon或外部转录服务。更小的native-loaded-file.exe只require native addon和fetch(Bun.file)，约177ms崩溃，无Worker、录音和音频删除。
+
+单变量对照compiled-native-voice-matrix.exe保持同一真实Worker、短录音、回环响应及清理：file正文第一次崩溃；no-terminate仍崩溃；bytes（先arrayBuffer）和内存Blob均连续两轮通过。源码模式真实录音通过、没有native addon的单次编译file上传通过；故原单元测试和只确认Worker可启动的smoke不足以覆盖组合。复现只使用本地回环，测试录音已清理；崩溃退出的专属临时目录可能保留，仅含诊断音频，不属仓库修改。
+
+修正owner是submitVoice上传入口：先signal.throwIfAborted()，await Bun.file(file).arrayBuffer()，再次signal.throwIfAborted()，然后现有sdk.fetch使用这份bytes。整个读取和上传继续受现有120秒调用信号约束，读取期间不能强行中断文件API，但完成后禁止被取消请求进入网络。URL、认证头、directory、Content-Type、响应解析和本地WAV清理保持原样。统一走字节正文，不增加Windows版本分支、尝试失败后fallback或第二次请求。
+
+### I13：取消测试观察响应生命周期
+
+远端run35359491055的attempt1/job105646939765与attempt2/job105654416613均在voice-auth.test.ts相同四项30秒超时：never advances/cache、profile-post，以及keeps body/cache、profile。两次均4428通过、21跳过、4失败；不是未确认的随机CI波动。原始日志tool_0b535ce0b001hFQ0VKH9UeQqOu、tool_0b5301ce5001iKboSFDlJoHY0s保存在既有tool-output目录。
+
+四项都用未结束响应正文制造等待，并只靠IncomingMessage.aborted兑现closed.promise。该事件描述请求体销毁，不等同响应读取取消。Bun1.3.14本地对照中，正文读完后client为AbortError、request.complete/readableEnded均true，却没有request.aborted；Node标准HTTP对照同样只得到response.close。真实macOS未插入阶段日志，因此当前不能断言每项停在哪一个await；已证明的是其共同取消观测前提不成立，后续必须保留macOS实跑门禁。
+
+拟在既有voice-auth.test.ts原backendFixture中以Bun.serve提供模拟外部转录上游，handler改为标准Request → Response/Promise<Response>。正常用例消费上传后返回原状态/JSON；取消用例在读取正文后监听原Request.signal，返回含原未完成JSON的真实ReadableStream；/ready CLI握手保留可控Promise响应与既有就绪信号。用原生signal观察连接取消，不依赖node:http的请求体事件。该fixture测试的是后端原生fetch事务，不是Effect HTTP middleware；真实生产HTTP/Effect取消继续由tui-provider-endpoint-status.test.ts覆盖，生产serverLayer不修改。已有macOS/Windows不对称事件路径不通过复制生产HTTP补丁解决。
+
+原生fixture的本地可行性探针已经执行：服务端先await request.arrayBuffer()，监听request.signal；返回未完成响应；客户端解析期间abort，输出client AbortError及server Request.signal aborted。只证明该seam本地成立，不替代macOS最终结果。closed就绪等等待使用已有withTimeout明确给出失败阶段，保持原30秒测试总期限，不添加skip或放宽时间，不删除服务端取消、禁止后继步骤、配置字节不变和独立40秒断言。
+
+### 双向映射、范围和TDD
+
+| 要求/不变量 | owner与生产链 | 文件与行为证明 |
+| --- | --- | --- |
+| R01/R07/I12 | submitVoice拥有上传bytes的生命周期；已有SDK负责认证与目标连接 | 既有prompt-voice-input.ts仅改正文准备；既有prompt-voice-input.test.ts编译真实函数、加载native、单次回环上传后正常退出 |
+| R07/R09/I13 | 模拟外部转录上游拥有连接断开事实；请求体完成不代表响应完成 | 既有voice-auth.test.ts调整backendFixture和handler表达；保留四项及全部相关原断言，macOS必须实跑 |
+| owned bytes → I12 | native加载后的file正文原生释放已确定性崩溃，内存字节同条件通过 | 不能只断言类型或重新抄写submitVoice，回归必须import真实生产函数 |
+| 原生Request.signal → I13 | 旧aborted事件仅保证未完成请求体，不能承载响应取消观测 | 请求正文先完成再取消仍观察服务端断连；不把client抛错代替server资源收尾 |
+
+生产文件仍16（修改现有submitVoice所在文件），新增仓库文件0。测试编译产物及源入口仅放测试专属tmp并在finally释放；Windows用已安装pvrecorder包解析native路径，fixture WAV由已知PCM字节生成，不依赖未checkout的子模块音频或录音权限。兼容回归属于Windows standalone输入域，在Windows CI自动运行，其他平台仍运行原上传/取消测试。构建使用当前process.execPath及Bun.build，不安装或升级工具。
+
+新增生产实质代码预计E4、邻近解释C2，含替换增加侧预算不超过10行，原全任务A₀520加本轮仍远低于800；所有改写注释和测试adapter重写按实质新增计量，不凭相似度扣除语义变化。测试预计E120/C至少20，最终逐文件及总量按原门槛重算。旧fixture所有说明保留其完整意图，描述已失效事件假设的注释改为准确说明响应取消所有权，不能降低详细程度。
+
+TDD顺序：生产import编译回归先跑RED exit3；改submitVoice最小字节准备后同exe回归GREEN，并检查预取消不进入fetch、读取结束后取消不上传、已知音频字节/认证/响应保持。然后原backendFixture迁移，先用“上传读完、响应尚未结束”触发旧事件红信号，再验证标准signal的新fixture；运行voice-auth整文件和原生产HTTP生命周期文件。命令在packages/opencode：bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "compiled|submits|cancels the HTTP"；bun test test/cli/tui/voice-auth.test.ts --timeout 30000；bun test test/server/tui-provider-endpoint-status.test.ts --timeout 30000；bun typecheck。最终Windows实际编译artifact必须执行新增组合smoke，macOS四项及完整testCI必须保留真实结果。未经用户授权不推送实验分支或触发发布来测试。
+
+### 当前门禁
+
+R17已发布实现存在本轮真实回归，其历史APPROVE不能作为R18实施授权。用户先禁止task，随后明确“授权task”，现已完成独立R18方案审计，记录见§40。Windows根因已复现；macOS具体await阶段和修正后的平台结果仍待补齐，不将本地对照说成远端通过。
+
+## 40. R18 独立方案审计
+
+Invocation: ses_f4a956730ffeL0jcs2xtHDwg4T；Audit mode: plan；Revision: R18；full-scope。
+
+首次裁决原文：“No blocking findings.” “BLOCK — R18 暂不批准，独立证据核验未完成。” 独立核验获准后复用同一审计会话，最终裁决原文如下：
+
+### Blocking findings
+
+No blocking findings.
+
+### Non-blocking findings
+
+- **N-01：R18 的 Windows 根因已独立复现。** `D:/Temp/opencode/actual-submit-voice.exe` 和 `D:/Temp/opencode/native-loaded-file.exe` 均在 Bun 1.3.14 standalone 环境中发生 segmentation fault，退出码为 3；前者输出 `Blob`/上传路径相关 Bun 崩溃，后者在 native addon 已加载后直接执行文件正文上传也崩溃。该证据支持 §39 将 owner 定位到 `submitVoice` 的 `Bun.file(file)` 请求正文路径。
+- **N-02：`compiled-native-voice-matrix.exe` 未完成完整对照矩阵。** 本次独立执行只记录 `recorded file 0 48128`，随后同样在 Bun 内崩溃，没有产生 bytes/no-terminate 等后续对照输出。因此 §39 中“bytes 与内存 Blob 连续通过”的历史描述不能由当前 artifact 独立确认；计划已经要求新增真实编译回归，不将该历史摘要作为唯一验收证据。
+- **N-03：本地现状测试为绿，不能替代 standalone RED。** `bun test test/cli/tui/voice-auth.test.ts --timeout 30000` 得到 51 pass、0 fail；上传/取消定向测试得到 3 pass、0 fail。这些测试覆盖源码运行时和协议行为，无法触发 standalone + native-loaded + `Bun.file` 的崩溃组合。§39 规定的编译产物回归仍是必要门禁。
+- **N-04：macOS 原始失败证据已核验。** 两份只读 CI 日志均记录同四项测试在 30 秒超时，结果为 4428 passed、21 skipped、4 failed：cache、profile-post 两个取消等待，以及 cache/profile 两个 response-body deadline 测试。该结果与 §39 的 fixture 事件假设冲突一致。
+- **N-05：授权记录存在行政性过时文本。** §39 第957、996行仍保留“禁止task”等历史约束；本轮用户消息已明确授权 task。该项不改变 R18 行为规格，也不阻断计划批准，但实施前应由记录方单独更新。
+
+### Release verdict
+
+**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R18，full-scope plan audit。**
+
+批准仅适用于 R18 方案本身，不代表 R18 已实施或已通过实现审计。实施后必须继续取得：
+
+- standalone 编译上传 RED/GREEN 原始证据；
+- `submitVoice` 预取消、读取完成后取消、正文/认证/响应保持的行为证据；
+- macOS 四项取消测试及完整 testCI 结果；
+- 最终独立实现审计和实际 E/C 计量。
+
+## 41. R18 实施证据
+
+本轮仅修改已有生产prompt-voice-input.ts及两个既有测试文件；记录方修改本canonical。其他config.json、sdks/vscode/.gitignore、未跟踪调查文档及thirdparty/opencode-11720均不属本轮，保持原样。Bun保持1.3.14。未提交、推送、访问账户或重启现用daemon。
+
+### Red / Green 与集成验证
+
+所有测试和typecheck从packages/opencode执行。
+
+| 命令/反馈 | 实际结果 |
+| --- | --- |
+| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable"，修正前 | RED：真实生产import、已安装native、回环HTTP的EXE segmentation fault，exit3；构建准备错误不计为RED |
+| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable\|already cancelled\|after the file has been read"，修正后 | 3 pass、0 fail、8断言 |
+| bun test test/cli/tui/prompt-voice-input.test.ts | 34 pass、3既有账户E2E skip、0 fail、109断言，含真实120秒测试 |
+| 旧Node HTTP fixture先消费完正文，再跑 never advances after cancellation / keeps body consumption | RED：7 pass、4 fail；cache/profile/profile-post/browser旧aborted观测在约30秒超时，随后移除诊断变更 |
+| bun test test/cli/tui/voice-auth.test.ts --timeout 30000 | 51 pass、0 fail、188断言 |
+| bun test test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | 11 pass、0 fail、76断言 |
+| bun test test/cli/tui/prompt-voice-input.test.ts test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | primary集成实跑：107 pass、3既有skip、0 fail、410断言，194.51秒 |
+| bun typecheck | agent并行准备期曾出现编译target类型错误；最终agent及primary独立执行均退出0 |
+| git diff --check（仓库根） | 退出0 |
+
+实现主路径为预取消检查→读取独立ArrayBuffer→读后取消检查→原sdk.fetch；没有新重试或fallback、没有生产HTTP/Worker/状态机变更。fixture统一完整读取请求体后交给handler，并使用原生Request.signal观察响应取消；旧依赖未消费请求体触发aborted的临时策略已移除。行为测试保留协议字节、认证、directory、文字结果、请求禁止推进、配置原字节和40秒尝试期限。
+
+### 完整Windows artifact与原始反馈
+
+Invocation ses_f4a739783ffe09TCpWIqf5n6Q1；使用临时隔离副本的原script/build.ts执行 bun run script/build.ts --single --skip-install，包含完整Web UI。未在用户工作树执行会删除dist/改写models snapshot的构建。原构建脚本Sharp、version、voice Worker smoke通过。
+
+完整artifact：D:/Temp/opencode/r18-artifact-verification-20260919/repo/packages/opencode/dist/opencode-windows-x64/bin/opencode.exe；169604096 bytes；SHA256 dfef91fd88bedd6e77725e933527559dd487af586bb0ff44c877ce904fa5a0b3。
+
+ConPTY真实Alt+V组合验证：两个独立完整EXE attach进程共四轮录音→停止→生产submitVoice→回环响应→文字回填→WAV清理，exit均0。上传52268、51244、53292、51244 bytes，均RIFF/WAVE、16kHz、单声道、audio/wav，directory和测试认证头正确；两次录音目录无残留WAV，native哈希与已安装依赖相同。证据位于D:/Temp/opencode/r18-artifact-verification-20260919/verification-final.json及combined-smoke6、combined-smoke7；primary已读取汇总原文件。
+
+隔离构建曾遇到跨盘native导入与OpenTUI重复依赖造成的renderer/WrongGeneration错误，仅修正临时副本的依赖布局后通过，失败日志保留；不是上传回归GREEN证据。核验4949个原仓库输入文件无变化，副本仅构建自动生成models snapshot文本变化，JSON等价。回环返回固定文字，不代表真实ChatGPT账户或MCP外部链路验收；未测试baseline/ARM64或长压。
+
+### 计量与开放门禁
+
+本轮生产增加侧6行（4实质代码、2解释），替换前1行删除；全任务生产仍16文件，历史A₀520加6为526，低于800。prompt-voice-input.test.ts增加165行，E135/C22，排除空行及import-only；voice-auth.test.ts +88/-60，E74/C13，排除import-only。本轮E213/C37=17.37%，分文件50%、16.30%、17.57%。无纯移动或formatter扣减。代表性解释为上传正文所有权、不可中断读取后的取消边界、真实compiled seam、PCM格式、请求EOF与响应取消区别及fixture清理。
+
+完整macOS testCI及修正后的四项平台结果尚不可验证：当前是Windows主机，未获准推送改动到远端分支/触发新CI，也没有已提供macOS执行环境。旧run重跑只会测试旧commit，不能用来验证本地diff。该缺口保留为发布门禁，不能将Windows通过写成macOS通过。独立实现审计尚待裁决，不标记verified或完成、不按旧批准提交。
+
+## 42. R18 独立实现审计第一轮
+
+Invocation: ses_f4a5c4f71ffe5taTTmOWKa9Vjj；Audit mode: implementation；Revision R18；full-scope。同一会话补齐本地执行授权澄清后，保留完整范围复核，最终原文：
+
+### Blocking findings
+
+### B-01 修正后的 macOS 回归与完整 testCI 门禁仍未关闭
+
+- Violated invariant: R18 要求在原失败平台验证四项取消测试及完整 testCI。
+- Evidence class: contracted
+- Producer and execution path: macOS testCI → `backendFixture` → 实际转录请求 → 未完成响应正文 → 取消或超时 → 服务端断连断言。
+- Source evidence: `.github/workflows/test.yml:92`；`packages/opencode/test/cli/tui/voice-auth.test.ts:287`；`packages/opencode/test/cli/tui/voice-auth.test.ts:372`。
+- Canonical-plan evidence: §39 I13、§40 验收要求；`docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md:1063`。
+- Responsibility owner: R18 跨平台验证及发布流程。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 原 macOS 四项失败尚无当前差异的成功运行结果，平台回归反馈循环未闭合。
+- Why this is not speculative: 历史失败已有两次原始 CI 记录，macOS 验收属于批准版本的明确门禁。
+- Minimal correction direction: 对当前差异取得 macOS 四项回归及完整 testCI 原始结果，再进行全范围复审；Windows 结果不能替代。
+
+### Non-blocking findings
+
+**上一轮“本地独立复跑未执行”的验证缺口已关闭。** 本轮从 `packages/opencode` 独立执行，运行时为 Bun 1.3.14：
+
+| 验证 | 实际结果 |
+|---|---|
+| standalone 上传、预取消、读取后取消 | 3 pass、0 fail、8 断言；6.08 秒 |
+| 两个修改测试文件＋录音器＋生产 HTTP 生命周期 | 107 pass、3 skip、0 fail、410 断言；196.03 秒 |
+| `bun typecheck` | 成功退出 |
+| 定向 `git diff --check` | 成功退出，仅 LF/CRLF 提示 |
+
+显式关闭账户 E2E，3 个 skip 为既有账户用例。没有访问账户、重启用户 daemon、修改实现或计划、进行远端写操作。修复前 standalone RED 的历史证据未在本轮重新执行；本轮直接确认了当前实现的 GREEN。
+
+### Release verdict
+
+**BLOCK — R18 与当前指定 diff。**
+
+本地独立验证已通过，未发现额外实现缺陷。B-01 的 macOS 四项回归及完整 testCI 门禁继续保留，当前不能标记 verified 或发布完成。
+
+记录方判定：B-01直接对应原用户macOS CI回归和批准要求，保留此项，不扩大生产修改。现有test.yml支持workflow_dispatch，可在获准的临时远端验证分支运行原CI，无需修改workflow；临时分支提交/推送及dispatch尚待用户明确授权，当前工作树不提交、不发布。
+
+## 43. R19 用户指定等价验收
+
+### 最新原文与边界
+
+用户对临时CI分支明确答复：“不得进行相应的CI临时分支，但仍需完成任务，做等价检查，不得进行block，最终完整完成后进行审计+commit”。此消息改变验收方式并明确本地commit授权，禁止临时远端分支与相关CI操作。R19不改R18生产或测试修复；保留所有原有行为断言、时间期限和独立全范围审计，不以跳过失败构造完成。
+
+R18 B-01作为历史发布门禁记录保留；本版以用户要求的等价检查矩阵替代“必须远端macOS实跑”条件，不把Linux运行写成Darwin验证。不增加生产fallback、版本分支、状态机、仓库文件或测试skip。本轮新增生产/测试E0/C0，R18实际E213/C37和累计增加侧预算保持。
+
+### 当前证据与执行环境
+
+已直接读取当前test-ci.ts：原CI默认core/TUI两个子进程，固定每项30秒，保留退出码和JUnit；Windows可选分片但本轮Linux不设置分片。test.yml的macOS命令为bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream。当前Windows两轮primary/auditor的107tests、完整EXE四轮Alt+V和typecheck证据见§41-42。
+
+WSL Ubuntu-22.04可用，普通用户smark/UID1000，Linux6.6.114.1 x86_64、glibc2.35；已有Bun1.3.14与Node24.16.0，位于/home/smark/.cache/opencode-r15-tools/{bun,node}/package/bin。历史/home/smark/.cache/opencode-r16-worktree仅用作Linux依赖复制源；根lock/package/bunfig与当前一致，依赖解析探针通过，但历史测试成绩不计入本轮。实际无依赖回环探针输出：{"bun":"1.3.14","platform":"linux","bytes":4,"client":"AbortError","serverRequestSignalAborted":true}，exit0；上传正文已读完后才取消未结束响应，复现I13相同公开seam。
+
+### 等价映射与命令
+
+| 原验收责任 | 本版执行证据 | 保留限制 |
+| --- | --- | --- |
+| I12 Windows native + standalone原始崩溃闭环 | 保留当前真实生产import RED/GREEN、完整EXE Alt+V四轮、native/正文/清理证据 | 仅Windows x64，账户服务使用隔离回环 |
+| I13原macOS四项失败的取消语义 | 当前相同测试在独立Linux/POSIX Bun1.3.14执行；fixture完整消费正文，原生Request.signal、禁止推进、配置字节与40秒断言全部保留；Windows对应敏感旧fixture RED已实跑 | 不证明Darwin特定运行时或内核实现 |
+| 完整testCI回归 | 从当前工作树隔离复制，真实运行原Turbo依赖构建与opencode test:ci，禁用旧缓存命中，不设置shard，不删测试 | 当前源码哈希、命令、日志和JUnit关联；不能用旧R16成绩替代 |
+| 类型与资源清理 | Linux及Windows包级typecheck；原fixture显式收尾、真实进程退出码及无残留WAV | 本轮不执行真实账户E2E，其既有skip保持 |
+
+隔离位置为Linux /tmp/opencode-r19.XXXXXX，复制当前受跟踪源码的工作树内容（含未提交修复），排除真实账户配置、.git、Windows node_modules和缓存；使用独立HOME/XDG/TMPDIR，无继承账户凭据。复制历史Linux依赖但不硬链接、不改源副本，检查workspace manifest/lock/patch哈希、符号链接与native加载。必要正常依赖构建只发生在副本；不改CI配置、不操作远端。测试在专属临时fixture内的git init/commit/config和fixture daemon收尾属于测试自身资源，不涉及用户仓库或现用daemon；最新完整验证/commit要求允许这些既有测试步骤，不能误读成禁止运行测试。
+
+packages/opencode工作目录：bun test test/cli/tui/voice-auth.test.ts --test-name-pattern 'never advances after cancellation|keeps .* body consumption' --timeout 30000；bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts --timeout 30000；bun typecheck。隔离repo根只运行Turbo编排（不直接bun test）：bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream --force --cache=local:。以45分钟外层上限和原测试30秒期限保留真实失败；全量依赖构建及退出结果写专属evidence。完整CI环境保持OPENCODE_DISABLE_LSP_DOWNLOAD=true、Linux FILEWATCHER=false、关闭账户E2E，NODE/Bun路径明确。禁用测试缓存不改变行为或断言。
+
+所有失败先判断是否本轮实际引入或环境配置问题，只修正隔离环境中确证缺失条件；新生产/测试范围变更必须重新修订审计。最终完整full-scope实现审计覆盖原需求及当前全部diff，核对等价矩阵每项真实结果与未验证限制。只有R19审计APPROVE和本地验证完成后才标记verified，并按用户原要求仅本地commit相关四文件，保留hooks和无关改动、不push。
+
+## 44. R19 独立方案批准
+
+Invocation ses_f4a4cf655ffeUy0tCUtFO58vgg；Audit mode: plan；Revision R19；full-scope。以下分类与裁决原文记录：
+
+### Blocking findings
+
+No blocking findings.
+
+### Non-blocking findings
+
+- **N-01：等价检查有明确平台边界。** R19 §43 保留相同取消断言、Bun 1.3.14、完整 `test:ci` 编排及真实退出码，符合本次交接中用户明确要求的“做等价检查”。Linux 结果只能证明对应 Linux/POSIX 执行路径；Darwin 特定运行时行为仍须列为未验证项，不能报告为 macOS CI 通过。
+- **N-02：计划批准不代表验证完成。** §43 的当前源码隔离复制、哈希关联、禁用缓存后的完整 CI、Linux typecheck 尚属于待执行验收。本轮仅进行了只读源码、diff、计划和已有证据检查，没有执行测试，也没有将历史审计结论作为当前实现批准。
+
+### Release verdict
+
+**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R19，full-scope plan audit。**
+
+批准仅适用于 R19 方案。R18 的 macOS 阻断保留为历史结论；R19 依据交接中的明确用户原文采用等价验收，并保留平台限制。完成 §43 验证及新的全范围独立实现审计前，不能标记实现完成或据此直接提交。
+
+## 45. R19 等价验收实际结果
+
+Invocation ses_f4a525157ffeBcwEPEprY7lm2T；Linux副本/home/smark/.cache/opencode-r19-clean-DP5rF6/repo；证据/home/smark/.cache/opencode-r19-clean-evidence-20260919。使用普通用户smark、独立HOME/XDG/TMPDIR及Git配置，无账户继承，Bun1.3.14、Node24.16.0。未修改共享生产/测试或CI，未远端操作；测试只在隔离fixture使用Git/daemon。primary读取原始日志/汇总及最终更正记录，不采用agent错误摘要。
+
+### 当前源码与依赖对应
+
+复制当前工作树5426个tracked输入，包含本轮未提交实现；排除.git、真实配置/账户、两个子模块、Windows node_modules与产物。共享源码前后变化0；副本仅原依赖build生成sdk.gen.ts和types.gen.ts两个既有生成文件变化。33个manifest/patch无变化。Linux依赖初始复制285903文件哈希匹配，无硬链接，6972链接检查无外部或悬空指向。最终补齐本机缓存中的turbo-linux-64、workspace-local anthropic3.0.71、OpenTUI nested diff9.0.0；native加载及版本探针通过。中间verification-summary.json保留修正前diff8.0.2错误，不能作为最终无错误证明；最终索引为dependency-final-record.txt、native-dependency-versions.json及r19-final-fact-corrections.txt。
+
+### 实跑与命令兼容修正
+
+- 定向原取消场景：7 pass、0 fail、exit0，日志副本evidence/directed.log。
+- voice-auth + prompt-voice-input两文件：84 pass、4 skip、0 fail、294断言、137.85秒；其中3个既有账户E2E，1个本轮Windows-only standalone在Linux按批准输入域skip。agent首次“4个全既有”摘要已由primary据原log纠正；Windows该compiled测试已真实执行通过。
+- 包级bun typecheck：exit0，日志副本evidence/typecheck.log。
+- 原计划--force与--cache=local:同时使用被Turbo2.8.13在测试前拒绝，exit1，失败日志副本evidence/turbo-exact.log。此为工具参数兼容修正，不改测试范围、期限或缓存验收：使用原完整命令加--cache=local:，日志证实三个任务均cache bypass/force executing、0 cached。
+- 最终实际命令（隔离repo根）：timeout --signal=TERM --kill-after=30s 2700s bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream --cache=local:。未设置shard，执行原依赖构建与完整core/TUI子进程，保留30秒每项期限。exit0，core3656 pass/19 skip/0 fail；TUI771 pass/10 skip/0 fail；合计4427 pass/29 skip/0 fail；3 successful/3 total、0 cached/3 total、15m39.477秒。
+- 原始日志turbo-equivalent.log与turbo-equivalent-status.txt；JUnit junit-core.xml SHA256 743618b91a8d960d9a81ab0e78103910a0827389245e77a2f55b6a8f426d6705；junit-tui.xml SHA256 a46b966798da52e93e447250b27d6078a2808842e88e24acc3b1c200f47b3678，均在最终证据目录。
+
+准备期失败全部保留：缺turbo-linux-64导致未开跑；Turbo参数冲突；中间副本的空Darwin @types/plist、@types/verror触发TS2688；错误workspace anthropic3.0.64造成一项失败；OpenTUI误解析diff8.0.2。仅修正隔离依赖布局与无效类型目录，恢复manifest要求版本后取得最终全量结果，无共享源文件修改或测试弱化。
+
+### 平台与skip解释
+
+最终FILEWATCHER=false（即禁用开关值为false）；七项FileWatcher skip来自既有FileWatcher.hasNativeBinding()条件，Linux source-run中的OPENCODE_LIBC未定义导致capability=false，filewatcher-runtime-probe.json保留原始stderr和结果；本轮没有新增或修改该skip。其余skip由原平台/账户条件及已批准Windows专用compiled输入域决定。该限制不扩展到本轮语音取消七项，后者全执行通过。Linux不能表述为macOS实跑，Darwin内核/native runner仍未直接验证；本轮按用户明确要求完成等价检查。
+
+R19没有额外生产/测试代码修改，R18 E213/C37及独立计量仍有效；当前三个代码文件与Windows审计时相同。最终full-scope实现审计待执行；不得将验证agent自述的审计桥接失败当本会话审计结果，primary使用正常adversarial-auditor入口。
+
+## 46. R19 最终独立实现批准
+
+Invocation ses_f49c3d8c9ffe6TQhDdouaqglx8；Audit mode: implementation；Revision R19；full-scope。首次裁决为验证待完成，同一会话实际执行后最终原文如下。此前C37为builder/R18计量，最终以本轮独立剔除两条复述后的C35为准，仍满足门槛。
+
+### Blocking findings
+
+No blocking findings.
+
+### Non-blocking findings
+
+- **N-01：等价验收的平台边界保留。** Linux/POSIX 验证符合 R19 用户指定的等价检查方式；Darwin 特定运行时行为仍未直接验证，不能报告为 macOS CI 通过。
+- **N-02 已关闭：独立执行验证完成。** 本轮在 `packages/opencode` 使用 Bun 1.3.14 运行四文件回归：107 pass、3 skip、0 fail、410 断言，188.30 秒。三个 skip 为关闭的既有账户 E2E。`bun typecheck` 成功退出。
+- **N-03 已关闭：原始崩溃独立复现。** 本轮执行 `actual-submit-voice.exe` 和 `native-loaded-file.exe`，分别在约 230ms、239ms 出现 Bun segmentation fault，均退出 3。当前真实生产 import 的 native-loaded standalone 回归在四文件测试中通过。
+- 定向 `git diff --check` 通过，仅有 LF/CRLF 提示。本轮未编辑实现、访问外部账户、操作远端或用户现用 daemon。
+
+### Primary-path and fallback verdict
+
+**通过。**
+
+上传保持唯一权威路径：预取消检查 → 独立字节读取 → 读后取消检查 → 原 SDK 上传。修正落在拥有正文生命周期的 `submitVoice`，没有失败后改走其他正文实现。
+
+既有后端缓存、profile、浏览器编排保持原用户合同，本轮没有增加备用成功路径。新增生产诊断路径为 0。
+
+### Code quality and Chinese-comment verdict
+
+**通过。** 独立按实际 diff 增加侧计算：
+
+| 文件 | E | 合格 C | C/E |
+|---|---:|---:|---:|
+| `prompt-voice-input.ts` | 4 | 2 | 50.00% |
+| `prompt-voice-input.test.ts` | 135 | 21 | 15.56% |
+| `voice-auth.test.ts` | 74 | 12 | 16.22% |
+| 合计 | 213 | 35 | 16.43% |
+
+排除空行、文档、import-only，以及两处仅复述行为的注释；没有使用纯移动或格式化扣减。三个文件均达到 15% 目标。未发现新增类型逃逸、测试断言弱化、生产职责泄漏或无依据的实现概念。
+
+### Release verdict
+
+**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R19，当前指定四文件相对 HEAD 的实际 diff，full-scope implementation audit。**
+
+前次待核验事项已关闭。批准仅适用于本次核验的 R19 和实际差异，保留 Darwin 未直接验证及账户 E2E 未执行的明确边界。
+
+记录方据此设置verified。方案审计R18、R19各一轮（R18补齐执行授权后同会话批准），实现审计R18一轮保留旧平台门禁、R19一轮按新用户验收完成。R19没有增加生产行为；全量Linux CI等价、Windows原始崩溃反馈、源码回归、typecheck、完整artifact与独立计量均已获得证据。提交仅包含canonical、prompt-voice-input.ts及两个测试文件，保留无关工作树与hooks，不创建CI分支、不push。

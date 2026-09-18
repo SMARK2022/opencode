@@ -7,6 +7,7 @@ import path from "path"
 import { tmpdir } from "../../fixture/fixture"
 import { ConfigParse } from "../../../src/config/parse"
 import { ConfigMCP } from "../../../src/config/mcp"
+import { withTimeout } from "../../../src/util/timeout"
 import {
   authFromHarvest,
   buildDirectTranscribeRequest,
@@ -134,7 +135,7 @@ describe("voice auth helpers", () => {
 })
 
 // 只替换网络目的地址；正文解析、请求取消和 CLI 生命周期全部由生产入口负责。
-async function backendFixture(dir: string, handler: Http.RequestListener, command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))") {
+async function backendFixture(dir: string, handler: (request: Request) => Response | Promise<Response>, command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))") {
   const config = path.join(dir, "opencode.json")
   const file = path.join(dir, "voice.wav")
   const script = path.join(dir, "agent.cjs")
@@ -146,14 +147,21 @@ async function backendFixture(dir: string, handler: Http.RequestListener, comman
   await Bun.write(script, `const stage = process.argv[2]; require('fs').appendFileSync(${JSON.stringify(log)}, stage+'\\n');
 const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'profile' : 'browser',expires:-1}],fetchedAt:'2026-09-18T00:00:00Z'};
 (async () => { ${command} })().catch(error => { console.error(error.message); process.exitCode = 1 });`)
-  const server = Http.createServer(handler)
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-  const address = server.address()
-  if (!address || typeof address === "string") throw new Error("Fixture listener missing")
-  const url = `http://127.0.0.1:${address.port}`
+  // 原生 Request 的 signal 只在请求正文完成后仍能观察响应读取取消，避免把 body EOF 误当成连接结束。
+  // fixture 统一先消费上传字节，再把响应生命周期交给标准 fetch；handler 不再接触 Node 专属事件。
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: async (request) => {
+      await request.arrayBuffer()
+      return handler(request)
+    },
+  })
+  const url = `http://127.0.0.1:${server.port}`
   const headers = Promise.withResolvers<void>()
   const requests: { url: string; cookie: string | null; signal: AbortSignal | null | undefined }[] = []
   // 记录原始 URL，额外 session 刷新或绕路请求不能被重定向偷偷掩盖。
+  // fetch 返回只表示响应头可用，正文是否结束仍由生产解析阶段决定。
   const fetch = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
     requests.push({ url: String(input), cookie: new Headers(init?.headers).get("cookie"), signal: init?.signal })
     const response = await globalThis.fetch(url, init)
@@ -168,9 +176,9 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
     commands: () => Bun.file(log).text(),
     async [Symbol.asyncDispose]() {
       fetch.mockRestore()
-      // 取消测试会刻意留下未结束的正文；关闭连接后再释放监听端口，防止污染下个用例。
-      server.closeAllConnections()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      // 取消测试会刻意留下未结束的正文；先关闭连接再释放端口，防止残留响应污染下个用例。
+      // 强制停止只属于 fixture 收尾，不能改变被测请求的取消结果。
+      await server.stop(true)
     },
   }
 }
@@ -180,12 +188,14 @@ describe("backend Cookie attempts", () => {
   test("reuses the browser account snapshot after anonymous dictation is rejected", async () => {
     await using tmp = await tmpdir()
     const seen: (string | undefined)[] = []
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      seen.push(request.headers.authorization)
+    await using fixture = await backendFixture(tmp.path, async (request) => {
+      const authorization = request.headers.get("authorization") ?? undefined
+      const cookie = request.headers.get("cookie")
+      seen.push(authorization)
       // 只认独立已知的账户值，避免Cookie单独成功掩盖授权字段在持久化中丢失。
-      const account = request.headers.authorization === "Bearer browser-token" && request.headers.cookie === "oai-did=browser"
-      response.writeHead(account ? 200 : 429).end(JSON.stringify({ text: "authenticated transcript" }))
+      // 标准 Headers 读取保持与线上请求相同的大小写无关语义。
+      const account = authorization === "Bearer browser-token" && cookie === "oai-did=browser"
+      return new Response(JSON.stringify({ text: "authenticated transcript" }), { status: account ? 200 : 429 })
     }, "console.log(JSON.stringify({text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))")
     expect(await fixture.run()).toBe("browser transcript")
     // 第二轮从文件读取，经真实HTTP发送；仅检查转换helper不足以覆盖完整消费链。
@@ -198,10 +208,8 @@ describe("backend Cookie attempts", () => {
   // 401 与 403 都是凭据恢复入口，其余 HTTP 失败跳过 profile，直接进入完整浏览器转录。
   test.each([401, 403, 400, 429, 500])("routes HTTP %i to the contracted next step", async (status) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      response.writeHead(request.headers.cookie === "oai-did=profile" ? 200 : status)
-      response.end(JSON.stringify({ text: "profile transcript" }))
+    await using fixture = await backendFixture(tmp.path, async (request) => {
+      return new Response(JSON.stringify({ text: "profile transcript" }), { status: request.headers.get("cookie") === "oai-did=profile" ? 200 : status })
     })
     expect(await fixture.run()).toBe(status === 401 || status === 403 ? "profile transcript" : "browser transcript")
     expect(await fixture.commands()).toBe(status === 401 || status === 403 ? "auth-export\n" : "transcribe-file\n")
@@ -213,10 +221,7 @@ describe("backend Cookie attempts", () => {
   // 未写入快照和格式错误的旧节点都不可用于直连，不能先发一个空凭据请求。
   test.each([undefined, { access_token: "old" }])("reads profile when cache is unavailable: %j", async (cached) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      response.end(JSON.stringify({ text: "profile transcript" }))
-    })
+    await using fixture = await backendFixture(tmp.path, async () => new Response(JSON.stringify({ text: "profile transcript" })))
     await Bun.write(fixture.config, JSON.stringify({ mcp: { chatgpt: { auth: cached } } }))
     expect(await fixture.run()).toBe("profile transcript")
     expect(await fixture.commands()).toBe("auth-export\n")
@@ -227,9 +232,8 @@ describe("backend Cookie attempts", () => {
   // profile 的读取错误、协议错误和 POST 错误都进入末级；不允许重复离线读取。
   test.each(["exit", "json", "shape", "post"])("advances after profile %s failure", async (failure) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      response.writeHead(403).end("{}")
+    await using fixture = await backendFixture(tmp.path, async () => {
+      return new Response("{}", { status: 403 })
     }, `if (stage === 'auth-export') { if (${JSON.stringify(failure)} === 'exit') process.exit(3); console.log(${JSON.stringify(failure)} === 'json' ? 'invalid JSON' : JSON.stringify(${JSON.stringify(failure)} === 'shape' ? {} : exported)); return; } console.log(JSON.stringify({text:'browser transcript',auth:exported}));`)
     expect(await fixture.run()).toBe("browser transcript")
     expect(await fixture.commands()).toBe("auth-export\ntranscribe-file\n")
@@ -240,7 +244,7 @@ describe("backend Cookie attempts", () => {
   // 静音的空串是成功；缺 text、类型错误和无效 JSON 是可观察的协议失败。
   test.each(['{"text":""}', '{}', 'null', '{"text":7}', 'not JSON'])("consumes direct response %s", async (body) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => { request.resume(); response.end(body) })
+    await using fixture = await backendFixture(tmp.path, async () => new Response(body))
     expect(await fixture.run()).toBe(body === '{"text":""}' ? "" : "browser transcript")
     expect(await fixture.commands()).toBe(body === '{"text":""}' ? "" : "transcribe-file\n")
     // 即使解析失败也不能把它改判为认证失败，从而触发未批准的 profile 分支。
@@ -255,7 +259,7 @@ describe("backend Cookie attempts", () => {
     ["console.log(JSON.stringify({text:'text',auth:{}}))", "Invalid voice Cookie export"],
   ])("propagates terminal CLI failure %s", async (command, message) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => { request.resume(); response.writeHead(500).end("{}") }, command)
+    await using fixture = await backendFixture(tmp.path, async () => new Response("{}", { status: 500 }), command)
     const before = await Bun.file(fixture.config).text()
     await expect(fixture.run()).rejects.toThrow(message)
     expect(await fixture.commands()).toBe("transcribe-file\n")
@@ -267,10 +271,10 @@ describe("backend Cookie attempts", () => {
   // 写回属于提交阶段，不在恢复 catch 内；真实文件消失必须导致失败，不能返回内存态成功。
   test("propagates writeback failure without advancing to browser", async () => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      if (request.headers.cookie !== "oai-did=profile") { response.writeHead(401).end("{}"); return }
-      void fs.unlink(path.join(tmp.path, "opencode.json")).then(() => response.end(JSON.stringify({ text: "must not deliver" })))
+    await using fixture = await backendFixture(tmp.path, async (request) => {
+      if (request.headers.get("cookie") !== "oai-did=profile") return new Response("{}", { status: 401 })
+      await fs.unlink(path.join(tmp.path, "opencode.json"))
+      return new Response(JSON.stringify({ text: "must not deliver" }))
     })
     await expect(fixture.run()).rejects.toThrow(/ENOENT/)
     expect(await fixture.commands()).toBe("auth-export\n")
@@ -286,17 +290,25 @@ describe("backend cancellation and deadlines", () => {
     const closed = Promise.withResolvers<void>()
     const controller = new AbortController()
     const reason = new Error("cancel voice transaction")
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+    await using fixture = await backendFixture(tmp.path, (request) => {
+      const pathname = new URL(request.url).pathname
       // CLI 用就绪握手证明已经启动；不靠固定 sleep 猜测进程是否到达取消点。
-      if (request.url === "/ready" || stage === "cache" || stage === "profile-post") {
-        // Bun 的 HTTP 兼容层在请求已被排空后不发 aborted；保留未读请求以观察真实断开。
-        request.once("aborted", () => closed.resolve())
-        if (request.url !== "/ready") response.write('{"text":"')
-        ready.resolve()
-        return
+      if (pathname === "/ready" || stage === "cache" || stage === "profile-post") {
+        // 握手与转录响应都只发布响应头；正文故意不关闭以观察原生 signal 的断连事实。
+        // 取消回调只关闭测试流并发布完成点，不能替代生产请求的取消传播。
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            request.signal.addEventListener("abort", () => {
+              closed.resolve()
+              controller.close()
+            }, { once: true })
+            if (pathname !== "/ready") controller.enqueue(new TextEncoder().encode('{"text":"'))
+            ready.resolve()
+          },
+        })
+        return new Response(body, { headers: { "content-type": "application/json" } })
       }
-      request.resume()
-      response.writeHead(stage === "profile" ? 401 : 500).end("{}")
+      return new Response("{}", { status: stage === "profile" ? 401 : 500 })
     }, stage === "profile-post" ? "console.log(JSON.stringify(exported))" : "await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify({text:'late',auth:exported}));")
     // 无缓存使 profile POST 成为第一条直连，避免把缓存的响应头误作正文就绪。
     if (stage === "profile-post") await Bun.write(fixture.config, handwritten)
@@ -306,10 +318,11 @@ describe("backend cancellation and deadlines", () => {
     // 先附拒绝处理再触发取消，避免异步失败在就绪握手期间成为未处理异常。
     const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
     try {
-      if (stage !== "before") { await ready.promise; controller.abort(reason) }
+      if (stage !== "before") { await withTimeout(ready.promise, 30_000, `voice cancellation ${stage} readiness timed out`); controller.abort(reason) }
       expect(await outcome).toEqual({ error: reason })
-      // 服务端观察请求被中断，避免只丢弃 Promise 的假取消；不依赖兼容层的响应 close 事件。
-      if (stage !== "before") await closed.promise
+      // 服务端观察响应读取请求被中断，避免只丢弃 Promise 的假取消。
+      // 阶段标签让30秒总期限内的失败能区分握手缺失与服务端未收取消。
+      if (stage !== "before") await withTimeout(closed.promise, 30_000, `voice cancellation ${stage} server abort timed out`)
       expect(await fixture.commands()).toBe(stage === "profile" || stage === "profile-post" ? "auth-export\n" : stage === "browser" ? "transcribe-file\n" : "")
       expect(fixture.requests).toHaveLength(stage === "before" ? 0 : 1)
       expect(await Bun.file(fixture.config).text()).toBe(before)
@@ -319,9 +332,8 @@ describe("backend cancellation and deadlines", () => {
   // rename 是提交点：之前取消不得改配置，之后取消保留快照但绝不交付本轮文字。
   test.each(["before", "after"])("cancels %s atomic rename without delivering text", async (when) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      response.writeHead(request.headers.cookie === "oai-did=profile" ? 200 : 401).end(JSON.stringify({ text: "must not deliver" }))
+    await using fixture = await backendFixture(tmp.path, (request) => {
+      return new Response(JSON.stringify({ text: "must not deliver" }), { status: request.headers.get("cookie") === "oai-did=profile" ? 200 : 401 })
     })
     const controller = new AbortController()
     const reason = new Error(`cancel ${when} rename`)
@@ -359,7 +371,7 @@ describe("backend cancellation and deadlines", () => {
   // 受控时钟仅替换 timeout 信号，真实 fetch 收到响应头后仍须等待并取消真实正文。
   test.each(["cache", "profile"])("keeps %s body consumption inside one fixed 40-second attempt", async (stage) => {
     await using tmp = await tmpdir()
-    const readingProfile = Promise.withResolvers<Http.ServerResponse>()
+    const readingProfile = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>()
     const closed = Promise.withResolvers<void>()
     const controllers: AbortController[] = []
     const durations: number[] = []
@@ -371,20 +383,37 @@ describe("backend cancellation and deadlines", () => {
       controllers.push(controller)
       return controller.signal
     })
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      if (request.url === "/ready") { readingProfile.resolve(response); return }
+    await using fixture = await backendFixture(tmp.path, (request) => {
+      if (new URL(request.url).pathname === "/ready") {
+        // CLI 只需要响应头继续启动；控制器由测试在既有计时点显式结束正文。
+        const response = new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            readingProfile.resolve(controller)
+          },
+        }), { headers: { "content-type": "text/plain" } })
+        return response
+      }
       // 不发送结束花括号，确保返回响应头并不等于完成转录正文解析。
-      request.once("aborted", () => closed.resolve())
-      response.writeHead(200, { "content-type": "application/json" })
-      response.write('{"text":"unfinished')
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          request.signal.addEventListener("abort", () => {
+            closed.resolve()
+            controller.close()
+          }, { once: true })
+          controller.enqueue(new TextEncoder().encode('{"text":"unfinished'))
+        },
+      })
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } })
     }, "if (stage === 'auth-export') await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));")
     if (stage === "profile") await Bun.write(fixture.config, handwritten)
     const request = new AbortController()
     const pending = fixture.run(request.signal)
     try {
       // profile CLI 尚未结束时计时器就已存在，POST 不能另开一个新的 40 秒窗口。
-      if (stage === "profile") { const response = await readingProfile.promise; expect(durations).toEqual([40_000]); response.end("ready") }
-      await fixture.headers
+      // 这里只释放握手正文，不缩短真实转录请求的固定尝试期限。
+      if (stage === "profile") { const response = await withTimeout(readingProfile.promise, 30_000, "profile CLI readiness timed out"); expect(durations).toEqual([40_000]); response.close() }
+      // 响应头、正文取消和下一步推进分别有独立阶段信号，避免单一超时掩盖顺序错误。
+      await withTimeout(fixture.headers, 30_000, `${stage} response headers timed out`)
       expect(durations).toEqual([40_000])
       expect(fixture.requests).toHaveLength(1)
       const attempt = controllers[0]
@@ -393,7 +422,7 @@ describe("backend cancellation and deadlines", () => {
       attempt.abort(new DOMException("attempt timed out", "TimeoutError"))
       // 单次超时仍允许下一契约步骤；整轮信号保持有效，浏览器获得独立完整窗口。
       expect(await pending).toBe("browser transcript")
-      await closed.promise
+      await withTimeout(closed.promise, 30_000, `${stage} response cancellation timed out`)
       expect(request.signal.aborted).toBe(false)
       expect(fixture.requests[0]?.signal?.aborted).toBe(true)
       expect(durations).toEqual([40_000, 40_000])
@@ -415,17 +444,16 @@ describe("backend cancellation and deadlines", () => {
       controllers.push(controller)
       return controller.signal
     })
-    await using fixture = await backendFixture(tmp.path, (request, response) => {
-      request.resume()
-      if (request.url === "/ready") { ready.resolve(); return }
-      response.writeHead(401).end("{}")
+    await using fixture = await backendFixture(tmp.path, (request) => {
+      if (new URL(request.url).pathname === "/ready") { ready.resolve(); return new Response("ready") }
+      return new Response("{}", { status: 401 })
     }, `if (stage === ${JSON.stringify(stage === "profile" ? "auth-export" : "transcribe-file")}) await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));`)
     const request = new AbortController()
     const reason = new DOMException("CLI deadline", "TimeoutError")
     const pending = fixture.run(request.signal)
     const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
     try {
-      await ready.promise
+      await withTimeout(ready.promise, 30_000, `${stage} CLI readiness timed out`)
       // 快速 401 必须立即推进，既不等满 40 秒，也不从末级扣除之前的耗时。
       expect(durations).toEqual(stage === "profile" ? [40_000, 40_000] : [40_000, 40_000, 40_000])
       const attempt = controllers[stage === "profile" ? 1 : 2]
