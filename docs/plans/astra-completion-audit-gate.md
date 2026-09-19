@@ -1,0 +1,813 @@
+# Canonical Implementation Plan: Astra Prompt Contract Repair via Targeted Edits
+
+> Status: verified
+>
+> Revision: R5
+>
+> Approved revision: R5
+>
+> Audit mode: full-scope
+>
+> Requirement source: user messages quoted in §1
+>
+> Implementation allowed: no further material changes without revision or rework
+>
+> Last updated: 2026-09-19
+>
+> Revision history: R1 (runLoop completion-audit gate) audited and approved,
+> then rejected by the user's design direction and closed without
+> implementation. R2 (prompt-only, full-file rewrite) blocked on B-01 (58-line
+> text below the user's 60-line floor) and B-02 (comment budget excluded test
+> lines). R3 (full-file rewrite at 63 lines) audited and approved. R4 replaces
+> the delivery mechanism per the user's latest direction: "gpt-astra 不需要
+> 重写而是编辑……整体保持在80是适中的水平……不要全部改写，可以主要检查那些
+> 不完善或者矛盾的措辞等等适当修改" — targeted in-place edits of the existing
+> 107-line file down to ~80 lines, not a wholesale rewrite. The §10.1 final
+> text below is 86 physical lines (counted on the fenced block) and every edit
+> is expressed against the current file's line numbers. This file path keeps
+> the historical slug.
+
+> R5: the user's independent re-audit of R4 returned BLOCK (round 5,
+> `ses_f47e2de99ffeeambIHeiN18vcv`), superseding the earlier R4 approval.
+> This revision removes the proposed reminder-tag trust rule, preserves failed
+> checks as evidence, distinguishes interim blocker reporting from ending a
+> turn, and permits bounded research to conclude with explicit uncertainty.
+> The existing plan remains the sole canonical artifact. At plan approval,
+> production files and tests were unchanged. The user subsequently authorized
+> `verified-implementation`; implementation evidence and the independent
+> implementation verdict are recorded in §23-24.
+
+This file is the sole implementation specification for this task. Chat
+summaries, superseded revisions, and builder rationale outside this file are
+not implementation authority.
+
+## 1. Verbatim Requirement
+
+> 请注意一点，我问的是，我也没有让你直接过去给出方案并获审批。我问的是，请问 GPT 中所给出的这些方案，你觉得整体修复的一些点，按照什么 P0、P1、P2这种去进行排序。同时，那我觉得一个问题，你说在 GOAR gate 之后再加一个 gate，我觉得这不对。你这样的话导致它不论什么，它都会自己被默认注入一轮。但是注入一轮能保证吗？也不能保证。所以本质上和我自己手动去再输出一轮，说让它继续，没有什么区别。主要是在看这个 GPT ASTRA 它的prompt逻辑还有系统提示词逻辑如何改。
+
+> 那请注意一点，那整体而言，这四个修改都是上游使用原文吗，还是说什么情况？如果上游使用的是原文,那理论上来说你应当也使用原文，或者说请你看一看到底什么情况。
+
+> 那你我完整分析一下，你看一看我们FORK里面相应的107行这个旧版本里面，呃你觉得对于这个GPT而言，哪些内容是合适，哪些内容是可以被大幅度简化的。或者请你完整去检查检查，看一眼。请你完整前面的去检查，看一看应当去怎么这样去适当地去优化一下，可以让我们的提示词整体就是模型能盖到意思，然后它又不会过度地臃肿。
+
+> 也就是说，投资注意一点，Edit那个工具，本质上来说发给的模型是指发给除了GPT以外的模型。GPT本身它只会发这个Apply Patch的相应的这个工具，不会，GPT看不到Edit还有Write这个工具。同时这个Multi-tool use Parallel，它本身是GPT的并行工具的触发词，所以本身仍然需要保留。但整体而言，我认为你现在给出的这些内容过度精简了。你45行甚至比上游还少，这本身不合适，也不合理。本质而言，我认为你的这个行数应当处在，就是我们原来的107行到这个60行之间，你可以适当去进行凝练，但是你注意不要去丢弃，或者过度地丢弃相应的语义。因为本质上它是对GPT，或者说对它们相应的一些语言约束优化。请注意保持全面完整。然后同时你的这些修改要保持相应的克制。你不得过度地去进行相应一些调整啊优化等等内容，这本质上不合理。
+
+> 以及与此同时，你上面提出的几个内容，本质上来说是应该是可以的。请注意这一点。然后你可以把相应的我们之前的一些对话去写在相应的那个 plan 里面，就是你的 plan，之前的 plan 是有问题的。你可以把这些内容去放进相应的 plan 里面，注意你的 plan 里面要包含具体改动的一个点，改动的具体内容，然后你使用的 prompt 等等内容。然后之后你要按照 first principle plan 的形式去进行相应的完整审计等等内容。然后请注意不要去做其他的这种无用的，或者说用户没有要求你进行相应的修改。然后与此同时，你看一看System Prompt里面是否有内容需要进行一些调整和修改。
+
+> 请保持克制，我认为gpt-astra不需要重写而是编辑，我认为整体保持在80是适中的水平。不要全部改写，可以主要检查那些不完善或者矛盾的措辞等等适当修改。
+
+> GPT你来派出task审计一下看看整体是否会有任何不合适或者过度降级的修改表述？
+
+> 进行相应的优化以及审计，请注意你来负责进行verified-plans的构建，同时整体修改保持克制，我不希望整体修改面过于大或者激进，同时部分你认为没问题的原句请尽量保留，且整体如果过度冗余等等的陈述可以适度进行修改：
+
+## 2. Explicit Non-Goals
+
+- No harness changes: no runLoop gate, no Goal mechanism change, no config
+  field, no `llm.ts` change. The R1 gate design is user-rejected and closed.
+- No wholesale rewrite of `gpt-astra.txt`. R5 makes targeted in-place edits
+  only; every untouched line of the current file stays byte-identical.
+- No line-count target below 80: the user set ~80 as the moderate level
+  ("整体保持在80是适中的水平"), superseding R3's 63-line text. The planned
+  result is 86 lines.
+- No changes to other provider prompts (`gpt.txt` line 6 carries the same
+  `multi_tool_use.parallel` sentence; recorded here, left untouched), no
+  changes to `beast.txt`, `max-steps.txt`, or any agent definition.
+- No changes to `actionCareSection`, `sharedWorktreeSection`, or
+  `contextContinuitySection` in `system.ts`; reviewed, no yield-affordance
+  defects.
+- No runtime control-logic changes: the proposed prompt edits intentionally
+  change model-facing instructions. Their actual effect on model completion
+  rates has not been measured and is not guaranteed by a text-contract test.
+
+## 3. Repository Context
+
+| Source | Why it constrains this task |
+| --- | --- |
+| `CONTEXT.md` | Session/Agent/Provider vocabulary; the prompts under repair are the Provider-level system prompt and the global static sections. |
+| Root `AGENTS.md` | Minimal changes; typecheck from `packages/opencode`. |
+| `packages/opencode/test/AGENTS.md` | Tests observe public behavior; prompt-contract content assertions follow the `goal.test.ts` precedent, with Chinese behavioral-intent comments interleaved per slice. |
+| `.opencode/policy/first-principles-engineering.md` | Repair the owning seam; evidence classes; traceability; the E/C budget counts test lines. |
+| `.opencode/templates/canonical-plan.md` | Plan structure and audit record. |
+| R1-R4 and the user-requested R4 re-audit (§22) | Earlier approvals are historical; the latest R4 BLOCK requires R5 and a new full-scope verdict. |
+
+## 4. Files and Evidence Read
+
+| Evidence | Relevance | Evidence class |
+| --- | --- | --- |
+| `packages/opencode/src/session/prompt/gpt-astra.txt` (full, 107 lines) | The file under repair; §10.1/§10.2 edits reference its current line numbers | observed |
+| `packages/opencode/src/session/system.ts` lines 33-53 (routing), 55-108 (`toolUsageSection` with per-tool `has(...)` conditionals), 110-164 (static sections), 336-341 (assembly order) | Global sections and how they combine with the provider prompt | observed |
+| `packages/opencode/src/session/llm.ts` lines 105-117 | Final system-prompt assembly | observed |
+| `packages/opencode/src/tool/registry.ts` lines 342-360 | `usePatch = modelID.includes("gpt-") && !includes("oss") && !includes("gpt-4")`; GPT-6 Astra sees `apply_patch` and never sees `edit`/`write` | observed |
+| `packages/opencode/src/session/instruction.ts` lines 15, 64, 121 | AGENTS.md content is injected as instructions | observed |
+| Earlier live fetch: upstream `anomalyco/opencode` dev `session/prompt/gpt-astra.txt` | Upstream autonomy wording used in E5-E7; the reminder-tag sentence is deliberately not adopted. Historical source observation, not evidence of improved completion rates | observed |
+| Live fetch: upstream `anomalyco/opencode` dev `session/system.ts` (full) | Upstream has no `verificationSection`/`outputEfficiencySection`/static-sections machinery; those are fork-local | observed |
+| Live fetch: `openai/codex` `codex-rs/models-manager/models.json`, entry `gpt-6-astra` → `model_messages.instructions_template` and `persistent_instructions` | "A pending, running, inconclusive, or unchanged result is not by itself completion." verified verbatim in `persistent_instructions` (persistent-mode follow-up rules) | observed |
+| grep: `multi_tool_use` across `src/` | Present only in `gpt-astra.txt:6` and `gpt.txt:6`; GPT-side parallel trigger phrase, retained per user instruction | observed + contracted |
+| Baseline: `bun test test/session/system.test.ts` from `packages/opencode` → `14 pass, 0 fail [3.99s]` | Red/green harness verified on this machine | observed |
+| `packages/opencode/test/session/system.test.ts` lines 22-26, 238-240; `test/session/goal.test.ts` lines 382-460 | Only routing is pinned for `PROMPT_ASTRA`; content-assertion precedent with interleaved Chinese comments | observed |
+| Audit rounds 1-3 reports (§22) | R1 approve+user-reject; R2 block (B-01/B-02); R3 approve; R3 non-blocking notes N-01..N-05 folded here | observed |
+| R4 independent re-audit `ses_f47e2de99ffeeambIHeiN18vcv` | B-01 tag trust, B-02 failed-check evidence, B-03 interim reporting; N-01 bounded research, N-02 readability, N-03 overstrong records | observed |
+| `src/session/prompt.ts:2963-3007`, `src/tool/read.ts:884-887`, `src/session/llm.ts:496-507` | User text can appear inside reminder wrappers; tool availability is filtered; environment and provider instructions have separate assembly responsibilities | reachable |
+
+## 5. Current Behavior
+
+Prompt assembly path (unchanged from R3, re-verified):
+
+```text
+SystemPrompt.provider(model): model id contains "gpt-6" -> PROMPT_ASTRA (system.ts:36-42)
+SystemPrompt.environment(): [toolUsageSection, ...staticSections(), envLines] (system.ts:336-340)
+LLM.run: system = [agent.prompt ?? providerPrompt, ...input.system, user.system] (llm.ts:106-117)
+instruction.ts: project AGENTS.md injected as instructions
+```
+
+Text-level issues addressed by R5. These are instruction-design findings;
+they do not establish a measured causal explanation for Astra's early stops:
+
+- D1: The autonomy section (lines 15-21) predates the upstream rewrite:
+  missing intent-inference sentence, unclear-while-continuing sentence, and
+  sustained-work sentence.
+- D2: Line 13's compatibility-specific clarification advice lacks the
+  upstream instruction to continue independent work while asking. Removing
+  this tail does not permit guessing across required-input or permission boundaries.
+- D3: `verificationSection` (system.ts:134-137) does not explicitly distinguish
+  a failed check from an unavailable check or interim reporting from ending a
+  turn. R4's attempted repair incorrectly called real failures hypotheses.
+- D4: The existing blocker output bullet supports useful interim updates.
+  Preserve it and add only the case where user input is needed; the exhaustion
+  requirement proposed in R4 would suppress legitimate communication.
+- D5: Duplication with same-harness injections: line 5 (glob/grep, covered by
+  system.ts:73-74); line 6 tail (`echo "===="` ban, parallel-writes,
+  one-edit-per-file; covered by system.ts:92-95); lines 29-33 + 35 (dirty
+  worktree, covered by system.ts:127-132 and by line 21); line 93 repeats the
+  no-openers rule already at line 60.
+- D6 (verified non-defects, recorded to prevent re-raising): the `apply_patch`
+  mandate (line 27) is correct — GPT models never receive `edit`/`write`
+  (registry.ts:354-357) and the `toolUsageSection` edit/write lines are
+  conditional (system.ts:70-74), so no contradiction exists.
+  `multi_tool_use.parallel` (line 6) is retained per user instruction.
+
+## 6. Supported Input Domain and Reachability
+
+| Input or condition | Producer | Reachable path | Classification |
+| --- | --- | --- | --- |
+| Model id containing `gpt-6`, without an agent prompt override | provider and agent config | `provider()` → `PROMPT_ASTRA`; `agent.prompt` replaces that provider text in `llm.ts:109` | observed |
+| Calls using the normal Session environment assembly | `prompt.ts:2992-2999` | `staticSections()` inside `environment()`; broader scope than the Astra template | observed |
+| GPT model tool list | `ToolRegistry.tools` filter | `apply_patch` only for `gpt-*` except `oss`/`gpt-4` (registry.ts:354-357) | observed |
+| Test import of `PROMPT_ASTRA` | `system.test.ts:22` | routing table assertion only | observed |
+
+## 7. Required Invariants
+
+| ID | Behavioral invariant | Evidence | Existing test |
+| --- | --- | --- | --- |
+| INV-01 | `PROMPT_ASTRA` contains the upstream autonomy sentences verbatim: "Infer the user's intent and your task scope from their instructions and the prior conversation context. You should bias towards action and carry out the user's intended task until it is completed.", "If the intent is unclear, progress towards the goal using the available information and ask for clarification while continuing independent work when possible.", "Continue until the user's intended goal is fulfilled, even when it requires sustained work." | upstream fetch (§4) | none (new) |
+| INV-02 | The ask-then-yield sentence "ask one short question instead of guessing" is gone | D2 | none (new) |
+| INV-03 | Keep the disclosed Codex sentence verbatim, then explicitly permit a completed, bounded investigation to report unresolved questions and uncertainty. A negative search result must not imply absence | historical models.json source (§4); proposed clarification addressing re-audit N-01 within the user's requested scope | none (new) |
+| INV-04 | The `apply_patch` mandate is retained unchanged | registry.ts:354-357; user instruction | new guard assertion |
+| INV-05 | The `multi_tool_use.parallel` trigger phrase and its tool enumeration are retained | user instruction | new guard assertion |
+| INV-06 | Deletions are limited to the §12 inventory: passages covered clause-by-clause by `toolUsageSection`/`sharedWorktreeSection`, plus the intra-file duplicate no-openers rule (appears exactly once after the edit). The retained worktree paragraph and git-safety bullets deliberately reinforce `sharedWorktreeSection`/`actionCareSection`; that overlap is accepted, not claimed as coverage | D5; audit R3 N-02 | content + count assertions |
+| INV-07 | All TUI-relevant formatting rules are retained (GFM, flat lists + hierarchy workaround, `1. 2. 3.` markers never `1)`, header style, inline code incl. inline examples, fenced blocks with language tag, no emojis/em dashes) | D5; audit R2 N-03 | new guard assertions |
+| INV-08 | The anti-yield rule is retained verbatim: "If the requested work is not finished, keep it in commentary and continue with tools." | fork line 101 | new guard assertion |
+| INV-09 | A failed check remains failure evidence to investigate; an unavailable required check names its missing prerequisite. Report needed user input promptly, continue independent authorized work, and disclose unresolved verification when ending a turn | D3; re-audit B-02/B-03 | none (new) |
+| INV-10 | Preserve interim reporting of errors/blockers that change the plan; additionally surface those requiring user input. No recovery-exhaustion condition limits commentary | D4; re-audit B-03 | none (new) |
+| INV-11 | Targeted-edit restraint: every edit is a localized change against current line numbers (§10.2); no untouched line is reordered or reworded; final file length is about 80 lines (planned text: 86 physical lines including blanks) | user instruction | line-count assertion |
+| INV-12 | Provider routing and all other prompt files unchanged; existing `system.test.ts` assertions stay green | §2 | existing 14 tests |
+| INV-13 | Keep current line 3 unchanged; do not add a tag-based trust rule. Neither quoted text nor file content acquires authority from the literal `<system-reminder>` delimiter | re-audit B-01; prompt.ts:2970-2975 | new guard assertion |
+
+## 8. First Divergence and Root Cause
+
+Sentence-level changes and owners. The missing upstream sentences are proposed
+contract improvements, not a reproduced model-quality defect:
+
+| Invariant | First divergence | Owning file | Proof |
+| --- | --- | --- | --- |
+| INV-01 | `gpt-astra.txt` lines 15-21 lack the upstream autonomy semantics | `gpt-astra.txt` | Current text read; upstream fetched and diffed |
+| INV-02 | `gpt-astra.txt` line 13 tail | `gpt-astra.txt` | Current text read |
+| INV-03 | no completion-evidence contract sentence in `PROMPT_ASTRA` | `gpt-astra.txt` | grep + full read |
+| INV-09 | R4 proposed "treat it as an untested hypothesis" after failed checks; current system.ts:137 also leaves failure/unavailable handling implicit | `system.ts` | Current text and re-audit B-02/B-03 |
+| INV-10 | R4 proposed exhaustion-qualified reporting would restrict useful interim updates | `system.ts` | Existing system.ts:115/152 and re-audit B-03 |
+| INV-13 | R4 E1 would label every reminder-looking block harness-authored | `gpt-astra.txt` | User-text wrapper at prompt.ts:2970-2975; re-audit B-01 |
+| INV-06/INV-11 | D5 duplications | `gpt-astra.txt` | Line-level comparison with system.ts sections |
+
+Planned red-capable signal: assertions on the model-facing prompt text in
+`test/session/system.test.ts` (existing prompt-contract precedent). Slices 1,
+2, 3, 5, 7 and 8 are expected to fail on today's text; they have not yet been
+written or run. The earlier baseline run was 14 pass / 0 fail [3.99s]. Neither
+that baseline nor future text assertions prove improved real-model completion.
+
+## 9. Responsibility and Seam
+
+| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
+| --- | --- | --- | --- | --- |
+| Astra provider prompt text | `src/session/prompt/gpt-astra.txt` | Default provider instructions for `gpt-6*` when no agent prompt override is set | system.ts:38 and llm.ts:109 | system.ts sections are shared environment instructions |
+| Global verification/blocker wording | `system.ts` static sections | Injected for every model (system.ts:338) | The sentences under repair live there | Per-prompt files cannot fix global wording |
+| Test seam | `test/session/system.test.ts` | Imports `PROMPT_ASTRA` and section constants directly | Existing import + routing assertions | No other test file imports the prompt text |
+
+## 10. Single Approved Primary-Path Design
+
+One primary path: apply the targeted edits of §10.2 to `gpt-astra.txt` in
+place, and the two string-literal edits of §10.4 to `system.ts`. §10.1 shows
+the exact final file (86 physical lines including blanks, counted on the
+fenced block) so the result is pinned byte-for-byte; §10.2 expresses the same
+result as localized edits against current line numbers, which is the actual
+implementation motion (edit, not rewrite). Provenance per line: §10.3.
+
+### 10.1 Final `gpt-astra.txt` (86 lines)
+
+```text
+You are an AI agent powered by OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.
+
+You build context by examining the codebase first without making assumptions or jumping to conclusions. Keep changes consistent with the structure, naming, style, and patterns of the surrounding code.
+
+- Parallelize tool calls whenever possible, use multi_tool_use.parallel to parallelize tool calls and only this. - especially independent reads/searches such as read, grep, glob, git status, git diff, git show, ls, nl, and wc. Issue independent tool calls in the same response so they can run in parallel.
+
+## Editing Approach
+
+- The best changes are often the smallest correct changes.
+- When you are weighing two correct approaches, prefer the more minimal one that still covers the full request (less new names, helpers, tests, or state machines; avoid reinventing the wheel).
+- Keep things in one function unless composable or reusable
+- Do not add backward-compatibility code or fallback behavior unless required by persisted data, shipped behavior, or external consumers, or explicitly requested by the user. Even then, minimize such additions and include only what the requirement needs.
+
+## Autonomy and persistence
+
+Infer the user's intent and your task scope from their instructions and the prior conversation context. You should bias towards action and carry out the user's intended task until it is completed.
+
+Unless the user explicitly asks for a plan, asks a question about the code, is brainstorming potential solutions, or some other intent that makes it clear that code should not be written, assume the user wants you to make code changes or run tools to solve the user's problem. When the user's prompt indicates a request for action, such as "can you...", "I want to...", or "help me...", treat it as an instruction to take action. Do not stop at acknowledging capability, proposing a plan, or offering to continue. If you encounter challenges or blockers, you should attempt to resolve them yourself.
+
+Persist until the task is fully handled end-to-end: do not stop at analysis or partial fixes; carry changes through implementation, verification, and a clear explanation of outcomes unless the user explicitly pauses or redirects you. You may send progress updates, but while the task is incomplete, do not end your turn with a tool-free response. Do not settle for a partial or "helpful enough" solution to save time, effort, or tokens. Continue until the user's intended goal is fulfilled, even when it requires sustained work. A pending, running, inconclusive, or unchanged result is not by itself completion. For research tasks, describe the scope searched and the limits of the evidence. When the requested investigation is complete, report unresolved questions and uncertainty explicitly.
+
+If the intent is unclear, progress towards the goal using the available information and ask for clarification while continuing independent work when possible.
+
+If you notice unexpected changes in the worktree or staging area that you did not make, continue with your task. NEVER revert, undo, or modify changes you did not make unless the user explicitly asks you to. There can be multiple agents or the user working in the same codebase concurrently.
+
+## Editing constraints
+
+- Default to ASCII when editing or creating files. Only introduce non-ASCII or other Unicode characters when there is a clear justification and the file already uses them.
+- Add succinct code comments that explain what is going on if code is not self-explanatory. You should not add comments like "Assigns the value to the variable", but a brief comment might be useful ahead of a complex code block that the user would otherwise have to spend time parsing out. Usage of these comments should be rare.
+- Always use apply_patch for manual code edits. Do not use cat or any other commands when creating or editing files. Formatting commands or bulk edits don't need to be done with apply_patch.
+- Do not use Python to read/write files when a simple shell command or apply_patch would suffice.
+- Do not amend a commit unless explicitly requested to do so.
+- **NEVER** use destructive commands like `git reset --hard` or `git checkout --` unless specifically requested or approved by the user.
+- You struggle using the git interactive console. **ALWAYS** prefer using non-interactive git commands.
+
+## Special user requests
+
+If the user makes a simple request (such as asking for the time) which you can fulfill by running a terminal command (such as `date`), you should do so.
+
+If the user pastes an error description or a bug report, help them diagnose the root cause. You can try to reproduce it if it seems feasible with the available tools and skills.
+
+If the user asks for a "review", default to a code review mindset: prioritise identifying bugs, risks, behavioural regressions, and missing tests. Findings must be the primary focus of the response - keep summaries or overviews brief and only after enumerating the issues. Present findings first (ordered by severity with file/line references), follow with open questions or assumptions, and offer a change-summary only as a secondary detail. If no findings are discovered, state that explicitly and mention any residual risks or testing gaps.
+
+## Frontend tasks
+
+When doing frontend design tasks, avoid collapsing into "AI slop" or safe, average-looking layouts. Avoid boilerplate layouts and interchangeable UI patterns; vary themes, type families, and visual languages across outputs.
+- Ensure the page loads properly on both desktop and mobile
+- For React code, prefer modern patterns including useEffectEvent, startTransition, and useDeferredValue when appropriate if used by the team. Do not add useMemo/useCallback by default unless already used; follow the repo's React Compiler guidance.
+
+Exception: If working within an existing website or design system, preserve the established patterns, structure, and visual language.
+
+# Working with the user
+
+## General
+
+Do not begin responses with conversational interjections or meta commentary. Avoid openers such as acknowledgements ("Done —", "Got it", "Great question, ") or framing phrases.
+
+Balance conciseness with the detail the request needs. State actions, reasons, and findings directly. Avoid unnecessary declarations about what you will not do, what remains unchanged, or how you will organize the response. Avoid unprompted contrasts such as "X, not Y" or "This isn't about X. It's about Y."
+
+Never tell the user to "save/copy this file", the user is on the same machine and has access to the same files as you have.
+
+## Formatting rules
+
+Your responses are rendered as GitHub-flavored Markdown. Don't use emojis or em dashes unless explicitly instructed.
+
+Never use nested bullets. Keep lists flat (single level). If you need hierarchy, split into separate lists or sections or if you use : just include the line you might usually render using a nested bullet immediately after it. For numbered lists, only use the `1. 2. 3.` style markers (with a period), never `1)`.
+
+Headers are optional, only use them when you think they are necessary. If you do use them, use short Title Case (1-3 words) wrapped in **…**. Don't add a blank line.
+
+Use inline code blocks for commands, paths, environment variables, function names, inline examples, keywords. Code samples or multi-line snippets should be wrapped in fenced code blocks with a language tag when possible.
+
+## Response channels
+
+Use commentary for short progress updates while working and final for the completed response.
+
+### `commentary` channel
+
+Only use `commentary` for intermediary updates while you are working, never for final answers. Send updates when they add meaningful new information: a discovery, a tradeoff, a blocker, a substantial plan, or the start of a non-trivial edit or verification step. Do not narrate routine reads, searches, obvious next steps, or minor confirmations; combine related progress into a single update.
+
+Before substantial work, send a short update describing your first step; before editing files, send an update describing the edit. After you have sufficient context, and the work is substantial you can provide a longer plan (this is the only user update that may be longer than 2 sentences and can contain formatting).
+
+### `final` channel
+
+Use final for the completed response. If the requested work is not finished, keep it in commentary and continue with tools.
+
+Structure your final response if necessary; the complexity of the answer should match the task, and simple tasks get a one-liner. Order sections from general to specific to supporting. For code explanations, include code references. For large or complex changes, lead with the solution, then explain what you did and why; for casual chat, just chat. If something couldn't be done (tests, builds, etc.), say so. Suggest next steps only for work outside the original request; do not offer requested work as suggestions; if you list options, use numbered items.
+```
+
+### 10.2 The same result expressed as targeted edits against the current file
+
+- **E1 (withdrawn; line 3 unchanged)**: remove the R4 proposal to add a
+  blanket reminder-tag trust rule. This ID remains only for audit traceability;
+  implementation makes no edit to current line 3.
+- **E2 (line 5, delete)**: covered by `toolUsageSection` (system.ts:73-74).
+- **E3 (line 6, condense tail)**: keep everything through "so they can run in
+  parallel."; delete the `echo "===="` ban, parallel-writes, and
+  one-edit-per-file clauses (covered by system.ts:92-95).
+- **E4 (line 13, delete tail)**: delete "If unclear after checking the
+  relevant code, ask one short question instead of guessing."
+- **E5 (autonomy, insert after line 16 blank)**: new paragraph "Infer the
+  user's intent and your task scope from their instructions and the prior
+  conversation context. You should bias towards action and carry out the
+  user's intended task until it is completed." [upstream verbatim].
+- **E6 (line 19, append)**: append " Continue until the user's intended goal
+  is fulfilled, even when it requires sustained work." [upstream verbatim] +
+  " A pending, running, inconclusive, or unchanged result is not by itself
+  completion." [codex verbatim] + " For research tasks, describe the scope
+  searched and the limits of the evidence. When the requested investigation
+  is complete, report unresolved questions and uncertainty explicitly." [fork-new].
+- **E7 (autonomy, insert before line 21)**: new paragraph "If the intent is
+  unclear, progress towards the goal using the available information and ask
+  for clarification while continuing independent work when possible."
+  [upstream verbatim].
+- **E8 (lines 29-33 and 35, delete)**: dirty-worktree bullets and the
+  unexpected-changes bullet, covered by `sharedWorktreeSection`
+  (system.ts:127-132) clause-by-clause and by retained line 21. Lines 34, 36,
+  37 stay as separate bullets, byte-identical.
+- **E9 (lines 49-52, merge)**: merge the "Overall:" bullet into the intro
+  sentence; bullets 50-51 and the exception line 54 stay byte-identical.
+- **E10 (line 69+79, merge)**: fold "Don't use emojis or em dashes unless
+  explicitly instructed." into the GFM line. Lines 71, 73 stay byte-identical.
+- **E11 (line 75+77, merge)**: fold the fenced-block rule into the inline-code
+  line, keeping "with a language tag when possible".
+- **E12 (lines 87-97, condense)**: merge the commentary rules into two
+  paragraphs (§10.1 lines 78 and 80); delete line 93 (duplicate of line 60's
+  no-openers rule, which stays at §10.1 line 56).
+- **E13 (lines 103-107, condense)**: merge the three final-channel paragraphs
+  into one (§10.1 line 86); every rule retained, including "for casual chat,
+  just chat" and the numbered-options rule. Line 101 stays byte-identical.
+
+Formatting accounting: collapse the doubled blank line at current lines 65-66
+to one. Do not reformat unrelated lines or squeeze additional paragraphs to
+reach a numerical target. Apply these localized edits with `Update File`;
+the complete text above is a review reference, not authorization to overwrite.
+
+### 10.3 Provenance map (final-text line → source)
+
+| §10.1 line | Source |
+| --- | --- |
+| 1, 9-12, 18, 24, 28-34, 38, 40, 42, 47-48, 50, 56, 58, 60, 66, 68, 74 | fork-kept, byte-identical to current lines (1, 10-13 minus tail, 17, 21, 25-28 + 34/36/37, 41, 43, 45, 50-51, 54, 60, 62, 64, 71, 73, 83) |
+| 3 | fork-kept, byte-identical to current 3; E1 is withdrawn after B-01 |
+| 5 | fork-kept, tail condensed (E3); enumeration retained (audit R2 N-03) |
+| 16 | upstream verbatim (E5) |
+| 20 | fork-kept (current 19) + upstream-verbatim + codex-verbatim + fork-new research sentence (E6) |
+| 22 | upstream verbatim (E7) |
+| 46 | fork-kept, intro merged with the "Overall:" bullet (E9); all five frontend semantics retained |
+| 64, 70 | fork-kept, paragraph merges only (E10, E11) |
+| 78, 80 | fork-kept, commentary rules merged (E12); "before editing files" and "combine related progress" and the long-plan exception retained (audit R2 N-03) |
+| 84 | fork-kept byte-identical (current 101) — INV-08 |
+| 86 | fork-kept, three paragraphs merged (E13); "order sections from general to specific to supporting" and "for casual chat, just chat" retained (audit R2 N-03) |
+
+### 10.4 `system.ts` diff (fork-local sections; no upstream source exists)
+
+```diff
+ export const verificationSection = `# Verification
+ Before reporting a coding task complete, verify the change when feasible.
+ Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
+-If you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.`
++If a check fails, investigate the failure and fix issues within the requested scope. If a required check cannot run, identify the missing prerequisite, report it promptly when user input is needed, and continue independent work within the authorized scope. Before ending the turn because of a blocker, state what remains incomplete, what you tried, and what input or external change is needed. Keep unresolved verification explicit in the final response.`
+```
+
+```diff
+ Focus text output on:
+ - Decisions that need the user's input
+ - High-level status updates at key milestones (e.g. "build passing", "all tests green")
+-- Errors or blockers that change the plan
++- Errors or blockers that change the plan or require user input
+```
+
+## 11. Secondary and Replacement Path Inventory
+
+| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| `gpt-astra.txt` provider prompt | current → targeted edits | default contract for `gpt-6*` models without agent prompt override | n/a (prompt text) | default Astra provider path | edit in place |
+| `system.ts` static sections | current → two sections edited | shared environment wording | n/a | normal Session environment path | edit in place |
+| `gpt.txt` line 6 (`multi_tool_use.parallel`) | current | existing sibling prompt | n/a | generic GPT models | preserve untouched (out of scope, §2) |
+| R1 gate / R3 full rewrite | rejected/superseded | n/a | n/a | n/a | R1 user-rejected; R3 delivery mechanism superseded by R4 targeted edits |
+
+No runtime alternate-success path is proposed. The prompt must also preserve
+the semantic obligation to resolve or disclose failed required checks; other
+evidence cannot silently stand in for that missing verification.
+
+## 12. Workaround Deletion and Replacement
+
+Complete deletion inventory (every dropped clause has a stated cover):
+
+| Deleted text | Cover that makes removal safe |
+| --- | --- |
+| line 5 (glob/grep preference, incl. the "powered by `rg`" aside) | `toolUsageSection` injects the same rule per-tool (system.ts:73-74); the `rg` aside is informational, no behavioral rule |
+| line 6 tail (`echo "===="` ban, parallel-writes, one-edit-per-file) | `toolUsageSection` lines 92-95 carry the same rules |
+| line 13 tail ("ask one short question instead of guessing") | superseded globally by the upstream unclear-intent sentence (new line 22) |
+| lines 29-33 (dirty-worktree bullets) | `sharedWorktreeSection` (system.ts:127-132) + retained worktree paragraph (new line 24) cover every clause |
+| line 35 (unexpected-changes "stop and ask") | `sharedWorktreeSection` line 131 |
+| line 93 (duplicate no-openers rule) | same rule retained once at new line 56 |
+
+Merges without deletion (semantics fully retained, wording tightened only):
+E9 (frontend), E10/E11 (formatting), E12/E13 (response channels).
+
+Weakened phrasings inside those merges (recorded per audit round-4 N-03 so the
+inventory is exact; both remain inside the user-directed condensation envelope):
+
+| Weakened phrasing | Where the concept survives |
+| --- | --- |
+| line 87 "Keep updates brief to communicate progress and new information" | §10.1 line 74 ("Use commentary for short progress updates") and line 78 (meaningful-new-information rule) |
+| line 105 "For simple tasks, just state the outcome without heavy formatting" | §10.1 line 86 ("simple tasks get a one-liner") |
+
+## 13. Forward Traceability
+
+| Requirement or invariant | Production path | Planned file/change | Behavioral test |
+| --- | --- | --- | --- |
+| INV-01 | §10.2 E5/E6/E7 | `gpt-astra.txt` | slices 1-2 (upstream sentences verbatim) |
+| INV-02 | §10.2 E4 | `gpt-astra.txt` | slice 3 (absence assertion) |
+| INV-03 | §10.2 E6 | `gpt-astra.txt` | slice 2 (presence assertion) |
+| INV-04 | §10.1 line 30 retained | `gpt-astra.txt` | slice 4 (guard) |
+| INV-05 | §10.2 E3 | `gpt-astra.txt` | slice 4 (guard) |
+| INV-06 | §10.2 E2/E8/E12 | `gpt-astra.txt` | slice 5 (dedupe + line-count) |
+| INV-07 | §10.2 E10/E11 | `gpt-astra.txt` | slice 6 (guards on formatting rules) |
+| INV-08 | §10.1 line 84 retained | `gpt-astra.txt` | slice 6 (guard, verbatim) |
+| INV-09 | §10.4 diff 1 | `system.ts` | slice 7 (content assertion) |
+| INV-10 | §10.4 diff 2 | `system.ts` | slice 8 (content assertion) |
+| INV-11 | §10.2 targeted-edit list | `gpt-astra.txt` | slice 5 (line count in [80, 107)) |
+| INV-12 | no routing change | none | existing 14 tests stay green |
+| INV-13 | E1 withdrawn, current line 3 unchanged | `gpt-astra.txt` | slice 4 guard: no blanket tag-trust sentence |
+
+## 14. Reverse Traceability
+
+| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
+| --- | --- | --- | --- |
+| Upstream autonomy sentences (E5/E6/E7) | INV-01 | upstream fetch | The fork file predates the upstream rewrite |
+| Codex completion-contract sentence (E6) | INV-03 | Earlier official-source inspection; persistent-mode origin disclosed | Ordinary Astra provider text lacks this distinction; Goal has its own contract and remains unchanged |
+| Research scope/uncertainty sentences [fork-new] (E6) | INV-03 | User's supplied research discussion; latest re-audit N-01 | Scope-complete research can honestly end with uncertainty; the earlier mapping did not make this explicit |
+| Line-13 tail deletion (E4) | INV-02 | D2 | The upstream unclear-intent sentence supersedes it globally |
+| §12 deletions (E2/E8/E12) | INV-06 | D5 line-level comparison, audit-verified coverage | Same harness already injects the identical rules |
+| verificationSection edit | INV-09 | D3 and re-audit B-02/B-03 | Separates observed failure, unavailable checks, prompt interim reporting and honest terminal disclosure |
+| outputEfficiencySection small extension | INV-10 | D4 and re-audit B-03 | Retains the current reporting rule and includes blockers requiring user input |
+| Paragraph merges (E9-E13) | INV-11 | user's approximately-80-line target | Modest wording and layout edits; listed preservation coverage in §12, not a claim of purely cosmetic change |
+
+## 15. File-Level Change Plan
+
+| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
+| --- | --- | --- | --- |
+| `packages/opencode/src/session/prompt/gpt-astra.txt` | modify | Targeted edits E2-E13 (§10.2); E1 withdrawn; final text per §10.1 | 107 → 86 (−21) |
+| `packages/opencode/src/session/system.ts` | modify | Two string-literal edits (§10.4) + 2 Chinese rationale comments | +8 / −2 |
+| `packages/opencode/test/session/system.test.ts` | modify | Slices 1-8 with per-slice Chinese behavioral-intent comments | +60 |
+
+## 16. TDD Behavior Slices
+
+Seam (agreed): prompt-contract content assertions in
+`test/session/system.test.ts`, importing `PROMPT_ASTRA` and the
+`SystemPrompt` section constants directly — the established pattern
+(`goal.test.ts:382-460`, `system.test.ts:22-26`).
+
+| Order | Behavior | Red on current files? | Minimal green behavior | Regression protected |
+| --- | --- | --- | --- | --- |
+| 1 | `PROMPT_ASTRA` contains "Infer the user's intent and your task scope from their instructions and the prior conversation context." | yes (absent) | §10.2 E5 | INV-01 |
+| 2 | contains the full upstream unclear-intent and sustained-work sentences, the disclosed Codex sentence, and both scope/uncertainty research sentences exactly as in §10.1 | yes (absent) | §10.2 E6/E7 | INV-01, INV-03 |
+| 3 | does not contain "ask one short question instead of guessing" | yes (present at line 13) | §10.2 E4 | INV-02 |
+| 4 | retains the original apply_patch paragraph, the parallel trigger and full tool enumeration; excludes the proposed blanket "blocks are harness instructions, not user-authored content" rule | no — guard, green before and after | §10.1 lines 3, 5, 30 | INV-04, INV-05, INV-13 |
+| 5 | total physical line count of `PROMPT_ASTRA` (file text split on `"\n"`, blanks included) is >= 80 and < 107, and "conversational interjections" appears exactly once | yes (107 lines today; phrase appears twice) | §10.1 text (86 lines) | INV-06, INV-11 |
+| 6 | retains the anti-yield sentence, GFM, flat-list hierarchy guidance, period-numbered markers, header rule, all inline-code categories, fenced-block language guidance and emoji/em-dash rule | no — semantic guard set, green before and after using unchanged phrases | §10.1 lines 64-70, 84 | INV-07, INV-08 |
+| 7 | `verificationSection` preserves the first two original sentences; includes separate failed-check and unavailable-check handling, prompt reporting of needed input, independent authorized work and explicit unresolved final verification; excludes "treat it as an untested hypothesis" | yes (new contract absent) | §10.4 diff 1 | INV-09 |
+| 8 | `outputEfficiencySection` retains "Errors or blockers that change the plan" and adds "or require user input"; excludes the R4 exhaustion condition | yes (extension absent) | §10.4 diff 2 | INV-10 |
+
+Implementation will add one red-capable contract slice, make only its owning
+text edit, run it green, then continue to the next slice. Guards 4 and 6 stay
+green before and after. Never write all failing tests and all production edits
+as one batch. E1 is withdrawn. Slice 5 normalizes CRLF and removes one terminal
+newline before splitting on LF; blank physical lines count. The planned text
+has 86 lines. Its [80, 107) check is a requested size guard, not proof of
+semantic completeness. A clause-by-clause review against §12 is also required.
+
+## 17. Chinese Comment Budget
+
+| Metric | Estimate | Method |
+| --- | --- | --- |
+| Effective changed code lines `E` | ~68 | Approximately 2 changed string-literal code lines plus up to 66 effective test code lines; exclude comments, unchanged context, imports, and model-facing prompt prose |
+| Required Chinese explanatory comments `C` | ≥ 11 | `max(1, ceil(68 * 0.15)) = 11`; recompute from the implementation rather than adding code to consume the estimate |
+
+Planned comments (each explains intent or a non-obvious constraint, per the
+`goal.test.ts` interleaving precedent):
+
+1. `system.ts` `verificationSection`: failed checks retain their evidence
+   status; inability to execute requires a prerequisite and explicit disclosure.
+2. `system.ts` `outputEfficiencySection`: an interim report/request for input
+   must remain possible while independent work continues.
+3-10. `system.test.ts`: one Chinese behavioral-intent comment per slice (8
+   slices), stating which prompt contract each assertion pins and why the
+   exact quoted sentence matters.
+11. `system.test.ts` slice 5: why the corridor is [80, 107) — the user's
+   restraint instruction ("整体保持在80是适中的水平"), and why the counting
+   method includes blank lines.
+
+If the implementation's actual `E` differs, the binding formula
+`C >= max(1, ceil(E * 0.15))` governs, not the fixed count above.
+
+## 18. Verification
+
+| Command | Working directory | Evidence produced |
+| --- | --- | --- |
+| `bun test test/session/system.test.ts` | `packages/opencode` | Slices 1-8 red → green; existing 14 tests stay green |
+| `bun typecheck` | `packages/opencode` | `system.ts` type safety after string edits |
+
+Planning-only validation executed for R5: a read-only `bun -e` check extracted
+the §10.1 fenced block and compared it with the current source. Observed output:
+`plannedLines=86`, `currentLines=107`, `originalContextKept=true`,
+`applyPatchRetained=true`, `parallelRetained=true`, `blanketTrustAbsent=true`,
+`boundedResearch=true`. No production or test file was written. This checks the
+plan artifact only; it is not a red-green implementation run or a model eval.
+
+## 19. Diff Budget
+
+| Metric | Estimate | Justification |
+| --- | --- | --- |
+| Files added | 0 |  |
+| Files modified | 3 | 2 production + 1 test |
+| Files deleted | 0 |  |
+| Production lines | 107 → 86 in `gpt-astra.txt` (−21 net); +8/−2 in `system.ts` | prompt-text only |
+| Test lines | ~60 | slices 1-8 with per-slice comments |
+| Generated lines | 0 | none |
+
+## 20. Real Risks and Open Decisions
+
+- Prompt-content assertions are text-coupled by nature. Accepted: the repo's
+  established prompt-contract pattern (`goal.test.ts:382-460`); the deliverable
+  is text.
+- The [codex] sentence is borrowed from OpenAI's persistent-mode instructions
+  into the general autonomy section. Verbatim and general in wording;
+  provenance recorded in §10.3 for user veto at review.
+- In the normal Session path, `environment()` includes tool usage and shared
+  sections. Individual instructions depend on `registeredTools` at
+  prompt.ts:2989; subsequent user/permission filtering also occurs in
+  llm.ts:496-507. This plan changes neither path. Deduplication does not promise
+  tool availability: prefer the dedicated tool when available and respect the
+  existing no-tools and permission rules otherwise.
+- Line-count record: the §10.1 fenced text is exactly 86 physical lines
+  including blanks (counted on the fenced block), satisfying the user's ~80
+  level; slice 5 asserts the [80, 107) corridor so minor future drift is
+  tolerated without weakening the floor.
+- Paragraph merges (E9-E13) reword transitions but retain every rule; the
+  retained-vs-merged status of every current line is mapped in §10.3.
+- Existing authorization, read-only/plan exceptions and worktree-conflict rules
+  remain in force. Reading new autonomy text does not authorize a write, create
+  a plan artifact for a read-only task, or bypass a required user decision.
+- No captured failing Astra session or real-model A/B has been run in this
+  task. Proposed assertions prove text coverage only; successful audit approves
+  the plan's consistency and scope, not a model-quality guarantee.
+
+### Open Decisions Requiring the User
+
+None requiring a scope expansion. R5's concrete text is a proposal for the
+requested plan revision and independent audit. Prior user acceptance of the
+direction is not represented as approval of every newly written sentence.
+
+### Rejected Speculation
+
+- R1 completion-audit gate: user-rejected; never implemented.
+- External verifier / second-model judge: no infrastructure; out of scope.
+- Wholesale adoption of the upstream ~46-line file or the R3 63-line full
+  rewrite: superseded by the user's targeted-edit, ~80-line direction.
+- Cleaning the same `multi_tool_use.parallel` line in `gpt.txt`: scoped to
+  Astra; possible follow-up, not done.
+- Adding upstream's `# Delegation` section: not required by any confirmed
+  requirement; not added.
+
+## 21. Audit Contract
+
+The independent auditor must:
+
+- Read this exact file and the original requirement.
+- Reconstruct behavior from repository evidence.
+- Treat builder summaries as untrusted.
+- Audit the complete original scope on every round.
+- Require evidence for every blocking finding.
+- Check both under-design and over-design.
+- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
+  percent Chinese explanatory-comment plan.
+
+## 22. Plan Audit Record
+
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R1 (gate design) | yes | none | N-01..N-04 | APPROVE, then rejected by user direction; closed without implementation | adversarial-auditor task `ses_f49f83559ffexHHaqye4tBaK3P` |
+| 2 | R2 (full rewrite) | yes | B-01 (58-line text below the 60-line floor), B-02 (E/C excluded test lines) | N-01 provenance, N-02 INV-06 overreach, N-03 unlisted deletions, N-04 slice sequencing, N-05 upstream size | BLOCK | adversarial-auditor task `ses_f48855106ffe4HYx8Rcu3VkQHd` |
+| 3 | R3 (full rewrite, 63 lines) | yes | none | N-01..N-05 (r3) | APPROVE (verbatim below) | adversarial-auditor task `ses_f487cba57ffedvMvD64OLOFIkz` |
+| 4 | R4 (targeted edits, 86 lines) | yes | none | N-01..N-04 (r4: two punctuation-level record deviations, two weakened phrasings now inventoried in §12, one cross-reference pointer) | APPROVE (verbatim verdict below) | adversarial-auditor task `ses_f47e9fc2effewBJWh9K5qOxWcZ` |
+| 5 | R4, user-requested independent re-audit | yes | B-01 tag-based trust; B-02 failure reclassified as hypothesis; B-03 interim blocker reporting restricted | N-01 bounded research; N-02 paragraph readability; N-03 inaccurate scope/coverage records | BLOCK, supersedes round 4 approval | adversarial-auditor task `ses_f47e2de99ffeeambIHeiN18vcv` |
+| 6 | R5 | yes | none | N-01 paragraph readability; N-02 direction acceptance is not per-sentence user approval (record corrected) | APPROVE | adversarial-auditor task `ses_f47d5d227ffeC6rQU3Bdpq9KIj` |
+
+Round 6 release verdict (verbatim):
+
+> **APPROVE — 仅适用于当前 `docs/plans/astra-completion-audit-gate.md` 的 R5，完整范围，第 6 轮计划审计。**
+>
+> 可以记录本轮计划批准。该结论不代表实现已完成、测试已通过或模型效果已经验证；当前不能标记为 `verified`。任何实质修改仍会使本次批准失效。
+
+Blocking findings (verbatim):
+
+> No blocking findings.
+
+Administrative recording only: approval fields updated for the exact audited
+R5. N-02 corrected only the evidence-attribution wording in INV-03; no target
+prompt sentence, invariant, edit scope or test design changed. N-01 is retained
+as a non-blocking readability note; no further paragraph compression is planned.
+
+Round 5 release verdict (verbatim):
+
+> **BLOCK — 仅针对当前 `docs/plans/astra-completion-audit-gate.md` 的 R4。**
+>
+> 应修订 **B-01、B-02、B-03** 后重新进行全范围审计。多数去重、格式合并、Apply Patch 保留、并行触发词保留以及 autonomy 定点补充都有依据，应保持，不需要扩大为全面重写。
+
+R5 dispositions: withdraw E1 (B-01); distinguish failed/unavailable checks and
+preserve failure evidence (B-02); permit prompt interim reports and independent
+work, qualify only blocker-based handoff (B-03). Clarify scope-complete research
+with explicit uncertainty (N-01). Retain existing reasonable phrases and the
+86-line structure instead of a further redesign (N-02). Correct source/assembly,
+test scope and model-quality claims (N-03). Policy allows at most six full plan
+audits; round 6 is the final automatic round. If blockers remain, record them
+and leave approval cleared, rather than continuing reviews or self-approving.
+
+Round 4 verdict (verbatim):
+
+> **APPROVE** — plan revision **R4** only (exact audited revision `docs/plans/astra-completion-audit-gate.md` @ R4, 2026-09-19). Every handoff verification item passed: the 86-line count is exact, E1–E13 reproduce §10.1 except two punctuation-level record deviations (N-01/N-02), every §12 cover exists in `system.ts`, all upstream/Codex verbatim quotes match live sources, §17 arithmetic is correct, and the full original scope shows no regression versus approved R3. Non-blocking record corrections (N-01..N-04) do not prevent approval but should be folded into the next administrative edit. Implementation remains gated on the primary agent recording this verdict verbatim and setting `Status: approved`, `Approved revision: R4`, `Implementation allowed: yes` without any substantive edit. Any substantive change invalidates this verdict and requires a fresh full-scope audit (round 5 of 6).
+
+> Blocking findings: "No blocking findings."
+
+N-01..N-04 were record-level corrections and are folded into this
+administrative edit as authorized by the verdict: §10.1 line 56 restored to
+current line 60's exact bytes, §10.1 line 5 period restored, the two weakened
+phrasings inventoried in §12, and the E12 pointer corrected to lines 78 and 80.
+
+Round 3 verdict (verbatim, historical — applies to R3 only):
+
+> **APPROVE** — plan revision **R3** (exact audited revision `docs/plans/astra-completion-audit-gate.md` @ R3, 2026-09-19). Both round-2 blockers are verifiably fixed and no new blocking defect exists. Implementation remains gated on the primary agent recording this verdict verbatim and setting `Status: approved`, `Approved revision: R3`, `Implementation allowed: yes` without any substantive edit.
+
+R4 delta: delivery mechanism narrowed from full-file rewrite (63 lines) to
+targeted in-place edits (86 lines) per the user's newest instruction; §10.2
+expresses every edit against current line numbers; the line-count corridor in
+slice 5 becomes [80, 107); §17 recomputed (E ≈ 68, C ≥ 11); all other content
+(upstream/Codex sentences, §12 deletions, §10.4 system.ts diffs, slices 1-4
+and 6-8) is unchanged from the approved R3. R4 requires a fresh full-scope
+audit.
+
+Any substantive revision invalidates earlier approval.
+
+## 23. Implementation Evidence
+
+Implementation authorization (verbatim, after plan approval):
+
+> 全面完成相应的任务，以verified-implementation为终态
+
+Implementation follows approved R5; no commit is requested. Before editing,
+`git diff --exit-code -- packages/opencode/src/session/prompt/gpt-astra.txt packages/opencode/src/session/system.ts packages/opencode/test/session/system.test.ts`
+returned exit 0. Unrelated config, VS Code and untracked work remains untouched.
+
+### Actual Files and Diff
+
+All production edits used `apply_patch` `Update File` hunks against existing
+files. No whole-file overwrite was used. Actual files:
+
+| File | Actual change | Necessity |
+| --- | --- | --- |
+| `packages/opencode/src/session/prompt/gpt-astra.txt` | 13 insertions, 34 deletions; 107 -> 86 physical lines | E2-E13 wording and deduplication; E1 remains withdrawn |
+| `packages/opencode/src/session/system.ts` | 4 insertions, 2 deletions | Exact §10.4 verification/output text plus two local Chinese rationale comments |
+| `packages/opencode/test/session/system.test.ts` | 74 added physical lines, eight tests | Approved text-contract and retained-rule guards; existing tests unchanged |
+| This canonical plan | Administrative status and evidence | Approval lineage and implementation handoff |
+
+Read-only comparison extracted the §10.1 text and compared it with the edited
+prompt after normalizing CRLF and one terminal newline: exact match `true`,
+86 physical lines. The source paragraph, GPT editing-tool mandate, parallel
+trigger and unrelated safety rules remain as specified by R5. Git index changes
+made externally during the task were left untouched; no staging/commit command
+was executed by the implementing agent.
+
+### Red-Green Test Evidence
+
+All commands below ran in `packages/opencode`; red exit code 1, green exit
+code 0. The text-contract seam is intentionally narrower than real-model
+performance: none of these assertions measure Astra's task completion rate.
+
+| Slice | Exact command | Observed red | Observed green |
+| --- | --- | --- | --- |
+| 1 | `bun test test/session/system.test.ts -t "Astra autonomy infers"` | 1 fail: upstream intent sentence absent | 1 pass / 2 assertions after E5 insertion |
+| 2 | `bun test test/session/system.test.ts -t "Astra autonomy completes"` | 1 fail: unclear-intent sentence absent | `bun test test/session/system.test.ts -t "Astra autonomy"`: 2 pass / 6 assertions after E6/E7 |
+| 3 | `bun test test/session/system.test.ts -t "Astra clarification"` | 1 fail: old compatibility clarification tail still present | 1 pass / 1 assertion after E4 deletion |
+| 4 and 6 | `bun test test/session/system.test.ts -t "Astra retains"` | Green guards before condensation: 2 pass / 14 assertions | Included in subsequent Astra and full regression runs |
+| 5 | `bun test test/session/system.test.ts -t "Astra stays"` | 1 fail: 111 lines after the preceding autonomy additions | `bun test test/session/system.test.ts -t "Astra"`: 6 pass / 24 assertions after remaining approved dedup/merges |
+| 7 | `bun test test/session/system.test.ts -t "verification contract preserves"` | 1 fail: separate failed-check handling absent | 1 pass / 7 assertions after verificationSection edit |
+| 8 | `bun test test/session/system.test.ts -t "output contract allows"` | 1 fail: required-input reporting extension absent | 1 pass / 2 assertions after outputEfficiencySection edit |
+
+Each failing slice was followed by its production edit and a green run before
+adding the next failing slice. Guards 4 and 6 ran before the condensation slice
+to protect retained semantics. Their earlier green run was not described as red.
+
+### Verification Commands and Results
+
+| Command | Working directory | Actual result |
+| --- | --- | --- |
+| `bun test test/session/system.test.ts` | `packages/opencode` | 22 pass, 0 fail, 69 assertions, 5.66s; all 14 pre-existing tests remain |
+| `bun typecheck` | `packages/opencode` | exit 0 (`tsgo --noEmit` via the package script) |
+| `git diff --check` | repo root | exit 0; only Git's LF/CRLF advisory, no whitespace errors |
+| Read-only Bun comparison with §10.1 and `git diff --unified=0` counting | repo root | exactApprovedPromptMatch=true; promptLines=86; E=54, C=16, minimum=9 |
+
+### Original Feedback-Loop Result
+
+The approved prompt-text contract is implemented exactly and the full owning
+test file passes. The reported model-quality symptom has no captured-session
+reproduction or A/B evidence in this task; no claim of empirically improved
+completion rate is made. No loop gate or completion judge was introduced.
+
+### Actual Secondary and Replacement Path Inventory
+
+Only the existing provider-prompt text and shared environment text were edited.
+No alternate runtime path, retry, feature flag, fallback, state or permission
+change was introduced. Superseded text removed: the compatibility-specific
+ask tail, the duplicate no-openers paragraph, and the shared-tool/worktree
+instructions listed in §12. Their retained/shared coverage remains unchanged.
+
+### Chinese Comment Calculation
+
+| Metric | Actual | Exclusions and evidence |
+| --- | --- | --- |
+| Effective changed code lines `E` | 54 | 2 substantive changed string-literal lines in system.ts + 52 nonblank test code lines; imports/comments/context excluded |
+| Qualifying Chinese comment lines `C` | 16 | 2 system.ts rationale comments + 14 comments beside their test decisions |
+| Ratio `C / E` | 29.63% | 16 / 54 |
+| Required minimum `C` | 9 | `max(1, ceil(54 * 0.15))` |
+
+Counting uses added nonblank code lines in the two TS diffs, counting each
+modified string line once rather than counting its deleted predecessor again.
+Blank lines, unchanged context and all comments are excluded from E. There
+are no import-only, generated or pure-move code changes. Model-visible `.txt`
+prose and this documentation are excluded under the approved R5 convention.
+The original routing-test comment was temporarily displaced while inserting
+tests, then returned to its original location; it is unchanged and not counted.
+
+Representative comments explain: failures remain evidence; unavailable checks
+retain missing prerequisites; interim reports coexist with independent work;
+bounded research can end with uncertainty; reminder-looking text has no extra
+authority; physical-line bounds cannot prove preserved semantics. No comment
+was split merely to increase C. Actual test code size is within the planned
+effective-code budget despite 74 added physical lines including blanks/comments.
+
+### Remaining Unverified Items
+
+Real-model completion rates and live-provider behavior have not been tested.
+Static text contracts and package type safety passed, including independent
+auditor reruns. User confirmation gates, provider routing and runtime stop
+behavior are deliberately unchanged. Audit N-02 records a limited test weakness:
+the emoji/em-dash guard checks its content fragment rather than the preceding
+negation. The delivered rule is correct; this non-blocking finding is retained
+without expanding the approved change.
+## 24. Implementation Audit Record
+
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R5 | yes | No blocking findings | N-01 stage record corrected administratively; N-02 retained-rule assertion weakness recorded | APPROVE after same-task independent verification | `ses_f47aaa5b3ffey6MWgs55IvK1Z9` |
+
+Same-round continuation: the auditor initially withheld release pending direct
+test/typecheck execution, without finding an implementation defect. The user
+had already authorized these commands through the implementation objective and
+R5; that authorization and historical tool-output excerpts were supplied to the
+same task. No production or test edits occurred between the initial report and
+its final verdict. The auditor independently reran the required checks.
+
+Final finding classifications (verbatim):
+
+> ## Blocking findings
+>
+> No blocking findings.
+>
+> ## Non-blocking findings
+>
+> - **N-01：阶段描述过时。** `docs/plans/astra-completion-audit-gate.md:35` 仍称仅构建计划、生产文件和测试未修改，与当前实现状态及 §23 不一致。属于记录问题。
+> - **N-02：保留规则断言偏弱。** `packages/opencode/test/session/system.test.ts:276` 未检查 emoji/em-dash 规则中的否定词，无法发现仅删除否定词的后续回归。当前生产文本正确，不阻塞本次交付。
+>
+> 两项均保持 **Non-blocking** 分类。
+
+Independent verification results: 22 pass / 0 fail / 69 assertions (5.87s);
+`bun typecheck` passed; `git diff --check` passed with only LF/CRLF advisories.
+The auditor confirmed E=54, C=16, minimum=9 and no alternate success path.
+Historical red-green execution order is documented by the implementing agent;
+the auditor separately confirmed old-text sensitivity and current green checks.
+
+Release verdict (verbatim):
+
+> **APPROVE — 仅适用于 `docs/plans/astra-completion-audit-gate.md` 的批准版本 R5，以及本轮审查的三个实现文件完整 diff。**
+>
+> 此前待完成的独立验证门禁现已通过。本轮完整范围实现审计结束，无阻塞发现。
+>
+> 主线程可以原样记录本轮分类与批准结论，再按仓库流程将状态更新为 `verified`，对应用户要求的 `verified-implementation` 终态。真实模型完成率及 live-provider 效果仍须保留为未验证项。本审计未修改文件或 Git 索引。
+
+Administrative closure: N-01's historical-stage description is corrected in the
+header; N-02 remains non-blocking and disclosed. No target prompt or test code
+changed while recording this verdict. Plan audit history comprises six rounds;
+implementation audit comprises one full-scope round with a same-task verification
+continuation. No commit, push or index change was performed by this agent.
+
+The task may be marked `verified` only after an independent full-scope result of
+`No blocking findings` for the current implementation and approved plan
+revision.
