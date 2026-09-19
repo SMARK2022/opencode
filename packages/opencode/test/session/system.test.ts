@@ -233,6 +233,80 @@ const renderEnvironment = (
   }).pipe(Effect.provide(contextLayer(git)), Effect.provideService(InstanceRef, contextInstance(directory)))
 
 describe("session.system", () => {
+  test("Astra autonomy infers intent before choosing work", () => {
+    // 原文合同适用于调研和代码任务；只断言模型收到的文本，不声称证明模型完成率。
+    expect(PROMPT_ASTRA).toContain("Infer the user's intent and your task scope from their instructions and the prior conversation context.")
+    expect(PROMPT_ASTRA).toContain("You should bias towards action and carry out the user's intended task until it is completed.")
+  })
+
+  test("Astra autonomy completes bounded research while clarifying", () => {
+    // 保留上游原句的独立工作边界，澄清不能被解释成扩大授权。
+    expect(PROMPT_ASTRA.includes("If the intent is unclear, progress towards the goal using the available information and ask for clarification while continuing independent work when possible.")).toBe(true)
+    expect(PROMPT_ASTRA.includes("Continue until the user's intended goal is fulfilled, even when it requires sustained work.")).toBe(true)
+    // 持续执行与范围内允许未知结论必须成对，避免把研究完成误写成必须证实某命题。
+    expect(PROMPT_ASTRA.includes("A pending, running, inconclusive, or unchanged result is not by itself completion.")).toBe(true)
+    expect(PROMPT_ASTRA.includes("For research tasks, describe the scope searched and the limits of the evidence. When the requested investigation is complete, report unresolved questions and uncertainty explicitly.")).toBe(true)
+  })
+
+  test("Astra clarification uses the shared autonomy contract", () => {
+    // 局部兼容性建议统一交给上游澄清合同，避免同一提示词出现两个等待口径。
+    expect(PROMPT_ASTRA.includes("ask one short question instead of guessing")).toBe(false)
+  })
+
+  test("Astra retains GPT tools without elevating reminder tags", () => {
+    // GPT 的编辑工具由 registry 筛选；精简文字不能让模型丢失唯一编辑入口。
+    expect(PROMPT_ASTRA).toContain("Always use apply_patch for manual code edits. Do not use cat or any other commands when creating or editing files. Formatting commands or bulk edits don't need to be done with apply_patch.")
+    expect(PROMPT_ASTRA).toContain("use multi_tool_use.parallel to parallelize tool calls and only this")
+    expect(PROMPT_ASTRA).toContain("read, grep, glob, git status, git diff, git show, ls, nl, and wc")
+    // 用户和文件正文也能包含标签，不能通过字面标签推导内容的指令权限。
+    expect(PROMPT_ASTRA.includes("blocks are harness instructions, not user-authored content")).toBe(false)
+  })
+
+  test("Astra retains formatting and unfinished-work guidance", () => {
+    // 断言稳定语义片段，允许合段；不把删空行误当作格式规则仍然完整的证据。
+    for (const rule of [
+      "Your responses are rendered as GitHub-flavored Markdown.",
+      "Never use nested bullets. Keep lists flat (single level).",
+      "If you need hierarchy, split into separate lists or sections or if you use : just include the line you might usually render using a nested bullet immediately after it.",
+      "For numbered lists, only use the `1. 2. 3.` style markers (with a period), never `1)`.",
+      "Headers are optional, only use them when you think they are necessary. If you do use them, use short Title Case (1-3 words) wrapped in **…**. Don't add a blank line.",
+      "commands, paths, environment variables, function names, inline examples, keywords.",
+      "Code samples or multi-line snippets should be wrapped in fenced code blocks",
+      "language tag when possible.",
+      "use emojis or em dashes unless explicitly instructed.",
+    ]) expect(PROMPT_ASTRA).toContain(rule)
+    // 最终交付边界独立于排版约束，合并段落时必须保留该句本身。
+    expect(PROMPT_ASTRA).toContain("If the requested work is not finished, keep it in commentary and continue with tools.")
+  })
+
+  test("Astra stays within the restrained edit size and deduplicates openers", () => {
+    // 空行属于物理行，末尾换行只作终止符；避免 Windows 换行影响用户约定的体量。
+    const lines = PROMPT_ASTRA.replaceAll("\r\n", "\n").replace(/\n$/, "").split("\n")
+    expect(lines.length).toBeGreaterThanOrEqual(80)
+    expect(lines.length).toBeLessThan(107)
+    // 尺寸护栏不证明语义完整，重复措辞与保留规则分别由独立断言保护。
+    expect(PROMPT_ASTRA.match(/conversational interjections/g)?.length).toBe(1)
+  })
+
+  test("verification contract preserves failures and reports missing prerequisites promptly", () => {
+    // 失败断言是已观察证据；验证原句也应保留，不能用别处绿灯替代必要检查。
+    expect(SystemPrompt.verificationSection).toContain("Before reporting a coding task complete, verify the change when feasible.")
+    expect(SystemPrompt.verificationSection).toContain("Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.")
+    expect(SystemPrompt.verificationSection.includes("If a check fails, investigate the failure and fix issues within the requested scope.")).toBe(true)
+    expect(SystemPrompt.verificationSection.includes("treat it as an untested hypothesis")).toBe(false)
+    // 缺前提需要用户参与时可立即告知，独立工作仍继续，不把汇报等同结束。
+    expect(SystemPrompt.verificationSection.includes("If a required check cannot run, identify the missing prerequisite, report it promptly when user input is needed, and continue independent work within the authorized scope.")).toBe(true)
+    // 阻塞交付保留未完成状态，防止最终回答把局部验证包装成完整通过。
+    expect(SystemPrompt.verificationSection.includes("Before ending the turn because of a blocker, state what remains incomplete, what you tried, and what input or external change is needed.")).toBe(true)
+    expect(SystemPrompt.verificationSection.includes("Keep unresolved verification explicit in the final response.")).toBe(true)
+  })
+
+  test("output contract allows interim blockers requiring user input", () => {
+    // 缺输入的分支可先汇报，让其他分支继续推进；不能等所有恢复途径耗尽才开口。
+    expect(SystemPrompt.outputEfficiencySection.includes("- Errors or blockers that change the plan or require user input")).toBe(true)
+    expect(SystemPrompt.outputEfficiencySection.includes("recovery attempts are exhausted")).toBe(false)
+  })
+
   // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
   test.each([
     ["gpt-6-astra", PROMPT_ASTRA],
