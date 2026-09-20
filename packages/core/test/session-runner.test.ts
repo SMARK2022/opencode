@@ -755,7 +755,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.set(sessionID, { status: "active" })
     yield* goals.accountUsage(sessionID, 234, 26, { goalID: revised.id, generation: revised.generation })
     const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
-    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with operate", "two consecutive eligible Goal turns", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
+    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with operate", "after the next goal-continuation message arrives", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
     expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
     expect(yield* goals.set(sessionID, { tokenBudget: 100000 })).toMatchObject({ tokenBudget: 100000 })
     const escaped = SessionGoal.continuationPrompt(yield* goals.set(sessionID, { objective: "fix <script> & <style> tags" }))
@@ -781,6 +781,8 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* session.resume(sessionID)
     // 已排队输入先提升；随后恰好两次合成续跑，预算仅记录，不提前截断。
     expect(requests).toHaveLength(4)
+    // 未回答的首个用户输入不能被恢复注入抢占。
+    expect(userTexts(requests[0]!)).toEqual(["Start working"])
     expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
     expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
     // queue 先提升；其后两个无证据完成才切策略，不能按 provider step 提前计轮。
@@ -838,6 +840,9 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* session.resume(sessionID)
     // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
     expect(requests).toHaveLength(3)
+    // 两条旧续跑之后，首次恢复请求已携带第三条上下文，不能等盲答后才补。
+    expect(userTexts(requests[0]!).filter((text) => text.includes("<session-goal-continuation>"))).toHaveLength(3)
+    expect(userTexts(requests[0]!).at(-1)).toContain("<objective>Finish the native task</objective>")
     expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({
       status: "complete", generation: 1, reason: "Verified requested end state", tokensUsed: 15,
     })
@@ -862,15 +867,21 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     const goalDatabase = yield* Database.Service
     // 验证真正存入事件 data 的快照；重放不能依赖只存在于实时 envelope 的字段。
     const recorded = yield* goalDatabase.db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)
+    // 两次显式恢复各自补一次上下文，独立drain均从turn=1开始；原两条快照仍原样保留。
+    const expectedContinuations = [
+      ...continuations.map(message => message.metadata),
+      { goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 2 },
+      { goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 2 },
+    ]
     expect(recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1)).map(event => event.data.metadata))
-      .toEqual(continuations.map(message => message.metadata))
+      .toEqual(expectedContinuations)
     const replayed: SessionMessageUpdater.MemoryState = { messages: [] }
     for (const event of recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1))) {
       yield* SessionMessageUpdater.update(SessionMessageUpdater.memory(replayed), Schema.decodeUnknownSync(SessionEvent.Synthetic)({
         id: event.id, type: SessionEvent.Synthetic.type, data: event.data,
       }))
     }
-    expect(replayed.messages.map(message => message.metadata)).toEqual(continuations.map(message => message.metadata))
+    expect(replayed.messages.map(message => message.metadata)).toEqual(expectedContinuations)
     const beforeReminder = yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)
     const goalEvents = yield* EventV2.Service
     yield* goalEvents.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Technical plan reminder" })
@@ -989,6 +1000,10 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a
     yield* session.resume(sessionID)
     // 首轮加32次续跑，到限暂停；恢复后由新用户输入开启下一轮额度。
     expect(requests).toHaveLength(33)
+    // 第八次仍保持原合同，第九次附加长程提示并保留既有replan。
+    expect(userTexts(requests[8]!).at(-1)).not.toContain("<long-run-notice>")
+    expect(userTexts(requests[9]!).at(-1)).toContain("<long-run-notice>")
+    expect(userTexts(requests[9]!).at(-1)).toContain('mode="breadth-first-replan"')
     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
     yield* goals.set(sessionID, { status: "active" })
     yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue the goal" }), resume: false })

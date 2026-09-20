@@ -16,13 +16,13 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
       description: [
         "Read the current goal, or change its status.",
         "",
-        "Call with `operate: \"read\"` to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST read before changing any status — the tool rejects transitions without a prior read in the same Goal turn.",
+        "Call with `operate: \"read\"` to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST read before changing any status — the tool rejects transitions without a prior read of the current goal state.",
         "",
         "Call with `operate` and, when required, `reason` to change the goal:",
         "- Use `operate: \"complete\"` with a `reason` only when the objective has actually been achieved and no required work remains.",
-        "- Use `operate: \"blocked\"` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress, call `operate: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. Do not block merely because work is hard, uncertain, or incomplete.",
-        "- Use `operate: \"active\"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.",
-        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least two consecutive resumed goal turns, mark as `blocked` again.",
+        "- Use `operate: \"blocked\"` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress after that verification, optionally delegate an independent audit to a subagent with the task tool, then call `operate: \"blocked\"` again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count. Do not block merely because the work is hard, uncertain, or incomplete.",
+        "- Use `operate: \"active\"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only after the user has sent a new message. You cannot resume a goal that was paused or terminated by the user.",
+        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed work as a fresh blocked audit: the same blocking condition must be verified again before marking `blocked`.",
         "- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; use `operate: \"blocked\"`.",
         "- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
         "- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
@@ -32,7 +32,7 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
       input: Schema.Struct({
         // 显式 read 消除空调用歧义；可信快照仍保存在 runner 提供的同一 turn 上。
         operate: Schema.Literals(["read", "complete", "blocked", "active"]).annotate({
-          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
+          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker after the next goal-continuation message arrives. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal after the user sends a new message.",
         }),
         reason: Schema.String.pipe(Schema.optional).annotate({
           description: "Required when operate is `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `read` and `active`.",
@@ -81,14 +81,16 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
                   "1. Restate the exact blocker and the Goal requirement it prevents.",
                   "2. Re-read the most relevant files and inspect one adjacent producer, consumer, test, or configuration path that could change the conclusion.",
                   "3. Run one different search, test, or focused check, and split the blocker into a smaller verifiable question.",
-                  "4. If any branch yields a viable path, continue working and do not call blocked again.",
-                  'If the same blocker still prevents meaningful progress after this exploration, call operate "blocked" in the next eligible Goal turn with the same trimmed reason. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
+                  // 审查建议不新增持久状态或准入条件；计数仍归modelTransition。
+                  "4. Delegate an independent audit to a subagent with the task tool: fresh context should judge whether the blocker is real, whether the current route is wrong, and which requirements remain unfinished.",
+                  "5. If any branch yields a viable path, continue working and do not call blocked again.",
+                  'If no branch is viable, call operate "blocked" again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
                 ].join("\n")
               : output.status === "active"
                 ? "Goal resumed to active. Continue working toward the objective."
                 : output.status === "blocked"
-                  ? `Goal marked as blocked: ${output.reason}. The session loop will end after this turn. The user can resume the goal later.`
-                  : `Goal marked as complete: ${output.reason}. The session loop will end after this turn.`,
+                  ? `Goal marked as blocked: ${output.reason}. The user can resume the goal later.`
+                  : `Goal marked as complete: ${output.reason}.`,
       }],
     }),
   }).pipe(Effect.orDie)

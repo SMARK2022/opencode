@@ -22,7 +22,7 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { disposeAllInstances } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
@@ -1444,6 +1444,8 @@ describe("tool.task", () => {
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
+      // 捕获真实后台完成回调送到 Prompt seam 的输入；等待信号而不是猜测后台调度时间。
+      const resumed = yield* Deferred.make<SessionPrompt.PromptInput>()
 
       const result = yield* def.execute(
         {
@@ -1461,7 +1463,9 @@ describe("tool.task", () => {
             promptOps: {
               ...stubOps({ text: "background done" }),
               prompt: (input) =>
-                input.sessionID === chat.id ? Effect.never : Effect.succeed(reply(input, "background done")),
+                input.sessionID === chat.id
+                  ? Deferred.succeed(resumed, input).pipe(Effect.andThen(Effect.never))
+                  : Effect.succeed(reply(input, "background done")),
             } satisfies TaskPromptOps,
           },
           messages: [],
@@ -1473,6 +1477,10 @@ describe("tool.task", () => {
       const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("completed")
+      // 后台结果经公开prompt入口恢复；该入口负责创建新消息前的撤回清理，不另造loop接线。
+      const input = yield* awaitWithTimeout(Deferred.await(resumed), "parent resume was not requested")
+      expect(input.sessionID).toBe(chat.id)
+      expect(JSON.stringify(input.parts)).toContain("Background task completed: inspect bug")
     }),
   )
 

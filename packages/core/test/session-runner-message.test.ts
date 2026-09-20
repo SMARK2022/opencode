@@ -33,6 +33,17 @@ test("classifies Native goal progress from structured producer receipts", () => 
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
   expect(gate).toEqual({ noProgressTurns: 2, replanRequired: true })
+  // 背景运行通知不能冒充完成；真实Native task_id在完成后才成为去重身份。
+  expect(signal([tool("task-running", "task", {}, { task_id: "ses_child", state: "running", output: "running" })])).toEqual({ exploration: false, advancement: false })
+  const task = tool("task-completed", "task", {}, { task_id: "ses_child", state: "completed", output: "finished" })
+  const explored = signal([task])
+  expect(explored).toEqual({ exploration: true, advancement: false })
+  SessionGoalProgress.updateGoalProgressGate(gate, explored)
+  // 子代理文字并非主任务状态变化，同一子会话重复返回也不能解除replan锁定。
+  expect(gate).toEqual({ noProgressTurns: 0, replanRequired: true })
+  expect(signal([task])).toEqual({ exploration: false, advancement: false })
+  expect(signal([tool("task-other", "task", {}, { task_id: "ses_other", state: "completed", output: "finished" })])).toEqual({ exploration: true, advancement: false })
+  SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
   const read = { canonicalPath: "/project/receipt.txt", size: 3, modifiedMs: 1, fp: "head-v1", start: 1, end: 1, stub: false }
   const receipt = tool("read", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read })
   const first = signal([receipt])

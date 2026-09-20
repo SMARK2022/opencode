@@ -276,7 +276,8 @@ const layer = Layer.effect(
             if (Option.isSome(goal) && goal.value.status === "active") {
               yield* events.publish(SessionEvent.Synthetic, {
                 sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
-                text: SessionGoal.continuationPrompt(goal.value, continuation.mode),
+                // 本次发布后才递增；已发布八次时，下一条才是第九次长程督促。
+                text: SessionGoal.continuationPrompt(goal.value, continuation.mode, continuation.turns >= 8),
                 // 候选模式和额度在 admission 时采样，发布成功后才递增本 drain 的计数。
                 metadata: {
                   goal_continuation: true,
@@ -827,6 +828,23 @@ const layer = Layer.effect(
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
       // frontier 仅属于本次 drain；新唤醒不继承旧运行的停滞或验证基线。
       const continuation: GoalContinuation = { turns: 0, progressLedger: SessionGoalProgress.createGoalProgressLedger(), progressGate: { noProgressTurns: 0, replanRequired: false } }
+      // 仅显式恢复且没有待提升输入时补上下文；自动wake与未回答消息保留原入口。
+      const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 32
+      if (input.force && !promotion && maxGoalTurns > 0) {
+        const session = yield* getSession(input.sessionID)
+        const agent = yield* agents.select(session.agent)
+        const goal = yield* goals.get(input.sessionID)
+        if (!session.parentID && agent.id !== "decide" && Option.isSome(goal) && goal.value.status === "active") {
+          const answered = yield* SessionHistory.goalTurnMessages(db, input.sessionID)
+          // 采用原生eligible历史；显式revert.commit仍由其owner消费，不能吞掉新admission。
+          if (answered.length > 0) continuation.goal = {
+            ...goal.value, maxTurns: maxGoalTurns,
+            // 使用既有可信pending回执采样展示快照，不把恢复当成又一次完成证据。
+            viewMode: answered.some(message => message.type === "assistant" && message.content.some(part => part.type === "tool" && part.name === "goal" && part.state.status === "completed" && part.state.structured.blockedAttempt !== undefined))
+              ? "block-check" : "continue",
+          }
+        }
+      }
       let shouldRun = input.force || hasSteer || hasQueue
       while (shouldRun) {
         let needsContinuation = true
