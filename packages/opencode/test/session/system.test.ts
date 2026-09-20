@@ -9,6 +9,7 @@ import { Permission } from "../../src/permission"
 import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
+import { Config } from "../../src/config/config"
 import { Git } from "../../src/git"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { InstanceState } from "../../src/effect/instance-state"
@@ -118,6 +119,58 @@ const prepareContext = (sessionID: SessionID, git: string, history = contextHist
 })
 
 describe("session.system", () => {
+  // 同一服务连续渲染，防止把配置值冻结在 layer 构造或首次调用时；Git 用固定快照隔离宿主状态。
+  const shellCfg: { shell: string | undefined } = { shell: process.platform === "win32" ? "cmd" : "sh" }
+  const configShellIt = testEffect(
+    LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node, Database.node]), [
+      [RuntimeFlags.node, RuntimeFlags.layer({ disableGit: false })],
+      [
+        Config.node,
+        // 私有fixture只改变shell配置，保留同一Session的Git与日期快照。
+        Layer.mock(Config.Service, { get: () => Effect.sync(() => ({ shell: shellCfg.shell })) }),
+      ],
+      [
+        Git.node,
+        Layer.mock(Git.Service, {
+          branch: () => Effect.succeed("feature"),
+          defaultBranch: () => Effect.succeed({ name: "dev", ref: "refs/heads/dev" }),
+          status: () => Effect.succeed([{ file: "before.ts", code: "M", status: "modified" as const }]),
+          run: () => Effect.succeed({ exitCode: 0, text: () => "SMARK", stdout: Buffer.from(""), stderr: Buffer.from(""), truncated: false }),
+        }),
+      ],
+      [MCP.node, Layer.mock(MCP.Service, { instructions: () => Effect.succeed([]) })],
+      [
+        Skill.node,
+        Layer.mock(Skill.Service, { available: () => Effect.succeed([]) }),
+      ],
+    ]),
+  )
+  configShellIt.instance("environment follows configured shell changes", () =>
+    Effect.gen(function* () {
+      const prompt = yield* SystemPrompt.Service
+      const instance = yield* InstanceState.context
+      const sessionID = SessionID.make("ses_configured_shell")
+      yield* seedContextSession(sessionID, instance.directory)
+      const input = { sessionID, model: { api: { id: "test" } } as Provider.Model, history: contextHistory }
+      const first = yield* prompt.environment(input)
+      // 独立名称来自显式配置；Windows解析出的.EXE大小写不改变shell身份。
+      expect(first.system.join("\n")).toMatch(process.platform === "win32" ? /Shell: (?:.*[\\/])?cmd\.exe/i : /Shell: (?:.*[\\/])?sh\n/)
+      shellCfg.shell = "bash"
+      const second = yield* prompt.environment(input)
+      expect(second.system.join("\n")).toMatch(/Shell: (?:.*[\\/])?bash(?:\.exe)?\n/i)
+      // Shell是每轮能力，不改写已持久化的Git/日期；只剔除该动态段再比较全文。
+      const stripShell = (lines: string[]) => {
+        const all = lines.join("\n").split("\n")
+        const start = all.findIndex((line) => line.startsWith("  Shell"))
+        const end = all.findIndex((line) => line.startsWith("  OS Version:"))
+        return [...all.slice(0, start === -1 ? all.length : start), ...all.slice(end === -1 ? all.length : end)]
+      }
+      expect(stripShell(second.system)).toEqual(stripShell(first.system))
+      expect(second.updates).toEqual(first.updates)
+      // git 的会话快照仍由原缓存合同保护。
+      expect(second.system.join("\n")).toContain("before.ts")
+    }), { git: true })
+
   test("Astra autonomy infers intent before choosing work", () => {
     // 原文合同适用于调研和代码任务；只断言模型收到的文本，不声称证明模型完成率。
     expect(PROMPT_ASTRA).toContain("Infer the user's intent and your task scope from their instructions and the prior conversation context.")

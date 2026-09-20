@@ -24,6 +24,43 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
 }
 
 describe("shell", () => {
+  for (const name of ["bash", "zsh"]) {
+    const file = name === "bash" && process.platform === "win32" ? Shell.gitbash() : which(name)
+    test.skipIf(!file)(`${name} preserves native script and startup behavior`, async () => {
+      if (!file) throw new Error(`Missing ${name}`)
+      await using home = await tmpdir()
+      await using cwd = await tmpdir()
+      // 独立 HOME 避免用户 rc 干扰；login 和手动 rc 各自提供可观察标记。
+      await Bun.write(path.join(home.path, name === "bash" ? ".bash_profile" : ".zprofile"), "export LOGIN_MARK=login\n")
+      await Bun.write(path.join(home.path, `.${name}rc`), "export VALUE=outer\nalias fidelity_alias='printf alias'\ncd /\n")
+      // Zsh 的 env 与 rc 查找语义不同于 Bash，不能合并初始化脚本。
+      await Bun.write(path.join(home.path, ".zshenv"), "export ENV_MARK=zshenv\n")
+      await Bun.write(path.join(cwd.path, "cwd-marker"), "")
+      // rc 故意离开工作目录；命令开始前必须恢复 cwd，且别名仍可用。
+      const command = String.raw`VALUE=inner
+printf '%s\n' "$VALUE" '$VALUE' 'C:\Temp\x'
+printf '%s\n' \
+  'continued'
+printf '%s\n' "$LOGIN_MARK" "$0"
+fidelity_alias
+[[ -f cwd-marker ]] && printf ':cwd'
+[[ -n "$ENV_MARK" ]] && printf ':zshenv'
+true`
+      // 先锁定输入中的反斜杠换行，防止测试源码先把目标字符吃掉。
+      expect(command).toContain(String.fromCharCode(92, 10))
+      const proc = Bun.spawn([file, ...Shell.args(file, command, cwd.path)], {
+        cwd: home.path,
+        env: { ...process.env, HOME: home.path, ZDOTDIR: home.path, ENV_MARK: "" },
+        stdout: "pipe", stderr: "pipe",
+      })
+      const [output, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+      expect(error).toBe("")
+      expect(code).toBe(0)
+      // 预期值由语言合同独立给出：赋值后才展开，单引号中的字符原样输出。
+      expect(output).toBe("inner\n$VALUE\nC:\\Temp\\x\ncontinued\nlogin\nopencode\nalias:cwd" + (name === "zsh" ? ":zshenv" : ""))
+    })
+  }
+
   test("normalizes bare double dash only for PowerShell permission parsing", async () => {
     // 直接调用共享解析器覆盖事故、缺段、三类豁免与残余错误；不启动任何shell进程。
     for (const [command, expected] of [
@@ -80,26 +117,25 @@ describe("shell", () => {
     expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
   })
 
-  test("normalizes only bounded Windows PowerShell inline Python through the real transport", () => {
-    const command = String.raw`python -c "print('{\"key\":1}')"`
-    const normalized = Shell.normalizePowerShellInlinePython(command, "pwsh", "win32")
-    if (!normalized) throw new Error("expected static Python adaptation")
-    expect(normalized.source).toBe(`print('{"key":1}')`)
-    expect(normalized.command).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
-    const encoded = Shell.cmd("pwsh", normalized.command, "win32").args.at(-1)
-    if (!encoded) throw new Error("expected EncodedCommand")
-    expect(Buffer.from(encoded, "base64").toString("utf16le")).toContain(normalized.command)
-    // 显式平台输入沿用Shell.cmd风格，不伪造全局platform，也不启动任何解释器。
-    for (const platform of ["linux", "darwin"]) expect(Shell.normalizePowerShellInlinePython(command, "pwsh", platform)).toBeUndefined()
-    expect(Shell.normalizePowerShellInlinePython(command, "cmd.exe", "win32")).toBeUndefined()
-    for (const prefix of ["python3.12 -B -Wdefault -Xutf8", "py -3.12 -B", '& "C:\\Python312\\python3.12.exe"', "conda run --name=agent --live-stream python"]) {
-      expect(Shell.normalizePowerShellInlinePython(`${prefix} -c "print(1)"`, "pwsh", "win32")?.source).toBe("print(1)")
-    }
-    for (const value of [
+  test("preserves native Python scripts through the real transport without speculative quoting", () => {
+    // 旧改写的正反输入都保留为原生脚本，传输不得插入Legacy绑定或吞掉反斜杠。
+    for (const command of [
+      String.raw`python -c "print('{\"key\":1}')"`,
+      ...["python3.12 -B -Wdefault -Xutf8", "py -3.12 -B", '& "C:\\Python312\\python3.12.exe"', "conda run --name=agent --live-stream python"].map((prefix) => `${prefix} -c "print(1)"`),
       'python -i -c "print(1)"', 'python -c "print(1)" extra', 'python -c "print(1)"; Write-Output done',
       'python -c "print(1)" > output.txt', 'conda run --name=$env:ENV python -c "print(1)"',
-    ]) expect(Shell.normalizePowerShellInlinePython(value, "pwsh", "win32")).toBeUndefined()
-    expect(Shell.normalizePowerShellInlinePython(`python -c "${"x".repeat(20_000)}"`, "pwsh", "win32")).toBeUndefined()
+      `python -c "${"x".repeat(20_000)}"`,
+    ]) {
+      for (const [shell, platform] of [["pwsh", "win32"], ["cmd.exe", "win32"], ["/bin/sh", "linux"], ["/bin/sh", "darwin"]]) {
+        const invocation = Shell.cmd(shell, command, platform)
+        const body = invocation.args.at(-1)
+        if (!body) throw new Error("expected native command transport")
+        // 只在PowerShell解开UTF-16传输，其余shell仍接收单个原文参数；不运行解释器。
+        const script = shell === "pwsh" ? Buffer.from(body, "base64").toString("utf16le") : body
+        expect(script).toContain(command)
+        expect(script).not.toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
+      }
+    }
   })
 
   test("normalizes shell names", () => {
@@ -146,7 +182,9 @@ describe("shell", () => {
     const zsh = Shell.args("/bin/zsh", "echo hi", "/tmp")
     expect(zsh[0]).toBe("-l")
     expect(zsh[1]).toBe("-c")
-    expect(zsh.at(-1)).toBe("/tmp")
+    // 正文占最后一个位置参数：初始化脚本 eval "$2"，cwd 仍是 $1。
+    expect(zsh.at(-2)).toBe("/tmp")
+    expect(zsh.at(-1)).toBe("echo hi")
   })
 
   if (process.platform === "win32") {
