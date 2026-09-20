@@ -30,7 +30,7 @@ export interface GoalTurnContext {
 export const Parameters = Schema.Struct({
   operate: Schema.Literals(["read", "complete", "blocked", "active"] as const).annotate({
     description:
-      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
+      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker after the next goal-continuation message arrives. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal after the user sends a new message.",
   }),
   reason: Schema.optional(Schema.String).annotate({
     description:
@@ -128,14 +128,14 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
             return {
               title: "Goal complete",
               metadata: {},
-              output: `Goal marked as complete: ${goal.reason}. The session loop will end after this turn.`,
+              output: `Goal marked as complete: ${goal.reason}.`,
             }
           }
           if (goal.status === "blocked") {
             return {
               title: "Goal blocked",
               metadata: {},
-              output: `Goal marked as blocked: ${goal.reason}. The session loop will end after this turn. The user can resume the goal later.`,
+              output: `Goal marked as blocked: ${goal.reason}. The user can resume the goal later.`,
             }
           }
           // active recovery 成功
@@ -157,8 +157,10 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
             "1. Restate the exact blocker and the Goal requirement it prevents.",
             "2. Re-read the most relevant files and inspect one adjacent producer, consumer, test, or configuration path that could change the conclusion.",
             "3. Run one different search, test, or focused check, and split the blocker into a smaller verifiable question.",
-            "4. If any branch yields a viable path, continue working and do not call blocked again.",
-            'If the same blocker still prevents meaningful progress after this exploration, call operate "blocked" in the next eligible Goal turn with the same trimmed reason. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
+            // fresh-context 审查是行动建议；确认资格仍由 modelTransition 的消息边界决定。
+            "4. Delegate an independent audit to a subagent with the task tool: fresh context should judge whether the blocker is real, whether the current route is wrong, and which requirements remain unfinished.",
+            "5. If any branch yields a viable path, continue working and do not call blocked again.",
+            'If no branch is viable, call operate "blocked" again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
           ].join("\n"),
         }
       }).pipe(Effect.orDie),

@@ -425,7 +425,7 @@ export const TaskTool = Tool.define(
             duration: 5000,
           })
           yield* ops
-            .loop({ sessionID: ctx.sessionID })
+            .loop({ sessionID: ctx.sessionID, cleanupRevert: true })
             .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
         })
 

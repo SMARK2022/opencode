@@ -5427,6 +5427,195 @@ function continuationTexts(msgs: MessageV2.WithParts[]) {
 }
 
 it.instance(
+  "goal resume injects context before answering an interrupted message",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 1 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const chat = yield* sessions.create({ title: "resume interrupted work" })
+      yield* goals.set(chat.id, { objective: "finish the interrupted objective" })
+      const original = yield* user(chat.id, "start")
+      // 通过真实取消路径留下 interrupted assistant；不直接伪造 error/finish 字段。
+      // 不使用固定延迟：收到请求后 runner 已启动，此时 cancel 才能证明中断的是实际执行。
+      yield* llm.push(reply().hang().item())
+      const running = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+      yield* llm.wait(1)
+      yield* prompt.cancel(chat.id)
+      yield* Fiber.await(running)
+      yield* llm.push(reply().text("resumed with context").stop(), reply().text("end").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+      const resumed = messages.find((m) => m.parts.some((p) => p.type === "text" && p.text === "resumed with context"))
+      // 第一条恢复回答的 parent 才能区分“先补发”与“盲答完才补发”。
+      const parts = continuationParts(messages)
+      expect(parts).toHaveLength(1)
+      expect(resumed?.info.role === "assistant" && resumed.info.parentID).toBe(parts[0]?.messageID)
+      expect(parts[0]?.messageID).not.toBe(original.id)
+      // turn/max 快照必须与本次恢复使用的预算同源，否则 TUI 与 Goal 确认身份会分离。
+      expect(parts[0]?.metadata).toMatchObject({ goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 1 })
+      expect(JSON.stringify((yield* llm.inputs)[1]?.messages)).toContain("<objective>finish the interrupted objective</objective>")
+    }),
+  { git: true },
+  30_000,
+)
+
+it.instance(
+  "goal resume applies a pending revert before its first provider request",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 1 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const revert = yield* SessionRevert.Service
+      const chat = yield* sessions.create({ title: "revert continuation then resume" })
+      yield* goals.set(chat.id, { objective: "finish after undo" })
+      yield* user(chat.id, "start")
+      yield* llm.push(reply().text("initial work").stop(), reply().hang().item())
+      const running = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+      yield* llm.wait(2)
+      yield* prompt.cancel(chat.id)
+      yield* Fiber.await(running)
+      // 在取消完成后才撤回，避免把 SessionBusyError 当成恢复逻辑的红灯。
+      const parts = continuationParts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(parts).toHaveLength(1)
+      // 独有标记区分旧消息与后来生成的相同 continuation 正文；仍通过真实 Revert API 撤回。
+      yield* sessions.updatePart({ ...parts[0], text: parts[0].text + "\nwithdrawn-continuation-only" })
+      yield* revert.revert({ sessionID: chat.id, messageID: parts[0].messageID })
+      yield* llm.push(reply().text("resumed after undo").stop(), reply().text("end").stop())
+      yield* prompt.loop({ sessionID: chat.id, cleanupRevert: true })
+      // 检查恢复后的第一次真实请求，不能只检查后来补发时顺便清掉的最终记录。
+      const body = JSON.stringify((yield* llm.inputs)[2]?.messages)
+      expect(body).not.toContain("withdrawn-continuation-only")
+      expect(body).toContain("<objective>finish after undo</objective>")
+      // 被撤的原消息仍可按 ID 读取；hidden 状态证明使用既有生命周期，而非删除历史。
+      const old = yield* MessageV2.get({ sessionID: chat.id, messageID: parts[0].messageID })
+      expect(old.info.hidden?.reason).toBe("undo")
+      expect((yield* sessions.get(chat.id)).revert).toBeUndefined()
+    }),
+  { git: true },
+  30_000,
+)
+
+it.instance(
+  "goal resume leaves fully reverted history idle without creating another message",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 1 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const revert = yield* SessionRevert.Service
+      const chat = yield* sessions.create({ title: "full revert" })
+      const original = yield* user(chat.id, "withdraw the whole history")
+      yield* goals.set(chat.id, { objective: "wait for real input after undo" })
+      yield* revert.revert({ sessionID: chat.id, messageID: original.id })
+      // 脚本回复让旧实现能走完并暴露意外派发；正确实现无需访问 Provider。
+      yield* llm.push(reply().text("unexpected answer").stop(), reply().text("unexpected continuation").stop())
+      const result = yield* prompt.loop({ sessionID: chat.id, cleanupRevert: true })
+      expect(yield* llm.inputs).toEqual([])
+      // 空恢复返回持久尾部仅是接口结果，不能被解释为生成了新的 assistant 回答。
+      expect(result.info.id).toBe(original.id)
+      expect(result.info.hidden?.reason).toBe("undo")
+      // 没有可恢复历史时保留目标，而不是为满足返回类型启动一次空运行。
+      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toEqual([])
+      const goal = yield* goals.get(chat.id)
+      expect(goal._tag === "Some" && goal.value.status).toBe("active")
+      expect((yield* (yield* SessionStatus.Service).get(chat.id)).type).toBe("idle")
+    }),
+  { git: true },
+  30_000,
+)
+
+// 留出第二次续跑额度，区分错误停止策略与达到上限后的既有自动暂停。
+for (const max of [0, 2]) {
+  it.instance(
+    `goal resume after provider error respects continuation limit ${max}`,
+    () => Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: max }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const chat = yield* sessions.create({ title: "error then explicit resume" })
+      yield* goals.set(chat.id, { objective: "recover authorized work", continueOnError: false })
+      const original = yield* user(chat.id, "start")
+      // 400 为现有非重试错误；恢复与自动错误续跑必须分开判定。
+      yield* llm.error(400, { error: { message: "first failure" } })
+      yield* prompt.loop({ sessionID: chat.id })
+      yield* llm.error(400, { error: { message: "resumed failure" } })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      const parts = continuationParts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(parts).toHaveLength(max === 0 ? 0 : 1)
+      // 开启时回答补发消息，禁用时维持旧派发；第二次错误仍然终止，不再自动续跑。
+      expect(result.info.role === "assistant" && result.info.parentID).toBe(max === 0 ? original.id : parts[0]?.messageID)
+      expect(result.info.role === "assistant" && result.info.error).toBeDefined()
+      // 这里验证错误策略而非达上限暂停，因此开启分支仍有未使用额度。
+      const goal = yield* goals.get(chat.id)
+      expect(goal._tag === "Some" && goal.value.status).toBe("active")
+    }),
+    { git: true },
+    30_000,
+  )
+}
+
+for (const pending of [false, true]) {
+  it.instance(
+    `goal resume directly answers an unanswered ${pending ? "continuation" : "user message"}`,
+    () => Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 1 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const chat = yield* sessions.create({ title: "pending input takes precedence" })
+      const goal = yield* goals.set(chat.id, { objective: "answer pending input" })
+      // 真实持久消息 seam 构造尚未派发的 continuation；无需竞速取消注入与请求之间的窗口。
+      // synthetic 与 goal marker 都保留，测试才能区分消息角色与“已被回答”的结构条件。
+      const input = yield* user(chat.id, pending ? SessionGoal.continuationPrompt(goal) : "new user request", {
+        synthetic: pending, goalContinuation: pending,
+      })
+      yield* llm.error(400, { error: { message: "stop after observing first dispatch" } })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role === "assistant" && result.info.parentID).toBe(input.id)
+      // 返回的 parent 加上持久 continuation 数量，证明未用新消息抢占已有输入。
+      expect(continuationParts(yield* MessageV2.filterCompactedEffect(chat.id))).toHaveLength(pending ? 1 : 0)
+    }),
+    { git: true },
+    30_000,
+  )
+}
+
+it.instance(
+  "goal normal prompt cleans before creation while direct loop preserves its caller ordering",
+  () => Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const revert = yield* SessionRevert.Service
+    const chat = yield* sessions.create({ title: "cleanup ordering" })
+    const original = yield* user(chat.id, "old message to undo")
+    yield* llm.push(reply().text("old answer").stop())
+    yield* prompt.loop({ sessionID: chat.id })
+    yield* revert.revert({ sessionID: chat.id, messageID: original.id })
+    // 普通 loop 调用不能消费后到的边界；该行为保护 prompt 创建新消息后的时间窗口。
+    yield* prompt.loop({ sessionID: chat.id })
+    expect((yield* sessions.get(chat.id)).revert?.messageID).toBe(original.id)
+    // 随后走公开 prompt 入口消费同一边界，检验恢复分支没有改变普通输入的清理职责。
+    yield* llm.push(reply().text("answer fresh message").stop())
+    const fresh = yield* prompt.prompt({ sessionID: chat.id, model: ref, parts: [{ type: "text", text: "fresh after undo" }] })
+    expect(fresh.parts.some((p) => p.type === "text" && p.text === "answer fresh message")).toBe(true)
+    // 清理必须先于创建；模型消费的新输入仍可见，而被撤内容不再参与这次回答。
+    const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+    expect(body).toContain("fresh after undo")
+    expect(body).not.toContain("old message to undo")
+    expect((yield* sessions.get(chat.id)).revert).toBeUndefined()
+  }),
+  { git: true },
+  30_000,
+)
+
+it.instance(
   "goal blocked pending continuation stores block check",
   () =>
     Effect.gen(function* () {
@@ -5472,6 +5661,70 @@ it.instance(
 )
 
 // progress gate：两轮无 structured 证据后，下一条 continuation 必须进入 BFS replan。
+it.instance(
+  "goal progress gate credits a completed task as exploration",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 4 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "task exploration",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goals.set(chat.id, { objective: "inspect a delegated branch" })
+      yield* user(chat.id, "start")
+      // 子会话走真实 task producer，并通过同一脚本 Provider 返回；不能伪造 sessionId。
+      yield* llm.push(
+        reply().text("idle before delegation").stop(),
+        reply().tool("task", { description: "inspect", prompt: "inspect this branch", subagent_type: "general" }),
+        reply().text("independent evidence").stop(),
+        reply().text("delegation checked").stop(),
+        reply().text("idle after delegation").stop(),
+        reply().text("idle again").stop(),
+        reply().text("finish").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+      // 成功执行而非只发出调用才能计分；这个断言把 fixture 失败与分类失败分开。
+      expect(messages.flatMap((m) => m.parts).some((p) => p.type === "tool" && p.tool === "task" && p.state.status === "completed")).toBe(true)
+      const parts = continuationParts(messages)
+      expect(parts).toHaveLength(4)
+      // 两次新的无证据完成才重新触发 replan；一次委派不能永久免除停滞检查。
+      expect(parts.map((part) => part.metadata?.goal_continuation_mode)).toEqual(["continue", "continue", "continue", "replan"])
+    }),
+  { git: true },
+  30_000,
+)
+
+it.instance(
+  "goal long-run notice starts at the ninth continuation and preserves replan",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 9 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goals = yield* SessionGoal.Service
+      const chat = yield* sessions.create({ title: "long-run boundary" })
+      yield* goals.set(chat.id, { objective: "complete every requirement" })
+      yield* user(chat.id, "start")
+      // 实际经过九次注入；前八次不提前督促，最后一次同时保留停滞策略。
+      yield* llm.push(...Array.from({ length: 10 }, () => reply().text("still working").stop()))
+      yield* prompt.loop({ sessionID: chat.id })
+      const parts = continuationParts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(parts).toHaveLength(9)
+      // 同时覆盖临界点两侧，防止把“超过八次”实现成第八次或每次都附加。
+      expect(parts.slice(0, 8).every((part) => !part.text.includes("<long-run-notice>"))).toBe(true)
+      // 数字来自公开的消息快照，避免只检查静态生成函数而遗漏 gate 接线。
+      expect(parts[8]?.metadata?.goal_continuation_turn).toBe(9)
+      expect(parts[8]?.text).toContain("<long-run-notice>")
+      expect(parts[8]?.text).toContain('<strategy-switch mode="breadth-first-replan">')
+    }),
+  { git: true },
+  30_000,
+)
+
 it.instance(
   "goal progress gate switches to replan after two no-evidence completions",
   () =>

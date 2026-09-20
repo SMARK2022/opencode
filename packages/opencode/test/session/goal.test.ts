@@ -400,8 +400,25 @@ it.instance(
         expect(prompt).toContain("Token budget: 50000")
         expect(prompt).toContain("Tokens remaining: 48766")
         expect(prompt).toContain('call the goal tool with operate "complete"')
-        expect(prompt).toContain("two consecutive eligible Goal turns")
+        // 确认边界必须指向下一条续跑消息，不能让同一消息里的重试自证 blocked。
+        expect(prompt).toContain("after the next goal-continuation message arrives")
+        expect(prompt).toContain("a repeated call while answering the same message does not count as the second confirmation")
+        expect(prompt).toContain("delegate the blocker audit to a subagent with the task tool")
         expect(prompt).toContain("the same trimmed reason")
+        // 允许拆步骤，但每步完成后必须继续；不能把下一步建议当作已执行工作。
+        expect(prompt).toContain("work on it until it is verifiably complete")
+        expect(prompt).toContain("finishing one step is a reason to start the next, not to stop")
+        expect(prompt).toContain("take it now instead of reporting findings")
+        // 等待必须有活句柄证据；观测失败不等于工作失败，不能指示重复启动。
+        expect(prompt).toContain("What counts as progress:")
+        expect(prompt).toContain("Waiting counts as progress only while")
+        expect(prompt).toContain("observe again, not restart")
+        expect(prompt).toContain("a blocker rephrased in different words is still the same condition")
+        expect(prompt).toContain("circling on one small point without a new operation is not progress either")
+        // 精简尾段仍必须要求正面完成证据，并保留逐项审查与预算汇报。
+        expect(prompt).toContain("the audit above must prove completion, not merely fail to find remaining work")
+        expect(prompt).toContain("For every explicit requirement, numbered item, named artifact")
+        expect(prompt).toContain("report the final consumed token budget to the user after the goal tool succeeds")
         // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
         // ordinary prompt 同时验证“不改变 blocked ownership”和“提供可执行 BFS 复核”两条边界。
         expect(prompt).toContain("re-check the blocker breadth-first")
@@ -413,6 +430,36 @@ it.instance(
         // ordinary 模式不得插入 BFS strategy-switch。
         expect(prompt).not.toContain("<strategy-switch")
         expect(prompt).not.toContain('mode="breadth-first-replan"')
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "continuationPrompt long-run notice is opt-in and independent of replan",
+  () =>
+    Effect.gen(function* () {
+      const goal = yield* (yield* SessionGoal.Service).set((yield* (yield* SessionNs.Service).create({})).id, {
+        objective: "build the feature",
+        tokenBudget: 50000,
+      })
+      // 默认调用不得提前施加长程督促；replan 不是长程开关的替代条件。
+      expect(SessionGoal.continuationPrompt(goal)).not.toContain("<long-run-notice>")
+      expect(SessionGoal.continuationPrompt(goal, "replan")).not.toContain("<long-run-notice>")
+      for (const mode of ["ordinary", "replan"] as const) {
+        const prompt = SessionGoal.continuationPrompt(goal, mode, true)
+        // 三条分支必须围绕完整需求执行，不允许提示仅分类或停在半途。
+        expect(prompt).toContain("<long-run-notice>")
+        expect(prompt).toContain("drive it to full completion")
+        expect(prompt).toContain("do not stop halfway through")
+        expect(prompt).toContain('If everything is verifiably complete, call the goal tool with operate "complete" and finish.')
+        expect(prompt).toContain("choose the next or the largest unfinished requirement you are authorized to advance and complete it now")
+        expect(prompt).toContain("advance any other authorized, unfinished part")
+        expect(prompt).toContain("follow the blocked verification rules and mark the goal blocked")
+        // 插入位置固定在预算之后、证据指引之前，避免与 BFS 策略块互相覆盖。
+        expect(prompt.indexOf("Tokens remaining:")).toBeLessThan(prompt.indexOf("<long-run-notice>"))
+        expect(prompt.indexOf("</long-run-notice>")).toBeLessThan(prompt.indexOf("Work from evidence:"))
+        expect(prompt.includes('<strategy-switch mode="breadth-first-replan">')).toBe(mode === "replan")
       }
     }),
   { git: true },
@@ -435,7 +482,17 @@ it.instance(
       expect(prompt).toContain("Explore breadth-first")
       expect(prompt).toContain("Ordinary continuation resumes only after advancement evidence appears")
       expect(prompt).toContain('call the goal tool with operate "complete"')
-      expect(prompt).toContain("two consecutive eligible Goal turns")
+      // 保留证据强弱与反作弊边界，只移除“汇报下一步即可停止”的出口。
+      expect(prompt).toContain("after the next goal-continuation message arrives")
+      expect(prompt).toContain("execute evidence-producing actions as you select nodes")
+      expect(prompt).toContain("Stagnation by itself is not a blocker")
+      expect(prompt).toContain("Do not manufacture a cosmetic edit")
+      expect(prompt).not.toContain("End-of-turn")
+      expect(prompt).not.toContain("at least one concrete evidence-producing action")
+      // 两种输出都要去掉分段指令，不能只修普通续跑而遗漏策略分支。
+      for (const text of [prompt, SessionGoal.continuationPrompt(goal)]) {
+        expect(text).not.toMatch(/this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i)
+      }
       // strategy 必须位于 Work from evidence 之后、Fidelity 之前。
       expect(prompt.indexOf("Work from evidence:")).toBeLessThan(prompt.indexOf("<strategy-switch"))
       expect(prompt.indexOf("</strategy-switch>")).toBeLessThan(prompt.indexOf("Fidelity:"))

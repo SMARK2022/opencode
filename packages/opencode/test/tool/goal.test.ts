@@ -6,7 +6,8 @@ import { Config } from "@/config/config"
 import { Session as SessionNs } from "@/session/session"
 import { SessionGoal } from "@/session/goal"
 import { MessageID, SessionID } from "@/session/schema"
-import { GoalTool, type GoalTurnContext } from "@/tool/goal"
+import { GoalTool, Parameters, type GoalTurnContext } from "@/tool/goal"
+import { ToolJsonSchema } from "@/tool/json-schema"
 import { Truncate } from "@/tool/truncate"
 import { Storage } from "@/storage/storage"
 import { SyncEvent } from "@/sync"
@@ -141,6 +142,15 @@ it.instance(
       )
       expect(result.output).toContain("complete")
       expect(result.output).toContain("all done")
+      // 成功结果只声明状态事实，不能把模型引向“结束本轮”的机制指令。
+      expect(result.output).toBe("Goal marked as complete: all done.")
+      // 经真实 wire schema 转换检查注解，覆盖不读取完整工具说明的 provider。
+      const schema = JSON.stringify(ToolJsonSchema.fromSchema(Parameters))
+      expect(schema).toContain("after the next goal-continuation message arrives")
+      expect(schema).toContain("after the user sends a new message")
+      for (const text of [schema, result.output]) {
+        expect(text).not.toMatch(/this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i)
+      }
 
       // 验证持久化
       const goal = yield* goalSvc.get(session.id)
@@ -220,7 +230,11 @@ it.instance(
       expect(r1.output).toContain("adjacent producer, consumer, test, or configuration path")
       expect(r1.output).toContain("one different search, test, or focused check")
       expect(r1.output).toContain("If any branch yields a viable path, continue working")
-      expect(r1.output).toContain("next eligible Goal turn")
+      // 重复调用不是第二次确认；文本必须给出真实可达的消息边界。
+      expect(r1.output).toContain("after the next goal-continuation message arrives")
+      expect(r1.output).toContain("a repeated call while answering the same message does not count")
+      expect(r1.output).toContain("Delegate an independent audit to a subagent with the task tool")
+      expect(r1.output).toContain("whether the current route is wrong, and which requirements remain unfinished")
       expect(r1.output).toContain("same trimmed reason")
       expect(r1.output).toContain("hard, uncertain, or incomplete")
       expect(r1.output.length).toBeLessThan(2000)
@@ -232,6 +246,17 @@ it.instance(
       expect(def.description).toContain("keeps the Goal active")
       expect(def.description).toContain("viable path")
       expect(def.description).toContain("adjacent producers/consumers/tests/configuration")
+      // 工具可见说明必须保留用户控制权，去分段措辞不能放宽暂停或恢复权限。
+      expect(def.description).toContain("prior read of the current goal state")
+      expect(def.description).toContain("after the user has sent a new message")
+      expect(def.description).toContain("You cannot resume a goal that was paused or terminated by the user")
+      expect(def.description).toContain("You cannot use this tool to pause, resume (from paused), or clear a goal")
+      expect(def.description).toContain("optionally delegate an independent audit to a subagent with the task tool")
+      expect(def.description).toContain("the same blocking condition must be verified again before marking `blocked`")
+      // description 与 pending 输出分别供调用前后读取，两面都不能泄露分段指令。
+      for (const text of [def.description, r1.output]) {
+        expect(text).not.toMatch(/this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i)
+      }
 
       // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
@@ -242,6 +267,7 @@ it.instance(
       )
       expect(r2.output).toContain("blocked")
       expect(r2.output).toContain("stuck on X")
+      expect(r2.output).toBe("Goal marked as blocked: stuck on X. The user can resume the goal later.")
 
       // 验证持久化
       const goal = yield* goalSvc.get(session.id)
@@ -338,8 +364,18 @@ it.instance(
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
         const error = Cause.squash(result.cause) as Error
-        expect(error.message).toContain("same turn")
+        // 拒绝原因用可执行的用户消息边界表达，不暗示模型能自行开启下一轮恢复。
+        expect(error.message).toContain("immediately after marking it")
         expect(error.message).toContain("Wait for a new user message")
+      }
+      // 新的合成续跑消息也不能恢复 terminal；必须与同消息重试的拒绝区分。
+      const continuation: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: false }
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, continuation))
+      const resumed = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, continuation)).pipe(Effect.exit)
+      expect(Exit.isFailure(resumed)).toBe(true)
+      if (Exit.isFailure(resumed)) {
+        const error = Cause.squash(resumed.cause) as Error
+        expect(error.message).toBe("You cannot resume a terminal goal while responding to a goal-continuation message. Resuming requires a new message from the user.")
       }
     }),
   { git: true },
@@ -366,6 +402,8 @@ it.instance(
             const error = Cause.squash(remark.cause) as Error
             expect(error.message).toContain("only valid for an active goal")
             expect(error.message).toContain("wait for the user to resume")
+            // 终态重标的错误仍需先读再恢复，避免简化文本抹掉用户授权边界。
+            expect(error.message).toContain("use operate active only after the user sends a new message; read the goal again first")
           }
 
           const persisted = yield* goalSvc.get(session.id)

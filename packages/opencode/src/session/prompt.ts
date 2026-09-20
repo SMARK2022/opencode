@@ -410,6 +410,14 @@ function absorbGoalTurnEvidence(
         const ckey = `${command.trim().toLowerCase()}\0${String(exit)}\0${output}`
         if (recordIfNew(ledger.commands, ckey)) exploration = true
       }
+
+      // task 完成只证明检查过一个外部分支；不将子代理自报结果提升为 advancement。
+      // 同一子会话重复返回不得反复冲掉停滞计数，沿用 commands 的身份去重。
+      if (part.tool === "task") {
+        const child = typeof metadata.sessionId === "string" ? metadata.sessionId : ""
+        if (child && recordIfNew(ledger.commands, `task:${child}`)) exploration = true
+        continue
+      }
     }
   }
   return { exploration, advancement }
@@ -2725,6 +2733,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const cfg = yield* config.get()
             // [local-smark] goal 续跑不再需要 experimental 开关，始终可用
             const maxGoalTurns = cfg.goal_max_turns ?? 32
+            // 长程督促与续跑上限在同一处定义：超过八次才附加提示，不改变 replan 判断。
+            const GOAL_LONG_RUN_TURN_THRESHOLD = 8
             if (
               maxGoalTurns > 0 &&
               !session.parentID &&
@@ -2811,7 +2821,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                           // max 来自本次 runLoop 已采用的配置，与 turn 共享同一 reset 边界。
                           goal_continuation_max_turns: maxGoalTurns,
                         },
-                        text: SessionGoal.continuationPrompt(goal, continuationMode),
+                        text: SessionGoal.continuationPrompt(goal, continuationMode, goalTurns > GOAL_LONG_RUN_TURN_THRESHOLD),
                       },
                     ],
                   }).pipe(Effect.orDie)
@@ -2839,6 +2849,48 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
             yield* slog.info("exiting loop")
             break
+          }
+
+          // 首次派发时，已有回答的消息不能在恢复后被盲目重答；新用户消息直接执行。
+          // step 限定恢复入口，避免正常 tool-calls 的后续 step 被当成再次恢复。
+          if (step === 0 && !session.parentID && lastAssistant?.parentID === lastUser.id) {
+            const cfg = yield* config.get()
+            const maxGoalTurns = cfg.goal_max_turns ?? 32
+            // 0 是既有禁用合同；恢复动作不能绕过用户关闭续跑的配置。
+            if (maxGoalTurns > 0) {
+              const goal = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              const goalAgent = yield* agents.get(lastUser.agent)
+              if (goal._tag === "Some" && goal.value.status === "active" && goalAgent && !isDecideAgent(goalAgent)) {
+                goalTurns++
+                // 恢复不吸收一次新的完成证据，正文用 ordinary；展示仍保留 pending 复查身份。
+                const blockedCheck = msgs.some((message) =>
+                  message.info.role === "assistant" && message.info.parentID === lastUser.id &&
+                  message.parts.some((part) => part.type === "tool" && part.tool === "goal" &&
+                    part.state.status === "completed" && part.state.metadata.goal_transition === GOAL_BLOCKED_PENDING_TRANSITION),
+                )
+                // marker 是 Goal 确认计数的身份依据；其余字段是同一消息的不可变展示快照。
+                yield* prompt({
+                  sessionID,
+                  noReply: true,
+                  source: "system_continue",
+                  agent: lastUser.agent,
+                  model: { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID },
+                  parts: [{
+                    type: "text",
+                    synthetic: true,
+                    metadata: {
+                      goal_continuation: true,
+                      goal_continuation_mode: blockedCheck ? "block-check" : "continue",
+                      goal_continuation_turn: goalTurns,
+                      goal_continuation_max_turns: maxGoalTurns,
+                    },
+                    text: SessionGoal.continuationPrompt(goal.value, "ordinary"),
+                  }],
+                }).pipe(Effect.orDie)
+                // 新 continuation 尚无回答，下一次迭代自然直派，不能再次补发。
+                continue
+              }
+            }
           }
 
           step++
@@ -3341,6 +3393,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
+      // 只处理恢复入口：普通 prompt 已经在 createUserMessage 前清理，不能在创建后再清理。
+      if (input.cleanupRevert) {
+        const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        if (session.revert) yield* revert.cleanup(session)
+        const user = yield* sessions.findMessage(input.sessionID, (info) => info.role === "user").pipe(Effect.orDie)
+        // 全撤后不启动空循环；恢复调用方忽略返回值，隐藏的持久消息只履行返回类型合同。
+        // cleanup 不删除记录，且两个恢复入口已确认历史存在，故这里不调用要求可见消息的 lastAssistant。
+        if (Option.isNone(user)) {
+          const tail = yield* MessageV2.page({ sessionID: input.sessionID, limit: 1, includeHidden: true }).pipe(Effect.orDie)
+          return tail.items[0]
+        }
+      }
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
 
@@ -3553,6 +3617,8 @@ export type PromptInput = Schema.Schema.Type<typeof PromptInput>
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,
+  // 内部恢复调用参数，不改变工具输入、结果或持久化消息结构。
+  cleanupRevert: Schema.optional(Schema.Boolean),
 }) {}
 
 export const ShellInput = Schema.Struct({

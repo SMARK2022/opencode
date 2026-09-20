@@ -239,6 +239,40 @@ describe("session goal HttpApi", () => {
   )
 
   it.instance(
+    "goal resume after reverting all history stays idle and applies the revert",
+    () => Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "full revert resume" })
+      const user = yield* sessions.updateMessage({
+        id: MessageID.ascending(), role: "user", sessionID: session.id, agent: "build",
+        model: { providerID: ProviderID.make("missing"), modelID: ModelID.make("missing") },
+        time: { created: Date.now() },
+      })
+      yield* sessions.updatePart({ id: PartID.ascending(), messageID: user.id, sessionID: session.id, type: "text", text: "withdrawn request" })
+      // 用公开撤回端点留下边界；不直接写 hidden，才能验证 HTTP 恢复接线确实执行清理。
+      const reverted = yield* request(pathFor(SessionPaths.revert, { sessionID: session.id }), {
+        method: "POST", headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+        body: JSON.stringify({ messageID: user.id }),
+      })
+      expect(reverted.status).toBe(200)
+      expect((yield* sessions.get(session.id)).revert?.messageID).toBe(user.id)
+      // 订阅先连接再提交 goal mutation；观察窗口只检查空恢复本身，不依赖模型响应速度。
+      const result = yield* observeGoalEvents({ directory: test.directory, sessionID: session.id, objective: "await new input", timeout: 1_000 })
+      expect(result.response.status).toBe(200)
+      // 全撤之后没有可派发的历史：既不报 Provider 错误，也不创建空运行。
+      expect(result.statuses).not.toContain("busy")
+      expect(result.failed).toBe(false)
+      expect(yield* sessions.messages({ sessionID: session.id })).toEqual([])
+      expect((yield* sessions.get(session.id)).revert).toBeUndefined()
+      const body = yield* responseJson(result.response)
+      expect(body.goal.status).toBe("active")
+    }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30_000,
+  )
+
+  it.instance(
     "active goal with user history starts the loop and exposes background failure",
     () =>
       Effect.gen(function* () {

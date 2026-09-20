@@ -357,7 +357,8 @@ export const layer = Layer.effect(
         if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
           return {
             type: "error",
-            message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only in a later real user turn after reading it again.`,
+            // 保留用户恢复与模型自有终态的区别，只把时序要求改成可见消息边界。
+            message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only after the user sends a new message; read the goal again first.`,
           }
         }
 
@@ -462,12 +463,12 @@ export const layer = Layer.effect(
           // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
           if (!row.terminal_turn_id)
             return { type: "error", message: "This goal was marked as complete or blocked by the user, not by you. You can only resume goals that you yourself marked as complete or blocked. The user must resume this goal themselves." }
-          // 必须在后续新真实用户 turn 恢复，不能在同一 turn
+          // 拒绝同消息恢复仍按 terminal_turn_id 判定；文案只给出用户可触发的下一步。
           if (row.terminal_turn_id === input.turnID)
-            return { type: "error", message: "You cannot resume a goal in the same turn that you marked it as complete or blocked. Wait for a new user message before attempting to resume." }
-          // 必须是真实用户 turn，不能是 Goal continuation
+            return { type: "error", message: "You cannot resume a goal immediately after marking it complete or blocked. Wait for a new user message before attempting to resume." }
+          // 合成续跑消息不代表用户重新授权，不能因移除 turn 措辞而放宽恢复权限。
           if (!input.userInitiated)
-            return { type: "error", message: "You cannot resume a terminal goal from a continuation turn. Resuming a terminal goal requires a new user-initiated turn." }
+            return { type: "error", message: "You cannot resume a terminal goal while responding to a goal-continuation message. Resuming requires a new message from the user." }
 
           Database.use((db) =>
             db.update(SessionGoalTable).set({
@@ -553,7 +554,7 @@ export type ContinuationMode = "ordinary" | "replan"
 // 固定文本让模型看到稳定的行为边界；progress ledger 仍是唯一决定何时切换的 owner。
 const STRATEGY_SWITCH_BLOCK = [
   '<strategy-switch mode="breadth-first-replan">',
-  "The progress gate entered breadth-first re-plan mode after two consecutive eligible Goal turns produced no new qualifying evidence.",
+  "The recent work produced no new qualifying evidence. This goal needs a breadth-first re-plan.",
   "",
   "Keep the Goal active. This mode changes the work strategy; it does not pause, narrow, complete, or block the Goal. Preserve the full objective and continue until the existing completion or blocked contract is genuinely satisfied.",
   "",
@@ -577,19 +578,28 @@ const STRATEGY_SWITCH_BLOCK = [
   // 不要求模型为了满足 gate 制造改动；可达但无效的动作仍应保持 re-plan。
   "7. If exploration produces no advancement evidence, remain in breadth-first re-plan mode and move to another unvisited branch. Do not fall back to the previous repeated strategy.",
   "",
-  "End-of-turn rule:",
-  // 末尾规则把“有证据的探索”和“纯文字计划”区分开，防止 re-plan 自己成为停滞循环。
-  "- State which frontier node was explored, what authoritative evidence was produced, and which node should be visited next.",
-  "- A prose-only re-plan does not satisfy the progress gate; carry out at least one concrete evidence-producing action when a reachable action exists.",
+  "Execution rules:",
+  // 选择节点后直接执行并继续，避免“汇报下一节点”或最低动作数成为停止条件。
+  "- A prose-only re-plan does not satisfy the progress gate; execute evidence-producing actions as you select nodes, and keep going to the next node yourself instead of stopping to report what should happen next.",
   "- If current authoritative evidence already proves every requirement, perform the existing completion audit and mark the Goal complete. Do not create artificial work merely to satisfy the gate.",
   // blocked 仍由 GoalTool/SessionGoal 所有，strategy-switch 不能越权把停滞变成 terminal。
-  "- If a real blocker remains, follow the existing two-turn blocked audit exactly. Stagnation by itself is not a blocker.",
+  "- If a real blocker remains, follow the existing blocked audit exactly. Stagnation by itself is not a blocker.",
   "</strategy-switch>",
+].join("\n")
+
+// 长程督促只描述未完成工作，不暴露计数机制，以免再次诱导按轮次分段。
+const GOAL_LONG_RUN_NOTICE = [
+  "<long-run-notice>",
+  "This objective is still unfinished after repeated work. Stay on it autonomously and drive it to full completion: do not stop halfway through, do not narrow it to what is already done, and do not settle into reporting status. Re-read the full objective and every requirement it references, then act:",
+  '- If everything is verifiably complete, call the goal tool with operate "complete" and finish.',
+  "- If work remains, choose the next or the largest unfinished requirement you are authorized to advance and complete it now. If you have been circling on one difficult part, check the remaining requirements and advance any other authorized, unfinished part instead of repeating the same status.",
+  "- If verification keeps hitting the same genuine blocker, follow the blocked verification rules and mark the goal blocked instead of circling further.",
+  "</long-run-notice>",
 ].join("\n")
 
 // 构建续跑 prompt：作为 synthetic user message 注入，不进 system prompt
 // 以保持 provider prefix cache 稳定。replan 只在 Work from evidence 后插入 strategy-switch。
-export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinary"): string {
+export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinary", longRun = false): string {
   // budget/remaining 每轮从当前 Goal 读取，避免 synthetic message 使用旧 usage 快照。
   const budget = goal.tokenBudget ?? "unbounded"
   const remaining = goal.tokenBudget != null ? Math.max(0, goal.tokenBudget - goal.tokensUsed) : "unbounded"
@@ -600,9 +610,9 @@ export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinar
     "",
     `<objective>${escapeXml(goal.objective)}</objective>`,
     "",
-    "Continuation behavior:",
-    "- This goal persists across turns. Ending this turn does not require shrinking the objective to what fits now.",
-    "- Keep the full objective intact. If it cannot be finished now, make concrete progress toward the real requested end state, leave the goal active, and do not redefine success around a smaller or easier task.",
+    // 拆步骤用于执行完整目标，不把一次回答或一个步骤当作停止边界。
+    "Execution:",
+    "- Keep the full objective intact: work on it until it is verifiably complete. You may break the work into steps; finishing one step is a reason to start the next, not to stop. When you identify an authorized action that advances the objective, take it now instead of reporting findings, a plan, or a next-step recommendation. Do not redefine success around a smaller or easier task.",
     "- Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.",
     "",
     "Budget:",
@@ -610,14 +620,24 @@ export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinar
     `- Token budget: ${budget}`,
     `- Tokens remaining: ${remaining}`,
     "",
+    // longRun 与策略模式正交；是否达到阈值由调用方拥有，不从 Goal 用量推断。
+    ...(longRun ? [GOAL_LONG_RUN_NOTICE, ""] : []),
     "Work from evidence:",
     "Use the current worktree and external state as authoritative. Previous conversation context can help locate relevant work, but inspect the current state before relying on it. Improve, replace, or remove existing work as needed to satisfy the actual objective.",
     "",
     // replan 模式才插入 BFS 策略块；ordinary 保持历史文案结构不变。
     // ordinary 保持既有 prompt 形状；只有 gate 明确设置 replan 才增加 BFS block。
     ...(mode === "replan" ? [STRATEGY_SWITCH_BLOCK, ""] : []),
+    // 进展必须可判定；活句柄等待与观测失败分开，避免超时观测诱导重复启动。
+    "What counts as progress:",
+    "- Progress changes real state or produces evidence that changes what to do next: completed edits, executed checks, a new source inspected, a result that differs from before.",
+    "- Re-reading the same content, restating status, rewriting the plan, or describing future steps is not progress when it adds no new evidence or concrete improvement — circling on one small point without a new operation is not progress either.",
+    "- An inconclusive check or an empty search result is a fact about that check, not a conclusion about the objective. Change the approach: a different source, different search terms, or a different verification path.",
+    "- Waiting counts as progress only while a specific process, job, session, or tool handle is confirmed alive right now. A missing handle or a terminal state means the work has stopped — act on that. A failed or timed-out observation means observe again, not restart.",
+    "- If the recent work produced no progress, take the next available safe action directly instead of restating status. If nothing is actionable because the same genuine blocker remains, follow the blocked rules below; a blocker rephrased in different words is still the same condition.",
+    "",
     "Fidelity:",
-    "- Optimize each turn for movement toward the requested end state, not for the smallest stable-looking subset or easiest passing change.",
+    "- Optimize every action for movement toward the requested end state, not for the smallest stable-looking subset or easiest passing change.",
     "- Do not substitute a narrower, safer, smaller, merely compatible, or easier-to-test solution because it is more likely to pass current tests.",
     "- Treat alignment as movement toward the requested end state. An edit is aligned only if it makes the requested final state more true; useful-looking behavior that preserves a different end state is misaligned.",
     "",
@@ -632,13 +652,14 @@ export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinar
     "- Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.",
     "- The audit must prove completion, not merely fail to find obvious remaining work.",
     "",
-    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
+    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion; the audit above must prove completion, not merely fail to find remaining work. If the evidence is incomplete, weak, indirect, or leaves any requirement unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
     "",
     "Blocked audit:",
     '- The first blocked call starts the audit and keeps the Goal active; re-check the blocker breadth-first, inspect adjacent producers, consumers, tests, or configuration, and run a different focused check.',
     '- If any explored branch yields a viable path, continue working and do not call blocked again.',
-    '- If the same blocker still prevents meaningful progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
-    '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh audit with the same two-turn and exact-reason requirements.',
+    // runtime 按消息边界确认而非按调用次数；独立审查建议不新增状态机前置条件。
+    '- If the same blocker still prevents meaningful progress after that exploration, call the goal tool with operate "blocked" again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count as the second confirmation. For an independent judgment, delegate the blocker audit to a subagent with the task tool before confirming.',
+    '- If the user resumes a goal that was previously marked "blocked", treat the resumed work as a fresh audit with the same exact-reason requirements.',
     '- Use operate "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
     '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',
     '- Never use operate "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
