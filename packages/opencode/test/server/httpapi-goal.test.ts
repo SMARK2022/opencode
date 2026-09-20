@@ -247,6 +247,78 @@ describe("session goal HttpApi", () => {
     30000,
   )
 
+  // [local-smark] 0642：全撤后的 goal 恢复——loop 必须消费 revert 边界后保持 idle，不派发也不报错。
+  it.instance(
+    "goal resume after reverting all history stays idle and applies the revert",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "full revert resume" })
+        const user = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("missing"), modelID: ModelV2.ID.make("missing") },
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({ id: PartID.ascending(), messageID: user.id, sessionID: session.id, type: "text", text: "withdrawn request" })
+        // 用公开撤回端点留下边界；不直接写 hidden，才能验证 HTTP 恢复接线确实执行清理。
+        const reverted = yield* request(pathFor(SessionPaths.revert, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ messageID: user.id }),
+        })
+        expect(reverted.status).toBe(200)
+        expect((yield* sessions.get(session.id)).revert?.messageID).toBe(user.id)
+        // 订阅先连接再提交 goal mutation；观察窗口只检查空恢复本身，不依赖模型响应速度。
+        const eventRes = yield* request(pathFor(EventPaths.event, {}), {
+          headers: { "x-opencode-directory": test.directory },
+        })
+        expect(eventRes.status).toBe(200)
+        const eventQueue = yield* Queue.unbounded<Uint8Array>()
+        yield* eventRes.stream.pipe(
+          Stream.runForEach((value) => Queue.offer(eventQueue, value)),
+          Effect.forkScoped,
+        )
+        const decoder = new TextDecoder()
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "await new input" }),
+        })
+        expect(res.status).toBe(200)
+        // 全撤之后没有可派发的历史：goalSet 只在存在可见 user 时 fork loop，
+        // loop 入口的 cleanupRevert 清理后也不得报 Provider 错误或创建空运行。
+        let sawBusy = false
+        for (let i = 0; i < 10 && !sawBusy; i++) {
+          const statusRes = yield* request(pathFor(SessionPaths.status, {}), {
+            headers: { "x-opencode-directory": test.directory },
+          })
+          const statuses = (yield* responseJson(statusRes)) as Record<string, { type: string }>
+          sawBusy = statuses[session.id]?.type === "busy"
+          if (!sawBusy) yield* Effect.sleep(100)
+        }
+        expect(sawBusy).toBe(false)
+        // goal.updated 等事件可以到达，但不得出现 session error 事件。
+        let sawErrorEvent = false
+        for (let i = 0; i < 20; i++) {
+          const chunk = yield* Queue.take(eventQueue).pipe(Effect.timeoutOption("500 millis"))
+          if (chunk._tag === "None") break
+          const text = decoder.decode(chunk.value)
+          if (text.includes("session.error") || text.includes('"type":"error"')) sawErrorEvent = true
+        }
+        expect(sawErrorEvent).toBe(false)
+        expect(yield* sessions.messages({ sessionID: session.id })).toEqual([])
+        expect((yield* sessions.get(session.id)).revert).toBeUndefined()
+        const body = yield* responseJson(res)
+        expect((body as { goal?: { status?: string } }).goal?.status).toBe("active")
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30_000,
+  )
+
   // 有 user history 时 active mutation 启动后台 loop（missing provider 会在模型解析处失败）。
   // mutation 已提交后 loop failure 走既有 Session error event，而不是 catch-and-ignore；
   // busy 的出现证明 fork 真正启动，未被空守卫拦截。

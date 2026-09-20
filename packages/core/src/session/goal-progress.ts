@@ -239,6 +239,14 @@ export function absorbGoalTurnEvidence(
         const ckey = `${command.trim().toLowerCase()}\0${String(exit)}\0${output}`
         if (recordIfNew(ledger.commands, ckey)) exploration = true
       }
+
+      // task 完成只证明检查过一个外部分支；不将子代理自报结果提升为 advancement。
+      // 同一子会话重复返回不得反复冲掉停滞计数，沿用 commands 的身份去重。
+      if (part.tool === "task") {
+        const child = typeof metadata.sessionId === "string" ? metadata.sessionId : ""
+        if (child && recordIfNew(ledger.commands, `task:${child}`)) exploration = true
+        continue
+      }
     }
   }
   return { exploration, advancement }
@@ -278,7 +286,10 @@ export function nativeEvidence(messages: readonly SessionMessage.Message[]): Evi
     }
     for (const part of message.content) {
       if (part.type !== "tool" || part.state.status !== "completed") continue
-      const metadata = part.state.structured
+      // Native后台通知也是已结算ToolPart；只有实际任务完成才提供共享探索身份。
+      const metadata = part.name === "task" && part.state.structured.state === "completed"
+        ? { ...part.state.structured, sessionId: part.state.structured.task_id }
+        : part.state.structured
       // Bash 首段是稳定输出，后附耗时说明不能制造验证结果变化。
       const output = part.state.content.flatMap((content) => content.type === "text" ? [content.text] : [])[0] ?? ""
       parts.push({
