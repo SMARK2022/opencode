@@ -6,7 +6,7 @@ import { Shell } from "../shell"
 export type Dialect = "bash" | "powershell" | "cmd"
 export type Word = { value: string; start: number; end: number; quoted: boolean; stripped: boolean; dynamic: boolean }
 export type Redirect = { operator: string; target?: Word; content?: string }
-export type Command = { words: Word[]; redirects: Redirect[]; group: number; pipeTo?: number }
+export type Command = { words: Word[]; redirects: Redirect[]; group: number; pipeTo?: number; stdin?: Word }
 
 // 返回语法树；兼容变换仅作用于分析文本，工具执行始终使用原命令。
 export async function parse(source: string, dialect: Dialect) {
@@ -34,13 +34,15 @@ function word(node: Node, dialect: Dialect): Word {
   // 命令名和重定向文件名都可能包住一个literal，片段拼接仍由同一解引用路径处理。
   if (["command_name", "redirected_file_name"].includes(node.type) && parts.length === 1) return word(parts[0], dialect)
   const raw = node.text
-  const single = dialect !== "cmd" && raw.startsWith("'") && raw.endsWith("'")
-  const double = raw.startsWith('"') && raw.endsWith('"')
-  const body = single || double ? raw.slice(1, -1) : raw
+  // here-string的首尾换行属于定界符；正文中的引号不承担普通字符串的转义职责。
+  const here = dialect === "powershell" && /^@['"]\r?\n/.test(raw)
+  const single = dialect !== "cmd" && (here ? raw.startsWith("@'") : raw.startsWith("'") && raw.endsWith("'"))
+  const double = here ? raw.startsWith('@"') : raw.startsWith('"') && raw.endsWith('"')
+  const body = here ? raw.replace(/^@['"]\r?\n|\r?\n['"]@$/g, "") : single || double ? raw.slice(1, -1) : raw
   // 相邻引用片段共同组成一个argv；分别解释片段后拼接，避免拆成多个操作数。
   const value = node.type === "concatenation" ? parts.map((part) => word(part, dialect).value).join("")
-    : single ? dialect === "powershell" ? body.replaceAll("''", "'") : body
-    : dialect === "powershell" ? body.replace(/`(.)/gs, (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "0": "\0" })[char] ?? char)
+    : single ? dialect === "powershell" && !here ? body.replaceAll("''", "'") : body
+    : dialect === "powershell" ? body.replace(/`(.)|""/gs, (text, char: string | undefined) => char === undefined ? double && !here ? '"' : text : ({ n: "\n", r: "\r", t: "\t", "0": "\0" })[char] ?? char)
     : dialect === "cmd" ? body.replace(/\\([\\'"$`#;^&|<> ()])/g, "$1")
     : double ? body.replace(/\\([\\$`"\n])/g, "$1") : body.replace(/\\(.)/gs, "$1")
   const expansion = ["expansion", "simple_expansion", "command_substitution", "sub_expression", "variable"]
@@ -102,6 +104,12 @@ export async function analyze(source: string, dialect: Dialect) {
       // here-doc右侧的管道节点位于redirect内部，左端来自其所属statement.body。
       const owner = pipeline.parent?.type === "heredoc_redirect" ? redirectOwner(pipeline.parent) : undefined
       const members = [...(owner ? [owner] : []), ...topCommands(pipeline)]
+      // PowerShell的管道首项可以是表达式而非command；只接收grammar确认的单个字符串。
+      const first = children(children(pipeline)[0] ?? pipeline)[0]
+      const literal = first?.descendantsOfType("string_literal")[0]
+      const consumer = members[0] ? records.get(members[0].id) : undefined
+      if (dialect === "powershell" && consumer && literal && first?.text === literal.text)
+        consumer.stdin = word(literal, dialect)
       for (let index = 0; index + 1 < members.length; index++) {
         const left = records.get(members[index].id)
         const right = records.get(members[index + 1].id)
@@ -111,7 +119,8 @@ export async function analyze(source: string, dialect: Dialect) {
     }
     // 后台和换行组成的普通只读序列沿用原general下限；引用内部换行不属于命令间隙。
     const top = topCommands(tree.rootNode)
-    const opaque = tree.rootNode.children.some((child) => child?.type === "&") || top.some((node, index) => index > 0 && /[\r\n]/.test(source.slice(top[index - 1].endIndex, node.startIndex)))
+    // Word与node的offset都属于实际解析表示，不能回切长度不同的原执行正文。
+    const opaque = tree.rootNode.children.some((child) => child?.type === "&") || top.some((node, index) => index > 0 && /[\r\n]/.test(tree.rootNode.text.slice(top[index - 1].endIndex, node.startIndex)))
     return { commands, incomplete: tree.rootNode.hasError, opaque, environment: tree.rootNode.descendantsOfType("variable_assignment").length > 0 }
   } finally {
     // 导出的记录与树分离，异常退出时也及时释放WASM分配。

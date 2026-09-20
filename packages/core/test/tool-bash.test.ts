@@ -86,9 +86,10 @@ const appProcess = Layer.succeed(
         const argument = command.args.at(-1)
         // 只观察外层脚本块中的原始命令；偏好行数和末尾流重定向不属于用户输入。
         const script = command.args.includes("-EncodedCommand") && argument !== undefined ? Buffer.from(argument, "base64").toString("utf16le") : undefined
+        // 固定三行完成postlude属于传输包装，观察原命令时剥除，完整argv另有独立字节预期。
         const original = script === undefined
           ? command.options.shell === false && Shell.name(command.command) === "cmd" ? (argument ?? "").slice(1, -1) : argument ?? command.command
-          : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
+          : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} ")).split("\n").slice(0, -3).join("\n")
         runs.push({ command: original, executable: command.command, spawnShell: command.options.shell, cwd: command.options.cwd,
           shell: command.options.shell === false ? command.command : command.options.shell,
           args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
@@ -318,7 +319,7 @@ describe("BashTool", () => {
             // 独立字节预期同时约束无profile、UTF-8前导与原命令，不能只检查编码标志。
             if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
               expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
-                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'SilentlyContinue'", "$DebugPreference = 'SilentlyContinue'", "& {", "pwd", "} 3>&1 4>&1 5>&1 6>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
+                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'SilentlyContinue'", "$DebugPreference = 'SilentlyContinue'", "& {", "pwd", "if ($?) { exit 0 }", "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", "exit 1", "} 3>&1 4>&1 5>&1 6>&1"].join("\n"), "utf16le").toString("base64")])
           }),
         )
           .pipe(Effect.andThen(() => Effect.gen(function* () {
@@ -413,17 +414,21 @@ describe("BashTool", () => {
                   // 真实leaf/registry配已有process替身，验证双门、执行串和typed输出而不运行Python。
                   const settled = yield* settleTool(registry, call(input))
                   expect(settled.result.type).toBe("content")
-                  expect(settled.output?.structured).toMatchObject({ commandAdaptation: "powershell-inline-python-quoting-v1" })
+                  expect(settled.output?.structured).not.toHaveProperty("commandAdaptation")
                   expect(assertions.map((request) => request.action)).toEqual(["external_directory", "bash"])
-                  for (const request of assertions) expect(request.metadata).toMatchObject({ command, inline_scripts: [`print('{"native":1}')`] })
+                  // 两道门禁直接看原生脚本；不再消费被猜测改写的Python附加源码。
+                  for (const request of assertions) {
+                    expect(request.metadata).toMatchObject({ command })
+                    expect(request.metadata).not.toHaveProperty("inline_scripts")
+                  }
                   expect(assertions[1]?.resources).toEqual([command])
                   expect(assertions[1]?.save).toEqual([command])
                   expect(runs).toHaveLength(1)
                   const encoded = runs[0]?.args?.at(-1)
                   if (!encoded) throw new Error("expected captured transport")
                   const script = Buffer.from(encoded, "base64").toString("utf16le")
-                  expect(script).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
-                  expect(script).not.toContain(command)
+                  expect(script).not.toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
+                  expect(script).toContain(command)
                   for (const action of ["external_directory", "bash"]) {
                     reset()
                     denyAction = action
@@ -536,9 +541,9 @@ describe("BashTool", () => {
               expect(text).not.toContain("\r")
               expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
               expect(text).not.toContain("\uFFFD")
-              // 仍逐字检查原授权警告与退出状态，只允许尾部增加本项耗时。
+              // 原警告和退出状态逐字保留，附加notice同时记录真实shell身份与耗时。
               expect(actualStatus.replace(/\n\n<opencode_notice [^\n]*\/>$/, "")).toBe(status)
-              expect(actualStatus).toMatch(/\n\n<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" elapsed_ms="\d+" \/>$/)
+              expect(actualStatus).toMatch(/\n\n<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" elapsed_ms="\d+" shell="(?:pwsh|powershell)" \/>$/)
               for (const expected of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
                 expect(text).toContain(expected)
               }
@@ -621,6 +626,8 @@ describe("BashTool", () => {
         }),
         (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
       ),
+      // 两版PowerShell共22次原生启动，总预算独立于单次命令期限。
+      60_000,
     )
   }
 
