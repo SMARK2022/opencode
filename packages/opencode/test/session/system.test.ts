@@ -18,6 +18,7 @@ import { ProjectID } from "../../src/project/schema"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { SessionContextEpoch } from "../../src/session/context-epoch"
+import { Config } from "../../src/config/config"
 import type { InstanceContext } from "../../src/project/instance-context"
 import PROMPT_ASTRA from "../../src/session/prompt/gpt-astra.txt"
 import PROMPT_GPT from "../../src/session/prompt/gpt.txt"
@@ -60,6 +61,7 @@ const build: Agent.Info = {
 
 const it = testEffect(
   SystemPrompt.layer.pipe(
+    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.succeed({}) })),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(
@@ -159,8 +161,10 @@ const contextGit = (file: () => string): Git.Interface =>
     applyPatch: () => Effect.die("unused"),
   })
 
-const contextLayer = (git: Git.Interface) =>
+const contextLayer = (git: Git.Interface, shell: () => string | undefined = () => undefined) =>
   SystemPrompt.layer.pipe(
+    // epoch 用例使用虚构目录；显式提供配置边界，避免提示回归测试读取宿主配置。
+    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.sync(() => ({ shell: shell() })) })),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(
@@ -233,6 +237,30 @@ const renderEnvironment = (
   }).pipe(Effect.provide(contextLayer(git)), Effect.provideService(InstanceRef, contextInstance(directory)))
 
 describe("session.system", () => {
+  baseIt.effect("environment follows configured shell changes", () => {
+    // 同一个服务连续渲染，防止把配置值冻结在 layer 构造或首次调用时。
+    const cfg = { shell: process.platform === "win32" ? "cmd" : "sh" }
+    const directory = "F:/tmp/opencode-configured-shell"
+    const sessionID = SessionID.make("session-configured-shell")
+    return Effect.gen(function* () {
+      seedContextSession(sessionID, directory)
+      const prompt = yield* SystemPrompt.Service
+      const input = { sessionID, model: contextModel, registeredTools: [], history: contextHistory }
+      const first = yield* prompt.environment(input)
+      // 独立 shell 名称来自显式配置，而非复制生产 shell 解析算法。
+      expect(first.system.join("\n")).toContain(process.platform === "win32" ? "Shell: cmd.exe" : "Shell: sh")
+      cfg.shell = "bash"
+      const second = yield* prompt.environment(input)
+      expect(second.system.join("\n")).toContain("Shell: bash")
+      // 只允许当前能力段变化，日期和 Git 的会话快照仍由原 epoch 合同保护。
+      expect(second.updates).toEqual(first.updates)
+      expect(second.system.join("\n")).toContain("before.ts")
+    }).pipe(
+      Effect.provide(contextLayer(contextGit(() => "before.ts"), () => cfg.shell)),
+      Effect.provideService(InstanceRef, contextInstance(directory)),
+    )
+  })
+
   test("Astra autonomy infers intent before choosing work", () => {
     // 原文合同适用于调研和代码任务；只断言模型收到的文本，不声称证明模型完成率。
     expect(PROMPT_ASTRA).toContain("Infer the user's intent and your task scope from their instructions and the prior conversation context.")

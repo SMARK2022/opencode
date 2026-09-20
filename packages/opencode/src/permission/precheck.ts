@@ -254,10 +254,8 @@ async function bashEffect(input: {
   const patternCommand = input.patterns.join(" && ")
   if (!command) return evaluateShell(patternCommand, 0, cwd, shellDialect(input.metadata.shell))
 
-  // 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据风险取 max。
-  // inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的源码证据，
-  // 只能提高风险，不能降低：forbidden/dangerous source 在任何 gate 都不可被弱化。
-  const raw = await shellEvidenceRisk(command, input.metadata, cwd)
+  // 执行原文承载外层命令与源码，模式键提供额外匹配信息并参与风险取高。
+  const raw = await evaluateShell(command, 0, cwd, shellDialect(input.metadata.shell))
   if (!patternCommand.trim() || patternCommand === command) return raw
 
   // Shell metadata is the raw audit/reviewer evidence, while permission patterns
@@ -268,18 +266,7 @@ async function bashEffect(input: {
   return maxRisk(raw, await evaluateShell(patternCommand, 0, cwd, shellDialect(input.metadata.shell)))
 }
 
-// inline_scripts附加证据在原命令风险之上单调叠加，保持原工具的双证据合同。
-// 非数组或非字符串元素沿用原过滤方式，任何附加源码都不会降低已确定风险。
-// inline_scripts是Python源码，不带python -c命令前缀，应直接交给源码词法入口。
-// sourceRisk区分字符串与真实API调用，并分别保留原普通删除和保护目录规则。
-// 外层命令则使用其实际shell方言，两种输入各自对应明确的语言协议。
-async function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>, cwd?: string): Promise<Decision> {
-  const scripts = Array.isArray(metadata.inline_scripts) ? metadata.inline_scripts.filter((item): item is string => typeof item === "string") : []
-  let risk = await evaluateShell(command, 0, cwd, shellDialect(metadata.shell))
-  for (const script of scripts) risk = maxRisk(risk, await sourceRisk(script, "python"))
-  return risk
-}
-
+// inline_scripts 随 Python 命令改写移除，两道门禁改为直接分析实际执行的 command。
 function maxRisk(left: Decision, right: Decision) {
   return LEVELS.indexOf(right.level) > LEVELS.indexOf(left.level) ? right : left
 }
@@ -438,11 +425,12 @@ async function externalDirectoryEffect(input: {
   if (input.permission !== "external_directory") return
 
   if (input.metadata.action_kind === "shell") {
-    // external_directory 是第一道权限门禁；使用与 bashEffect 相同的 shellEvidenceRisk，
-    // 确保 dangerous inline source 在此就被 deterministic deny，而非等到后续 bash gate。
-    const shell = await shellEvidenceRisk(
+    // 两道门禁共享原command、方言与cwd；外部目录的cautious下限不覆盖更高源码风险。
+    const shell = await evaluateShell(
       typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-      input.metadata,
+      0,
+      typeof input.metadata.cwd === "string" ? input.metadata.cwd : undefined,
+      shellDialect(input.metadata.shell),
     )
     // external_directory access is normally reviewable, but an already-critical
     // shell payload must remain deterministic deny (forbidden) or keep its stronger
@@ -590,6 +578,11 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
     // 包装器不升级safe，其实际载荷的已有风险完整保留。
     return inner.level === "safe" ? { level: "general", reason: "privilege wrapper requires explicit approval" } : inner
   }
+  // PowerShell 的版本后缀和 conda 参数在此定位 Python 源码，随后沿用 sourceRisk。
+  const content = command.redirects.findLast((redirect) => redirect.content !== undefined)?.content
+    ?? (command.stdin?.dynamic ? undefined : command.stdin?.value)
+  const python = dialect === "powershell" ? pythonSource(command.words, content) : undefined
+  if (python !== undefined) return sourceRisk(python, "python")
   const evalFlags = INTERPRETER_FLAGS.get(name) ?? (SHELL_WRAPPERS.has(name) ? new Set(["-c", "-lc"]) : POWERSHELL_WRAPPERS.has(name) ? new Set(["-command", "-c", "-encodedcommand", "-enc"]) : undefined)
   let evalIndex = -1
   for (let index = 1; evalFlags && index < tokens.length; index++) {
@@ -604,10 +597,8 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
   }
   if (evalIndex > 0 && tokens[evalIndex + 1] && ["python", "python3", "py", "node"].includes(name))
     return sourceRisk(tokens[evalIndex + 1], name === "node" ? "javascript" : "python")
-  // here-doc/这里字符串提供当前请求内的输入正文；消费者仍由解释器参数模式决定。
-  const content = command.redirects.findLast((redirect) => redirect.content !== undefined)?.content
   // Shell直接消费stdin时走既有Shell主路径；显式脚本文件继续把stdin作为数据。
-  if (content !== undefined && (["python", "python3", "py", "node"].includes(name) || SHELL_WRAPPERS.has(name)) && consumesInput(tokens))
+  if (content !== undefined && (["python", "python3", "py", "node"].includes(name) || SHELL_WRAPPERS.has(name)) && consumesInput(tokens, command.stdin !== undefined))
     return SHELL_WRAPPERS.has(name) ? evaluateShell(content, depth + 1, cwd, "bash") : sourceRisk(content, name === "node" ? "javascript" : "python")
   if (["curl", "wget"].includes(name)) {
     const upload = bind(tokens.slice(1), CURL_VALUES)
@@ -722,10 +713,71 @@ function printfOutput(words: ShellParse.Word[]) {
     format.replace(/%%|%[sb]/g, (slot) => slot === "%%" ? "%" : slot === "%s" ? (words[index++]?.value ?? "") : (words[index++]?.value ?? "").replace(/\\([nrt\\])/g, (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "\\": "\\" })[char] ?? char))).join("")
 }
 
+// Python 源码的位置由解释器名称、环境选项和 -c/stdin 入口共同确定。
+function pythonSource(words: ShellParse.Word[], input?: string) {
+  let index = 0
+  if (/^conda(?:\.exe)?$/i.test(words[0]?.value ?? "")) {
+    if (words[1]?.value.toLowerCase() !== "run") return
+    index = 2
+    for (; index < words.length; index++) {
+      const option = words[index]
+      if (option.dynamic) return
+      if (!option.value.startsWith("-")) break
+      // 选项集合来自旧INLINE_PYTHON_CONDA常量，未知模式不增加源码识别。
+      if (["--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream"].includes(option.value) || /^-v{1,3}$/.test(option.value)) continue
+      if (/^--(?:name|prefix|cwd)=[^\s"'`$@;&|<>(){}]+$/.test(option.value)) continue
+      if (!["-n", "--name", "-p", "--prefix", "--cwd"].includes(option.value)) return
+      const value = words[++index]
+      if (!value || value.dynamic || !value.value || /^-/.test(value.value) || /[`$@;&|<>(){}]/.test(value.value)) return
+    }
+  }
+  const executable = words[index]
+  if (!executable || executable.dynamic) return
+  const name = normalizeCommandName(executable.value)
+  if (!/^(?:python(?:3(?:\.\d+)?)?|py)$/.test(name)) return
+  // 普通解释器保留原入口算法；这里只补conda与版本后缀，避免影响其它命令政策。
+  if (index === 0 && !/^python3\.\d+$/.test(name)) return
+  if (index === 0 && /[/\\]/.test(executable.value) && !/^(?:[a-z]:[/\\]|\\\\)/i.test(executable.value)) return
+  if (index > 0 && /[/\\]/.test(executable.value)) return
+  let version = name === "py"
+  for (index++; index < words.length; index++) {
+    const flag = words[index]
+    if (flag.dynamic) return
+    // -c 的可见源码交给 sourceRisk；源码中的变量表达式由现有源码规则处理。
+    if (flag.value === "-c") return words[index + 1]?.value
+    if (flag.value === "-") return input
+    if (version && /^(?:-3(?:\.\d+)?(?:-32|-64)?|-32|-64)$/.test(flag.value)) continue
+    version = false
+    // 旧Python布尔/取值flags决定入口位置；文件、模块、未知参数均不消费可见stdin源码。
+    if (["-B", "-E", "-I", "-O", "-OO", "-P", "-b", "-bb", "-d", "-q", "-s", "-S", "-u", "-v", "-x"].includes(flag.value)) continue
+    if (/^-[WX][^\s"'`$@;&|<>(){}]+$/.test(flag.value)) continue
+    if (!["-W", "-X"].includes(flag.value)) return
+    const value = words[++index]
+    if (!value || value.dynamic || !/^[^-\s"'`$@;&|<>(){}][^\s"'`$@;&|<>(){}]*$/.test(value.value)) return
+  }
+  return input
+}
+
 // 只有stdin入口消费字面输入；eval、模块和脚本文件参数分别指定其他源码来源。
-function consumesInput(tokens: string[]) {
-  const bound = bind(tokens.slice(1), ["-c", "-e", "-m", "-command", "-file", "-encodedcommand", "-W", "-X", "-r", "--require", "--import", "--loader", "--preload"])
-  return !["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag)) && bound.operands.every((path) => path === "-")
+function consumesInput(tokens: string[], literal = false) {
+  // 已有管道和重定向继续使用原参数判定；新提取的字面输入按首个源码入口绑定 argv。
+  if (!literal) {
+    const bound = bind(tokens.slice(1), ["-c", "-e", "-m", "-command", "-file", "-encodedcommand", "-W", "-X", "-r", "--require", "--import", "--loader", "--preload"])
+    return !["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag)) && bound.operands.every((path) => path === "-")
+  }
+  for (let index = 1; index < tokens.length; index++) {
+    const option = tokens[index]
+    // 横线选定 stdin 源码后，后续参数属于脚本自身的 argv。
+    if (option === "-") return true
+    if (option === "--") return tokens[index + 1] === undefined || tokens[index + 1] === "-"
+    if (!option.startsWith("-")) return false
+    // 完整取值表先绑定短簇，-Werror的e与-rmodule的m都属于前一个选项的值。
+    const bound = bind([option, tokens[index + 1] ?? ""], ["-c", "-e", "-m", "-command", "-file", "-encodedcommand", "-W", "-X", "-r", "--require", "--import", "--loader", "--preload"])
+    if (["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag))) return false
+    // 与既有eval入口相同的元数；告警和预载模块的值不会成为新的入口选项。
+    if (["-W", "-X", "-r", "--require", "--import", "--loader", "--preload"].includes(option)) index++
+  }
+  return true
 }
 
 // 返回已知包装器链后第一个可执行名的索引；调用者据此切片，原Token数组保持不变。

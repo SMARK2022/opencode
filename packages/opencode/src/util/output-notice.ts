@@ -12,7 +12,7 @@ type OutputTruncatedNotice = {
 
 type ExecutionNotice = {
   // execution notice 是 shell/tool 输出里给模型看的执行状态，不是完整 metadata 回放。
-  // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
+  // timeout/user_abort 继续用 warning；exit 暴露退出码与shell名称，避免把命令、环境变量或原始 metadata 放进模型上下文。
   // source 缺省为 shell，generic tool 传 "tool" 以区分来源
   source?: "shell" | "tool"
   severity: "info" | "warning" | "error"
@@ -20,6 +20,8 @@ type ExecutionNotice = {
   reason: "timeout" | "user_abort" | "exit" | "completed"
   timeout_ms?: number
   exit_code?: number
+  // 仅提供方言名称供失败修正使用，保持命令与环境内容留在原有安全边界内。
+  shell?: string
   // 实际墙钟耗时（毫秒），由 server 在终态时写入；不从旧 state.time 追溯
   elapsed_ms?: number
 }
@@ -83,6 +85,7 @@ export function formatLongExecutionNotice(source: "shell" | "tool", elapsedMs: n
 // timeout > user_abort > exit(non-zero/empty) > long completed > none
 // 保证一个 Bash 结果不会同时出现两种系统 outcome（如 abort + completed）
 export function formatShellExecutionNotice(input: {
+  shell?: string
   aborted: boolean
   expired: boolean
   exitCode: number | null
@@ -93,15 +96,15 @@ export function formatShellExecutionNotice(input: {
   const elapsed = normalizeElapsed(input.elapsedMs)
   // timeout 优先：即使后续 exitCode 有值，也是 kill 后的残留，不是真实退出
   if (input.expired) {
-    return formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeoutMs, elapsed_ms: elapsed })
+    return formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeoutMs, elapsed_ms: elapsed, shell: input.shell })
   }
   if (input.aborted) {
-    return formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: elapsed })
+    return formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: elapsed, shell: input.shell })
   }
   if (input.exitCode !== null) {
     // non-zero exit 始终显示 error exit Notice + elapsed
     if (input.exitCode !== 0) {
-      return formatExecutionNotice({ severity: "error", reason: "exit", exit_code: input.exitCode, elapsed_ms: elapsed })
+      return formatExecutionNotice({ severity: "error", reason: "exit", exit_code: input.exitCode, elapsed_ms: elapsed, shell: input.shell })
     }
     // exit 0 + 空输出：保留既有 info exit Notice，不改成 completed
     if (input.emptyOutput) {

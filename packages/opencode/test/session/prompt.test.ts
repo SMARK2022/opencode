@@ -4033,6 +4033,32 @@ unix(
   30_000,
 )
 
+it.instance(
+  "direct shell preserves native expansion and literal characters",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, run, chat } = yield* boot()
+      // 经过用户 shell 入口而非 Tool，保护配置选择到 Shell.args 的真实消费链。
+      const command = String.raw`OPENCODE_FIDELITY=inner
+printf '%s\n' "$OPENCODE_FIDELITY" '$OPENCODE_FIDELITY' 'C:\Temp\x'
+printf '%s\n' \
+  'continued'`
+      const result = yield* prompt.shell({ sessionID: chat.id, agent: "build", command })
+      const tool = completedTool(result.parts)
+      // 不能让缺失 Tool 的情况悄悄跳过后续值断言。
+      expect(tool).toBeDefined()
+      if (!tool) throw new Error("Missing direct shell result")
+      expect(tool.state.input.command).toBe(command)
+      // 独立常量同时区分本层展开、字面美元符和原生续行，不只检查 exit 成功。
+      expect(tool.state.output).toBe("inner\n$OPENCODE_FIDELITY\nC:\\Temp\\x\ncontinued\n")
+      // 用户面板与模型结果共享原始正文，生命周期仍由既有 Run state 完结。
+      expect(tool.state.metadata.output).toBe(tool.state.output)
+      yield* run.assertNotBusy(chat.id)
+    }),
+  { git: true, config: { ...cfg, shell: "bash" } },
+  30_000,
+)
+
 unix(
   "shell commands can change directory after startup",
   () =>

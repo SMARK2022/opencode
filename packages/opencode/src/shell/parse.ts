@@ -8,7 +8,7 @@ import { lazy } from "@/util/lazy"
 export type Dialect = "bash" | "powershell" | "cmd"
 export type Word = { value: string; start: number; end: number; quoted: boolean; stripped: boolean; dynamic: boolean }
 export type Redirect = { operator: string; target?: Word; content?: string }
-export type Command = { words: Word[]; redirects: Redirect[]; group: number; pipeTo?: number }
+export type Command = { words: Word[]; redirects: Redirect[]; group: number; pipeTo?: number; stdin?: Word }
 
 // 解析Bun内嵌资源与开发目录中的同一WASM引用，保持原ShellTool的路径合同。
 const resolveWasm = (asset: string) => asset.startsWith("/") || /^[a-z]:/i.test(asset) ? asset : fileURLToPath(new URL(asset, import.meta.url))
@@ -35,32 +35,102 @@ export async function parse(source: string, dialect: Dialect) {
   return tree
 }
 
-// [local-smark] 裸 `--` 词法盲区归一化，迁移自ShellTool。
-// tree-sitter-powershell 0.25.10（package.json钉版）对引号外的独立--缺少词法归类，
-// 因其前缀预留给自减运算符，command规则会断裂，曾导致三次git commit丢失审批节点。
-// 紧邻分隔符时也会丢弃所在命令段。解析输入引号化为"--"后，两种形态均可恢复。
-// 这只改变解析表示，实际执行及审计metadata保持原文，沿用inline-python的分离合同。
-// 独立Token边界为首尾、空白以及分隔符`;`、`&`、`|`，包括已验证的--;和--&形态。
-// --%是PowerShell stop-parsing标志，--flag等带后续字符的形式也保持原文。
-// 引号内--属于数据；引用边界不确定时保持原引用状态，不主动拆开数据。
+// grammar将裸横线预留给运算符，命令参数中的-与--需使用等值引用的分析表示。
+// 单次词法扫描只定位兼容变换区域；AST仍由原grammar提供，执行与审计保留原文。
 export function normalize(source: string) {
   let result = ""
   let quote = ""
+  let command: boolean | undefined
+  let invocation = false
+  const groups: (boolean | undefined)[] = []
   for (let index = 0; index < source.length; index++) {
     const char = source[index]
     if (quote) {
-      // PowerShell反引号和原兼容路径的双引号反斜杠，都可保护关闭引号。
-      if (char === quote && source[index - 1] !== "`" && !(quote === '"' && source[index - 1] === "\\")) quote = ""
+      // here-string只在行首结束；正文内的引号、注释与横线均不可触发兼容变换。
+      if (quote.length === 2) {
+        if (source[index - 1] === "\n" && source.startsWith(quote, index)) {
+          result += quote
+          index++
+          quote = ""
+          continue
+        }
+        result += char
+        continue
+      }
+      // 单引号内只有成对单引号特殊；双引号内反引号一次消费下一个字符。
+      if ((quote === '"' && char === "`") || (char === quote && source[index + 1] === quote)) {
+        result += char + (source[++index] ?? "")
+        continue
+      }
+      if (char === quote) quote = ""
       result += char
       continue
     }
-    if (["'", '"', "`"].includes(char)) quote = char
-    if (char === "-" && source[index + 1] === "-" &&
-      (index === 0 || /[\s;&|]/.test(source[index - 1])) &&
-      (index + 2 === source.length || /[\s;&|]/.test(source[index + 2]))) {
-      result += '"--"'
-      index++
+    // 反引号不是引用定界符；跳过被保护字符后立刻恢复普通扫描。
+    if (char === "`") { result += char + (source[++index] ?? ""); continue }
+    // 块注释允许嵌套；整段前进，避免为每个字符重扫此前的源码。
+    if (source.startsWith("<#", index)) {
+      const start = index
+      let depth = 1
+      index += 2
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("<#", index)) { depth++; index += 2; continue }
+        if (source.startsWith("#>", index)) { depth--; index += 2; continue }
+        index++
+      }
+      result += source.slice(start, index--)
       continue
+    }
+    // 行注释与stop-parsing正文保持原样，换行本身仍恢复下一条语句的边界。
+    if ((char === "#" && (index === 0 || /[\s;|&({]/.test(source[index - 1]))) || (command && source.startsWith("--%", index))) {
+      const end = source.indexOf("\n", index)
+      if (end < 0) { result += source.slice(index); break }
+      result += source.slice(index, end)
+      index = end - 1
+      continue
+    }
+    // 括号上下文只决定是否允许横线兼容；运算表达式的含义仍完全交给grammar。
+    if (/[;|&\r\n(){}=]/.test(char)) {
+      if (/[;|\r\n]/.test(char)) { command = undefined; invocation = false }
+      if (char === "&") { command = true; invocation = true }
+      if (char === "(" || char === "{") { groups.push(command ?? false); command = undefined }
+      if (char === ")" || char === "}") command = groups.pop()
+      if (char === "=" && !command) command = undefined
+      result += char
+      continue
+    }
+    if (!/\s/.test(char)) {
+      // 只恢复旧conda/Python前缀的三个静态等号选项；引用/动态值与其它子程序不匹配。
+      if ((command === undefined || invocation) && /c/i.test(char)) {
+        const prefix = /^(conda(?:\.exe)?[ \t]+run[ \t]+(?:(?:--(?:dev|debug-wrapper-scripts|no-capture-output|live-stream)|-v{1,3})[ \t]+|(?:-n|--name|-p|--prefix|--cwd)[ \t]+[^-\s"'`$@;&|<>(){}][^\s"'`$@;&|<>(){}]*[ \t]+|--(?:name|prefix|cwd)=[^\s"'`$@;&|<>(){}]+[ \t]+)*)(python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?=$|[ \t])/i.exec(source.slice(index))
+        // 只有旧flags后的-c或本次字面stdin入口适用；脚本文件和模块不恢复等号选项。
+        if (prefix && /^(?:[ \t]+(?:-3(?:\.\d+)?(?:-32|-64)?|-32|-64|-B|-E|-I|-O|-OO|-P|-b|-bb|-d|-q|-s|-S|-u|-v|-x|-[WX](?:[ \t]+)?[^\s"'`$@;&|<>(){}]+))*[ \t]+(?:-c(?=[ \t]+['"])|-(?=$|[ \t;|]))/.test(source.slice(index + prefix[0].length))) {
+          // 只改grammar表示，选项值不解码；该段消费一次，避免逐字符重扫前缀。
+          result += prefix[1].replace(/--(?:name|prefix|cwd)=[^\s]+/g, (option) => `'${option}'`)
+          index += prefix[1].length - 1
+          command = true
+          invocation = false
+          continue
+        }
+      }
+      invocation = false
+      // 表达式以数值、变量或引用开始；调用运算符则已明确后续字符串是执行名。
+      command ??= /[A-Za-z_./\\]/.test(char)
+      if (char === "@" && ["'", '"'].includes(source[index + 1]) && /[\r\n]/.test(source[index + 2] ?? "")) {
+        quote = source[index + 1] + "@"
+        result += char + source[++index]
+        continue
+      }
+      if (["'", '"'].includes(char)) quote = char
+      // 仅检查独立参数，不触碰负数、自减、长选项或括号内的数值减法。
+      if (command && char === "-" && /[\s;&|]/.test(source[index - 1] ?? "")) {
+        const dash = source[index + 1] === "-" ? "--" : "-"
+        if (index + dash.length === source.length || /[\s;&|)}]/.test(source[index + dash.length])) {
+          result += `"${dash}"`
+          index += dash.length - 1
+          continue
+        }
+      }
     }
     result += char
   }
@@ -88,13 +158,15 @@ function word(node: Node, dialect: Dialect): Word {
   // 命令名和重定向文件名都可能包住一个literal，片段拼接仍由同一解引用路径处理。
   if (["command_name", "redirected_file_name"].includes(node.type) && parts.length === 1) return word(parts[0], dialect)
   const raw = node.text
-  const single = dialect !== "cmd" && raw.startsWith("'") && raw.endsWith("'")
-  const double = raw.startsWith('"') && raw.endsWith('"')
-  const body = single || double ? raw.slice(1, -1) : raw
+  // here-string的首尾换行属于定界符；正文中的引号不承担普通字符串的转义职责。
+  const here = dialect === "powershell" && /^@['"]\r?\n/.test(raw)
+  const single = dialect !== "cmd" && (here ? raw.startsWith("@'") : raw.startsWith("'") && raw.endsWith("'"))
+  const double = here ? raw.startsWith('@"') : raw.startsWith('"') && raw.endsWith('"')
+  const body = here ? raw.replace(/^@['"]\r?\n|\r?\n['"]@$/g, "") : single || double ? raw.slice(1, -1) : raw
   // 相邻引用片段共同组成一个argv；分别解释片段后拼接，避免拆成多个操作数。
   const value = node.type === "concatenation" ? parts.map((part) => word(part, dialect).value).join("")
-    : single ? dialect === "powershell" ? body.replaceAll("''", "'") : body
-    : dialect === "powershell" ? body.replace(/`(.)/gs, (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "0": "\0" })[char] ?? char)
+    : single ? dialect === "powershell" && !here ? body.replaceAll("''", "'") : body
+    : dialect === "powershell" ? body.replace(/`(.)|""/gs, (text, char: string | undefined) => char === undefined ? double && !here ? '"' : text : ({ n: "\n", r: "\r", t: "\t", "0": "\0" })[char] ?? char)
     : dialect === "cmd" ? body.replace(/\\([\\'"$`#;^&|<> ()])/g, "$1")
     : double ? body.replace(/\\([\\$`"\n])/g, "$1") : body.replace(/\\(.)/gs, "$1")
   const expansion = ["expansion", "simple_expansion", "command_substitution", "sub_expression", "variable"]
@@ -156,6 +228,12 @@ export async function analyze(source: string, dialect: Dialect) {
       // here-doc右侧的管道节点位于redirect内部，左端来自其所属statement.body。
       const owner = pipeline.parent?.type === "heredoc_redirect" ? redirectOwner(pipeline.parent) : undefined
       const members = [...(owner ? [owner] : []), ...topCommands(pipeline)]
+      // PowerShell的管道首项可以是表达式而非command；只接收grammar确认的单个字符串。
+      const first = children(children(pipeline)[0] ?? pipeline)[0]
+      const literal = first?.descendantsOfType("string_literal")[0]
+      const consumer = members[0] ? records.get(members[0].id) : undefined
+      if (dialect === "powershell" && consumer && literal && first?.text === literal.text)
+        consumer.stdin = word(literal, dialect)
       for (let index = 0; index + 1 < members.length; index++) {
         const left = records.get(members[index].id)
         const right = records.get(members[index + 1].id)
@@ -165,7 +243,8 @@ export async function analyze(source: string, dialect: Dialect) {
     }
     // 后台和换行组成的普通只读序列沿用原general下限；引用内部换行不属于命令间隙。
     const top = topCommands(tree.rootNode)
-    const opaque = tree.rootNode.children.some((child) => child?.type === "&") || top.some((node, index) => index > 0 && /[\r\n]/.test(source.slice(top[index - 1].endIndex, node.startIndex)))
+    // Word与node的offset都属于实际解析表示，不能回切长度不同的原执行正文。
+    const opaque = tree.rootNode.children.some((child) => child?.type === "&") || top.some((node, index) => index > 0 && /[\r\n]/.test(tree.rootNode.text.slice(top[index - 1].endIndex, node.startIndex)))
     return { commands, incomplete: tree.rootNode.hasError, opaque, environment: tree.rootNode.descendantsOfType("variable_assignment").length > 0 }
   } finally {
     // 导出的记录与树分离，异常退出时也及时释放WASM分配。

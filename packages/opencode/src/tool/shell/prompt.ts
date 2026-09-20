@@ -19,9 +19,12 @@ export type Limits = {
   maxBytes: number
 }
 
-export function parameterSchema(description: string) {
+// SDK 完成 JSON 解码后，command 就是目标 shell 接收的原生脚本。
+export function parameterSchema(description: string, name = "the configured shell") {
   return Schema.Struct({
-    command: Schema.String.annotate({ description: "The command to execute" }),
+    command: Schema.String.annotate({
+      description: `The native script to execute in ${name}. JSON decoding happens once; use native quoting and newlines, without extra escaping.`,
+    }),
     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
     workdir: Schema.optional(Schema.String).annotate({
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
@@ -53,35 +56,27 @@ function shellDisplayName(name: string) {
 }
 
 function powershellNotes(name: string) {
-  if (name === "pwsh") {
-    return `# PowerShell (7+) shell notes
-- This cross-platform shell supports pipeline chain operators (\`&&\` and \`||\`).
-- Use double quotes for interpolated strings (\`"Hello $name"\`), single quotes for verbatim strings.
-- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
-- Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
+  // PowerShell 两个版本共享字符串规则，链式运算和 native 参数传递分别说明。
+  return `# ${shellDisplayName(name)} shell notes
+- PowerShell expands $name and evaluates $(...) inside double quotes; use "..." when you want those local values.
+- In single-quoted strings, PowerShell leaves $name and $(...) unevaluated; backslash is ordinary. Write '' for a single quote.
+- Inside double quotes, \`$name keeps $name as text and \`" inserts a double quote; \\$name still expands $name, and \\" does not escape a quote.
+- For multiline text without variable substitution, start with @' followed by a newline; close with '@ at the start of a new line.
+- To run a Linux program through WSL, use wsl --exec <program> ...; for Bash use wsl --exec bash -lc 'echo "$HOME"'. wsl -- bash -lc adds another shell that can expand variables first.
+${name === "powershell" ? "- Windows PowerShell 5.1 rebuilds native arguments as a command line, consuming embedded double quotes; use a program's stdin interface for quoted code.\n" : ""}- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
+- Use \`@(...)\` for array expressions.
+- Read environment variables with \`$env:NAME\`, not \`export NAME=...\`; use \`$null\`, not \`/dev/null\`.
 - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
-- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
-- Escape special characters with the PowerShell backtick character.`
-  }
-  if (name === "powershell") {
-    return `# Windows PowerShell (5.1) shell notes
-- Use \`cmd1; if ($?) { cmd2 }\` to chain dependent commands.
-- Use double quotes for interpolated strings (\`"Hello $name"\`), single quotes for verbatim strings.
-- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
-- Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
-- To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
-- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
-- Escape special characters with the PowerShell backtick character.`
-  }
-  return ""
+- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.`
 }
 
 function chainGuidance(name: string) {
+  // 版本差异集中在实际使用位置，避免 notes 与 usage 两处给出重复的链式规则。
   if (name === "powershell") {
-    return "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell (5.1) does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
+    return "Windows PowerShell (5.1) does not support && or ||; use `cmd1; if ($?) { cmd2 }` for dependent commands."
   }
   if (PS.has(name)) {
-    return "If the commands depend on each other and must run sequentially, use a single bash tool call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like New-Item before Copy-Item, Write before bash for git operations, or git add before git commit), run these operations sequentially instead."
+    return "PowerShell (7+) supports && and ||; use `cmd1 && cmd2` in one bash call when cmd2 depends on cmd1 succeeding."
   }
   if (CMD.has(name)) {
     return "If the commands depend on each other and must run sequentially, use a single bash tool call with `&&` to chain them together (e.g., `mkdir out && dir out`). For instance, if one operation must complete before another starts, run these operations sequentially instead."
@@ -123,7 +118,7 @@ Usage notes:
     - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
     - ${chain}
     - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+    - Native multiline scripts are allowed; use this shell's quoting and control flow.
   - AVOID using \`cd <directory> && <command>\`. Use the \`workdir\` parameter to change directories instead.
     <good-example>
     Use workdir="/foo/bar" with command: pytest tests
@@ -158,7 +153,7 @@ Usage notes:
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`Select-Object -First\`, \`Select-Object -Last\`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
 
-  - Avoid using Shell with PowerShell file/content cmdlets unless explicitly instructed or when these cmdlets are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
+  - Prefer dedicated file tools; use PowerShell cmdlets only if instructed or necessary (Get-Content -Tail, Select-String, Get-ChildItem, Test-Path). Unix utilities may be unavailable:
     - File search: Use Glob (NOT Get-ChildItem)
     - Content search: Use Grep (NOT Select-String)
     - Read files: Use Read (NOT Get-Content)
@@ -169,7 +164,7 @@ Usage notes:
     - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
     - ${chain}
     - Use \`;\` only when you need to run commands sequentially but don't care if earlier commands fail
-    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+    - Native multiline scripts are allowed; use this shell's quoting and control flow.
   - AVOID changing directories inside the command. Use the \`workdir\` parameter to change directories instead.
     <good-example>
     Use workdir="project${pathSep}subdir" with command: pytest tests
@@ -181,6 +176,8 @@ Usage notes:
 
 function cmdCommandSection(chain: string, limits: Limits) {
   return `# cmd.exe shell notes
+- Use cmd.exe syntax, not Bash or PowerShell; use \`NUL\`, not \`/dev/null\`.
+- If shell file operations are necessary, use \`dir\` and \`type\`, not Unix utilities (ls/tail/head/sed/awk/grep).
 - Use double quotes for paths with spaces.
 - Use %VAR% for environment variables.
 - Use \`if exist\` for existence checks.
@@ -219,7 +216,7 @@ Usage notes:
     - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "dir" and "where cmd", send a single message with two bash tool calls in parallel.
     - ${chain}
     - Use \`&\` only when you need to run commands sequentially but don't care if earlier commands fail
-    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+    - Native multiline scripts are allowed; use this shell's quoting and control flow.
   - AVOID changing directories inside the command. Use the \`workdir\` parameter to change directories instead.
     <good-example>
     Use workdir="project\\subdir" with command: dir
@@ -232,9 +229,11 @@ Usage notes:
 function profile(name: string, platform: NodeJS.Platform, limits: Limits) {
   const isPowerShell = PS.has(name)
   const chain = chainGuidance(name)
+  // 首行绑定实际配置名称；POSIX 家族不再被固定称为 bash 或持久会话。
+  const intro = `Executes a native script in ${name} with optional timeout.`
   if (CMD.has(name)) {
     return {
-      intro: `Executes a given ${shellDisplayName(name)} command with optional timeout, ensuring proper handling and security measures.`,
+      intro,
       workdirSection:
         "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID changing directories inside the command - use `workdir` instead.",
       commandSection: cmdCommandSection(chain, limits),
@@ -247,7 +246,7 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits) {
   }
   if (isPowerShell) {
     return {
-      intro: `Executes a given ${shellDisplayName(name)} command with optional timeout, ensuring proper handling and security measures.`,
+      intro,
       workdirSection:
         "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID changing directories inside the command - use `workdir` instead.",
       commandSection: powershellCommandSection(name, chain, platform === "win32" ? "\\" : "/", limits),
@@ -262,11 +261,13 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits) {
     }
   }
   return {
-    intro:
-      "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.",
+    intro,
     workdirSection:
       "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.",
-    commandSection: bashCommandSection(chain, limits),
+    // Windows 工具可用性来自旧附加指导；只合并到 Windows 的同一渲染路径。
+    commandSection:
+      bashCommandSection(chain, limits) +
+      (platform === "win32" ? "\n- Unix utilities may be unavailable; prefer dedicated OpenCode file tools." : ""),
     gitCommands: "bash commands",
     gitCommandRestriction: "git bash commands",
     createPrInstruction:
@@ -294,7 +295,7 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits) 
       createPrInstruction: selected.createPrInstruction,
       createPrExample: selected.createPrExample,
     }),
-    parameters: parameterSchema(selected.parameterDescription),
+    parameters: parameterSchema(selected.parameterDescription, name),
   }
 }
 

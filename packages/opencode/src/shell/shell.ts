@@ -160,6 +160,7 @@ export function args(file: string, command: string, cwd: string) {
   const n = name(file)
   if (n === "nu" || n === "fish") return ["-c", command]
   if (n === "zsh") {
+    // 正文通过位置参数跨过初始化解析；双引号只保护参数，不提前展开正文中的变量。
     return [
       "-l",
       "-c",
@@ -167,13 +168,15 @@ export function args(file: string, command: string, cwd: string) {
         [[ -f ~/.zshenv ]] && source ~/.zshenv >/dev/null 2>&1 || true
         [[ -f "\${ZDOTDIR:-$HOME}/.zshrc" ]] && source "\${ZDOTDIR:-$HOME}/.zshrc" >/dev/null 2>&1 || true
         cd -- "$1"
-        eval ${JSON.stringify(command)}
+        eval "$2"
       `,
       "opencode",
       cwd,
+      command,
     ]
   }
   if (n === "bash") {
+    // 保留 Bash 的别名与 rc 初始化；cwd 仍是 $1，原命令独占 $2。
     return [
       "-l",
       "-c",
@@ -181,10 +184,11 @@ export function args(file: string, command: string, cwd: string) {
         shopt -s expand_aliases
         [[ -f ~/.bashrc ]] && source ~/.bashrc >/dev/null 2>&1 || true
         cd -- "$1"
-        eval ${JSON.stringify(command)}
+        eval "$2"
       `,
       "opencode",
       cwd,
+      command,
     ]
   }
   if (n === "cmd") return ["/c", command]

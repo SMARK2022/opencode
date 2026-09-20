@@ -26,6 +26,7 @@ import { Skill } from "@/skill"
 import { Git } from "@/git"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Shell } from "@/shell/shell"
+import { Config } from "@/config/config"
 
 // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
 const MAX_STATUS_CHARS = 2000
@@ -202,9 +203,12 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const git = yield* Git.Service
+    const config = yield* Config.Service
 
     const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
-      const actualShell = Shell.acceptable()
+      // Shell 属于当前执行能力而非会话快照；每轮读取配置，保持与工具选择规则一致。
+      const cfg = yield* config.get()
+      const actualShell = Shell.acceptable(cfg.shell)
       const shellName = Shell.name(actualShell)
       const shellNotes =
         process.platform !== "win32"
@@ -361,6 +365,7 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(
   Layer.provide(Skill.defaultLayer),
   Layer.provide(Git.defaultLayer),
+  Layer.provide(Config.defaultLayer),
 )
 
 export * as SystemPrompt from "./system"

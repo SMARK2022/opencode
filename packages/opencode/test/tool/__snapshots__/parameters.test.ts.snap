@@ -21,7 +21,7 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
     "command": {
-      "description": "The command to execute",
+      "description": "The native script to execute in the configured shell. JSON decoding happens once; use native quoting and newlines, without extra escaping.",
       "type": "string",
     },
     "compress_output": {
