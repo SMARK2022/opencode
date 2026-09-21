@@ -22,6 +22,10 @@ function app() {
 type TestApp = ReturnType<typeof app>
 type TestHandler = ReturnType<typeof HttpApiApp.webHandler>
 
+// webHandler 是进程共享实例；单个测试不能关闭后续 HTTP 请求仍会使用的 scope。
+// 目标基线本就地借用且从不 dispose；集中为 sharedHandler seam 统一获取面并显式承载该不变式。
+const sharedHandler = Effect.sync(() => HttpApiApp.webHandler())
+
 const request = Effect.fnUntraced(function* (
   handler: TestHandler,
   route: string,
@@ -61,7 +65,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = HttpApiApp.webHandler()
+        const handler = yield* sharedHandler
         const response = yield* request(handler, McpPaths.status, tmp.directory)
 
         expect(response.status).toBe(200)
@@ -85,7 +89,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = HttpApiApp.webHandler()
+        const handler = yield* sharedHandler
         const added = yield* request(handler, McpPaths.status, tmp.directory, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -131,7 +135,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = HttpApiApp.webHandler()
+        const handler = yield* sharedHandler
         const start = yield* request(handler, "/mcp/demo/auth", tmp.directory, { method: "POST" })
         expect(start.status).toBe(400)
 
@@ -194,7 +198,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = HttpApiApp.webHandler()
+        const handler = yield* sharedHandler
 
         for (const input of [
           { method: "POST", route: "/mcp/missing/auth" },
