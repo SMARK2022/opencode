@@ -25,10 +25,8 @@ function app() {
 type TestApp = ReturnType<typeof app>
 type TestHandler = ReturnType<typeof HttpApiApp.webHandler>
 
-const handlerScoped = Effect.acquireRelease(
-  Effect.sync(() => HttpApiApp.webHandler()),
-  (handler) => Effect.promise(() => handler.dispose()).pipe(Effect.ignore),
-)
+// webHandler 是进程共享实例；单个测试不能关闭后续 HTTP 请求仍会使用的 scope。
+const sharedHandler = Effect.sync(() => HttpApiApp.webHandler())
 
 const request = Effect.fnUntraced(function* (
   handler: TestHandler,
@@ -69,7 +67,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = yield* handlerScoped
+        const handler = yield* sharedHandler
         const response = yield* request(handler, McpPaths.status, tmp.directory)
 
         expect(response.status).toBe(200)
@@ -93,7 +91,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = yield* handlerScoped
+        const handler = yield* sharedHandler
         const added = yield* request(handler, McpPaths.status, tmp.directory, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -135,7 +133,7 @@ describe("mcp HttpApi", () => {
     () =>
       Effect.gen(function* () {
         const tmp = yield* TestInstance
-        const handler = yield* handlerScoped
+        const handler = yield* sharedHandler
         const start = yield* request(handler, "/mcp/demo/auth", tmp.directory, { method: "POST" })
         expect(start.status).toBe(400)
 
