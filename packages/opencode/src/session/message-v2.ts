@@ -1191,6 +1191,15 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
     if (msg.info.role === "assistant") {
       const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
+      const replaysForeignReasoning =
+        model.api.npm === "@ai-sdk/openai-compatible" &&
+        typeof model.capabilities.interleaved === "object" &&
+        model.capabilities.interleaved.field === "reasoning_content"
+      const replaysForeignOpenAIReasoning =
+        // 按用户指定的 GPT 家族边界回放，不把自定义 provider 名称当作兼容性依据。
+        model.id.toLowerCase().startsWith("gpt") && msg.info.modelID.toLowerCase().startsWith("gpt")
+      // 两端都检查，避免非 GPT 模型的签名因目标为 GPT 而被放行。
+      // 此处保留语义信息；最终 wire 字段由目标协议适配器编码。
       const media: Array<{ mime: string; url: string; filename?: string }> = []
 
       if (
@@ -1343,7 +1352,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           }
         }
         if (part.type === "reasoning") {
-          if (differentModel) {
+          if (differentModel && !replaysForeignReasoning && !replaysForeignOpenAIReasoning) {
             if (part.text.trim().length > 0)
               assistantMessage.parts.push({
                 type: "text",
@@ -1352,10 +1361,21 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             continue
           }
           const providerMetadata = providerMeta(part.metadata)
+          // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
+          const replayMetadata =
+            differentModel
+              ? replaysForeignOpenAIReasoning && providerMetadata?.openai
+                ? { openai: providerMetadata.openai }
+                : undefined
+              : providerMetadata
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,
-            ...(providerMetadata ? { providerMetadata } : {}),
+            ...(differentModel && !replaysForeignOpenAIReasoning
+              ? {}
+              : replayMetadata
+                ? { providerMetadata: replayMetadata }
+                : {}),
           })
         }
       }

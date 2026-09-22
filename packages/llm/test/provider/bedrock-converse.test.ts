@@ -328,6 +328,25 @@ describe("Bedrock Converse route", () => {
     }),
   )
 
+  it.effect("lowers unsigned foreign reasoning to assistant text", () =>
+    Effect.gen(function* () {
+      // 目标签名不存在时，Bedrock 将摘要作为普通文本接收。
+      // 这样目标账号不会验证源账号的 opaque state。
+      const prepared = yield* LLMClient.prepare<BedrockConverse.BedrockConverseBody>(
+        LLM.request({
+          model,
+          messages: [Message.assistant({ type: "reasoning", text: "foreign thought" })],
+          cache: "none",
+        }),
+      )
+
+      expect(prepared.body.messages).toEqual([
+        // 无签名时使用 Bedrock 普通文本块。
+        { role: "assistant", content: [{ text: "foreign thought" }] },
+      ])
+    }),
+  )
+
   it.effect("lowers image media into Bedrock image blocks", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare(

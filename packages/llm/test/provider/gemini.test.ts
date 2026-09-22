@@ -390,4 +390,19 @@ describe("Gemini route", () => {
       )
     }),
   )
+
+  it.effect("lowers unsigned foreign reasoning to assistant text", () =>
+    Effect.gen(function* () {
+      // 缺少签名的 Gemini thought 块不能作为 thought metadata 回放。
+      // 普通文本仍保留模型可见的摘要语义。
+      const prepared = yield* LLMClient.prepare<Gemini.GeminiBody>(
+        LLM.request({ model, messages: [Message.assistant({ type: "reasoning", text: "foreign thought" })] }),
+      )
+
+      expect(prepared.body.contents).toEqual([
+        // 没有 thoughtSignature 时不发送 thought=true。
+        { role: "model", parts: [{ text: "foreign thought" }] },
+      ])
+    }),
+  )
 })

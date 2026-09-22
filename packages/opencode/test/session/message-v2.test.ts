@@ -758,6 +758,96 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("preserves foreign reasoning for OpenAI-compatible reasoning fields", async () => {
+    const assistantID = "m-assistant"
+    // reasoning_content 是可移植文本字段，因此兼容模型保留其结构化形态。
+    const compatible: Provider.Model = {
+      ...model,
+      api: { ...model.api, npm: "@ai-sdk/openai-compatible" },
+      capabilities: { ...model.capabilities, reasoning: true, interleaved: { field: "reasoning_content" } },
+    }
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-user", undefined, { providerID: "other", modelID: "other" }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "thinking",
+            metadata: { anthropic: { signature: "foreign" } },
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "text",
+            text: "answer",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(
+      ProviderTransform.message(await MessageV2.toModelMessages(input, compatible), compatible, {}),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "answer" }],
+        providerOptions: { openaiCompatible: { reasoning_content: "thinking" } },
+      },
+    ])
+  })
+
+  test.each(["openai", "smark-codex"])("preserves encrypted GPT reasoning for %s", async (targetProvider) => {
+    // 该测试覆盖 Session projection 与 provider transform 的完整边界。
+    const assistantID = "m-assistant"
+    // 目标模型满足 OpenAI Responses 与 gpt 前缀两个边界条件。
+    const gpt: Provider.Model = {
+      ...model,
+      id: ModelID.make("gpt-5.5"),
+      providerID: ProviderID.make(targetProvider),
+      api: { ...model.api, id: "gpt-5.5", npm: "@ai-sdk/openai" },
+      capabilities: { ...model.capabilities, reasoning: true },
+    }
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-user", undefined, { providerID: "smark-codex", modelID: "gpt-6-astra" }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "foreign summary",
+            // 持久化 metadata 会在 adapter 边界投影为 providerOptions。
+            metadata: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "text",
+            text: "answer",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // adapter 边界接收 providerOptions，Session 持久化的 MessageV2 Part 仍保留原 metadata 形态。
+    // GPT Responses 在模型切换时保留不透明的续接状态。
+    // 只有目标 GPT 协议接收这类 provider metadata。
+    expect(ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, {})).toStrictEqual([
+      {
+        role: "assistant",
+        ...(targetProvider === "openai" ? {} : { providerOptions: undefined }),
+        content: [
+          {
+            type: "reasoning",
+            text: "foreign summary",
+            providerOptions: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
+          },
+          { type: "text", text: "answer", ...(targetProvider === "openai" ? {} : { providerOptions: undefined }) },
+        ],
+      },
+    ])
+  })
+
   test("replaces compacted tool output with placeholder", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"

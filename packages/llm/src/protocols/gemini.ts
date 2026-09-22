@@ -210,7 +210,13 @@ const lowerMessages = Effect.fn("Gemini.lowerMessages")(function* (request: LLMR
           continue
         }
         if (part.type === "reasoning") {
-          parts.push({ text: part.text, thought: true })
+          // Gemini thought 签名由 provider 所有；外部无签名摘要安全地保留为普通模型文本。
+          const signature = part.providerMetadata?.google?.thoughtSignature
+          parts.push(
+            typeof signature === "string"
+              ? { text: part.text, thought: true, thoughtSignature: signature }
+              : { text: part.text },
+          )
           continue
         }
         if (part.type === "tool-call") {

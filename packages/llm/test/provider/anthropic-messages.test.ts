@@ -90,6 +90,21 @@ describe("Anthropic Messages route", () => {
     }),
   )
 
+  it.effect("lowers unsigned foreign reasoning to assistant text", () =>
+    Effect.gen(function* () {
+      // 无签名块无法满足 Anthropic 的 thinking signature 字段。
+      // 该断言防止跨 provider 回放生成伪造签名。
+      const prepared = yield* LLMClient.prepare(
+        LLM.request({ model, messages: [Message.assistant({ type: "reasoning", text: "foreign thought" })] }),
+      )
+
+      expect(prepared.body).toMatchObject({
+        // 目标协议只接受可见文本，不伪造源 provider 的签名。
+        messages: [{ role: "assistant", content: [{ type: "text", text: "foreign thought" }] }],
+      })
+    }),
+  )
+
   it.effect("parses text, reasoning, and usage stream fixtures", () =>
     Effect.gen(function* () {
       const body = sseEvents(

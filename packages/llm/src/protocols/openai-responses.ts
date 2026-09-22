@@ -11,6 +11,7 @@ import {
   type FinishReason,
   type LLMRequest,
   type ProviderMetadata,
+  type ReasoningPart,
   type TextPart,
   type ToolCallPart,
   type ToolDefinition,
@@ -37,10 +38,28 @@ const OpenAIResponsesOutputText = Schema.Struct({
   text: Schema.String,
 })
 
+const OpenAIResponsesReasoningSummary = Schema.Struct({
+  type: Schema.tag("summary_text"),
+  text: Schema.String,
+})
+
+// 摘要文本是 reasoning 的可见投影；它与 encrypted_content 共同组成回放输入。
+
+// Response item ID 属于源 response 链。跨模型回放保留加密状态，但省略服务端所有的 ID。
+// encrypted_content 是续接状态，必须保留为 reasoning item，不能压平成普通 assistant 文本。
+const OpenAIResponsesReasoningItem = Schema.Struct({
+  type: Schema.tag("reasoning"),
+  id: Schema.optional(Schema.String),
+  summary: Schema.Array(OpenAIResponsesReasoningSummary),
+  encrypted_content: Schema.optional(Schema.NullOr(Schema.String)),
+})
+type OpenAIResponsesReasoningItem = Schema.Schema.Type<typeof OpenAIResponsesReasoningItem>
+
 const OpenAIResponsesInputItem = Schema.Union([
   Schema.Struct({ role: Schema.tag("system"), content: Schema.String }),
   Schema.Struct({ role: Schema.tag("user"), content: Schema.Array(OpenAIResponsesInputText) }),
   Schema.Struct({ role: Schema.tag("assistant"), content: Schema.Array(OpenAIResponsesOutputText) }),
+  OpenAIResponsesReasoningItem,
   Schema.Struct({
     type: Schema.tag("function_call"),
     call_id: Schema.String,
@@ -125,6 +144,9 @@ type OpenAIResponsesUsage = Schema.Schema.Type<typeof OpenAIResponsesUsage>
 const OpenAIResponsesStreamItem = Schema.Struct({
   type: Schema.String,
   id: Schema.optional(Schema.String),
+  // provider 可能在不同终止事件中附带 reasoning 字段；可选字段允许解析器安全合并这些形态。
+  summary: Schema.optional(Schema.Array(OpenAIResponsesReasoningSummary)),
+  encrypted_content: Schema.optional(Schema.NullOr(Schema.String)),
   call_id: Schema.optional(Schema.String),
   name: Schema.optional(Schema.String),
   arguments: Schema.optional(Schema.String),
@@ -196,7 +218,23 @@ const lowerToolCall = (part: ToolCallPart): OpenAIResponsesInputItem => ({
   arguments: ProviderShared.encodeJson(part.input),
 })
 
+const lowerReasoning = (part: ReasoningPart): OpenAIResponsesReasoningItem | undefined => {
+  const openai = part.providerMetadata?.openai
+  if (!ProviderShared.isRecord(openai)) return undefined
+  // Responses 的加密状态是回放契约；只有摘要时可以降为可见文本，但无法重建 reasoning item。
+  if (typeof openai.reasoningEncryptedContent !== "string") return undefined
+  // 只有明确的字符串状态才进入 item 路径，避免把 null 当作可续接凭据。
+  // 摘要仍需让目标模型可读；加密 blob 才能让 item 具备续接资格，而不只是展示内容。
+  return {
+    type: "reasoning",
+    summary: part.text.length > 0 ? [{ type: "summary_text", text: part.text }] : [],
+    encrypted_content: openai.reasoningEncryptedContent,
+  }
+}
+
 const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (request: LLMRequest) {
+  // 该函数负责把统一 LLM 消息投影为 Responses input item。
+  // 跨模型安全性在这里落实，而不是交给 provider SDK 猜测。
   const system: OpenAIResponsesInputItem[] =
     request.system.length === 0 ? [] : [{ role: "system", content: ProviderShared.joinText(request.system) }]
   const input: OpenAIResponsesInputItem[] = [...system]
@@ -216,10 +254,28 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
     if (message.role === "assistant") {
       const content: TextPart[] = []
       for (const part of message.content) {
-        if (!ProviderShared.supportsContent(part, ["text", "tool-call"]))
-          return yield* ProviderShared.unsupportedContent("OpenAI Responses", "assistant", ["text", "tool-call"])
+        if (!ProviderShared.supportsContent(part, ["text", "reasoning", "tool-call"]))
+          return yield* ProviderShared.unsupportedContent("OpenAI Responses", "assistant", ["text", "reasoning", "tool-call"])
         if (part.type === "text") {
           content.push(part)
+          continue
+        }
+        if (part.type === "reasoning") {
+          // 有加密状态时保留协议级 reasoning item；否则使用普通文本降级。
+          // 这样非 GPT Responses 部署不会收到无法验证的伪 reasoning 块。
+          const reasoning = lowerReasoning(part)
+          if (!reasoning) {
+            // 没有加密续接状态时，摘要无法重建为有效的 Responses reasoning item。
+            content.push({ type: "text", text: part.text })
+            continue
+          }
+          if (content.length > 0) {
+            // Responses wire 会分离 assistant 文本和 reasoning item，因此追加 item 前先刷新前置文本。
+            input.push({ role: "assistant", content: content.map((item) => ({ type: "output_text", text: item.text })) })
+            content.splice(0, content.length)
+          }
+          // 省略外部 item ID，避免无状态目标解析源 response/model 所拥有的标识符。
+          input.push(reasoning)
           continue
         }
         if (part.type === "tool-call") {
@@ -394,8 +450,38 @@ const onOutputTextDelta = (state: ParserState, event: OpenAIResponsesEvent): Ste
   ]
 }
 
+const onReasoningDelta = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
+  if (!event.delta || !event.item_id) return [state, NO_EVENTS]
+  const events: LLMEvent[] = []
+  // 当摘要 delta 早于 provider 的终止 output item 到达时，lifecycle helper 会先开启 reasoning 块。
+  // 这避免流式摘要在终止事件前丢失。
+  return [
+    { ...state, lifecycle: Lifecycle.reasoningDelta(state.lifecycle, events, event.item_id, event.delta) },
+    events,
+  ]
+}
+
 const onOutputItemAdded = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
+  // output_item.added 是恢复 reasoning 元数据的最早稳定边界。
+  // 后续 delta 只补充摘要文本，不改变 item 的身份。
   const item = event.item
+  if (item?.type === "reasoning" && item.id) {
+    const events: LLMEvent[] = []
+    // 首个 item 事件暴露下一轮所需的不透明续接状态。
+    const providerMetadata = openaiMetadata({
+      itemId: item.id,
+      reasoningEncryptedContent: item.encrypted_content ?? null,
+    })
+    const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
+    events.push(LLMEvent.reasoningStart({ id: item.id, providerMetadata }))
+    return [
+      {
+        ...state,
+        lifecycle: { ...lifecycle, reasoning: new Set([...lifecycle.reasoning, item.id]) },
+      },
+      events,
+    ]
+  }
   if (item?.type !== "function_call" || !item.id) return [state, NO_EVENTS]
   const providerMetadata = openaiMetadata({ itemId: item.id })
   const events: LLMEvent[] = []
@@ -439,6 +525,7 @@ const onOutputItemDone = Effect.fn("OpenAIResponses.onOutputItemDone")(function*
   state: ParserState,
   event: OpenAIResponsesEvent,
 ) {
+  // 终止事件负责关闭生命周期，确保持久化的 reasoning Part 获得完整 metadata。
   const item = event.item
   if (!item) return [state, NO_EVENTS] satisfies StepResult
 
@@ -473,6 +560,23 @@ const onOutputItemDone = Effect.fn("OpenAIResponses.onOutputItemDone")(function*
     return [{ ...state, lifecycle }, events] satisfies StepResult
   }
 
+  if (item.type === "reasoning" && item.id) {
+    const events: LLMEvent[] = []
+    // 终止事件可能是唯一携带最终加密 blob 的事件，因此关闭 reasoning 块时再次写入 metadata。
+    return [
+      {
+        ...state,
+        lifecycle: Lifecycle.reasoningEnd(
+          state.lifecycle,
+          events,
+          item.id,
+          openaiMetadata({ itemId: item.id, reasoningEncryptedContent: item.encrypted_content ?? null }),
+        ),
+      },
+      events,
+    ] satisfies StepResult
+  }
+
   return [state, NO_EVENTS] satisfies StepResult
 })
 
@@ -504,6 +608,8 @@ const onError = (state: ParserState, event: OpenAIResponsesEvent): StepResult =>
 
 const step = (state: ParserState, event: OpenAIResponsesEvent) => {
   if (event.type === "response.output_text.delta") return Effect.succeed(onOutputTextDelta(state, event))
+  if (event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta")
+    return Effect.succeed(onReasoningDelta(state, event))
   if (event.type === "response.output_item.added") return Effect.succeed(onOutputItemAdded(state, event))
   if (event.type === "response.function_call_arguments.delta") return onFunctionCallArgumentsDelta(state, event)
   if (event.type === "response.output_item.done") return onOutputItemDone(state, event)

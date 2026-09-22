@@ -298,10 +298,16 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
           continue
         }
         if (part.type === "reasoning") {
+          // 外部无签名块不具备 Anthropic 签名，不能作为 `thinking` 发送；保留其语义文本。
+          const signature = part.encrypted ?? signatureFromMetadata(part.providerMetadata)
+          if (!signature) {
+            content.push({ type: "text", text: part.text })
+            continue
+          }
           content.push({
             type: "thinking",
             thinking: part.text,
-            signature: part.encrypted ?? signatureFromMetadata(part.providerMetadata),
+            signature,
           })
           continue
         }

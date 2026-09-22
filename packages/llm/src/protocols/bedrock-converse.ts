@@ -311,6 +311,11 @@ const lowerMessages = Effect.fn("BedrockConverse.lowerMessages")(function* (
           continue
         }
         if (part.type === "reasoning") {
+          // Bedrock 会用目标账号校验签名，因此只有带签名的 reasoning 才能使用原生块。
+          if (!part.encrypted) {
+            content.push({ text: part.text })
+            continue
+          }
           content.push({
             reasoningContent: {
               reasoningText: { text: part.text, signature: part.encrypted },
