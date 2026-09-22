@@ -92,18 +92,35 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
   const reuseProviderMetadata = sameModel && message.error === undefined
   const content = message.content.flatMap((item): ContentPart[] => {
     if (item.type === "text") return [{ type: "text", text: item.text }]
-    if (item.type === "reasoning")
-      return sameModel
-        ? [
-            {
-              type: "reasoning",
-              text: item.text,
-              providerMetadata: reuseProviderMetadata ? item.providerMetadata : undefined,
-            },
-          ]
-        : item.text.length > 0
-          ? [{ type: "text", text: item.text }]
-          : []
+    if (item.type === "reasoning") {
+      if (sameModel)
+        return [
+          {
+            type: "reasoning",
+            text: item.text,
+            providerMetadata: reuseProviderMetadata ? item.providerMetadata : undefined,
+          },
+        ]
+      // 跨模型推理回放边界：openai-compatible 路由回放可移植的 reasoning_content 文本，
+      // GPT 家族之间保留 Responses 加密续接状态；其余目标降级为可见文本。
+      // V2 catalog 无 interleaved 能力位，以目标路由等价表达 reasoning_content 回放边界。
+      const replaysForeignReasoning = model.route.id === "openai-compatible-chat"
+      const replaysForeignOpenAIReasoning =
+        // 按用户指定的 GPT 家族边界回放，不把 provider 名称当作兼容性依据。
+        model.route.id.startsWith("openai-responses") &&
+        String(model.id).toLowerCase().startsWith("gpt") &&
+        String(message.model.id).toLowerCase().startsWith("gpt")
+      if (!replaysForeignReasoning && !replaysForeignOpenAIReasoning)
+        return item.text.length > 0 ? [{ type: "text", text: item.text }] : []
+      // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
+      // 失败轮次不具备续接资格；克隆过滤源ID不修改持久历史或同模型引用。
+      const replayMetadata =
+        message.error === undefined &&
+        replaysForeignOpenAIReasoning && item.providerMetadata?.openai
+          ? { openai: Object.fromEntries(Object.entries(item.providerMetadata.openai).filter(([key]) => key !== "itemId")) }
+          : undefined
+      return [{ type: "reasoning", text: item.text, providerMetadata: replayMetadata }]
+    }
     const call = toolCall(item, reuseProviderMetadata ? item.provider?.metadata : undefined)
     if (item.provider?.executed !== true) return [call]
     const result = toolResult(

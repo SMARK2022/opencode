@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Message, Model } from "@opencode-ai/llm"
 import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
+import { OpenAICompatibleChat } from "@opencode-ai/llm/protocols/openai-compatible-chat"
+import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -714,6 +716,114 @@ Recent work
         metadata: undefined,
         providerMetadata: undefined,
       },
+    ])
+  })
+
+  test("preserves foreign reasoning for openai-compatible reasoning_content routes", () => {
+    const compatible = Model.make({
+      id: "kimi-k2",
+      provider: "moonshot",
+      route: OpenAICompatibleChat.route,
+    })
+    const messages = toLLMMessages(
+      [
+        SessionMessage.Assistant.make({
+          id: id("assistant-compatible-reasoning"),
+          type: "assistant",
+          agent: "build",
+          model: { id: ModelV2.ID.make("glm-5"), providerID: ProviderV2.ID.make("other") },
+          content: [
+            // reasoning_content 是可移植文本字段；跨模型切换 GLM/Kimi 时保留结构化形态。
+            SessionMessage.AssistantReasoning.make({
+              type: "reasoning",
+              id: "reasoning-compatible",
+              text: "thinking",
+              providerMetadata: { anthropic: { signature: "foreign" } },
+            }),
+            SessionMessage.AssistantText.make({ type: "text", id: "text-compatible", text: "answer" }),
+          ],
+          time: { created, completed: created },
+        }),
+      ],
+      compatible,
+    )
+
+    expect(messages[0]?.content).toEqual([
+      // 外部签名不跨协议携带；协议层把 reasoning part 降为 reasoning_content 文本字段。
+      { type: "reasoning", text: "thinking", providerMetadata: undefined },
+      { type: "text", text: "answer" },
+    ])
+  })
+
+  test.each([false, true])("replays encrypted GPT reasoning across providers (failed=%s)", (failed) => {
+    const gpt = Model.make({ id: "gpt-5.5", provider: "openai", route: OpenAIResponses.route })
+    const messages = toLLMMessages(
+      [
+        SessionMessage.Assistant.make({
+          id: id("assistant-gpt-reasoning"),
+          type: "assistant",
+          agent: "build",
+          error: failed ? { type: "unknown", message: "Provider turn interrupted" } : undefined,
+          // 源与目标都是 GPT 家族，但 provider 不同；加密续接状态仍可回放。
+          model: { id: ModelV2.ID.make("gpt-6-astra"), providerID: ProviderV2.ID.make("smark-codex") },
+          content: [
+            SessionMessage.AssistantReasoning.make({
+              type: "reasoning",
+              id: "reasoning-gpt",
+              text: "foreign summary",
+              providerMetadata: {
+                openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" },
+              },
+            }),
+            SessionMessage.AssistantText.make({ type: "text", id: "text-gpt", text: "answer" }),
+          ],
+          time: { created, completed: created },
+        }),
+      ],
+      gpt,
+    )
+
+    expect(messages[0]?.content).toEqual([
+      // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
+      // 源 provider 与目标不同；回放凭据只按 GPT 家族边界判定。
+      {
+        type: "reasoning",
+        text: "foreign summary",
+        providerMetadata: failed ? undefined : { openai: { reasoningEncryptedContent: "encrypted-state" } },
+      },
+      { type: "text", text: "answer" },
+    ])
+  })
+
+  test("degrades cross-family reasoning to text for non-replaying routes", () => {
+    const gpt = Model.make({ id: "gpt-5.5", provider: "openai", route: OpenAIResponses.route })
+    const messages = toLLMMessages(
+      [
+        SessionMessage.Assistant.make({
+          id: id("assistant-cross-family"),
+          type: "assistant",
+          agent: "build",
+          // 源模型不在 GPT 家族：即使目标是 GPT，也不回放签名/加密状态，避免伪造凭据。
+          model: { id: ModelV2.ID.make("claude-opus-4-8"), providerID: ProviderV2.ID.make("anthropic") },
+          content: [
+            SessionMessage.AssistantReasoning.make({
+              type: "reasoning",
+              id: "reasoning-cross-family",
+              text: "foreign summary",
+              providerMetadata: {
+                openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" },
+              },
+            }),
+          ],
+          time: { created, completed: created },
+        }),
+      ],
+      gpt,
+    )
+
+    expect(messages[0]?.content).toEqual([
+      // 投影层不伪造跨协议凭据；目标协议层再按自身规则编码可见文本。
+      { type: "text", text: "foreign summary" },
     ])
   })
 })
