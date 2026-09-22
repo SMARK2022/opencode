@@ -99,7 +99,7 @@ type OpenAIResponsesInputItem = Schema.Schema.Type<typeof OpenAIResponsesInputIt
 // multiple streamed summary parts into the same item before flushing.
 type OpenAIResponsesReasoningInput = {
   type: "reasoning"
-  id: string
+  id?: string
   summary: Array<{ type: "summary_text"; text: string }>
   encrypted_content?: string | null
 }
@@ -284,8 +284,10 @@ const lowerToolCall = (part: ToolCallPart): OpenAIResponsesInputItem => ({
 
 const lowerReasoning = (part: ReasoningPart): OpenAIResponsesReasoningInput | undefined => {
   const openai = part.providerMetadata?.openai
-  if (!ProviderShared.isRecord(openai) || typeof openai.itemId !== "string" || openai.itemId.length === 0)
-    return undefined
+  if (!ProviderShared.isRecord(openai)) return undefined
+  const id = typeof openai.itemId === "string" && openai.itemId.length > 0 ? openai.itemId : undefined
+  // 跨模型投影已去源ID；字符串blob仍是完整续接凭据，不能只因缺ID丢弃它。
+  if (!id && typeof openai.reasoningEncryptedContent !== "string") return undefined
   const encryptedContent =
     typeof openai.reasoningEncryptedContent === "string"
       ? openai.reasoningEncryptedContent
@@ -294,7 +296,7 @@ const lowerReasoning = (part: ReasoningPart): OpenAIResponsesReasoningInput | un
         : undefined
   return {
     type: "reasoning",
-    id: openai.itemId,
+    id,
     summary: part.text.length > 0 ? [{ type: "summary_text", text: part.text }] : [],
     encrypted_content: encryptedContent,
   }
@@ -385,9 +387,21 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
           continue
         }
         if (part.type === "reasoning") {
-          flushText()
           const reasoning = lowerReasoning(part)
-          if (!reasoning) continue
+          // 外部推理没有可回放的 OpenAI item 状态（无 itemId/加密续接）时降级为可见文本，
+          // 而不是静默丢弃摘要；降级发生在 flushText 之前，使摘要与前后文本合并进同一 assistant item。
+          if (!reasoning) {
+            content.push({ type: "text", text: part.text })
+            continue
+          }
+          // 带 itemId 的同链回放保留上游 item_reference 与 join-then-filter 契约
+          //（store:false 无加密状态的丢弃由上游用例锁定，不做逐 part 降级）。
+          flushText()
+          if (reasoning.id === undefined) {
+            // 无ID的外部item只能发送完整状态；store:true也不能转成源服务器引用。
+            input.push({ type: reasoning.type, summary: reasoning.summary, encrypted_content: reasoning.encrypted_content })
+            continue
+          }
           if (store !== false) {
             if (!reasoningReferences.has(reasoning.id)) input.push({ type: "item_reference", id: reasoning.id })
             reasoningReferences.add(reasoning.id)

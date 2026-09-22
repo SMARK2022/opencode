@@ -111,7 +111,13 @@ const messages = (input: readonly ModelMessage[]) => {
       Message.make({
         role: message.role,
         content: content(message.content),
-        native: isRecord(message.providerOptions) ? { providerOptions: message.providerOptions } : undefined,
+        native: isRecord(message.providerOptions)
+          ? {
+              // compatible lowerer消费消息级字段；保留原选项，不把任意namespace展开到wire。
+              providerOptions: message.providerOptions,
+              openaiCompatible: message.providerOptions.openaiCompatible,
+            }
+          : undefined,
       }),
     ]
   })

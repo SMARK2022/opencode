@@ -8,6 +8,7 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { LLMNative } from "@/session/llm/native-request"
 import { LLMNativeRuntime } from "@/session/llm/native-runtime"
 import type { Provider } from "@/provider/provider"
+import { ProviderTransform } from "@/provider/transform"
 
 import { OAUTH_DUMMY_KEY } from "@/auth"
 import { testEffect } from "../lib/effect"
@@ -697,6 +698,42 @@ describe("session.llm-native.request", () => {
         ],
         store: false,
       },
+    }),
+  )
+
+  it.effect("preserves transformed reasoning through native request preparation", () =>
+    Effect.gen(function* () {
+      const compatible: Provider.Model = {
+        ...baseModel,
+        id: ModelV2.ID.make("kimi-k2"),
+        api: { ...baseModel.api, id: "kimi-k2", npm: "@ai-sdk/openai-compatible" },
+        capabilities: { ...baseModel.capabilities, interleaved: { field: "reasoning_content" } },
+      }
+      const history: ModelMessage[] = [{ role: "assistant", content: [
+        { type: "reasoning", text: "thinking" }, { type: "text", text: "answer" },
+      ] }]
+      // 必须经过生产transform再适配，直接喂reasoning part会绕开消息级字段丢失。
+      const prepared = yield* prepareNativeRequest({
+        model: compatible, apiKey: "test-key",
+        messages: ProviderTransform.message(history, compatible, {}),
+      })
+      expect(prepared.body).toMatchObject({
+        messages: [{ role: "assistant", content: "answer", reasoning_content: "thinking" }],
+      })
+      for (const store of [false, true]) {
+        const encrypted: ModelMessage[] = [{ role: "assistant", content: [{
+          type: "reasoning", text: "", providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
+        }] }]
+        // 没有可见摘要也须穿过同一transform/adapter，凭据不能被降级为空文本。
+        yield* expectOpenAIResponsesRequest({
+          history: ProviderTransform.message(encrypted, baseModel, { store }),
+          providerOptions: { openai: { store } },
+          expectedBody: {
+            input: [{ type: "reasoning", summary: [], encrypted_content: "encrypted-state" }],
+            store,
+          },
+        })
+      }
     }),
   )
 

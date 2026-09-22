@@ -1353,6 +1353,85 @@ describe("OpenAI Responses route", () => {
     }),
   )
 
+  it.effect("lowers foreign reasoning to assistant text", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
+        LLM.request({
+          model,
+          messages: [
+            Message.assistant([
+              { type: "text", text: "before" },
+              { type: "reasoning", text: "foreign thought" },
+              { type: "text", text: "after" },
+            ]),
+          ],
+        }),
+      )
+
+      expect(prepared.body.input).toEqual([
+        {
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "before" },
+            // 无 OpenAI 回放状态的外部推理降级为可见文本，与前后文本合入同一 assistant item。
+            // 降级后摘要仍对目标模型可见，且不产生无法验证的伪 reasoning item。
+            { type: "output_text", text: "foreign thought" },
+            { type: "output_text", text: "after" },
+          ],
+        },
+      ])
+    }),
+  )
+
+  it.effect("replays encrypted reasoning items without foreign item ids", () =>
+    // 该测试锁定摘要、加密状态和源 ID 脱敏三个回放契约。
+    Effect.gen(function* () {
+      // 这里模拟 GPT 到 GPT 的切换，此时源 item ID 不再复用。
+      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
+        LLM.request({
+          model,
+          messages: [
+            Message.assistant({
+              type: "reasoning",
+              text: "foreign summary",
+              providerMetadata: {
+                openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" },
+              },
+            }),
+          ],
+        }),
+      )
+
+      // 无状态回放保留加密状态，但不会把源 response 的 ID 交给目标。
+      // 目标接收完整 item，不查询源 response 链；无状态回放保留状态但丢弃源 ID。
+      expect(prepared.body.input).toEqual([
+        {
+          // item 本身承载摘要与加密续接状态。
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "foreign summary" }],
+          encrypted_content: "encrypted-state",
+        },
+      ])
+      // 投影剥离ID后仍能回放；显式store与空摘要都不能丢失加密凭据。
+      for (const store of [false, true]) {
+        for (const text of ["foreign summary", ""]) {
+          const withoutID = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
+            LLM.request({
+              model,
+              providerOptions: { openai: { store } },
+              messages: [Message.assistant({ type: "reasoning", text, providerMetadata: { openai: { reasoningEncryptedContent: "encrypted-state" } } })],
+            }),
+          )
+          expect(withoutID.body.input).toEqual([{
+            type: "reasoning",
+            summary: text ? [{ type: "summary_text", text }] : [],
+            encrypted_content: "encrypted-state",
+          }])
+        }
+      }
+    }),
+  )
+
   it.effect("emits provider-error events for mid-stream provider errors", () =>
     Effect.gen(function* () {
       const response = yield* LLMClient.generate(request).pipe(
