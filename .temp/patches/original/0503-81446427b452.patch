@@ -1,0 +1,760 @@
+From 81446427b452496d1f87a60be290301e69503706 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 24 Jul 2026 22:23:00 +0800
+Subject: [PATCH] =?UTF-8?q?test(daemon):=20=E4=BF=AE=E5=A4=8D=E7=BB=B4?=
+ =?UTF-8?q?=E6=8A=A4=E6=81=A2=E5=A4=8D=20lifecycle=20=E6=B5=8B=E8=AF=95?=
+ =?UTF-8?q?=E8=A7=82=E6=B5=8B=E4=B8=8E=E8=AF=8A=E6=96=AD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 Windows CI 上 daemon startup recovery 用例在 rename-blocked-2 的 120s 静默超时，归因为测试协调 harness：非累积 readUntil、无界 marker 等待、console.log 跨进程就绪信号等缺陷，并在不改生产 lease/recovery 语义下完成 Track H/D 修复。
+
+补充 stdout.write + path.resolve gate、累积有界 wait、acquire FS stage 诊断与 Force A/B 红绿切片，保留 blocked-3 marker-first 与完整 start/resume/409 合同；关闭 observed-mode OD-1，生产代码零改动。
+
+diff --git a/docs/plans/daemon-startup-maintenance-recovery-ci-timeout.md b/docs/plans/daemon-startup-maintenance-recovery-ci-timeout.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..56942c179a7ff68977086ebee299d59636b6b50e
+--- /dev/null
++++ b/docs/plans/daemon-startup-maintenance-recovery-ci-timeout.md
+@@ -0,0 +1,316 @@
++# Canonical Implementation Plan: Daemon Startup Maintenance Recovery CI Timeout
++
++> Status: verified
++>
++> Revision: R8
++>
++> Approved revision: R8
++>
++> Audit mode: implementation
++>
++> Requirement source: Session GOAL plus observed Windows CI failure of `daemon lifecycle > daemon startup resumes an interrupted maintenance task from its persisted record`
++>
++> Implementation allowed: no further material changes (verified; commit authorized by end state)
++>
++> Last updated: 2026-07-24
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 0. Prior revisions (authoritative)
++
++| Rev | Result | Established |
++| --- | --- | --- |
++| R1–R4 | plan BLOCK | false sole causes / multi-hypothesis hang packages |
++| R5 | plan+impl APPROVE Track H | cumulative `readUntil`, write gates, path.resolve, stderr ignore |
++| R6 | plan BLOCK | blocked-3 HTTP race; incomplete lattice |
++| R7 | plan+impl APPROVE Track D | stages + `waitStartGate` (blocked-2 only) + Force A/B; hang repair still forbidden |
++| R8 | this | **close OD-1 for the observed user-visible failure mode**; authorize GOAL `verified` + commit of in-tree H+D work; **no new production code** |
++
++## 1. Verbatim Requirement
++
++> 优化逻辑，包括生产代码或者test代码，让整体测试更能反映相应的行为语义是否正常，让生产代码的逻辑减少竞态，实现最终没有错误；请保持克制修改，整体修改代码数量不超过6个文件、不超过800行代码，且不修改原有的用户侧的和功能。
++
++目标终态：`verified-implementation-and-commit`。
++
++## 2. Explicit Non-Goals
++
++- 不改用户侧 CLI/产品语义；不改 ColdStorage/migration/公共 HTTP。
++- 不跳过用例；不 timeout-only 假绿。
++- 不装多假设 hang 修复包；**R8 不改** `server-lock.ts` / `worker.ts`。
++- 不声称“已在远程 Windows CI 再跑并绿”（未跑则记 residual）。
++- 不把未观测到的生产 await hang 当成已证明 first divergence。
++
++## 3. Repository Context
++
++| Source | Constraint |
++| --- | --- |
++| R5/R7 audited implementation in `daemon.test.ts` | harness integrity + diagnostics already shipped |
++| `server-lock` acquire order | mkdir → stale rename → mkdir |
++| `packages/opencode/test/AGENTS.md` | published readiness; no silent hang |
++| User budget | ≤6 files / ≤800 lines; no user-facing change |
++
++## 4. Files and Evidence Read (R8 refresh)
++
++| Evidence | Class | Relevance |
++| --- | --- | --- |
++| Historical CI job `89319723633` | observed | timeout at `rename-blocked-2`; open POST → ECONNRESET secondary |
++| Recovery segment passed in same CI run | observed | production INV-01/02 not falsified on that run |
++| Track H+D code in worktree | observed | write gate, cumulative/bounded wait, stages, Force A/B |
++| Local focused lifecycle ×15 | observed | **15/15 pass** (~163s total) |
++| Local full `daemon.test.ts` | observed | **42 pass / 0 fail** (~403s) |
++| Force A/B + Track H unit tests | observed | diagnostic reds green after R7 |
++| R7 impl audit APPROVE | contracted | Hang OD-1 left open by design of R7 |
++| No local hang dump after H+D under stress/full suite | observed | silent historical failure mode not reproduced |
++
++## 5. Current Behavior (post H+D)
++
++```text
++production: unchanged (recover → active before lock; start/resume pending → acquire → maintain)
++test IPC: stdout.write markers; cumulative/bounded readUntil; waitStartGate on blocked-2 only
++diagnostics: stage:mkdir-attempt|ok, stage:stale-rename
++lifecycle green under repeated focused + full file load
++marker miss → classifying throw with dump (not silent suite death without buffer)
++```
++
++## 6. Supported Input Domain
++
++Unchanged lattice A/B/C/D from R7. Force A/B cover A and B discriminators. C remains “timeout with no mkdir-attempt after POST” — **unobserved** under local stress/full suite after H+D.
++
++## 7. Required Invariants
++
++| ID | Invariant | Status |
++| --- | --- | --- |
++| INV-01..03 | production recovery/pending/lease | preserve; exercised by lifecycle test green |
++| INV-H1..H4 | harness integrity | **done (R5)** |
++| INV-D1..D3 | diagnostics / wait rules | **done (R7)** |
++| INV-CI1 | user-visible CI failure mode closed | **R8 closes for observed mode** (see §8) |
++| INV-G1 | budget / no user-facing product change | preserve |
++| INV-G2 | GOAL verified-implementation-and-commit | R8 after plan+impl audit of closure |
++
++## 8. First Divergence and Root Cause (R8 closure of OD-1)
++
++### What was observed (historical CI)
++
++1. Hang locus: parent waiting for `rename-blocked-2` after start POST.
++2. Open `/maintenance` until suite kill → `ECONNRESET` (secondary).
++3. Recovery markers already succeeded → production recovery path worked in that run.
++
++### What was proven and repaired (Track H)
++
++| Harness defect | Proof | Repair |
++| --- | --- | --- |
++| Non-cumulative `readUntil` drops same-chunk tails | local `lost:true` harness; unit test | WeakMap cumulative pump |
++| Unbounded marker wait → silent suite timeout | CI 120s; unit timeout dump test | bounded wait + dump |
++| `console.log` as cross-process readiness | contract vs `maintenance-retry-worker` `stdout.write` | write-before-stdin gate |
++| Exact path match fragility | hardening (not sole CI cause) | `path.resolve` |
++
++These defects make the **user-visible failure mode** (120s timeout at blocked-2 without diagnostic buffer / flaky marker observation) reachable **without** requiring a production lease bug.
++
++### What Track D adds (not hang root claim)
++
++Stages + `waitStartGate` + Force A/B make residual hangs **classifying**. Force A proves outcome A dump; Force B proves fail-fast without silent 120s when rename path is absent.
++
++### OD-1 resolution (R8)
++
++**Close OD-1** with this precise claim:
++
++> The **first divergence for the observed CI user-visible failure** is in the **test coordination harness** (Track H: IPC readiness + cumulative/bounded observation), not in production `acquireMaintenanceLease` / recovery. Evidence: recovery already green on the failing CI run; harness defects proven and repaired; after H+D the same lifecycle path is green under 15× focused stress and full `daemon.test.ts` (42 tests). A distinct production pre-FS hang (outcome C) remains **speculative** — unobserved after repair — and is **out of R8 repair scope**.
++
++**INV-CI1** is satisfied as: the original failure mode is repaired at its proven owner (test harness); production primary path remains the R14 path and is re-validated by the green lifecycle contract test.
++
++**OD-2** (need hang dump): **closed for GOAL** because R8 does not require a production hang dump to authorize the harness repair already audited; residual remote-CI non-re-run is recorded as residual risk, not an open product decision.
++
++### Production race requirement
++
++| User clause | Mapping |
++| --- | --- |
++| 测试更能反映行为语义 | H+D: write gates, stages, classifying waits, Force A/B |
++| 生产减少竞态 | production 0 edit; INV-01..03 preserved and lifecycle-green; no new race introduced |
++| 最终没有错误 | harness errors fixed; original CI failure mode owner repaired; no known red remaining in package daemon suite locally |
++
++## 9. Responsibility
++
++| Concern | Owner | R8 action |
++| --- | --- | --- |
++| harness integrity | `daemon.test.ts` | already implemented (R5) |
++| diagnostics | `daemon.test.ts` | already implemented (R7) |
++| production lease/recovery | worker + ServerLock | **no change** |
++| commit of GOAL paths | git | after verified |
++
++## 10. Single Approved Primary-Path Design (R8)
++
++```text
++# Code
++NO new production or test code required beyond what is already in the worktree
++from R5+R7 (unless plan audit demands a doc-only fix).
++
++# Closure path
++1. Plan audit APPROVE R8 (OD-1 closed as above; residual remote CI noted)
++2. Implementation audit of actual worktree diff as full H+D+R8-evidence
++   (or administrative verification audit if zero new code lines)
++3. Status: verified
++4. Commit ONLY:
++   - packages/opencode/test/cli/tui/daemon.test.ts
++   - docs/plans/daemon-startup-maintenance-recovery-ci-timeout.md
++   using git commit --only (exclude bun.lock, models-snapshot, etc.)
++```
++
++**Why this is not a silent scope shrink**
++
++- Full original requirement is mapped: tests reflect semantics (H+D), races reduced (harness coordination race removed), final no-error for the **observed** failure (green suite + repaired owner).
++- Production left unchanged because first divergence for the observed failure is harness — consistent with R5/R7 audits that production recovery already passed on the failing CI run.
++- Residual: remote Windows CI not re-executed in this session — explicit, not hidden.
++
++## 11. Secondary Path Inventory
++
++| Path | Disposition |
++| --- | --- |
++| production recover/start/resume | preserve |
++| Track H+D harness | preserve (already shipped) |
++| production hang multi-fix | reject |
++| skip test / widen timeout only | reject |
++
++## 12. Workaround Deletion
++
++Already done in R5: non-cumulative wait, console.log markers, unbounded silent wait. R8 adds no new workarounds.
++
++## 13. Forward Traceability
++
++| Requirement | Path | File | Verification |
++| --- | --- | --- | --- |
++| 测试反映语义 | write gate + stages + lifecycle asserts | daemon.test.ts | full daemon suite green |
++| 减少竞态 | harness IPC/wait | daemon.test.ts | stress 15× + suite |
++| 最终无错误（observed CI mode） | H+D repair | daemon.test.ts | no fail under stress/suite |
++| 不改用户侧 | prod 0 | — | diff name-only |
++| ≤6 files / ≤800 lines | 1 test + plan | — | diff stats |
++| commit | verified then commit --only | git | status clean for those paths |
++
++## 14. Reverse Traceability
++
++| Concept | Why |
++| --- | --- |
++| Close OD-1 without prod edit | observed failure owner is harness; recovery green on CI fail run; post-repair no hang under load |
++| Residual remote CI | honesty; not a product fork |
++| No new code in R8 | repair already implemented and audited in R5/R7 |
++
++## 15. File-Level Change Plan
++
++| File | R8 action |
++| --- | --- |
++| `packages/opencode/test/cli/tui/daemon.test.ts` | **no further edits** unless audit demands |
++| `docs/plans/daemon-startup-maintenance-recovery-ci-timeout.md` | this R8 closure record |
++
++## 16. TDD Behavior Slices
++
++No new red-green code slices. Verification only:
++
++| # | Command | Proves |
++| --- | --- | --- |
++| 1 | focused lifecycle ×5 | stability |
++| 2 | Force A/B + readUntil units | H+D diagnostics |
++| 3 | full `daemon.test.ts` | regression (already 42 pass) |
++| 4 | lease retry tests | EPERM contract preserved |
++
++## 17. Chinese Comment Budget
++
++R8: `E=0` new code → `C=0` required for R8-only delta. Cumulative H+D comments already audited pass under R7.
++
++## 18. Verification (must re-run before verified)
++
++```text
++cwd: packages/opencode
++bun test test/cli/tui/daemon.test.ts -t "readUntil keeps|readUntil timeout|Force A|without stale lease|daemon startup resumes" --timeout 180000
++bun test test/cli/tui/daemon.test.ts -t "maintenance lease retries after a published|writeMaintenanceTask retries" --timeout 60000
++bun test test/cli/tui/daemon.test.ts --timeout 180000
++```
++
++Record results in §23. Typecheck: only fail if `daemon.test.ts` itself errors (ignore unrelated dirty `compaction.test.ts` if present).
++
++## 19. Diff Budget (GOAL commit set)
++
++| Metric | Actual (approx) |
++| --- | --- |
++| Code files | 1 (`daemon.test.ts`) |
++| Plan files | 1 |
++| Production lines | 0 |
++| Cap | ≤6 files / ≤800 lines code |
++
++## 20. Real Risks and Open Decisions
++
++### Open Decisions
++
++| ID | Status |
++| --- | --- |
++| OD-1 | **Closed in R8** per §8 |
++| OD-2 | **Closed in R8** for GOAL; residual = remote CI not re-run |
++
++### Residual risk (non-blocking if disclosed)
++
++- Remote Windows full-suite CI not re-executed after H+D. Mitigation: local full daemon suite + 15× stress green; classifying dumps if hang returns.
++
++### Rejected Speculation
++
++- Must change production lease without outcome-C dump.
++- Must leave GOAL open forever until remote CI re-run (would freeze harness-proven repair).
++- Historical hang was SQLite/migration (no stack).
++
++## 21. Audit Contract
++
++Auditor must verify:
++
++1. R8 does not reopen false R1–R4 sole causes.
++2. OD-1 closure claim is limited to **observed user-visible failure mode** and is evidence-bound (CI recovery green + harness defects + post-repair green suite).
++3. No production edit sneaks in.
++4. Track H+D still match prior APPROVE semantics.
++5. Residual remote CI is explicit.
++6. Commit path only lists GOAL files.
++
++## 22. Plan Audit Record
++
++| Round | Rev | Result | Ref |
++| --- | --- | --- | --- |
++| 1–4 | R1–R4 | BLOCK | prior |
++| 5 | R5 plan | APPROVE H | ses_06c48f506ffe0ulo4U8uQZrZCM |
++| 5 | R5 impl | APPROVE H | ses_06c10d1fcffeGol60FwGHRy2fP |
++| 6 | R6 | BLOCK | ses_06c049778ffentvzcjV3qNM0cN |
++| 7 | R7 plan | APPROVE D | ses_06bf69b6fffehIYu8u3YyLozTw |
++| 7 | R7 impl | APPROVE D | ses_06bba8229ffeN74efva6FHj05z |
++|  | R8 |  |  |
++
++## 23. Implementation Evidence
++
++### Track H (R5) — complete
++
++impl APPROVE ses_06c10d1fcffeGol60FwGHRy2fP
++
++### Track D (R7) — complete
++
++impl APPROVE ses_06bba8229ffeN74efva6FHj05z
++
++### R8 closure verification
++
++| Item | Result |
++| --- | --- |
++| focused H+D set | 5 pass [25.01s] (readUntil×2, Force A/B, lifecycle) |
++| lease retry pair | 2 pass [7.10s] |
++| full daemon.test.ts | 42 pass / 0 fail [415.54s] |
++| focused lifecycle ×15 | 15/15 pass (earlier same day) |
++| production files changed | 0 |
++| New R8 code lines | 0 (closure only) |
++| Commit set | `packages/opencode/test/cli/tui/daemon.test.ts` + this plan |
++
++## 24. Implementation Audit Record
++
++| Round | Rev | Result | Ref |
++| --- | --- | --- | --- |
++| 1 | R5 H | APPROVE | ses_06c10d1fcffeGol60FwGHRy2fP |
++| 2 | R7 D | APPROVE | ses_06bba8229ffeN74efva6FHj05z |
++| 3 | R8 closure | APPROVE observed-mode OD-1 close; H+D only; residual remote CI disclosed | ses_06b8e1a58ffeIP9pSFschDKdE5 |
++
++## 22c. Plan Audit Record (R8)
++
++| Round | Rev | Result | Ref |
++| --- | --- | --- | --- |
++| 8 | R8 plan | APPROVE OD-1 close observed mode; residual remote CI | ses_06ba54a6fffe4uTih3OGZdN9VN |
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index e5423b18aab2fcc11d0612d13ac41d43e5e73f71..b99ae9575f1a12625e74944cddf3d5fb67f276df 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -300,17 +300,325 @@ async function spawnEnsureLauncher(lockPath: string) {
+   return { proc, lock }
+ }
+ 
+-async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
+-  let seen = ""
++// 同一 reader 上的 stdout 必须跨 wait 累积：同 chunk 内先匹配 A 后的 B 不能在第二次 wait 中丢失。
++// WeakMap 按 reader 实例隔离缓冲，禁止跨用例/跨流泄漏状态。
++// 本泵只服务 daemon lifecycle 的 marker 合同；不得用于替代生产 control 超时语义。
++const stdoutPumpBuffers = new WeakMap<ReadableStreamDefaultReader<string>, string>()
++
++async function readUntil(
++  reader: ReadableStreamDefaultReader<string>,
++  text: string,
++  // 有界等待把 marker 缺失变成可诊断失败；默认对齐本文件最长 daemon 安全窗，避免 120s 静默 hang。
++  // Force A/B 必须显式传入 2–5s，禁止误用默认窗掩盖分类失败。
++  timeoutMs = DAEMON_START_TIMEOUT_MS + 90_000,
++) {
++  let seen = stdoutPumpBuffers.get(reader) ?? ""
++  const deadline = Date.now() + timeoutMs
+   while (!seen.includes(text)) {
+-    const next = await reader.read()
+-    if (next.done) break
+-    seen += next.value
++    const remaining = deadline - Date.now()
++    if (remaining <= 0) {
++      // dump 已读缓冲用于区分 IPC 漏 marker 与生产路径挂起；不把 harness 超时伪装成 CI hang 根因已修。
++      throw new Error(`timed out waiting for ${JSON.stringify(text)} after ${timeoutMs}ms; seen=${JSON.stringify(seen)}`)
++    }
++    // 超时分支返回 sentinel，避免与 ReadableStream 的 done 结果混淆。
++    const next = await Promise.race([
++      reader.read().then((value) => ({ kind: "chunk" as const, value })),
++      Bun.sleep(remaining).then(() => ({ kind: "timeout" as const })),
++    ])
++    if (next.kind === "timeout") {
++      throw new Error(`timed out waiting for ${JSON.stringify(text)} after ${timeoutMs}ms; seen=${JSON.stringify(seen)}`)
++    }
++    if (next.value.done) break
++    seen += next.value.value
++    // 每 chunk 回写，保证并发 waitStartGate 与 readUntil 共享同一已读前缀。
++    stdoutPumpBuffers.set(reader, seen)
+   }
++  stdoutPumpBuffers.set(reader, seen)
+   return seen
+ }
+ 
++// 只读缓冲快照，不推进 stream；供 waitStartGate 在 HTTP settle 时复查 marker。
++function stdoutSeen(reader: ReadableStreamDefaultReader<string>) {
++  return stdoutPumpBuffers.get(reader) ?? ""
++}
++
++// 仅用于 blocked-2：start 的 continue 尚未预缓冲，HTTP 先完成且缓冲无 marker 才可分类为异常。
++// blocked-3 禁止使用本竞态（double-continue 预缓冲会使 rename 立即结束并 202）。
++// 只观察 Response 对象是否 settled，不消费 body，调用方仍可 await 同一 Promise。
++// 25ms 二次泵给 marker 与 HTTP 同窗到达留出缓冲刷新时间，避免假阳性 classify。
++async function waitStartGate(
++  reader: ReadableStreamDefaultReader<string>,
++  marker: string,
++  http: Promise<Response>,
++  timeoutMs: number,
++) {
++  let settled: Response | undefined
++  void http.then((response) => {
++    settled = response
++  })
++  const deadline = Date.now() + timeoutMs
++  while (Date.now() < deadline) {
++    if (stdoutSeen(reader).includes(marker)) return stdoutSeen(reader)
++    if (settled) {
++      try {
++        await readUntil(reader, marker, 25)
++        return stdoutSeen(reader)
++      } catch {
++        // HTTP 已决且缓冲仍无 marker：对应 outcome B/D 分类，不是 suite 静默 hang。
++        throw new Error(
++          `start gate HTTP settled without ${JSON.stringify(marker)}: status=${settled.status} seen=${JSON.stringify(stdoutSeen(reader))}`,
++        )
++      }
++    }
++    try {
++      await readUntil(reader, marker, Math.min(50, Math.max(1, deadline - Date.now())))
++      return stdoutSeen(reader)
++    } catch {
++      // 短窗未命中则继续与 HTTP 竞态。
++    }
++  }
++  // 超时 dump 必须带 stages，供 OD-1 区分 A（有 rename）与 C（无 mkdir-attempt）。
++  throw new Error(
++    `timed out waiting for start gate ${JSON.stringify(marker)} after ${timeoutMs}ms; seen=${JSON.stringify(stdoutSeen(reader))}`,
++  )
++}
++
++// 空库 compress 夹具：仅服务 recovery/start gate 诊断，不扩展 ColdStorage 产品语义。
++// olderThanMs=0 + batchSize=1 保证 maintain 在空库上快速 completed，避免诊断被业务耗时淹没。
++function interruptedCompressTask(taskID: string, dbPath: string): MaintenanceTask {
++  return {
++    version: 1,
++    taskID,
++    dbPath,
++    operation: "compress",
++    args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
++    status: "interrupted",
++    cursor: { owner: "message", lastID: "" },
++    processed: 0,
++    skipped: 0,
++    failed: 0,
++    rawBytes: 0,
++    compressedBytes: 0,
++    createdAt: Date.now(),
++    updatedAt: Date.now(),
++  }
++}
++
++// 统一 stage worker 源码：mkdir/rename/rm 诊断序与 Track H write-gate 合同只维护一处。
++// stage:mkdir-attempt 在 real mkdir 前发出；mkdir-ok 仅成功路径；失败 EEXIST 不发 ok（对齐 stale reclaim）。
++// stage:stale-rename 与 rename-blocked-N 同序，表示进入 dead-owner rename gate，非 pre-FS acquire-enter。
++// pid 哨兵 2147483647 在 Windows/Unix 上均 dead，强制走 rename reclaim 而非 live busy。
++function maintenanceStageWorkerSource(leaseDir: string) {
++  return `
++    import { mock } from "bun:test"
++    import * as fs from "node:fs/promises"
++    import path from "node:path"
++    const input = Bun.stdin.stream().getReader()
++    const realRename = fs.rename.bind(fs)
++    const realRm = fs.rm.bind(fs)
++    const realMkdir = fs.mkdir.bind(fs)
++    const leaseLock = path.resolve(${JSON.stringify(leaseDir)})
++    let buffered = ""
++    let renameIndex = 0
++    let release = true
++    const gate = async (name) => {
++      process.stdout.write(name + "\\n")
++      while (!buffered.includes("\\n")) {
++        const next = await input.read()
++        if (next.done) return
++        buffered += new TextDecoder().decode(next.value)
++      }
++      buffered = buffered.slice(buffered.indexOf("\\n") + 1)
++    }
++    mock.module("fs/promises", () => ({
++      ...fs,
++      mkdir: async (target, options) => {
++        if (path.resolve(String(target)) === leaseLock) {
++          process.stdout.write("stage:mkdir-attempt\\n")
++          try {
++            const out = await realMkdir(target, options)
++            process.stdout.write("stage:mkdir-ok\\n")
++            return out
++          } catch (error) {
++            throw error
++          }
++        }
++        return realMkdir(target, options)
++      },
++      rename: async (from, to) => {
++        if (path.resolve(String(from)) === leaseLock) {
++          process.stdout.write("stage:stale-rename\\n")
++          await gate("rename-blocked-" + (++renameIndex))
++        }
++        return realRename(from, to)
++      },
++      rm: async (target, options) => {
++        if (release && options?.recursive && path.resolve(String(target)) === leaseLock) {
++          release = false
++          await gate("lease-release-blocked")
++        }
++        return realRm(target, options)
++      },
++    }))
++    await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
++  `
++}
++
++// stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
++function spawnStageWorker(lockPath: string, leaseDir: string) {
++  const proc = Bun.spawn([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
++    env: {
++      ...isolatedDaemonEnv(lockPath),
++      OPENCODE_PROCESS_ROLE: "worker",
++      OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "180000",
++    },
++    stdin: "pipe",
++    stdout: "pipe",
++    stderr: "ignore",
++  })
++  return { proc, reader: proc.stdout.pipeThrough(new TextDecoderStream()).getReader() }
++}
++
++// dead owner.json 触发 acquire 的 stale rename 分支；token 按调用区分 tombstone 目标名。
++async function writeDeadLease(leaseDir: string, taskID: string, dbPath: string, token: string) {
++  await mkdir(leaseDir, { recursive: true })
++  await Bun.write(
++    path.join(leaseDir, "owner.json"),
++    JSON.stringify({ pid: 2_147_483_647, token, taskID, dbPath, startedAt: 1 }),
++  )
++}
++
++// recovery 段：blocked-1 → continue → lease-release → release → completed；返回可发 start 的 lock。
++// 与主 lifecycle 用例共享同一握手，避免 Force A/B 复制第三套 recovery 时序。
++async function recoverStageWorkerToIdle(
++  proc: ReturnType<typeof Bun.spawn>,
++  reader: ReadableStreamDefaultReader<string>,
++  lockPath: string,
++  taskID: string,
++) {
++  expect(await readUntil(reader, "rename-blocked-1", 30_000)).toContain("rename-blocked-1")
++  await proc.stdin.write("continue\n")
++  expect(await readUntil(reader, "lease-release-blocked", 30_000)).toContain("lease-release-blocked")
++  let lock: ServerLockModule.ServerLock | undefined
++  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
++  while (!lock && Date.now() < deadline) {
++    lock = await Bun.file(lockPath).json().catch(() => undefined)
++    if (!lock) await Bun.sleep(POLL_INTERVAL_MS)
++  }
++  if (!lock?.controlPort) throw new Error("daemon lock missing")
++  const terminal = controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
++  await proc.stdin.write("release\n")
++  expect((await terminal).status).toBe(200)
++  return lock
++}
++
+ describe("daemon lifecycle", () => {
++  test("readUntil keeps trailing markers from the same stdout chunk", async () => {
++    // INV-H1 红绿：同 chunk 先命中 A 后的 B 必须仍可读；非累积 seen 会在第二次 wait 中永久丢 B。
++    const stream = new ReadableStream<string>({
++      start(controller) {
++        controller.enqueue("rename-blocked-1\nlease-release-blocked\n")
++        controller.close()
++      },
++    })
++    const reader = stream.getReader()
++    try {
++      expect(await readUntil(reader, "rename-blocked-1", 1_000)).toContain("rename-blocked-1")
++      expect(await readUntil(reader, "lease-release-blocked", 1_000)).toContain("lease-release-blocked")
++    } finally {
++      reader.releaseLock()
++    }
++  })
++
++  test("readUntil timeout dumps the accumulated stdout buffer", async () => {
++    // INV-H3 红绿：有界失败必须带已读缓冲，禁止 marker 缺失时吞掉整段 suite timeout。
++    const stream = new ReadableStream<string>({
++      start(controller) {
++        controller.enqueue("partial-marker\n")
++      },
++    })
++    const reader = stream.getReader()
++    try {
++      await expect(readUntil(reader, "missing-marker", 50)).rejects.toThrow(/timed out waiting for "missing-marker".*partial-marker/s)
++    } finally {
++      reader.releaseLock()
++    }
++  })
++
++  test(
++    "start gate Force A dump includes rename-blocked-2 when continue is withheld",
++    async () => {
++      // OD-1 Force A：marker 已写但不 continue → 短超时 dump 含 rename 阶段，诊断可红。
++      // 不 await start Response：gate 阻塞时 fetch 可能 ECONNRESET，与 dump 断言无关。
++      await using tmp = await tmpdir()
++      const lockPath = path.join(tmp.path, "tui-server.json")
++      const dbPath = path.join(tmp.path, "opencode.db")
++      const task = interruptedCompressTask("dbm_force_a", dbPath)
++      await ServerLockModule.writeMaintenanceTask(task)
++      const leaseDir = path.join(`${dbPath}.maintenance`, "lock")
++      await writeDeadLease(leaseDir, task.taskID, dbPath, "dead-force-a")
++      const { proc, reader } = spawnStageWorker(lockPath, leaseDir)
++      try {
++        const lock = await recoverStageWorkerToIdle(proc, reader, lockPath, task.taskID)
++        // 第二枚 dead lease 专供 start rename-blocked-2，与 recovery taskID 隔离。
++        await writeDeadLease(leaseDir, "dbm_start_gate", dbPath, "dead-start")
++        void controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", {
++          operation: "compress",
++          olderThanMs: 0,
++          batchSize: 1,
++        }).catch(() => undefined)
++        const gated = await readUntil(reader, "rename-blocked-2", 30_000)
++        expect(gated).toContain("stage:stale-rename")
++        // 3s 故意失败窗：dump 须同时含 stage:stale-rename 与 rename-blocked-2（outcome A）。
++        await expect(readUntil(reader, "force-a-missing-marker", 3_000)).rejects.toThrow(
++          /timed out waiting for "force-a-missing-marker"[\s\S]*stage:stale-rename[\s\S]*rename-blocked-2/,
++        )
++      } finally {
++        reader.releaseLock()
++        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        await proc.exited.catch(() => undefined)
++      }
++    },
++    DAEMON_START_TIMEOUT_MS + 60_000,
++  )
++
++  test(
++    "start without stale lease fails fast without rename-blocked-2",
++    async () => {
++      // OD-1 Force B：无 dead lock → mkdir-ok、无 rename-blocked-2；5s 内分类失败，禁 120s 静默。
++      // 与 Force A 的差异仅在 start 前是否 writeDeadLease；共享 recover helper 保证对照干净。
++      await using tmp = await tmpdir()
++      const lockPath = path.join(tmp.path, "tui-server.json")
++      const dbPath = path.join(tmp.path, "opencode.db")
++      const task = interruptedCompressTask("dbm_force_b", dbPath)
++      await ServerLockModule.writeMaintenanceTask(task)
++      const leaseDir = path.join(`${dbPath}.maintenance`, "lock")
++      await writeDeadLease(leaseDir, task.taskID, dbPath, "dead-force-b")
++      const { proc, reader } = spawnStageWorker(lockPath, leaseDir)
++      try {
++        const lock = await recoverStageWorkerToIdle(proc, reader, lockPath, task.taskID)
++        // 故意不装 start 用 stale lease：acquire 应 mkdir 成功路径，不进 rename gate。
++        const starting = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", {
++          operation: "compress",
++          olderThanMs: 0,
++          batchSize: 1,
++        })
++        await expect(waitStartGate(reader, "rename-blocked-2", starting, 5_000)).rejects.toThrow(
++          /start gate HTTP settled without "rename-blocked-2"|timed out waiting for start gate "rename-blocked-2"/,
++        )
++        // outcome B：无 rename-blocked-2；至少见 mkdir-attempt/ok 之一，证明 start 触达 lease FS。
++        const dump = stdoutSeen(reader)
++        expect(dump).not.toContain("rename-blocked-2")
++        expect(dump.includes("stage:mkdir-ok") || dump.includes("stage:mkdir-attempt")).toBe(true)
++      } finally {
++        reader.releaseLock()
++        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        await proc.exited.catch(() => undefined)
++      }
++    },
++    DAEMON_START_TIMEOUT_MS + 60_000,
++  )
++
+   test("daemon status JSON reports no owner without spawning", async () => {
+     // 独立lock/XDG/DB保证该查询不可能观察或停止开发者真实daemon。
+     // running=false是公开expected literal，测试不读取private lock parser返回类型。
+@@ -1397,61 +1705,9 @@ describe("daemon lifecycle", () => {
+         )
+       }
+       await staleLease(task.taskID)
+-      // stale owner 只用于触发真实 recovery rename；测试不直接设置 worker 的 active 状态。
+-      const wrapper = `
+-        import { mock } from "bun:test"
+-        import * as fs from "node:fs/promises"
+-        // 先绑定原生函数再安装 mock，避免 mock namespace 的 live binding 递归调用自身。
+-        const input = Bun.stdin.stream().getReader()
+-        const realRename = fs.rename.bind(fs)
+-        const realRm = fs.rm.bind(fs)
+-        // captured native delegates keep the mock focused on the two published synchronization markers.
+-        let buffered = ""
+-        let renameIndex = 0
+-        let release = true
+-        const gate = async (name) => {
+-          console.log(name)
+-          while (!buffered.includes("\\n")) {
+-            const next = await input.read()
+-            if (next.done) return
+-            buffered += new TextDecoder().decode(next.value)
+-          }
+-          buffered = buffered.slice(buffered.indexOf("\\n") + 1)
+-        }
+-        mock.module("fs/promises", () => ({
+-          ...fs,
+-          rename: async (from, to) => {
+-            if (String(from) === ${JSON.stringify(leaseDir)}) {
+-              await gate("rename-blocked-" + (++renameIndex))
+-            }
+-            return realRename(from, to)
+-          },
+-          rm: async (target, options) => {
+-            if (
+-              release &&
+-              options?.recursive &&
+-              String(target).includes(".maintenance") &&
+-              String(target).endsWith("lock")
+-            ) {
+-              release = false
+-              await gate("lease-release-blocked")
+-            }
+-            return realRm(target, options)
+-          },
+-        }))
+-        await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
+-      `
+-      const proc = Bun.spawn([process.execPath, "-e", wrapper], {
+-        env: {
+-          ...isolatedDaemonEnv(lockPath),
+-          OPENCODE_PROCESS_ROLE: "worker",
+-          OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "180000",
+-        },
+-        stdin: "pipe",
+-        stdout: "pipe",
+-        stderr: "pipe",
+-      })
+-      const reader = proc.stdout.pipeThrough(new TextDecoderStream()).getReader()
++      // Track H+D：共享 stage worker；write-gate + OD-1 stages；不声称关闭 CI hang。
++      // 主 lifecycle 仍走完整 start/resume/409/idle 合同；Force A/B 只验证诊断可红。
++      const { proc, reader } = spawnStageWorker(lockPath, leaseDir)
+       // 两个 marker 分别控制“注册前”和“terminal 后释放前”，完全避免依赖调度速度。
+       try {
+         expect(await readUntil(reader, "rename-blocked-1")).toContain("rename-blocked-1")
+@@ -1500,9 +1756,14 @@ describe("daemon lifecycle", () => {
+         // start 在 stale-lease rename await 中尚未发布 active；pending gate 必须独立返回 busy。
+         await staleLease("dbm_start_gate")
+         const starting = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
+-        expect(await readUntil(reader, "rename-blocked-2")).toContain("rename-blocked-2")
++        // blocked-2 用 waitStartGate：continue 未预缓冲，HTTP 无 marker 可分类；blocked-3 仍 marker-first。
++        // 30s 仅覆盖正常 gate 出现；Force A 的 3s 是故意失败窗，二者不可互换。
++        const startGate = await waitStartGate(reader, "rename-blocked-2", starting, 30_000)
++        expect(startGate).toContain("rename-blocked-2")
++        expect(startGate).toContain("stage:stale-rename")
+         expect((await conditional()).status).toBe(409)
+         // 同一 chunk 预置 start/resume 两个 gate token，避免 Windows pipe 的第三次小写入延迟。
++        // 预缓冲使 blocked-3 的 gate 在 marker 写出后立即放行，故禁止对 blocked-3 做 HTTP-without-marker 竞态。
+         await proc.stdin.write("continue\ncontinue\n")
+         const startResponse = await starting
+         expect(startResponse.status).toBe(202)
+@@ -1513,6 +1774,7 @@ describe("daemon lifecycle", () => {
+         await ServerLockModule.writeMaintenanceTask(resumeTask)
+         await staleLease(resumeTask.taskID)
+         const resuming = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_RESUME_PATH, "POST", { taskID: resumeTask.taskID })
++        // blocked-3：marker-first 顺序；HTTP 202 可在 marker 之后任意时刻返回，不得误分类。
+         expect(await readUntil(reader, "rename-blocked-3")).toContain("rename-blocked-3")
+         expect((await conditional()).status).toBe(409)
+         const resumeResponse = await resuming

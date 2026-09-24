@@ -1,0 +1,23 @@
+From d75c026a5a68914958f4473fbc5d6cbd1a0c986f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 14 Jul 2026 17:33:31 +0800
+Subject: [PATCH] =?UTF-8?q?fix(version):=20=E6=9B=B4=E6=96=B0opencode?=
+ =?UTF-8?q?=E7=89=88=E6=9C=AC=E8=87=B31.15.10-smark?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/bun.lock b/bun.lock
+index 5a5f4146bd855b5f8ae5234478dad14da58ee036..c452d625e561fdfaa99b9e4219ac0ff280c51570 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -384,7 +384,7 @@
+     },
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.15.9-smark",
++      "version": "1.15.10-smark",
+       "bin": {
+         "opencode": "./bin/opencode",
+       },

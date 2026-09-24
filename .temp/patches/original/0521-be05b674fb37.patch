@@ -1,0 +1,2953 @@
+From be05b674fb37ad55e4654d1da8bc12693ad50cd1 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 27 Jul 2026 06:53:19 +0800
+Subject: [PATCH] =?UTF-8?q?perf(session):=20=E7=A7=BB=E9=99=A4=E9=9B=B6=20?=
+ =?UTF-8?q?token=20=E9=A6=96=E5=86=99=E5=B9=B6=E6=8C=89=E9=9C=80=E6=9E=84?=
+ =?UTF-8?q?=E5=BB=BA=20worktree=20=E5=BF=AB=E7=85=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Assistant 之前在组装请求体前先以全零 token 落库一次，制造 TUI 闪 0 和多余写入；Snapshot 也在 Processor 创建时同步执行，使纯文本或只读请求白付一次 git 扫描。现在首笔持久化即携带 estimate 与 inputBreakdown，快照推迟到首个有副作用的本地工具执行前，并由 Tool.Def.worktree 声明 declared/ambient 归属，缺省 none 不认领任何文件。
+
+同时把 Message 历史收敛为单条可替换缓存：命中前只比较原始行证明，未变前缀复用已转换块，失配处起增量重建；Goal chronology 改为 goal 工具真正启动时才查询最近两个回合，Prompt、Compaction、Revert 统一使用持久化 (time_created,id) 顺序。Revert 的文件授权按所属 Assistant 隔离，避免后续 ambient 工具反向授权更早的 Patch。
+
+# Conflicts:
+#	packages/opencode/src/session/message-v2.ts
+#	packages/opencode/src/session/prompt.ts
+
+diff --git a/docs/plans/session-prompt-preflight-latency-lazy-snapshot.md b/docs/plans/session-prompt-preflight-latency-lazy-snapshot.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a424e25d7388379cc0087f5219288491a60920c
+--- /dev/null
++++ b/docs/plans/session-prompt-preflight-latency-lazy-snapshot.md
+@@ -0,0 +1,1053 @@
++# Canonical Implementation Plan: Session Prompt Preflight Latency and Lazy Snapshot
++
++> Status: verified
++>
++> Revision: R34
++>
++> Approved revision: R34
++>
++> Audit mode: implementation
++>
++> Requirement source: Session GOAL and the quoted clarifications below
++>
++> Implementation allowed: yes
++>
++> Last updated: 2026-07-26
++
++This file is the sole implementation specification for this task. Chat summaries,
++superseded revisions, `stash@{0}`, and builder rationale outside this file are
++not implementation authority.
++
++## 1. Verbatim Requirement
++
++> 详细完整检查全面的内容，检查当前行为设计，先写 tokens=0
++> snapshot.track() 在 create 时同步 应该改成首个副作用工具调用之前进行相应的snapshot构建（同时每个工具可以添加一个相应的metadata，尽量保持整体风格一致，同时metadata中，edit/write/apply_patch/bash这几个增加相应的副作用参数;）
++> 第二笔 updateMessage(估算);MessageV2.chronology 在工具goal启动才进行扫描、同时只扫描最近两个lastturn部分（避免因为最近的compaction导致识别错误）
++> 1. Messages 历史（user / assistant / 已发生的 tool 调用与结果） 已完成前缀基本稳 要优化（filter 窗口 + toModelMessages 前缀缓存 + 后缀增量）。
++> 然后针对完整问题进行完整的修改，请确保修改后的内容不会出现红测问题，保持整体逻辑理顺、服从整体项目的开发和实现风格，移除或者替换旧的逻辑。我希望整体的修改保持甜点级别,也就是不要修改过于冗余。整体修改文件数量控制在12个代码文件以内，同时代码修改不超过1200行。
++>
++> 默认 "none"：不把 ambient worktree 变化算作本工具副作用。仅影响 snapshot/revert 归因，不进 LLM schema。
++>
++> none 不认领 worktree 文件变更；declared 只认工具 metadata 声明的文件，适用 edit/write/apply_patch；ambient 可能有不透明副作用，适用 bash/shell、未知 MCP，task 子 agent 间接改文件时需另议。
++>
++> 其中所有非none的会触发第一次snapshot。
++>
++> 自行提高上限到16；同时保持整体克制实现。
++>
++> 额外授权一次 R32 full-scope plan audit，以补齐 warm cache 下本地
++> `tool.definition` freshness 测试。
++>
++> 授权一次 R33 full-scope plan audit，以先收缩重复测试代码再完成剩余行为。
++>
++> 授权一次 R34 full-scope plan audit，合并动态 surface 测试并补 exact
++> full-hit 性能信号。
++
++The later clarification replaces, rather than preserves, the zero publication:
++
++> 谁要求保留两笔了？那个是我让检查的内容，也就是需要修改的内容。
++>
++> **先写 tokens=0** 对发模型零收益；只制造 UI 闪 0 和一次多余 DB/sync 写。
++
++The cache contract is one replaceable entry with full, prefix, or no hit:
++
++> 如果缓存的内容是不能用的,那么我们这一次就要重新进行完整的序列化等等操作。而如果这一次前缀部分没有变,只增加了后面的东西,那理论来说缓存是可以用的。
++>
++> 缓存了A、B、C、D、E、F、G,当前从G我们用户撤销到了E,那么我们理论上来说A到E的所有内容都是可以用的。
++>
++> 整体列表最好只保留一个 [...] 如果全都命中不了,那么我们就直接进行撤销,重建就可以。
++
++Additional binding clarifications:
++
++> 注意整体有可能是增量也有可能是撤销甚至撤销压缩的marker
++>
++> 前缀不是一直稳定的
++>
++> 请focus on 任务而非过度的defensive
++>
++> 集中堆放不是计0而是完全不通过！禁止存在
++>
++> 一个方案应该进行完整的方案构建,然后再完整地进行方案实施,而不能进行方案构建,实施,构建,实施。
++
++Audit-cycle authorization recorded verbatim from the 2026-07-26 user decision:
++
++> 授权新六轮周期 (Recommended)
++
++This answered the exact question: “是否明确授权本任务从 R25 起重新开始最多
++6 轮独立 full-scope plan audit，并将 R1-R24 仅作为历史记录、不计入这个新周期？”
++R26 was round 1, R27 round 2, and R28 is round 3 of that newly authorized cycle.
++
++Target terminal state: verified implementation, independent implementation audit,
++and one commit containing only this GOAL.
++
++## 2. Explicit Non-Goals
++
++- Do not cache Tool schemas, Permission decisions, control-panel selection, MCP
++  connection state, system instructions, or Plugin Tool-definition output.
++- Do not replace `TokenEstimate`, omit `inputBreakdown`, or ask the Provider for
++  pre-dispatch usage; Provider usage does not exist before dispatch.
++- Do not add a persisted cache, migration, EventSequence dependency, asynchronous
++  dirty subscriber, per-Session cache Map, or multiple retained generations.
++- Do not change Snapshot storage, patch format, pruning, restore semantics,
++  Provider request format, or generated SDK contracts.
++- Do not infer exact files for `ambient`; its Snapshot patch is best-effort.
++- Do not assign Task child-Session worktree ownership in this revision.
++- Do not add malformed-row cleaning or speculative compatibility branches.
++- Do not touch unrelated CI/voice, HttpApi search, Git asset, LSP, VS Code, or
++  Windows precheck worktree changes.
++
++## 3. Repository Context
++
++| Source | Constraint |
++| --- | --- |
++| `AGENTS.md` | Small natural changes, package-local verification, no unrelated edits. |
++| `packages/opencode/AGENTS.md` | Effect service/module and database ownership conventions. |
++| `CONTEXT.md` | Canonical Session, Message, Tool, Snapshot, Revert, Project and InstanceState language. |
++| `docs/adr/README.md` | No ADR is needed for this bounded repair. |
++| `docs/adr/0001-...` | Unrelated to Session preflight. |
++| `.opencode/policy/first-principles-engineering.md` | First-divergence repair, one path, no fallback, full traceability and independent audit. |
++| `.opencode/templates/canonical-plan.md` | Required artifact fields and audit transitions. |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Class |
++| --- | --- | --- |
++| `session/prompt.ts:1142-1388,2546-3044` | Tool/MCP adapters, repeated history assembly, loop-head Goal scan, zero and estimate writes, Plugin transform, dispatch | observed |
++| `session/processor.ts:105-212,490-819,917-1127` | eager Snapshot, Tool event ordering, Patch and cleanup | observed |
++| `session/message-v2.ts:818-959,989-1394,1508-1756` | hydration, conversion, pagination, Compaction filter, chronology and latest | observed |
++| `session/compaction-boundary.ts:1-74` | completed boundary currently ordered by ID | observed |
++| `session/revert.ts:46-136,157-209` | lexical tail/range/cleanup and declared intersection | observed |
++| `session/session.sql.ts:164-217`, `storage/schema.sql.ts:3-10` | persisted Message/Part row identity and timestamps | contracted |
++| `session/session.ts:726-759,878-925` | authoritative writes, paging and removals | observed |
++| `tool/tool.ts:45-93`, `tool/registry.ts:365-391` | Tool metadata owner and internal projection | observed |
++| `tool/edit.ts`, `write.ts`, `apply_patch.ts`, `shell.ts` | declared and ambient Tool owners | observed |
++| `tool/goal.ts:1-166` | trusted GoalTurnContext consumer | contracted |
++| `server/.../handlers/session.ts:399-430` | reachable public Message/Part mutations; no new guard is planned because admission is exact | reachable |
++| `test/session/prompt.test.ts` | public SessionPrompt/TestLLM, Goal, Compaction, queued and Revert fixtures | observed |
++| `test/session/snapshot-tool-race.test.ts` | existing execute-before-event Snapshot race | observed |
++| real opencode DB and Snapshot benchmark | 5405-Message chronology and git contributor timings | observed |
++| `stash@{0}` | superseded implementation archive, diagnostic history only | observed |
++
++## 5. Current Behavior
++
++```text
++SessionPrompt.runLoop iteration
++  -> filterCompactedEffect: identify boundary, page and hydrate complete window
++  -> latest + full MessageV2.chronology even if Goal Tool is never called
++  -> create Assistant(tokens=0)
++  -> durable updateMessage(0), visible to Sync/TUI
++  -> SessionProcessor.create -> Snapshot.track()
++  -> resolve fresh builtin/MCP Tools
++  -> mutate working Messages through reminders/Plugin transform
++  -> toModelMessagesEffect over complete window
++  -> sanitize/stringify final body and compute breakdown/estimate
++  -> durable updateMessage(estimate)
++  -> Provider dispatch
++```
++
++Every continuation or later run repeats complete hydration and conversion.
++`inputBreakdown` also scans the final request, but that scan is required for the
++actual estimate/TUI snapshot and is not the avoidable database/cold-hydration
++cost. Snapshot is captured before Tool selection proves a worktree mutation is
++possible. Text-only, read-only, denied and Provider-executed steps therefore pay
++git work before dispatch.
++
++Ordering is inconsistent: pagination persists `(time_created,id)`, while
++Compaction boundary selection, `filterCompacted`, `latest`, and Revert tail/range
++logic use lexical ID order. Public callers can supply a later low ID, so IDs are
++identifiers rather than chronology.
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| text/read-only step | Agent + local Tool | no worktree ownership | Prompt -> Processor -> Provider | Prompt/Processor | observed |
++| edit/write/apply_patch | builtin Tool | declared files are reported in Tool metadata | local execute adapter | Tool/Processor/Revert | observed |
++| bash/shell | builtin Tool | arbitrary worktree mutation is possible | local execute adapter | Tool/Processor/Revert | observed |
++| connected MCP Tool | MCP client | side effects are opaque | MCP execute adapter | Prompt/Processor | reachable |
++| Provider-executed Tool | Provider stream | local execute adapter is not called | Processor event | Processor | observed |
++| Tool set changes | permission/control panel/MCP/plugin | current step owns availability | resolveTools | Prompt | observed |
++| queued user Message | public prompt while busy | append is persisted | next iteration | Prompt/MessageV2 | observed |
++| Revert A-G to A-E | SessionRevert | selected suffix becomes hidden | later run | Revert/MessageV2 | observed |
++| successful Compaction | SessionCompaction | window reorders while old rows may remain | same/later run | CompactionBoundary/MessageV2 | observed |
++| caller-selected low ID | public Message input | ID need not reflect creation time | latest/Revert/Compaction | MessageV2 | observed |
++| Plugin Message transform | plugin hook | may mutate any historical working Message | pre-dispatch hook | Prompt | reachable |
++| different Session/model | another request | conversion is not transferable | later Prompt run | Prompt | reachable |
++
++Speculative malformed rows, downstream normalization and serialization recovery
++cannot justify production branches.
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | A normal Provider attempt has no durable zero Assistant; its first durable Assistant contains estimate/breakdown before dispatch. | explicit clarification; current two writes | partial token/Prompt coverage |
++| INV-02 | Pre-dispatch failure/interruption remains one durable completed typed-error Assistant; preflight Compaction leaves no dangling attempt. | current early publication supplies visibility | partial interruption coverage |
++| INV-03 | A step with no local non-`none` Tool performs no Snapshot git operation. | explicit requirement; eager create | absent focused matrix |
++| INV-04 | The first local declared/ambient Tool awaits one shared pre-Tool Snapshot before plugin, Permission, MCP client or mutation. | explicit requirement; observed event race | race coverage partial |
++| INV-05 | Provider-executed Tools never trigger local Snapshot. | ownership boundary | no sensitive Prompt test |
++| INV-06 | worktree defaults none, stays outside Provider schema, persists only at the existing `ToolPart.metadata.worktree` primitive key through every lifecycle transition, and drives declared exact or ambient same-Assistant Revert. | explicit policy; reachable metadata replacement | ambient/lifecycle coverage absent |
++| INV-07 | One replaceable cache supports full hit, common-prefix hit including A-G -> A-E, or full rebuild; miss is not an error fallback. | explicit cache contract | absent |
++| INV-08 | Admission proves the raw Compaction window before hydration; every reminder, queued wrapper, decide rewrite or Plugin transform invalidates/reconverts its affected working suffix without mutating cached canonical data. | timing red; reachable working transforms | absent |
++| INV-09 | Tool/MCP/Permission/control-panel/schema resolution remains fresh each step. | explicit clarification | partial dynamic tests |
++| INV-10 | Prompt, Compaction, latest/tasks, cache and Revert use persisted `(time_created,id)` chronology. | low-ID producer; R22 B-01 | Goal low-ID only |
++| INV-11 | Ordinary steps do no Goal chronology query; actual Goal Tool start reads at most two canonical eligible turns. | explicit requirement | latency seam absent |
++| INV-12 | Estimate/breakdown still describe the final Provider request and are replaced by confirmed usage only after response. | accounting contract | token tests exist |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| INV-01/02 | `runLoop` durably writes a new all-zero Assistant before assembly has produced an estimate or error. | SessionPrompt Assistant lifecycle | `prompt.ts:2788-2803,3034-3044` |
++| INV-03/04/05 | `SessionProcessor.create` captures before a Tool exists; event-side rescue is not the local execute barrier. | SessionProcessor + Prompt Tool adapter | `processor.ts:189-202,712-749`; race output below |
++| INV-07/08 | each loop fully filters/hydrates before any prefix admission and converts the complete window. | MessageV2 window + SessionPrompt cache owner | `prompt.ts:2581,2892`; timing red below |
++| INV-09 | moving dynamic definitions into the cache would cross `resolveTools` ownership. | SessionPrompt.resolveTools | `prompt.ts:1206-1385` |
++| INV-10 | consumers compare caller-controlled IDs after storage defines persisted order. | MessageV2/CompactionBoundary/Revert | current ranges and R22 B-01 |
++| INV-11 | `deriveGoalTurn(MessageV2.chronology(sessionID))` executes at each loop head. | SessionPrompt + MessageV2 | `prompt.ts:2587-2591` |
++| INV-12 | no divergence; final-body estimate scanning is required and retained. | TokenEstimate/Prompt | `prompt.ts:2897-2981` |
++
++### Red-capable feedback loop
++
++The following read-only command was run from the repository root. It exercises
++the two current preflight contributors against the user's real database and
++active Snapshot repository, and exits non-zero when the current path reproduces
++either material latency contributor. The command body below is the reproducible
++shape; the concrete Session ID and active gitdir are selected from the local
++read-only fixture at execution time:
++
++```bash
++python3 - <<'PY'
++import json, os, sqlite3, statistics, subprocess, time
++
++db = sqlite3.connect(os.environ.get("OPENCODE_DB", "/Users/sunbenteng/.local/share/opencode/opencode.db"))
++session_id = os.environ.get("OPENCODE_SESSION", "ses_1296dfec8ffeF4HyjYjd4NbDUk")
++
++def chronology():
++    messages = db.execute(
++        "select id, session_id, time_created, data from message where session_id = ? order by time_created, id",
++        (session_id,),
++    ).fetchall()
++    parts = db.execute(
++        "select message_id, json_extract(data, '$.type'), json_extract(data, '$.synthetic'), json_extract(data, '$.metadata.goal_continuation') from part where session_id = ? order by message_id, id",
++        (session_id,),
++    ).fetchall()
++    for message in messages:
++        json.loads(message[3])
++    return len(messages), len(parts)
++
++def median_ms(action):
++    samples = []
++    for _ in range(7):
++        started = time.perf_counter()
++        action()
++        samples.append((time.perf_counter() - started) * 1000)
++    return statistics.median(samples), min(samples), max(samples)
++
++counts = chronology()
++chronology_ms = median_ms(chronology)
++repo = os.getcwd()
++snapshot_ms = median_ms(lambda: (
++    subprocess.run(["git", "diff-files", "--quiet"], cwd=repo, check=False,
++                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
++    subprocess.run(["git", "ls-files", "-m"], cwd=repo, check=True,
++                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
++))
++print("RED preflight chronology:", counts, chronology_ms)
++print("RED preflight snapshot-track-like:", snapshot_ms)
++if chronology_ms[0] >= 20 or snapshot_ms[0] >= 80:
++    raise SystemExit("RED: reproduced a material preflight contributor")
++PY
++```
++
++Observed result on 2026-07-25:
++
++```text
++RED preflight chronology: session=ses_1296dfec8ffeF4HyjYjd4NbDUk messages=5405 parts=20834 min=65.2ms median=70.5ms max=437.1ms
++RED preflight snapshot-track-like: gitdir=.../8cc856836d9ad45b7e458478c8844c8d30569ac0 min=105.2ms median=122.7ms max=131.3ms
++```
++
++Minimized reproduction: a Session with no active Goal still pays a full
++chronology query; a text-only or read-only step still pays one pre-stream
++Snapshot track. The standalone command records contributor cost and deliberately
++does not claim call-path removal after implementation; focused SessionPrompt
++tests provide that path evidence. The benchmark does not include Provider
++latency.
++
++R21 implementation then established the cache-specific red through the approved
++public SessionPrompt/TestLLM seam:
++
++```text
++bun test --timeout 60000 test/session/prompt.test.ts \
++  --test-name-pattern "reuses one retained Message prefix across Session runs"
++
++full toModelMessagesEffect median: 3.3ms
++next-run dispatch: 236.41ms
++approved threshold: 42.13ms
++result: 0 pass, 1 fail
++```
++
++The 2048 valid closed-turn fixture removes Provider latency as an explanation:
++the local TestLLM response is immediate, and the literal request body remains
++the independent correctness oracle. Full conversion alone is too small to
++explain the observed dispatch cost. Therefore a design that hydrates the whole
++canonical window before checking the cache cannot turn this feedback loop green;
++MessageV2 must prove an unchanged raw prefix before full hydration.
++
++### Execute-boundary race feedback
++
++The first R4 implementation slice added a real SessionPrompt test with a public
++Snapshot observer and a wrapped builtin Tool execute. The command:
++
++```text
++bun test test/session/prompt.test.ts --test-name-pattern "first declared tool snapshots once"
++```
++
++went red with the observed sequence:
++
++```text
++expected: track, track:end, execute, track, track:end, patch
++received: track, execute, track:end, track, track:end, patch
++```
++
++This is a reachable AI SDK ordering fact: handling `tool-input-start` begins an
++Effect, but the SDK may begin the local Tool execute before that handler's
++asynchronous `snapshot.track()` has completed. Therefore an event-only capture
++cannot satisfy the before-mutation invariant; the actual local execute wrapper
++must await the processor-owned capture immediately before invoking the Tool
++implementation.
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| Assistant pre-dispatch lifecycle | SessionPrompt.runLoop | first normal durable state is estimated; failures remain durable | Prompt owns assembly/dispatch | TUI cannot repair database timing |
++| Tool worktree policy | Tool.Def + `ToolPart.metadata.worktree` | definition semantics and one durable server-owned key in the existing metadata record | definition knows semantics; Processor owns preservation | Snapshot/Revert cannot infer names or use state metadata |
++| shared lazy Snapshot | SessionProcessor Handle called by Prompt adapters | first non-none local execute awaits one baseline | Processor owns one request | individual Tools cannot coordinate |
++| fresh Tool availability | SessionPrompt.resolveTools/MCP | build current callable set every step | existing availability owner | Message cache contains history only |
++| fresh control-panel state | SessionPrompt.runLoop | re-read current persisted Session at each while step before Tool/Permission resolution | queued prompt can update permission while busy | loop-entry Session snapshot becomes stale |
++| proof/hydration/conversion | MessageV2 | one Compaction-aware row-to-model seam | owns rows, cold hydration and conversion | Prompt must not duplicate storage/filter logic |
++| retained entry | SessionPrompt service closure | full/prefix/miss replacement | owns request lifetime | no global or per-Session authority |
++| Goal turn tail | MessageV2 query lazily called by Prompt | latest two canonical turns | storage owns bounded SQL | Goal Tool should not scan persistence |
++| Revert range/files | SessionRevert | persisted chronology and declared/ambient attribution | owns hide/restore scope | cache cannot compensate downstream |
++
++## 10. Single Approved Primary-Path Design
++
++### 10.1 One estimated Assistant write
++
++`runLoop` creates the Assistant only in memory. Processor creation becomes a
++cheap lazy-Snapshot setup. Prompt resolves fresh Tool/system surfaces, builds
++the final Message body, computes `inputBreakdown` and `estimatedInput`, then
++performs the first normal `updateMessage` immediately before dispatch.
++
++```text
++create in-memory Assistant(tokens=0)
++  -> fresh tools/system/messages/estimate
++  -> durable Assistant(estimate + breakdown)
++  -> provider dispatch
++```
++
++The zero value remains an internal constructor default, never a Sync/TUI event.
++A pre-dispatch failure or interrupt writes that same Assistant once with the
++existing typed error and `time.completed`, then propagates. Successful preflight
++Compaction discards the unpersisted attempt because no Provider attempt occurred.
++`TokenEstimate`, request serialization and raw-parts breakdown remain after cache
++assembly because they describe the request actually dispatched.
++
++### 10.2 Tool worktree policy and lazy Snapshot
++
++Add the requested server-owned field to `Tool.Def`:
++
++```ts
++worktree?: "none" | "declared" | "ambient"
++```
++
++Policy assignments:
++
++| Tool source | Policy |
++| --- | --- |
++| edit, write, apply_patch | `declared` |
++| bash/shell | `ambient` |
++| task | no assignment; child-Session ownership remains deferred |
++| connected unknown MCP Tools | `ambient` for the current step |
++| all unannotated Tools | `none` |
++
++Registry forwards this field only to internal Prompt resolution; it is absent
++from Provider descriptions and schemas. Persistence uses the existing open
++`ToolPart.metadata` record and one primitive server key:
++
++```text
++part.metadata.worktree = "declared" | "ambient"
++```
++
++Absence means `none` and preserves old rows without Schema, HttpApi, SDK or
++migration changes. Tool result/progress metadata remains in
++`part.state.metadata` and is never a policy authority. Provider replay already
++accepts only object-valued provider namespaces from `part.metadata`, so this
++primitive marker is excluded; the final Provider-body test remains authoritative.
++
++`SessionProcessor.Handle` exposes one internal pre-execute operation. Builtin
++and MCP adapters invoke it as their first effect, before plugin, Permission, MCP
++client or Tool implementation. For non-`none`, the Processor writes the server
++key and awaits one processor-scoped cached `snapshot.track()` attempt. The
++existing Tool permit is extended to every persisted Tool Part read-update-write,
++not only terminal writes, so pre-execute, `tool-call`, progress, complete, error
++and cleanup cannot overwrite one another from stale Parts. The central update
++path carries the latest server key across provider-metadata replacement; terminal
++and cleanup transitions spread that latest Part. Only pre-execute sets the key,
++and it overrides any same-named provider value. `none` is a no-op.
++Provider-executed Tools never enter the local adapter and receive no key. Concurrent local
++non-`none` calls share the same Snapshot attempt.
++
++Remove capture from Processor creation and `start-step`. Post-step/cleanup patch
++generation runs only when a pre-Tool baseline exists; Patch Part creation remains
++the only delta producer. Revert reads only the exact primitive
++`ToolPart.metadata.worktree`: declared Tools continue to use existing
++result metadata for exact files, while an Assistant containing an ambient Tool
++admits that Assistant's Patch files as best-effort. Missing/none admits nothing;
++no shell parser, state-metadata lookup or fallback is added.
++
++### 10.3 Message window and one-entry cache
++
++`MessageV2` adds one Compaction-aware window seam. Its proof operation reads an
++ordered window without hydrating business objects. Each Message and ordered Part
++proof contains exact raw SQLite `data`, ID, persisted timestamps, cold reference,
++hex key and cold stats. Primitive tuple comparison avoids hash, timestamp and
++concatenation ambiguity. The same structural filter orders proof and hydrated
++windows; no second Compaction algorithm is introduced.
++
++The second operation hydrates only supplied proof Message IDs and converts that
++suffix through existing semantics, returning per-Message output chunks.
++Characterization tests prove chunk concatenation equals full conversion for
++text, Tool output/error, media and Compaction shapes.
++
++SessionPrompt owns one replaceable Project-scoped entry:
++
++```text
++{ sessionID, model identity, ordered proof, canonical Messages, conversion chunks }
++```
++
++Admission compares proof from the beginning. Full match reuses all data. Common
++prefix retains that prefix and hydrates/converts only the suffix. Current A-E
++after cached A-G slices and reuses A-E. No prefix, different Session or model
++hydrates/converts the authoritative full window and replaces the same entry.
++A miss is a normal pre-serialization branch, not failure recovery. There are no
++older generations or Session-keyed entries.
++
++Before any request-only rewrite, Prompt clones the admitted canonical view. The
++single final conversion path carries the earliest dirty Message index. Existing
++rewriters update that one boundary instead of creating another serializer:
++
++- `insertReminders` returns the latest-user index only when it actually injects
++  a disabled-Tool, decide, plan or build reminder;
++- queued-user wrapping lowers the boundary to its earliest rewritten user;
++- ordinary requests reuse chunks strictly before the boundary and reconvert the
++  dirty suffix;
++- Plugin Message Transform may rewrite arbitrary history, so its boundary is 0;
++- decide sanitizes Tool/Reasoning history and selects candidate suffixes, so a
++  decide request fully converts its selected working history while still using
++  the admitted canonical hydration.
++
++No request-only Message or converted output is written back into the retained
++entry. A reminder persisted as a Part changes the next raw proof and is admitted
++normally. Every step still resolves ToolSelection, Permission, Plugin Tool
++definitions and `mcp.tools()` fresh. At the start of each `while` step, Prompt
++re-reads the current persisted Session before calling `resolveTools`; queued
++`prompt({ tools })` updates therefore affect the immediately following Provider
++step rather than waiting for a new runLoop.
++
++### 10.4 Bounded Goal continuity
++
++Remove the loop-head full chronology call and unbounded export. A bounded
++MessageV2 query selects newest canonical user turns in persisted order, excludes
++lineaged wrappers and all-technical Compaction/synthetic Messages with the
++current classifier, and returns at most two eligible turns.
++
++Prompt owns a run-local lazy loader. Only actual local `goal` Tool execution
++invokes it; read and transition calls in one eligible turn share the mutable
++trusted GoalTurnContext. Ordinary active-Goal steps and disabled Goal Tools run
++no chronology query.
++
++### 10.5 Persisted chronology and Revert
++
++Define one MessageV2 comparator using `time.created`, then ID only as a
++same-millisecond tie. Apply it to `filterCompacted`, `latest`, task cutoffs,
++Compaction boundary, proof ordering and Revert. `fromMessageID` keeps its
++interface but resolves the referenced row's persisted cursor before selecting
++the inclusive tail. Revert computes diff and cleanup ranges with the comparator.
++No schema or migration is added.
++
++### 10.6 No fallback
++
++There is one Message filter/converter, one retained entry, one Tool policy
++source and one Snapshot attempt. Snapshot, proof, hydration, conversion, Plugin
++or Provider failure propagates through existing typed paths. No alternate
++serializer or fallback request is attempted.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++| exact full cache hit | proposed | primary-contract branch | yes | proof comparison | add |
++| exact common-prefix hit | proposed | primary-contract branch | yes | suffix hydrate/convert | add |
++| authoritative miss/rebuild | proposed | primary-contract branch | yes | one full window | add as deterministic admission |
++| mutable Plugin Message transform | current | existing compatibility | yes | full working conversion | preserve |
++| fresh Tool/MCP resolution | current | contracted pass-through | yes | every Provider step | preserve outside cache |
++| Provider-executed Tool | current | contracted pass-through | yes | no local execute | preserve without Snapshot |
++| declared/ambient Revert | current/proposed | primary-contract branches | yes | deterministic policy | preserve/extend |
++| alternate serializer/catch-and-success | rejected | forbidden fallback | n/a | 0 | reject |
++
++Alternate-success-path ratio: `0%`. Diagnostic decision surface: `0%`.
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| zero Assistant then estimate write | early pending visibility | estimated publication plus typed failure finalization | `session/prompt.ts` |
++| eager create Snapshot and start-step rescue | attempted event-race protection | awaited local execute barrier | `session/processor.ts`, `session/prompt.ts` |
++| loop-head full Goal chronology | easy shared context construction | lazy two-turn Tool-start loader | `session/prompt.ts`, `message-v2.ts` |
++| full hydrate/convert before admission | no prefix proof seam | raw proof then suffix hydration/conversion | `session/message-v2.ts`, `session/prompt.ts` |
++| lexical ID chronology | generated IDs assumed monotonic | persisted time + ID tie | MessageV2/Compaction/Revert |
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| INV-01/02 | Assistant assembly -> dispatch/error | Prompt single publication/finalizer | first state estimated; failure durable; overflow no dangling Assistant |
++| INV-03/04/05 | local Tool adapter -> Processor gate | lazy shared Snapshot and provider exclusion | text/read zero; declared/ambient ordering; concurrent one; provider zero |
++| INV-06 | Tool.Def -> registry -> pre-execute -> `part.metadata.worktree` -> Revert | policy assignment, permit-preserved lifecycle and file admission | Provider excludes primitive key; builtin/MCP pending-running-progress-terminal matrix; declared/ambient/none Revert |
++| INV-07/08 | proof -> admission -> canonical chunks -> working dirty suffix | exact one-entry cache and one final converter | full/prefix/miss, A-G -> A-E, reminder, queued wrapper, decide, Plugin and literal body |
++| INV-09 | resolveTools per step | keep dynamic surfaces outside cache | Tool/MCP change between equal-history steps |
++| INV-10 | storage order -> all consumers | comparator and inclusive cursor | low-ID queued Message, Compaction, Revert diff/cleanup |
++| INV-11 | Goal Tool execute -> bounded query | lazy latest-two context | ordinary no penalty; current/previous across Compaction |
++| INV-12 | final body -> estimate | retain estimator/breakdown | token suites and first Assistant assertions |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| Tool.Def worktree policy | INV-03/06 | explicit user table | names/arguments cannot express custom semantics |
++| server-owned `part.metadata.worktree` key | INV-06 | top-level Provider metadata is replaced by reachable lifecycle transitions, while the existing record is already persisted and SDK-typed as open metadata | permit-serialized central preservation gives Revert one authority without changing public Schema or reading state metadata |
++| Processor pre-execute gate | INV-04/05 | observed event race | create/start are too early or not an await barrier |
++| exact raw window proof | INV-07/08 | 236ms red; R18 timestamp finding | hydration defeats admission; IDs/timestamps/events are not exact |
++| per-Message conversion chunks | INV-07 | A-G -> A-E and suffix reuse | one flat output cannot be sliced safely |
++| one Prompt retained entry | INV-07 | explicit cardinality | per-Session Map and run-only cache violate contract |
++| earliest dirty working index | INV-08 | reminder, queued wrapper, decide and Plugin rewrites are reachable before Provider conversion | canonical proof cannot represent request-only mutation; one boundary preserves the same converter without invalidating untouched prefix |
++| shared chronology comparator | INV-10 | low IDs and R22 B-01 | local lexical fixes leave consumers inconsistent |
++| bounded Goal query | INV-11 | full scan benchmark/latest-two requirement | current chronology scans every Message/Part locator |
++| ambient Patch admission | INV-06 | opaque bash/MCP side effects | declared metadata cannot name ambient files |
++
++No production concept remains unmapped.
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++| `packages/opencode/src/session/prompt.ts` | modify | single publication, one entry, working dirty boundary, fresh Tools, lazy Goal loader, pre-execute calls | 105-160 |
++| `packages/opencode/src/session/processor.ts` | modify | remove eager capture; shared lazy Snapshot; permit-serialized Tool Part lifecycle; conditional Patch | 55-90 |
++| `packages/opencode/src/session/message-v2.ts` | modify | proof, suffix hydration/chunks, comparator, persisted tail, bounded Goal query | 120-190 |
++| `packages/opencode/src/session/compaction-boundary.ts` | modify | persisted latest-boundary order | 2-8 |
++| `packages/opencode/src/session/revert.ts` | modify | persisted range/cleanup and ambient admission | 25-50 |
++| `packages/opencode/src/tool/tool.ts` | modify | optional worktree field | 3-8 |
++| `packages/opencode/src/tool/registry.ts` | modify | internal policy projection | 2-6 |
++| `packages/opencode/src/tool/edit.ts` | modify | declared assignment | 1-3 |
++| `packages/opencode/src/tool/write.ts` | modify | declared assignment | 1-3 |
++| `packages/opencode/src/tool/apply_patch.ts` | modify | declared assignment | 1-3 |
++| `packages/opencode/src/tool/shell.ts` | modify | ambient assignment | 1-3 |
++| `packages/opencode/test/session/prompt.test.ts` | modify | all public behavior/performance slices; first consolidate repeated turn/input fixture code before adding R33 signals | final file diff at most 590 changed lines |
++| `packages/opencode/test/session/revert-compact.test.ts` | modify | existing legacy fixtures explicitly persist declared/ambient authority so missing remains none | 2-6 |
++
++Exactly 13 code/test files, below the user-authorized ceiling of 16; no
++added/deleted code file, migration or generated artifact. The thirteenth path
++is required because shipped Revert tests previously encoded implicit Tool-name
++ownership, which conflicts with R28's audited missing-means-none authority.
++
++### 15.1 R33 executable diff contraction
++
++The current 12-path implementation diff is 1197 changed lines. R33 must perform
++the following contraction before adding remaining behavior:
++
++1. Add one reused test helper that performs the repeated
++   `user -> llm.text -> prompt.loop` turn and one helper that returns the latest
++   TestLLM Provider input. Replace at least ten existing repeated sequences in
++   the cache matrix. Net reduction: at least 25 changed lines after counting the
++   helper definitions.
++2. Factor the typed provider-executed finish event's repeated usage fields into
++   the existing shared fixture value and compact the two literal events without
++   changing event order or assertions. Additional net reduction: at least 8
++   changed lines.
++3. Do not remove any behavior slice, Chinese invariant comment, Provider-body
++   equality assertion, timing assertion or failure signal to obtain the saving.
++4. Remove the standalone cross-runLoop Plugin-definition and MCP-freshness test
++   bodies only after moving their assertions into the queued same-runLoop
++   continuation test. This consolidation must save at least 30 additional lines
++   while strengthening, not dropping, the original signals.
++
++Only after at least 33 lines are removed may implementation add:
++
++- per-step Session re-admission in `prompt.ts`: at most 2 changed lines;
++- queued Permission/control-panel real bash execution: at most 9 net lines;
++- warm public Revert+cleanup body assertion: at most 4 net lines;
++- dynamic local `tool.definition` v1/v2 Provider-body assertion: at most 8 net
++  lines by extending the existing transforming Plugin fixture/test;
++- two explicit Revert fixture authority markers: exactly 2 lines.
++- unchanged exact full-hit versus one-entry eviction/rebuild public timing:
++  at most 10 net lines in the existing 2048-turn test.
++
++Budget proof: `1197 - 33 - 30 + 35 = 1169`, strictly below 1200. Production remains
++at most `586 + 2 = 588`. If actual contraction is smaller or additions exceed
++these caps, implementation must stop rather than weaken coverage.
++
++## 16. TDD Behavior Slices
++
++Agreed seams are public `SessionPrompt.prompt/runLoop` through TestLLM,
++`SessionRevert.revert/cleanup`, actual Tool registry definitions, and persisted
++Messages through Session APIs. Tests do not call private cache helpers, inspect
++source text, assert internal calls, or reproduce conversion logic.
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 | first Assistant state is estimated; assembly failure durable; Compaction no zero attempt | zero write first | move publication and add one finalizer | TUI flash/dangling attempt |
++| 2 | text/read request records no Snapshot | create tracks eagerly | remove eager/event capture | pre-dispatch git latency |
++| 3 | first declared/ambient builtin and MCP Tool snapshots before plugin/Permission/execute; concurrent calls share; policy survives real pending/running/progress/terminal metadata updates | no execute barrier and replaceable metadata | permit-serialized preservation of one existing-record server key plus cached Processor gate | mutation-before-baseline and lost ownership marker |
++| 4 | provider-executed ambient-named Tool records no local Snapshot | event path owns capture | local adapter sole trigger | provider/local confusion |
++| 5 | Provider excludes worktree; after real builtin/MCP metadata updates Revert restores declared/ambient but not none-only files | no durable policy/ambient admission | dedicated Part authority and one Revert branch | schema leak/lost marker/wrong restore |
++| 6 | proof full/prefix/miss, A-G -> A-E and warm public Revert+cleanup produce expected bodies; unchanged 2048-turn Session is timed as exact full hit, then another Session replaces the sole entry and the unchanged original is timed as rebuild | full window hydrates first, equality can rebuild, and deletion alone cannot prove hidden invalidation | one entry + suffix seam; real Revert hidden mutation; public full-hit versus eviction timing | stale/multi-generation/reverted history and fake full hit |
++| 7 | in one queued Tool continuation, step1 waits while public prompt changes bash deny→allow, local `tool.definition` v1→v2 and MCP enabled→disabled; step2 Provider body must use v2/no MCP and successfully execute bash; reminder, decide and historical Message Plugin transforms retain their signals | resolving dynamic surfaces once per runLoop or using loop-entry Session remains stale | every while step re-admits Session and calls current ToolRegistry/Plugin/MCP; dirty suffix and decide/Plugin conversion remain separate | stale Permission/Tool schema/MCP, missing reminder and unsafe decide history |
++| 8 | later low-ID Message wins; Compaction/Revert hide and diff persisted suffix | lexical ID | shared comparator | reverted history replay |
++| 9 | ordinary Goal step avoids chronology; Goal Tool gets two eligible turns | loop-head full scan | Tool-start bounded query | repeated latency/wrong lineage |
++| 10 | 2048-turn later dispatch beats paired rebuild while literal body remains equal | admission after hydration | proof-before-hydrate | performance regression |
++
++Each slice runs red -> minimal approved green -> focused regression. Timing uses
++five paired samples and `cached <= 0.65 * full median + 40ms`; literal Provider
++body equality is the primary correctness oracle.
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` | 600-900 | excludes import-only, formatting, generated and pure moves |
++| Required Chinese explanatory comments `C` | 90-135 | actual gate is `ceil(E * 0.15)` |
++
++Qualifying comments will be adjacent to:
++
++- worktree policy default and why it stays outside LLM schema;
++- first non-none execute-boundary ordering and provider-executed exclusion;
++- one-Snapshot-per-processor and one permit-serialized Tool Part lifecycle;
++- declared exact attribution versus ambient best-effort Revert;
++- exact raw proof and common-prefix replacement;
++- canonical clone versus mutable reminder/Plugin working copy;
++- model/Session replacement and dynamic Tool exclusion;
++- persisted chronology tie and Revert boundary;
++- latest-two Goal classifier and Tool-start timing;
++- independent literal/timing test intent.
++
++Every comment must sit beside the exact branch/test it explains. Declaration
++essays, repeated identifier translation, obvious narration and split-line
++padding are forbidden; any concentrated pile fails regardless of the ratio.
++
++## 18. Verification
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test --timeout 60000 test/session/prompt.test.ts --test-name-pattern 'estimated Assistant|assembly failure|preflight Compaction|Snapshot|worktree|retained Message prefix|A-G to A-E|low MessageID|Goal chronology'` | `packages/opencode` | new vertical slices |
++| `bun test --timeout 60000 test/session/prompt.test.ts` | `packages/opencode` | complete directly modified suite |
++| `bun test test/session/snapshot-tool-race.test.ts test/session/message-v2.test.ts test/session/messages-pagination.test.ts` | `packages/opencode` | Tool race, conversion, pagination and Compaction |
++| `bun test test/session/compaction.test.ts test/session/revert-compact.test.ts test/session/summary-tool-diff.test.ts` | `packages/opencode` | Compaction/Revert/declared ownership |
++| `bun test test/session/processor-effect.test.ts test/token/accounting.test.ts test/token/estimate.test.ts` | `packages/opencode` | Processor cleanup and token accounting |
++| `bun typecheck` | `packages/opencode` | Package type correctness |
++| rerun 2048-turn public timing slice five times | `packages/opencode` | cache feedback turns green with literal body equality |
++| rerun real DB/Snapshot contributor harness | repository root | contributor baseline plus focused call-path removal |
++| `git diff --check -- <all GOAL paths>` | repository root | whitespace integrity |
++
++No generated output, migration, SDK build, or root-level test command is
++required because this plan changes no public generated schema or database.
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added | 0 code/test | reuse current modules |
++| Files modified | 13 code/test | below explicit 16-file ceiling |
++| Files deleted | 0 | no replacement module |
++| Production lines | 300-490 | below approximately 600-line expectation |
++| Test lines | 280-430 | consolidated in one existing suite |
++| Total changed code/test lines | 580-920 | reserve below 1200 |
++| Generated lines | 0 | no generated contract change |
++
++Hard implementation budget: at most 16 code/test files and fewer than 1200
++changed code lines. R29 plans exactly 13. The plan document is not counted as
++production code.
++
++## 20. Real Risks and Open Decisions
++
++### Real Risks
++
++- `toModelMessagesEffect` depends on current Provider/Model for reasoning/media
++  behavior. The cache must key and invalidate on exact current model identity.
++- Compaction reorders a visible window while retaining old rows; proof and full
++  hydration must use one structural filter.
++- Current Assistant Parts grow under one MessageID; proof must include ordered
++  Part rows, not only Message IDs.
++- `insertReminders` mutates the latest user in memory and sometimes persists a
++  Part. Its actual injection must mark the latest user dirty, and neither the
++  working Message nor its conversion may enter the retained entry.
++- queued-user wrapping changes only a persisted suffix, while decide and Plugin
++  transforms may change selection or arbitrary history; their dirty boundaries
++  must remain explicit in the final converter.
++- Ambient Snapshot patch files can include concurrent external worktree changes.
++  This is the explicit best-effort policy and must remain observable as ambient,
++  never reclassified as declared summary evidence.
++- MCP Tool definitions can change by notification or connect/disconnect. Fresh
++  per-step resolution is mandatory.
++- Raw proof reads bounded-window row bytes. It must satisfy the public timing
++  slice; failure requires plan revision, not a second authority.
++- Old Compaction markers without `goalTurnID` require the current canonical-turn
++  classifier rather than assuming every unlineaged user is eligible.
++
++### Open Decisions Requiring the User
++
++None. The user explicitly authorized a fresh maximum-six-round full-scope plan
++audit cycle. R1-R24 remain historical; R28 is round 3/6.
++
++### Rejected Speculation
++
++- Timestamp-only proof is rejected because same-millisecond mutation is reachable.
++- EventSequence/Bus invalidation is rejected because availability/subscriber
++  ordering does not prove admission.
++- Per-Session Maps and retained generations violate the one-entry rule.
++- Caching Tool/MCP schemas was rejected by explicit user clarification and
++  observed dynamic producers.
++- Inferring worktree policy by arbitrary Tool name or shell command parsing was
++  rejected; the definition owner supplies policy, and ambient remains opaque.
++- Recomputing exact ambient file diffs from Tool output was rejected; Snapshot
++  Patch is the only evidence available and is explicitly best-effort.
++- Replacing local estimate with Provider preflight usage was rejected because no
++  such Provider contract exists before dispatch.
++- Public Part busy guards are not added solely for cache correctness; exact row
++  admission handles mutation without expanding the HTTP contract.
++
++## 21. Audit Contract
++
++The independent auditor must read this exact revision and original requirement,
++reconstruct current behavior, treat summaries and `stash@{0}` as untrusted, and
++audit full scope. It must check first-divergence ownership, traceability, no
++fallback, exact one-entry cardinality, proof-before-hydration, dynamic Tool and
++Plugin exclusions, persisted chronology, Snapshot ownership, 12 files, under
++1200 total lines, production restraint, and the distributed 15% Chinese-comment
++gate. Any blocker requires a revised full-scope audit; only a clean exact-revision
++verdict may permit implementation.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| R1 | R1 | yes | B-01 将 Task 标记为 `ambient` 超出原始需求授权；B-02 Message 前缀缓存未覆盖现有可变的 Plugin Message Transform seam | §10.2 default normalization seam and §18 benchmark path need explicit implementation evidence | BLOCK | `ses_06751a49cffedigXU5AkDV1MMT` |
++| R2 | R2 | yes | B-01 Cache boundary can promote in-place prompt decorations (`insertReminders` / queued-user wrappers) into replayed canonical history; B-02 removing the initial write leaves reachable non-interruption pre-dispatch failures without a durable Assistant boundary | §8 benchmark body should be reproducible; §10.2 normalization seam should be named | BLOCK | `ses_06749b6eeffeWzmepbqOQk6YwC` |
++| R3 | R3 | yes | B-01 run-local Message cache does not invalidate after successful automatic Compaction; B-02 connected MCP Tools have no behaviorally sensitive worktree-policy test | §8 benchmark exit semantics were inverted and standalone operations cannot alone prove call-path removal | BLOCK | `ses_0669d31c7ffebK868eOQPkd223` |
++| R4 | R4 | yes | No blocking findings. | Registration operation/persisted worktree metadata location should be explicit in implementation evidence; standalone benchmark is contributor evidence while SessionPrompt tests remain authoritative; MCP wrapper/Tool.Def distinction must be preserved; final approval remains tied only to R4. | APPROVE | `ses_06693a720ffe3TMgltXNw157Db` |
++| R5 | R5 | yes | B-01 Canonical plan baseline drifted from current repository: create/start-step eager capture was already removed in the current worktree, so required red slices no longer targeted the audited source behavior | concurrent capture synchronization and concrete focused command need explicit implementation evidence | BLOCK | `ses_06672de0affePJM5BMDhWcpn00` |
++| R6 | R6 | yes | No blocking findings. | N-01 partial worktree changes require actual-diff implementation audit; N-02 slice 1 is characterization rather than red-green; N-03 standalone benchmark is contributor evidence only and focused path tests are authoritative. | APPROVE | `ses_0666b29fbffeS51g1QLvcO8E84` |
++| R7 | R7 | yes | B-01 Goal chronology is still scanned on every active-Goal provider step instead of at the `goal` Tool-start boundary; B-02 non-`none` Tools do not unconditionally trigger the first Snapshot because MCP permission/plugin work runs before `ensureToolSnapshot` | Benchmark approximation and comment-budget estimate remain non-blocking | BLOCK | `ses_06623e73cffeQN5DfIkITIkYg1` |
++| R8 | R8 | yes | B-01 Canonical plan baseline is contradicted by the current repository: the current source already has no durable zero Assistant update and substantial planned implementation, so stale red slices cannot fail | E/C remains implementation evidence; standalone benchmark remains contributor-only evidence | BLOCK | `ses_06619f200ffewGvzsBz1xYINN7` |
++| R9 | R9 | yes | No blocking findings. | N-01 verification command must explicitly execute all mapped behavior slices; N-02 implementation must inject the lazy Goal result into the same trusted `GoalTurnContext` consumed by Goal read/transition. | APPROVE | `ses_0660a85f3ffe4q2YF2EXnHyZUl` |
++| R9 implementation | R9 | yes | B-01 SessionPrompt regression suite remains red; B-02 superseded unbounded `MessageV2.chronology()` remains exported; B-03 Message-prefix optimization lacks behaviorally sensitive verification | independent E/C calculation passes; exact failure count was 111/2 in the audit run | BLOCK | `ses_065f087b2ffe4qXhghx3OEcWve` |
++| R10 | R10 | yes | B-01 plan baseline still described already-completed Goal/Snapshot fixes as pending; B-02 ordinary active Goal no-scan path lacked sensitive verification; B-03 verification omitted the complete red Prompt file | fixed benchmark parameters remained non-blocking; stale R9 labels reduced readability | BLOCK | `ses_065df4640ffeXvS03UQ0yGQk4M` |
++| R11 | R11 | yes | B-01 remaining work had no executable path below 1200 changed lines; B-02 `worktree` schema exclusion lacked a sensitive Provider-boundary test | Timing mutation sensitivity remained an implementation-audit concern | BLOCK | `ses_06589a974ffe4NwQdeZ3vNDPHK` |
++| R12 | R12 | yes | No blocking findings. | N-01 审计模式元数据用词不一致；N-02 Provider-executed Tool 的测试落点应在实施证据中明确核对 | **APPROVE — exact canonical revision R12 only.** | `ses_0657a4bb7ffe0PbNPDCA0gMccy` |
++| R13 | R13 | yes | B-01 Provider-executed Tool 的 Snapshot 排除路径缺少行为敏感验证 | N-01 diff 预算把删除 chronology 错算成增加 changed lines | **BLOCK — exact canonical revision R13.** | `ses_065615370ffeg8DDW8XzzeL6hf` |
++| R14 | R14 | yes | B-01 Message 增量窗口错误地假设调用方提供的 MessageID 单调递增 | R14 的部分旧 revision 文案；注释墙仍需在实施审计中清零 | **BLOCK — exact canonical revision R14.** | `ses_0655a7530ffeJXrDt17Lq69J44` |
++| R15 | R15 | yes | B-01 计划删除用户明确要求的首笔 `tokens=0` 持久化；B-02 未分离公共 `fromMessageID` 与内部 persisted-order cursor 合同 | 当前 revision 文案与实施 evidence 仍需清理 | **BLOCK — exact canonical revision R15.** | `ses_0654e65dbffecL6SNhX2SLWSkz` |
++| R16 | R16 | yes | B-01 Message mutation revision 依赖 experimental Workspaces 的 EventSequence/EventTable，默认运行路径不可用；B-02 所有 MCP Tool 被无条件标记为 `ambient`，独立审计认为缺少受信副作用归属 | N-01 §23 保留 superseded implementation evidence；当前不改变 release verdict | **BLOCK — exact canonical revision R16.** | `ses_0653b1fd3ffeBVWFx6yNnq5r70` |
++| R17 | R17 | yes | B-01 active Run 公开旧 Part 修改无法使 cache miss；B-02 `MessageV2.latest` 仍按 ID；B-03 Compaction 首次读取仍按 ID cutoff；B-04 auditor 未收到较早的 audit-cap 授权 | N-01 zero-write current-state wording；N-02 diff estimates；N-03 stale §23 evidence | **BLOCK — exact canonical revision R17.** | `ses_0652764fdffeX9QfMtTYCilXtt` |
++| R18 | R18 | yes | B-01 plan retained contradictory run-local versus cross-run cache lifetime; B-02 millisecond `time_updated` could collide | N-01 stale §23 evidence | **BLOCK — exact canonical revision R18.** | `ses_06512fd22ffeh6FjULE2Se3guR` |
++| R19 | R19 | yes | B-01 Cache lifetime contract remained contradictory between run-local and cross-run ownership; B-02 typed Bus invalidation had no admission-before-subscriber ordering guarantee | none recorded | **BLOCK — exact canonical revision R19.** | `ses_06507d712ffeHNdJJonfHNmtcA` |
++| R20 | R20 | yes | B-01 Audit handoff omitted the later user quote removing the first durable `tokens=0` write and therefore treated the superseded two-write description as contracted; B-02 a per-Session entry Map violated the user's one retained cache cardinality | none | **BLOCK — exact canonical revision R20.** | `ses_064f073b0ffeFWgQkCJziVSlnV` |
++| R21 | R21 | yes | No blocking findings. | §23 superseded evidence should be replaced after implementation; timing thresholds remain supplemental to literal request-body equivalence | **APPROVE — exact canonical plan revision R21 only.** | `ses_064e752cbffetbpSgyXKckegu3` |
++| R22 | R22 | yes | B-01 Revert tail selection, diff range and cleanup retained lexical MessageID order, so a later low-ID Message could remain visible and be replayed by the otherwise correct cache | E/C remains implementation-stage evidence; §23 is superseded history; 12-file count depends on removing the standalone Tool.define test diff | **BLOCK — exact canonical plan revision R22.** | `ses_064d5e535ffekBO2u2gRF5HcTa` |
++| R23 | R23 | no | audit was not invoked; revision superseded after the worktree reset | none | NOT AUDITED | n/a |
++| R24 | R24 | yes | B-01 已超过计划审计六轮硬上限；B-02 缓存转换块没有覆盖工作历史的非 Plugin 改写 | Audit mode 元数据用词；E/C 与预算实施时复核 | **BLOCK — exact canonical plan revision R24.** | `ses_064a8954fffeoD381UdncWoZZe` |
++| R25 | R25 | no | B-02 corrected; B-01 awaits explicit user authorization for a fresh six-round cycle | none | BLOCKED BEFORE AUDIT | pending user decision |
++| new cycle 1/6 | R26 | yes | B-01 Tool worktree policy lacks a durable, race-safe ownership path | Budget/comment/benchmark findings are implementation-stage checks | **BLOCK — exact canonical plan revision R26, new audit cycle round 1/6.** | `ses_06490986cffeYL9DMmMExTi0q0` |
++| new cycle 2/6 | R27 | yes | B-01 新增 `ToolPart.worktree` 会改变公开 SDK 合同，但计划明确排除了 SDK 生成 | Budget/comment/benchmark findings remain implementation-stage checks | **BLOCK — exact canonical plan revision R27, new audit cycle round 2/6.** | `ses_06489a881ffevD5G1HLJsE80lD` |
++| new cycle 3/6 | R28 | yes | No blocking findings. | 无。 | **APPROVE — exact canonical plan revision R28 only.** | `ses_0647a79b5ffeiCIs88oqfCp38L` |
++
++Any substantive revision invalidates earlier approval.
++
++The orchestrating primary agent must copy the independent verdict without
++paraphrasing. A clean verdict may update only the administrative approval fields
++for the exact audited revision. It must not be combined with a design change.
++
++### R24 Independent Verdict (verbatim)
++
++#### Blocking findings
++
++##### B-01 已超过计划审计六轮硬上限
++
++- Violated invariant: 计划审计最多进行 6 轮；达到上限后，未解决事项必须转为用户的显式开放决策，发布结论保持 `BLOCK`。
++- Evidence class: contracted
++- Producer and execution path: canonical plan 的审计记录累计记录了 R1–R22 的多轮完整计划审计，当前又请求审计 R24；计划没有引用用户对审计轮数上限的明确例外授权。
++- Source evidence: `.opencode/policy/first-principles-engineering.md:548-557`
++- Canonical-plan evidence: §22，`docs/plans/session-prompt-preflight-latency-lazy-snapshot.md:641-667`
++- Responsibility owner: 审计编排与 canonical-plan 状态转换流程
++- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 仓库政策禁止在超过六轮后继续通过普通修订—审计循环取得计划批准；R24 不能进入 `approved` 或 `Implementation allowed: yes`。
++- Why this is not speculative: canonical plan 自身记录了超过六轮的实际审计历史，政策明确规定了硬上限及达到上限后的处理方式。
++- Minimal correction direction: 将剩余阻塞项作为用户开放决策处理；只有用户明确授权本任务突破或重置审计轮数限制，并由 canonical plan 原文记录该授权，才可继续寻求批准。
++
++##### B-02 缓存转换块没有覆盖工作历史的非 Plugin 改写
++
++- Violated invariant: 最终发送给 Provider 的 Message 必须包含本轮所有 reminder、排队 Message 包装和 Agent 专用转换；缓存只能复用与最终工作历史语义一致的转换块。
++- Evidence class: reachable
++- Producer and execution path:
++  1. `SessionPrompt.runLoop` 取得 canonical Message 历史。
++  2. `insertReminders` 可以修改最新 user Message，并可能持久化新的 Part。
++  3. 后续 user Message 会被包装为 `<system-reminder>`。
++  4. `decide` Agent 会把 Tool Part 改写成 synthetic text，并截断 Reasoning。
++  5. 当前实现完成这些改写后才调用 `toModelMessagesEffect`。
++  6. R24 计划改为先生成并复用 canonical conversion chunks，再克隆和装饰工作历史；它只为 Plugin Message Transform 明确规定完整重转换，没有规定 reminder、排队包装或 `sanitizeDecideMessages` 如何使受影响的缓存块失效或重新转换。
++- Source evidence: `packages/opencode/src/session/prompt.ts:462-479`, `packages/opencode/src/session/prompt.ts:2504-2524`, `packages/opencode/src/session/prompt.ts:2784-2787`, `packages/opencode/src/session/prompt.ts:2855-2873`, `packages/opencode/src/session/prompt.ts:2891-2893`
++- Canonical-plan evidence: §10.3 lines 368-400；§16 slices 6-8
++- Responsibility owner: `SessionPrompt` 的最终工作 Message 组装与 `MessageV2` conversion-chunk admission 边界
++- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: full/prefix cache hit 可以把装饰前的 canonical chunk 直接发送给 Provider，导致缺失 reminder、遗漏排队 user Message 的系统包装，或者让 `decide` Agent 收到未净化的 Tool/Reasoning 历史；最终请求体会与当前正常行为不一致。
++- Why this is not speculative: 三类改写都存在于当前可达的 Provider 请求路径中；canonical plan 明确把 conversion chunks 建在装饰前，并只对 Plugin transform 指定完整重转换。
++- Minimal correction direction: 在 `SessionPrompt` 的唯一最终转换路径中明确规定，所有会改变工作 Message 的现有转换都必须在 Provider dispatch 前使受影响的 canonical chunks 失效或重建；为 reminder、排队包装和 `decide` 转换分别加入通过最终 Provider 请求体观察的行为敏感测试。
++
++#### Non-blocking findings
++
++- `Audit mode` 元数据写成 `full-scope`，而本次输入指定的是 `plan`。当前上下文足以确定审计类型，不单独影响设计可执行性。
++- R24 对 `E=600–900`、`C=90–135` 的估算满足 `ceil(E × 0.15)`，并承诺注释贴近具体决策。实际分布和有效行数仍须在 implementation audit 中重新计算。
++- 12 个代码/测试文件、少于 1200 行以及约 600 行以内生产代码的预算在当前文件计划下可行；实际 diff 必须重新核算。
++
++#### Release verdict
++
++**BLOCK — exact canonical plan revision R24.**
++
++R24 存在 B-02 的最终请求体一致性缺口；同时审计历史已经超过六轮硬上限。剩余阻塞项必须作为用户开放决策处理，当前 revision 不得标记为 `approved`，也不得开始实施。
++
++### R26 Independent Verdict (verbatim)
++
++#### Blocking findings
++
++##### B-01 Tool worktree policy lacks a durable, race-safe ownership path
++
++- Violated invariant: `declared` / `ambient` policy must survive the complete Tool lifecycle so the first non-`none` Tool triggers Snapshot and Revert can distinguish declared, ambient, and none attribution.
++- Evidence class: reachable
++- Producer and execution path:
++  1. The local builtin or MCP execute adapter invokes the planned pre-execute operation and marks the Tool Part with server-owned worktree policy.
++  2. AI SDK Tool execution can overlap Processor event handling; the plan’s own reproduced race proves execute can start before preceding asynchronous event work completes.
++  3. `SessionProcessor` later handles `tool-call` and replaces top-level `ToolPart.metadata` with Provider metadata.
++  4. Tool progress replaces `state.metadata`, and terminal completion replaces it again with sanitized result metadata.
++  5. Revert later depends on the persisted policy to admit ambient Patch files and distinguish them from none.
++- Source evidence:
++  - `packages/opencode/src/session/prompt.ts:1169-1183`
++  - `packages/opencode/src/session/prompt.ts:1217-1235`
++  - `packages/opencode/src/session/prompt.ts:1286-1308`
++  - `packages/opencode/src/session/processor.ts:275-294`
++  - `packages/opencode/src/session/processor.ts:355-370`
++  - `packages/opencode/src/session/processor.ts:490-520`
++  - `packages/opencode/src/session/processor.ts:563-597`
++  - `packages/opencode/src/session/revert.ts:95-118`
++- Canonical-plan evidence: §8 “Execute-boundary race feedback”; §10.2; §13 INV-06; §15 `processor.ts` / `prompt.ts` responsibilities; §16 slices 3 and 5
++- Responsibility owner: `SessionProcessor` Tool Part lifecycle and the Prompt local/MCP execute adapters
++- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: An ambient shell or MCP Tool can successfully mutate the worktree and produce a Patch while its persisted Tool Part loses the ambient marker. A subsequent Revert then treats that Assistant as none/undeclared and omits the Patch files, leaving the Tool’s worktree changes in place. The same overwrite surface can erase declared classification needed by the policy matrix.
++- Why this is not speculative: The metadata replacement transitions exist in the current production path, and the plan records observed overlap between asynchronous Processor event handling and actual Tool execution. R26 requires a persisted Tool Part marker but does not assign a canonical storage location or preservation rule to any of these existing replacement transitions.
++- Minimal correction direction: Define one Processor-owned persisted location for worktree policy and require that location to survive pending → running → progress → completed/error/cleanup transitions, including concurrent `tool-call` and pre-execute updates. The behavioral tests must use real builtin and MCP metadata updates before checking declared/ambient/none Revert behavior.
++
++#### Non-blocking findings
++
++- The 12-code/test-file plan is internally consistent: 11 production files plus `test/session/prompt.test.ts`.
++- The estimated 300–490 production lines and 580–920 total code/test lines are feasible under the user’s approximate 600-production-line preference and hard 1200-line limit.
++- The Chinese explanatory-comment estimate commits to the actual `ceil(E × 0.15)` minimum and explicitly rejects concentrated comments and split-line padding. Actual `E`/`C` remains an implementation-audit calculation.
++- The standalone database/Snapshot benchmark establishes measured contributor cost. R26 correctly assigns behavior-level call-path verification to focused `SessionPrompt` tests rather than treating that benchmark as proof of removal.
++- The audit-cycle reset is explicitly authorized and quoted. R26 is validly treated as round 1 of the new six-round cycle.
++
++#### Release verdict
++
++**BLOCK — exact canonical plan revision R26, new audit cycle round 1/6.**
++
++R26 must define the single durable worktree-policy location and its preservation across the real Processor Tool lifecycle, then undergo another full-scope plan audit.
++
++### R27 Independent Verdict (verbatim)
++
++#### Blocking findings
++
++##### B-01 新增 `ToolPart.worktree` 会改变公开 SDK 合同，但计划明确排除了 SDK 生成
++
++- Violated invariant: 每个生产接口变更都必须覆盖其实际消费者、生成物和验证路径；12 个代码文件及少于 1200 行的硬限制必须基于完整改动面计算。
++- Evidence class: contracted
++- Producer and execution path:
++  1. R27 在 `MessageV2.ToolPart` 上新增公开可序列化字段 `worktree`.
++  2. `MessageV2.Part` 是 `part.update` HttpApi 的请求和响应 Schema。
++  3. 同一个 `Part` Schema 也进入 Message Part 事件及 Session Message 响应合同。
++  4. JavaScript SDK 从这些 HttpApi/OpenAPI Schema 生成 `ToolPart` 类型。
++  5. 当前 SDK 已分别生成 v1 和 v2 `ToolPart`：`packages/sdk/js/src/gen/types.gen.ts` 与 `packages/sdk/js/src/v2/gen/types.gen.ts`。
++  6. 根级仓库指令要求修改相关 Schema 后运行 `./packages/sdk/js/script/build.ts`。
++- Source evidence:
++  - `packages/opencode/src/session/message-v2.ts:432-442`
++  - `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts:609-619`
++  - `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:416-430`
++  - `packages/sdk/js/src/gen/types.gen.ts:294-404`
++  - `packages/sdk/js/src/v2/gen/types.gen.ts:282`
++  - `AGENTS.md:1`
++- Canonical-plan evidence: §2 lines 80-81；§10.2 lines 362-367；§15 lines 517-535；§18 lines 599-600；§19 lines 606-615
++- Responsibility owner: `MessageV2.Part` 的公开 Schema、HttpApi 合同及 JavaScript SDK 生成流程
++- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 按 R27 实施会让服务端公开 `ToolPart` 与已发布 SDK 的 `ToolPart` 类型发生漂移；执行仓库要求的 SDK 生成又会修改计划未授权的生成代码文件，使“恰好 12 个代码/测试文件、无 generated artifact”的实施合同失效，并可能直接超过用户的 12 文件硬上限。
++- Why this is not speculative: `part.update` 明确直接以 `MessageV2.Part` 作为公开 payload 和 success Schema，生成的 SDK 中也已经存在对应 `ToolPart` 类型；这是当前可见的生产接口链，不依赖未来消费者假设。
++- Minimal correction direction: 在同一 canonical revision 中明确解决 `ToolPart.worktree` 的公开 Schema/SDK 归属，并把必需生成物纳入文件预算和验证；仍须通过减少其他代码文件或采用不扩张公开生成合同的所属路径，保持最多 12 个代码文件。不得以跳过 SDK 生成来维持文件数。
++
++#### Non-blocking findings
++
++- R27 对首笔 durable Assistant publication、pre-dispatch typed-error finalization 和 preflight Compaction 丢弃未发布尝试的设计，已经覆盖后续澄清，不再保留 durable `tokens=0`。
++- `E=600–900`、`C=90–135` 的计划估算承诺实际执行 `C >= ceil(E × 0.15)`，并明确禁止集中注释与拆行填充。实际数值和分布留到 implementation audit 复算，符合阶段要求。
++- 独立审计周期授权已逐字记录；R27 可作为新周期第 2/6 轮审计，不受 R1–R24 历史轮次阻断。
++- 真实数据库/Snapshot benchmark 只被用作延迟贡献证据，最终行为移除由公开 `SessionPrompt` 测试证明，证据职责划分合理。
++
++#### Release verdict
++
++**BLOCK — exact canonical plan revision R27, new audit cycle round 2/6.**
++
++R27 尚未覆盖 `ToolPart.worktree` 从公开 `MessageV2.Part` Schema 到 JavaScript SDK 的实际生产接口链。当前 revision 不得标记为 `approved`，也不得开始实施。
++
++### R28 Independent Verdict (verbatim)
++
++#### Blocking findings
++
++No blocking findings.
++
++#### Non-blocking findings
++
++无。
++
++#### Release verdict
++
++**APPROVE — exact canonical plan revision R28 only.**
++
++R28 可以由编排方仅执行行政状态更新，记录本次 full-scope clean verdict，并将 `Status`、`Approved revision` 与 `Implementation allowed` 更新为 R28 对应的批准状态。任何行为、接口、测试、ownership、fallback classification 或文件计划变更都必须递增 revision 并重新进行完整计划审计。
++
++## 23. Implementation Evidence
++
++Implementation was rebuilt from the post-stash source without restoring
++`stash@{0}`. Twelve R28 code/test paths currently changed; R29 additionally
++plans the existing `revert-compact.test.ts` fixture path. No schema, migration,
++generated file, dependency or fallback path changed.
++
++### Actual behavior and paths
++
++- `prompt.ts` removes the constructor-state zero publication, persists estimate
++  as the first normal Assistant state, finalizes pre-dispatch failure once,
++  admits one Project-scoped raw-proof cache, converts only dirty suffixes and
++  loads bounded Goal chronology only from the real Goal Tool adapter.
++- `message-v2.ts` owns exact raw Message/Part proof tuples, inclusive suffix
++  hydration, per-Message conversion chunks and persisted `(time_created,id)`
++  chronology; `compaction-boundary.ts` uses that persisted ordering.
++- `processor.ts` moves Snapshot capture to the local non-`none` Tool execution
++  barrier, shares one cached capture, serializes Tool Part lifecycle updates and
++  preserves the primitive `metadata.worktree` authority across Provider
++  metadata replacement. Pure text/read and Provider-executed Tools do not
++  capture. Consecutive side-effect steps retain the completed baseline without
++  rescanning pure continuation steps.
++- `tool.ts`, `registry.ts`, `edit.ts`, `write.ts`, `apply_patch.ts` and `shell.ts`
++  carry the server-only policy. The Provider schema/description remains fresh
++  and contains no policy field. `revert.ts` combines declared result files with
++  same-Assistant ambient Patch files and uses persisted chronology.
++- `prompt.test.ts` covers first publication, typed assembly failure, lexical-low
++  later Messages, retained-prefix contraction after hidden mutation, 2048-turn
++  literal conversion equality/timing and two consecutive ambient Tool steps
++  through real Revert.
++
++### Red-green evidence
++
++- Initial pre-change test executions were repeatedly terminated by the OpenCode
++  runner as `reason=user_abort` although the user did not cancel. No false red
++  verdict is claimed for those attempts.
++- After the runner recovered, an exact mutation restored the removed initial
++  `updateMessage(msg)`: the public Bus test failed with
++  `Expected: > 0 / Received: 0`. Removing that mutation made the same test pass
++  (`1 pass`, `2 expect() calls`).
++- Adding a new required Handle method produced a real typecheck red in four
++  existing Compaction stubs. The implementation was simplified to extend the
++  existing `updateToolCall` operation instead of changing a thirteenth file;
++  `bun typecheck` then passed.
++
++### Verification
++
++- Complete modified suite: `105 pass / 0 fail`, 459 expectations. Its expected
++  retry scenario printed a 503 stack but did not fail.
++- Message/pagination/Tool race group: `112 pass / 0 fail`.
++- Compaction/Revert/declared ownership group: `93 pass / 0 fail`.
++- Processor/token group initially had one overflow assertion fail under three
++  groups running concurrently; the focused test passed, and the whole group
++  rerun alone passed `31 pass / 0 fail`, so no reproducible implementation
++  failure remains.
++- `snapshot-tool-race.test.ts`: `1 pass / 0 fail`; ambient two-step Revert:
++  `1 pass / 0 fail`; chronology/cache contraction: `2 pass / 0 fail`.
++- `bun typecheck` and `git diff --check` pass.
++
++### Original feedback loops
++
++- The 2048-turn public loop passed five independent runs. Cold/warm milliseconds
++  were `511.6/105.7`, `515.3/95.5`, `485.4/99.9`, `460.1/92.9` and
++  `481.0/97.4`; warm was 4.8–5.3 times faster and always below one second.
++- Read-only real DB harness on `ses_1296dfec8ffeF4HyjYjd4NbDUk` (5405 Messages,
++  20834 Parts): current Compaction proof domain was 77 Messages/505 Parts;
++  raw-proof median was 13.0 ms versus full-history row decode median 88.9 ms.
++- Snapshot core `diff-files + ls-files + write-tree` contributor median was
++  99.0 ms. The new pure text/read path does not invoke this contributor.
++
++### Diff and comment gates
++
++- Final code/test paths: 13. R34 diff is 1189 changed lines; production changed
++  lines are 598. The executable contraction completed before final additions.
++- Final gate calculation excludes blank, import-only and comment lines:
++  `E=1042`, `C=165`, required `ceil(E*0.15)=157`; excluding the six candidates
++  rejected by the first auditor still leaves 159 qualifying comments.
++- Representative comments are adjacent to raw proof identity, inclusive
++  mismatch hydration, lifecycle permit, Snapshot active-step baseline,
++  server-only Tool policy, dirty conversion suffix, failure publication and
++  Revert admission. No declaration comment wall was retained.
++
++Post-blocker verification: Prompt `109 pass`; Message/pagination/race `112 pass`;
++Compaction/Revert `93 pass`; Processor/token `31 pass`; typecheck and
++`git diff --check` pass. The 2048-turn common-prefix/full-hit/eviction test passed
++five consecutive isolated runs. Remaining item: independent full-scope R34
++implementation audit only.
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R28 | yes | B-01 none Tool metadata admitted by Revert; B-02 Snapshot policy matrix missing; B-03 cache invalidation matrix missing | none | BLOCK | `ses_064478ad8ffedh0FK7Xp1QexRF` |
++| 2 | R34 | yes | B-01 ambient authority crossed Assistant boundaries; B-02 chunk equivalence lacked Tool error/output, media and Compaction shapes | none | BLOCK | `ses_062d1dfd2ffexZCjNos6qxstxQ` |
++| 3 | R34 | yes | none | N-01 pre-existing Goal test flakiness under full-suite load; N-02 single-sample timing assertions; N-03 commit must exclude unrelated worktree paths | APPROVE | `ses_0627920f5ffeXWYts4oAAQzYQw` |
++
++Round-3 verdict recorded verbatim: **APPROVE — exact R34 implementation diff
++against approved canonical plan revision R34 only.** The auditor independently
++re-ran the §18 commands (`109 pass`, `112 pass`, `93 pass`, `31 pass`,
++`bun typecheck` clean, `git diff --check` clean) and recomputed the comment gate
++as `E=864`, `C=165`, required `130`, ratio `19.1%`.
++
++R29 identified the thirteenth fixture path. Its plan audit then found that the
++loop-entry Session snapshot makes queued control-panel changes stale. R30 added
++the correct owner but its audit required sensitive Revert and Permission tests.
++R31 kept the same production correction and rewrote existing tests only:
++warm cache -> public Revert/cleanup -> Provider body, and initial bash deny ->
++queued public allow -> next-step real bash execution.
++Its sixth-round audit required one remaining fresh-surface signal. User then
++authorized one extra R32 audit. R32 extends the existing warm Plugin fixture so
++`tool.definition` returns v1 then v2 description/schema and the second TestLLM
++Provider Tool body must contain only v2.
++R33 added an executable contraction plan, but its audit showed that cross-runLoop
++freshness and append-only timing were insufficient. User authorized R34. R34
++moves Tool-definition and MCP state changes into the same queued continuation
++runLoop and adds unchanged full-hit versus one-entry eviction/rebuild timing.
++B-01 is corrected at `SessionRevert`; B-02 and
++B-03 now have sensitive public behavior tests in the approved Prompt suite.
++Those tests exposed that four existing Revert regressions still construct
++builtin Tool Parts without the new top-level authority. Treating missing as a
++Tool-name-derived policy would reopen B-01 and violate the original default-none
++contract. R32 adds `revert-compact.test.ts`, updates its shared bash/edit fixtures
++to persist `ambient`/`declared`, and changes the queued Prompt test to disable
++bash through the public control-panel input before the next Tool continuation.
++No production compatibility fallback is introduced.
++
++The task may be marked `verified` only after an independent full-scope result of
++`No blocking findings` for the current implementation and approved plan
++revision.
+diff --git a/packages/opencode/src/session/compaction-boundary.ts b/packages/opencode/src/session/compaction-boundary.ts
+index bf956813d17e282099d399c5530eafb8a17f23ce..d842c8ab5a33f5c6bd671bde8148c51f611c24c9 100644
+--- a/packages/opencode/src/session/compaction-boundary.ts
++++ b/packages/opencode/src/session/compaction-boundary.ts
+@@ -28,8 +28,8 @@ export function latest(sessionID: SessionID): Info | undefined {
+           sql`coalesce(json_type(${MessageTable.data}, '$.error'), 'null') = 'null'`,
+         ),
+       )
+-      // 单调 MessageID newest-first，不依赖 wall-clock 精度或平台 timestamp 舍入。
+-      .orderBy(desc(MessageTable.id))
++      // caller 可自选 ID；持久化时间是主序，ID 只处理同毫秒平局。
++      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+       .all()
+ 
+     // 最新失败候选不会遮挡更早仍合法的 completed boundary。
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index e0e6cd62b1bf2f30ac5c13dd9ffc46f4a05b360d..784fa2a27f50bb88eec0de552b09c4a3b58f76da 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -8,7 +8,7 @@ import { SyncEvent } from "../sync"
+ import { Database } from "@/storage/db"
+ import { ColdStorage } from "@/storage/cold"
+ import { NotFoundError } from "@/storage/storage"
+-import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
++import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
+ import { MessageTable, PartTable, SessionTable } from "./session.sql"
+ import * as ProviderError from "@/provider/error"
+ import { iife } from "@/util/iife"
+@@ -785,6 +785,15 @@ const Cursor = Schema.Struct({
+ })
+ type Cursor = typeof Cursor.Type
+ 
++export function compareChronology(
++  a: { id: MessageID; time: { created: number } },
++  b: { id: MessageID; time: { created: number } },
++) {
++  // time.created 来自持久 row，不借助进程内事件到达顺序。
++  // ID 只解决同毫秒冲突，不能反向覆盖 caller 指定的时间。
++  return a.time.created - b.time.created || a.id.localeCompare(b.id)
++}
++
+ const decodeCursor = Schema.decodeUnknownSync(Cursor)
+ 
+ export const cursor = {
+@@ -859,44 +868,73 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
+   }
+ }
+ 
+-// Goal chronology 只读取 Message hot info 与三个 Part locator 字段；Tool output、Reasoning、附件和 summary.diffs
+-// 不会进入 JS，也不会触发持久 thaw。排序继续使用 persisted time，再以 MessageID 处理同毫秒 tie。
+-export function chronology(sessionID: SessionID): ChronologyMessage[] {
++// Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
++export function goalChronology(sessionID: SessionID): ChronologyMessage[] {
+   return Database.use((db) => {
+-    const messages = db
+-      .select()
+-      .from(MessageTable)
+-      .where(eq(MessageTable.session_id, sessionID))
+-      .orderBy(MessageTable.time_created, MessageTable.id)
+-      .all()
+-    const parts = db
+-      .select({
+-        messageID: PartTable.message_id,
+-        type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
+-        synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
+-        goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
+-        hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
+-      })
+-      .from(PartTable)
+-      .where(eq(PartTable.session_id, sessionID))
+-      .orderBy(PartTable.message_id, PartTable.id)
+-      .all()
+-    const byMessage = new Map<string, ChronologyPart[]>()
+-    // 只在 narrow locator projection 过滤 hidden Part，避免为 Goal chronology thaw 完整 payload。
+-    for (const part of parts) {
+-      if (part.hidden !== null) continue
+-      const value: ChronologyPart = {
+-        type: part.type,
+-        ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
+-        ...(part.goalContinuation === 1 ? { metadata: { goal_continuation: true as const } } : {}),
++    const result: ChronologyMessage[] = []
++    let before: Cursor | undefined
++    const size = 16
++    while (result.length < 2) {
++      const base = and(
++        eq(MessageTable.session_id, sessionID),
++        sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
++        sql`json_extract(${MessageTable.data}, '$.goalTurnID') is null`,
++        sql`json_type(${MessageTable.data}, '$.hidden') is null`,
++      )
++      const rows = db
++        .select()
++        .from(MessageTable)
++        .where(before ? and(base, older(before)) : base)
++        .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
++        .limit(size)
++        .all()
++      if (!rows.length) break
++
++      const parts = db
++        .select({
++          messageID: PartTable.message_id,
++          type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
++          synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
++          goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
++          hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
++        })
++        .from(PartTable)
++        .where(inArray(PartTable.message_id, rows.map((row) => row.id)))
++        .orderBy(PartTable.message_id, PartTable.id)
++        .all()
++      const byMessage = new Map<MessageID, ChronologyPart[]>()
++      // 先在 locator 层排除 hidden Part，Goal classifier 不应读取 tombstone 的旧资格。
++      for (const item of parts) {
++        if (item.hidden !== null) continue
++        const value: ChronologyPart = {
++          type: item.type,
++          ...(item.synthetic === 1 ? { synthetic: true } : {}),
++          ...(item.goalContinuation === 1 ? { metadata: { goal_continuation: true as const } } : {}),
++        }
++        const list = byMessage.get(item.messageID)
++        if (list) list.push(value)
++        else byMessage.set(item.messageID, [value])
++      }
++
++      for (const row of rows) {
++        const message = { info: hotInfo(row), parts: byMessage.get(row.id) ?? [] }
++        const continuation = message.parts.some(
++          (part) => part.type === "text" && part.synthetic && part.metadata?.goal_continuation === true,
++        )
++        const userInitiated = message.parts.some(
++          (part) => part.type !== "compaction" && part.synthetic !== true,
++        )
++        // compaction-only user rows are technical markers and do not consume a Goal slot.
++        if (continuation || userInitiated) result.push(message)
++        if (result.length === 2) break
+       }
+-      const list = byMessage.get(part.messageID)
+-      if (list) list.push(value)
+-      else byMessage.set(part.messageID, [value])
++
++      const last = rows.at(-1)
++      if (!last || rows.length < size) break
++      // persisted tuple keeps same-millisecond rows in a stable scan window.
++      before = { id: last.id, time: last.time_created }
+     }
+-    return messages
+-      .filter((message) => !message.data.hidden)
+-      .map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
++    return result.toSorted((a, b) => compareChronology(a.info, b.info))
+   })
+ }
+ 
+@@ -944,6 +982,9 @@ export const decodePartRow = part
+ const older = (row: Cursor) =>
+   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
+ 
++const atOrNewer = (row: Cursor) =>
++  or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
++
+ // hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
+ // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
+ function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
+@@ -1342,6 +1383,19 @@ export function toModelMessages(
+ 
+ // raw page 保留 indexed limit 与 structural caller 合同；visible page 在相同 physical cursor 上 refill，
+ // 直到业务 capacity 成立后才 hydrate，避免 hidden rows 消耗 limit 或触发无意义 Part thaw。
++export const toModelMessageChunksEffect = Effect.fnUntraced(function* (
++  input: WithParts[],
++  model: Provider.Model,
++) {
++  // 每个 persisted Message 自成转换块，prefix contraction 才能截断到任意命中点。
++  // concurrency 只并行纯转换，最终拼接仍服从 input 顺序。
++  // Tool call/result 与 media 都属于本 Message parts，不共享跨块状态。
++  return yield* Effect.forEach(input, (message) => toModelMessagesEffect([message], model), {
++    concurrency: "unbounded",
++  })
++})
++
++// page 的 SQL 先只取 limit+1 个 Message rows，hydrate 只查询该 slice 的 Parts；next-page 探针不会被 thaw。
+ // cursor 由 time_created+id 组成，fractional 历史 timestamp 仍可分页，冷存储不能借机收紧旧数据合同。
+ // 该函数是所有业务 Message 范围读取的 cold-aware seam；raw SQL 诊断命令明确不具备透明展开承诺。
+ export const page = Effect.fn("MessageV2.page")(function* (input: {
+@@ -1361,11 +1415,23 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+     return { items, more: false }
+   }
+   const before = input.before ? cursor.decode(input.before) : undefined
+-  // fromMessageID 裁剪：MessageID 单调递增（见 message-v2.ts ascending），
+-  // gte(id, fromMessageID) 等价于"该消息及之后的所有消息"，与 revert.ts 中
+-  // `msg.info.id >= rev.messageID` 的字符串比较语义一致。
+-  const base = input.fromMessageID
+-    ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
++  const fromMessageID = input.fromMessageID
++  // inclusive suffix 先把 public ID 解析回 canonical tuple。
++  // lexical-low ID 仍可成为后来写入的合法边界。
++  const from = fromMessageID
++    ? Database.use((db) =>
++        db
++          .select({ id: MessageTable.id, time: MessageTable.time_created })
++          .from(MessageTable)
++          .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, fromMessageID)))
++          .get(),
++      )
++    : undefined
++  // MessageID 是 caller 可选标识；先解析 row cursor，才能包含后来写入的 lexical-low Message。
++  const base = fromMessageID
++    ? from
++      ? and(eq(MessageTable.session_id, input.sessionID), atOrNewer(from))
++      : and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, fromMessageID))
+     : eq(MessageTable.session_id, input.sessionID)
+   const where = before ? and(base, older(before)) : base
+   const scanLimit = input.includeHidden ? input.limit + 1 : input.limit + Math.min(input.limit, 10) + 1
+@@ -1662,7 +1728,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+   // safety boundary local to the compaction filter.  MessageID.ascending() is the
+   // persisted ordering invariant; relying on caller order can revive pre-summary
+   // history and inflate the next compaction request past the model limit.
+-  const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
++  const ordered = Array.from(msgs).toSorted((a, b) => compareChronology(b.info, a.info))
+   const result = [] as WithParts[]
+   const completed = new Map<MessageID, boolean>()
+   let retain: MessageID | undefined
+@@ -1770,25 +1836,119 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
+   return filterCompacted(stream(sessionID, { fromMessageID: cutoff }))
+ })
+ 
+-// filterCompacted reorders messages for model consumption
+-// ([compaction-user, summary, ...retained tail..., continue-user]), so array
+-// position is not chronological. Derive each binding by max id (MessageID
+-// is monotonic via MessageID.ascending) so a pre-compaction overflowing tail
+-// assistant doesn't get mistaken for the most recent turn. Compaction is not a
+-// replayable task anymore: producers run it directly, and consumers only keep
+-// completed boundaries, which prevents stale compact markers from restarting.
++export type PromptWindowProof = {
++  boundary: string
++  messages: Array<{ id: MessageID; key: string }>
++}
++
++export function promptWindowProof(sessionID: SessionID): PromptWindowProof {
++  return Database.use((db) => {
++    const boundary = CompactionBoundary.latest(sessionID)
++    // boundary identity 是 Provider window 的结构版本，不能从旧 row 尚存推断命中。
++    // successful Compaction 改写 boundary 后必须完整 miss。
++    const cutoffID = boundary?.tailStartID ?? boundary?.markerID
++    const cutoff = cutoffID
++      ? db
++          .select({ id: MessageTable.id, time: MessageTable.time_created })
++          .from(MessageTable)
++          .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, cutoffID)))
++          .get()
++      : undefined
++    // cutoff row 缺失时不猜测半个 Compaction window，boundary key 已迫使 caller miss。
++    const messageRows = db
++      .select({
++        id: MessageTable.id,
++        timeCreated: MessageTable.time_created,
++        timeUpdated: MessageTable.time_updated,
++        data: sql<string>`cast(${MessageTable.data} as text)`,
++        coldRef: MessageTable.cold_ref,
++        coldKey: sql<string>`hex(${MessageTable.cold_key})`,
++      })
++      .from(MessageTable)
++      .where(
++        cutoff
++          ? and(eq(MessageTable.session_id, sessionID), atOrNewer(cutoff))
++          : eq(MessageTable.session_id, sessionID),
++      )
++      .orderBy(MessageTable.time_created, MessageTable.id)
++      .all()
++    // proof 只读取 SQLite 原始文本和 cold locator，不调用 thaw/hydrate。
++    // time_updated 覆盖同一 Message ID 的原位更新。
++    // time_created 决定 common-prefix 的 persisted 顺序。
++    const partRows = db
++      .select({
++        messageID: PartTable.message_id,
++        id: PartTable.id,
++        timeCreated: PartTable.time_created,
++        timeUpdated: PartTable.time_updated,
++        data: sql<string>`cast(${PartTable.data} as text)`,
++        coldRef: PartTable.cold_ref,
++        coldKey: sql<string>`hex(${PartTable.cold_key})`,
++        coldStats: sql<string>`cast(${PartTable.cold_stats} as text)`,
++      })
++      .from(PartTable)
++      .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
++      // 同一join同时承载完整历史与cutoff窗口，避免两个proof查询形状漂移。
++      .where(
++        and(
++          eq(PartTable.session_id, sessionID),
++          eq(MessageTable.session_id, sessionID),
++          ...(cutoff ? [atOrNewer(cutoff)] : []),
++        ),
++      )
++      .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
++      .all()
++    const parts = new Map<MessageID, unknown[]>()
++    for (const row of partRows) {
++      // Part ID 顺序覆盖 pending→running→terminal 的同 row replacement。
++      // primitive worktree marker 变化也必须让对应 Message proof miss。
++      const list = parts.get(row.messageID) ?? []
++      list.push([row.id, row.timeCreated, row.timeUpdated, row.data, row.coldRef, row.coldKey, row.coldStats])
++      parts.set(row.messageID, list)
++    }
++    return {
++      // boundary 单独比较，row prefix 相同也不能跨 summary/tail 重排复用。
++      boundary: JSON.stringify(boundary ?? null),
++      // raw JSON 与 cold identity 都进入 tuple；proof 不依赖毫秒 revision 或异步事件顺序。
++      // cold key/ref/stats 变化意味着 thaw 结果变化，必须与 hot data 同时比较。
++      // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
++      messages: messageRows.map((row) => ({
++        id: row.id,
++        key: JSON.stringify([
++          row.id,
++          row.timeCreated,
++          row.timeUpdated,
++          row.data,
++          row.coldRef,
++          row.coldKey,
++          parts.get(row.id) ?? [],
++        ]),
++      })),
++    }
++  })
++}
++
++export function promptWindowSuffix(sessionID: SessionID, fromMessageID: MessageID) {
++  // 首个 mismatch 必须 inclusive hydrate，同一 Assistant 新增 Part 才会替换旧版本。
++  // hidden row 也进入 suffix，最终可见性仍由唯一 filterCompacted owner 决定。
++  return Array.from(stream(sessionID, { fromMessageID, includeHidden: true }))
++}
++
++// filterCompacted 会重排 Provider window，因此 latest 仍须比较每条 Message 的持久 chronology。
+ export function latest(msgs: WithParts[]) {
+   let user: User | undefined
+   let assistant: Assistant | undefined
+   let finished: Assistant | undefined
+   for (const msg of msgs) {
+     const info = msg.info
+-    if (info.role === "user" && (!user || info.id > user.id)) user = info
+-    if (info.role === "assistant" && (!assistant || info.id > assistant.id)) assistant = info
+-    if (info.role === "assistant" && info.finish && (!finished || info.id > finished.id)) finished = info
++    if (info.role === "user" && (!user || compareChronology(info, user) > 0)) user = info
++    if (info.role === "assistant" && (!assistant || compareChronology(info, assistant) > 0)) assistant = info
++    if (info.role === "assistant" && info.finish && (!finished || compareChronology(info, finished) > 0)) finished = info
+   }
++  // tasks 只属于最新 completed Assistant 之后的 persisted chronology。
++  // Provider window 的重排位置不能改变这个消费边界。
+   const tasks = msgs.flatMap((m) =>
+-    finished && m.info.id <= finished.id
++    finished && compareChronology(m.info, finished) <= 0
+       ? []
+       : m.parts.filter((p): p is SubtaskPart => p.type === "subtask"),
+   )
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index a7e4cf00149cd1c7d4aeb3d2a506b350d7461908..2d56652dc3c259b8cd57ca99e94a2ac184344df3 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -110,6 +110,7 @@ export interface Handle {
+     toolCallID: string,
+     update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
+     delivery?: "durable" | "ephemeral",
++    worktree?: "none" | "declared" | "ambient",
+   ) => Effect.Effect<MessageV2.ToolPart | undefined>
+   readonly completeToolCall: (
+     toolCallID: string,
+@@ -143,8 +144,12 @@ type ToolCall = {
+ interface ProcessorContext extends Input {
+   toolcalls: Record<string, ToolCall>
+   toolInputBuffer: Record<string, string>
++  // registry 只活在当前 process；持久 authority 随后写入 ToolPart.metadata。
++  toolWorktree: Record<string, "declared" | "ambient">
+   shouldBreak: boolean
+   snapshot: string | undefined
++  // active 区分“已有可复用 baseline”与“本 step 真实执行了副作用 Tool”。
++  snapshotActive: boolean
+   blocked: boolean
+   needsCompaction: boolean
+   currentText: MessageV2.TextPart | undefined
+@@ -187,18 +192,16 @@ export const layer = Layer.effect(
+     const flags = yield* RuntimeFlags.Service
+ 
+     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
+-      // Pre-capture snapshot before the LLM stream starts. The AI SDK
+-      // may execute tools internally before emitting start-step events,
+-      // so capturing inside the event handler can be too late.
+-      const initialSnapshot = yield* snapshot.track()
+       const ctx: ProcessorContext = {
+         assistantMessage: input.assistantMessage,
+         sessionID: input.sessionID,
+         model: input.model,
+         toolcalls: {},
+         toolInputBuffer: {},
++        toolWorktree: {},
+         shouldBreak: false,
+-        snapshot: initialSnapshot,
++        snapshot: undefined,
++        snapshotActive: false,
+         blocked: false,
+         needsCompaction: false,
+         currentText: undefined,
+@@ -215,6 +218,11 @@ export const layer = Layer.effect(
+       // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner。
+       // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的。
+       const toolPermit = Semaphore.makeUnsafe(1)
++      // cached gate 让并发 Tool calls 共享同一 in-flight baseline。
++      // failure 同样共享，不能让第二个 Tool 绕过首次 Snapshot 失败。
++      const captureToolSnapshot = yield* Effect.cached(
++        snapshot.track().pipe(Effect.tap((hash) => Effect.sync(() => (ctx.snapshot = hash)))),
++      )
+       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
+       let timing:
+         | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
+@@ -276,22 +284,38 @@ export const layer = Layer.effect(
+         toolCallID: string,
+         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
+         delivery: "durable" | "ephemeral" = "durable",
++        worktree: "none" | "declared" | "ambient" = "none",
+       ) {
+-        const match = yield* readToolCall(toolCallID)
+-        if (!match) return
+-        const next = update(match.part)
+-        // delivery 只选择同一 next snapshot 的传输合同，不能重新执行 updater；
+-        // 否则有副作用的 metadata merge 会在 live/durable 分支产生不同 Part。
+-        // 缺省 durable 保持所有既有 Tool 调用语义；只有显式 ephemeral 的
+-        // shell progress 绕过 SQLite，并且仍复用同一个 Part updater。
+-        const part = yield* delivery === "ephemeral" ? session.publishPartProgress(next) : session.updatePart(next)
+-        ctx.toolcalls[toolCallID] = {
+-          ...match.call,
+-          partID: part.id,
+-          messageID: part.messageID,
+-          sessionID: part.sessionID,
++        if (worktree !== "none") {
++          // execute 可能早于 tool-input-start；同步登记让事件创建路径也能持久化同一 policy。
++          // none 不进入 gate，纯读取 Tool 因而不启动 git 子进程。
++          // policy 在 plugin/Permission 前登记，拒绝执行也保留准确归因边界。
++          ctx.toolWorktree[toolCallID] = worktree
++          yield* captureToolSnapshot
++          ctx.snapshotActive = true
+         }
+-        return part
++        return yield* toolPermit.withPermits(1)(
++          Effect.gen(function* () {
++            // permit 包住 read-update-write，progress 不能用 stale Part 擦除 policy。
++            // updater 只执行一次，durable/live 分支不会产生不同 metadata。
++            const match = yield* readToolCall(toolCallID)
++            if (!match) return
++            const next = update(match.part)
++            const marked =
++              worktree === "none"
++                ? next
++                : { ...next, metadata: { ...next.metadata, worktree } }
++            // durable 与 live progress 必须从同一 latest Part 派生，不能覆盖并发写入的 server marker。
++            const part = yield* delivery === "ephemeral" ? session.publishPartProgress(marked) : session.updatePart(marked)
++            ctx.toolcalls[toolCallID] = {
++              ...match.call,
++              partID: part.id,
++              messageID: part.messageID,
++              sessionID: part.sessionID,
++            }
++            return part
++          }),
++        )
+       })
+ 
+       const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
+@@ -502,16 +526,23 @@ export const layer = Layer.effect(
+             }
+             // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
+             ctx.hasToolCall = true
+-            const part = yield* session.updatePart({
+-              id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
+-              messageID: ctx.assistantMessage.id,
+-              sessionID: ctx.assistantMessage.sessionID,
+-              type: "tool",
+-              tool: value.toolName,
+-              callID: value.id,
+-              state: { status: "pending", input: {}, raw: "" },
+-              metadata: value.providerExecuted ? { providerExecuted: true } : undefined,
+-            } satisfies MessageV2.ToolPart)
++            const part = yield* toolPermit.withPermits(1)(
++              // event 创建路径读取同步 registry；execute 先到时 marker 已经可用。
++              session.updatePart({
++                id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
++                messageID: ctx.assistantMessage.id,
++                sessionID: ctx.assistantMessage.sessionID,
++                type: "tool",
++                tool: value.toolName,
++                callID: value.id,
++                state: { status: "pending", input: {}, raw: "" },
++                metadata: {
++                  // 空 metadata object 合法且不会进入 Provider schema；后续 lifecycle 统一 merge。
++                  ...(value.providerExecuted ? { providerExecuted: true } : {}),
++                  ...(ctx.toolWorktree[value.id] ? { worktree: ctx.toolWorktree[value.id] } : {}),
++                },
++              } satisfies MessageV2.ToolPart),
++            )
+             ctx.toolcalls[value.id] = {
+               done: yield* Deferred.make<void>(),
+               partID: part.id,
+@@ -591,9 +622,13 @@ export const layer = Layer.effect(
+                 input: value.input,
+                 time: { start: Date.now() },
+               },
+-              metadata: match.metadata?.providerExecuted
+-                ? { ...value.providerMetadata, providerExecuted: true }
+-                : value.providerMetadata,
++              metadata: {
++                // Provider metadata 可整体替换，但 server-owned primitive 必须显式回填。
++                // providerExecuted 仍独立，远端 Tool 不能伪装成本地 worktree owner。
++                ...value.providerMetadata,
++                ...(match.metadata?.providerExecuted ? { providerExecuted: true } : {}),
++                ...(match.metadata?.worktree ? { worktree: match.metadata.worktree } : {}),
++              },
+             }))
+             // doom_loop 仅在 tool-error 上做「同 tool + 同 input + 全 error」AND 判定。
+             // tool-call 阶段结果未知：相同输入的成功重试是合法行为，不得在此预拦截。
+@@ -711,7 +746,6 @@ export const layer = Layer.effect(
+             throw value.error
+ 
+           case "start-step":
+-            if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+             if (!ctx.assistantMessage.summary) {
+               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+               if (flags.experimentalEventSystem) {
+@@ -747,7 +781,9 @@ export const layer = Layer.effect(
+             return
+ 
+           case "finish-step": {
+-            const completedSnapshot = yield* snapshot.track()
++            // 未执行 non-none Tool 时没有 baseline，也不应为了空 Patch 再启动一次 git 扫描。
++            // snapshotActive 只描述当前 step，不改变跨 step 保存的 completed baseline。
++            const completedSnapshot = ctx.snapshotActive ? yield* snapshot.track() : undefined
+             const usage = Session.getUsage({
+               model: ctx.model,
+               usage: value.usage,
+@@ -804,7 +840,9 @@ export const layer = Layer.effect(
+                 requestID: ctx.assistantMessage.parentID,
+                 assistant: ctx.assistantMessage,
+               })
+-            if (ctx.snapshot) {
++            if (ctx.snapshot && completedSnapshot) {
++              // 一个 step 内多个副作用 Tool 共用 before/after，Patch 只生成一次。
++              // Patch 为空仍推进 baseline，下一 step 不重复比较旧窗口。
+               const patch = yield* snapshot.patch(ctx.snapshot)
+               if (patch.files.length) {
+                 yield* session.updatePart({
+@@ -816,7 +854,9 @@ export const layer = Layer.effect(
+                   files: patch.files,
+                 })
+               }
+-              ctx.snapshot = undefined
++              // 下一 side-effect step 复用完成态 baseline；纯 Provider step 不触发 post-track。
++              ctx.snapshot = completedSnapshot
++              ctx.snapshotActive = false
+             }
+             yield* summary
+               .summarize({
+@@ -916,7 +956,9 @@ export const layer = Layer.effect(
+       })
+ 
+       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
+-        if (ctx.snapshot && !aborted) {
++        // stream error 可能跳过 finish-step；仅 active side-effect step 需要 rescue Patch。
++        // abort 优先快速终止，沿用现有合同不等待 git teardown。
++        if (ctx.snapshot && ctx.snapshotActive && !aborted) {
+           const patch = yield* snapshot.patch(ctx.snapshot)
+           if (patch.files.length) {
+             yield* session.updatePart({
+@@ -933,6 +975,7 @@ export const layer = Layer.effect(
+         // boundary.  Snapshot patching can involve slow git subprocess teardown,
+         // so skip it for aborted turns rather than delaying cancellation.
+         ctx.snapshot = undefined
++        ctx.snapshotActive = false
+ 
+         if (ctx.currentText) {
+           const end = Date.now()
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 4df82f38ab18fb32dcf1f97159fb6cf5d0bd2046..3abb89f96102aac116ed8ac294fd107a52d5add8 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -9,7 +9,7 @@ import * as Session from "./session"
+ import { Agent } from "../agent/agent"
+ import { Provider } from "@/provider/provider"
+ import { ModelID, ProviderID } from "../provider/schema"
+-import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
++import { type ModelMessage, type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
+ import type { JSONSchema7 } from "@ai-sdk/provider"
+ import { SessionCompaction } from "./compaction"
+ import { SessionGoal } from "./goal"
+@@ -141,7 +141,9 @@ function isDecideAgent(agent: Agent.Info) {
+   return agent.name === "decide"
+ }
+ 
+-function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTurnContext | undefined {
++function deriveGoalTurn(
++  messages: Iterable<MessageV2.ChronologyMessage | MessageV2.WithParts>,
++): GoalTurnContext | undefined {
+   const turns = Array.from(messages)
+     .flatMap((message) => {
+       // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
+@@ -696,6 +698,18 @@ export const layer = Layer.effect(
+     // Deferred<Exit>，而非各自独立执行 state.cancel。这消除了排队 cancel 在旧操作
+     // 完成后重新读取 Runner 并误伤 replacement loop 的时序窗口。
+     const cancelOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
++    // InstanceState 生命周期内只保留一个 entry；切换 Session 会直接替换而不是累积 Map。
++    // entry 不跨 Project，因为 Service 本身由 InstanceState scope 隔离。
++    // retained 保存 canonical DB view，request-only decoration 永不回写。
++    let retainedMessages:
++      | {
++          sessionID: SessionID
++          model: string
++          proof: MessageV2.PromptWindowProof
++          canonical: MessageV2.WithParts[]
++          chunks: Map<MessageID, ModelMessage[]>
++        }
++      | undefined
+     const runner = Effect.fn("SessionPrompt.runner")(function* () {
+       return yield* EffectBridge.make()
+     })
+@@ -1150,6 +1164,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+       // [local-smark] 当前 eligible Goal turn 的受信上下文，
+       // 由 runLoop 创建并注入，GoalTool get 写入 read snapshot，transition 读取校验
+       goalTurn?: GoalTurnContext
++      loadGoalTurn?: Effect.Effect<GoalTurnContext | undefined>
+     }) {
+       using _ = log.time("resolveTools")
+       const tools: Record<string, AITool> = {}
+@@ -1217,6 +1232,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           execute(args, options) {
+             return run.promise(
+               Effect.gen(function* () {
++                if (item.id === "goal" && input.loadGoalTurn) input.goalTurn = yield* input.loadGoalTurn
+                 const ctx = context(args, options)
+                 // [local-smark] 记录 Adapter 入口时间，用于计算完整 elapsed
+                 const adapterStartedAt = Date.now()
+@@ -1227,6 +1243,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                   messageID: ctx.messageID,
+                   callID: ctx.callID,
+                 }
++                // 这是本地 Tool 的真实执行屏障；事件回调只能登记 Part，不能证明 mutation 尚未开始。
++                // registry 每 step fresh resolve，control-panel 与 Permission 选择不进入 Message cache。
++                yield* input.processor.updateToolCall(options.toolCallId, (part) => part, "durable", item.worktree ?? "none")
+                 yield* plugin.trigger(
+                   "tool.execute.before",
+                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+@@ -1296,6 +1315,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 messageID: ctx.messageID,
+                 callID: opts.toolCallId,
+               }
++              // 未知 MCP 的副作用不透明，必须在 plugin、Permission 与 client call 前建立 ambient baseline。
++              // MCP 连接态和 schema 仍每 step fresh resolve，只复用 Message 转换结果。
++              yield* input.processor.updateToolCall(opts.toolCallId, (part) => part, "durable", "ambient")
+               yield* plugin.trigger(
+                 "tool.execute.before",
+                 { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
+@@ -2572,23 +2594,76 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+         // 同一 eligible user 下的 assistant/provider steps 共享同一个 context 和 read snapshot。
+         // 新 eligible user turn 时重建，确保 blocked streak 不被同一 user 的多个 step 伪造。
+         let goalTurn: GoalTurnContext | undefined
+-        const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+ 
+         while (true) {
+           yield* status.set(sessionID, { type: "busy" })
+           yield* slog.info("loop", { step })
+-
+-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID)
++          // busy期间queued prompt可更新Permission；每step必须在resolveTools前重读control-panel状态。
++          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
++
++          const proof = MessageV2.promptWindowProof(sessionID)
++          // boundary 不同直接丢弃旧窗口，禁止 cache 复制 Compaction 规则。
++          const cached = retainedMessages?.sessionID === sessionID && retainedMessages.proof.boundary === proof.boundary
++            ? retainedMessages
++            : undefined
++          const common = cached
++            ? proof.messages.findIndex((item, index) => item.key !== cached.proof.messages[index]?.key)
++            : 0
++          // findIndex=-1 表示当前 proof 全部匹配；当前更短时自然得到 contraction hit。
++          const matched = cached ? (common < 0 ? proof.messages.length : common) : 0
++          // common prefix 可以覆盖 full hit、append、原地 mutation 与 A-G→A-E contraction。
++          // 首个 key 不同即停止，后续相同 ID 不能越过 mutation 被拼回。
++          const matchedIDs = new Set(proof.messages.slice(0, matched).map((item) => item.id))
++          const suffixID = proof.messages[matched]?.id
++          // full hit 没有 suffix I/O；miss=0 则从首条 Message 走同一 inclusive loader。
++          const canonical = cached
++            ? MessageV2.filterCompacted([
++                // retained prefix 只按 exact proof ID admission；suffix 从 mismatch inclusive 重载。
++                ...cached.canonical.filter((message) => matchedIDs.has(message.info.id)),
++                ...(suffixID ? MessageV2.promptWindowSuffix(sessionID, suffixID) : []),
++              ])
++            : yield* MessageV2.filterCompactedEffect(sessionID)
++          let msgs = canonical
+ 
+           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
+ 
+           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
++          const modelKey = `${lastUser.model.providerID}/${lastUser.model.modelID}/${lastUser.model.variant ?? ""}`
++          // model identity 改变 reasoning/media conversion，raw canonical 仍可复用但 chunks 必须清空。
++          retainedMessages = {
++            sessionID,
++            model: modelKey,
++            proof,
++            canonical,
++            chunks:
++              cached?.model === modelKey
++                // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
++                ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
++                : new Map(),
++          }
++          const messageEntry = retainedMessages
+ 
+-          // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
+-          // 重排，late technical wrapper 也可能晚于新用户落盘，两者都不能改变 current/previous turn。
+-          const nextGoalTurn = deriveGoalTurn(MessageV2.chronology(sessionID))
+-          if (!nextGoalTurn) goalTurn = undefined
+-          if (nextGoalTurn && (!goalTurn || goalTurn.id !== nextGoalTurn.id)) goalTurn = nextGoalTurn
++          const currentUserMessage = msgs.find((message) => message.info.id === lastUser.id)
++          if (!currentUserMessage || currentUserMessage.info.role !== "user")
++            throw new Error(`Current user message missing from prompt window: ${lastUser.id}`)
++          if (goalTurn?.id !== lastUser.id) goalTurn = undefined
++          const loadGoalTurn = yield* Effect.cached(
++            Effect.gen(function* () {
++              // Goal chronology 延迟到真实 goal Tool adapter，普通对话不支付这次历史查询。
++              // 同一 Provider step 内 read/transition 共享 loader 结果。
++              const current = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
++              const next =
++                current._tag === "Some" && current.value.status === "active"
++                  ? deriveGoalTurn(MessageV2.goalChronology(sessionID))
++                  : current._tag === "Some" && ["complete", "blocked"].includes(current.value.status)
++                    ? deriveGoalTurn([currentUserMessage])
++                    : undefined
++              if (!next) return
++              // 同一 eligible user 的多次 Goal 调用共享 read snapshot；新 user 才替换受信对象。
++              if (!goalTurn || goalTurn.id !== next.id) goalTurn = next
++              return goalTurn
++            }),
++          )
+ 
+           const lastAssistantMsg = msgs.findLast(
+             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
+@@ -2783,7 +2858,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           }
+           const maxSteps = agent.steps ?? Infinity
+           const isLastStep = step >= maxSteps
++          const currentUserIndex = msgs.findIndex((message) => message.info.id === lastUser.id)
++          if (currentUserIndex < 0) throw new Error(`Current user message missing from prompt window: ${lastUser.id}`)
++          const hasMessageTransform = (yield* plugin.list()).some(
++            (hooks) => hooks["experimental.chat.messages.transform"] !== undefined,
++          )
++          msgs = hasMessageTransform
++            // arbitrary transform 可改写任意历史，兼容 seam 必须取得完整 clone 并 dirty=0。
++            ? structuredClone(msgs)
++            // 普通 reminder/queued wrapper 只会接触 current-user 起的 mutable tail。
++            : [...msgs.slice(0, currentUserIndex), ...structuredClone(msgs.slice(currentUserIndex))]
++          let conversionDirty = msgs.length
++          const currentUserParts = msgs[currentUserIndex]?.parts.length ?? 0
+           msgs = yield* insertReminders({ messages: msgs, agent, session })
++          // reminder 通过 Part 数变化声明 dirty boundary，不扫描或序列化稳定 prefix。
++          if ((msgs[currentUserIndex]?.parts.length ?? 0) !== currentUserParts) conversionDirty = currentUserIndex
+ 
+           const msg: MessageV2.Assistant = {
+             id: MessageID.ascending(),
+@@ -2800,15 +2889,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             time: { created: Date.now() },
+             sessionID,
+           }
+-          yield* sessions.updateMessage(msg)
++          let assistantPersisted = false
+ 
+-          const finalizeInterruptedAssistant = Effect.gen(function* () {
+-            if (msg.time.completed) return
+-            msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
++          const finalizePreDispatchAssistant = (error: unknown, aborted: boolean) => Effect.gen(function* () {
++            // persisted guard 表示 lifecycle publication，不以 token 是否为零判断是否已发布。
++            // typed error 与 completed 同次 durable write，TUI 不会留下 dangling Assistant。
++            if (assistantPersisted || msg.time.completed) return
++            msg.error ??= MessageV2.fromError(error, {
+               providerID: msg.providerID,
+-              aborted: true,
++              aborted,
+             })
+             msg.time.completed = Date.now()
++            // 先置 guard 再 await DB，防止 interrupt finalizer 重入发布第二条 lifecycle event。
++            assistantPersisted = true
+             yield* sessions.updateMessage(msg)
+           })
+ 
+@@ -2818,7 +2911,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               sessionID,
+               model,
+             })
+-            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
++            .pipe(
++              Effect.onInterrupt(() =>
++                finalizePreDispatchAssistant(new DOMException("Aborted", "AbortError"), true),
++              ),
++            )
+ 
+           // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
+           const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
+@@ -2838,6 +2935,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                   messages: msgs,
+                   // [local-smark] 注入当前 Goal turn context，使 GoalTool 能校验 read snapshot
+                   goalTurn,
++                  loadGoalTurn,
+                 })
+ 
+             if (!decide && lastUser.format?.type === "json_schema") {
+@@ -2853,8 +2951,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
+ 
+             if (step > 1 && lastFinished) {
+-              for (const m of msgs) {
+-                if (m.info.role !== "user" || m.info.id <= lastFinished.id) continue
++              for (const [index, m] of msgs.entries()) {
++                if (m.info.role !== "user" || MessageV2.compareChronology(m.info, lastFinished) <= 0) continue
+                 for (const p of m.parts) {
+                   if (p.type !== "text" || p.ignored || p.synthetic) continue
+                   if (!p.text.trim()) continue
+@@ -2866,12 +2964,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                     "Please address this message and continue with your tasks.",
+                     "</system-reminder>",
+                   ].join("\n")
++                  conversionDirty = Math.min(conversionDirty, index)
+                 }
+               }
+             }
+ 
+-            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+-            // plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
++            if (!decide) {
++              yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
++              if (hasMessageTransform) conversionDirty = 0
++            }
++            // plugin 可能改写任意历史；先失效 retained chunks，再统一排除 hidden Message/Part。
+             msgs = MessageV2.visible(msgs)
+ 
+             const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
+@@ -2891,7 +2993,26 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             const mcpText = mcpInstr ?? ""
+             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
+             const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
+-            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
++            const modelMsgs = decide
++              ? yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
++              : yield* Effect.gen(function* () {
++                  const stable = requestMsgs.slice(0, conversionDirty)
++                  // stable chunks 只来自本轮 admitted canonical IDs，不从 working clone 写回。
++                  const missing = stable.filter((message) => !messageEntry.chunks.has(message.info.id))
++                  const converted = yield* MessageV2.toModelMessageChunksEffect(missing, model)
++                  // missing 与 converted 保持 index 对齐，Map 只写 canonical Message ID。
++                  for (const [index, message] of missing.entries()) {
++                    messageEntry.chunks.set(message.info.id, converted[index] ?? [])
++                  }
++                  // working rewrite 只能使 suffix 变脏；canonical prefix 继续复用唯一 entry 的已转换块。
++                  return [
++                    // prefix flatten 保持 canonical Message 顺序；suffix 仍走原完整 converter。
++                    ...stable.flatMap((message) => messageEntry.chunks.get(message.info.id) ?? []),
++                    ...(conversionDirty < requestMsgs.length
++                      ? yield* MessageV2.toModelMessagesEffect(requestMsgs.slice(conversionDirty), model)
++                      : []),
++                  ]
++                })
+             const messages = [
+               ...modelMsgs,
+               ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : []),
+@@ -3043,6 +3164,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             // Also set on the handle so the processor can copy to step-start/step-finish parts.
+             handle.inputChars = inputChars
+             handle.inputBreakdown = inputBreakdown
++            // guard 在 await 前置位，避免 interrupt finalizer 与同一 durable write 竞争重复发布。
++            assistantPersisted = true
+             yield* sessions.updateMessage(handle.message)
+             // [local-smark] 在 provider dispatch 前捕获 active Goal 的 {goalID, generation}，
+             // 用于后续 accountUsage 的原子归属校验。objective edit 后 generation 不匹配，
+@@ -3136,7 +3259,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             return "continue" as const
+           }).pipe(
+             Effect.ensuring(instruction.clear(handle.message.id)),
+-            Effect.onInterrupt(() => finalizeInterruptedAssistant),
++            Effect.onExit((exit) => {
++              // successful preflight Compaction 不产生未 dispatch Assistant；只有 failure 进入 finalizer。
++              if (Exit.isSuccess(exit) || assistantPersisted) return Effect.void
++              return finalizePreDispatchAssistant(Cause.squash(exit.cause), Cause.hasInterruptsOnly(exit.cause))
++            }),
+           )
+           if (outcome === "break") break
+           // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。
+diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
+index a63596c1050c7707367ae6bf4a4a5334f69aa5ff..af60a3d9581c7d346fa09dd5499836925ec86252 100644
+--- a/packages/opencode/src/session/revert.ts
++++ b/packages/opencode/src/session/revert.ts
+@@ -67,7 +67,7 @@ export const layer = Layer.effect(
+             const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+ 
+             let rev: Session.Info["revert"]
+-            const patches: Snapshot.Patch[] = []
++            const patches: MessageV2.PatchPart[] = []
+             for (const msg of all) {
+               if (msg.info.role === "user") lastUser = msg.info
+               const remaining = []
+@@ -96,18 +96,32 @@ export const layer = Layer.effect(
+             // snapshot.patch() 的时间窗会混入同目录其他 session/外部改动；
+             // 与 toolFiles 取交集后只 checkout 本 session 工具认领的文件。
+             // toolFiles 为空（只读/bash/无 declared 元数据）时交集为空：消息可 undo，磁盘不撤。
+-            const range = all.filter((msg) => msg.info.id >= rev.messageID)
+-            const toolDiffs = yield* summary.computeDiff({ messages: range })
++            const boundary = all.find((msg) => msg.info.id === rev.messageID)
++            // Revert range 与 Prompt 使用同一个 persisted comparator，不能恢复 lexical-low 后继之外的行。
++            if (!boundary) throw new Error(`Revert boundary missing from Session history: ${rev.messageID}`)
++            const range = all.filter((msg) => MessageV2.compareChronology(msg.info, boundary.info) >= 0)
++            // range 可包含 hidden audit rows；真正文件 admission 仍由各 Tool policy 决定。
+             const ictx = yield* InstanceState.context
+-            const toolFiles = new Set(
+-              toolDiffs
+-                .map((d) => d.file)
+-                .filter((f): f is string => Boolean(f))
+-                .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
++            const ownership = yield* Effect.forEach(range, (msg) =>
++              Effect.gen(function* () {
++                // declared diff按Assistant单独计算，禁止后续Tool把文件authority回传给早期Patch。
++                const diffs = yield* summary.computeDiff({
++                  messages: [{ ...msg, parts: msg.parts.filter((part) => part.type !== "tool" || part.metadata?.worktree === "declared") }],
++                })
++                const files = new Set(diffs.flatMap((d) => d.file ? [path.join(ictx.worktree, d.file).replaceAll("\\", "/")] : []))
++                // authority必须停留在所属Assistant；后续ambient不能反向授权更早Patch。
++                if (msg.parts.some((part) => part.type === "tool" && part.metadata?.worktree === "ambient"))
++                  msg.parts.filter((part) => part.type === "patch").flatMap((part) => part.files).forEach((file) => files.add(file))
++                return { id: msg.info.id, diffs, files }
++              }),
+             )
++            const toolDiffs = ownership.flatMap((item) => item.diffs)
++            // messageID是Patch与authority的稳定关联键，不能退化为range级文件并集。
++            const toolFiles = new Map(ownership.map((item) => [item.id, item.files]))
+             const filteredPatches = patches.map((p) => ({
+               ...p,
+-              files: p.files.filter((f) => toolFiles.has(f)),
++              // Patch 未被 declared 或 ambient owner 接纳时保留空 files，hash 顺序不改写。
++              files: p.files.filter((f) => toolFiles.get(p.messageID)?.has(f)),
+             }))
+             // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
+             const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
+@@ -162,11 +176,15 @@ export const layer = Layer.effect(
+       const boundary = session.revert
+       const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
+       const messageID = boundary.messageID
++      const boundaryMessage = msgs.find((msg) => msg.info.id === messageID)
++      // cleanup 与首次 revert 共用同一 boundary tuple，hidden/删除不能重新解释范围。
++      if (!boundaryMessage) throw new Error(`Revert cleanup boundary missing from Session history: ${messageID}`)
+       const remove = [] as MessageV2.WithParts[]
+       let target: MessageV2.WithParts | undefined
+       for (const msg of msgs) {
+-        if (msg.info.id < messageID) continue
+-        if (msg.info.id > messageID) {
++        const order = MessageV2.compareChronology(msg.info, boundaryMessage.info)
++        if (order < 0) continue
++        if (order > 0) {
+           remove.push(msg)
+           continue
+         }
+diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
+index d938b67766388d67010dedb5afe47ef0e76c37e0..408047ad90d4931977e98ca908d5e3ed163d7982 100644
+--- a/packages/opencode/src/tool/apply_patch.ts
++++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -441,6 +441,8 @@ export const ApplyPatchTool = Tool.define(
+     return {
+       description: DESCRIPTION,
+       parameters: Parameters,
++      // apply_patch metadata.files 是多文件 declared authority。
++      worktree: "declared",
+       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+         run(params, ctx).pipe(Effect.orDie),
+     }
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index 48ed0288681c6494ecca897fd4438627957172b6..44cccd35d6c2bfa39e9a836c01d5aa56468fc96a 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -100,6 +100,8 @@ export const EditTool = Tool.define(
+     return {
+       description: DESCRIPTION,
+       parameters: Parameters,
++      // edit result 已声明 filepath/diff，Revert 不需要扩大到 ambient Patch。
++      worktree: "declared",
+       prepareArguments: prepareEditArguments,
+       execute: (params: Parameters, ctx: Tool.Context) =>
+         Effect.gen(function* () {
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+index a258a6415b96316d117e205aac087df47da69e49..14a88fb7113c66b8b077fa4439efc3bb6cf4137a 100644
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -384,6 +384,8 @@ export const layer: Layer.Layer<
+               .join("\n"),
+             parameters: output.parameters,
+             jsonSchema,
++            // plugin 只能改 Provider definition；server policy 始终取原 Tool.Def。
++            worktree: tool.worktree,
+             execute: tool.execute,
+             // 透传 prepareArguments，使 edit 等工具的 legacy 折叠在 registry 包装后仍生效
+             prepareArguments: tool.prepareArguments,
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 731cdb56ea2bf37cf5f036c3e4a69a3f77ec41e1..0b9bb641748343e01904d0bb938ec8935b8b5e2a 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -1380,6 +1380,8 @@ export const ShellTool = Tool.define(
+         return {
+           description,
+           parameters: prompt.parameters,
++          // shell 命令副作用不透明，只能使用短窗口 Patch best-effort 归因。
++          worktree: "ambient",
+           execute: (params: Parameters, ctx: Tool.Context) =>
+             Effect.gen(function* () {
+               const instanceCtx = yield* InstanceState.context
+diff --git a/packages/opencode/src/tool/tool.ts b/packages/opencode/src/tool/tool.ts
+index 653703b9fe75983af433108e1e05b1ed859fc494..3146b5b8da8d4ef7f28c84c3bc77fec568721143 100644
+--- a/packages/opencode/src/tool/tool.ts
++++ b/packages/opencode/src/tool/tool.ts
+@@ -70,6 +70,9 @@ export interface Def<
+   description: string
+   parameters: Parameters
+   jsonSchema?: JSONSchema7
++  /** 只控制本地 Snapshot/Revert 归因，不能进入 Provider Tool schema。 */
++  /** 缺失等价于 none，旧 Tool 不需要显式声明只读策略。 */
++  worktree?: "none" | "declared" | "ambient"
+   /** 在 Schema.decode 之前折叠兼容入参（如 edit 的 legacy oldString → edits[]）。 */
+   prepareArguments?(args: unknown): unknown
+   execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
+diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
+index 107efde032d394d46d70ec702015bfe380c13630..519e9c8ce514b3f6f69d854db239f57cad7bda57 100644
+--- a/packages/opencode/src/tool/write.ts
++++ b/packages/opencode/src/tool/write.ts
+@@ -35,6 +35,8 @@ export const WriteTool = Tool.define(
+     return {
+       description: DESCRIPTION,
+       parameters: Parameters,
++      // write 的单一 filePath 是精确归属，不认领并发 worktree 变化。
++      worktree: "declared",
+       execute: (params: { content: string; filePath: string }, ctx: Tool.Context) =>
+         Effect.gen(function* () {
+           const instance = yield* InstanceState.context
+diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
+index 7d97bb28fa165fd025babc5f932ac73995396569..649f564c7830333d43f6188454f6122afca90730 100644
+--- a/packages/opencode/test/session/messages-pagination.test.ts
++++ b/packages/opencode/test/session/messages-pagination.test.ts
+@@ -53,6 +53,7 @@ const fill = Effect.fn("Test.fill")(function* (
+   sessionID: SessionID,
+   count: number,
+   time = (i: number) => Date.now() + i,
++  partsPerMessage = 1,
+ ) {
+   const session = yield* SessionNs.Service
+   const ids = [] as MessageID[]
+@@ -69,13 +70,16 @@ const fill = Effect.fn("Test.fill")(function* (
+       tools: {},
+       mode: "",
+     } as unknown as MessageV2.Info)
+-    yield* session.updatePart({
+-      id: PartID.ascending(),
+-      sessionID,
+-      messageID: id,
+-      type: "text",
+-      text: `m${i}`,
+-    })
++    // 多 Part cohort 让旧 locator 的 payload 扫描成本可见；固定形状仍只服务 Goal eligibility。
++    for (let part = 0; part < partsPerMessage; part++) {
++      yield* session.updatePart({
++        id: PartID.ascending(),
++        sessionID,
++        messageID: id,
++        type: "text",
++        text: part === 0 ? `m${i}` : `m${i}-${part}`,
++      })
++    }
+   }
+   return ids
+ })
+@@ -247,43 +251,75 @@ describe("MessageV2.page", () => {
+   )
+ 
+   it.instance(
+-    "visibility performance uses the production page and chronology seams",
+-    withSession(({ session, sessionID }) =>
++    "bounded Goal query cost does not grow with old history",
++    () =>
+       Effect.gen(function* () {
+-        // 固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
+-        const ids = yield* fill(sessionID, 6326)
+-        for (const id of ids.filter((_, index) => index % 17 === 0).slice(0, 364)) {
+-          const message = yield* MessageV2.get({ sessionID, messageID: id })
+-          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
++        const sessions = yield* SessionNs.Service
++        const smallSession = yield* sessions.create({})
++        const largeSession = yield* sessions.create({})
++        const smallIDs = yield* fill(smallSession.id, 256, (i: number) => Date.now() + i, 4)
++        const largeIDs = yield* fill(largeSession.id, 6326, (i: number) => Date.now() + i, 4)
++
++        const measure = (sessionID: SessionID) => {
++          const p95s = Array.from({ length: 3 }, () => {
++            for (let i = 0; i < 5; i++) MessageV2.goalChronology(sessionID)
++            const samples = Array.from({ length: 20 }, () => {
++              const started = performance.now()
++              MessageV2.goalChronology(sessionID)
++              return performance.now() - started
++            }).sort((a, b) => a - b)
++            return samples[18] ?? 0
++          })
++          return { p95s, p95: [...p95s].sort((a, b) => a - b)[1] ?? 0 }
+         }
+ 
+-        const p95 = (run: () => unknown) => {
+-          for (let i = 0; i < 5; i++) run()
+-          const samples = Array.from({ length: 20 }, () => {
+-            const started = performance.now()
+-            run()
+-            return performance.now() - started
+-          }).sort((a, b) => a - b)
+-          // 20 个样本的 nearest-rank p95 是第 19 个值；取最大值会把单次离群当成 p95。
+-          const [nearestRank] = samples.slice(-2)
+-          return nearestRank ?? 0
+-        }
+-        const medianP95 = (run: () => unknown) => {
+-          const [, median] = [p95(run), p95(run), p95(run)].sort((a, b) => a - b)
+-          return median ?? 0
+-        }
+-        const rawPage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
+-        const visiblePage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301 })))
+-        const page = yield* MessageV2.page({ sessionID, limit: 301 })
+-        expect(page.items).toHaveLength(301)
+-        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
+-        const chronologyBaseline = 51.831
+-        expect(medianP95(() => MessageV2.chronology(sessionID))).toBeLessThanOrEqual(chronologyBaseline * 1.25)
++        const small = measure(smallSession.id)
++        const large = measure(largeSession.id)
++        small.p95s.forEach((value, index) => {
++          const largeValue = large.p95s[index] ?? 0
++          console.log(
++            `goal-query-scale repetition=${index + 1} small_p95_ms=${value.toFixed(2)} large_p95_ms=${largeValue.toFixed(2)} delta_ms=${(
++              largeValue - value
++            ).toFixed(2)}`,
++          )
++        })
++        console.log(
++          `goal-query-scale median small_p95_ms=${small.p95.toFixed(2)} large_p95_ms=${large.p95.toFixed(2)} delta_ms=${(
++            large.p95 - small.p95
++          ).toFixed(2)}`,
++        )
++
++        expect(smallIDs.slice(-2)).toEqual(MessageV2.goalChronology(smallSession.id).map((message) => message.info.id))
++        expect(largeIDs.slice(-2)).toEqual(MessageV2.goalChronology(largeSession.id).map((message) => message.info.id))
++        expect(large.p95 - small.p95).toBeLessThanOrEqual(45)
++        expect(large.p95).toBeLessThanOrEqual(100)
+       }),
+-    ),
+     90_000,
+   )
+ 
++  it.instance("Goal query excludes hidden and technical user rows before classification", () =>
++    withSession(({ session, sessionID }) =>
++      Effect.gen(function* () {
++        const previous = yield* addUser(sessionID, "previous")
++        const hiddenPartUser = yield* addUser(sessionID, "hidden part")
++        const hiddenPartMessage = yield* MessageV2.get({ sessionID, messageID: hiddenPartUser })
++        const hiddenText = hiddenPartMessage.parts.find((part) => part.type === "text")
++        if (!hiddenText) throw new Error("hidden-part fixture did not create text")
++        yield* session.updatePart({ ...hiddenText, hidden: { time: Date.now(), reason: "undo" } })
++
++        const hiddenMessageUser = yield* addUser(sessionID, "hidden message")
++        const hiddenMessage = yield* MessageV2.get({ sessionID, messageID: hiddenMessageUser })
++        yield* session.updateMessage({ ...hiddenMessage.info, hidden: { time: Date.now(), reason: "undo" } })
++
++        const technical = yield* addUser(sessionID)
++        yield* addCompactionPart(sessionID, technical)
++        const current = yield* addUser(sessionID, "current")
++
++        expect(MessageV2.goalChronology(sessionID).map((message) => message.info.id)).toEqual([previous, current])
++      }),
++    ),
++  )
++
+   it.instance("hydrates multiple parts per message", () =>
+     withSession(({ session, sessionID }) =>
+       Effect.gen(function* () {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 501dba94f7086a0f0f9486d3351900884884b2a3..7908b273e6670b264356cbc246db6ba21193b73a 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1,7 +1,8 @@
+ import { NodeFileSystem } from "@effect/platform-node"
+ import { FetchHttpClient } from "effect/unstable/http"
+ import { expect } from "bun:test"
+-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
++import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Stream } from "effect"
++import { jsonSchema, tool, type Tool as AITool } from "ai"
+ import { symlink } from "fs/promises"
+ import path from "path"
+ import { fileURLToPath, pathToFileURL } from "url"
+@@ -147,6 +148,52 @@ const mcp = Layer.succeed(
+     getAuthStatus: () => Effect.succeed("not_authenticated" as const),
+   }),
+ )
++let mcpMutationFile = ""
++let mcpEnabled = true
++// MCP开关模拟同daemon内连接态变化，Message cache不得冻结其Tool surface。
++const mcpMutationTool = tool({
++  description: "mutate one test file",
++  inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
++  execute: () => Bun.write(mcpMutationFile, "mcp").then(() => "mutated"),
++})
++const mutatingMcp = Layer.mock(MCP.Service, {
++  // partial mock只暴露Prompt真实消费的tools seam，意外调用其他方法会直接红测。
++  tools: () => Effect.succeed<Record<string, AITool>>(mcpEnabled ? { mcp_mutate: mcpMutationTool } : {}),
++})
++
++const snapshotTracks = new Map<string, number>()
++// observer包装真实Snapshot Service，因此计数包含before和after，而非伪造成功值。
++const observedSnapshot = Layer.effect(
++  Snapshot.Service,
++  Effect.gen(function* () {
++    const base = yield* Snapshot.Service
++    return Snapshot.Service.of({
++      ...base,
++      // track计数发生在真实调用之前，晚capture和重复capture都能被断言观察。
++      track: () =>
++        InstanceState.directory.pipe(
++          Effect.tap((dir) => Effect.sync(() => snapshotTracks.set(dir, (snapshotTracks.get(dir) ?? 0) + 1))),
++          Effect.andThen(base.track()),
++        ),
++    })
++  }),
++).pipe(Layer.provide(Snapshot.defaultLayer))
++const providerUsage = {
++  inputTokens: 1, outputTokens: 1, totalTokens: 2,
++  inputTokenDetails: { noCacheTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
++  outputTokenDetails: { textTokens: 1, reasoningTokens: 0 },
++}
++// providerExecuted事件绕过本地Tool adapter，专门保护“远端Tool不建本地baseline”。
++const providerExecutedLLM = Layer.mock(LLM.Service, {
++  stream: () =>
++    Stream.make(
++      { type: "tool-input-start", id: "provider-call", toolName: "provider_search", providerExecuted: true } satisfies LLM.Event,
++      // tool-call仍进入Processor生命周期，但没有任何本地execute回调可触发Snapshot。
++      { type: "tool-call", toolCallId: "provider-call", toolName: "provider_search", input: {}, providerExecuted: true } satisfies LLM.Event,
++      { type: "finish-step", finishReason: "stop", rawFinishReason: "stop", response: { id: "provider-response", modelId: "test-model", timestamp: new Date() }, providerMetadata: undefined, usage: providerUsage } satisfies LLM.Event,
++      { type: "finish", finishReason: "stop", rawFinishReason: "stop", totalUsage: providerUsage } satisfies LLM.Event,
++    ),
++})
+ 
+ const lspDirectories: string[] = []
+ const lsp = Layer.succeed(
+@@ -217,6 +264,44 @@ const mutatingPlugin = Layer.succeed(
+     init: () => Effect.void,
+   }),
+ )
++const failingMessageTransform = Layer.mock(Plugin.Service, {
++  trigger: (name, _input, output) =>
++    name === "experimental.chat.messages.transform"
++      ? Effect.die(new Error("pre-dispatch transform failed"))
++      : Effect.succeed(output),
++  list: () => Effect.succeed([{ "experimental.chat.messages.transform": () => Promise.resolve() }]),
++})
++let transformedHistoryText = ""
++let toolDefinitionVersion = ""
++const transformingHistory = Layer.mock(Plugin.Service, {
++  trigger: (name, _input, output) =>
++    Effect.sync(() => {
++      if (name === "tool.definition" && typeof output === "object" && output !== null) {
++        // description和schema使用同一版本，第二step可同时检测definition两种输出是否fresh。
++        Reflect.set(output, "description", `dynamic tool ${toolDefinitionVersion}`)
++        Reflect.set(output, "jsonSchema", { type: "object", properties: { version: { const: toolDefinitionVersion } } })
++        return output
++      }
++      if (name !== "experimental.chat.messages.transform") return output
++      if (typeof output !== "object" || output === null) return output
++      const messages = Reflect.get(output, "messages")
++      if (!Array.isArray(messages)) return output
++      // 改写最早历史Part可检测错误的converted-prefix复用，改latest不足以区分suffix路径。
++      const text = messages
++        .flatMap((message) => Reflect.get(message, "parts") ?? [])
++        .find((part) => Reflect.get(part, "type") === "text")
++      if (text) Reflect.set(text, "text", transformedHistoryText)
++      // mutation只作用working clone；下一run仍须从persisted原文重新应用当前版本。
++      return output
++    }),
++  list: () => Effect.succeed([{ "experimental.chat.messages.transform": () => Promise.resolve() }]),
++})
++const failingToolPlugin = Layer.mock(Plugin.Service, {
++  // hook在真实Tool implementation之前失败，用于验证baseline已先建立且文件未写入。
++  trigger: (name, _input, output) =>
++    name === "tool.execute.before" ? Effect.die(new Error("Tool rejected before implementation")) : Effect.succeed(output),
++  list: () => Effect.succeed([]),
++})
+ 
+ const processorCreateStarted: Array<() => void> = []
+ const blockingProcessor = Layer.succeed(
+@@ -230,24 +315,35 @@ function makeHttp(input?: {
+   processor?: "blocking"
+   usage?: boolean
+   image?: "unavailable" | "counting"
+-  plugin?: "mutate"
++  plugin?: "mutate" | "fail-transform" | "transform-history" | "fail-tool"
++  snapshot?: "observe"
++  mcp?: "mutating"
++  llm?: "provider-executed"
+ }) {
+   const imageLayer =
+     input?.image === "unavailable" ? unavailableImage : input?.image === "counting" ? countingImage : Image.defaultLayer
+   const registryImageLayer = input?.image === "counting" ? countingImage : registryImage
+   const deps = Layer.mergeAll(
+     Session.defaultLayer,
+-    Snapshot.defaultLayer,
+-    LLM.defaultLayer,
++    input?.snapshot === "observe" ? observedSnapshot : Snapshot.defaultLayer,
++    input?.llm === "provider-executed" ? providerExecutedLLM : LLM.defaultLayer,
+     Env.defaultLayer,
+     AgentSvc.defaultLayer,
+     Command.defaultLayer,
+     Permission.defaultLayer,
+-    input?.plugin === "mutate" ? mutatingPlugin : Plugin.defaultLayer,
++    input?.plugin === "mutate"
++      ? mutatingPlugin
++      : input?.plugin === "fail-transform"
++        ? failingMessageTransform
++        : input?.plugin === "transform-history"
++          ? transformingHistory
++          : input?.plugin === "fail-tool"
++            ? failingToolPlugin
++            : Plugin.defaultLayer,
+     Config.defaultLayer,
+     ProviderSvc.defaultLayer,
+     lsp,
+-    mcp,
++    input?.mcp === "mutating" ? mutatingMcp : mcp,
+     AppFileSystem.defaultLayer,
+     BackgroundJob.defaultLayer,
+     status,
+@@ -292,7 +388,7 @@ function makeHttp(input?: {
+   return Layer.mergeAll(
+     TestLLMServer.layer,
+     SessionPrompt.layer.pipe(
+-      Layer.provide(SessionRevert.defaultLayer),
++      Layer.provideMerge(SessionRevert.defaultLayer),
+       Layer.provide(imageLayer),
+       Layer.provide(Reference.defaultLayer),
+       Layer.provide(summary),
+@@ -315,6 +411,11 @@ const accounting = testEffect(makeHttp({ usage: true }))
+ const unavailable = testEffect(makeHttp({ image: "unavailable" }))
+ const oneShotImage = testEffect(makeHttp({ image: "counting" }))
+ const mutatedImage = testEffect(makeHttp({ image: "counting", plugin: "mutate" }))
++const failingTransform = testEffect(makeHttp({ plugin: "fail-transform" }))
++const dynamicSurfaces = testEffect(makeHttp({ plugin: "transform-history", mcp: "mutating" }))
++const observed = testEffect(makeHttp({ snapshot: "observe" }))
++const observedProvider = testEffect(makeHttp({ snapshot: "observe", llm: "provider-executed" }))
++const observedDenied = testEffect(makeHttp({ snapshot: "observe", plugin: "fail-tool" }))
+ const unix = process.platform !== "win32" ? it.instance : it.instance.skip
+ 
+ unavailable.instance(
+@@ -728,6 +829,22 @@ function defer<T>() {
+   return { promise, resolve }
+ }
+ 
++function concurrentToolReply(calls: Array<{ name: string; input: unknown }>) {
++  const item = calls.reduce((value, call) => value.tool(call.name, call.input), reply()).item()
++  if (item.type !== "sse") throw new Error("Expected SSE Tool reply")
++  let index = -1
++  // 每个Tool的参数delta必须沿用其start delta index，否则AI SDK会把后调用覆盖到index 0。
++  for (const line of [...item.head, ...item.tail] as Array<{ choices?: Array<{ delta?: { tool_calls?: Array<{ index: number; function?: { name?: string } }> } }> }>) {
++    const call = line.choices?.[0]?.delta?.tool_calls?.[0]
++    if (!call) continue
++    if (call.function?.name) index++
++    // TestLLM默认固定index=0；同一response的后续call必须拥有独立OpenAI stream index。
++    // 这里只修fixture协议索引，不改变Tool参数、时序或production并发模型。
++    call.index = index
++  }
++  return item
++}
++
+ const succeedVoid = (deferred: Deferred.Deferred<void>) => {
+   Effect.runSync(Deferred.succeed(deferred, void 0).pipe(Effect.ignore))
+ }
+@@ -809,6 +926,16 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
+   return { user: msg, assistant }
+ })
+ 
++const textTurn = Effect.fn("test.textTurn")(function* (sessionID: SessionID, input: string, output: string) {
++  const llm = yield* TestLLMServer
++  const prompt = yield* SessionPrompt.Service
++  const userMessage = yield* user(sessionID, input)
++  yield* llm.text(output)
++  return { user: userMessage, result: yield* prompt.loop({ sessionID }) }
++})
++
++const lastProviderInput = Effect.fn("test.lastProviderInput")(function* () { return (yield* (yield* TestLLMServer).inputs).at(-1) })
++
+ const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
+   Effect.gen(function* () {
+     const session = yield* Session.Service
+@@ -882,6 +1009,307 @@ it.instance(
+   { git: true },
+ )
+ 
++it.instance(
++  "publishes the estimated Assistant as the first durable attempt state",
++  () =>
++    Effect.gen(function* () {
++      yield* useServerConfig(providerCfg)
++      const sessions = yield* Session.Service
++      const bus = yield* Bus.Service
++      const chat = yield* sessions.create({ title: "Pinned" })
++      const updates: MessageV2.Assistant[] = []
++      // Bus snapshot 是 TUI 实际消费面，不能只检查最终数据库状态。
++      const dispose = yield* bus.subscribeAllCallback((event) => {
++        if (event.type !== MessageV2.Event.Updated.type) return
++        const info = (event.properties as { info?: MessageV2.Info }).info
++        if (info?.role !== "assistant" || info.sessionID !== chat.id) return
++        updates.push(structuredClone(info))
++      })
++      yield* Effect.addFinalizer(() => Effect.sync(dispose))
++
++      yield* textTurn(chat.id, "estimate this request", "estimated")
++
++      // 第一条公开 Assistant 快照就是 TUI 可见边界，不能先闪现构造期的全零对象。
++      expect(updates[0]?.tokens.input).toBeGreaterThan(0)
++      expect(updates[0]?.inputBreakdown?.messages.userText).toBeGreaterThan(0)
++    }),
++  { git: true },
++)
++
++failingTransform.instance(
++  "persists one typed Assistant when pre-dispatch assembly fails",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Pinned" })
++      yield* user(chat.id, "fail before dispatch")
++
++      const exit = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.exit)
++      // transform defect 位于 estimate publication 前，Provider 绝不能收到请求。
++      expect(Exit.isFailure(exit)).toBe(true)
++      expect(yield* llm.calls).toBe(0)
++      const assistants = (yield* sessions.messages({ sessionID: chat.id })).filter(
++        (message) => message.info.role === "assistant",
++      )
++      expect(assistants).toHaveLength(1)
++      const assistant = assistants[0]?.info
++      // failure owner 复用 MessageV2 error 分类；不能为了移除零写而留下 dangling user。
++      expect(assistant?.role === "assistant" ? assistant.error?.name : undefined).toBe("UnknownError")
++      expect(assistant?.role === "assistant" ? assistant.time.completed : undefined).toBeNumber()
++    }),
++  { git: true },
++)
++
++it.instance(
++  "contracts a retained suffix after public Revert cleanup",
++  () =>
++    Effect.gen(function* () {
++      yield* useServerConfig(providerCfg)
++      const sessions = yield* Session.Service
++      const revert = yield* SessionRevert.Service
++      const chat = yield* sessions.create({ title: "Deleted suffix" })
++      // 第一次loop必须先形成full hit候选，删除前不能只测试cold rebuild。
++      const removed = yield* textTurn(chat.id, "delete cached user", "delete cached assistant")
++      // 真实cleanup写hidden mutation，不能依赖直接删除提供不同的proof形状。
++      // revert先建立公开boundary，cleanup再执行production使用的hide流程。
++      yield* revert.revert({ sessionID: chat.id, messageID: removed.user.id })
++      yield* revert.cleanup(yield* sessions.get(chat.id))
++      // replacement保证当前proof仍有合法suffix，cache不能因删除返回空窗口。
++      const replacement = yield* textTurn(chat.id, "surviving replacement", "replacement")
++      const body = JSON.stringify((yield* lastProviderInput())?.messages)
++      // Provider body而非cache内部长度证明deleted rows没有被重播。
++      expect(body).toContain("surviving replacement")
++      expect(body).not.toContain("delete cached assistant")
++      const part = (yield* sessions.messages({ sessionID: chat.id }))
++        .find((message) => message.info.id === replacement.user.id)
++        ?.parts.find((item): item is MessageV2.TextPart => item.type === "text")
++      if (!part) throw new Error("Expected replacement text Part")
++      // 同Message ID原位增长必须从mismatch inclusive重载，不能只比较ID前缀。
++      yield* sessions.updatePart({ ...part, text: "grown part text" })
++      yield* textTurn(chat.id, "continue after growth", "done")
++      // 第二次mutation继续复用删除后的stable prefix，同时替换增长Message自身。
++      expect(JSON.stringify((yield* lastProviderInput())?.messages)).toContain("grown part text")
++    }),
++  { git: true },
++)
++
++dynamicSurfaces.instance(
++  "refreshes queued Permission, Tool definition and MCP in one continuation",
++  () =>
++    Effect.gen(function* () {
++      const { dir, llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({
++        title: "Queued cache",
++        permission: [
++          { permission: "*", pattern: "*", action: "allow" },
++          { permission: "bash", pattern: "*", action: "deny" },
++        ],
++      })
++      const file = path.join(dir, "queued-read.txt")
++      const bashFile = path.join(dir, "queued-bash.txt")
++      yield* Effect.promise(() => Bun.write(file, "queued"))
++      transformedHistoryText = "message transform v1"
++      toolDefinitionVersion = "v1"
++      mcpEnabled = true
++      // 三个动态producer在step1共享同一可观察版本，避免跨runLoop刷新伪通过。
++      mcpMutationFile = path.join(dir, "unused-mcp.txt")
++      yield* Effect.addFinalizer(() => Effect.sync(() => (mcpEnabled = true)))
++      yield* textTurn(chat.id, "establish cache", "first")
++      const gate = defer<void>()
++      // Provider gate让queued user确定落在step 1已admit之后、step 2 proof之前。
++      yield* user(chat.id, "start tool step")
++      yield* llm.push(
++        reply().wait(gate.promise).tool("read", { filePath: file }).item(),
++        reply()
++          .tool("bash", { command: `printf allowed > ${JSON.stringify(bashFile)}`, description: "fresh permission" })
++          .item(),
++        reply().text("after queue").stop().item(),
++      )
++      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++      yield* llm.wait(2)
++      const firstTools = JSON.stringify((yield* lastProviderInput())?.tools)
++      // step1 body固定变更前基线，后续“不含v1”断言才有独立expected value。
++      expect(firstTools).toContain("dynamic tool v1")
++      expect(firstTools).toContain("mcp_mutate")
++      // 新user row只追加到canonical suffix，wrapper本身仍必须是request-only改写。
++      // readiness来自真实HTTP call计数，不使用固定sleep制造时序。
++      transformedHistoryText = "message transform v2"
++      toolDefinitionVersion = "v2"
++      mcpEnabled = false
++      // 状态切换发生在同一runLoop尚未释放Provider gate时，不允许重建runLoop规避刷新。
++      yield* prompt.prompt({
++        sessionID: chat.id,
++        agent: "build",
++        noReply: true,
++        tools: { bash: true },
++        parts: [{ type: "text", text: "queued during provider call" }],
++      })
++      gate.resolve()
++      yield* Fiber.join(run)
++      const latest = (yield* llm.inputs).at(-2)
++      const body = JSON.stringify(latest?.messages)
++      const tools = JSON.stringify(latest?.tools)
++      // reminder文案存在证明conversionDirty下移到queued Message，而非复用未包装chunk。
++      expect(body).toContain("queued during provider call")
++      expect(body).toContain("Please address this message and continue with your tasks.")
++      expect(body).toContain("message transform v2")
++      expect(body).not.toContain("message transform v1")
++      expect(tools).toContain("dynamic tool v2")
++      expect(tools).not.toContain("dynamic tool v1")
++      expect(tools).not.toContain("mcp_mutate")
++      // 文件落盘证明bash不仅重新出现在schema，还通过最新Permission进入真实implementation。
++      expect(yield* Effect.promise(() => Bun.file(bashFile).exists())).toBe(true)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "invalidates a retained window after successful Compaction",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const compaction = yield* SessionCompaction.Service
++      const chat = yield* sessions.create({ title: "Compaction cache" })
++      yield* textTurn(chat.id, "history before compaction", "first response")
++      yield* llm.text("canonical compacted summary")
++      // compaction.run写入真实marker/summary/tail boundary，不直接操纵cache entry。
++      expect(yield* compaction.run({ sessionID: chat.id, agent: "build", model: ref, auto: true })).toBe("continue")
++      // tools:false与新user一起落盘，但不应改变summary boundary的admission结果。
++      yield* prompt.prompt({
++        sessionID: chat.id,
++        agent: "build",
++        noReply: true,
++        tools: { bash: false },
++        parts: [{ type: "text", text: "after compaction" }],
++      })
++      yield* llm.text("final response")
++      yield* prompt.loop({ sessionID: chat.id })
++      // summary进入body证明boundary identity变化触发full window rebuild。
++      expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages)).toContain("canonical compacted summary")
++      // 同次warm请求的Tool开关证明Tool surface未进入Message cache。
++      expect(JSON.stringify((yield* llm.inputs).at(-1)?.tools)).not.toContain('"bash"')
++    }),
++  { git: true },
++)
++
++it.instance(
++  "sanitizes cached Tool history for a decide request",
++  () =>
++    Effect.gen(function* () {
++      const { dir, llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({
++        title: "Decide cache",
++        permission: [{ permission: "*", pattern: "*", action: "allow" }],
++      })
++      const file = path.join(dir, "decide-cache.txt")
++      yield* user(chat.id, "build history")
++      yield* llm.tool("write", { filePath: file, content: "tool output" })
++      // build请求先让raw Tool Part进入retained history，decide随后必须重新sanitise。
++      yield* llm.text("built")
++      yield* prompt.loop({ sessionID: chat.id })
++      yield* prompt.prompt({
++        sessionID: chat.id,
++        agent: "decide",
++        noReply: true,
++        parts: [{ type: "text", text: "make the decision" }],
++      })
++      // decide mode强制tools为空，旧build Tool schema也不能从warm entry复现。
++      yield* llm.text("decision")
++      yield* prompt.loop({ sessionID: chat.id })
++      const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
++      // synthetic tool-context证明decide走完整selected history conversion，而非普通cached chunk。
++      expect(body).toContain("<tool-context tool=\\\"write\\\"")
++      // 原AI tool role缺失防止unsanitized Tool protocol泄漏给decide模型。
++      expect(body).not.toContain('"role":"tool"')
++    }),
++  { git: true },
++)
++
++it.instance(
++  "reuses a 2048-turn prefix before Provider dispatch",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Large retained prefix" })
++      yield* Effect.forEach(Array.from({ length: 2_048 }), () => seed(chat.id, { finish: "stop" }), {
++        concurrency: 1,
++        discard: true,
++      })
++      const providers = yield* ProviderSvc.Service
++      const model = yield* providers.getModel(ref.providerID, ref.modelID)
++      const history = yield* MessageV2.filterCompactedEffect(chat.id)
++      const full = yield* MessageV2.toModelMessagesEffect(history, model)
++      const chunks = yield* MessageV2.toModelMessageChunksEffect(history, model)
++      // cache 只改变转换分块，不允许改变 Provider body 的 role/content/tool 顺序。
++      // 2048 turns让等价断言覆盖真实大前缀，而非只验证两条text fixture。
++      expect(chunks.flat()).toEqual(full)
++      const shaped = structuredClone(history.slice(0, 2))
++      // shaped history不写数据库，避免测试fixture本身改变2048-turn cache性能样本。
++      const shapeUser = shaped.find((message) => message.info.role === "user")
++      const shapeAssistant = shaped.find((message) => message.info.role === "assistant")
++      if (!shapeUser || !shapeAssistant) throw new Error("Expected shape pair")
++      shapeUser.parts.push(
++        { id: PartID.ascending(), messageID: shapeUser.info.id, sessionID: chat.id, type: "file", mime: "image/png", url: `data:image/png;base64,${tinyPng}` },
++        { id: PartID.ascending(), messageID: shapeUser.info.id, sessionID: chat.id, type: "compaction", auto: true },
++      )
++      shapeAssistant.parts.push(
++        { id: PartID.ascending(), messageID: shapeAssistant.info.id, sessionID: chat.id, type: "tool", tool: "shape", callID: "completed", state: { status: "completed", input: {}, output: "tool output", title: "", metadata: {}, time: { start: 0, end: 1 } } },
++        { id: PartID.ascending(), messageID: shapeAssistant.info.id, sessionID: chat.id, type: "tool", tool: "shape", callID: "error", state: { status: "error", input: {}, error: "tool error", metadata: {}, time: { start: 0, end: 1 } } },
++      )
++      // Tool completed/error、media与Compaction都必须保持full converter的literal形状。
++      // 同一断言比较公开converter输出，不复制role/tool/media转换算法到expected value。
++      const shapeFull = yield* MessageV2.toModelMessagesEffect(shaped, model)
++      expect((yield* MessageV2.toModelMessageChunksEffect(shaped, model)).flat()).toEqual(shapeFull)
++
++      yield* user(chat.id, "cold suffix")
++      yield* llm.text("cold response")
++      const coldStarted = performance.now()
++      yield* prompt.loop({ sessionID: chat.id })
++      // cold 样本包含首次 hydrate 与 chunk construction，是原始回归基线。
++      const cold = performance.now() - coldStarted
++
++      yield* user(chat.id, "warm suffix")
++      yield* llm.text("warm response")
++      const warmStarted = performance.now()
++      yield* prompt.loop({ sessionID: chat.id })
++      // warm 仍包含 Provider HTTP 与 durable Assistant 写入，不是 private helper 计时。
++      // 因此阈值失败可定位整体pre-dispatch回归，而非微型helper benchmark波动。
++      const warm = performance.now() - warmStarted
++
++      // 阈值覆盖用户报告的约 1 秒准备窗口；相对断言证明命中而非单纯机器更快。
++      expect(warm).toBeLessThan(cold)
++      expect(warm).toBeLessThan(1_000)
++      // 首次无新消息调用先admit刚完成的Assistant；第二次才是proof完全不变的exact full hit。
++      yield* prompt.loop({ sessionID: chat.id })
++      const hitStarted = performance.now()
++      yield* prompt.loop({ sessionID: chat.id })
++      const fullHit = performance.now() - hitStarted
++      const other = yield* sessions.create({ title: "Evict sole Message entry" })
++      yield* seed(other.id, { finish: "stop" })
++      yield* prompt.loop({ sessionID: other.id })
++      // 另一Session只负责替换唯一entry，不修改原2048-turn proof或可见历史。
++      const rebuildStarted = performance.now()
++      yield* prompt.loop({ sessionID: chat.id })
++      const rebuild = performance.now() - rebuildStarted
++      // 切换Session只替换唯一entry；原Session未变，rebuild与full hit具有相同可见历史。
++      // 两条路径均不dispatch Provider，时间差只来自admission/hydration/conversion。
++      expect(fullHit).toBeLessThan(rebuild * 0.65 + 40)
++      expect(yield* llm.calls).toBe(2)
++    }),
++  { git: true },
++  120_000,
++)
++
+ it.instance(
+   "preflight estimates image attachments as media tokens",
+   () =>
+@@ -3099,6 +3527,153 @@ it.instance(
+ 
+ // Shell semantics
+ 
++observedDenied.instance(
++  "captures before a non-none Tool rejected by a pre-execution hook",
++  () =>
++    Effect.gen(function* () {
++      const { dir, llm } = yield* useServerConfig(providerCfg)
++      snapshotTracks.delete(dir)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({
++        title: "Rejected Tool",
++        permission: [{ permission: "*", pattern: "*", action: "allow" }],
++      })
++      const file = path.join(dir, "rejected-tool.txt")
++      // bash是ambient；hook拒绝后仍应留下policy marker而无文件副作用。
++      yield* user(chat.id, "reject before implementation")
++      yield* llm.tool("bash", { command: `printf rejected > ${JSON.stringify(file)}`, description: "reject" })
++      yield* llm.text("done")
++      yield* prompt.loop({ sessionID: chat.id })
++      const part = (yield* sessions.messages({ sessionID: chat.id }))
++        .flatMap((message) => message.parts)
++        .find((item): item is MessageV2.ToolPart => item.type === "tool" && item.tool === "bash")
++      expect(snapshotTracks.get(dir)).toBe(2)
++      // before+after各一次证明capture位于hook前，error step仍完成Snapshot边界。
++      // 文件不存在则证明被拒Tool没有在baseline之后越过hook执行实现。
++      expect(part?.state.status).toBe("error")
++      // error replacement不能擦除prepare阶段写入的top-level authority。
++      expect(part?.metadata?.worktree).toBe("ambient")
++      expect(yield* Effect.promise(() => Bun.file(file).exists())).toBe(false)
++    }),
++  { git: true },
++)
++
++observedProvider.instance(
++  "does not snapshot a Provider-executed Tool",
++  () =>
++    Effect.gen(function* () {
++      const { dir } = yield* useServerConfig(providerCfg)
++      snapshotTracks.delete(dir)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Provider Tool" })
++      // providerExecuted stream没有local execute callback，任何track都属于错误归因。
++      yield* user(chat.id, "provider executes remotely")
++      yield* prompt.loop({ sessionID: chat.id })
++      const part = (yield* sessions.messages({ sessionID: chat.id }))
++        .flatMap((message) => message.parts)
++        .find((item): item is MessageV2.ToolPart => item.type === "tool")
++      expect(snapshotTracks.get(dir) ?? 0).toBe(0)
++      // provider marker保留用于展示，但不得被映射成ambient或declared。
++      // worktree缺失还保护Revert不会把远端Tool当成本地文件owner。
++      expect(part?.metadata?.providerExecuted).toBe(true)
++      expect(part?.metadata?.worktree).toBeUndefined()
++    }),
++  { git: true },
++)
++
++observed.instance(
++  "enforces Snapshot and Revert worktree authority matrix",
++  () =>
++    Effect.gen(function* () {
++      const { dir, llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const snapshots = yield* Snapshot.Service
++      const revert = yield* SessionRevert.Service
++      snapshotTracks.delete(dir)
++      const readChat = yield* sessions.create({ title: "None policy", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
++      const readFile = path.join(dir, "read-only.txt")
++      yield* Effect.promise(() => Bun.write(readFile, "read only"))
++      yield* user(readChat.id, "read without side effects")
++      // Read经过真实local adapter和terminal lifecycle，0计数不能由“没有Tool”偶然满足。
++      yield* llm.tool("read", { filePath: readFile })
++      yield* llm.text("done")
++      yield* prompt.loop({ sessionID: readChat.id })
++      expect(snapshotTracks.get(dir) ?? 0).toBe(0)
++
++      const shared = yield* sessions.create({ title: "Shared Snapshot", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
++      yield* user(shared.id, "run both tools")
++      yield* llm.push(
++        concurrentToolReply([
++          { name: "write", input: { filePath: path.join(dir, "declared-concurrent.txt"), content: "declared" } },
++          { name: "bash", input: { command: `printf ambient > ${JSON.stringify(path.join(dir, "ambient-concurrent.txt"))}`, description: "ambient write" } },
++        ]),
++        reply().tool("bash", { command: `printf next > ${JSON.stringify(path.join(dir, "ambient-next-step.txt"))}`, description: "next step" }).item(),
++        reply().text("done").stop().item(),
++      )
++      yield* prompt.loop({ sessionID: shared.id })
++      const policies = (yield* sessions.messages({ sessionID: shared.id })).flatMap((message) => message.parts)
++        .filter((part): part is MessageV2.ToolPart => part.type === "tool").map((part) => part.metadata?.worktree).sort()
++      // 首轮并发共享before/after；新Assistant续轮建立另一组，重复capture会使总数超过4。
++      expect(snapshotTracks.get(dir)).toBe(4)
++      expect(policies).toEqual(["ambient", "ambient", "declared"])
++
++      const chat = yield* sessions.create({ title: "Revert authority" })
++      const turn = yield* seed(chat.id, { finish: "stop" })
++      const before = yield* snapshots.track()
++      // baseline早于两个文件写入，使一个Patch同时覆盖declared和none候选。
++      if (!before) throw new Error("Expected Snapshot baseline")
++      const noneFile = path.join(dir, "none-owned.txt")
++      const declaredFile = path.join(dir, "declared-owned.txt")
++      yield* Effect.promise(() => Promise.all([Bun.write(noneFile, "none"), Bun.write(declaredFile, "declared")]))
++      const patch = yield* snapshots.patch(before)
++      // result metadata形状刻意相同，唯一authority差异是top-level policy。
++      const completed = (filepath: string) => ({
++        status: "completed" as const,
++        input: {},
++        output: "done",
++        title: path.basename(filepath),
++        metadata: { filepath, diff: "changed" },
++        time: { start: 0, end: 1 },
++      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(), messageID: turn.assistant.id, sessionID: chat.id, type: "tool",
++        tool: "custom_none", callID: "none", state: completed(noneFile),
++      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(), messageID: turn.assistant.id, sessionID: chat.id, type: "tool",
++        tool: "edit", callID: "declared", metadata: { worktree: "declared" }, state: completed(declaredFile),
++      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(), messageID: turn.assistant.id, sessionID: chat.id, type: "patch",
++        hash: patch.hash, files: patch.files,
++      })
++      const ambientTurn = yield* seed(chat.id, { finish: "stop" })
++      // 第二Assistant修改同一none文件，专门复现range级全局Set的反向授权缺陷。
++      const ambientBefore = yield* snapshots.track()
++      if (!ambientBefore) throw new Error("Expected ambient baseline")
++      yield* Effect.promise(() => Bun.write(noneFile, "ambient"))
++      const ambientPatch = yield* snapshots.patch(ambientBefore)
++      yield* sessions.updatePart({
++        id: PartID.ascending(), messageID: ambientTurn.assistant.id, sessionID: chat.id, type: "tool",
++        tool: "bash", callID: "ambient", metadata: { worktree: "ambient" }, state: completed(noneFile),
++      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(), messageID: ambientTurn.assistant.id, sessionID: chat.id, type: "patch",
++        hash: ambientPatch.hash, files: ambientPatch.files,
++      })
++
++      yield* revert.revert({ sessionID: chat.id, messageID: turn.user.id })
++      // 后Assistant的ambient只能恢复到none写入后的状态，不能反向授权更早Patch。
++      expect(yield* Effect.promise(() => Bun.file(noneFile).text())).toBe("none")
++      // declared文件撤回证明修复没有关闭既有精确归因路径。
++      expect(yield* Effect.promise(() => Bun.file(declaredFile).exists())).toBe(false)
++    }),
++  { git: true },
++)
++
+ it.instance(
+   "shell rejects with BusyError when loop running",
+   () =>
+diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/opencode/test/session/revert-compact.test.ts
+index 6531e22898530a294b67c210cd7489248958a78b..b2b5ac5ca66c37bec3dd5d5f8492ec8278d1e277 100644
+--- a/packages/opencode/test/session/revert-compact.test.ts
++++ b/packages/opencode/test/session/revert-compact.test.ts
+@@ -79,6 +79,7 @@ const tool = Effect.fn("test.tool")(function* (sessionID: SessionID, messageID:
+     type: "tool" as const,
+     tool: "bash",
+     callID: "call-1",
++    metadata: { worktree: "ambient" },
+     state: {
+       status: "completed" as const,
+       input: {},
+@@ -107,6 +108,7 @@ const editTool = Effect.fn("test.editTool")(function* (
+     type: "tool" as const,
+     tool: "edit",
+     callID: "edit-" + Math.random().toString(36).slice(2),
++    metadata: { worktree: "declared" },
+     state: {
+       status: "completed" as const,
+       input: { filePath: absFile },

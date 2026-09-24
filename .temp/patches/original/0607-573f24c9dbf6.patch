@@ -1,0 +1,58 @@
+From 573f24c9dbf69c606bf4df8031586bbf4dac7bcb Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 21 Sep 2026 11:40:06 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20=E9=81=BF=E5=85=8D=20MCP=20?=
+ =?UTF-8?q?=E6=B5=8B=E8=AF=95=E5=85=B3=E9=97=AD=E5=85=B1=E4=BA=AB=20HTTP?=
+ =?UTF-8?q?=20handler?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+HttpApiApp.webHandler 是进程级缓存实例，单个 MCP 测试释放它会关闭后续请求复用的 scope，导致 Goal 恢复清理在隐藏消息后被中断。改为借用共享 handler，保留原有 Instance 和数据库清理。
+
+复现并消除 MCP 在前、Goal 在后的顺序相关失败；Windows 与 Linux 完整 server 回归、原 CI 顺序重放及包内类型检查均通过，不修改生产逻辑或放宽测试断言。
+
+diff --git a/packages/opencode/test/server/httpapi-mcp.test.ts b/packages/opencode/test/server/httpapi-mcp.test.ts
+index 3f7f54f294eecc0a301af7389c0f453a3ea6146d..95adf05c34d619d5e17e33eeafb747c6fa2e3fe3 100644
+--- a/packages/opencode/test/server/httpapi-mcp.test.ts
++++ b/packages/opencode/test/server/httpapi-mcp.test.ts
+@@ -25,10 +25,8 @@ function app() {
+ type TestApp = ReturnType<typeof app>
+ type TestHandler = ReturnType<typeof HttpApiApp.webHandler>
+ 
+-const handlerScoped = Effect.acquireRelease(
+-  Effect.sync(() => HttpApiApp.webHandler()),
+-  (handler) => Effect.promise(() => handler.dispose()).pipe(Effect.ignore),
+-)
++// webHandler 是进程共享实例；单个测试不能关闭后续 HTTP 请求仍会使用的 scope。
++const sharedHandler = Effect.sync(() => HttpApiApp.webHandler())
+ 
+ const request = Effect.fnUntraced(function* (
+   handler: TestHandler,
+@@ -69,7 +67,7 @@ describe("mcp HttpApi", () => {
+     () =>
+       Effect.gen(function* () {
+         const tmp = yield* TestInstance
+-        const handler = yield* handlerScoped
++        const handler = yield* sharedHandler
+         const response = yield* request(handler, McpPaths.status, tmp.directory)
+ 
+         expect(response.status).toBe(200)
+@@ -93,7 +91,7 @@ describe("mcp HttpApi", () => {
+     () =>
+       Effect.gen(function* () {
+         const tmp = yield* TestInstance
+-        const handler = yield* handlerScoped
++        const handler = yield* sharedHandler
+         const added = yield* request(handler, McpPaths.status, tmp.directory, {
+           method: "POST",
+           headers: { "content-type": "application/json" },
+@@ -135,7 +133,7 @@ describe("mcp HttpApi", () => {
+     () =>
+       Effect.gen(function* () {
+         const tmp = yield* TestInstance
+-        const handler = yield* handlerScoped
++        const handler = yield* sharedHandler
+         const start = yield* request(handler, "/mcp/demo/auth", tmp.directory, { method: "POST" })
+         expect(start.status).toBe(400)
+ 

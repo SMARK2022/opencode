@@ -1,0 +1,18 @@
+From fe2abb7edeff10b178ab97e80094b3743994ad1f Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 28 Jul 2026 05:03:03 +0800
+Subject: [PATCH] =?UTF-8?q?fix(opentui):=20=E5=8D=87=E7=BA=A7=E5=AD=90?=
+ =?UTF-8?q?=E6=A8=A1=E5=9D=97=E8=87=B3=20v0.4.3-smark.4=20=E5=B9=B3?=
+ =?UTF-8?q?=E6=BB=91=E6=B5=81=E5=BC=8F=20Markdown=20=E9=AB=98=E4=BA=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/thirdparty/opentui b/thirdparty/opentui
+index 93098b5189645cb3fa135360625190c10605f6bb..df4bd31caaa1153944b28509ac13610b4a16ca85 160000
+--- a/thirdparty/opentui
++++ b/thirdparty/opentui
+@@ -1 +1 @@
+-Subproject commit 93098b5189645cb3fa135360625190c10605f6bb
++Subproject commit df4bd31caaa1153944b28509ac13610b4a16ca85

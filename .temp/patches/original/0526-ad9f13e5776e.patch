@@ -1,0 +1,25 @@
+From ad9f13e5776e60f4c76df9190e3182c666dc39f6 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 31 Jul 2026 15:54:12 +0800
+Subject: [PATCH] =?UTF-8?q?fix(provider):=20=E4=BD=BF=E7=94=A8=20Codex=20s?=
+ =?UTF-8?q?ession-id=20=E4=BF=9D=E6=8C=81=E7=BC=93=E5=AD=98=E4=BA=B2?=
+ =?UTF-8?q?=E5=92=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/plugin/codex.ts b/packages/opencode/src/plugin/codex.ts
+index 6629ca6f474ec9f3f70dd7818fa0273c9d3f8b21..2bdc9d7a17472b1093dbdaf95cac7e1d7b630b19 100644
+--- a/packages/opencode/src/plugin/codex.ts
++++ b/packages/opencode/src/plugin/codex.ts
+@@ -625,7 +625,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+     "chat.headers": async (input, output) => {
+       if (input.model.providerID !== "openai") return
+       Object.assign(output.headers, CODEX_HEADERS)
+-      output.headers.session_id = input.sessionID
++      // Codex-compatible proxies recognize the hyphenated header for session affinity.
++      output.headers["session-id"] = input.sessionID
+     },
+     "chat.params": async (input, output) => {
+       if (input.model.providerID !== "openai") return

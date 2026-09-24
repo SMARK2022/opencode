@@ -1,0 +1,155 @@
+From 82c6b9963e7f19da911ea48b5996d68c65485864 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 23:04:46 +0800
+Subject: [PATCH] =?UTF-8?q?fix(voice):=20drainBufferedFrames=20=E4=B8=A4?=
+ =?UTF-8?q?=E9=98=B6=E6=AE=B5=E7=A1=AE=E8=AE=A4=E9=98=B2=E6=AD=A2=E5=8D=95?=
+ =?UTF-8?q?=E6=AC=A1=E6=8A=A2=E5=8D=A0=E4=B8=A2=E5=B8=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+drainBufferedFrames 遇到单次慢读（wall-clock ≥28ms）时直接终止，
+丢弃全部剩余 queued 帧。OS 调度抢占导致的单次 wall-clock 膨胀
+即可触发此缺陷，造成 CI 测试间歇性失败（wavFrameCount < 121）。
+
+改为二次确认：首次慢读后再读一帧，连续两帧都慢才认定为 live read；
+第二帧快返回时判定前帧为抢占膨胀的 queued 帧，两帧一并保留。
+测试侧移除不真实的 queuedReadDelayMs=4（真实 queued read 是亚毫秒级
+memcpy），新增 slowOnReadCount 确定性模拟单次抢占的行为级测试。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+index b6c187c2d2190b821edc9ae03bf2e779e265161d..6d284805b2cbf6a8dc3aeea9a69375a528dc332e 100644
+--- a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
++++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+@@ -44,10 +44,11 @@ const VOICE_RECORDER_DEVICE_INDEX = -1
+ // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
+ const VOICE_RECORDER_BUFFERED_FRAMES = 250
+ // queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
+-// macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
+-// 导致 drainBufferedFrames 误判缓冲耗尽而提前终止（丢失尾部 queued 帧）。
+-// 0.9 系数给出 28ms 阈值：queued read（~5ms）留 23ms 余量，live read（~32ms 帧周期）仍可正确区分。
+-// 28ms 距 32ms 仅 4ms，但调度抖动只会膨胀测量值、不会缩短，因此 4ms 间隙不可被抖动闭合。
++// 生产环境中 queued read 是亚毫秒级 memcpy，live read 阻塞约一个帧周期（32ms）。
++// 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
++// 调度抖动只会膨胀 wall-clock 测量值、不会缩短，因此 live read 不会被误判为 queued。
++// drainBufferedFrames 对首次慢读做二次确认（再读一帧），防止单次抢占膨胀的 queued read
++// 被误判为 live 而丢失全部尾部帧；只有连续两帧都慢才认定缓冲耗尽。
+ const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
+ // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
+ const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
+@@ -376,9 +377,20 @@ function drainBufferedFrames(PvRecorder: PvRecorderConstructor, recorder: PvReco
+   for (let index = 0; index < VOICE_RECORDER_BUFFERED_FRAMES; index++) {
+     const startedAt = performance.now()
+     const frame = readFrame(PvRecorder, recorder)
+-    // 同步 native read 不能被 JS timeout 中断；耗时达到 live 帧级别时丢弃该帧并停止，只保留 stop 前已缓冲音频。
+-    if (performance.now() - startedAt >= VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) return
++    // 快返回的 read 是 queued backlog，直接保留。
++    if (performance.now() - startedAt < VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) {
++      frames.push(frame)
++      continue
++    }
++    // 单次慢读可能是缓冲耗尽进入 live read，也可能是 OS 调度抢占导致的 wall-clock 膨胀。
++    // 再读一帧确认：连续两帧都慢才认定为 live read，避免单次抢占导致尾部 queued 帧全部丢失。
++    // 确认帧会额外消耗一个 native 帧周期（~32ms），但仅在首次遇到慢读时触发一次，对 stop 延迟可忽略。
++    const confirmStartedAt = performance.now()
++    const confirmFrame = readFrame(PvRecorder, recorder)
++    if (performance.now() - confirmStartedAt >= VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) return
++    // 确认帧快返回：前一帧是抢占膨胀的 queued 帧，两帧都是有效 backlog 数据，一并保留。
+     frames.push(frame)
++    frames.push(confirmFrame)
+   }
+ }
+ 
+diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+index 2e3449438de88e4d612e27237624494c2d698288..af9831cb8bb2937c3b51886c3b6718dabfd9cd5e 100644
+--- a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
++++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+@@ -14,6 +14,9 @@ class FakePvRecorder {
+   static queuedReadDelayMs = 0
+   static liveReadDelayMs = 0
+   static liveFrameValue = 321
++  // 指定 readCount 的 read 强制走 live 延迟，模拟 OS 调度抢占导致的单次慢读。
++  // 用于确定性地测试 drainBufferedFrames 的两阶段确认机制，不依赖 wall-clock 时序。
++  static slowOnReadCount: number | undefined
+   static _pvRecorder = {
+     read: (_handle: bigint, pcm: Int16Array) => {
+       FakePvRecorder.readCount++
+@@ -21,9 +24,15 @@ class FakePvRecorder {
+       if (FakePvRecorder.readStatus !== 0) return FakePvRecorder.readStatus
+       // queuedFrameValues 模拟 native circular buffer 中已经录好的历史帧，应该被 stop drain 快速读走。
+       const queued = FakePvRecorder.queuedFrameValues.shift()
+-      if (queued !== undefined && FakePvRecorder.queuedReadDelayMs > 0) busyWait(FakePvRecorder.queuedReadDelayMs)
+-      // 队列耗尽后的 live read 会阻塞一个帧周期；测试用它证明实现不会继续录入 stop 之后的声音。
+-      if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) busyWait(FakePvRecorder.liveReadDelayMs)
++      // slowOnReadCount 模拟 OS 调度抢占：指定 readCount 的 read 强制走 live 延迟，
++      // 不论该帧来自 queued backlog 还是 live capture，用于确定性地测试两阶段确认机制。
++      if (FakePvRecorder.slowOnReadCount === FakePvRecorder.readCount) {
++        busyWait(FakePvRecorder.liveReadDelayMs)
++      } else if (queued !== undefined && FakePvRecorder.queuedReadDelayMs > 0) {
++        busyWait(FakePvRecorder.queuedReadDelayMs)
++      } else if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) {
++        busyWait(FakePvRecorder.liveReadDelayMs)
++      }
+       pcm.fill(queued ?? FakePvRecorder.liveFrameValue)
+       return 0
+     },
+@@ -74,6 +83,7 @@ describe("prompt voice recorder", () => {
+     FakePvRecorder.queuedReadDelayMs = 0
+     FakePvRecorder.liveReadDelayMs = 40
+     FakePvRecorder.liveFrameValue = 321
++    FakePvRecorder.slowOnReadCount = undefined
+     delete (globalThis as { OPENCODE_COMPILED?: boolean }).OPENCODE_COMPILED
+   })
+ 
+@@ -172,10 +182,10 @@ describe("prompt voice recorder", () => {
+   // stop 写 WAV 前必须把这些已经存在的 queued 帧读出来，否则最终文件会比用户实际录音短。
+   // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
+   // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
+-  // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
+-  // macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
+-  // 导致 drainBufferedFrames 误判缓冲耗尽而提前终止。
+-  // 生产代码的 DRAIN_BLOCKED_READ_MS 阈值需留出足够余量（28ms = 0.9×32ms）。
++  // queued read 不引入 busyWait：真实 PvRecorder queued read 是亚毫秒级 memcpy，
++  // 人为 busyWait 会把 wall-clock 测量推近 drain 阈值（28ms），CI 调度抖动下触发
++  // drainBufferedFrames 误判缓冲耗尽而提前终止，丢失尾部 queued 帧。
++  // live read 用 40ms busyWait 模拟帧周期，远超 28ms 阈值，确保被 drain 正确丢弃。
+   test("writes audio buffered during a stalled TUI tick before stopping", async () => {
+     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+ 
+@@ -183,7 +193,35 @@ describe("prompt voice recorder", () => {
+     try {
+       await waitForFakeRead()
+       FakePvRecorder.queueNativeFrames(120)
+-      FakePvRecorder.queuedReadDelayMs = 4
++      // queuedReadDelayMs 保持 beforeEach 的 0：不为人造延迟引入 wall-clock 敏感性。
++      FakePvRecorder.liveReadDelayMs = 40
++      FakePvRecorder.liveFrameValue = 9_999
++      await recorder.stop()
++
++      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
++
++      expect(wavFrameCount(wav)).toBe(121)
++      expect(wavSamples(wav)).not.toContain(9_999)
++    } finally {
++      await recorder.abort()
++    }
++  })
++
++  // 两阶段确认机制：drain 遇到单次慢读时不应直接终止而丢失剩余 queued 帧。
++  // slowOnReadCount 确定性地让第 50 次 read（drain 的第 49 个 queued 帧）走 live 延迟，
++  // 模拟 OS 调度抢占。其余 queued read 保持亚毫秒。确认机制应读到第 51 帧（快），
++  // 判定第 50 帧为抢占而非缓冲耗尽，两帧都保留，继续 drain 直到真正的 live read。
++  // 最终 WAV 帧数仍为 121（1 bg + 120 drain），live 帧（9999）被两阶段确认正确丢弃。
++  test("recovers queued frames after a single slow read via drain confirmation", async () => {
++    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++
++    const recorder = await startPromptVoiceRecorder()
++    try {
++      await waitForFakeRead()
++      // bg 循环已读取 1 帧（readCount=1）；drain 从 readCount=2 开始。
++      // slowOnReadCount=50 让 drain 的第 49 个 queued 帧模拟单次抢占慢读。
++      FakePvRecorder.queueNativeFrames(120)
++      FakePvRecorder.slowOnReadCount = 50
+       FakePvRecorder.liveReadDelayMs = 40
+       FakePvRecorder.liveFrameValue = 9_999
+       await recorder.stop()

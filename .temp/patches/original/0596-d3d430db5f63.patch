@@ -1,0 +1,472 @@
+From d3d430db5f63c5e369dd185bcd939a52a4072523 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 17 Sep 2026 03:12:44 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E4=BF=AE=E6=AD=A3=E6=B5=8B=E8=AF=95?=
+ =?UTF-8?q?=E7=94=9F=E5=91=BD=E5=91=A8=E6=9C=9F=E5=B9=B6=E5=B0=86=20Window?=
+ =?UTF-8?q?s=20=E5=BF=85=E8=BF=87=E6=B5=8B=E8=AF=95=E6=8B=86=E4=B8=BA?=
+ =?UTF-8?q?=E4=B8=89=E7=89=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 Windows OpenCode 测试分到独立 runner，保留其他平台的 core/TUI 顺序；分片选择纳入 Turbo 缓存键，并移除警告任务的重复执行。修正 Shell 取消排空、缓存生命周期断言、PTY 提示识别和测试清理。
+
+验证：针对性测试、类型检查、workflow 结构及 Turbo dry-run 通过。全量 runtime 两次触及本地 20 分钟验证期限，integration 全量按用户要求中止，未宣称全量通过。
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 98e4cc16a5ed465ef4ece073df121b6a94f40fb5..ef20fe2ce3f2e119b546c5a15bc4cb174a8b2df1 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -42,12 +42,26 @@ jobs:
+             runner: ubuntu-latest
+             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+             junit: packages/opencode/.artifacts/unit/*.xml
+-          - id: opencode-windows
++          # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
++          # 分片 env 纳入测试缓存键，报告路径逐片唯一，失败不能互相覆盖。
++          - id: opencode-windows-integration
+             label: packages/opencode
+-            os_label: Windows
++            os_label: Windows / 会话与服务集成
+             runner: windows-latest
+-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+-            junit: packages/opencode/.artifacts/unit/*.xml
++            command: OPENCODE_TEST_SHARD=integration bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
++            junit: packages/opencode/.artifacts/unit/junit-integration.xml
++          - id: opencode-windows-runtime
++            label: packages/opencode
++            os_label: Windows / 工具与基础模块
++            runner: windows-latest
++            command: OPENCODE_TEST_SHARD=runtime bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
++            junit: packages/opencode/.artifacts/unit/junit-runtime.xml
++          - id: opencode-windows-tui
++            label: packages/opencode
++            os_label: Windows / TUI
++            runner: windows-latest
++            command: OPENCODE_TEST_SHARD=tui bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
++            junit: packages/opencode/.artifacts/unit/junit-tui.xml
+           - id: core-linux
+             label: packages/core
+             os_label: Linux
+@@ -119,7 +133,7 @@ jobs:
+         id: junit
+         if: always()
+         run: |
+-          # opencode 产出两个 shard 报告；literal package 路径也由同一 glob 检查兼容。
++          # 默认全量产出两个报告，Windows 单片产出一个；同一检查兼容 glob 与精确路径。
+           if compgen -G "${{ matrix.junit }}" > /dev/null; then
+             echo "exists=true" >> "$GITHUB_OUTPUT"
+           else
+@@ -351,12 +365,13 @@ jobs:
+         continue-on-error: true
+         # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
+         # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
+-        # 串行消除并行资源竞争，预期总时长 ~30m（opencode 24m + 其余 <2m + 安装 4m）。
+-        run: bun turbo test:ci --continue=always --summarize --concurrency=1
++        # Windows 的 OpenCode 已由必过三分片完整覆盖，此处只跑其余包，避免重复占据约 30m。
++        # 其余包仍在同机串行；Linux 保留原有全量兼容性检查，Windows 实时日志保留卡点。
++        run: bun turbo test:ci --continue=always --summarize --concurrency=1 ${{ matrix.runner == 'windows-latest' && '--filter=!opencode --log-order=stream' || '' }}
+ 
+       - name: Warn on upstream unit failures
+         if: always() && steps.upstream.outcome != 'success'
+-        run: echo "::warning title=上游单元兼容性::${{ matrix.os_label }} 上游全量单元测试存在失败；此结果只作为兼容性警告，不阻断 fork 核心测试。"
++        run: echo "::warning title=上游单元兼容性::${{ matrix.os_label }} 上游单元测试存在失败；此结果只作为兼容性警告，不阻断 fork 核心测试。"
+ 
+       - name: Publish upstream unit reports
+         if: always() && hashFiles('packages/**/.artifacts/unit/*.xml') != ''
+@@ -393,7 +408,7 @@ jobs:
+             echo "### 警告 上游单元兼容性"
+             echo "| 范围 | 平台 | 结果 | 说明 |"
+             echo "| --- | --- | --- | --- |"
+-            echo "| bun turbo test:ci --continue=always | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
++            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
+           } >> "$GITHUB_STEP_SUMMARY"
+ 
+   upstream-extra-warning:
+diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test-ci.ts
+index d7c678d040c842d1270ee58afd3bb63003e4330d..f3e56f3286a9b3a075549d092b5bd53c7aff7a3d 100644
+--- a/packages/opencode/script/test-ci.ts
++++ b/packages/opencode/script/test-ci.ts
+@@ -9,16 +9,19 @@ export function partitionTestFiles(files: readonly string[]) {
+   // Bun Glob 在 Windows 返回反斜杠；先统一表示，分区才不会只在 Unix 上成立。
+   const normalized = files.map((file) => file.replaceAll("\\", "/"))
+   // 三个 CLI 根目录是 Windows feedback loop 验证过的 native process domain。
+-  // 其余路径默认进入 core，确保未来新增测试不会因名单未更新而被静默漏掉。
++  // 其余路径分到 integration/runtime；默认全量调用仍将它们合并为原 core。
+   const isTuiTest = (file: string) => /^test\/cli\/(?:run|tui|cmd\/tui)\//.test(file)
++  // 先排除 TUI，再按目录拆会话/服务集成；其余新目录默认进入 runtime，不维护文件白名单。
++  const isIntegrationTest = (file: string) => /^test\/(?:session|server|cli)\//.test(file)
+ 
+   return {
+-    core: normalized.filter((file) => !isTuiTest(file)),
++    integration: normalized.filter((file) => !isTuiTest(file) && isIntegrationTest(file)),
++    runtime: normalized.filter((file) => !isTuiTest(file) && !isIntegrationTest(file)),
+     tui: normalized.filter(isTuiTest),
+   }
+ }
+ 
+-async function runShard(name: "core" | "tui", files: readonly string[]) {
++async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFiles>, files: readonly string[]) {
+   console.log(`Running ${name} test shard (${files.length} files)`)
+   // 每个 child 独占 JUnit 路径；复用同一文件会覆盖先完成 shard 的失败证据。
+   const proc = Bun.spawn(
+@@ -40,6 +43,11 @@ async function runShard(name: "core" | "tui", files: readonly string[]) {
+ }
+ 
+ async function main() {
++  // 用 task env 选择单片，避免 Turbo argv 传入依赖 build；该变量在 turbo.json 中参与缓存键。
++  const shard = process.env.OPENCODE_TEST_SHARD
++  if (shard !== undefined && shard !== "integration" && shard !== "runtime" && shard !== "tui") {
++    throw new Error("OPENCODE_TEST_SHARD must be integration, runtime, or tui")
++  }
+   const files = (
+     await Array.fromAsync(new Bun.Glob("test/**/*.test.{ts,tsx}").scan({ cwd: PACKAGE_ROOT, onlyFiles: true }))
+   ).sort()
+@@ -51,8 +59,8 @@ async function main() {
+   const shards = partitionTestFiles(files)
+   // 任一空 shard 都会让 Bun 退回自动发现全套测试，重新破坏进程隔离。
+   // 在编排 owner 处 fail closed，避免“看似分片、实际全量”的假绿。
+-  if (shards.core.length === 0 || shards.tui.length === 0) {
+-    throw new Error(`Expected non-empty core and TUI shards, got ${JSON.stringify(shards)}`)
++  if (Object.values(shards).some((files) => files.length === 0)) {
++    throw new Error(`Expected non-empty integration, runtime, and TUI shards, got ${JSON.stringify(shards)}`)
+   }
+ 
+   await mkdir(REPORT_DIR, { recursive: true })
+@@ -60,8 +68,11 @@ async function main() {
+   // 清理旧报告，避免 CI 或本地复用目录时发布未参与本次运行的结果。
+   await Promise.all(reports.map((file) => rm(join(REPORT_DIR, file), { force: true })))
+ 
+-  // 两个 shard 必须顺序启动；TUI child 不能继承 core 的 native process state。
+-  const coreStatus = await runShard("core", shards.core)
++  // 单片独占 runner 与 JUnit 文件；不在同一 Windows 主机并发启动重型测试进程。
++  if (shard) process.exit(await runShard(shard, shards[shard]))
++
++  // 默认调用合并并恢复原排序，Linux/macOS 与本地全量执行的 core 顺序保持不变。
++  const coreStatus = await runShard("core", [...shards.integration, ...shards.runtime].sort())
+   const tuiStatus = await runShard("tui", shards.tui)
+   // 首个非零 exit code 保留真实失败；core 失败不能阻止 TUI 产生完整报告。
+   process.exit(coreStatus || tuiStatus)
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index bc53ebf6c9a2d939838f194624364aeb76f7a7a3..03e721af7b0500bbff513f17b663376a578ef65b 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -1163,39 +1163,27 @@ export const ShellTool = Tool.define(
+             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+           ])
+ 
+-          if (exit.kind === "abort") {
+-            aborted = true
+-            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
+-            // Effect ChildProcess.kill 的 forceKillAfter 只限制信号发送（Unix 同步
+-            // 即完成），不限制 Deferred.await(exitSignal) 的进程退出等待（无上限）。
+-            // 用 timeoutOrElse 包裹整个 kill，实现 SIGTERM→500ms→SIGKILL 序列，
+-            // 复用代码库 shell/shell.ts:killTree 的 SIGKILL_TIMEOUT_MS=200 同款语义。
+-            // orElse 加 Effect.ignore：进程可能在 SIGTERM 后恰好退出，SIGKILL 时
+-            // 抛 ESRCH，与 killTree 的 exited() 检查同理。
+-            yield* handle.kill().pipe(
+-              Effect.timeoutOrElse({
+-                duration: "500 millis",
+-                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
+-              }),
+-              Effect.orDie,
+-            )
+-          }
+-          if (exit.kind === "timeout") {
+-            expired = true
+-            // timeout 路径同样使用 bounded kill
++          if (exit.kind !== "exit") {
++            aborted = exit.kind === "abort"
++            expired = exit.kind === "timeout"
++            // kill 等到的是主进程 exit，后代仍可能持有 stdout/stderr。
++            // 将输出排空纳入同一 500ms 宽限期，避免主进程先退出后跳过强杀升级。
++            // 此处只等待 output fiber；宽限期到期不打断它，保留后续缓冲输出消费。
+             yield* handle.kill().pipe(
++              Effect.andThen(Fiber.join(output)),
+               Effect.timeoutOrElse({
+                 duration: "500 millis",
++                // 主进程退出后仍向原进程组发送 SIGKILL，清理持有管道的后代。
++                // 保留原有忽略错误语义：升级时进程组可能已经消失。
+                 orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
+               }),
+               Effect.orDie,
+             )
+           }
+ 
+-          // 子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
+-          // 已缓冲的最后几个 chunk 或它们触发的 metadata 更新。最终输出、截断、
+-          // 诊断摘要都必须在输出消费完成后组装，否则 Linux 上 fast-exit 命令
+-          // 会偶发丢尾部输出并把错误上下文误判为仍然可见。
++          // 进程退出不代表 Effect stream 已处理完缓冲 chunk 及其 metadata 更新。
++          // 正常退出或强杀后都完成消费，再组装最终输出、截断和诊断摘要。
++          // 宽限期内已排空时，此次 join 立即返回；否则继续消费剩余输出。
+           yield* Fiber.join(output)
+ 
+           return exit.kind === "exit" ? exit.code : null
+diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
+index c085569989ddf387a8545f5a5dd6488e9922ee59..8246a26043a8bf2d605e02bcfbd0a9d1550c62b0 100644
+--- a/packages/opencode/test/cli/db-maintenance.test.ts
++++ b/packages/opencode/test/cli/db-maintenance.test.ts
+@@ -163,8 +163,13 @@ async function runCliUntilStderr(root: string, args: string[], marker: string) {
+ 
+ function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
+   let answered = false
++  let output = ""
++  // PTY 可以把提示文本和 ANSI 序列拆到不同 chunk；累积后再识别提示。
++  // 回答后停止累积，避免此 helper 持有后续维护进度输出。
+   proc.onData((data) => {
+-    if (answered || !data.includes(prompt)) return
++    if (answered) return
++    output += data
++    if (!stripAnsi(output).includes(prompt)) return
+     answered = true
+     proc.write(`${answer}\r`)
+   })
+@@ -384,7 +389,7 @@ describe("database maintenance CLI", () => {
+   // 本用例伪造 live daemon control：POST 只登记 task，进度只写 durable JSON。
+   test("online observe completes while control status hangs during nonterminal work", async () => {
+     await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 8) })
+-    await runCli(tmp.path, ["db", "status", "--json"])
++    // seedColdParts 已通过真实 CLI 完成 migration，无需再次冷启动相同的 status 命令。
+     const { realpath } = await import("fs/promises")
+     // realpath 与 CLI Database.getPath 对齐，避免 task.dbPath mismatch 拒读。
+     const dbPath = await realpath(path.join(tmp.path, "opencode.db"))
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index 830b631cf53e1109825cc9ba81cfc6103b5cf24e..0ed39e936a457423897da9712f422e0c435008e5 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -1502,11 +1502,12 @@ describe("daemon lifecycle", () => {
+       await using yesTmp = await tmpdir()
+       const yesLockPath = path.join(yesTmp.path, "tui-server.json")
+       const yesDaemon = await spawnDaemon(yesLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
++      // contender 属于此 fixture；断言失败时也必须在临时目录销毁前等待它结束。
++      let contender = Promise.resolve()
+       try {
+         // 未替换 owner 的 Y 必须安全停掉同一 PID，再由当前 CLI 完成 offline compression。
+         let acquired = false
+         let acquiredAtTerminal = false
+-        let contender = Promise.resolve()
+         // reconnect 竞争者在旧 PID 退出后争用同一 election lock；terminal renderer 执行时它仍不得进入。
+         const result = await runInteractiveDb(
+           yesLockPath,
+@@ -1533,6 +1534,8 @@ describe("daemon lifecycle", () => {
+             })
+             acquired = true
+           })
++          // 立即登记 rejection handler；成功路径仍 await 原 Promise，使竞争失败正常暴露。
++          void contender.catch(() => undefined)
+           },
+           (chunk) => {
+             if (chunk.includes("Compression completed")) {
+@@ -1551,6 +1554,8 @@ describe("daemon lifecycle", () => {
+       } finally {
+         if (ServerLockModule.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
+         await yesDaemon.proc.exited.catch(() => undefined)
++        // 失败清理不覆盖原始断言错误，也不让竞争者在下一用例中访问已删除目录。
++        await Promise.allSettled([contender])
+       }
+       // replacement 场景独立启动 control server，任何 prompt 后请求都会改变公开错误并使测试失败。
+       await using replacementTmp = await tmpdir()
+diff --git a/packages/opencode/test/script/test-ci.test.ts b/packages/opencode/test/script/test-ci.test.ts
+index a3a4bfad472f7fa8a35282fd0d4e3df5bb3b8aac..eea52af9b70c3b35e795723c82e379a5ea9de0d4 100644
+--- a/packages/opencode/test/script/test-ci.test.ts
++++ b/packages/opencode/test/script/test-ci.test.ts
+@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
+ import { partitionTestFiles } from "../../script/test-ci"
+ 
+ describe("partitionTestFiles", () => {
+-  test("normalizes separators and assigns every test to one shard", () => {
++  test("normalizes separators and assigns every test to one shard", async () => {
+     // 混合两种真实平台表示；expected 只使用仓库路径，不复制 normalization 实现。
+     const files = [
+       "test/account/repo.test.ts",
+@@ -10,11 +10,21 @@ describe("partitionTestFiles", () => {
+       "test/cli/cmd/tui/dialog-prompt.test.tsx",
+       "test\\cli\\run\\footer.view.test.tsx",
+       "test/cli/cmd/tui/session-list-params.test.ts",
++      "test\\session\\prompt.test.ts",
++      "test/server/tui-provider-endpoint-status.test.ts",
++      "test/cli/db-maintenance.test.ts",
++      "test/tool/shell.test.ts",
++      "test/future/new.test.ts",
+     ]
+ 
+-    // 两个 literal 分组共同覆盖全部输入，使遗漏或重复分配都能直接令断言失败。
++    // TUI 必须优先于 cli 目录分组；未知目录自动归入 runtime，避免新增测试被漏掉。
+     expect(partitionTestFiles(files)).toEqual({
+-      core: ["test/account/repo.test.ts"],
++      integration: [
++        "test/session/prompt.test.ts",
++        "test/server/tui-provider-endpoint-status.test.ts",
++        "test/cli/db-maintenance.test.ts",
++      ],
++      runtime: ["test/account/repo.test.ts", "test/tool/shell.test.ts", "test/future/new.test.ts"],
+       tui: [
+         "test/cli/tui/dialog-select.test.tsx",
+         "test/cli/cmd/tui/dialog-prompt.test.tsx",
+@@ -22,5 +32,22 @@ describe("partitionTestFiles", () => {
+         "test/cli/cmd/tui/session-list-params.test.ts",
+       ],
+     })
++    // 同时检查真实发现集：三个分片必须非空，且每个文件恰好出现一次。
++    const discovered = await Array.fromAsync(
++      new Bun.Glob("test/**/*.test.{ts,tsx}").scan({ cwd: `${import.meta.dir}/../..`, onlyFiles: true }),
++    )
++    const shards = Object.values(partitionTestFiles(discovered))
++    expect(shards.every((files) => files.length > 0)).toBe(true)
++    expect(shards.flat().sort()).toEqual(discovered.map((file) => file.replaceAll("\\", "/")).sort())
++    expect(new Set(shards.flat()).size).toBe(discovered.length)
++    // 拼写错误必须在启动测试与清理报告前失败，不能静默退回全量执行。
++    const invalid = Bun.spawn([process.execPath, `${import.meta.dir}/../../script/test-ci.ts`], {
++      env: { ...process.env, OPENCODE_TEST_SHARD: "invalid" },
++      stdout: "ignore",
++      stderr: "pipe",
++    })
++    const error = await new Response(invalid.stderr).text()
++    expect(await invalid.exited).toBe(1)
++    expect(error).toContain("OPENCODE_TEST_SHARD must be integration, runtime, or tui")
+   })
+ })
+diff --git a/packages/opencode/test/server/tui-provider-endpoint-status.test.ts b/packages/opencode/test/server/tui-provider-endpoint-status.test.ts
+index f8a923c2a7384dae04d8e500d4b32d34f2687a19..c077d7a9f3bf62bdf761c0bd5252a5067e668ea7 100644
+--- a/packages/opencode/test/server/tui-provider-endpoint-status.test.ts
++++ b/packages/opencode/test/server/tui-provider-endpoint-status.test.ts
+@@ -5,7 +5,7 @@ import * as Log from "@opencode-ai/core/util/log"
+ import { Session } from "@/session/session"
+ import { Server } from "../../src/server/server"
+ import { TestInstance } from "../fixture/fixture"
+-import { testEffect } from "../lib/effect"
++import { pollWithTimeout, testEffect } from "../lib/effect"
+ 
+ void Log.init({ print: false })
+ 
+@@ -107,10 +107,17 @@ describe("tui.providerEndpointStatus endpoint", () => {
+   it.instance("reports a down endpoint without failing the TUI request", () =>
+     Effect.gen(function* () {
+       const tmp = yield* TestInstance
+-      const provider = yield* probeServer()
+-      yield* Effect.promise(() => provider.close())
+-
+-      const response = yield* request(tmp.directory, provider.origin)
++      // 保持端口归 fixture 所有，以连接中断制造失败，避免释放后被其他监听者复用。
++      const provider = yield* probeServer((_req, res) => res.destroy())
++
++      // origin 可能复用上一用例的短期缓存；必须观察到真实探测才判断网络失败结果。
++      // 等待行为信号，不固定 sleep，也不清空生产缓存来绕过真实刷新语义。
++      const response = yield* pollWithTimeout(
++        request(tmp.directory, provider.origin).pipe(
++          Effect.map((response) => provider.hits() > 0 ? response : undefined),
++        ),
++        "down endpoint was never probed",
++      )
+ 
+       expect(response.status).toBe(200)
+       expect(response.body).toMatchObject({
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 9be8daecc01374a5cc0aace835f37c8ad75b6f38..c6de125dba3a7b47bfc286355e042a6bc5673832 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -5956,10 +5956,10 @@ const cacheLifetime = testEffect(
+ )
+ 
+ // [缓存生命周期] 单槽 current-entry 不得延长已删除 Session / 已 dispose Instance 的生存期。
+-// WeakRef 只观察真实 loop 返回的 proof 对象；spy 自身结果已清除，不影响可达性。
++// 观察真实 loop 发布的槽位，以生命周期失效为准，不依赖 GC 的回收时机。
+ for (const lifecycle of ["delete", "dispose"] as const) {
+   cacheLifetime.instance(
+-    `prompt window proof is released after session ${lifecycle}`,
++    `prompt window cache is invalidated after session ${lifecycle}`,
+     () =>
+       Effect.gen(function* () {
+         const sessions = yield* Session.Service
+@@ -6001,12 +6001,13 @@ for (const lifecycle of ["delete", "dispose"] as const) {
+           })
+         // assistant 已完成（finish: stop）让 loop 单轮退出：缓存条目已发布，但不引入真实 Provider 变量。
+         const sessionID = yield* seed("x".repeat(1024))
+-        const original = MessageV2.promptWindowProof
+-        let weak: WeakRef<MessageV2.PromptWindowProof> | undefined
+-        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) => {
+-          const proof = original(id)
+-          if (id === sessionID) weak = new WeakRef(proof)
+-          return proof
++        const original = PromptWindowCache.publish
++        let slot: Parameters<typeof original>[0] | undefined
++        // 只捕获真实发布目标，仍执行原实现，不在测试中模拟缓存失效。
++        // 不额外保存 entry/proof，避免观察器自身延长被测对象的生命周期。
++        const observer = spyOn(PromptWindowCache, "publish").mockImplementation((target, generation, entry) => {
++          if (entry.sessionID === sessionID) slot = target
++          return original(target, generation, entry)
+         })
+         yield* prompt.loop({ sessionID }).pipe(
+           Effect.ensuring(
+@@ -6016,28 +6017,25 @@ for (const lifecycle of ["delete", "dispose"] as const) {
+             }),
+           ),
+         )
+-        // 两轮 gc 之间让出事件循环，确保 WeakRef 回调与终结队列先跑完再观察。
+-        const collect = Effect.promise(async () => {
+-          await Bun.sleep(0)
+-          Bun.gc(true)
+-          await Bun.sleep(0)
+-          Bun.gc(true)
+-        })
+-        yield* collect
+-        // 删除前的强可达是基线事实：没有它，后面的 undefined 断言无法区分修复与测试真空。
+-        expect(weak?.deref()).toBeDefined()
++        // 先确认槽内确有当前实例的 entry，避免“从未缓存”也让清理断言通过。
++        // slot 清空是生命周期契约；对象何时被 GC 回收不属于该契约。
++        expect(slot).toBeDefined()
++        if (!slot) throw new Error("prompt window cache was not published")
++        const generation = PromptWindowCache.lease(slot)
++        expect(PromptWindowCache.read(slot, sessionID)?.instance?.directory).toBe((yield* TestInstance).directory)
+         if (lifecycle === "delete") yield* sessions.remove(sessionID)
+         // dispose 必须走加载该实例的同一 InstanceStore：Promise 版 disposeAllInstances 只清共享 runtime，
+         // it.instance 的实例由当前测试 runtime 的 store 持有。
+         if (lifecycle === "dispose") yield* disposeAllInstancesEffect
+-        yield* collect
+-        const retainedAfter = weak?.deref() !== undefined
+-        // replacement 是 GC 正向对照：同 Service 换入新 Session 后旧 proof 必须可回收。
++        // 必须在 replacement 覆盖槽位之前验证失效，避免新发布掩盖清理缺失。
++        // generation 推进使旧发布凭证失效；在途发布拒绝仍由现有独立用例覆盖。
++        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
++        expect(PromptWindowCache.lease(slot)).toBeGreaterThan(generation)
++        // 同 Service 随后仍可发布新 Session，避免把永久禁用缓存误当成正确清理。
+         const replacement = yield* seed("small replacement")
+         yield* prompt.loop({ sessionID: replacement })
+-        yield* collect
+-        expect(weak?.deref()).toBeUndefined()
+-        expect(retainedAfter).toBe(false)
++        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
++        expect(PromptWindowCache.read(slot, replacement)).toBeDefined()
+       }),
+     { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
+   )
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index aeea9f05f415e4e7dc3a38527f13e9fa70f876f7..f181cf16bddddeb080fe1d566de784cd1e2d856f 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -2162,7 +2162,11 @@ describe("tool.shell abort", () => {
+           const collected: string[] = []
+           const res = yield* run(
+             {
+-              command: `echo before && sleep 30`,
++              // POSIX 后代先忽略 TERM 再发布 readiness；主进程退出后仍会持有输出管道。
++              // 保留原有输出触发取消及结果断言，验证强杀升级不能只等待主进程。
++              command: process.platform === "win32"
++                ? `echo before && sleep 30`
++                : `sh -c 'trap "" TERM; echo before; sleep 30' & wait`,
+               description: "Long running command",
+             },
+             {
+diff --git a/turbo.json b/turbo.json
+index 17746884630651c2d50e1b7cddc5702ee8f01cd8..126040f5b15d13c6923fb0334a01906d2df62e92 100644
+--- a/turbo.json
++++ b/turbo.json
+@@ -19,6 +19,7 @@
+     },
+     "opencode#test:ci": {
+       "dependsOn": ["^build"],
++      "env": ["OPENCODE_TEST_SHARD"],
+       "outputs": [".artifacts/unit/*.xml"],
+       "passThroughEnv": ["*"]
+     },

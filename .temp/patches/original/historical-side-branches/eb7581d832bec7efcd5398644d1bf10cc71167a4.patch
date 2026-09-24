@@ -1,0 +1,46 @@
+From eb7581d832bec7efcd5398644d1bf10cc71167a4 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 16:02:19 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20=E4=BF=AE=E5=A4=8D=20macOS=20CI=20?=
+ =?UTF-8?q?shell=20echo=20=E6=B5=8B=E8=AF=95=20stdout=20=E7=AE=A1=E9=81=93?=
+ =?UTF-8?q?=E7=AB=9E=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+echo 是 shell builtin，在 <1ms 内写入 stdout 并退出。macOS CI 调度
+抖动下 detached:true 创建新进程组时 Effect stream consumer 可能
+尚未订阅 proc.stdout，echo 已退出导致数据丢失，测试收到 (no output)。
+
+detached:true 是 abort/timeout 进程组隔离的硬性依赖不能移除（已验证
+detached:false 会导致 5 个 abort/timeout 测试超时失败）。
+
+改为 echo test; sleep 0.01 让 shell 存活 10ms 足够 stream 订阅完成。
+断言不变（仍检查 output 包含 test/fallback，exit code 0）。
+
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index b55e8478b26c6c4854fd1113282bf1b91f380ccf..acde64deb85ab60f3aa43293a3e5cced1ddd526f 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -204,7 +204,10 @@ describe("tool.shell", () => {
+       projectRoot,
+       Effect.gen(function* () {
+         const result = yield* run({
+-          command: "echo test",
++          // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态：
++          // detached:true 创建新进程组时，Effect stream consumer 可能尚未订阅 proc.stdout，
++          // echo 已写入并退出，数据丢失。sleep 让 shell 存活足够久让 stream 订阅完成。
++          command: "echo test; sleep 0.01",
+           description: "Echo test message",
+         })
+         expect(result.metadata.exit).toBe(0)
+@@ -248,7 +251,8 @@ describe("tool.shell", () => {
+ 
+           const result = yield* bash.execute(
+             {
+-              command: "echo fallback",
++              // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态
++              command: "echo fallback; sleep 0.01",
+               description: "Echo fallback text",
+             },
+             ctx,

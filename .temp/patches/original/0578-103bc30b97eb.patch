@@ -1,0 +1,733 @@
+From 103bc30b97eb03a2d239b90f47d3f45287787243 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 11 Sep 2026 02:28:14 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20exit=20=E5=BF=AB=E7=85=A7=E6=83=B0?=
+ =?UTF-8?q?=E8=AE=A1=E7=AE=97=20+=20=E9=87=87=E7=BA=B3=20OpenTUI=200.4.3-s?=
+ =?UTF-8?q?mark.12=20=E4=BF=AE=E5=A4=8D=20TUI=20=E5=8D=A1=E6=AD=BB?=
+ =?UTF-8?q?=E6=A0=B9=E5=9B=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+卡死根因：超长会话中 exit 快照的 eager memo（sessionUsage）订阅全部 part store，每个 part delta 都对全部消息做 O(总数) 的 tokenAccounting 重算（实测 300 条时 ~15ms/delta）占满主线程；reconciler 又把 renderable 销毁无界 defer 到 process.nextTick，主线程被占满时 nextTick 饿死，待销毁积压涨满 native handle 注册表（65535）→ Failed to create TextBuffer → 渲染崩溃 → 主线程自旋 → 卡死。
+
+修复：(1) exit 快照改退出时惰计算——删除 eager memo 与随-delta createEffect，改为一次性注册惰性 producer，exit.message 支持 lazy 取值；token 计数数值口径不变。(2) 采纳 OpenTUI 0.4.3-smark.12：reconciler 待销毁积压加 MAX_PENDING_DESTROY 阈值、超阈值同步 drain（defer 与 move/reuse 语义不变）。
+
+diff --git a/bun.lock b/bun.lock
+index 51175b466bc7b7435b7eab95fcf4eb1fd0c1275a..b28e66ab0589029c2744866f4dd6dcb12708acd7 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -541,9 +541,9 @@
+         "typescript": "catalog:",
+       },
+       "peerDependencies": {
+-        "@opentui/core": ">=0.4.3-smark.1",
+-        "@opentui/keymap": ">=0.4.3-smark.1",
+-        "@opentui/solid": ">=0.4.3-smark.1",
++        "@opentui/core": ">=0.4.3-smark.12",
++        "@opentui/keymap": ">=0.4.3-smark.12",
++        "@opentui/solid": ">=0.4.3-smark.12",
+       },
+       "optionalPeers": [
+         "@opentui/core",
+@@ -709,17 +709,17 @@
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+   },
+   "overrides": {
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-0.4.3-smark.11.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-arm64-0.4.3-smark.11.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-x64-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-musl-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-musl-0.4.3-smark.11.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-arm64-0.4.3-smark.11.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-x64-0.4.3-smark.11.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-keymap-0.4.3-smark.11.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-solid-0.4.3-smark.11.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+     "poe-oauth": "0.0.6",
+@@ -735,9 +735,9 @@
+     "@npmcli/arborist": "9.4.0",
+     "@octokit/rest": "22.0.0",
+     "@openauthjs/openauth": "0.0.0-20250322224806",
+-    "@opentui/core": "0.4.3-smark.11",
+-    "@opentui/keymap": "0.4.3-smark.11",
+-    "@opentui/solid": "0.4.3-smark.11",
++    "@opentui/core": "0.4.3-smark.12",
++    "@opentui/keymap": "0.4.3-smark.12",
++    "@opentui/solid": "0.4.3-smark.12",
+     "@pierre/diffs": "1.1.0-beta.18",
+     "@playwright/test": "1.60.0",
+     "@sentry/solid": "10.36.0",
+@@ -1616,27 +1616,27 @@
+ 
+     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.40.0", "https://registry.npmmirror.com/@opentelemetry/semantic-conventions/-/semantic-conventions-1.40.0.tgz", {}, "sha512-cifvXDhcqMwwTlTK04GBNeIe7yyo28Mfby85QXFe1Yk8nmi36Ab/5UQwptOx84SsoGNRg+EVSjwzfSZMy6pmlw=="],
+ 
+-    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-0.4.3-smark.11.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.11", "@opentui/core-darwin-x64": "0.4.3-smark.11", "@opentui/core-linux-arm64": "0.4.3-smark.11", "@opentui/core-linux-arm64-musl": "0.4.3-smark.11", "@opentui/core-linux-x64": "0.4.3-smark.11", "@opentui/core-linux-x64-musl": "0.4.3-smark.11", "@opentui/core-win32-arm64": "0.4.3-smark.11", "@opentui/core-win32-x64": "0.4.3-smark.11" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-q+RjcrMA6vXz46h8/SupE/Gl9QtgcyGlIOAO3VZlV7HwLUvJAPPGEh4gWdFjGclP5SquMQ9B3TatiYHXJ4D66g=="],
++    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.12", "@opentui/core-darwin-x64": "0.4.3-smark.12", "@opentui/core-linux-arm64": "0.4.3-smark.12", "@opentui/core-linux-arm64-musl": "0.4.3-smark.12", "@opentui/core-linux-x64": "0.4.3-smark.12", "@opentui/core-linux-x64-musl": "0.4.3-smark.12", "@opentui/core-win32-arm64": "0.4.3-smark.12", "@opentui/core-win32-x64": "0.4.3-smark.12" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-LGVJWpnCkK+DZaHzctBZSjsGdzLkqKTlGLb+PiCReE8072xIRotb6QrxoFOSnH99RdrCHD0PTMikUtwQ5yJnDg=="],
+ 
+-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-arm64-0.4.3-smark.11.tgz", {}, "sha512-X4W32M7v9JeiFNWoMDto2bJ6kOhAb2p6eJxes6R52/gpd7vl/JiG8q0mdfo1AG0QTWE8/0wPCE18Ea1h4bDuHQ=="],
++    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz", {}, "sha512-X7Ti59iiAqiS+MctJKSaxNdq1upFa4uVqPixzZpi5e0vN6DvJETpxyNchyAYOblhXbRotPreZII/s6SPm1VH3A=="],
+ 
+-    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-x64-0.4.3-smark.11.tgz", {}, "sha512-2EOWKeptxnzWk2PKbxMhRah901zSHPPYzMs0y3ZvduKxGBd4cLezwig4hm1wNIh3fd0H/fHF5sjCIHVWbkFmOA=="],
++    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz", {}, "sha512-LnvsOGyIgb+sEq4VYnAUzPrL6rGGYNVpKQGX9j3X3to8gIKxLPpcO032gA5TeX7Q97cVbgbHiG374KpOFdjwkw=="],
+ 
+-    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-0.4.3-smark.11.tgz", {}, "sha512-kykF5DruTIImlgMfCzfOMvwdFG1HkDMVsoVfJGWqoMX3p6XrvAB0d/kDuIYk8D+NmgECD80fGk+MxfuPr6uiyg=="],
++    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz", {}, "sha512-64N3xqov96lN/XoV9tnzKlSjJXPxrT95eppr4P8NYkaeWPFbtNbThutgAAXPmmd5hBee4EB0Rdq+nMTODGVBRQ=="],
+ 
+-    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-musl-0.4.3-smark.11.tgz", {}, "sha512-pqk8hviu1JkN2XoLj5/zvFBKp8HCQ8VJjzfjwd4xUq8NEq8wEBu6FjLk5Xcfdrjf8KSFcpNQ8MTxK/Hy8T5Nfw=="],
++    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz", {}, "sha512-dx51XRvLjQc0Wt73tDK5uj8j8ndJzz1iqP6oIcphDRpNE3+9pRhgrtGmgebKArol6yvKQxY1vAqI+fr+tvK59A=="],
+ 
+-    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-0.4.3-smark.11.tgz", {}, "sha512-6axCmJUZjjh3zBoajQS5rwWYfeIV8vnqrwCFcFgiPfYHKcCBi2yOLZ+voWCCFnbcdmLpEzVgY75EPtes4M64Zg=="],
++    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz", {}, "sha512-Abw1EmvKh0lA2zSuMnPrqD0pi6nmFooYpjH/wyyxefsSS9SYBVq5we7IFev3hUM6P38oibFTuRMpBAq06oKN6Q=="],
+ 
+-    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-musl-0.4.3-smark.11.tgz", {}, "sha512-+E4H1gZMHO4Ra2SVN7n4aki7WYEMwUgTPPV7pfbaIj/kn31qfeSkueNBhq+iJSkk36otbx5dEn+h/B3HdnupkA=="],
++    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz", {}, "sha512-nr1E67xJ3taU0YLN6xW/mzD4eHiRToJnTAhdfckI21ues9iSolKbQpe/lo/IMX+3k4ebAKakwkDZIYS25cbHJg=="],
+ 
+-    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-arm64-0.4.3-smark.11.tgz", {}, "sha512-yfjvV/IWrkKNaLyRQcR1yiuPLEpf8vUtBZ9vOYEZ+dhwXd/7uOsDkgLecs6+qgTCtdOEsOYUHqqmvD8ACOq+Yg=="],
++    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz", {}, "sha512-5y7/E56F7FObVZdLvDmd/n7Lyp2twkSkhvTNhvRQrwb3iASXuiK2xlct6YgT+t35TthpVGmrgJip6dALMce3jw=="],
+ 
+-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-x64-0.4.3-smark.11.tgz", {}, "sha512-S7MsEGR5HIV1Cg/kGg/pkOQeKS0ly5SRLAJWniS3/U2Tk1jgKQkVNq7q9SY4WvfEGg91aowx8iBaIvzGdSEGzA=="],
++    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz", {}, "sha512-xs38fltR0unoSYoRveMgwOy9A1+PZzLQRHVRwIFR71gYE/ojUJ1y6RVJ0B8RXJ950Qmu++jkDxT1tPeW9sd5Yg=="],
+ 
+-    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-keymap-0.4.3-smark.11.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.11" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.11", "@opentui/solid": "0.4.3-smark.11", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-W2bAc1eflIkLqw0e9zclGZLZPx4Z7cqkLv5lrJerYfw/pQy15TgsouL1yawmIpbi6+vzkcrf9Kwps0qgKXTXNg=="],
++    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.12" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.12", "@opentui/solid": "0.4.3-smark.12", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-J1KFnA8c1nmBTbI3i56zzpmdo/rbS03zUNTOexS5CeB5oUs2mNhIhrsodK5jamhOosRI00S6IcRUWvA7ACpr4Q=="],
+ 
+-    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-solid-0.4.3-smark.11.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.11", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-ZGyluDqWjNG/ogChzHKjfX7b/gM8UNBIlyP/aDcRYVpHBF3W4BwG8Ngkg1zZqXzbb7mTGm4cS4klIQ2Yd13J9Q=="],
++    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.12", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-eMJSLeZnHB/6bAMGs6PwcIvxMG+s2b3DRO+PjM+7YwGV2pT/BDrqdFo8cCifAw+ub/s90HZL9N74ummC9b4G3A=="],
+ 
+     "@oslojs/asn1": ["@oslojs/asn1@1.0.0", "https://registry.npmmirror.com/@oslojs/asn1/-/asn1-1.0.0.tgz", { "dependencies": { "@oslojs/binary": "1.0.0" } }, "sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA=="],
+ 
+diff --git a/docs/plans/tui-token-accounting-and-destroy-backlog-repair.md b/docs/plans/tui-token-accounting-and-destroy-backlog-repair.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..68352a88b60014a59f5ff3ed3e2a5b6087a1b413
+--- /dev/null
++++ b/docs/plans/tui-token-accounting-and-destroy-backlog-repair.md
+@@ -0,0 +1,303 @@
++# Canonical Implementation Plan: TUI 卡死——tokenAccounting 惰计算 + reconciler 销毁积压有界
++
++> Status: verified
++>
++> Revision: R2
++>
++> Approved revision: R2
++>
++> Audit verdict: 方案审计 R1 BLOCK（B-01/B-02）→ R2 **APPROVE / No blocking findings**；实现审计 Round 1 BLOCK（B-01 测试 red-capability）→ rework（同步观测）后 Round 2 **APPROVE / No blocking findings**（2026-09-10，adversarial-auditor subagent，full-scope）
++>
++> Audit mode: full-scope
++>
++> Requirement source: 用户 Session GOAL（2026-09-10）——五点修复需求，见 §1 逐字引用
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-09-10
++
++本文是本任务唯一的 implementation authority。调查证据与根因分析记录见姊妹文档 `docs/plans/tui-freeze-native-handle-exhaustion.md`（下称「调查文档」）；本文件只承载修复设计与放行依据。
++
++## 1. Verbatim Requirement
++
++> 需修改（治本优先）：
++> 1.【主凶·治本】session/index.tsx:486 的 exit 快照 createEffect 在每个 part delta 上全量重算 tokenAccounting（O(总数)），应改为退出时惰计算——exit message 仅在 exit() 里被读，零兼容风险，异常退出无回归。
++> 2.【安全网】reconciler.ts:133 把待销毁 renderable 无界 defer 到 process.nextTick，主线程被（1）的计算占满时饿死、积压无界涨满 65535；应给积压加上限、超阈值同步 drain（不改正常 defer 语义）。
++> 可选/配套：
++> 3. session/index.tsx:1842 turnUsage 只算当前 request 的用量，不再全表遍历。
++> 4. accounting.ts:176-186 的 O(parts²) 内层回扫循环、:223-225 的 ratio 全表 map，改为增量/缓存。
++> 5. theme.tsx 共享 SyntaxStyle 退休前等待在途高亮完成，修 use-after-destroy（消除 NativeSyntaxStyle is destroyed → 工具空卡片）。
++>
++> 整体修改预算为生产代码不超过八个文件，生产代码修改行数不超过八百行，如有需要可扩充为一千二百行。整体修改保持精简且尽量避免让上下游的调用等等发生冲突，并适当修改移除掉不必要的，避免或者不合适的调用。同时整体的最终行为精确度又不改，譬如整体的token的计数的估算等等，上下游不会受到基础设施修改而被影响。其准确度不能出现问题。最终方案同时需要完整调研相应测试是否会引发红测，最终的 commit 版本不得引入新的红测或出现已有红测。所有的红测都应当得到解决，如生产代码，时序不稳定，请修改生产代码；如测试语义过旧，请谨慎修改。
++
++## 2. Explicit Non-Goals
++
++- 不改变任何 token 计数/估算的**数值语义**：exit message、每条 footer、prompt/sidebar、`/context` 的 input/output/reasoning/cache/cost 口径与现状逐字符一致。
++- 不改变 reconciler 的正常 defer 语义与 move/reuse 语义（被 remove 后在 drain 前 re-add 的节点不销毁）。
++- 不改变消息列表的增量渲染行为（`<For>` keyed、markdown 流式原地更新——这些实测是正常的）。
++- 不发布 OpenTUI 新版本、不改 CI/release 流程、不改 `package.json` overrides（reconciler 改动先落在 thirdparty 源码并经本地测试；进入生产二进制属另一发布动作，见 §20 开放决定）。
++- 不修改 daemon、sync 事件协议、SQLite schema、provider、权限。
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` | Message=MessageV2 parts；`token/` 是 token accounting + estimate；TUI 在 `cli/cmd/tui/`。 |
++| `.opencode/policy/first-principles-engineering.md` | 修 first divergence、单一 primary path、禁 fallback、双向 traceability、中文注释门禁。 |
++| `packages/opencode/AGENTS.md` | Bun、从 package 目录跑测试/typecheck、避免不必要抽象。 |
++| `thirdparty/opentui/AGENTS.md` | OpenTUI 改动必须有真实复现；TS-only 改动无需 native build。 |
++| 调查文档 §3.4/§3.5/§3.6 | 本任务的实测根因与消费者/兼容性证据（全部来自可复现 harness）。 |
++| root `package.json` `overrides` | `@opentui/*` 生产构建取自 GitHub release tarball `v0.4.3-smark.11` → reconciler 源码改动进生产二进制需另走发布（见 §20）。 |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `session/index.tsx:236,486-499` | `sessionUsage` memo 被 exit-message `createEffect` 读取，每个 part delta 触发重算 | observed |
++| `session/index.tsx:1842-1855,1964` | `turnUsage` footer 用 `tokenAccounting(...).request`，受 `footerVisible()` 门控 | observed |
++| `token/accounting.ts:144-225` | 全表遍历所有消息；`:176-186` O(parts²) 回扫 + tool `JSON.stringify`；`:223-225` `learnInputCharsPerToken` map 全表 | observed |
++| `cli/cmd/tui/context/exit.tsx`（`message.set/get`，`exit()` 内 `store.get()`） | exit message **仅退出时**被读 → 惰计算零兼容风险 | observed |
++| `cli/cmd/tui/context/sync.tsx:672` | `exit.message.set("opencode daemon stopped.")` 字符串用法 → thunk 扩展必须向后兼容字符串 | observed |
++| `thirdparty/opentui/packages/solid/src/reconciler.ts:111-139` | `_removeNode` 把 `destroyRecursively()` 无界 defer 到 `process.nextTick`，带 `!node.parent` 条件 | observed |
++| `thirdparty/opentui/packages/core/src/zig/handles.zig:10,146` | native handle 注册表 `MAX_SLOTS=65535` 硬上限，满则 `OutOfHandles` | observed |
++| `.temp/Testing/repro-reconciler-leak.tsx` A/B | 紧凑循环积压无界（+8/轮→3210），让出事件循环即排干为 0；native 容量无泄漏 | observed（可复现） |
++| `.temp/Testing/zz-emit-timing.test.tsx` 插桩 | 300 条消息下 30 个 delta 触发 tokenAccounting 34 次 / 456.9ms ≈15ms/delta；50 条≈0 | observed（可复现） |
++| `.temp/Testing/zz-production-rate.test.tsx` | 流式 delta 新建 renderable 0.2/个、tool 生命周期 0、新消息 ~24-30 → 生产数量正常 | observed（可复现） |
++| 冻结 TUI 日志 `2026-09-09T213500.log` | `Failed to create TextBuffer`（启动 ~8h 后）→ `NativeSyntaxStyle is destroyed` | observed |
++
++## 5. Current Behavior
++
++```text
++provider SSE part-delta / tool event
++  -> sync.tsx 写 store.part（O(1)，Binary.search+splice）
++  -> Solid recompute：sessionUsage = tokenAccounting(所有消息)  〔O(总数×parts²)，~15ms/delta @300 条〕
++       - 触发者 A：session/index.tsx:486 createEffect 读 sessionUsage() 更新 exit 快照
++       - 触发者 B：session/index.tsx:1842 各 assistant footer turnUsage（全表遍历）
++  -> 主线程被 O(总数) 计算占满，不 yield 事件循环
++  -> reconciler._removeNode 的 process.nextTick 销毁被饿死（A/B 实测：紧凑循环积压无上限）
++  -> 待销毁 renderable（每个 ~4 native handle）积压涨满 65535
++  -> Failed to create TextBuffer → 渲染崩溃 → 主线程自旋 → 卡死
++```
++
++实测分项：renderable **生成数量**正常（流式 0.2/delta、新消息 ~30）；render（带 culling）~6ms @300；**tokenAccounting 是随消息数超线性膨胀的主线程占用源**。
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| 每个 part delta / tool 事件 | provider SSE → sync store | 已到达的 part 更新 | `sessionUsage`/`turnUsage` 重算 | session/index.tsx + accounting.ts | observed |
++| 退出（SIGINT/SIGTERM/SIGHUP） | 用户/信号 | `exit()` 读 `store.get()` | exit message 打印 | exit.tsx | contracted |
++| 异常退出（崩溃/强杀） | OS | `exit()` 不运行 | 无消息（现状相同） | exit.tsx | observed |
++| 连续无空闲负载下的 renderable 移除 | 滑窗/更新 → reconciler | remove 已置 parent=null | nextTick 销毁 | reconciler.ts | observed |
++| remove 后、drain 前 re-add 的节点（move/reuse） | `<For>` 重排等 | node.parent 非 null | 销毁须跳过 | reconciler.ts | reachable |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | exit message 文本与会话统计数值与现状**逐字符一致**（input/output/reasoning/cost 口径不变）；仅在退出时计算。 | 用户“准确度不能出现问题” + exit.tsx 仅退出时读取 | 新增 lazily-compute 等价性测试 |
++| INV-02 | part delta / tool 事件**不再**触发 `tokenAccounting` 的 O(总数) 重算（exit 快照改为退出时惰计算）。 | 插桩实测 15ms/delta@300 | 新增 red 测试：delta 后 tokenAccounting 调用数≈0 |
++| INV-03 | reconciler 待销毁 renderable 积压**有界**，任何连续负载下不超过阈值，永不涨满 65535。 | A/B 实测无界积压 | 新增 red 测试：紧凑循环后积压≤阈值 |
++| INV-04 | reconciler 的 move/reuse 语义保留：remove 后、drain 前 re-add（parent 非 null）的节点**不被销毁**。 | reconciler.ts:134 `!node.parent` 现有语义 | 新增/复用 reconciler move 测试 |
++| INV-05 | `exit.message.set(string)` 字符串用法不变（sync.tsx:672）。 | 现有调用 | 现有 sync/exit 测试 |
++| INV-06 | 不引入新红测、不出现已有红测；token 计数精度不变。 | 用户硬性要求 | 全套件回归 |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| INV-02 | `session/index.tsx:236` 的 `sessionUsage` **eager memo** 订阅全部 part store，每个 part delta 就重算 `tokenAccounting`（Solid memo eager：writeSignal 无条件推动 observer 重算，与下游是否读取无关）；`:486` 的 createEffect 只是其订阅者，非重算发生点 | session/index.tsx（sessionUsage memo，唯一消费者是 exit 快照） | zz-emit-timing 插桩：tokenAccounting 34 次/457ms @300，且随消息数超线性 |
++| INV-03 | `reconciler.ts:133-138` 把销毁无界 defer 到 `process.nextTick`，无积压上限；主线程被 (1) 占满时 nextTick 饿死 → 积压无界 | reconciler.ts `_removeNode` | repro-reconciler-leak A/B：紧凑循环 +8/轮无上限，让出即排干为 0 |
++
++**Red-capable feedback loop**（捕获用户症状的实测 harness，将固化为回归测试）：
++
++```text
++# 生产侧（INV-02）：packages/opencode
++bun test test/cli/cmd/tui/<red>.test.tsx   # 300 条会话下发 part delta，断言 tokenAccounting 调用数/耗时（red=随 delta 重算）
++# 销毁侧（INV-03）：thirdparty/opentui/packages/solid
++bun <repro>                                 # 紧凑 mount/unmount 循环，断言积压有界（red=无界增长）
++```
++
++两者已在 `.temp/Testing/` 以复现脚本形式跑通（红），将转为正式行为测试。
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| exit message 内容与时机 | session/index.tsx（路由拥有 session/usage 数据） | 退出时给出最终统计快照 | 它有 sessionUsage/session memos | exit.tsx 只存取消息、不懂 session 数据 |
++| exit message 的惰性取值 | exit.tsx（`message` store） | `set` 接受 string 或 lazy producer，`get` 在退出时求值 | 它是消息的唯一持有者/读取点 | 其它模块不持有该 store |
++| tokenAccounting 计算 | accounting.ts | 纯函数、数值口径不变 | 它是唯一 accounting 实现 | —（本计划不改其数值语义） |
++| renderable 销毁时机与积压上限 | reconciler.ts（`_removeNode`） | defer 销毁 + move/reuse 语义 | 它已经是销毁的唯一调度点 | renderer/core 不管 Solid 节点的移除时机 |
++
++## 10. Single Approved Primary-Path Design
++
++### 修复 1（生产侧·治本）：exit 快照真正惰性化——删除 eager memo
++
++**First divergence（经审计修正）**：`session/index.tsx:236` 的 `sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))` 是 **eager memo**——Solid 的 memo 只要存活且订阅着 part store，每个 part delta 都会重算（writeSignal 无条件推动 observer 重算，与下游是否读取无关）。`:486` 的 `createEffect` 只是它的一个订阅者；**只删 effect 不摘 memo 订阅，重算照常发生**。该 memo 的唯一消费者就是 exit 快照（全仓仅 :236 定义 + :487 读取两处引用）。
++
++**Primary repair**：既然 `sessionUsage` 唯一消费者是 exit 快照，就**删除这个 eager memo 本身**，让退出路径在 `get()` 时才以最终态直接调一次 `tokenAccounting`。
++
++- `session/index.tsx`：删除 `:236` 的 eager `sessionUsage` memo + 删除 `:486-499` 的随-delta `createEffect`；改为**一次性**（组件主体 / onMount）向 `exit.message.set` 注册一个 lazy producer，thunk 在退出被 `get()` 求值时现场调 `tokenAccounting(messages(), (id) => sync.data.part[id] ?? [])`。**不加 onCleanup restore**——现状 message 在 route 卸载后仍保留（createEffect 返回值不作 cleanup，Solid `runComputation` 仅把它存为 node.value），thunk 同样持久，保持「离开会话→回 home→退出仍打印该会话最终统计」的现状语义。
++- `exit.tsx`：`message.set` 接受 `string | (() => string | undefined)`；`get()` 在退出时若是函数则求值。字符串用法（sync.tsx:672）不受影响（INV-05）。thunk 在 route 卸载后读取已 dispose 的 memo 返回最后缓存值（Solid `readSignal` 对已 dispose memo 安全返回），无 throw 风险。
++
++```text
++路由挂载 -> exit.message.set(() => formatSessionExitMessage(退出时现场 tokenAccounting(最终 messages/parts)))  〔无 eager memo，delta 路径零重算〕
++退出 exit() -> store.get() 求值 thunk -> tokenAccounting(最终态) 一次 -> 打印（与现状逐字符一致）
++```
++
++为何修 first divergence：摘掉 eager memo 的 store 订阅后，part delta 路径上**不再存在**任何 tokenAccounting 重算；把「退出才需要」的 O(总数) 计算真正挪到「退出一次」。数值语义不变（同一 tokenAccounting、同一时间点的最终态）。
++
++### 修复 2（销毁侧·安全网）：reconciler 待销毁积压有界
++
++**First divergence**：`_removeNode` 无界 defer 销毁到 nextTick。**Primary repair**：给积压加上限，超阈值同步 drain，**不改变正常 defer 语义**。
++
++- `reconciler.ts`：把「每个 `_removeNode` 各自 `process.nextTick`」改为**模块级共享待销毁队列 + 单次 nextTick flush + 阈值同步 drain**：
++
++```text
++_removeNode: parent.remove(node) 后
++  若 node 是 BaseRenderable: 入队 pendingDestroy
++    - 队列长度 >= MAX_PENDING_DESTROY -> 立即同步 flushPendingDestroy()（防饿死时无界积压）
++    - 否则若未调度 -> process.nextTick(flushPendingDestroy) 一次
++flushPendingDestroy: 逐个 node 若仍 !node.parent 才 destroyRecursively()（保留 move/reuse 语义，INV-04）
++```
++
++- 阈值 `MAX_PENDING_DESTROY` 为命名常量：存活树约 5400 renderable ≈ 21600 handle，65535 上限余量 ~44000 handle（~11000 renderable）；阈值取远小于此的常量（如 2048），既远不到耗尽、又不因小批量移除就强制同步销毁。
++
++为何修 first divergence：它直接给「饿死」这一已实测机制上硬顶，无论主线程为何繁忙（accounting、突发 patch replay、未来的 O(总数) 回归）都不会再无界积压。
++
++**禁 fallback 自查**：两修复都直接修各自 first divergence，不引入第二套成功路径、不 catch-and-success、不禁用既有行为另起炉灶。
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++| exit 快照随-delta eager memo + createEffect | current | 现状（非 fallback，但是冗余重算源） | yes | 全部 | **移除**（删 :236 memo + :486 effect，改退出时惰计算，修复1） |
++| exit.message 字符串 set | current | contracted pass-through | yes | sync.tsx:672 | **保留**（兼容） |
++| reconciler 每节点 nextTick defer | current | 现状（defer 语义本身正确） | yes | 全部 | **改造为有界**（修复2，语义不变） |
++| turnUsage 全表遍历 | current | 现状 | yes | footer | **本计划不改**（见 §12/§20：实测其 per-delta 调用≈0，修复1后非瓶颈） |
++| accounting O(parts²)/ratio map | current | 现状 | yes | 内部 | **本计划不改**（修复1后 tokenAccounting 退出时才跑，内部成本不再关键） |
++| theme 共享 SyntaxStyle 退休 | current | 现状 | yes | theme | **本计划不改**（use-after-destroy 是卡死级联下游症状，根因修复后不复现；见其下游说明） |
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| `session/index.tsx:236` 的 eager `sessionUsage` memo + `:486-499` 的随-delta `createEffect` | 让 exit message 保持「最新快照」 | 退出时惰计算更准（用最终态）且不占运行期主线程；memo 唯一消费者就是 exit 快照 | 删除该 memo 与 effect，改一次性 lazy 注册（不加 onCleanup restore，保持卸载后保留语义） |
++
++无其它被取代的 workaround；本计划不为已修根因新增 fallback。
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| INV-01（exit 数值一致） | exit.tsx `get` 求值 thunk；session/index.tsx 一次性 lazy 注册（无 onCleanup restore） | exit.tsx、session/index.tsx | exit message 与现状逐字符相等（同一最终态；含「离开会话→home→退出」仍打印） |
++| INV-02（delta 不重算 O(总数)） | session/index.tsx **删 :236 eager memo** + 删 :486 createEffect → 退出时 thunk 直调 tokenAccounting | session/index.tsx | red：300 条发 delta，tokenAccounting 调用数≈0（修复前≈1+/delta） |
++| INV-03（积压有界） | reconciler.ts 共享队列+阈值 drain | reconciler.ts | red：紧凑 mount/unmount 循环后积压≤MAX_PENDING_DESTROY（修复前无界） |
++| INV-04（move/reuse 不销毁） | reconciler.ts flush 保留 `!node.parent` 检查 | reconciler.ts | reconciler move/reuse 行为测试 |
++| INV-05（字符串 set 兼容） | exit.tsx `get` 对 string 原样返回 | exit.tsx | sync.tsx:672 路径行为不变 |
++| INV-06（无新红测/精度不变） | 全部 | — | 相关包全套件回归 |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| exit.tsx `message` 支持 lazy producer | INV-01/02 | exit message 仅退出时读（exit.tsx `exit()`） | 现状 `set` 只收 string，route 被迫用 createEffect 随 delta 重算来保持新鲜 |
++| session/index.tsx 删 eager memo + 一次性 lazy 注册 | INV-01/02 | sessionUsage 唯一消费者是 exit 快照；eager memo 订阅 store 即每 delta 重算 | createEffect 语义就是随依赖重算；而 eager memo（:236）只要存活订阅 store 就重算，只删 effect 不摘订阅等于未修 |
++| reconciler 共享队列+阈值 drain | INV-03 | A/B 实测无界积压 | 每节点独立 nextTick 无积压概念、无上限 |
++| reconciler flush 保留 `!node.parent` | INV-04 | reconciler.ts:134 现有语义 | 直接同步销毁会破坏 move/reuse（re-add 节点被误销毁） |
++
++无多余 concept；每个都映射到 INV 与实测证据。
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/context/exit.tsx` | modify | `message.set` 接受 `string \| (() => string \| undefined)`；`get` 退出时求值 thunk | ~+8 |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | 删 `:236` eager `sessionUsage` memo + `:486-499` 随-delta createEffect，改一次性 lazy 注册 exit message producer（**不加 onCleanup restore**，保持卸载后保留语义） | ~+8/-14 |
++| `thirdparty/opentui/packages/solid/src/reconciler.ts` | modify | `_removeNode` 销毁从「每节点 nextTick」改为「共享队列 + 阈值同步 drain + 单次 nextTick flush」 | ~+18/-6 |
++
++生产代码共 **3 个文件**（预算 ≤8）。**Deferred（见 §11/§20，不进本计划）**：turnUsage 收窄（:1842）、accounting 内部 O(parts²)（accounting.ts）、theme use-after-destroy（theme.tsx）。
++
++## 16. TDD Behavior Slices
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1（INV-02，packages/opencode） | 300 条会话发 part delta，断言 `tokenAccounting` 不再被随 delta 重算（调用数≈0） | 现状 :236 eager memo 每 delta 重算 | 删 memo 后 delta 路径不触发 accounting；退出时算一次 | token 数值与现状一致（INV-01）由同测试断言；注意残余消费者（turnUsage/sidebar/prompt）需在 fixture 里关闭以免干扰 ≈0 断言 |
++| 2（INV-03，thirdparty/opentui/packages/solid） | 紧凑 mount/unmount 循环（不让出事件循环），断言待销毁积压≤阈值 | 现状无界 defer → 积压随迭代线性涨 | 加阈值同步 drain 后积压有界，settle 后清空 | move/reuse（INV-04）与正常 defer 语义不变 |
++| 3（INV-05，packages/opencode） | `exit.message.set("str")` 后退出仍打印该字符串 | —（兼容保护，非 red） | thunk 支持不影响字符串路径 | 现有 sync/exit 行为 |
++
++测试观察公开行为（exit message 文本 / 积压上界 / 字符串兼容），用独立预期值，不复制实现逻辑、不断言私有方法。
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` | ~32 | 排除 import、格式化、纯移动 |
++| Required Chinese explanatory comments `C` | ~5 | `C >= max(1, ceil(32 * 0.15)) = 5` |
++
++需要中文解释的点：
++- exit.tsx：为什么 `message` 支持 lazy producer（exit 快照只需退出时求值，避免随 delta 的 O(总数) 重算）。
++- session/index.tsx：为什么用一次性 lazy 注册而非 createEffect（数值在退出时才被消费，INV-01 语义不变）。
++- reconciler.ts：为什么积压超阈值要同步 drain（连续无空闲负载会饿死 nextTick，无界积压会耗尽 65535 native handle）；为什么 flush 仍保留 `!node.parent`（move/reuse 语义）。
++
++## 18. Verification
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test test/cli/cmd/tui/<red-lazy>.test.tsx` | `packages/opencode` | INV-01/02：delta 不重算 + exit 文本一致 |
++| `bun test <reconciler bounded 测试>` | `thirdparty/opentui/packages/solid` | INV-03/04：积压有界 + move/reuse 语义 |
++| `bun test test/cli/cmd/tui`（相关子集） | `packages/opencode` | INV-05/06：无新红测 |
++| `bun test`（accounting/session 相关） | `packages/opencode` | token 计数精度不变 |
++| `bun typecheck` | `packages/opencode` 与 `thirdparty/opentui/packages/solid` | 类型不破 |
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added | 0 | 复用既有 seam |
++| Files modified | 3（+ 各 1 测试文件） | 最小修复面 |
++| Files deleted | 0 | — |
++| Production lines | ~32 | 远低于 800 预算 |
++| Test lines | ~120 | 两个 red 行为测试 |
++| Generated lines | 0 | — |
++
++## 20. Real Risks and Open Decisions
++
++**真实风险（observed/reachable）**：
++- reconciler 阈值同步 drain 在极端批量移除时引入一次性主线程峰值——已通过「阈值远大于单消息移除量、远小于耗尽余量」缓解（保留 defer 的正常路径，仅超限时兜底）。
++- reconciler 改动在 `thirdparty/opentui`，本地可改可测；但**生产二进制经 root `package.json` overrides 取自 GitHub release tarball**，进入用户二进制需另走 OpenTUI 版本发布（0.4.3-smark.12）+ 重建 opencode——本计划不含发布动作。
++
++**已排除/不采纳的投机项**：turnUsage 收窄、accounting 内部增量、theme use-after-destroy——见 §11，均为修复1后非瓶颈或卡死级联下游症状，不进入本计划以保持最小修复面。
++
++### Open Decisions Requiring the User
++
++- **是否在本计划内做 OpenTUI reconciler 改动**（修复2）。它本地可改可测、是销毁侧安全网，但**进入生产二进制需要一次 OpenTUI 版本发布 + opencode 重建**。若你希望本计划只落 packages/opencode（修复1即可大概率消除卡死），我可以把修复2拆成独立的 OpenTUI 发布任务。默认：两个都做，reconciler 改动连同版本发布说明一并交付。
++
++## 21. Implementation Evidence
++
++**实际改动文件（3 生产 + 2 测试）**：
++- `packages/opencode/src/cli/cmd/tui/context/exit.tsx`（+8/-4）：`message.set` 接受 `string | (() => string | undefined)`，`get()` 退出时求值 thunk；字符串用法（sync.tsx:672）不变。
++- `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`（+10/-14）：删 `:236` eager `sessionUsage` memo + `:486` 随-delta `createEffect`，改 `onMount` 一次性注册惰性 exit 快照 thunk（无 onCleanup restore，保持卸载后保留语义）。
++- `thirdparty/opentui/packages/solid/src/reconciler.ts`（+37/-6）：`_removeNode` 销毁从「每节点各自 nextTick」改为「共享队列 + `MAX_PENDING_DESTROY=256` 阈值同步 drain + 单次 nextTick flush」，flush 保留 `!node.parent` 检查。
++- `test/cli/cmd/tui/session-exit.test.tsx`：新增 INV-02 red 测试（delta 不重设 exit message）。
++- `thirdparty/opentui/packages/solid/tests/reconciler-destroy-backlog.test.tsx`：新增 INV-03 red 测试（紧凑移除积压有界 + settle 排干）。
++
++**Red-Green 证据**：
++- INV-02：修复前 `setCount` 随 delta 增长（2→5），修复后 delta 不再重设 exit message（green）。
++- INV-03：修复前紧凑移除 300 个 renderable 全未销毁（300 > 256），修复后 ≤256 且 settle 后归零（green）。**测试观测为同步（setItems 后直接读 isDestroyed，不夹带任何 await/yield），实证：在还原后的原始 reconciler 上重跑为红（300），修复后绿——不依赖 renderOnce 是否排干 nextTick。**
++
++**验证命令与结果**（均从 package 目录跑）：
++- `bun test test/cli/cmd/tui/session-exit.test.tsx`（packages/opencode）：**4 pass**——3 个既有 exit 测试（INV-01 数值回归）+ 新 INV-02。
++- `bun test test/cli/cmd/tui/`（packages/opencode）：**323 pass / 0 fail**——TUI 无回归。
++- `bun test test/token/accounting.test.ts test/cli/cmd/tui/exit.test.tsx`（packages/opencode）：**10 pass**——token 精度与 exit 上下文不变。
++- `bun test`（thirdparty/opentui/packages/solid）：**263 pass / 0 fail**——reconciler 集合/move/portal/destroy 时序无回归。
++- `bun typecheck`（仓库根 = turbo typecheck，即 CI `typecheck.yml` 命令）：**14/14 通过**。（注：`tsc -p` 单独跑 opentui/solid 会经 project references 拉入兄弟包 three/ 的预存错误；opentui 不在 workspace、不进 CI typecheck。）
++- 原始反馈环（`.temp/Testing/zz-emit-timing.test.tsx`）：300 条消息 per-delta emit **19.20ms → 4.27ms**，tokenAccounting 重算 **34 次/457ms → 0**（delta 路径）。
++
++**E/C（实测）**：生产 E≈36 行（exit.tsx 5 + session/index.tsx 10 + reconciler.ts 21）；中文注释 C≈18 行（exit 3 + session 6 + reconciler 9），比例 ~50% ≫ 下限 `ceil(36×0.15)=6`。注释落点：exit.tsx 惰性 producer 与字符串兼容理由；session/index.tsx 惰注册与「不加 onCleanup restore」语义保留理由；reconciler.ts 阈值同步 drain 的饿死/耗尽因果与 `!node.parent` move/reuse 保留理由。
++
++**次级/替代路径盘点（实际）**：exit message 字符串 set（sync.tsx:672）为既有兼容路径，保留；无新增 fallback。
++
++**未验证项**：OpenTUI reconciler 改动进入生产二进制需另走 OpenTUI 版本发布（见 §20 开放决定）；本地 solid 套件已验证行为。
++
++---
+diff --git a/package.json b/package.json
+index ccaa182ac5a8a48b51f95fb547c042c755d1d43f..a02a7e45e77b587bf7cf3cd916f978c7599560dd 100644
+--- a/package.json
++++ b/package.json
+@@ -36,9 +36,9 @@
+       "@types/cross-spawn": "6.0.6",
+       "@octokit/rest": "22.0.0",
+       "@hono/zod-validator": "0.4.2",
+-      "@opentui/core": "0.4.3-smark.11",
+-      "@opentui/keymap": "0.4.3-smark.11",
+-      "@opentui/solid": "0.4.3-smark.11",
++      "@opentui/core": "0.4.3-smark.12",
++      "@opentui/keymap": "0.4.3-smark.12",
++      "@opentui/solid": "0.4.3-smark.12",
+       "ulid": "3.0.1",
+       "@kobalte/core": "0.13.11",
+       "@types/luxon": "3.7.1",
+@@ -128,17 +128,17 @@
+     "electron"
+   ],
+   "overrides": {
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-0.4.3-smark.11.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-keymap-0.4.3-smark.11.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-solid-0.4.3-smark.11.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-arm64-0.4.3-smark.11.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-x64-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-musl-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-0.4.3-smark.11.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-musl-0.4.3-smark.11.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-arm64-0.4.3-smark.11.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-x64-0.4.3-smark.11.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz",
+     "solid-js": "catalog:",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+diff --git a/packages/core/package.json b/packages/core/package.json
+index edf3ce8ba33ab741cb97df533f0cfc664a05a28d..a4394482a167342e54762a6ae92a97810343a0d5 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -72,6 +72,17 @@
+     "zod": "catalog:"
+   },
+   "overrides": {
+-    "drizzle-orm": "catalog:"
++    "drizzle-orm": "catalog:",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz"
+   }
+ }
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index e24edab07bfbaacc9c69fa6573845cf74a6c96ee..885a689c41c234251bd37d850430f7e2eceaa3ea 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -165,7 +165,18 @@
+     "zod": "catalog:"
+   },
+   "overrides": {
+-    "drizzle-orm": "catalog:"
++    "drizzle-orm": "catalog:",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz"
+   },
+   "optionalDependencies": {
+     "@picovoice/pvrecorder-node": "1.2.9",
+diff --git a/packages/opencode/src/cli/cmd/tui/context/exit.tsx b/packages/opencode/src/cli/cmd/tui/context/exit.tsx
+index d75fcf04a35b16d0e2a53ba895a66f945e32d7b5..e0495f0cc07b9dfa28c9dc081632fcd7174cec05 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/exit.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/exit.tsx
+@@ -8,9 +8,13 @@ import { onCleanup } from "solid-js"
+ const log = Log.create({ service: "tui" })
+ export const ExitSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
+ 
++// 退出消息允许惰性 producer：退出快照只需退出这一刻的最终态，不该随每个 part delta 全量重算。
++// 字符串与函数两种形态并存，兼容既有 `set("...")` 调用（sync.tsx 的 daemon stopped 等）。
++type ExitMessage = string | (() => string | undefined)
++
+ type Exit = ((reason?: unknown) => Promise<void>) & {
+   message: {
+-    set: (value?: string) => () => void
++    set: (value?: ExitMessage) => () => void
+     clear: () => void
+     get: () => string | undefined
+   }
+@@ -20,10 +24,10 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
+   name: "Exit",
+   init: (input: { onBeforeExit?: () => Promise<void>; onExit?: () => Promise<void> }) => {
+     const renderer = useRenderer()
+-    let message: string | undefined
++    let message: ExitMessage | undefined
+     let task: Promise<void> | undefined
+     const store = {
+-      set: (value?: string) => {
++      set: (value?: ExitMessage) => {
+         const prev = message
+         message = value
+         return () => {
+@@ -33,7 +37,8 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
+       clear: () => {
+         message = undefined
+       },
+-      get: () => message,
++      // get 在退出路径被调用；惰性 producer 此刻才求值，保证读到的是退出时的最终快照。
++      get: () => (typeof message === "function" ? message() : message),
+     }
+     const exit: Exit = Object.assign(
+       (reason?: unknown) => {
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 1328520ea9f976a8ce63f0d67815f906a2f254f2..16225f11d0eb84bad33bc7ad042f8afbbaf91955 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -231,9 +231,6 @@ export function Session() {
+   // Sync 数组已是 chronology 投影：路由决策统一用位置索引 + exact ID，
+   // 不再用 Message ID 字典序猜测时间顺序。
+   const messagePositions = createMemo(() => new Map(messages().map((message, index) => [message.id, index] as const)))
+-  // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
+-  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
+-  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
+   const permissions = createMemo(() => {
+     if (session()?.parentID) return []
+     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
+@@ -483,19 +480,21 @@ export function Session() {
+ 
+   const exit = useExit()
+ 
+-  createEffect(() => {
+-    const usage = sessionUsage().session
+-    // ExitProvider 只负责销毁 renderer 和发射已存文本；Session route 在这里保留最终统计快照。
+-    // effect 依赖 messages/parts 的 accounting memo，确保用户退出前 stored message 已反映最新快照。
+-    // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
+-    // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
+-    return exit.message.set(
+-      formatSessionExitMessage({
++  // exit 快照只在退出那一刻被 exit() 读取，所以挂载时注册一个惰性 producer 即可：
++  // 不在每个 part delta 上让 tokenAccounting 对全部消息做 O(总数) 重算（eager memo 会订阅 part store 随 delta 重算）。
++  // 数值口径与现状一致——退出时由同一 tokenAccounting 对最终 messages/parts 求值。
++  // 不加 onCleanup restore：现状 message 在 route 卸载后仍保留，离开会话回 home 再退出仍打印该会话统计。
++  onMount(() => {
++    exit.message.set(() => {
++      // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
++      // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
++      const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? []).session
++      return formatSessionExitMessage({
+         title: session()?.title ?? "",
+         sessionID: session()?.id,
+         usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
+-      }),
+-    )
++      })
++    })
+   })
+ 
+   // Helper: Find next visible message boundary in direction
+diff --git a/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx b/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
+index 4b8772de05ac56e4d3c1d475eb648cffdfe4f08b..14b21ce1976402b5ade00744ec2f3841c055d7cc 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
+@@ -75,6 +75,63 @@ test("keeps empty Session stdout free of a zero Stats row", async () => {
+   expect(output).toContain("Continue")
+ })
+ 
++test("exit snapshot is lazy: part deltas do not re-register the exit message", async () => {
++  const previous = Global.Path.state
++  await using tmp = await tmpdir()
++  Global.Path.state = tmp.path
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++
++  const user = userMessage("msg_user")
++  const assistant = assistantMessage("msg_assistant", user.id)
++  const calls = createFetch((url) => {
++    if (url.pathname === "/session") return json([sessionInfo({})])
++    if (url.pathname === `/session/${sessionID}`) return json(sessionInfo({}))
++    if (url.pathname === `/session/${sessionID}/message`)
++      return json([
++        { info: user, parts: [] },
++        {
++          info: assistant,
++          parts: [textPart("part_text", assistant.id, "hello"), stepFinishPart("part_finish", assistant.id)],
++        },
++      ])
++    return undefined
++  })
++  const events = createEventSource()
++  let exitRef: ReturnType<typeof useExit> | undefined
++  // 探测 exit.message.set 的注册次数：eager 重算会在每个 part delta 重新 set，lazy 只在挂载时 set 一次。
++  let setCount = 0
++  const app = await testRender(
++    () => <SessionHarness fetch={calls.fetch} events={events.source} bindExit={(e) => (exitRef = e)} onSetRegister={() => setCount++} />,
++    { width: 80, height: 16, footerHeight: 0 },
++  )
++  try {
++    await waitForExitMessage(app, () => exitRef, "Fix parser bug")
++    // 加载稳定后记录基线注册次数。
++    const baseline = setCount
++    for (let i = 0; i < 5; i++) {
++      // 每个 delta 改变 step-finish 的 token 数 => sessionUsage 的计算值必变，eager memo 必重算
++      const finish = stepFinishPart("part_finish", assistant.id)
++      events.emit({
++        directory,
++        project: "proj_test",
++        payload: {
++          id: `evt_${i}`,
++          type: "message.part.updated",
++          properties: { part: { ...finish, tokens: { ...finish.tokens, output: 970 + i + 1 } } },
++        },
++      } as any)
++      await app.renderOnce()
++      // 让出微任务/时任务确保 Solid effect 队列冲刷，避免多个 delta 的 effect 重算被批在一起而低估 eager 重算次数。
++      await Bun.sleep(0)
++    }
++    // INV-02：lazy 快照下 delta 不应再触发 exit message 的重注册（重算 tokenAccounting）。
++    expect(setCount).toBe(baseline)
++  } finally {
++    app.renderer.destroy()
++    Global.Path.state = previous
++  }
++})
++
+ async function captureExitOutput(
+   messages: Array<AssistantMessage | SDKUserMessage>,
+   parts: Record<string, Part[]>,
+@@ -128,6 +185,7 @@ function SessionHarness(props: {
+   fetch: typeof globalThis.fetch
+   events: ReturnType<typeof createEventSource>["source"]
+   bindExit: (exit: ReturnType<typeof useExit>) => void
++  onSetRegister?: () => void
+ }) {
+   const renderer = useRenderer()
+   const config = createTuiResolvedConfig()
+@@ -138,7 +196,7 @@ function SessionHarness(props: {
+     <OpencodeKeymapProvider keymap={keymap}>
+       <ArgsProvider>
+         <ExitProvider>
+-          <ExitCapture bind={props.bindExit}>
++          <ExitCapture bind={props.bindExit} onSetRegister={props.onSetRegister}>
+             <KVProvider>
+               <ToastProvider>
+                 <RouteProvider initialRoute={{ type: "session", sessionID }}>
+@@ -183,8 +241,18 @@ function SessionHarness(props: {
+   )
+ }
+ 
+-function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; children: JSX.Element }) {
+-  props.bind(useExit())
++function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; onSetRegister?: () => void; children: JSX.Element }) {
++  const exit = useExit()
++  props.bind(exit)
++  // 探测 exit.message.set 注册次数：在 Session 挂载前包住 set，且只包一次（ExitCapture 随挂载渲染一次）。
++  if (props.onSetRegister) {
++    const onSetRegister = props.onSetRegister
++    const orig = exit.message.set
++    exit.message.set = (value: any) => {
++      onSetRegister()
++      return orig(value)
++    }
++  }
+   return props.children
+ }
+ 
+diff --git a/packages/plugin/package.json b/packages/plugin/package.json
+index 889bc5790ea04adf9b56f96fa205c1362fe1d52e..5d11f744ea5f9cf412fac30640ec38c0c795c210 100644
+--- a/packages/plugin/package.json
++++ b/packages/plugin/package.json
+@@ -22,9 +22,9 @@
+     "zod": "catalog:"
+   },
+   "peerDependencies": {
+-    "@opentui/core": ">=0.4.3-smark.1",
+-    "@opentui/keymap": ">=0.4.3-smark.1",
+-    "@opentui/solid": ">=0.4.3-smark.1"
++    "@opentui/core": ">=0.4.3-smark.12",
++    "@opentui/keymap": ">=0.4.3-smark.12",
++    "@opentui/solid": ">=0.4.3-smark.12"
+   },
+   "peerDependenciesMeta": {
+     "@opentui/core": {
+diff --git a/thirdparty/opentui b/thirdparty/opentui
+index 0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2..2145b934ea8ef9da3faf63a6cb362879eaadb82d 160000
+--- a/thirdparty/opentui
++++ b/thirdparty/opentui
+@@ -1 +1 @@
+-Subproject commit 0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2
++Subproject commit 2145b934ea8ef9da3faf63a6cb362879eaadb82d
