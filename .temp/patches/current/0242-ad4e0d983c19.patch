@@ -504,7 +504,31 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2614,6 +2614,40 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>
+@@ -1156,15 +1156,20 @@ it.instance("auto compaction resumes without compacting retained old tail usage again", () =>
+     yield* sessions.updateMessage(old.assistant)
+     yield* addCompletedTool(chat.id, old.assistant.id)
+     yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
++    // #242: run consumes the summary immediately; markers are not replayable work.
++    yield* llm.text("summary")
++    yield* llm.text("resumed")
+-    yield* compact.create({
++    yield* compact.run({
+       sessionID: chat.id,
+       agent: "build",
+       model: ref,
+       auto: true,
+     })
+-    yield* llm.text("summary")
+-    yield* llm.text("resumed")
+ 
++    const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
++    expect(filtered.map((msg) => msg.info.id)).toContain(old.user.id)
++    expect(filtered.map((msg) => msg.info.id)).toContain(old.assistant.id)
++
+     const result = yield* prompt.loop({ sessionID: chat.id })
+     const all = yield* sessions.messages({ sessionID: chat.id })
+     const compactions = all.flatMap((msg) => msg.parts).filter((part) => part.type === "compaction")
+@@ -2614,6 +2619,40 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>
    }),
  )
  

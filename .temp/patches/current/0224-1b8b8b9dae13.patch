@@ -1346,19 +1346,7 @@ index afbae2c431..fd3f1b6df3 100644
    let key = ""
    // #187：是否位于 JSON 字符串 token 内部
    let inString = false
-@@ -188,6 +231,11 @@ function decodeEscaped(char: string) {
-           if (char === '"') {
-             inString = false
-             if (!activeField) pendingKey = key
-+            // #224：数组内多 string 项时，每个新 string 前补一个隐式换行，
-+            // #224：对齐 bridge sourceProp 用 "\n" 拼接 string[] 的行为
-+            // #224：arrayFieldHasValue 确保只在第二个及之后的数组项前补换行
-+            if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
-+            if (activeField && arrayField) arrayFieldHasValue = true
-             activeField = ""
-             key = ""
-             continue
-@@ -198,18 +246,31 @@ function decodeEscaped(char: string) {
+@@ -198,18 +241,42 @@ function decodeEscaped(char: string) {
  
          if (char === '"') {
            inString = true
@@ -1366,13 +1354,21 @@ index afbae2c431..fd3f1b6df3 100644
 +          // #224：数组内 string 项也激活 wanted 字段；数组外仍用 expectingValueFor
 +          // #224：这样 oldCode/newCode 的 string[] 元素也能被 lineCounter 正确计数
 +          activeField = wanted.has(expectingValueFor) ? expectingValueFor : arrayField
++          // #224：分隔换行必须先于第二项内容，才能对齐 sourceProp 的 join("\n")。
++          // 空末项也有分隔符，不能把它延迟到结束引号之后补入。
++          // 逐字符输入时，第二项尚未闭合也必须立即显示独立的一行。
++          if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
++          if (activeField && arrayField) arrayFieldHasValue = true
            expectingValueFor = ""
            key = ""
            continue
          }
--        if (char === ":" && pendingKey) {
--          expectingValueFor = pendingKey
--          pendingKey = ""
++        // #224：保留普通字段的冒号转换，数组扩展不能切断所有工具的字段识别。
+         if (char === ":" && pendingKey) {
+           expectingValueFor = pendingKey
+           pendingKey = ""
++          continue
++        }
 +        // #224：进入数组字段——oldCode/newCode 可以是 string[]
 +        // #224：遇到 [ 后切换到数组模式，后续逗号不再重置 pendingKey
 +        if (expectingValueFor && char === "[" && wanted.has(expectingValueFor)) {
@@ -1395,6 +1391,43 @@ index afbae2c431..fd3f1b6df3 100644
        }
      },
    }
+diff --git a/packages/tui/test/routes/session/notebook-pending-input.test.ts b/packages/tui/test/routes/session/notebook-pending-input.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/notebook-pending-input.test.ts
+@@ -0,0 +1,32 @@
++import { expect, test } from "bun:test"
++import { createPendingToolInputParser } from "../../../src/routes/session/pending-tool-input"
++
++test.each([
++  { code: ["a", ""], lines: 1 },
++  { code: ["", "b"], lines: 2 },
++  { code: ["a", "b"], lines: 2 },
++  { code: ["a\n", "b"], lines: 3 },
++  { code: [], lines: 0 },
++])("notebook array input preserves source lines: %j", ({ code, lines }) => {
++  // 数组空项和已有换行不能吞掉 bridge join 产生的源码边界。
++  const raw = JSON.stringify({ filePath: "a.ipynb", newCode: code, cellId: "TOP", editType: "insert" })
++  for (let split = 0; split <= raw.length; split++) {
++    // 每个分片位置均走真实 scanner，包括冒号、数组边界及转义序列中间。
++    const parser = createPendingToolInputParser("vscode_notebook_edit")
++    parser.push(raw.slice(0, split))
++    parser.push(raw.slice(split))
++    expect(parser.stats()).toMatchObject({ filePath: "a.ipynb", cellId: "TOP", operation: "insert", added: lines })
++  }
++})
++
++test("notebook next line is counted before its closing quote", () => {
++  const parser = createPendingToolInputParser("vscode_notebook_edit")
++  // UI 在字符串尚未结束时就读取统计，不能等最后引号才补数组分隔符。
++  parser.push('{"newCode":["first","sec')
++  expect(parser.stats()?.added).toBe(2)
++  parser.push('ond"],"oldCode":"before\\n","filePath":"a.ipynb"}')
++  // 数组结束后仍须恢复普通字段解析，不能把路径并入前一数组。
++  expect(parser.stats()).toMatchObject({ filePath: "a.ipynb", added: 2, removed: 1 })
++})
++
++// 普通 edit/write/apply_patch 的冒号转换由 pending-tool-input.test.ts 同时回归。
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
 index dac6c9a7fa..ad6d2393e9 100644
 --- a/sdks/vscode/src/notebook/edit.ts

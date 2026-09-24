@@ -1107,3 +1107,66 @@ new file mode 100644
 +  })
 +
 +})
+
+diff --git a/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap b/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap
+--- a/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap
++++ b/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap
+@@ -266,17 +266,42 @@ exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode models --help 1`] = `
+ exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode stats --help 1`] = `
+-"opencode stats
+-
+-show token usage and cost statistics
+-
+-Options:
+-  -h, --help        show help                                                              [boolean]
+-  -v, --version     show version number                                                    [boolean]
+-      --print-logs  print logs to stderr                                                   [boolean]
+-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+-      --pure        run without external plugins                                           [boolean]
+-      --days        show stats for the last N days (default: all time)                      [number]
+-      --tools       number of tools to show (default: all)                                  [number]
+-      --models      show model statistics (default: hidden). Pass a number to show top N, otherwise
+-                    shows all
+-      --project     filter by project (default: all projects, empty string: current project)[string]"
+-`;
++"opencode stats
++
++show token usage and cost statistics
++
++Commands:
++  opencode stats breakdown [dimension]  attribute cost, tokens, and requests by one dimension
++                                                                                       [aliases: by]
++  opencode stats overview               show a rich usage overview                [aliases: summary]
++  opencode stats dashboard              show a balanced usage dashboard              [aliases: dash]
++  opencode stats models                 rank token usage and cost by model id       [aliases: model]
++  opencode stats providers              rank token usage and cost by provider    [aliases: provider]
++  opencode stats timeline               render daily token stacks or cost bars      [aliases: daily]
++  opencode stats sessions               rank individual sessions by cost, tokens, calls, or recency
++                                                                                  [aliases: session]
++  opencode stats charts                 show the chart gallery for visual diagnostics
++                                                                                   [aliases: graphs]
++  opencode stats heatmap                show density maps for days and provider/model usage
++                                                                                     [aliases: heat]
++  opencode stats costs                  show cost-only curves, waterfalls, and distributions
++                                                                                     [aliases: cost]
++  opencode stats tokens                 show token-only input/output/cache stacks and ledger
++                                                                                    [aliases: token]
++  opencode stats insights               show trend insights, risks, recommendations, and outliers
++                                                                                  [aliases: insight]
++  opencode stats forecast               project cost run-rate and month-end spend[aliases: run-rate]
++
++Options:
++  -h, --help         show help                                                             [boolean]
++  -v, --version      show version number                                                   [boolean]
++      --print-logs   print logs to stderr                                                  [boolean]
++      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
++      --pure         run without external plugins                                          [boolean]
++      --days         show stats for the last N days (0 means today, default: all time)      [number]
++      --project      filter by project (default: all projects, empty string: current project)
++                                                                                            [string]
++      --color        ANSI color mode [string] [choices: "auto", "always", "never"] [default: "auto"]
++      --tools        number of tools to show in overview mode                               [number]
++      --models       legacy shortcut: show top model rows in the dashboard; pass a number for top N
++  -n, --limit        number of model/provider rows to show                                  [number]
++  -i, --interactive  cycle dashboard views with keyboard shortcuts        [boolean] [default: false]"
++`;

@@ -1,14 +1,32 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1903,7 +1903,9 @@ const renderedContent = createMemo(() => displayContent() || content())
+@@ -1903,7 +1903,25 @@ const renderedContent = createMemo(() => displayContent() || content())
              fg={theme.textMuted}
              wrapMode={!inMinimal() || expanded() ? "word" : "char"}
            />
 -          <Show when={inMinimal() && !expanded()}>
-+          {/* [local-smark] 流式期间折叠提示常显：内容从 1 行向 5 行增长时，
++        </box>
++          {/* [local-smark] 展开入口必须位于正文裁剪区之外，避免按钮也被五行上限隐藏。
++              流式期间折叠提示常显：内容从 1 行向 5 行增长时，
 +              行数判断会让 footer 闪烁；流式中默认收缩语义要求 footer 与裁剪同步 */}
-+          <Show when={inMinimal() && !expanded() && (!isDone() || renderedContent().split(String.fromCharCode(10)).length > 5)}>
-             <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
++          <Show
++            when={
++              inMinimal() &&
++              !expanded() &&
++              (!isDone() ||
++                renderedContent().split(String.fromCharCode(10)).length > 5 ||
++                renderedContent()
++                  .split(String.fromCharCode(10))
++                  .reduce(
++                    (rows, line) => rows + Math.max(1, Math.ceil(Bun.stringWidth(line) / Math.max(1, ctx.width - 5))),
++                    0,
++                  ) > 5)
++            }
++          >
+-            <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
++            <box paddingLeft={2} flexShrink={0} onMouseUp={toggle}>
++              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
++            </box>
            </Show>
-         </box>
+-        </box>

@@ -86,8 +86,8 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
        // #158：string/raw_string 等类型包含 string 即视为载荷边界
 +      // #179：ERROR 恢复节点中的 POSIX 碎片不算本地命令
 +      // #179：与 string 载荷过滤叠加，避免 WSL/ssh 引号内误判
-+      // #179：tree-sitter ERROR 节点上的 grep/cat 碎片不是本地命令意图
-+      if (cur.type === "ERROR") return false
++      // #179：根 ERROR 仍承载主机命令，不能清空权限扫描；只排除内部恢复碎片。
++      if (cur.id !== root.id && cur.type === "ERROR") return false
        if (cur.type.includes("string")) return false
        cur = cur.parent
      }

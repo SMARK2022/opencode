@@ -29,7 +29,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  )
  
  noLLMServer.instance(
-
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
@@ -56,3 +55,28 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
  
    it.live("falls back from terminal-only configured shell", () =>
      Effect.gen(function* () {
+diff --git a/packages/opencode/test/cli/help/help-snapshots.test.ts b/packages/opencode/test/cli/help/help-snapshots.test.ts
+--- a/packages/opencode/test/cli/help/help-snapshots.test.ts
++++ b/packages/opencode/test/cli/help/help-snapshots.test.ts
+@@ -88,7 +88,8 @@
+ // Fixed wrap width so a developer's terminal doesn't affect snapshots.
+ // yargs honors COLUMNS; CI runners typically default to 80 which produces
+ // different wraps from a 200-col local terminal.
+-const SNAPSHOT_ENV = { COLUMNS: "120" }
++// 快照约定英文；LC_ALL 优先于宿主的其他语言变量，不改变真实 CLI 的本地化行为。
++const SNAPSHOT_ENV = { COLUMNS: "120", LC_ALL: "en_US.UTF-8" }
+ 
+ describe("opencode CLI help-text snapshots", () => {
+   // Single test, parallel spawns. Each command's help fires under
+diff --git a/packages/opencode/test/cli/run/run-process.test.ts b/packages/opencode/test/cli/run/run-process.test.ts
+--- a/packages/opencode/test/cli/run/run-process.test.ts
++++ b/packages/opencode/test/cli/run/run-process.test.ts
+@@ -264,6 +264,7 @@
+         expect(explicitlyDenied.stdout).toContain("continued after explicit denial")
+         expect(yield* Effect.promise(() => Bun.file(`${home}/explicitly-denied`).exists())).toBe(false)
+       }),
+-    60_000,
++    // 三次冷启动各自仍受 30s 限制；Windows 总预算不能先截断第三次权限断言。
++    process.platform === "win32" ? 120_000 : 60_000,
+   )
+ 

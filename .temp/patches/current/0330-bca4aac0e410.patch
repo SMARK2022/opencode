@@ -214,10 +214,12 @@ diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -627,4 +627,63 @@ test("snapshot tracks streaming tool input deltas", () => {
+@@ -627,4 +627,64 @@ test("snapshot tracks streaming tool input deltas", () => {
      expect(runs).toBe(2)
      dispose()
    })
+ })
++  // 独立注册 queued-user 场景，不能在上一个 test 的执行回调里创建测试。
 +  test("queued trailing user does not blank out context usage or shift the resolved model", async () => {
 +    // orphan user3 没有 assistant 子节点（模拟 TaskTool 后台注入 noReply prompt 在父会话
 +    // busy 期间持久化的 user message）。修复前 lastUser=user3(modelB) 导致 /context 面板
@@ -277,7 +279,6 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 +    // totalTokens 取自活跃 assistantA 的 step（17000 input + 600 output），不受 queued user 影响
 +    expect(data.totalTokens).toBe(17_600)
 +  })
- })
 
 
 diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode/test/token/accounting.test.ts

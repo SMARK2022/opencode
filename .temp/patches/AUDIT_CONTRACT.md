@@ -27,6 +27,8 @@ Every material claim must be independently verified. A file list, grep result, b
 
 ## Admission Gate
 
+以下串行前置门禁用于首次重放。用户明确要求重放后复查时，以完整批次的 original/current、manifest、上游实现、最终物化源码及当前验证证据开展审计，不以历史 PASS 闭合、中间 state 保留、重新生成 source Git 或逐 index typecheck 作为准入条件。身份与累计 provenance 核对 manifest、不可变 original、source proof 及物化报告；安装、受影响 workspace 类型检查与行为测试核对同一累计终点版本。当前证据缺失或冲突仍须报告，但不得因此停止行为调查。不得倒填历史 PASS、认证未检查项或用后续 patch 掩盖前项语义丢失；逐项行为、E/C 与独立双审要求不变。禁止互读的是本轮对方结论，不是既有历史证据。
+
 普通批次必须恰好包含五个连续 manifest index。最终批次固定包含 `451-452` 两项，这是 452 项总量产生的唯一少于五项例外。输入少于五项、超过五项、非连续、重复、只有范围表达式或只有汇总 diff 时，立即停止：
 
 ```text

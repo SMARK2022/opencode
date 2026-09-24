@@ -47,7 +47,7 @@ index 1790401dbec0193eeae1bed96c8a31744107ee91..1e9aa55e7ebbc96ea232c8d4aece092e
  const permissionRequest = (id: string, sessionID: string, title = id) =>
    ({
      id,
-@@ -424,6 +449,33 @@ describe("applyDirectoryEvent", () => {
+@@ -424,6 +449,48 @@ describe("applyDirectoryEvent", () => {
      expect(store.part[messageID]).toBeUndefined()
    })
  
@@ -78,18 +78,38 @@ index 1790401dbec0193eeae1bed96c8a31744107ee91..1e9aa55e7ebbc96ea232c8d4aece092e
 +    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
 +  })
 +
++  test("ignores progress when session content is disabled", () => {
++    const [store, setStore] = createStore(baseState({ part: { msg_1: [shellPart("v1", 1)] } }))
++    applyDirectoryEvent({
++      event: { type: "message.part.progress", properties: { part: shellPart("v2", 2) } },
++      store,
++      setStore,
++      push() {},
++      directory: "/tmp",
++      loadLsp() {},
++      sessionContent: false,
++    })
++    expect(store.part.msg_1?.[0]).toMatchObject({
++      state: { status: "running", metadata: { output: "v1", progressVersion: 1 } },
++    })
++  })
    // 复现核心竞态：delta 已将 part.text 和 accum_delta 累积为长文本，
    // 随后收到不带 time.end 的短快照 part.updated（模拟 daemon fire-and-forget
    // 延迟到达的 text-start 事件），守卫必须阻止短文本回退已累积的长文本。
 diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/app/src/context/global-sync/event-reducer.ts
 --- a/packages/app/src/context/global-sync/event-reducer.ts
 +++ b/packages/app/src/context/global-sync/event-reducer.ts
-@@ -15,4 +15,5 @@ import type { State, VcsCache } from "./types"
+@@ -15,3 +15,4 @@ import type { State, VcsCache } from "./types"
  import { trimSessions } from "./session-trim"
  import { dropSessionCaches } from "./session-cache"
  import { diffs as list, message as clean } from "@/utils/diffs"
 +import { mergePartSnapshot } from "./part-merge"
- 
+@@ -26,4 +27,5 @@ const SESSION_CONTENT_EVENTS = new Set([
+   "message.part.updated",
++  "message.part.progress",
+   "message.part.removed",
+   "message.part.delta",
+   "permission.asked",
 @@ -260,6 +261,7 @@ export function applyDirectoryEvent(input: {
        break
      }

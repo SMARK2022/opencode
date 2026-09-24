@@ -1,4 +1,4 @@
-# Patch Dry Run typecheck-0452-2026-09-17T09-38-23-141Z
+# Patch Dry Run typecheck-0452-2026-09-24T01-22-47-519Z
 
 - Source: `dev-smark`
 - Source tip: `d0ceb469011412b4ac5058a12d5fe4f247bdac79`
@@ -16,13 +16,13 @@
 - Temporary repo: cleaned
 - Materialized index: 452
 - State directory: `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0452-d0ceb4690114`
-- Retained states: 0452-d0ceb4690114, 0141-190d962e1dd8
+- Retained states: 0452-d0ceb4690114
 - Source repository unchanged: true
 - Target repository unchanged: true
 - Simulation preflight: exact state reused
 
 - Test workspace: `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\.test-workspace\repo`
-- Install: installed (02cb1c9055216e2a1e1f79247eb3146962aeceec50059570a894f3180d40dbe6)
+- Install: reused (02cb1c9055216e2a1e1f79247eb3146962aeceec50059570a894f3180d40dbe6)
 - Typecheck: packages/app:passed, packages/cli:passed, packages/client:passed, packages/codemode:passed, packages/console/app:passed, packages/console/core:passed, packages/console/function:passed, packages/console/support:passed, packages/core:passed, packages/desktop:passed, packages/effect-drizzle-sqlite:passed, packages/effect-sqlite-node:passed, packages/enterprise:passed, packages/http-recorder:passed, packages/httpapi-codegen:passed, packages/llm:passed, packages/opencode:passed, packages/plugin:passed, packages/protocol:passed, packages/schema:passed, packages/sdk-next:passed, packages/sdk/js:passed, packages/server:passed, packages/session-ui:passed, packages/slack:passed, packages/stats/app:passed, packages/stats/core:passed, packages/stats/server:passed, packages/tui:passed, packages/ui:passed
 
 | # | SHA | Status | Phase | Reason | Subject |
@@ -33,20 +33,13 @@
 No failures.
 
 ## Test Output
-### Install (installed)
+### Install (reused)
 
 
 
 ```text
 
-Resolving dependencies
-Resolved, downloaded and extracted [33]
-Saved lockfile
-
-$ bun run --cwd packages/core fix-node-pty
-$ bun run script/fix-node-pty.ts
-$ husky
-
+No install output.
 
 ```
 
