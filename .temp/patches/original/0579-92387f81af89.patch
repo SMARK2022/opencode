@@ -1,0 +1,196 @@
+From 92387f81af8914fe65fee41d5cd5e617d25262be Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 11 Sep 2026 04:05:16 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E7=A7=BB=E9=99=A4=20opentui-source-?=
+ =?UTF-8?q?revision=20=E5=86=97=E4=BD=99=E6=B8=85=E5=8D=95=EF=BC=8Cclosure?=
+ =?UTF-8?q?=20=E9=AA=8C=E8=AF=81=E6=94=B9=E4=BB=8E=20package.json+git=20?=
+ =?UTF-8?q?=E6=B4=BE=E7=94=9F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+opentui-source-revision.json 是手写的第二信源（sourceGitlink/releaseTag/releaseCommit），
+三个值全部可从 root package.json catalog（版本→tag）+ git（gitlink + ls-remote 远端 tag）
+派生。它无生成脚本、每次 release 需手工同步，0.4.3-smark.12 版本 bump 漏改它导致 consumer
+gate 误判失败（invalid source revision manifest）。
+
+现移除该清单，verify-opentui-closure 始终走派生路径（verifyRemoteAnnotatedTagCommit 校验
+gitlink==远端 tag commit 的 provenance 一致性，语义不变），test.yml 去掉
+--source-revision-authorized。随删不再被引用的 verifySourceRevisionAuthorization 与其测试。
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 4b37eede6dac7c10dbde874a2e95667a64383861..98e4cc16a5ed465ef4ece073df121b6a94f40fb5 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -188,8 +188,9 @@ jobs:
+ 
+       - name: Verify immutable OpenTUI closure
+         # 先锁定source/release/runtime身份，再运行任何可通过缓存误导的应用测试。
++        # 身份一律从 root package.json catalog + git gitlink/远端 tag 派生，不再读手写清单。
+         working-directory: packages/opencode
+-        run: bun run script/verify-opentui-closure.ts --source-revision-authorized
++        run: bun run script/verify-opentui-closure.ts
+ 
+       - name: Run OpenTUI consumer regressions
+         # 这些测试覆盖Goal CJK、DialogPrompt factory和v2 error的用户可见seam。
+diff --git a/packages/opencode/script/opentui-provenance.ts b/packages/opencode/script/opentui-provenance.ts
+index 98a3b6e5332916cbf7706c39eb4f6f7a0ff290c1..d441edf3b560ad758fec62cd9b466e37667fbc9b 100644
+--- a/packages/opencode/script/opentui-provenance.ts
++++ b/packages/opencode/script/opentui-provenance.ts
+@@ -1,27 +1,3 @@
+-export interface OpenTuiSourceRevisionManifest {
+-  schema: 1
+-  sourceGitlink: string
+-  releaseTag: string
+-  releaseCommit: string
+-}
+-
+-export function verifySourceRevisionAuthorization(input: {
+-  parentGitlink: string
+-  nestedHead: string
+-  nestedStatus: string
+-  manifest: OpenTuiSourceRevisionManifest
+-}) {
+-  // sourceGitlink是审阅过的本地源码身份，不能由调用者传入任意clean SHA后自证。
+-  // releaseCommit单独证明immutable package family，两个身份不可互相替代。
+-  if (!/^[0-9a-f]{40}$/.test(input.manifest.sourceGitlink)) throw new Error("invalid OpenTUI sourceGitlink manifest SHA")
+-  if (input.parentGitlink !== input.manifest.sourceGitlink) {
+-    throw new Error(`OpenTUI parent gitlink is not the authorized source revision: ${input.parentGitlink}`)
+-  }
+-  if (input.nestedHead !== input.manifest.sourceGitlink || input.nestedStatus) {
+-    throw new Error(`OpenTUI source checkout is not clean at the authorized source revision: ${input.nestedHead}`)
+-  }
+-}
+-
+ export async function verifyRemoteAnnotatedTagCommit(input: {
+   repository: string
+   tag: string
+diff --git a/packages/opencode/script/opentui-source-revision.json b/packages/opencode/script/opentui-source-revision.json
+deleted file mode 100644
+index 50d62def1d80dc5b34396f4d4ee281236aa4c468..0000000000000000000000000000000000000000
+--- a/packages/opencode/script/opentui-source-revision.json
++++ /dev/null
+@@ -1,6 +0,0 @@
+-{
+-  "schema": 1,
+-  "sourceGitlink": "0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2",
+-  "releaseTag": "v0.4.3-smark.11",
+-  "releaseCommit": "0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2"
+-}
+diff --git a/packages/opencode/script/verify-opentui-closure.ts b/packages/opencode/script/verify-opentui-closure.ts
+index 929f01e610d807139628e4424f31191ba95cdddb..dd2ae80ac9817cb63362f76492e1337d5670e648 100644
+--- a/packages/opencode/script/verify-opentui-closure.ts
++++ b/packages/opencode/script/verify-opentui-closure.ts
+@@ -2,7 +2,7 @@
+ 
+ import fs from "node:fs/promises"
+ import path from "node:path"
+-import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
++import { verifyRemoteAnnotatedTagCommit } from "./opentui-provenance"
+ 
+ const root = path.resolve(import.meta.dir, "../../..")
+ // 版本唯一信源是 root package.json catalog；验证器不得维护第二份版本常量，避免升级时信源漂移。
+@@ -23,11 +23,11 @@ if (typeof solidVersion !== "string") {
+ const tag = `v${version}`
+ const repository = "https://github.com/SMARK2022/opentui"
+ const release = `${repository}/releases/download/${tag}`
+-const sourceRevisionAuthorized = process.argv.includes("--source-revision-authorized")
+-// CI在source gitlink更新后必须显式选择此模式，避免release-only校验把新源码误判为伪造发布物。
+ // 版本、tag和release根必须由同一个常量派生，避免验证器自己拼出跨版本的成功路径。
+ // URL来源是public fork的immutable release，不接受registry或临时workflow artifact。
+ // 这条约束保护OpenCode安装图和submodule provenance之间的可追溯关系。
++// 源码/发布身份一律从 package.json catalog（版本→tag）+ git（gitlink + 远端 tag）派生，
++// 不读任何手写清单——清单曾是第二信源，需随每次 release 手工同步，过期即误判。
+ const assets = {
+   "@opentui/core": "opentui-core",
+   "@opentui/keymap": "opentui-keymap",
+@@ -112,26 +112,13 @@ if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) =>
+ // 校验阶段读取index，允许在父commit前审计即将提交的source pin；CI中index与HEAD一致。
+ const gitlink = (await git(["ls-files", "--stage", "--", "thirdparty/opentui"], root)).trim().split(/\s+/)[1]
+ if (!gitlink) throw new Error("thirdparty/opentui gitlink is missing")
+-const sourceManifest = sourceRevisionAuthorized
+-  ? ((await Bun.file(path.join(import.meta.dir, "opentui-source-revision.json")).json()) as OpenTuiSourceRevisionManifest)
+-  : undefined
+ const nestedHead = (await git(["-C", "thirdparty/opentui", "rev-parse", "HEAD"], root)).trim()
+ const nestedStatus = (await git(["-C", "thirdparty/opentui", "status", "--porcelain"], root)).trim()
+-if (sourceManifest) {
+-  // manifest同时固定source和旧release身份；只验证其中一项会允许ABI与源码错配。
+-  if (sourceManifest.schema !== 1 || sourceManifest.releaseTag !== tag || !/^[0-9a-f]{40}$/.test(sourceManifest.releaseCommit)) {
+-    throw new Error("invalid OpenTUI source revision manifest")
+-  }
+-  verifySourceRevisionAuthorization({ parentGitlink: gitlink, nestedHead, nestedStatus, manifest: sourceManifest })
+-  // source revision and release identity are independent: the source pin must not replace the immutable tag proof.
+-  await verifyRemoteAnnotatedTagCommit({ repository, tag: sourceManifest.releaseTag, cwd: root, expectedCommit: sourceManifest.releaseCommit })
+-} else {
+-  // remote tag证明发布身份，nested HEAD/status另证本次构建源码；两项证据不能互相替代。
+-  await verifyRemoteAnnotatedTagCommit({ repository, tag, cwd: root, expectedCommit: gitlink })
+-  // 初始化后的submodule必须可直接审计同一source；dirty或停在workflow branch tip都不能冒充gitlink证据。
+-  if (nestedHead !== gitlink || nestedStatus) {
+-    throw new Error(`initialized OpenTUI submodule is not clean at gitlink: head=${nestedHead} status=${nestedStatus}`)
+-  }
++// remote tag证明发布身份，nested HEAD/status另证本次构建源码；两项证据不能互相替代。
++await verifyRemoteAnnotatedTagCommit({ repository, tag, cwd: root, expectedCommit: gitlink })
++// 初始化后的submodule必须可直接审计同一source；dirty或停在workflow branch tip都不能冒充gitlink证据。
++if (nestedHead !== gitlink || nestedStatus) {
++  throw new Error(`initialized OpenTUI submodule is not clean at gitlink: head=${nestedHead} status=${nestedStatus}`)
+ }
+ 
+ // native hash只针对当前宿主实际解析到的target计算，不能用其他平台的cross-build报告替代。
+@@ -161,7 +148,6 @@ console.log(
+     version,
+     tag,
+     gitlink,
+-    sourceRevisionAuthorized,
+     packages: packageRoots.length,
+     solid: { version: solidVersions.get(solidRoots[0]), realpath: solidRoots[0] },
+     native: { name: nativeName, file: nativeFile, sha256: nativeHash },
+diff --git a/packages/opencode/test/script/opentui-provenance.test.ts b/packages/opencode/test/script/opentui-provenance.test.ts
+index 98391483be178b7e89b3e3fc79093d3995fd38ed..540fab6ff17978e88523492529bdc29dad09bc4c 100644
+--- a/packages/opencode/test/script/opentui-provenance.test.ts
++++ b/packages/opencode/test/script/opentui-provenance.test.ts
+@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
+ import fs from "node:fs/promises"
+ import path from "node:path"
+ import { pathToFileURL } from "node:url"
+-import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization } from "../../script/opentui-provenance"
++import { verifyRemoteAnnotatedTagCommit } from "../../script/opentui-provenance"
+ import { tmpdir } from "../fixture/fixture"
+ 
+ test("resolves an annotated release tag from a remote when the shallow checkout has no tags", async () => {
+@@ -68,36 +68,6 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   ).rejects.toThrow("not found")
+ })
+ 
+-test("source-authorized closure rejects a clean source revision outside the manifest", () => {
+-  // negative fixture保持parent/nested两处一致，只改变manifest authority，锁定真正的失败边界。
+-  const authorized = "a".repeat(40)
+-  const unauthorized = "b".repeat(40)
+-  const manifest = {
+-    schema: 1 as const,
+-    sourceGitlink: authorized,
+-    releaseTag: "v0.4.3-smark.7" as const,
+-    releaseCommit: "c".repeat(40),
+-  }
+-
+-  expect(() =>
+-    verifySourceRevisionAuthorization({
+-      parentGitlink: authorized,
+-      nestedHead: authorized,
+-      nestedStatus: "",
+-      manifest,
+-    }),
+-  ).not.toThrow()
+-
+-  expect(() =>
+-    verifySourceRevisionAuthorization({
+-      parentGitlink: unauthorized,
+-      nestedHead: unauthorized,
+-      nestedStatus: "",
+-      manifest,
+-    }),
+-  ).toThrow("authorized source revision")
+-})
+-
+ async function git(args: string[], cwd: string, required = true) {
+   // helper返回非零结果仅服务预期red probe，其余fixture命令必须立即失败，不能制造虚假的shallow前提。
+   const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })

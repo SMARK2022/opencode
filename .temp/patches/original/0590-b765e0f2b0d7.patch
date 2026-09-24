@@ -1,0 +1,192 @@
+From b765e0f2b0d7d37f4ceed0fb98eede0617998c65 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 14 Sep 2026 02:17:33 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test,tui):=20=E4=BF=AE=E5=A4=8D=E6=8E=A8?=
+ =?UTF-8?q?=E9=80=81=E5=90=8E=E5=85=A8=E9=87=8F=E5=A5=97=E4=BB=B6=E6=9A=B4?=
+ =?UTF-8?q?=E9=9C=B2=E7=9A=84=E8=BF=9B=E7=A8=8B=E6=B1=A1=E6=9F=93=E4=B8=8E?=
+ =?UTF-8?q?=E4=B8=A4=E6=9D=A1=E7=AB=9E=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+lazy-runtime 探针改用子进程：Bun.plugin.clearAll() 会清掉 preload 注册的 JSX 转换，同进程 shard 中后续 tsx 全部编译损坏；app-layer-sharing 共享图探针改用 idle 语义清理，避免同进程 server 测试读到残留 Session。
+
+正文清扫从同步改为 microtask 复查计数：导航进入子会话时旧树卸载先于路由消费者注册，同步擦除会让 isServer 下一次性节流的 footer usage 永久丢真值。daemon 维护型 shutdown 同步发布 stopping 不变，拆解主体推迟一个 macrotask，修复处置变快后 controlServer.stop 抢在响应前的 ECONNRESET。
+
+diff --git a/docs/plans/opencode-memory-residency-successor.md b/docs/plans/opencode-memory-residency-successor.md
+index bc28701677294a5c6de7a0c7cabb27a6530ec4d6..5553a2d309f282eadd5d4e2af6f5eb1a3ca0e9bd 100644
+--- a/docs/plans/opencode-memory-residency-successor.md
++++ b/docs/plans/opencode-memory-residency-successor.md
+@@ -658,3 +658,14 @@ R3 实现提交（`45ba8f0c29`）后，用户要求对计划与实现做完整
+ - R4 不改变 T11 已实测的内存与流畅性结论；返工后需重跑涉及面测试与渲染几何断言，内存复测仅在返工触及驻留/释放路径的行为变化超出测试可证明范围时才需要。
+ 
+ R3 已实施并提交为 `45ba8f0c29`；R6 返工已实施并通过实现审计第 3 轮（APPROVE），当前 `Status: verified`。提交范围：返工的 4 个生产文件、4 个测试文件与本计划。
++
++## 27. Post-push CI 修复记录（推送后全量套件首次真实运行发现）
++
++推送后 CI 三平台全量套件首次运行暴露出四类问题，均已修复并验证（本地 TUI shard 731 用例 718 pass/0 fail/13 skip，daemon 维护两例、core 泄漏对均绿）：
++
++| 问题 | 根因 | 修复 | 范围属性 |
++| --- | --- | --- | --- |
++| ~190 个 tsx 测试全线“context missing” | `lazy-runtime.test.ts` 的 `Bun.plugin.clearAll()` 清掉了 preload 注册的 JSX 转换插件，之后加载的 tsx 模块全部编译损坏 | 探针改为子进程隔离，父进程只读退出码与输出 | 测试代码，不动生产 |
++| `httpapi-session` 读到 `ses_shared_layer_probe` | `app-layer-sharing` 测试往进程级共享图写入探针状态未清理 | 结尾以 idle 语义清除探针条目 | 测试代码 |
++| subagent footer usage 在 isServer 解析下永不显示 | 导航进入子会话时 Task 卸载释放把正文清零（计数归零即擦除）先于路由消费者注册；`leadingAndTrailing` 在 isServer 下一次性落地首个值，空值抢先占位 | `releaseParts` 正文清扫推迟到 microtask 并复查计数；同批次到达的新消费者阻止擦除 | sync.tsx（计划内文件） |
++| daemon 维护型 shutdown 客户端读到 ECONNRESET | 首个提交减少处置挂起工作使拆解变快，`controlServer.stop(true)` 抢在响应刷出前关连接 | maintenance-idle 路径同步发布 stopping（拒绝合同不变），拆解主体推迟一个 macrotask | worker.ts（新增第 17 个生产文件，属 CI 缺陷修复而非内存方案扩张） |
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 90729288b2257b23b989253626a9c0ac63d634fa..685b62af4801963be680e400c5843c1bef189985 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -388,7 +388,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       partConsumers.delete(sessionID)
+       // 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
+       syncRequests.delete(sessionID)
+-      releaseSessionParts(sessionID)
++      // 正文清扫推迟到 microtask 并复查计数：路由切换时旧树的清理（如 Task 卡片卸载）
++      // 可能先于新路由的消费者注册运行；同步擦除会把“导航进入该 Session”刚要用的正文清掉，
++      // 下游的一次性/节流展示（isServer 下 leadingAndTrailing 只落地首个值）再无恢复机会。
++      queueMicrotask(() => {
++        if (partConsumers.has(sessionID)) return
++        releaseSessionParts(sessionID)
++      })
+     }
+ 
+     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index a7a575434729fb411ae674db6b93c2cdb8536def..35dff25b4731bb6ed9b92ac93bfb5288b627dce1 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -263,8 +263,10 @@ async function recoverInterruptedMaintenance() {
+ // graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
+ // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
+ // Database.close 与 daemon lock 清理发生在 maintenance/instance/server 全部停止后，避免替代进程过早接管 SQLite。
+-async function gracefulShutdown(reason = "unknown") {
+-  if (shutdownInProgress) return
++async function gracefulShutdown(reason = "unknown", published = false) {
++  // published 表示控制面 handler 已同步置过标志（响应返回前到达的 start/resume 被拒）。
++  // 常规入口只允许第一个调用者真正开始拆解；published 入口则必须继续执行主体。
++  if (shutdownInProgress && !published) return
+   shutdownInProgress = true
+   // residual 与 process.exit 硬截止必须同一 t0：maintenance abort 也吃墙钟，不能只从 dispose 起算。
+   const shutdownStartedAt = Date.now()
+@@ -478,8 +480,13 @@ controlServer = Bun.serve({
+     // 这是 daemon stop 的本机私有控制面：只有持有当前 lock token 的调用方
+     // 才能让 daemon 自己执行 gracefulShutdown，避免 CLI 直接杀 pid。
+     // conditional 通过后同步发布 shutdownInProgress，响应返回前到达的 start/resume 也必须被拒绝。
+-    if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(DisposedReason.DaemonStop)
+-    else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
++    // 但拆解主体必须推迟到下一个 macrotask：Bun 在同一 macrotask 内先刷出本次响应，
++    // 若同步进入 gracefulShutdown，其 microtask 续段会先于 socket 写入跑到 controlServer.stop(true)，
++    // 客户端读到的是 ECONNRESET 而不是 {ok:true}（处置工作越少越容易输掉这个竞态）。
++    if (url.searchParams.get("maintenance-idle") === "1") {
++      shutdownInProgress = true
++      setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop, true), 0).unref?.()
++    } else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
+     return Response.json({ ok: true })
+   },
+ })
+diff --git a/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
+index 3abb6865910d4a0ccec688d1ea3d657be1ddcb32..7af64003c9656b85cd98eab3db8980f80826ca22 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
+@@ -101,6 +101,8 @@ test("explicit acquireParts holds bodies; release drops them; acquire again relo
+     const handle = await h.sync.session.acquireParts(other)
+     expect(bytes(h, other)).toBe(1024)
+     handle.release()
++    // 清扫在 microtask 落地并复查计数：同一批次注册的新消费者可以阻止擦除。
++    await Promise.resolve()
+     expect(bytes(h, other)).toBe(0)
+     const again = await h.sync.session.acquireParts(other)
+     expect(bytes(h, other)).toBe(1024)
+@@ -257,6 +259,7 @@ test("concurrent acquisitions both resolve only after bodies are loaded", async
+     expect(bytes(h, other)).toBe(1024)
+     h1.release()
+     h2.release()
++    await Promise.resolve()
+     expect(bytes(h, other)).toBe(0)
+   } finally {
+     h.app.renderer.destroy()
+diff --git a/packages/opencode/test/cli/run/lazy-runtime.test.ts b/packages/opencode/test/cli/run/lazy-runtime.test.ts
+index f013e9d64c22e5948bc5c06476233bf14ac35e32..d722686f55f1ef7aefce37c439749441d7206385 100644
+--- a/packages/opencode/test/cli/run/lazy-runtime.test.ts
++++ b/packages/opencode/test/cli/run/lazy-runtime.test.ts
+@@ -1,27 +1,44 @@
+ import { expect, test } from "bun:test"
++import path from "path"
+ 
+ test("importing the run command does not execute the interactive runtime module", async () => {
+-  const key = Symbol.for("opencode.test.run-runtime-loaded")
+-  const state = globalThis as typeof globalThis & { [key: symbol]: number }
+-  state[key] = 0
+-  // 用模块替换探针观察真实的 import 副作用边界：run 命令注册只需要命令元数据，
+-  // 交互 runtime 子图（TUI runner 及其依赖）只有用户真正进入交互分支时才允许执行。
+-  Bun.plugin({
+-    name: "run-runtime-eager-probe",
+-    setup(build) {
+-      build.onLoad({ filter: /[\\/]cli[\\/]cmd[\\/]run[\\/]runtime\.ts$/ }, () => ({
+-        contents: 'globalThis[Symbol.for("opencode.test.run-runtime-loaded")]++; export {};',
+-        loader: "js",
+-      }))
++  // Bun.plugin 的模块替换是进程全局的，clearAll 还会清掉 bunfig preload 注册的
++  // Solid JSX 转换——同进程使用会污染 shard 内所有后续 tsx 文件。探针因此放在
++  // 子进程里跑，父进程只读它的退出码与输出。
++  const child = Bun.spawn(
++    [
++      process.execPath,
++      "-e",
++      `const key = Symbol.for("opencode.test.run-runtime-loaded");
++globalThis[key] = 0;
++Bun.plugin({
++  name: "run-runtime-eager-probe",
++  setup(build) {
++    build.onLoad({ filter: /[\\\\/]cli[\\\\/]cmd[\\\\/]run[\\\\/]runtime\\.ts$/ }, () => ({
++      contents: 'globalThis[Symbol.for("opencode.test.run-runtime-loaded")]++; export {};',
++      loader: "js",
++    }))
++  },
++});
++const command = await import("./src/cli/cmd/run");
++await Bun.sleep(0);
++console.log(JSON.stringify({ command: command.RunCommand.command, loaded: globalThis[key] }));`,
++    ],
++    {
++      cwd: path.join(import.meta.dir, "../../.."),
++      stdout: "pipe",
++      stderr: "pipe",
++      // 不继承测试进程的 worker/daemon 角色变量，子进程走真实 CLI 模块路径。
++      env: { ...process.env, OPENCODE_WORKER: "", OPENCODE_TUI_WORKER: "" },
+     },
+-  })
+-  try {
+-    const command = await import("../../../src/cli/cmd/run")
+-    await Bun.sleep(0)
+-    expect(command.RunCommand.command).toContain("run")
+-    expect(state[key]).toBe(0)
+-  } finally {
+-    Bun.plugin.clearAll()
+-    delete state[key]
+-  }
++  )
++  const [stdout, stderr, exit] = await Promise.all([
++    new Response(child.stdout).text(),
++    new Response(child.stderr).text(),
++    child.exited,
++  ])
++  expect(exit, stderr).toBe(0)
++  const result = JSON.parse(stdout.trim().split("\n").at(-1)!)
++  expect(result.command).toContain("run")
++  expect(result.loaded).toBe(0)
+ })
+diff --git a/packages/opencode/test/server/app-layer-sharing.test.ts b/packages/opencode/test/server/app-layer-sharing.test.ts
+index 39e723d091f0c352e84fed19950b1fd0c2879aae..0f20848ed641d3bbdf31b5b3bdba433ad065d1ed 100644
+--- a/packages/opencode/test/server/app-layer-sharing.test.ts
++++ b/packages/opencode/test/server/app-layer-sharing.test.ts
+@@ -49,6 +49,9 @@ it.instance("sharedLayer builds application services once across listener scopes
+     expect(yield* Context.get(second, SessionStatus.Service).get("ses_shared_layer_probe" as never)).toEqual({
+       type: "busy",
+     })
++    // 共享图是进程级的：探针状态必须清走，idle 语义会从快照中删除该条目，
++    // 否则同进程的其他 server 测试会读到这个残留 Session。
++    yield* status.set("ses_shared_layer_probe" as never, { type: "idle" })
+   }),
+   options,
+   60000,

@@ -1,0 +1,24 @@
+From 3f0981d2c32f6e3439182bf348b47e04834ae8fd Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 16 Sep 2026 17:11:28 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E7=A7=BB=E9=99=A4=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E5=88=86=E4=BA=AB=E5=91=BD=E4=BB=A4=E7=9A=84=E6=8E=A8?=
+ =?UTF-8?q?=E8=8D=90=E6=A0=87=E8=AE=B0=E4=BB=A5=E5=87=8F=E5=B0=91=E8=AF=AF?=
+ =?UTF-8?q?=E8=A7=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index dc20abf7c335ead8cbbd5384d1e4c05dadc5d3ba..13e32de615806e4bf69492507a940cb218e6dee9 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -993,7 +993,6 @@ export function Session() {
+     {
+       title: session()?.share?.url ? "Copy share link" : "Share session",
+       value: "session.share",
+-      suggested: route.type === "session",
+       category: "Session",
+       enabled: sync.data.config.share !== "disabled",
+       slash: {

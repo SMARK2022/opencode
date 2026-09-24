@@ -1,0 +1,590 @@
+From dc0a42ccd4f5e126780c2cbe4e582ffed9fc6ef6 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 25 Jul 2026 13:57:15 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E5=AD=90=E4=BC=9A=E8=AF=9D=20Subag?=
+ =?UTF-8?q?entFooter=20=E5=B1=95=E7=A4=BA=20retry=20=E7=BA=A2=E5=AD=97?=
+ =?UTF-8?q?=E6=91=98=E8=A6=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+child/task 与 auto reviewer 共用底部栏，原先只显示 usage/导航，
+retry 状态已写入 session_status 却无 chrome。在同一行优先渲染
+红字摘要+(details)+meta，再显示 token usage，对齐主 Prompt 诊断契约。
+
+diff --git a/docs/plans/subagent-footer-retry-error-display.md b/docs/plans/subagent-footer-retry-error-display.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3ae7895b3c3c50ab5623d6f0791aa53456df327
+--- /dev/null
++++ b/docs/plans/subagent-footer-retry-error-display.md
+@@ -0,0 +1,272 @@
++# Canonical Implementation Plan: Subagent Footer Retry Error Display
++
++> Status: verified
++>
++> Revision: R1
++>
++> Approved revision: R1
++>
++> Audit mode: full-scope
++>
++> Requirement source: 用户要求在 sub-agent / task 页底部 `SubagentFooter` 一行优先显示与主 agent Prompt footer 同构的红字错误摘要，再显示 token usage 等；auto reviewer 页面也要挂载同样重试展示；保持甜点级修改（生产代码最好几十行内）、代码文件 ≤4、总改动 ≤800 行；目标终态 verified-implementation-and-commit。
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-07-25
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 1. Verbatim Requirement
++
++1. 详细完整检查 sub agent（task 页）底部错误展示，对比主 agent 底部红字逻辑，按确认结论修改。
++2. 错误展示放在用户截图所示的 subagent footer 这一行：`Permission-Reviewer (n of m) ↑… Parent/Prev/Next`。
++3. 同一行内**优先**显示红字错误摘要，然后再显示 token usage 等内容。
++4. 保持项目既有风格；移除或替换不足以承载需求的旧逻辑（不是平行加一套）。
++5. 甜点级：不要冗余；修改文件数量 ≤4 个代码文件；总代码修改 ≤800 行；生产代码尽量几十行以内。
++6. **auto reviewer 页面也要挂载同样的重试展示逻辑**，并尽量保持较小修改。
++
++## 2. Explicit Non-Goals
++
++- 不在子会话重新挂载完整 `Prompt` 输入框。
++- 不改 Web/App `SessionTurn` / `SessionRetry`。
++- 不改后端 `SessionStatus` / `SessionProcessor` retry 写入。
++- 不把终态 `message.error` 卡片迁到底部 chrome。
++- 不强制抽取大型共享 UI 库或重写 Prompt footer。
++- 不改 permission/question 在父会话聚合的策略。
++- 不改全局底部 `Footer`。
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` | Status = `idle` \| `retry` \| `busy` |
++| `packages/opencode/AGENTS.md` | 测试从 package 目录跑 |
++| 主 agent Prompt footer | 权威 retry 展示契约 |
++| `SubagentFooter` | 所有 parentID 子会话（含 permission-reviewer）共用底部栏 |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `session/index.tsx` visible/SubagentFooter/Prompt | child 卸 Prompt 挂 SubagentFooter | observed |
++| `subagent-footer.tsx` | status 仅服务 usage | observed |
++| `prompt/index.tsx` retry footer | 主红字契约 | observed |
++| `session/status.ts` + processor retry | 子会话同样写 status | observed |
++| 静态/行为 red 信号 | footer 无 Short error | observed |
++
++## 5. Current Behavior
++
++```text
++SessionProcessor -> session_status[sessionID]=retry
++Main: Prompt shows theme.error summary+(details)+meta
++Child: SubagentFooter shows label+usage+nav only (gap)
++Auto reviewer child uses same SubagentFooter
++```
++
++## 6. Supported Input Domain and Reachability
++
++| Input | Producer | Owner | Classification |
++| --- | --- | --- | --- |
++| child session_status retry | processor | SubagentFooter | observed |
++| permission-reviewer child | auto review navigate | SubagentFooter | observed |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant |
++| --- | --- |
++| INV-01 | child（含 auto reviewer）retry 时 SubagentFooter 同行 theme.error 摘要 |
++| INV-02 | 红字优先于 token usage |
++| INV-03 | 压平摘要；`(details)` → DialogAlert 原文 |
++| INV-04 | `retry in … · #n` meta |
++| INV-05 | gemini quota 特例与 Prompt 一致 |
++| INV-06 | 非 retry 行为不变 |
++| INV-07 | 不恢复 child Prompt |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owner |
++| --- | --- | --- |
++| INV-01..05 | SubagentFooter 未消费 session_status.retry | SubagentFooter |
++
++Root cause: UI consumer gap, not backend.
++
++## 9. Responsibility and Seam
++
++Child 底部 chrome 唯一 owner = `SubagentFooter`。
++
++## 10. Single Approved Primary-Path Design
++
++```text
++session_status[route.sessionID].type===retry
++  -> SubagentFooter same row: label · error+(details)+meta · usage · nav
++  details -> DialogAlert("Retry Error", original message)
++```
++
++Default: modify only `subagent-footer.tsx` + one test file.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Classification | Disposition |
++| --- | --- | --- |
++| SubagentFooter retry chrome | primary | implement |
++| Prompt retry / toast / message.error | preserve | preserve |
++| Re-enable Prompt on child | forbidden | reject |
++| Separate AutoReviewerFooter | forbidden | reject |
++
++## 12. Workaround Deletion
++
++Replace status-as-usage-only with status also driving retry chrome.
++
++## 13. Forward Traceability
++
++| Inv | Path | File | Test |
++| --- | --- | --- | --- |
++| INV-01..04 | SubagentFooter retry | subagent-footer.tsx | session-message-render child retry |
++| INV-06 | else branch | same | existing usage/label |
++| auto reviewer | same component | zero extra mount | permission-reviewer title fixture |
++
++## 14. Reverse Traceability
++
++| Concept | Req | Why needed |
++| --- | --- | --- |
++| retry 红字簇 | INV-01..05 | Prompt unmounted on child |
++| createRefreshClock | INV-04 | countdown |
++| DialogAlert | INV-03 | details |
++
++## 15. File-Level Change Plan
++
++| File | Change | Delta |
++| --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx` | modify | +40–70 |
++| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify | +60–120 |
++
++## 16. TDD Behavior Slices
++
++1. child + emit retry → `Short error (details)` + `#n` + same color details
++2. details click → DialogAlert
++3. non-retry usage regression
++
++## 17. Chinese Comment Budget
++
++E≈50–70, C>=ceil(0.15E)
++
++## 18. Verification
++
++| Command | Cwd |
++| --- | --- |
++| `bun test test/cli/cmd/tui/session-message-render.test.tsx -t "child subagent footer\|compact step\|non-shell auto review"` | packages/opencode |
++| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx -t "retry\|details"` | packages/opencode |
++| `bun typecheck` | packages/opencode |
++
++## 19. Diff Budget
++
++2 files, prod ~50 lines, tests ~100, hard cap ≤4 files / ≤800 lines.
++
++## 20. Real Risks
++
++Narrow width crowding — truncate error first; nav flexShrink=0.
++
++### Open Decisions
++
++None.
++
++### Rejected Speculation
++
++Separate auto reviewer footer; parent shows child retry; backend UI event.
++
++## 21. Audit Contract
++
++Full-scope independent audit required for plan and implementation.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | No blocking findings. | TDD slices for INV-03/04/05 should be strengthened in implementation; parallel Prompt copy drift risk. | APPROVE | adversarial-auditor task_id ses_069c6d2b0ffeoA6Sr3uZjTJcVT |
++
++### Independent plan audit verdict (verbatim)
++
++```text
++No blocking findings.
++
++APPROVE
++
++Audited revision: R1
++Scope: full original requirement（task 子会话 + auto reviewer 共用 SubagentFooter + 甜点预算）
++```
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++| File | Change |
++| --- | --- |
++| `packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx` | modify: retry 红字簇 + details DialogAlert + countdown + layout priority |
++| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify: child permission-reviewer fixture + retry/details assertions |
++| `docs/plans/subagent-footer-retry-error-display.md` | plan artifact |
++
++`git diff --stat` (code): 2 files, +201 / -11.
++
++### Red-Green Test Evidence
++
++1. Red: `bun test … -t "child subagent footer shows red retry"` timed out waiting for `Short error` while footer showed only usage (observed).
++2. Green: same test passes (11 expects) after SubagentFooter change.
++3. Regression: compact step usage + auto review open + Prompt retry details tests pass.
++
++### Verification Commands and Results
++
++| Command | Cwd | Result |
++| --- | --- | --- |
++| `bun test test/cli/cmd/tui/session-message-render.test.tsx -t "child subagent footer shows red\|subagent footer shows compact\|non-shell auto review status opens" --timeout 60000` | packages/opencode | 3 pass |
++| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx -t "opens the original retry\|keeps short retry" --timeout 60000` | packages/opencode | 2 pass |
++| `bun typecheck` | packages/opencode | pass |
++
++### Original Feedback-Loop Result
++
++Static red (status read, no theme.error/(details)/retry branch) resolved by production change; behavioral TUI frame now shows `Short error (details)` and DialogAlert.
++
++### Actual Secondary and Replacement Path Inventory
++
++| Path | Classification | Disposition |
++| --- | --- | --- |
++| SubagentFooter retry chrome | primary | implemented |
++| Prompt retry / toast / message.error | existing diagnostic | preserved |
++| Child Prompt re-enable | forbidden | not introduced |
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` | 180 | independent auditor recount round 2 |
++| Qualifying Chinese comment lines `C` | 29 | independent auditor recount round 2 |
++| Ratio `C / E` | 0.161 | PASS |
++| Required minimum `C` | 27 | max(1, ceil(0.15*180)) |
++
++### Remaining Unverified Items
++
++- INV-05 gemini 特例未单独行为测试（与 Prompt 同条件内联；non-blocking plan note）。
++- 极窄终端下 error+usage+nav 视觉挤占未做独立宽度矩阵测试。
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | B-01 Chinese comment gate: E=180 C=22 need 27 | INV-05 no dedicated test; same-color not theme.error pin; narrow width untested; auditor did not re-run commands | BLOCK | ses_069bb0a82ffeUrHlrgGTSwDtqx |
++| 2 | R1 | yes | No blocking findings. | INV-05 no dedicated test; same-color not theme.error pin; narrow width untested | APPROVE | ses_069b65a98ffeEIDXrajUB1xvKn |
++
++### Independent implementation audit verdict (round 2, verbatim)
++
++```text
++No blocking findings.
++
++APPROVE
++
++Audited mode: implementation
++Approved plan revision: R1
++Actual plan revision: R1
++Scope: full original requirement
++Chinese comments: E=180 C=29 need=27 PASS
++Blocking findings: none
++```
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+index a43a6d877695c452d938167c2b03744fd0e4a617..2c1064b47a92d57fb0aca5ba4018cfbc057e6e79 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+@@ -2,12 +2,13 @@ import { createEffect, createMemo, createSignal, Show } from "solid-js"
+ import { useRouteData } from "@tui/context/route"
+ import { useSync } from "@tui/context/sync"
+ import { useTheme } from "@tui/context/theme"
++import { useDialog } from "@tui/ui/dialog"
++import { DialogAlert } from "@tui/ui/dialog-alert"
+ import { SplitBorder } from "@tui/component/border"
+-// [local-smark] UserMessage type needed for token accounting
+-import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+ import { Locale } from "@/util/locale"
++import { formatDuration } from "@/util/format"
+ import { tokenAccounting } from "@/token/accounting"
+-import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++import { createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { activeTurnPair } from "../../util/session-pending"
+ import { useCommandPalette } from "../../context/command-palette"
+ import { useCommandShortcut } from "../../keymap"
+@@ -15,6 +16,7 @@ import { useCommandShortcut } from "../../keymap"
+ export function SubagentFooter() {
+   const route = useRouteData("session")
+   const sync = useSync()
++  const dialog = useDialog()
+   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+   const session = createMemo(() => sync.session.get(route.sessionID))
+ 
+@@ -37,6 +39,17 @@ export function SubagentFooter() {
+   })
+ 
+   const status = createMemo(() => sync.data.session_status?.[route.sessionID])
++  // child 无 Prompt；retry 诊断必须挂在本 footer，不能依赖主会话输入栏。
++  // task / general / permission-reviewer（auto reviewer）共用此栏，禁止再挂第二套 chrome。
++  // 只认当前 route.sessionID 的 status，禁止回读 parent 的 retry 以免串会话。
++  const retry = createMemo(() => {
++    const s = status()
++    if (s?.type !== "retry") return
++    return s
++  })
++  // countdown 只驱动 UI 重算“现在”；attempt/next 边界仍来自 session_status。
++  // 不在此模块持有业务计时起点，避免重挂载后与 processor 倒计时分叉。
++  const now = createRefreshClock(() => !!retry())
+ 
+   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
+ 
+@@ -91,6 +104,30 @@ export function SubagentFooter() {
+   const nextShortcut = useCommandShortcut("session.child.next")
+   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
+ 
++  // 展示层压平空白；DialogAlert 仍拿 status.message 原文。
++  // gemini quota 特例与主 Prompt footer 同条件，避免两处摘要语义漂移。
++  const retrySummary = createMemo(() => {
++    const r = retry()
++    if (!r) return
++    if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
++      return "gemini is way too hot right now"
++    return r.message.replace(/\s+/g, " ").trim()
++  })
++  // attempt/next 来自 SessionStatus.retry；formatDuration 与 Prompt 共用 util。
++  const retryMeta = createMemo(() => {
++    const r = retry()
++    if (!r) return ""
++    const seconds = Math.round((r.next - now()) / 1000)
++    const duration = formatDuration(seconds)
++    return duration ? `retry in ${duration} · #${r.attempt}` : `retry · #${r.attempt}`
++  })
++  // details 必须走 DialogAlert 原文路径，禁止把压平后的摘要写回 status。
++  const openRetryDetails = () => {
++    const r = retry()
++    if (!r) return
++    void DialogAlert.show(dialog, "Retry Error", r.message)
++  }
++
+   return (
+     <box flexShrink={0}>
+       <box
+@@ -104,28 +141,66 @@ export function SubagentFooter() {
+         flexShrink={0}
+         backgroundColor={theme.backgroundPanel}
+       >
+-        <box flexDirection="row" justifyContent="space-between" gap={1}>
+-          <box flexDirection="row" gap={1}>
+-            <text fg={theme.text}>
++        {/* 单行 chrome：label → retry 红字 → usage → 导航；与用户截图同一 footer 行。 */}
++        <box flexDirection="row" justifyContent="space-between" gap={1} minWidth={0} overflow="hidden">
++          <box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
++            <text fg={theme.text} flexShrink={0}>
+               <b>{subagentInfo().label}</b>
+             </text>
+             <Show when={subagentInfo().total > 0}>
+-              <text style={{ fg: theme.textMuted }}>
++              <text style={{ fg: theme.textMuted }} flexShrink={0}>
+                 ({subagentInfo().index} of {subagentInfo().total})
+               </text>
+             </Show>
++            {/* 红字诊断优先于 usage：宽度不足时先挤 usage，不能把 error 簇挤没。 */}
++            {/* theme.error + truncate：对齐主 Prompt retry 契约，摘要可缩 details/meta 不缩。 */}
++            <Show when={retry()}>
++              <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
++                <box
++                  minWidth={0}
++                  flexShrink={1}
++                  flexDirection="row"
++                  gap={1}
++                  overflow="hidden"
++                  onMouseUp={openRetryDetails}
++                >
++                  <text
++                    minWidth={0}
++                    flexShrink={1}
++                    fg={theme.error}
++                    wrapMode="none"
++                    truncate
++                    onMouseUp={openRetryDetails}
++                  >
++                    {retrySummary()}
++                  </text>
++                  {/* (details) 与摘要同色且不 truncate，保证窄宽下入口仍可点。 */}
++                  <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>
++                    (details)
++                  </text>
++                </box>
++                {/* retry meta 固定展示 attempt；倒计时文案可随 now 刷新。 */}
++                <text flexShrink={0} fg={theme.error} wrapMode="none">
++                  {retryMeta()}
++                </text>
++              </box>
++            </Show>
++            {/* usage 在 error 之后：retry 时仍可显示，但不得抢在诊断前占用左簇。 */}
+             <Show when={usage()}>
+               {(item) => (
+-                <text fg={theme.textMuted} wrapMode="none">
+-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
+-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
++                <text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>
++                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span>{" "}
++                  {Locale.number(item().input)}{" "}
++                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span>{" "}
++                  {Locale.number(item().output)}
+                   {item().context ? ` · ${item().context}` : ""}
+                   {item().cost ? ` · ${item().cost}` : ""}
+                 </text>
+               )}
+             </Show>
+           </box>
+-          <box flexDirection="row" gap={2}>
++          {/* 导航固定不收缩，避免长错误把 Parent/Prev/Next 挤出视口。 */}
++          <box flexDirection="row" gap={2} flexShrink={0}>
+             <box
+               onMouseOver={() => setHover("parent")}
+               onMouseOut={() => setHover(null)}
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index d831bd2fcd178e83e6680fc6cf99cbac504566d7..8b0a967cf7a8f7c5be9952859ec7aa7b5159782e 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -257,6 +257,140 @@ test("subagent footer shows compact step flow without request cumulative parenth
+   )
+ })
+ 
++// child 底部只有 SubagentFooter（无 Prompt）；retry 红字必须挂在同一行，并覆盖 auto reviewer 等所有 parentID 子会话。
++// 本测用 permission-reviewer title：既锁 task 入口，也锁 auto reviewer 共用 footer 路径。
++test("child subagent footer shows red retry summary before usage", async () => {
++  const childID = "ses_child_retry_footer"
++  await withRenderedSession(
++    [assistantMessage("msg_task_retry_footer", 1)],
++    {
++      msg_task_retry_footer: [
++        completedToolPart(
++          "part_task_retry_footer",
++          "msg_task_retry_footer",
++          "task",
++          { description: "retry footer child", subagent_type: "permission-reviewer" },
++          { sessionId: childID },
++        ),
++      ],
++    },
++    async (app, emit) => {
++      await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Permission-Reviewer Task") && line.includes("retry footer child")),
++      )
++      const raw = app.captureCharFrame().split("\n")
++      const y = raw.findIndex(
++        (line) => line.includes("Permission-Reviewer Task") && line.includes("retry footer child"),
++      )
++      expect(y).toBeGreaterThanOrEqual(0)
++      // 点击 task 行导航 child：与生产 Task tool onMouse 入口一致，不直接 route.navigate 绕过。
++      await app.mockMouse.click(35, y + 1)
++
++      await waitForFrame(
++        app,
++        (lines) =>
++          lines.some((line) => line.includes("retry footer visible")) &&
++          lines.some((line) => line.includes("Permission-Reviewer")),
++      )
++
++      // 通过公开 session.status 事件进入 Sync，覆盖真实 child sessionID 的 retry 消费链。
++      // 禁止直接写 store：必须证明 bus → Sync → SubagentFooter 全链路。
++      emit({
++        directory,
++        project: "proj_test",
++        payload: {
++          id: "evt-child-footer-retry",
++          type: "session.status",
++          properties: {
++            sessionID: childID,
++            status: {
++              type: "retry",
++              attempt: 3,
++              next: Date.now() + 9_000,
++              message: "Short error",
++            },
++          },
++        },
++      })
++
++      const frame = await waitForFrame(
++        app,
++        (lines) => lines.some((line) => line.includes("Short error") && line.includes("(details)")),
++      )
++      const footer = frame.find((line) => line.includes("Short error") && line.includes("(details)")) ?? ""
++      // 摘要与 details 左起成组；retry meta 与 agent 名同在 footer 行。
++      // 连续 token 证明未用 flexGrow 把 (details) 推到行尾制造假两端对齐。
++      expect(footer).toContain("Short error (details)")
++      // #3 来自 emit 的 attempt，锁定 meta 读 session_status 而非硬编码 UI。
++      expect(footer).toMatch(/retry(?: in .+)? · #3/)
++      expect(footer).toContain("Permission-Reviewer")
++      // 红字摘要在 token usage 之前（usage 可能仍出现在右侧，但不得插在 Short error 之前把诊断挤没）。
++      const errorAt = footer.indexOf("Short error")
++      const usageAt = footer.search(/[↑↓]/)
++      if (usageAt >= 0) expect(errorAt).toBeLessThan(usageAt)
++
++      const spans = app.captureSpans()
++      const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
++      const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
++      const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
++      expect(errorSpan).toBeDefined()
++      expect(detailsSpan).toBeDefined()
++      // 详情入口与错误摘要同色，避免 muted 弱化可点击诊断入口。
++      // 用 renderer span 实色比较，不绑定具体 theme hex，覆盖自定义主题。
++      expect(detailsSpan!.fg.toInts()).toEqual(errorSpan!.fg.toInts())
++
++      // INV-03：点击 (details) 打开 DialogAlert，正文保留原始 message。
++      // 点击坐标取自最终字符帧可见令牌，覆盖用户真实可点区域。
++      const detailsToken = "(details)"
++      const charLines = app.captureCharFrame().split("\n")
++      const detailsY = charLines.findIndex((row) => row.includes(detailsToken))
++      const detailsX = charLines[detailsY]?.indexOf(detailsToken) ?? -1
++      expect(detailsY).toBeGreaterThanOrEqual(0)
++      expect(detailsX).toBeGreaterThanOrEqual(0)
++      app.renderer.clearSelection()
++      await app.mockMouse.moveTo(detailsX + Math.floor(detailsToken.length / 2), detailsY)
++      await app.renderOnce()
++      await app.mockMouse.click(detailsX + Math.floor(detailsToken.length / 2), detailsY)
++      const dialog = await waitForFrame(app, (rows) => rows.some((row) => row.includes("Retry Error")))
++      expect(dialog.some((row) => row.includes("Short error"))).toBe(true)
++    },
++    {},
++    { width: 140, height: 24 },
++    {
++      [childID]: {
++        info: sessionInfo({
++          id: childID,
++          parentID: sessionID,
++          title: "retry footer child (@permission-reviewer subagent)",
++        }),
++        messages: [
++          {
++            ...userMessage("msg_child_retry_user", 1),
++            sessionID: childID,
++            agent: "permission-reviewer",
++          },
++          {
++            ...assistantMessage("msg_child_retry_asst", 2, "msg_child_retry_user"),
++            sessionID: childID,
++            finish: "stop",
++            agent: "permission-reviewer",
++            cost: 0.005,
++          },
++        ],
++        parts: {
++          msg_child_retry_asst: [
++            textPart("part_child_retry", "msg_child_retry_asst", "retry footer visible", { sessionID: childID }),
++            {
++              ...stepFinishPart("part_child_retry_finish", "msg_child_retry_asst", 6_000, 100, 0, 0.005),
++              sessionID: childID,
++            },
++          ],
++        },
++      },
++    },
++  )
++})
++
+ test("non-shell auto review status opens the reviewer child session", async () => {
+   const childID = "ses_reviewer_child"
+   await withRenderedSession(

@@ -1,0 +1,36 @@
+From c152cd8afa9b1f1e19f1c3ad4eee2a696d66baa9 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 25 Jul 2026 06:45:42 +0800
+Subject: [PATCH] =?UTF-8?q?test(daemon):=20=E4=BF=9D=E7=95=99=20stage=20wo?=
+ =?UTF-8?q?rker=20=E7=9A=84=20pipe=20=E7=B1=BB=E5=9E=8B=E4=B8=8E=E9=9A=90?=
+ =?UTF-8?q?=E8=97=8F=E7=AA=97=E5=8F=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+rebase 同时合并 maintenance recovery 的共享 stage worker 与 Windows hidden-spawn。
+专用 spawn 直接携带 windowsHide，保留 stdin/stdout pipe overload，避免通用 any helper
+绕过后续的类型检查，同时不改变 recovery marker 与 gate 时序。
+
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index 2c35fe7631b39d414b6b6e11505ccde3343bef01..41fef43eb40c3a99f09a2ecd8312425b87ca4a94 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -472,7 +472,8 @@ function maintenanceStageWorkerSource(leaseDir: string) {
+ 
+ // stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
+ function spawnStageWorker(lockPath: string, leaseDir: string) {
+-  const proc = spawnBackground([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
++  // 专用 pipe overload 保留 stdin/stdout 静态类型；windowsHide 直接落在同一真实 spawn。
++  const proc = Bun.spawn([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
+     env: {
+       ...isolatedDaemonEnv(lockPath),
+       OPENCODE_PROCESS_ROLE: "worker",
+@@ -481,6 +482,7 @@ function spawnStageWorker(lockPath: string, leaseDir: string) {
+     stdin: "pipe",
+     stdout: "pipe",
+     stderr: "ignore",
++    windowsHide: process.platform === "win32",
+   })
+   return { proc, reader: proc.stdout.pipeThrough(new TextDecoderStream()).getReader() }
+ }

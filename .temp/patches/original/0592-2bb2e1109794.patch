@@ -1,0 +1,846 @@
+From 2bb2e110979464face5d3e2014e3c2453fdb7c07 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 16 Sep 2026 01:27:58 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E5=9C=A8=E5=B8=83=E5=B1=80?=
+ =?UTF-8?q?=E9=98=B6=E6=AE=B5=E4=BF=9D=E6=8C=81=E9=98=85=E8=AF=BB=E4=BD=8D?=
+ =?UTF-8?q?=E7=BD=AE=E5=B9=B6=E7=A7=BB=E9=99=A4=E5=BB=B6=E8=BF=9F=E6=BB=9A?=
+ =?UTF-8?q?=E5=8A=A8=E6=81=A2=E5=A4=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+通过 OpenTUI 依赖补丁在子节点布局与绘制前保持可见内容，统一处理布局前贴底容差，避免重排覆盖用户滚动。删除 Session 的事后位置恢复，保留原生滚动条拖动语义。
+
+方案 R2 与完整实现均经独立审计通过。四个生产相关文件增删共 127 行；完整 TUI 分区 731 pass、13 skip、0 fail，类型检查通过。
+
+diff --git a/bun.lock b/bun.lock
+index ed06bc5d98a2f1d14ad41381058bca893c3273ee..dc354f48cf9e51fb22b58d13284c1e964a14a58f 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -703,10 +703,11 @@
+     "tree-sitter-bash",
+   ],
+   "patchedDependencies": {
++    "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+     "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
+     "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
+     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
+-    "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
++    "@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz": "patches/@opentui%2Fcore@0.4.3-smark.13.patch",
+   },
+   "overrides": {
+     "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz",
+diff --git a/docs/plans/tui-scroll-layout-stability.md b/docs/plans/tui-scroll-layout-stability.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..de2eb08c00fa9836d85159fc91de258ef0a09e04
+--- /dev/null
++++ b/docs/plans/tui-scroll-layout-stability.md
+@@ -0,0 +1,320 @@
++# Canonical Implementation Plan: TUI scroll layout stability
++
++> Status: verified
++>
++> Revision: R2
++>
++> Approved revision: R2
++>
++> Audit mode: full-scope
++>
++> Requirement source: current user request quoted below
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-09-16
++
++This is the sole implementation specification for this task.
++
++## 1. Verbatim Requirement
++
++> 那本质上而言，我认为这个松手跳，你以后你说话的时候你使用不要过度简称。松手跳本质上就是你自己创立的一个简称，不得使用这类简称来去进行表达。与此同时，请注意，我认为这个在拖动滚动条即使没有移动，然后它之后会自动进行相应一个跳动的一个情况，这本质上正是重排、重新排布的一个必要的，或者说一个不可避免的一个机制，所以本身我认为这是用户可接受的。因为毕竟用户正常情况下不会去手动地选择拖动那个滚动条，那如果他拖动了，那本质上他就应该去接受这个重排的风险。那所以这个本身上是可以理解的。那因此与此同时请你完整去看一下，你说它只需要几十行的量级，那现在我给你相应的最多四个生产代码文件的一个修改机会，同时最多修改行数，生产代码不超过四百行。所以现在请你开始按照完整的 workflow，也就是相应的 first plan，然后等等的一些 verify implementation and commit 的逻辑进行相应的完整的方案构建以及方案实现等等内容。
++
++Prior requirement retained:
++> 我希望最终的实现保持精简清爽，同时又能够不会，就是影响用户体验，就是之后不会再这种发射任何的这种弹跳，或者说用户在滚动翻译的时候，它有一个滞后的一个增量，这都是算是一种卡顿。
++
++## 2. Explicit Non-Goals
++
++- User accepts native scrollbar-drag position changes as extents change. Do not modify Slider drag semantics or quantization.
++- No new virtual-list framework, animation, timer, retry, setting, alternate renderer, or dependency release.
++- No changes to permissions or other dirty worktree files. Commit only task files; no push authorized by this request.
++- Width changes necessarily rewrap visible text. Preserve visible Message-root offset, not identical pixels or a semantic character position inside a rewrapping paragraph. Selection content must remain correct.
++
++## 3. Repository Context
++
++| Source | Constraint |
++| --- | --- |
++| AGENTS.md, packages/opencode/AGENTS.md, test/AGENTS.md | Bun tests/typecheck from package; real behavior; preserve unrelated changes |
++| CONTEXT.md | Message/Session ownership; current v1 Session is relevant |
++| docs/adr/README.md | No scrolling ADR exists |
++| .opencode/policy/first-principles-engineering.md | Independent plan/implementation audits; primary owner repair; Chinese comments |
++| package.json patchedDependencies | Existing installation delivery mechanism for dependency source repairs |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Class |
++| --- | --- | --- |
++| node_modules/@opentui/core/index.js:10113-10673 | ScrollBox, sticky state, input, extent update | observed |
++| node_modules/@opentui/core/index-b5dpwnes.js:1120-1199,1388-1457 | Layout traversal before rendering/culling | observed |
++| node_modules/@opentui/core/renderables/ScrollBox.d.ts | Actual installed interfaces | contracted |
++| thirdparty/opentui/packages/core/src/renderables/ScrollBox.ts | Corresponding source ownership; not runtime dependency | observed |
++| packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:459-868,1733-1883 | Current delayed correction, remeasurement and consumer | observed |
++| packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx:3971-4361 | Real Session harness, residency/resize tests | observed |
++| packages/opencode/src/cli/cmd/tui/component/spinner.tsx | Existing custom intrinsic option examined, rejected as unnecessary adapter |
++| package.json, bun.lock, patches/@npmcli%2Fagent@4.0.0.patch | Patch registration and lock delivery | observed |
++| packages/opencode/bunfig.toml, script/test-ci.ts | JSX preload and same-process TUI test partition | observed |
++| D:/Temp/opencode/scroll-reflow-experiment.ts and notes | Real native-renderer minimized reproduction | observed |
++
++## 5. Current Behavior
++
++Part/width/display change -> mounted auto-height or shelled remeasurement -> Yoga layout -> ScrollBox extent/clamp/sticky -> child geometry and render list -> paint -> Session microtask -> eventual restore after all batches.
++
++Current ScrollBox retains absolute scroll position when history geometry changes. Total height may be unchanged while the visible Message moves. Session captures an old anchor only on global invalidation and restores after all batches; it does not cancel that old position on manual input. Other ScrollBoxes use the same native class but do not promise Message residency behavior.
++
++## 6. Supported Input Domain and Reachability
++
++| Input | Producer | Guarantees/path | Owner | Class |
++| --- | --- | --- | --- | --- |
++| Growth/shrink above viewport | Session remeasure/Parts | Ordered direct Message roots with Yoga geometry | ScrollBox layout | observed |
++| Width/display change | Terminal/sidebar/toggles | Yoga layout precedes render traversal | ScrollBox layout | observed |
++| Wheel/key/navigation | Existing public scrollBy/scrollTo | Input changes translation before next layout | ScrollBox | observed |
++| Bottom following | stickyScroll + stickyStart | Session retains one-row tolerance | ScrollBox/Session existing policy | contracted |
++| Selection | Native mouse selection and Session pins | Selected text remains mounted | Existing selection/pins | reachable |
++| Removed root/revert | Session message window/revert | Current child list authoritative; deleted content cannot be preserved | ScrollBox clamp | reachable |
++| Scrollbar drag | Native Slider | Existing mapping and rounding remain | Slider | contracted |
++
++## 7. Required Invariants
++
++| ID | Invariant | Evidence/test |
++| --- | --- | --- |
++| INV-01 | Each painted frame preserves the first intersecting surviving Message root's viewport offset when preceding geometry changes | native and Session frame tests |
++| INV-02 | User wheel/key/navigation displacement is retained immediately; idle frames do not add delayed displacement | interleaved input and idle frames |
++| INV-03 | Exact native bottom following and existing Session one-row tolerance remain | existing streaming tests + native bottom test |
++| INV-04 | Residency, final geometry, selection/copy, navigation and cleanup remain correct | full Session/TUI suite |
++| INV-05 | No new background work/timer or unbounded state; no measured material frame-time regression in native 300-root workload | benchmark comparison |
++| INV-06 | <=4 production-related files, <=400 gross added/deleted production lines including patch/config/lock; independent audits before commit | diff audit |
++
++## 8. First Divergence and Root Cause
++
++INV-01 first diverges when new Yoga child positions are adopted with old absolute scroll position; correcting after paint is too late. Owning interface is ScrollBox.updateLayout before child traversal and culling. INV-02 additionally diverges when Session replays an old anchor after intervening input.
++
++Reproduction (cwd D:/Temp/opencode): `$env:SCROLL_ROWS='300'; bun run D:\Temp\opencode\scroll-reflow-experiment.ts` rerun 2026-09-16. Baseline max errors: reflow/wheel/manual 14 rows, unchanged-total redistribution 2, resize 300; layout compensation 0 for these scenarios. This harness prints baseline comparisons and asserts the experimental candidate; committed tests must independently fail against installed unpatched ScrollBox. Scrollbar drag remains explicitly exempt.
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Reason |
++| --- | --- | --- |
++| Geometry compensation | Native ScrollBox | Owns translation, child layout, range and culling |
++| Installation | Bun patch registration | Delivers owner fix without app monkeypatch/subclass |
++| Residency/measurement | Session | Owns payload state and lifetimes; keep existing mechanism |
++| Drag | Native Slider unchanged | User accepts range-related displacement |
++| Test seams | Real native renderer/public scroll APIs and real Session render harness | Observe frames/geometry/input, never implementation text |
++
++## 10. Single Approved Primary-Path Design
++
++Add `preserveVisibleContent?: boolean` (default false) and `stickyScrollTolerance?: number` (default zero) to ScrollBox options and instance properties. Session enables preservation and sets tolerance to one row. This selects a contracted consumer behavior, not a failure-triggered alternative. Existing non-Session scroll boxes preserve their shipped semantics. The tolerance moves the existing Session policy to the owner with access to pre-layout coordinates; it adds no user setting.
++
++At ScrollBox.updateLayout, when preservation is enabled:
++1. Read old first visible direct child and its offset relative to viewport before updating cached layout. Read old maximum and exact old bottom state before range updates. Use current scroll position, so already-applied user input belongs to the new baseline.
++2. Update viewport/content cached geometry from the already-calculated Yoga layout. Their existing size-change callbacks refresh extents only on actual size changes; NEVER call recalculateBarProps unconditionally per layout. Do not recalculate Yoga or walk/measure message subtrees.
++3. If previously exactly at the sticky bottom, retain bottom following. If within configured bottom tolerance AND maximum grew, follow the new bottom. A manual one-row movement without growth remains untouched. Otherwise adjust position from the selected child's new Yoga top minus its old offset. With no surviving visible child, retain native clamped position (empty/deleted content is a supported state, not alternate recovery).
++4. Run existing super.updateLayout once; selection autoscroll, child layout, culling, hit geometry and rendering continue normally. No frame timer, old anchor queue, or extra render traversal.
++
++Patch the shipped index.js and its ScrollBox.d.ts in one tracked patch artifact. Do not edit hashed renderer bundles or Slider. Enable on Session and remove its delayed anchor capture/restore and reset fields. Also delete lastMaxScrollTop and the Session post-layout automatic scrollTo branch: its tolerance behavior now belongs solely to native pre-layout policy. Keep the Session renderAfter callback only for residency scheduling and publishing current viewportStuckToBottom status. Preserve remeasurement batching, selection pins, height freeze gate and payload lifecycle.
++
++Prototype uses private calls because it was a subclass; production code inside the owning class requires no unsafe cast or access bypass. If real Session tests expose a wrong geometry ordering, repair this same pre-traversal path within budget; substantive design changes require revision/audit.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Classification | Decision |
++| --- | --- | --- |
++| Session preservation enabled | primary contract | one native layout path |
++| Other scrollboxes default false | shipped contracted pass-through | preserve |
++| Exact bottom vs history | supported contract branches | preserve |
++| Empty/deleted child | supported native clamp | preserve |
++| Slider drag mapping | shipped behavior explicitly accepted | preserve |
++| Session final anchor restoration | obsolete second owner | delete |
++
++New alternate success paths: zero. Diagnostics: zero percent.
++
++## 12. Workaround Deletion and Replacement
++
++Delete `remeasureAnchor`, `anchorRestorePending`, `captureRemeasureAnchor`, restoration block, finalization assignment, invalidation capture and session-reset assignments in index.tsx. Delete lastMaxScrollTop and the post-layout bottom-following branch, retaining only status publication. Native per-layout preservation and pre-layout tolerance policy supersede these corrections. Keep batch queues and remeasuring flag because they control actual resource work/culling.
++
++## 13. Forward Traceability
++
++| Invariant | Production change | Behavioral tests |
++| --- | --- | --- |
++| INV-01 | native patch + Session prop | grow/shrink, redistribution, resize each frame; shelled real Session resize |
++| INV-02 | same patch + delete delayed restore | scrollBy, actual wheel, navigation and idle-frame checks |
++| INV-03 | old bottom snapshot + existing tolerance | exact bottom, existing one-row streaming tests |
++| INV-04 | no residency/selection changes | full Session file and all TUI tests; selection with preceding reflow |
++| INV-05 | no stored anchors/timers/subtree walk | 300-root timed baseline/candidate experiment |
++| INV-06 | patch/package/lock/index only | git diff numstat; independent audit |
++
++## 14. Reverse Traceability
++
++| Concept | Invariant | Why current logic cannot carry it |
++| --- | --- | --- |
++| native preservation option | INV-01/04 | Session needs content identity; other consumers retain default behavior |
++| old visible geometry local variables | INV-01/02 | total-height deltas insufficient; persistent old anchors stale after input |
++| owner patch delivery | INV-06 | dependency is released tarball, thirdparty edits alone do not execute |
++| delete delayed restore | INV-02 | two position owners would override input |
++
++## 15. File-Level Change Plan
++
++| File | Change | Expected gross lines |
++| --- | --- | ---: |
++| patches/@opentui%2Fcore@0.4.3-smark.13.patch | New owner implementation + option/property declaration | 100-160 |
++| package.json | patchedDependencies registration | 1-2 |
++| bun.lock | install-generated patch registration | 1-10 |
++| packages/opencode/src/cli/cmd/tui/routes/session/index.tsx | enable native behavior; remove final restore | 45-65 |
++| packages/opencode/test/cli/tui/scroll-layout.test.ts | New real native behavioral tests | 180-260 test lines |
++| packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx | Real Session frame stability and selection/reflow | 80-150 test lines |
++| this plan | audit/evidence record | documentation |
++
++## 16. TDD Behavior Slices
++
++1. Native grow/shrink preceding content: red on old native absolute scroll; implement minimal enabled preservation; assert exact frame/offset, unchanged-total redistribution.
++2. Input/idle and bottom: red regression guard for pre-layout changes; use scrollBy and mock wheel with independent intended motion, assert idle does not move. Include explicit navigation and empty content; verify opt-out unchanged.
++3. Real Session resize with shelled roots and without: assert every sampled frame, not eventual waitFor success; remove old restore. Keep existing final geometry tests.
++4. Selection with preceding reflow and existing full render suite: copied text remains exact; tool/Markdown/streaming flows use real existing harness.
++
++R2 additions resolving B-01/B-02: real Session history reading with preceding growth larger than the old distance to bottom must remain stable on every frame; native one-row tolerance must not snap without growth and must follow on growth; real renderer `idle()`/idle notification must settle after input ends without manually pumping renderOnce. Use public scheduler idle state/notification, not private requestRender counts.
++
++No private-method tests, source-string assertions or weakened existing expectations. Baseline constructor can serve only in performance comparison, not a duplicated expected-value algorithm.
++
++## 17. Chinese Comment Budget
++
++E estimate 260-380 substantive production/test lines; C >= max(1, ceil(E*0.15)), estimated 40-57 meaningful nearby Chinese comment lines. Explain layout-before-culling order, preserving user movement, sticky distinction, same-total-height case, selection and idle-frame oracles. Compute actual totals including test additions; do not pad comments. Patch code comments count as implementation comments, patch envelope does not.
++
++## 18. Verification
++
++| Command | cwd | Evidence |
++| --- | --- | --- |
++| bun test test/cli/tui/scroll-layout.test.ts --timeout 30000 | packages/opencode | native behavioral red/green |
++| bun test test/cli/cmd/tui/session-message-render.test.tsx --timeout 60000 | packages/opencode | complete Session regression |
++| bun typecheck | packages/opencode | public declarations/consumer |
++| bun install --ignore-scripts | root | generate lock and apply tracked dependency patch |
++| bun install --frozen-lockfile --ignore-scripts | root | reproducible patch registration |
++| bun -e 'const files=(await Array.fromAsync(new Bun.Glob("test/cli/**/*.test.{ts,tsx}").scan())).filter(x=>/^test[\\/]cli[\\/](run|tui|cmd[\\/]tui)[\\/]/.test(x)).sort();const p=Bun.spawn([process.execPath,"test",...files,"--timeout","30000"],{stdout:"inherit",stderr:"inherit"});process.exit(await p.exited)' | packages/opencode | all TUI same-process tests |
++| SCROLL_BENCH=1 bun test test/cli/tui/scroll-layout.test.ts --test-name-pattern benchmark --timeout 30000 (PowerShell uses $env:SCROLL_BENCH='1') | packages/opencode | 300 roots, 30 warmup + 200 alternating reflow/input frames per mode; median and p95 of renderOnce wall time; repeat 3 times; investigate if median-of-three p95 increases by both >25% and >1ms |
++| git diff --check; git diff --numstat | root | clean diff and hard budget |
++
++Each foreground verification command <=600 seconds. A command timeout/failure is not passing evidence. Unrelated core/permission changes are excluded from commit, but any verification failure must be reported and attributed with evidence. Remote CI is not required as push is not authorized; local full affected TUI partition is required.
++
++## 19. Diff Budget
++
++Four production-related files maximum, gross additions plus deletions <=400 including patch envelope, package.json and generated lock. Expected 147-237 lines; test/documentation excluded from user production budget, included in quality review. No allowance to hide another production change inside a test. Stop and revise if dependency installation causes extra tracked churn.
++
++## 20. Real Risks and Open Decisions
++
++- Content/viewport update callbacks can clamp before correction: native frame tests must cover contraction and direct-child padding/margin.
++- Native layout traversal and selection autoscroll order must retain input displacement; test actual input, not only programmatic scrolling.
++- Existing end-of-frame bottom tolerance may conflict with shrinking extents: full Session streaming coverage required.
++- Async Markdown rebuilds may consume time even when coordinates stay stable. Measure existing real Session tests plus native overhead; no claim of universal zero CPU latency.
++- Text inside visible paragraphs necessarily rewraps; semantic character anchoring is outside this root-geometry repair and explicitly reported, not silently claimed.
++
++### Open Decisions Requiring the User
++
++None for current scope. User explicitly accepts native scrollbar-drag range changes and authorizes commit. No publishing or push is included.
++
++### Rejected Speculation
++
++No new slider state machine, whole-list virtualization rewrite, network/server changes, new cache, or fallback renderer. Those lack necessity for this repair.
++
++## 21. Audit Contract
++
++Independent auditor reads verbatim requirements and entire canonical revision, reconstructs owner/call path, reviews full original scope each round, both under/over-design, no fallback, file/line budget, behavioral test sensitivity and 15% Chinese explanations. Max 6 plan rounds / 3 implementation rounds. No implementation before exact revision has No blocking findings.
++
++## 22. Plan Audit Record
++
++Round 1, R1, full scope, invocation `ses_f5a181bc9ffeZ86lnoNiXyqDbM`.
++
++Verbatim finding IDs/classifications and release verdict:
++
++> ## Blocking findings
++> ### B-01 新的布局补偿会被 Session 保留的贴底判定覆盖
++> ### B-02 每次布局刷新滚动范围会持续预约下一帧
++> ## Non-blocking findings
++> - §18 的 300-root 性能比较尚未提供具体计时命令、采样方法和“material regression”的判定标准。实施前应固定这些内容，避免结果出来后再选择标准。
++> - 计划引用的临时实验可以用于定位算法，但不能代替提交后的回归测试。它还包含明确不在本次范围内的拖动实验分支；实现证据应只归属于实际交付路径。
++> ## Release verdict
++> **BLOCK — `docs/plans/tui-scroll-layout-stability.md`，R1。**
++> B-01、B-02 需要写入修订后的 canonical plan，再进行完整范围复审。当前修订不允许进入生产实现。
++
++R2 resolves B-01 by moving the existing tolerance policy into pre-layout native state and deleting the obsolete Session comparison. B-02 is resolved by using size-change-triggered extent refresh and requiring scheduler idle convergence. Full-scope R2 audit pending; approval remains none.
++
++## 23. Implementation Evidence
++
++Plan audit round 2, R2, full scope, invocation `ses_f5a181bc9ffeZ86lnoNiXyqDbM`. Verbatim verdict:
++
++> ## Blocking findings
++> No blocking findings.
++> ## Non-blocking findings
++> - §15 的 Session 修改说明、§19 的行数估算尚未体现新增的贴底逻辑迁移；§20 仍保留“现有帧末贴底容差”的旧描述。这些属于记录更新，不影响 §10、§12 已明确的实施路径。实际交付仍须计算四个生产相关文件及 400 行增删总量。
++> - 临时实验结果仍只作为研究依据。R2 已要求提交后的原生测试与真实 Session 测试独立验证，不得把临时实验报告直接当作实现通过证据。
++> ## Release verdict
++> **APPROVE — 仅适用于 `docs/plans/tui-scroll-layout-stability.md` 的 R2。**
++> 记录本轮完整范围批准后，可将 `Approved revision` 设为 `R2` 并允许实施。任何实质设计变更仍需递增修订并重新审计；本结论不代表实现已验证或允许跳过独立实现审计。
++
++### Actual Files and Diff
++
++Production-related tracked files: package.json +1; bun.lock +2/-1; Session index.tsx +3/-46; new dependency patch 74 lines (including diff envelope). Four files; gross 127 lines, below 400. Patch modifies installed index.js and ScrollBox.d.ts at owner; no Slider, renderer bundle, thirdparty source or unrelated changes.
++
++Tests: new scroll-layout.test.ts; session-message-render.test.tsx +74/-1. The changed existing resize wait predicate now also waits for actual public content-release completion; all original final geometry/release assertions remain. Early per-frame preservation makes the old offset predicate true before measurement completion.
++
++### Red-Green Test Evidence
++
++- `bun test test/cli/tui/scroll-layout.test.ts --timeout 30000`: original native first painted frame expected MESSAGE 20, received empty; 0 pass/1 fail. Applied owner patch: 1 pass/0 fail.
++- `bun test test/cli/cmd/tui/session-message-render.test.tsx --test-name-pattern 'session keeps every resize frame' --timeout 60000`: before Session enable/removal, both cases failed, offsets 120 and 18 rather than zero. After integration: 2 pass/0 fail, 205 assertions.
++- Native additional reachable slices: wheel, line input, real wrapping resize, same-total redistribution, margins/padding, bottom tolerance, explicit navigation, empty content, default-off behavior and real scheduler idle: 9 pass/0 fail before benchmark addition.
++- Actual Part event with preceding growth preserves selected copied text through all sampled frames. Both resident and shelled real Session resize paths keep per-frame offset while accepting a line-down command.
++
++### Verification Commands and Results
++
++All commands from packages/opencode unless noted; Windows Bun 1.3.14.
++
++| Command | Result |
++| --- | --- |
++| bun test test/cli/tui/scroll-layout.test.ts test/cli/cmd/tui/session-message-render.test.tsx --timeout 60000 | 114 pass, 0 fail; 948 assertions; 46.68s |
++| Full TUI partition command from section 18 | 77 files, 731 pass, 13 skip, 0 fail; 2725 assertions; 462.79s |
++| bun typecheck | pass after final tests |
++| bun install --ignore-scripts (root, explicitly authorized by user) | pass; URL-based override requires resolved tarball identity as patch key |
++| bun install --frozen-lockfile --ignore-scripts (root) | pass; no further lock diff |
++| git diff --check (root) | pass |
++
++First attempted semver patch key was ignored because actual dependency identity is a tarball URL; no test success was claimed. Corrected key to existing resolved URL, fixed patch hunk count, regenerated lock using Bun. These are delivery corrections within approved patch path, not a dependency or architecture change.
++
++Performance command run alone: `$env:SCROLL_BENCH='1'; bun test test/cli/tui/scroll-layout.test.ts --test-name-pattern benchmark --timeout 30000`. Three pairs of baseline/enabled p95 ms: 1.2598/1.0340, 1.3221/1.1465, 1.0603/0.8709. Median-of-three p95: 1.2598/1.0340; threshold not exceeded. This is native 300-root workload evidence, not a universal UI latency guarantee.
++
++### Original Feedback-Loop Result
++
++The committed native tests replace the temporary subclass with the actual patched dependency. Growth/shrink and real wrapping resize have zero per-frame error; input displacement and idle-frame stability pass. Real Session tests additionally cover the original shelled/resident reflow path and the pre-layout tolerance conflict. Temporary Slider experiment is not part of delivery or verification claims.
++
++### Actual Secondary and Replacement Path Inventory
++
++One primary layout path; preservation opt-out is existing-consumer pass-through; bottom/history and empty lists are normal input branches. No diagnostics, retries or alternate success paths. Session delayed restore and post-layout automatic following removed. Native Slider unchanged per explicit user acceptance.
++
++### Chinese Comment Calculation
++
++E=236 added nonblank non-comment code lines across production patch, package registration and both tests; exclude imports, generated bun.lock, deleted code, patch context/envelope. C=41 nearby Chinese explanatory comment lines; minimum ceil(236*0.15)=36; ratio 17.37%. Counts obtained from git added lines plus new test and patch-added code. Comments cover geometry/culling order, input preservation, tolerance, same-total redistribution, scheduler idle, resource readiness, independent frame/copy oracles and benchmark sampling.
++
++### Remaining Unverified Items
++
++No remote CI run or push requested for this task. Current Windows full affected TUI partition passes; Linux/macOS not executed locally. No claim of semantic character-position stability inside rewrapping paragraphs or zero latency for arbitrary Markdown parsing workloads. Slider drag range changes remain explicitly accepted. No production files outside the four listed files were changed by this task.
++
++## 24. Implementation Audit Record
++
++Round 1, approved R2, full original scope, invocation `ses_f5a181bc9ffeZ86lnoNiXyqDbM`. Initial invocation requested verification authorization without a verdict; continuation completed independent verification. Verbatim classifications and verdict:
++
++> ## Blocking findings
++> No blocking findings.
++> ## Non-blocking findings
++> - 完整 TUI 分区首次执行达到 **600 秒上限**，未产生最终汇总；该次不计为通过。独立重跑在 **558.36 秒**完成，结果为 **731 pass、13 skip、0 fail**。验证耗时接近上限，应保留两次记录，目前没有证据将首次超时归因于本次修改。
++> - 本轮未重新执行依赖安装，遵守“不安装”的限制。已直接核对 patch 注册、lock 条目和实际安装的 ScrollBox 实现，并通过真实测试确认执行了补偿路径；干净环境安装的可复现性仍依赖已有安装记录，本轮未独立复现。
++> **本轮独立验证：**
++> - 两个相关测试文件：**114 pass、0 fail，948 个断言，47.66 秒**。
++> - `bun typecheck`：通过。
++> - 完整 TUI 分区重跑：**731 pass、13 skip、0 fail，2725 个断言，77 个文件**。
++> - 300-root 性能比较：三次 p95 的中位数为基线 **1.4376 ms**、启用补偿 **1.4341 ms**，未触发计划的调查阈值。
++> - `git diff --check`：通过。
++> ## Primary-path and fallback verdict
++> 通过。
++> `ScrollBox.updateLayout` 是几何保持与布局前贴底判断的唯一新增语义路径。Session 仅启用该行为、调度驻留并发布当前位置状态。
++> 原有延迟位置恢复和帧末自动贴底已删除。默认关闭、底部与历史位置分支、空内容 clamp 均属于明确契约；未发现失败后替代成功路径、新增重试或诊断路径。
++> ## Release verdict
++> **APPROVE — 仅适用于批准计划 R2 及本轮审查的实际实现 diff。**
++> 首次验证超时和未独立重跑安装的限制应如实保留。此次批准不涵盖后续实质修改。本轮未编辑文件、安装依赖或创建提交。
++
++Independent comment recount: patch E28/C5, Session production E2/C1, package E1/C0, native tests E144/C24, Session tests E61/C11, total E236/C41=17.37%, satisfying this repository's 15% requirement. Production-related diff independently confirmed as four files, 127 gross lines.
+diff --git a/package.json b/package.json
+index 1df56197896923dc3258952d59e38b3eb1106972..ecfcb778afb17f9b4ede0b95bc0d88c7afeb1699 100644
+--- a/package.json
++++ b/package.json
+@@ -145,6 +145,7 @@
+     "poe-oauth": "0.0.6"
+   },
+   "patchedDependencies": {
++    "@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz": "patches/@opentui%2Fcore@0.4.3-smark.13.patch",
+     "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
+     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 797e6593e10d5e932a00b6289409a014cbe9c8c7..dc20abf7c335ead8cbbd5384d1e4c05dadc5d3ba 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -443,7 +443,6 @@ export function Session() {
+ 
+   let seeded = false
+   let scroll: ScrollBoxRenderable
+-  let lastMaxScrollTop = 0
+   let prompt: PromptRef | undefined
+   const bind = (r: PromptRef | undefined) => {
+     prompt = r
+@@ -458,22 +457,10 @@ export function Session() {
+ 
+   function syncSessionViewportStuckToBottom() {
+     if (!scroll || scroll.isDestroyed) return
+-    // renderAfter 的唯一入口（源码集成断言锁定该组合）：驻留窗口只把 store 写入推迟到
+-    // microtask，先调度它不会改变本函数的贴底判定；顺序无关紧要，关键是同一帧驱动两者。
++    // 位置保持与贴底由容器在布局前处理；此处只调度驻留和发布已经绘制的位置状态。
+     syncMessageResidency()
+     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
+-    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
+-    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
+-    lastMaxScrollTop = maxScrollTop
+     const stuckToBottom = () => scroll.scrollTop >= maxScrollTop - 1
+-    // The session viewport intentionally treats a one-row gap as visually
+-    // bottom-aligned so terminal rounding and scrollbar half-cell drawing do not
+-    // make the latest assistant line look detached. OpenTUI's sticky scroll only
+-    // follows content growth from the exact max, so when that tolerated bottom
+-    // band was already active and new rows appear, advance to the new max. Do
+-    // not normalize on an ordinary render after a manual one-line scroll-up; the
+-    // user should still be able to inspect the previous row until content grows.
+-    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
+     if (stuckToBottom() === untrack(viewportStuckToBottom)) return
+     queueMicrotask(() => setViewportStuckToBottom(stuckToBottom()))
+   }
+@@ -495,8 +482,6 @@ export function Session() {
+   // LRU 与年龄驱逐的唯一时间来源：进入视口（真实渲染）才刷新。无后台计时器，
+   // 年龄只在渲染驱动的 pass 中求值（plan §10.3 的授权约束）。
+   const lastRenderedAt = new Map<string, number>()
+-  let remeasureAnchor: { id: string; offset: number } | "bottom" | undefined
+-  let anchorRestorePending = false
+   // 分帧重测队列：每帧最多一批（累计冻结高度≈一屏），把壳化消息的重挂摊到多帧，
+   // 避免 R1 一次性全量重挂产生的 250–320MiB 瞬态 commit（证据见 plan §20）。
+   let remeasureQueue: string[] = []
+@@ -561,18 +546,6 @@ export function Session() {
+     return false
+   }
+ 
+-  function captureRemeasureAnchor(): { id: string; offset: number } | "bottom" {
+-    if (untrack(viewportStuckToBottom)) return "bottom"
+-    // 任何带 ID 的消息根都是合法锚点，不要求已有冻结记录——首次 resize 时全部消息
+-    // 可能还未入档，此时若错误回退贴底会覆盖用户已滚离的位置。
+-    const viewportTop = scroll.viewport.screenY
+-    for (const child of scroll.getChildren()) {
+-      if (!child.id) continue
+-      if (child.screenY + child.height > viewportTop) return { id: child.id, offset: child.y - scroll.y }
+-    }
+-    return "bottom"
+-  }
+-
+   // 估算字节缓存与增量总量：store 代理读取慢（300 次/帧实测约 2ms），估算只在挂载
+   // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
+   const estimateBytes = new Map<string, number>()
+@@ -602,18 +575,6 @@ export function Session() {
+       const byId = new Map<string, Renderable>()
+       for (const child of scroll.getChildren()) if (child.id) byId.set(child.id, child)
+ 
+-      if (anchorRestorePending) {
+-        anchorRestorePending = false
+-        // 锚点恢复滞后提交一帧：scrollHeight 要等冻结根高之后再对齐 content.height
+-        // （OpenTUI 滚动条滞后子节点一帧），贴底与偏移都按对齐后的几何计算。
+-        if (remeasureAnchor === "bottom") scroll.scrollTo(scroll.scrollHeight)
+-        else if (remeasureAnchor) {
+-          const child = byId.get(remeasureAnchor.id)
+-          if (child) scroll.scrollBy(child.y - scroll.y - remeasureAnchor.offset)
+-        }
+-        remeasureAnchor = undefined
+-      }
+-
+       // selection pin 用几何区间而不是 renderable 引用：区间内的冻结壳同样占高，
+       // 跨屏复制要求整条穿越区间的正文保持存活；anchor 起点节点由区间覆盖。
+       const selection = renderer.getSelection()
+@@ -707,9 +668,6 @@ export function Session() {
+           }
+           if (finalized) {
+             setRemeasuring(false)
+-            // 锚点恢复滞后最后一批提交一帧：scrollHeight 要等冻结根高后再对齐
+-            // content.height（OpenTUI 滚动条滞后子节点一帧）。
+-            anchorRestorePending = remeasureAnchor !== undefined
+           }
+         })
+         // 分帧重测期间主动预约下一帧：渲染空闲时 renderAfter 不会自发触发。
+@@ -816,7 +774,6 @@ export function Session() {
+         ] as const,
+       () => {
+         if (!scroll || scroll.isDestroyed) return
+-        remeasureAnchor = captureRemeasureAnchor()
+         remeasureBatch = []
+         batchStablePasses = 0
+         batchHeights.clear()
+@@ -860,8 +817,6 @@ export function Session() {
+         remeasureBatch = []
+         batchStablePasses = 0
+         batchHeights.clear()
+-        remeasureAnchor = undefined
+-        anchorRestorePending = false
+       },
+       { defer: true },
+     ),
+@@ -1777,6 +1732,8 @@ export function Session() {
+                 }}
+                 stickyScroll={true}
+                 stickyStart="bottom"
++                preserveVisibleContent={true}
++                stickyScrollTolerance={1}
+                 flexGrow={1}
+                 scrollAcceleration={scrollAcceleration()}
+               >
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index ecd11ea23dd3fbea7dc9026eaaaabc04d362f50e..6799ed891f31e60e25c22e556fea45d413f9f23b 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -4295,6 +4295,77 @@ test("selection dragged across screens keeps the whole traversed range alive for
+ // 几何邻接与 scrollbar 末端保持精确——这是预算内 resize 的基线同构路径。
+ // 阶段二（壳化消息存在）：只有壳化消息进入分帧重测队列，逐批实测后重新冻结；
+ // 锚点 Message 的视口偏移精确恢复。邻接等式与 scrollHeight = 末根底边是独立几何校验。
++test.each([false, true])("session keeps every resize frame stable with released content=%s", async (released) => {
++  const { messages, parts } = windowFixture(24, "stable")
++  await withRenderedSession(messages, parts, async (app) => {
++    await waitForFrame(app, (lines) => lines.some((line) => line.includes("stable assistant 23")))
++    const scroll = sessionScrollBox(app, messages[0].id)
++    if (released) {
++      await withFakeNow(async (advance) => {
++        advance(RESIDENCY_AGE_TEST_MS)
++        await pumpFrames(app, 8)
++        expect(messageContentReleased(app, messages[0].id)).toBe(true)
++      })
++    }
++    const reader = messageRoot(app, "msg_window_user_20")
++    scroll.scrollBy(reader.y - scroll.viewport.y)
++    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
++    const previousMax = scroll.scrollHeight - scroll.viewport.height
++    const previousTop = scroll.scrollTop
++    // 前方二十对消息换行后的增量大于剩余到底部距离，可发现补偿被误判为贴底。
++    app.resize(40, 24)
++    let movement = 0
++    for (let frame = 0; frame < 100; frame++) {
++      if (frame === 15) {
++        // 在分批布局尚可能继续时输入一次，旧的结束恢复逻辑会覆盖这次用户选择。
++        commandBridge.run("session.line.down")
++        movement = 1
++      }
++      await app.renderOnce()
++      await new Promise<void>((resolve) => process.nextTick(resolve))
++      // 不等最终稳定再断言，分批测量的中间帧同样不得推走正在阅读的消息。
++      expect(reader.y - scroll.viewport.y).toBe(0 - movement)
++    }
++    // 证明本 fixture 真正跨过旧贴底阈值，避免审计指出的比较错误失去触发条件。
++    expect(scroll.scrollTop - previousTop).toBeGreaterThan(previousMax - previousTop)
++    expect(app.captureCharFrame()).toContain("stable user 20")
++    // 后台测量结束后仍以用户最新位置为准，禁止重放 resize 开始时的旧位置。
++    commandBridge.run("session.last")
++    await waitForFrame(app, (lines) => lines.some((line) => line.includes("stable assistant 23")))
++  }, {}, { width: 80, height: 24 })
++})
++
++test("session preserves selected text while a preceding message grows", async () => {
++  const { messages, parts } = windowFixture(24, "selection")
++  await withRenderedSession(messages, parts, async (app, emit) => {
++    await waitForFrame(app, (lines) => lines.some((line) => line.includes("selection assistant 23")))
++    const scroll = sessionScrollBox(app, messages[0].id)
++    const reader = messageRoot(app, "msg_window_user_20")
++    scroll.scrollBy(reader.y - scroll.viewport.y)
++    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
++    const frame = app.captureCharFrame().split("\n")
++    const y = frame.findIndex((line) => line.includes("selection user 20"))
++    const x = frame[y].indexOf("selection user 20")
++    // 通过真实鼠标选择，验证补偿后的命中区域与文本坐标仍属于同一条消息。
++    await app.mockMouse.pressDown(x, y)
++    await app.mockMouse.moveTo(x + "selection user 20".length, y)
++    await app.mockMouse.release(x + "selection user 20".length, y)
++    // 先证明选择成功，再比较重排后文本，避免两次 undefined 被误当成复制一致。
++    const selected = app.renderer.getSelection()?.getSelectedText()
++    expect(selected).toContain("selection user 20")
++    // 更新通过真实 Part 事件进入 store，不能直接改 renderable 高度替代集成验证。
++    emit(partUpdatedEvent("evt_selection_growth", textPart("part_window_user_00", messages[0].id,
++      "selection user 00\n" + "extra line\n".repeat(60))))
++    for (let i = 0; i < 20; i++) {
++      await app.renderOnce()
++      await new Promise<void>((resolve) => process.nextTick(resolve))
++      expect(reader.y - scroll.viewport.y).toBe(0)
++      // 选区跨布局仍指向原始内容；只保持画面位置而丢失复制内容同样不算通过。
++      expect(app.renderer.getSelection()?.getSelectedText()).toBe(selected)
++    }
++  }, {}, { width: 80, height: 24 })
++})
++
+ test("resize reflows mounted content and re-measures shelled roots in batched frames exactly", async () => {
+   const count = 24
+   const { messages, parts } = windowFixture(count, "resize")
+@@ -4345,7 +4416,9 @@ test("resize reflows mounted content and re-measures shelled roots in batched fr
+         const current = scroll.scrollHeight
+         stable = current === last ? stable + 1 : 0
+         last = current
+-        return stable >= 2 && anchor.y - scroll.y === 0
++        // 位置现在每帧都保持稳定，不能再把位置恢复误当作整个重测队列已完成。
++        // 等待公开的正文释放结果，仍保留下方最终几何与资源释放断言。
++        return stable >= 2 && anchor.y - scroll.y === 0 && messageContentReleased(app, "msg_window_user_00")
+       })
+       expect(anchor.y - scroll.y).toBe(0)
+       expectExactGeometry()
+diff --git a/packages/opencode/test/cli/tui/scroll-layout.test.ts b/packages/opencode/test/cli/tui/scroll-layout.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1fdae61b0d9b4f26cbd4c3deb75cc60dad54705
+--- /dev/null
++++ b/packages/opencode/test/cli/tui/scroll-layout.test.ts
+@@ -0,0 +1,178 @@
++import { expect, test } from "bun:test"
++import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
++import { createTestRenderer } from "@opentui/core/testing"
++
++async function fixture(preserveVisibleContent = true, wrapped = false) {
++  // 窄视口保证根列表远大于可见范围，不会因原生边界裁剪掩盖历史位置漂移。
++  const app = await createTestRenderer({ width: 60, height: 15 })
++  const scroll = new ScrollBoxRenderable(app.renderer, {
++    width: 60, height: 15, preserveVisibleContent,
++    stickyScroll: true, stickyStart: "bottom", stickyScrollTolerance: 1,
++  })
++  app.renderer.root.add(scroll)
++  // 三百个根覆盖实际 Session 窗口量级；宽度用例让文本真正换行，不能手工估算高度。
++  const rows = Array.from({ length: 300 }, (_, i) => {
++    const row = new BoxRenderable(app.renderer, { height: wrapped ? "auto" : 3, flexShrink: 0 })
++    row.add(new TextRenderable(app.renderer, { content: `MESSAGE ${i}` + (wrapped ? " wrapped content".repeat(12) : "") }))
++    scroll.add(row)
++    return row
++  })
++  await app.renderOnce()
++  await app.renderOnce()
++  // 从历史中部开始，顶部和底部的原生粘附都不能替内容保持功能代偿。
++  scroll.scrollTo(rows[150].y - rows[0].y)
++  await app.renderOnce()
++  return { app, scroll, rows }
++}
++
++test("scroll layout preserves the visible message on every growth and shrink frame", async () => {
++  const app = await createTestRenderer({ width: 60, height: 15 })
++  // 使用真实容器和文本，避免仅比较高度差公式却遗漏实际绘制顺序。
++  const options = { width: 60, height: 15, preserveVisibleContent: true }
++  const scroll = new ScrollBoxRenderable(app.renderer, options)
++  app.renderer.root.add(scroll)
++  const rows = Array.from({ length: 40 }, (_, i) => {
++    const row = new BoxRenderable(app.renderer, { height: 3, flexShrink: 0 })
++    row.add(new TextRenderable(app.renderer, { content: `MESSAGE ${i}` }))
++    scroll.add(row)
++    return row
++  })
++  try {
++    await app.renderOnce()
++    await app.renderOnce()
++    scroll.scrollTo(60)
++    await app.renderOnce()
++    // 顶部标记是独立期望值；每帧断言才能拒绝“先偏移、最终恢复”的实现。
++    for (let i = 0; i < 8; i++) {
++      rows[i].height = i % 2 ? 1 : 8
++      await app.renderOnce()
++      expect(app.captureCharFrame().split("\n")[0].trim()).toBe("MESSAGE 20")
++      expect(rows[20].y - scroll.viewport.y).toBe(0)
++    }
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test.each(["wheel", "line", "resize", "redistribute", "padding"])("scroll layout preserves input during %s", async (kind) => {
++  const { app, scroll, rows } = await fixture(true, kind === "resize")
++  try {
++    if (kind === "padding") {
++      // 内容内边距和消息外边距都参与 Yoga 坐标，不能按零边距的特例通过。
++      scroll.content.paddingTop = 2
++      rows[20].marginTop = 3
++      await app.renderOnce()
++    }
++    const original = rows[150].y - scroll.viewport.y
++    // 累加已经接受的输入位移，避免用新布局后的绝对位置倒推期望而自证正确。
++    let movement = 0
++    // 输入量来自公开滚动接口的实际接受值；断言只排除布局额外引入的位移。
++    for (let i = 0; i < 8; i++) {
++      const before = scroll.scrollTop
++      if (kind === "wheel") await app.mockMouse.scroll(10, 5, "down")
++      if (kind === "line") scroll.scrollBy(1)
++      movement += scroll.scrollTop - before
++      // 反复恢复原宽度同时验证收缩路径，只有变窄时正确不足以保证连续调整窗口。
++      if (kind === "resize") scroll.width = i % 2 ? 60 : 40
++      else rows[i].height = i % 2 ? 1 : 5
++      // 上下各改相反的两行，总高不变也必须保持中间正在阅读的消息。
++      if (kind === "redistribute") rows[280 + i].height = i % 2 ? 5 : 1
++      await app.renderOnce()
++      expect(rows[150].y - scroll.viewport.y).toBe(original - movement)
++    }
++    // 若鼠标事件未到达容器，零漂移也会假通过，因此必须证明输入确实生效。
++    if (kind === "wheel" || kind === "line") expect(movement).toBeGreaterThan(0)
++    // 停止输入后再观察，拒绝把补偿延迟到后续空闲帧的实现。
++    for (let i = 0; i < 4; i++) {
++      await app.renderOnce()
++      expect(rows[150].y - scroll.viewport.y).toBe(original - movement)
++    }
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("scroll layout keeps bottom tolerance and explicit navigation semantics", async () => {
++  const { app, scroll, rows } = await fixture()
++  try {
++    // 通过公开导航进入尾部，检验既有贴底状态，而不是手工设置内部标志。
++    scroll.scrollTo(scroll.scrollHeight)
++    await app.renderOnce()
++    scroll.scrollBy(-1)
++    await app.renderOnce()
++    // 一行上滚没有内容增长时不能被吞掉；增长时则沿用 Session 的视觉贴底约定。
++    expect(scroll.scrollHeight - scroll.viewport.height - scroll.scrollTop).toBe(1)
++    rows[0].height = 8
++    await app.renderOnce()
++    expect(scroll.scrollHeight - scroll.viewport.height - scroll.scrollTop).toBe(0)
++    // 主动离开底部后不应被旧贴底意图拉回，空闲帧也要保留导航结果。
++    scroll.scrollTo(60)
++    await app.renderOnce()
++    const top = scroll.scrollTop
++    await app.renderOnce()
++    expect(scroll.scrollTop).toBe(top)
++    // 已删除内容没有可保留的位置，原生范围裁剪必须收敛到空列表起点。
++    // 销毁而非隐藏根可同时覆盖节点退订和父容器几何失效的真实路径。
++    for (const row of rows) row.destroyRecursively()
++    await app.renderOnce()
++    await app.renderOnce()
++    expect(scroll.scrollTop).toBe(0)
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("scroll layout leaves non-opted-in consumers unchanged", async () => {
++  const { app, scroll, rows } = await fixture(false)
++  try {
++    const top = scroll.scrollTop
++    rows[0].height = 8
++    await app.renderOnce()
++    // 其他滚动容器未承诺消息位置保持，默认仍使用原生绝对位置行为。
++    expect(scroll.scrollTop).toBe(top)
++    expect(rows[150].y - scroll.viewport.y).toBe(5)
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("scroll layout settles its real scheduler after geometry changes", async () => {
++  const { app, rows } = await fixture()
++  try {
++    rows[0].height = 8
++    // 这里不手动泵帧：idle 只有真实调度队列排空才返回，可抓到无限预约下一帧。
++    await new Promise<void>((resolve) => process.nextTick(resolve))
++    await app.renderer.idle()
++    // 坐标不变仍可能持续空转；公开调度状态必须证明没有等待绘制的任务。
++    expect(app.renderer.getSchedulerState()).toEqual({ isRunning: false, isRendering: false, hasScheduledRender: false })
++  } finally {
++    app.renderer.destroy()
++  }
++}, 5000)
++
++test("scroll layout benchmark", async () => {
++  if (process.env.SCROLL_BENCH !== "1") return
++  // 同一容器以开关区分基线与修复，避免加载两套 native 模块污染计时。
++  // 该用例只报告耗时，不把机器负载波动转成普通 CI 的不稳定断言。
++  for (let repeat = 0; repeat < 3; repeat++) {
++    for (const enabled of [false, true]) {
++      const { app, scroll, rows } = await fixture(enabled)
++      try {
++        const times: number[] = []
++        for (let i = 0; i < 230; i++) {
++          rows[0].height = i % 2 ? 3 : 5
++          scroll.scrollBy(i % 2 ? -1 : 1)
++          const start = performance.now()
++          await app.renderOnce()
++          // 前三十帧用于预热，剩余两百帧同时包含输入与几何变化的真实绘制成本。
++          if (i >= 30) times.push(performance.now() - start)
++        }
++        // 固定采样下标先于结果确定，避免事后挑选有利样本或仅报告最快一帧。
++        times.sort((a, b) => a - b)
++        console.log(JSON.stringify({ repeat, enabled, median: times[100], p95: times[190] }))
++      } finally {
++        app.renderer.destroy()
++      }
++    }
++  }
++}, 30000)
+diff --git a/patches/@opentui%2Fcore@0.4.3-smark.13.patch b/patches/@opentui%2Fcore@0.4.3-smark.13.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc692b29b924c36c3d29ee7cdba43dd01db7f783
+--- /dev/null
++++ b/patches/@opentui%2Fcore@0.4.3-smark.13.patch
+@@ -0,0 +1,74 @@
++diff --git a/index.js b/index.js
++--- a/index.js
+++++ b/index.js
++@@ -10142,6 +10142,8 @@
++   _hasManualScroll = false;
++   _isApplyingStickyScroll = false;
++   scrollAccel;
+++  preserveVisibleContent = false;
+++  stickyScrollTolerance = 0;
++   get stickyScroll() {
++     return this._stickyScroll;
++   }
++@@ -10284,6 +10286,8 @@
++       ...sanitizedRootBoxOptions,
++       ...sanitizedRootOptions
++     });
+++    this.preserveVisibleContent = options.preserveVisibleContent ?? false;
+++    this.stickyScrollTolerance = options.stickyScrollTolerance ?? 0;
++     this.internalId = ScrollBoxRenderable.idCounter++;
++     this._stickyScroll = stickyScroll;
++     this._stickyStart = stickyStart;
++@@ -10360,6 +10364,31 @@
++     };
++     this._ctx.on("selection", this.selectionListener);
++   }
+++  updateLayout(deltaTime, renderList = []) {
+++    if (this.preserveVisibleContent && this.visible) {
+++      // 必须在采用新布局前读取位置；此时已经包含用户本帧的滚轮和导航位移。
+++      const top = this.scrollTop;
+++      const previousMax = Math.max(0, this.scrollHeight - this.viewport.height);
+++      const child = this.getChildren().find((node) => node.visible && node.y + node.height > this.viewport.y);
+++      const offset = child ? child.y - this.viewport.y : 0;
+++      const sticky = this._stickyScroll && this._stickyStart === "bottom";
+++      // 复用尺寸变化回调更新范围，不能逐帧调用会预约下一帧的 recalculateBarProps。
+++      this.viewport.updateFromLayout();
+++      this.content.updateFromLayout();
+++      const maximum = Math.max(0, this.scrollHeight - this.viewport.height);
+++      // 一行容差只在内容增长时跟随；普通向上滚动一行必须保留其阅读位置。
+++      const follow = sticky && (top >= previousMax ||
+++        maximum > previousMax && top >= previousMax - this.stickyScrollTolerance);
+++      if (follow) {
+++        this.scrollTop = maximum;
+++      } else if (child) {
+++        // 新 Yoga 坐标与旧视口偏移相抵；即使总高度不变，也能消除前方高度重分布。
+++        this.scrollTop = child.yogaNode.getComputedTop() - offset;
+++      }
+++    }
+++    // 在子节点遍历、裁剪和命中区域生成前完成补偿，不留下先错位再恢复的绘制帧。
+++    super.updateLayout(deltaTime, renderList);
+++  }
++   onUpdate(deltaTime) {
++     this.handleAutoScroll(deltaTime);
++   }
++diff --git a/renderables/ScrollBox.d.ts b/renderables/ScrollBox.d.ts
++--- a/renderables/ScrollBox.d.ts
+++++ b/renderables/ScrollBox.d.ts
++@@ -28,6 +28,8 @@
++     scrollX?: boolean;
++     scrollY?: boolean;
++     scrollAcceleration?: ScrollAcceleration;
+++    preserveVisibleContent?: boolean;
+++    stickyScrollTolerance?: number;
++     viewportCulling?: boolean;
++ }
++ export declare class ScrollBoxRenderable extends BoxRenderable {
++@@ -63,6 +65,8 @@
++     private _isApplyingStickyScroll;
++     private scrollAccel;
++     get stickyScroll(): boolean;
+++    preserveVisibleContent: boolean;
+++    stickyScrollTolerance: number;
++     set stickyScroll(value: boolean);
++     get stickyStart(): "bottom" | "top" | "left" | "right" | undefined;
++     set stickyStart(value: "bottom" | "top" | "left" | "right" | undefined);

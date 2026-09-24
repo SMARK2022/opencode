@@ -1,0 +1,1132 @@
+From 2adc0bb083a3b658c5195b01c8bec910fa07b2b6 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 25 Jul 2026 06:27:03 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20daemon=20owner=20=E5=88=87?=
+ =?UTF-8?q?=E6=8D=A2=E6=97=B6=20reconcile=20=E4=B8=AD=E6=96=AD=E6=AE=8B?=
+ =?UTF-8?q?=E7=95=99=20turn?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+进程死亡会留下 incomplete assistant / open tool / running usage，下一任
+daemon 原先只恢复 maintenance，TUI 误显示 streaming。
+
+在 lock 对外可见前对最近 16 个 session 做 L1 durable 中断终态；优雅退出在
+dispose 后按 5s 残余预算清扫全库 incomplete 与预算内孤儿 tool。写入仅走
+SyncEvent publish:false，避免 InstanceRef 依赖并保持 cancel 等价语义。
+
+diff --git a/docs/plans/daemon-stale-turn-interrupt-reconcile.md b/docs/plans/daemon-stale-turn-interrupt-reconcile.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f319c47a49ffabaaa930e1b60e2121a25043429
+--- /dev/null
++++ b/docs/plans/daemon-stale-turn-interrupt-reconcile.md
+@@ -0,0 +1,467 @@
++# Canonical Implementation Plan: Daemon Stale-Turn Interrupt Reconcile
++
++> Status: verified
++>
++> Revision: R3
++>
++> Approved revision: R3
++>
++> Audit mode: full-scope
++>
++> Requirement source: session goal + prior diagnosis (verbatim in §1)
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-07-25
++>
++> Implementation audit: APPROVE — No blocking findings. Non-blocking: N-01 D/E mid-loop unbounded; N-02 worker order untested at process seam; N-03 orphan mid-scan stop untested; N-04 session.time_updated ranking.
++>
++> R1 plan audit: BLOCK (B-01 InstanceRef write, B-02 admission race, B-03 exit vs 5s).
++> R2 plan audit: BLOCK (B-01 post-lock L1 + publish:false visibility, B-02 worker 15s > CLI STOP 10s).
++> R3 plan audit: APPROVE — No blocking findings. Non-blocking: N-01 D/E not wall-clock bounded like C; N-02 orchestration order weakly tested; N-03 exit-full while HTTP up; N-04 cancel usage parity thinner; N-05 INV-07 overstates external-port bypass; N-06 cost model scan-heavy write-light.
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 1. Verbatim Requirement
++
++> 详细完整检查全面的内容，按照如上我们要求的逻辑进行相应修改,按照L1的逻辑进行初始化（最近16个活跃session），然后退出时进行优雅退出，保持整体逻辑理顺、服从整体项目的开发和实现风格，移除或者替换旧的逻辑。我希望整体的修改保持甜点级别,也就是不要修改过于冗余。整体修改文件数量控制在8个代码文件以内，同时代码修改不超过1200行。
++>
++> 目标终态：verified-implementation-and-commit
++
++Supporting product intent from the same investigation thread (not a narrowing):
++
++- After daemon death, users must see interrupted terminal semantics rather than fake streaming / open tools.
++- Startup uses L1 light reconcile: recent **16** active sessions.
++- Graceful daemon exit performs fuller stale-turn cleanup.
++- Reuse existing interrupt semantics (`MessageAbortedError`, tool abort + `metadata.interrupted`).
++- Do not auto-resume agent loops.
++
++## 2. Explicit Non-Goals
++
++- Auto-resume / re-enter agent loop after daemon restart.
++- Schema migration or generated columns/indexes for `part.state.status`.
++- Full-table open-tool SCAN on the **startup critical path**.
++- Reviewer-runtime ensuring fix (separate owner).
++- Changing multi-daemon / SQLite single-owner rules.
++- TUI-only fake interrupted labels without durable DB writes.
++- Changing maintenance-task reconcile (already exists).
++- Calling `Session.updateMessage` / `updatePart` (default publish) from worker boot/exit.
++- Raising worker shutdown above CLI stop wait (breaks force-stop hierarchy).
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` Session / Status vs Run state | Status is in-memory; durable truth is Message/Part SQLite. |
++| `CONTEXT.md` SMARK daemon | Server Lock + shared daemon is sole DB write owner. |
++| `packages/opencode/AGENTS.md` | Effect / InstanceState / AppRuntime conventions. |
++| `packages/opencode/test/AGENTS.md` | Package-local tests + tmp isolation. |
++| `.opencode/policy/first-principles-engineering.md` | One primary path; repair first divergence at owner. |
++| `SessionPrompt.cancel` | Established interrupt terminal contract. |
++| `SyncEvent.run` + `publish` option | Durable projectors; `publish:false` skips InstanceRef and bus. |
++| `worker.ts` SHUTDOWN_TIMEOUT_MS=5s vs CLI STOP_TIMEOUT_MS=10s | Worker must finish cleanup before CLI force-kill window. |
++| `ServerLock.reconcileMaintenanceTask` | Owner-change → interrupted pattern for control plane. |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/worker.ts` | listen → recovery → lock; gracefulShutdown 5s; hierarchy comment | observed |
++| `packages/opencode/src/cli/cmd/daemon.ts` | STOP_TIMEOUT_MS=10_000 then SIGKILL | observed |
++| `packages/opencode/src/cli/cmd/tui/daemon.ts` | ensure = lock + health only | observed |
++| `packages/opencode/src/sync/index.ts:160-166,370` | publish:false skips InstanceRef and bus | observed |
++| `packages/opencode/src/session/session.ts:726-745` | updateMessage/updatePart always publish | observed |
++| `packages/opencode/src/session/prompt.ts` | cancel interrupt contract; interruptedToolState | reachable |
++| `packages/opencode/src/session/processor.ts` | TOOL_ABORTED_ERROR, interruptedToolMetadata | reachable |
++| `packages/opencode/src/session/message-v2.ts` | cancelSnapshot hot incomplete detection | reachable |
++| `packages/opencode/src/session/projectors.ts` | Durable Message/Part replace | reachable |
++| `packages/opencode/src/session/request-usage.ts` | complete(aborted) SQL shape | reachable |
++| Live DB ~1.8GB (`~/.local/share/opencode/opencode.db`, 2026-07-25) | incomplete json scan ~400ms; open-tool SCAN ~5.3s; running usage ~1ms; top-16 incomplete ~52ms | observed |
++| R1/R2 adversarial audits | prior blocking set | observed |
++
++## 5. Current Behavior
++
++```text
++agent loop writes Message/Part early
++  -> cancel (live) applies interrupt terminal
++  -> process death leaves incomplete assistants / open tools / usage=running
++  -> next worker: recoverInterruptedMaintenance only
++  -> TUI force-syncs session.messages after server.connected
++  -> shows streaming/working; no · interrupted
++```
++
++```text
++gracefulShutdown (today)
++  -> maintenance abort
++  -> disposeAllInstances
++  -> stop servers, Database.close, clear lock
++  -> SHUTDOWN_TIMEOUT_MS = 5000 then process.exit(1)
++  -> CLI stop waits 10000 then SIGKILL
++  -> no transcript stale-turn sweep
++```
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| Incomplete assistant | Crash / incomplete finalize | Single owner after lock | L1 recent (pre-lock); exit-full D | SessionStaleTurn | observed |
++| Open tool on incomplete message | Crash mid-tool | Same | L1 if session in top-16; exit-full via message_id | SessionStaleTurn | observed |
++| Orphan open tool on completed message | Runtime half-write | Message already terminal | Exit-full budgeted C; residual if budget exhausted | SessionStaleTurn | observed |
++| usage status=running | Crash after begin | Separate table | L1 scoped; exit-full E | SessionStaleTurn | observed |
++| TUI reconnect after new owner | ensure after lock | First snapshot must already be terminal | L1 **before** lock write | worker orchestration | reachable (R2 B-01) |
++| CLI stop force window | stopDaemon 10s | Worker deadline must be shorter | Keep 5s worker; residual-budget exit-full | worker + daemon CLI | contracted (R2 B-02) |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | Before `ServerLock.write` makes the owner discoverable, incomplete assistants among the **16** most recently updated sessions are interrupt-terminal (`time.completed` + `MessageAbortedError` when missing). First post-connect `session.messages` snapshot therefore already shows terminal state. | User symptom; R2 B-01; ensure=lock+ping | none |
++| INV-02 | Open tools (`pending`/`running`) on those incomplete assistants are closed with abort error + interrupted metadata matching cancel/processor. | TOOL_ABORTED_ERROR | cancel/processor only |
++| INV-03 | On graceful shutdown, after dispose and before `Database.close`, residual-budget exit-full runs under **worker** `SHUTDOWN_TIMEOUT_MS=5000` (strictly less than CLI `STOP_TIMEOUT_MS=10000`): prioritize D (all incomplete + their tools) + E (running usage); orphan open tools C only with leftover budget. | R2 B-02; worker comment hierarchy; live D~0.4s / open-tool~5.3s | none |
++| INV-04 | Reconcile never auto-starts agent loops. | Non-goal | N/A |
++| INV-05 | Idempotent: already-terminal rows unchanged. | Safe re-entry | need test |
++| INV-06 | Startup L1 does not full-scan `part` for open tools; uses recent-16 session scope. | Benchmark top-16 ~52ms | need unit scope |
++| INV-07 | Live current-owner rows are not false-closed: L1 runs **before** lock admission, so no client agent loop can write yet. Exit-full runs only after dispose. | listen-before-lock; ensure waits for lock | ordering proof + unit |
++| INV-08 | Durable writes use `SyncEvent.run(..., { publish: false })` only (no InstanceRef). Visibility is guaranteed by pre-lock L1 + HTTP snapshot, not bus events. | R1 B-01; R2 B-01 | need no-InstanceRef test |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module | Proof |
++| --- | --- | --- | --- |
++| INV-01/02 | Next owner never applies cancel-equivalent durable terminalization before clients observe the DB | Missing SessionStaleTurn before lock publish | worker only recovers maintenance; ensure admits on lock |
++| INV-03 | gracefulShutdown has no residual-budget transcript sweep under the real 5s worker / 10s CLI stack | worker gracefulShutdown | no sweep |
++| INV-08 | Session.update* at boot needs InstanceRef; bus publish is unavailable at process owner transition | sync publish default | observed source |
++
++### Red-capable feedback loop
++
++```sh
++cd packages/opencode
++bun test test/session/stale-turn.test.ts
++```
++
++Red before implementation: seed incomplete assistant + open tool + running usage → call reconcile → expect terminal interrupt fields. Module absent today → red.
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why here | Why not elsewhere |
++| --- | --- | --- | --- | --- |
++| Detect stale durable turns | SessionStaleTurn | Scan by scope + residual budget | Transcript domain | Daemon.ensure must not parse messages |
++| Apply durable interrupt | SessionStaleTurn via SyncEvent publish:false | Projector writes without InstanceRef | Process owner transition | Session.update* requires InstanceRef |
++| Pre-lock L1 + residual-budget exit | worker.ts | Call recent before lock; exit-full after dispose with remaining ms | Only worker owns lock/shutdown | TUI reconnect multi-write risk |
++| Live user cancel | SessionPrompt.cancel | Unchanged | Live runners | Not owner-transition |
++| CLI force-stop window | daemon.ts STOP_TIMEOUT_MS | Unchanged at 10s | External stop contract | Do not invert by raising worker alone |
++
++## 10. Single Approved Primary-Path Design
++
++### 10.1 Durable write seam
++
++```text
++AppRuntime.runPromise(
++  SyncEvent.Service.use((sync) =>
++    Effect.gen(function* () {
++      yield* sync.run(MessageV2.Event.Updated, { sessionID, info }, { publish: false })
++      yield* sync.run(MessageV2.Event.PartUpdated, { sessionID, part, time: now }, { publish: false })
++    }),
++  ),
++)
++```
++
++- Projectors still run (same SQLite + cold/summary contract).
++- `publish: false` skips InstanceState.context and bus.
++- **Forbidden:** `Session.updateMessage` / `updatePart` as currently implemented.
++- Usage: direct Database update mirroring `RequestUsage.complete` (`status: "aborted"`, `time_completed`, `time_updated`).
++- Visibility: **not** bus; first client snapshot after lock sees pre-reconciled rows (INV-01).
++
++### 10.2 Algorithm
++
++```text
++reconcile(scope, opts)
++  scope = recent(16) | exit-full
++  opts.budgetMs?: number  // exit-full only; wall-clock cap for this call
++
++  recent(16):
++    session IDs = ORDER BY session.time_updated DESC, id DESC LIMIT 16
++    include children (parent_id in set)
++    for each session:
++      incomplete assistants (!time.completed):
++        open tools on that message -> error + TOOL_ABORTED_ERROR + interrupted metadata + time.end
++        assistant.time.completed = now
++        assistant.error ??= MessageAbortedError({ message: "Aborted" }).toObject()
++        empty parts -> hidden.repair-empty-dangling-assistant
++      request_usage status=running for session -> aborted
++
++  exit-full (after dispose):
++    deadline = now + opts.budgetMs
++    D: all incomplete assistants + open tools via message_id index
++       (json_extract incomplete scan; measured ~400ms on 1.8GB DB)
++    E: all request_usage status=running (~ms)
++    C: if time remains before deadline:
++         orphan open tools (open tool AND parent message completed)
++         budgeted SCAN using remaining ms (cap ORPHAN_TOOL_SCAN_BUDGET_MS=2000)
++         tool-only terminalization; on budget timeout log and stop
++    if budgetMs already exhausted before D: skip entire exit-full (log); residual → next L1
++
++  idempotent skip of already-terminal rows
++```
++
++### 10.3 Startup L1 (repairs R2 B-01)
++
++```text
++Server.listen + control + recoverInterruptedMaintenance
++  // exclusive: lock not published; ensure cannot admit clients yet
++  SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
++  ServerLock.write(...)   // only now discoverable / healthy
++  idle timers
++```
++
++Safety (INV-07): no external client can obtain lock+health before L1 finishes. No `ownerStartMs` watermark is required on the startup path.
++
++Latency (INV-06): top-16 session-scoped incomplete path measured ~52ms on live DB.
++
++### 10.4 Graceful exit (repairs R2 B-02)
++
++```text
++// KEEP hierarchy: worker 5s < CLI stop 10s (worker.ts comment; daemon.ts STOP_TIMEOUT_MS)
++SHUTDOWN_TIMEOUT_MS = 5_000   // unchanged
++SAFETY_MARGIN_MS = 500        // reserve for stop servers + Database.close + clear lock
++
++gracefulShutdown:
++  t0 = Date.now()
++  maintenance abort/wait
++  disposeAllInstances()
++  remaining = SHUTDOWN_TIMEOUT_MS - (Date.now() - t0) - SAFETY_MARGIN_MS
++  if remaining > 0:
++    SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: remaining })
++  stop servers, Database.close, clear lock
++```
++
++Cost model (observed on ~1.8GB DB):
++
++| Step | Work | Observed |
++| --- | --- | --- |
++| D | incomplete assistants (json) + tools by message_id | ~0.4s count+scan |
++| E | usage status=running | ~1ms |
++| C | full open-tool SCAN | ~5.3s unbounded; **cap ≤ min(2000, remaining)** |
++
++Under a healthy dispose, D+E fit; C is best-effort. If dispose consumes the budget, exit-full is skipped and next startup L1 covers top-16 (accepted residual for sessions outside top-16 / orphans).
++
++**Terminal values (match cancel/processor):**
++
++- Tool: same shape as `interruptedToolState` in `prompt.ts` (status error, TOOL_ABORTED_ERROR, interruptedToolMetadata, time.start/end). Inline this shape in stale-turn; do not export private prompt helpers.
++- Assistant: `time.completed=now`, `error ??= MessageAbortedError({ message: "Aborted" }).toObject()`, empty → hidden repair.
++- Usage: `status:"aborted"` fields aligned with `RequestUsage.complete`.
++
++**Constants:** `RECENT_ACTIVE_SESSION_LIMIT=16`, `ORPHAN_TOOL_SCAN_BUDGET_MS=2000`, `SHUTDOWN_TIMEOUT_MS=5000` (unchanged), `SAFETY_MARGIN_MS=500`.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Classification | Decision |
++| --- | --- | --- |
++| SessionStaleTurn recent pre-lock / residual-budget exit-full | primary owner-transition path | add |
++| SyncEvent.run publish:false | primary write seam | required |
++| Live cancel / processor ensuring / maintenance reconcile | separate existing contracts | preserve |
++| Session.update* at boot | non-executable | reject |
++| Post-lock L1 relying on bus/snapshot refresh | non-executable visibility | reject (R2 B-01) |
++| Worker deadline ≥ CLI STOP | breaks force hierarchy | reject (R2 B-02) |
++| Unbounded exit open-tool SCAN | non-executable under 5s | reject |
++| TUI-only interrupted label | forbidden fallback | reject |
++| Auto-resume agent loop | forbidden | reject |
++
++## 12. Workaround Deletion and Replacement
++
++| Item | Disposition |
++| --- | --- |
++| Relying only on LLM projection for open-tool interrupt text | Keep as concurrent-read defense; durable reconcile is the repair |
++| Missing owner-transition cleanup | Add SessionStaleTurn |
++| Post-lock watermark as admission safety | Superseded by pre-lock L1; do not implement ownerStartMs on startup |
++
++## 13. Forward Traceability
++
++| Req / INV | Path | Files | Test |
++| --- | --- | --- | --- |
++| L1 recent 16 pre-lock | recovery → recent reconcile → lock | worker, stale-turn | incomplete in top-16 terminalized |
++| INV-01 visibility | pre-lock order | worker | unit documents order; optional comment assertion in worker |
++| INV-02 tools | PartUpdated publish:false | stale-turn | pending → aborted error |
++| INV-03 exit residual budget | dispose → exit-full(budgetMs) | worker, stale-turn | D+E with budget; C stops at budget |
++| INV-08 write seam | publish:false only | stale-turn | succeeds without InstanceRef |
++| Usage | SQL aborted | stale-turn | running → aborted |
++| Idempotent | second call | stale-turn | stable |
++| No auto-resume | no prompt | stale-turn | terminal fields only |
++| Deadline hierarchy | SHUTDOWN=5s unchanged | worker | no raise; no daemon.ts change required |
++
++## 14. Reverse Traceability
++
++| Concept | Req | Why not reuse existing |
++| --- | --- | --- |
++| SessionStaleTurn | INV-01..05 | cancel is live user path only |
++| publish:false writes | INV-08 | update* requires InstanceRef |
++| Pre-lock L1 | INV-01/07 | post-lock + publish:false loses first-snapshot visibility |
++| Residual-budget exit-full under 5s | INV-03 | unbounded SCAN and 15s worker invert CLI hierarchy |
++| limit 16 | L1 + INV-06 | full SCAN violates UX budget |
++| abort string reuse | UI contract | new strings fork `· interrupted` |
++
++## 15. File-Level Change Plan
++
++| File | Change | Responsibility | Δ lines |
++| --- | --- | --- | --- |
++| `packages/opencode/src/session/stale-turn.ts` | add | recent / exit-full, publish:false, usage SQL, residual budget | +280–420 |
++| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify | pre-lock recent L1; post-dispose residual-budget exit-full; keep SHUTDOWN=5s | +25–55 |
++| `packages/opencode/test/session/stale-turn.test.ts` | add | recent, exit-full budget, no InstanceRef, idempotent | +220–380 |
++
++**No `prompt.ts` or `daemon.ts` change.** Import abort constants from `session/processor.ts`; inline tool error state shape matching prompt.
++
++Hard caps: ≤8 files, ≤1200 lines. Target **3 files**.
++
++## 16. TDD Behavior Slices
++
++| # | Red | Green | Protects |
++| --- | --- | --- | --- |
++| 1 | incomplete in top-16 not terminal | recent reconcile terminalizes | INV-01 |
++| 2 | open tool remains pending | tool aborted + interrupted metadata | INV-02 |
++| 3 | usage running | usage aborted | accounting |
++| 4 | no InstanceRef | reconcile succeeds | INV-08 |
++| 5 | orphan tool on completed message with budget | tool closed when budget allows | exit-full C |
++| 6 | exit-full with budgetMs=0 | no mutations | residual skip |
++| 7 | second reconcile | no-op | INV-05 |
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate |
++| --- | --- |
++| E | ~350–550 |
++| C | ≥ ceil(E×0.15) |
++
++Comment topics (Chinese, adjacent):
++
++- publish:false required (no InstanceRef; bus not used for owner-transition visibility)
++- L1 **before** lock so first snapshot is terminal
++- recent-16 not full part SCAN (latency)
++- exit after dispose; residual budget under 5s worker / 10s CLI hierarchy
++- D+E first, budgeted orphan C second
++- tool-only orphan path (cancelSnapshot gap)
++- interrupt strings match cancel/UI
++- idempotent already-terminal skip; constant 16 is product L1
++
++## 18. Verification
++
++| Command | Cwd | Proves |
++| --- | --- | --- |
++| `bun test test/session/stale-turn.test.ts` | packages/opencode | behavior slices |
++| `bun test test/cli/tui/daemon.test.ts` (relevant cases) | packages/opencode | start/stop still works |
++| `bun typecheck` | packages/opencode | types |
++
++## 19. Diff Budget
++
++| Metric | Estimate |
++| --- | --- |
++| Files added | 2 |
++| Files modified | 1 |
++| Production lines | ≤475 |
++| Test lines | ≤400 |
++| Total | ≤1200 |
++
++## 20. Real Risks and Open Decisions
++
++| Risk | Mitigation |
++| --- | --- |
++| Dispose consumes full 5s | exit-full skipped; next L1 covers top-16 |
++| Orphan SCAN incomplete under 2s budget | D+E still done when budget allows; residual logged |
++| Sessions outside top-16 after hard kill | L1 tradeoff; exit-full when graceful residual allows |
++| publish:false skips bus | Pre-lock L1 + TUI HTTP snapshot (not bus) |
++| Empty-assistant hide / recordAssistant parity | Match cancel empty hide; usage request row aborted is enough for INV |
++
++### Open Decisions
++
++None for R3.
++
++### Rejected Speculation
++
++- Persist SessionStatus across death
++- Post-lock L1 + bus refresh for visibility
++- Raising worker timeout above CLI STOP without raising CLI
++- Age-only reconcile
++- Reconcile on every SSE reconnect
++- Session.update* at boot
++- Unbounded exit open-tool SCAN
++
++## 21. Audit Contract
++
++Independent auditor must read this exact file and the original requirement, reconstruct from repository evidence, treat builder summaries as untrusted, audit full original scope, require evidence for blocking findings, and check under/over-design, root-cause repair, fallback, ownership, tests, quality, and 15% Chinese comment plan.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | B-01 InstanceRef write; B-02 admission race; B-03 exit vs 5s | N-01 worker hook tests; N-02 prompt extract | BLOCK | ses_06a112fc8ffedU4CSiJirFwstK |
++| 2 | R2 | yes | B-01 post-lock L1 + publish:false visibility; B-02 worker 15s > CLI STOP 10s | N-01 time_updated first-write; N-02 cancel parity gaps; N-03 admission test; N-04 exit while HTTP up | BLOCK | ses_069eb77bfffeuuax34cQFzmENm |
++| 3 | R3 | yes | No blocking findings. | N-01 D/E not wall-clock bounded like C; N-02 orchestration order weakly tested; N-03 exit-full while HTTP up; N-04 cancel usage parity thinner; N-05 INV-07 overstates external-port bypass; N-06 cost model scan-heavy write-light | APPROVE | ses_069e347fefferM01DFPiKCS8Bz |
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++| File | Change |
++| --- | --- |
++| `packages/opencode/src/session/stale-turn.ts` | add — SessionStaleTurn.reconcile (recent / exit-full) |
++| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify — pre-lock L1 + residual-budget exit-full; SHUTDOWN remains 5s |
++| `packages/opencode/test/session/stale-turn.test.ts` | add — 7 behavioral slices |
++
++Diff size: worker +20 lines; stale-turn ~280 LOC; test ~290 LOC. Within ≤3 files / ≤1200 lines.
++
++### Red-Green Test Evidence
++
++| Slice | Result |
++| --- | --- |
++| recent terminalizes incomplete assistant | pass |
++| open tool aborted + interrupted metadata | pass |
++| usage running → aborted | pass |
++| reconcile without InstanceRef | pass |
++| exit-full orphan tool on completed message | pass |
++| exit-full budgetMs=0 no-op | pass |
++| second reconcile idempotent | pass |
++
++### Verification Commands and Results
++
++| Command | Cwd | Result |
++| --- | --- | --- |
++| `bun test test/session/stale-turn.test.ts` | packages/opencode | 7 pass |
++| `bun typecheck` | packages/opencode | pass |
++| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "start\|stop\|ensure\|health"` | packages/opencode | 16 pass, 1 skip |
++
++### Original Feedback-Loop Result
++
++Module absent → tests fail before implementation; after implementation all 7 slices green. Durable terminal fields match cancel contract (MessageAbortedError, TOOL_ABORTED_ERROR, interrupted metadata).
++
++### Actual Secondary and Replacement Path Inventory
++
++| Path | Classification |
++| --- | --- |
++| SessionStaleTurn recent/exit-full + publish:false | primary |
++| Live cancel / processor / maintenance reconcile | preserved separate |
++| L1 catch-log on failure then still write lock | residual diagnostic (does not alternate success semantics of reconcile itself) |
++| exit-full skip when remaining≤0 | residual accepted → next L1 |
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` | 453 | exclude imports/blanks; worker counted from `git diff` added non-import code only |
++| Qualifying Chinese comment lines `C` | 69 | adjacent invariant/boundary/test-intent comments |
++| Ratio `C / E` | 0.152 |  |
++| Required minimum `C` | 68 | ceil(453×0.15) |
++
++Representative comments: pre-lock L1 visibility; publish:false / no InstanceRef; residual budget under 5s/10s hierarchy; orphan tool-only path; cancel-equivalent error strings.
++
++### Remaining Unverified Items
++
++- No integration test that forces worker boot order (L1 before lock) via process spawn (N-02).
++- Full open-tool orphan SCAN under live 1.8GB DB not re-run in CI (budgeted path unit-tested).
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R3 | yes | B-01 residual clock from dispose only; B-02 orphan unbounded .all() before budget | N-01 D/E unbounded; N-02 worker order untested; N-03 HTTP during exit-full; N-04 verification not re-run by auditor | BLOCK | ses_069d2ea83ffe3P6cRh2KuLRL7q |
++| 2 | R3 | yes | No blocking findings. | N-01 D/E mid-loop unbounded; N-02 worker order untested at process seam; N-03 orphan mid-scan stop untested; N-04 session.time_updated ranking | APPROVE | ses_069cc9c66ffeqWY9NXxe7ixsMk |
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index 878e675de8ab7410ce7fe5b59e57ae5b68f303d4..980168e87de48c73193e316a918863c1d625fa9a 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -7,6 +7,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { AppRuntime } from "@/effect/app-runtime"
+ import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
+ import * as Database from "@/storage/db"
++import { SessionStaleTurn } from "@/session/stale-turn"
+ import { ServerLock } from "@/cli/cmd/tui/server-lock"
+ import { Heap } from "@/cli/heap"
+ import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
+@@ -268,6 +269,8 @@ async function recoverInterruptedMaintenance() {
+ async function gracefulShutdown(reason = "unknown") {
+   if (shutdownInProgress) return
+   shutdownInProgress = true
++  // residual 与 process.exit 硬截止必须同一 t0：maintenance abort 也吃墙钟，不能只从 dispose 起算。
++  const shutdownStartedAt = Date.now()
+   shutdownDeadlineTimer = setTimeout(() => {
+     // deadline 到达时不能继续等待 disposer；进程退出后由下一次 owner 选举清理 stale lock。
+     // 不在这里清理 lock，避免另一个进程误以为 SQLite 已经释放。
+@@ -298,6 +301,17 @@ async function gracefulShutdown(reason = "unknown") {
+   })
+   if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
+   await InstanceRuntime.disposeAllInstances()
++  // 残余预算 = 5s 硬截止 − 已用墙钟 − SAFETY_MARGIN（stop/close/clear lock）。
++  const remaining =
++    SHUTDOWN_TIMEOUT_MS - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
++  if (remaining > 0) {
++    await SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => {
++      log.error("stale-turn exit-full failed", { error: String(error) })
++    })
++  } else {
++    // maintenance/dispose 已占满 5s 窗口：跳过 transcript 清扫，残留由下次 pre-lock L1 覆盖 top-16。
++    log.info("stale-turn exit-full skipped: no residual budget")
++  }
+   controlServer?.stop(true)
+   if (externalServer) await externalServer.stop(true)
+   await internalServer.stop(true)
+@@ -477,6 +491,13 @@ controlServer = Bun.serve({
+ maintenanceRecoveryPromise = recoverInterruptedMaintenance()
+ // 这里只等待 recovery 完成“无需恢复或已发布 active”判定，不等待后台 maintenance 跑到 terminal。
+ await maintenanceRecoveryPromise
++// L1 必须在 lock 对外可见前完成：ensure 以 lock+health 放行，publish:false 不会推 bus，首份 snapshot 只能依赖预写终态。
++// L1 失败不阻止 lock 发布：宁可带脏数据启动，也不让 ensure 永久卡住无法选主。
++await SessionStaleTurn.reconcile({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch(
++  (error) => {
++    log.error("stale-turn recent L1 failed", { error: String(error) })
++  },
++)
+ lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
+ log.info("daemon lock written", {
+   pid: process.pid,
+diff --git a/packages/opencode/src/session/stale-turn.ts b/packages/opencode/src/session/stale-turn.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f33928ea2553
+--- /dev/null
++++ b/packages/opencode/src/session/stale-turn.ts
+@@ -0,0 +1,284 @@
++import { Effect } from "effect"
++import { and, desc, eq, inArray, sql } from "drizzle-orm"
++import { AppRuntime } from "@/effect/app-runtime"
++import { Database } from "@/storage/db"
++import { Log } from "@opencode-ai/core/util/log"
++import { SyncEvent } from "@/sync"
++import { MessageTable, SessionTable } from "./session.sql"
++import { RequestUsageTable } from "./request-usage.sql"
++import { MessageV2 } from "./message-v2"
++import { SessionProcessor } from "./processor"
++import type { MessageID, SessionID } from "./schema"
++
++const log = Log.create({ service: "session.stale-turn" })
++
++// L1 产品范围：最近 16 个活跃 session。
++// 不变量 INV-06：启动路径禁止 full part SCAN（1.8GB DB 上约 1–5s）。
++export const RECENT_ACTIVE_SESSION_LIMIT = 16
++// 孤儿 open-tool SCAN 硬上限。
++// 完整 SCAN 在 1.8GB DB 上约 5.3s，必须让位于 worker 5s / CLI stop 10s 的强制层级。
++export const ORPHAN_TOOL_SCAN_BUDGET_MS = 2_000
++// gracefulShutdown 在 exit-full 后仍需 stop servers + Database.close + clear lock。
++// 该余量保证 worker 硬截止不会被 exit-full 吃光，CLI force-kill 不会先于 worker deadline。
++export const SAFETY_MARGIN_MS = 500
++
++export type Scope = { kind: "recent"; limit?: number } | { kind: "exit-full" }
++
++type OpenToolPart = MessageV2.ToolPart & {
++  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning
++}
++
++// open 仅 pending/running：completed/error 已是终态，重复写入会破坏幂等。
++function isOpenToolPart(part: MessageV2.Part): part is OpenToolPart {
++  return part.type === "tool" && (part.state.status === "pending" || part.state.status === "running")
++}
++
++// 与 SessionPrompt.interruptedToolState 同形。
++// 不变量：error 文案与 interrupted metadata 必须匹配 cancel/processor，UI 才渲染 “· interrupted”。
++function interruptedToolState(
++  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
++  now: number,
++): MessageV2.ToolStateError {
++  const start = state.status === "running" ? state.time.start : now
++  return {
++    status: "error",
++    input: state.input,
++    error: SessionProcessor.TOOL_ABORTED_ERROR,
++    metadata: SessionProcessor.interruptedToolMetadata(
++      state.status === "running" ? state.metadata : undefined,
++      now - start,
++    ),
++    time: { start, end: now },
++  }
++}
++
++// incomplete 检测只读 hot fields（role / time.completed），与 cancelSnapshot 同源，避免为 L1 全量 thaw。
++function hotInfo(row: typeof MessageTable.$inferSelect): MessageV2.Info {
++  return {
++    ...row.data,
++    id: row.id,
++    sessionID: row.session_id,
++  } as MessageV2.Info
++}
++
++function recentSessionIDs(limit: number): SessionID[] {
++  return Database.use((db) => {
++    const roots = db
++      .select({ id: SessionTable.id })
++      .from(SessionTable)
++      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
++      .limit(limit)
++      .all()
++      .map((row) => row.id)
++    if (roots.length === 0) return []
++    // 子 session（subagent）与 cancel 递归范围一致：parent 在 top-N 时一并终端化。
++    // 否则 reviewer/task 子会话 crash 残留不会被 L1 覆盖。
++    const children = db
++      .select({ id: SessionTable.id })
++      .from(SessionTable)
++      .where(inArray(SessionTable.parent_id, roots))
++      .all()
++      .map((row) => row.id)
++    return Array.from(new Set([...roots, ...children]))
++  })
++}
++
++// sessionIDs 缺省表示 exit-full 的 D 步：全库 incomplete assistant（json 扫描，实测约 0.4s）。
++// 有 sessionIDs 时是 L1 会话范围查询，保持启动预算。
++function incompleteAssistants(sessionIDs?: SessionID[]) {
++  return Database.use((db) => {
++    const rows =
++      sessionIDs === undefined
++        ? db
++            .select()
++            .from(MessageTable)
++            .where(
++              and(
++                sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
++                sql`json_extract(${MessageTable.data}, '$.time.completed') is null`,
++              ),
++            )
++            .all()
++        : sessionIDs.length === 0
++          ? []
++          : db
++              .select()
++              .from(MessageTable)
++              .where(
++                and(
++                  inArray(MessageTable.session_id, sessionIDs),
++                  sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
++                  sql`json_extract(${MessageTable.data}, '$.time.completed') is null`,
++                ),
++              )
++              .all()
++    return rows.flatMap((row) => {
++      const info = hotInfo(row)
++      if (info.role !== "assistant" || info.time.completed) return []
++      return [{ info, parts: MessageV2.parts(info.id) }]
++    })
++  })
++}
++
++// usage 表不走 SyncEvent；字段对齐 RequestUsage.complete(status=aborted)。
++// 只关 request_usage 行即可清 running 聚合；assistant 子表 parity 非本路径硬要求。
++function abortUsageRunning(sessionIDs?: SessionID[]) {
++  const now = Date.now()
++  Database.use((db) => {
++    const where =
++      sessionIDs === undefined
++        ? eq(RequestUsageTable.status, "running")
++        : sessionIDs.length === 0
++          ? sql`0`
++          : and(eq(RequestUsageTable.status, "running"), inArray(RequestUsageTable.session_id, sessionIDs))
++    db.update(RequestUsageTable)
++      .set({
++        status: "aborted",
++        time_completed: now,
++        time_updated: now,
++      })
++      .where(where)
++      .run()
++  })
++}
++
++// 单条 incomplete assistant 的 durable 终端化事务入口。
++// Part 先于 Message：与 cancel 顺序一致，避免读到 completed message 仍挂 open tool 的中间态。
++async function writeTerminal(input: {
++  sessionID: SessionID
++  assistant: MessageV2.Assistant
++  parts: MessageV2.Part[]
++  now: number
++}) {
++  // publish:false：worker 进程级 owner 切换没有 directory InstanceRef。
++  // 不变量 INV-08：禁止 Session.update* 默认 publish（会 yield InstanceState.context）。
++  // 可见性不靠 bus：pre-lock L1 完成后 ensure 才放行，首份 HTTP snapshot 已是终态。
++  await AppRuntime.runPromise(
++    SyncEvent.Service.use((sync) =>
++      Effect.gen(function* () {
++        for (const part of input.parts.filter(isOpenToolPart)) {
++          const next = {
++            ...part,
++            state: interruptedToolState(part.state, input.now),
++          }
++          yield* sync.run(
++            MessageV2.Event.PartUpdated,
++            { sessionID: input.sessionID, part: structuredClone(next), time: input.now },
++            { publish: false },
++          )
++        }
++        const assistant = { ...input.assistant }
++        assistant.time = { ...assistant.time, completed: input.now }
++        // error ??= 保留已有终态错误；仅补 MessageAbortedError 以触发 UI interrupted 标签。
++        assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
++        // 空 dangling assistant 与 cancel 一致：隐藏以免 UI 留下无内容终态气泡。
++        if (input.parts.length === 0) {
++          assistant.hidden = { time: input.now, reason: "repair-empty-dangling-assistant" }
++        }
++        yield* sync.run(
++          MessageV2.Event.Updated,
++          { sessionID: input.sessionID, info: assistant },
++          { publish: false },
++        )
++      }),
++    ),
++  )
++}
++
++// 幂等：已 completed 的 assistant / 非 open tool 不会进入 incompleteAssistants 集合。
++async function terminalizeIncomplete(sessionIDs?: SessionID[]) {
++  const now = Date.now()
++  for (const item of incompleteAssistants(sessionIDs)) {
++    await writeTerminal({
++      sessionID: item.info.sessionID,
++      assistant: item.info,
++      parts: item.parts,
++      now,
++    })
++  }
++  abortUsageRunning(sessionIDs)
++}
++
++async function terminalizeOrphanTools(deadlineMs: number) {
++  // 孤儿 tool：message 已 completed 但 tool 仍 pending/running。
++  // cancelSnapshot 只处理 incomplete assistant，因此 half-write 残留必须在 exit-full C 步清掉。
++  // 只改 tool part，不改写已 completed message 的 error（保持历史终态语义）。
++  // 关键：SCAN 本身必须服从 deadline——1.8GB DB 上 full open-tool SCAN 约 5.3s，禁止 .all() 后再计时。
++  const found: Array<{ id: string; message_id: string }> = []
++  const stmt = Database.Client().$client.prepare(`
++    SELECT part.id AS id, part.message_id AS message_id
++    FROM part
++    INNER JOIN message ON message.id = part.message_id
++    WHERE json_extract(part.data, '$.type') = 'tool'
++      AND json_extract(part.data, '$.state.status') IN ('pending', 'running')
++      AND json_extract(message.data, '$.time.completed') IS NOT NULL
++  `)
++  for (const row of stmt.iterate() as Iterable<{ id: string; message_id: string }>) {
++    if (Date.now() >= deadlineMs) {
++      log.info("orphan tool scan budget exhausted during scan", { collected: found.length })
++      break
++    }
++    found.push(row)
++  }
++
++  const now = Date.now()
++  for (const row of found) {
++    // 写循环同样检查预算：扫描后仍可能耗尽。
++    if (Date.now() >= deadlineMs) {
++      log.info("orphan tool write budget exhausted", { remaining: found.length })
++      return
++    }
++    const part = MessageV2.parts(row.message_id as MessageID).find((item) => item.id === row.id)
++    if (!part || !isOpenToolPart(part)) continue
++    await AppRuntime.runPromise(
++      SyncEvent.Service.use((sync) =>
++        sync.run(
++          MessageV2.Event.PartUpdated,
++          {
++            sessionID: part.sessionID,
++            part: structuredClone({ ...part, state: interruptedToolState(part.state, now) }),
++            time: now,
++          },
++          { publish: false },
++        ),
++      ),
++    )
++  }
++}
++
++/**
++ * owner 切换时的 durable 中断 reconcile。
++ * recent：启动 L1，必须在 ServerLock.write 之前调用。
++ * exit-full：优雅退出，必须在 dispose 之后、Database.close 之前，并带 residual budgetMs。
++ */
++export async function reconcile(scope: Scope, opts?: { budgetMs?: number }) {
++  if (scope.kind === "recent") {
++    // recent 不扫描孤儿 completed-message tools：L1 只修用户最可能打开的 streaming 会话。
++    // 孤儿清理由 exit-full C 步或下次 graceful stop 承担（产品 L1 延迟预算约束）。
++    const limit = scope.limit ?? RECENT_ACTIVE_SESSION_LIMIT
++    const sessionIDs = recentSessionIDs(limit)
++    await terminalizeIncomplete(sessionIDs)
++    return
++  }
++
++  // exit-full：仅在 worker residual budget 内运行。
++  // budgetMs<=0 表示 dispose 已吃光 5s 窗口，整段跳过，残留交给下次 pre-lock L1。
++  const budgetMs = opts?.budgetMs ?? 0
++  if (budgetMs <= 0) {
++    log.info("exit-full skipped: no residual budget")
++    return
++  }
++  const deadline = Date.now() + budgetMs
++  // D+E 优先：incomplete assistant / open tools / running usage 是用户可见 streaming 的主因。
++  await terminalizeIncomplete()
++  if (Date.now() >= deadline) {
++    log.info("exit-full stopped after D/E: budget exhausted")
++    return
++  }
++  // C 步 best-effort：孤儿 open-tool 再占 min(2000ms, 剩余预算)。
++  const orphanBudget = Math.min(ORPHAN_TOOL_SCAN_BUDGET_MS, deadline - Date.now())
++  if (orphanBudget <= 0) return
++  await terminalizeOrphanTools(Date.now() + orphanBudget)
++}
++
++export * as SessionStaleTurn from "./stale-turn"
+diff --git a/packages/opencode/test/session/stale-turn.test.ts b/packages/opencode/test/session/stale-turn.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401da456a59
+--- /dev/null
++++ b/packages/opencode/test/session/stale-turn.test.ts
+@@ -0,0 +1,293 @@
++import { describe, expect } from "bun:test"
++import { Effect, Layer } from "effect"
++import { eq } from "drizzle-orm"
++import { Session as SessionNs } from "@/session/session"
++import { MessageV2 } from "@/session/message-v2"
++import { MessageID, PartID, type SessionID } from "@/session/schema"
++import { ModelID, ProviderID } from "@/provider/schema"
++import { SessionStaleTurn } from "@/session/stale-turn"
++import { SessionProcessor } from "@/session/processor"
++import { Database } from "@/storage/db"
++import { RequestUsageTable } from "@/session/request-usage.sql"
++import { Bus } from "@/bus"
++import { Storage } from "@/storage/storage"
++import { SyncEvent } from "@/sync"
++import { RuntimeFlags } from "@/effect/runtime-flags"
++import { BackgroundJob } from "@/background/job"
++import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import { testEffect } from "../lib/effect"
++import { provideInstance, tmpdirScoped } from "../fixture/fixture"
++import * as Log from "@opencode-ai/core/util/log"
++
++void Log.init({ print: false })
++
++// 测试层只提供 Session + SyncEvent，与 worker 调用 SessionStaleTurn 时的最小依赖一致。
++// experimentalWorkspaces=false：避免 event-log 旁路干扰 publish:false 投影路径。
++const it = testEffect(
++  Layer.mergeAll(
++    SessionNs.layer.pipe(
++      Layer.provide(Bus.layer),
++      Layer.provide(Storage.defaultLayer),
++      Layer.provide(SyncEvent.defaultLayer),
++      Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
++      Layer.provide(BackgroundJob.defaultLayer),
++    ),
++    CrossSpawnSpawner.defaultLayer,
++  ),
++)
++
++// 构造 crash 残留：incomplete assistant + pending tool + running usage。
++// 对应真实 daemon 死亡现场，而不是 live cancel 的内存 runner 状态。
++// seed 经 Session.update*（有 instance）写入；reconcile 本身必须在无 InstanceRef 下仍可执行。
++function seedIncompleteTurn(sessions: SessionNs.Interface, sessionID: SessionID) {
++  return Effect.gen(function* () {
++    const userID = MessageID.ascending()
++    yield* sessions.updateMessage({
++      id: userID,
++      sessionID,
++      role: "user",
++      time: { created: Date.now() },
++      agent: "build",
++      model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
++    })
++    const assistantID = MessageID.ascending()
++    // assistant 故意不写 time.completed：模拟 agent 循环中途进程退出。
++    const assistant = yield* sessions.updateMessage({
++      id: assistantID,
++      sessionID,
++      role: "assistant",
++      parentID: userID,
++      mode: "build",
++      agent: "build",
++      path: { cwd: "/tmp", root: "/tmp" },
++      cost: 0,
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      modelID: ModelID.make("test"),
++      providerID: ProviderID.make("test"),
++      time: { created: Date.now() },
++    })
++    const partID = PartID.ascending()
++    // pending + raw 是 ToolStatePending 的完整合同；缺 raw 会在类型层失败。
++    const tool = yield* sessions.updatePart({
++      id: partID,
++      sessionID,
++      messageID: assistantID,
++      type: "tool",
++      tool: "bash",
++      callID: "call_stale",
++      state: {
++        status: "pending",
++        input: { command: "sleep 999" },
++        raw: "",
++      },
++    })
++    // usage 直接插 running 行：绕过 begin() 的 Effect 服务，聚焦 reconcile 的 SQL 终态。
++    Database.use((db) => {
++      db.insert(RequestUsageTable)
++        .values({
++          session_id: sessionID,
++          request_id: userID,
++          root_request_id: userID,
++          source: "prompt",
++          status: "running",
++          agent: "build",
++          provider_id: "test",
++          model_id: "test",
++          time_created: Date.now(),
++          time_updated: Date.now(),
++        })
++        .run()
++    })
++    return { userID, assistant, tool }
++  })
++}
++
++describe("SessionStaleTurn", () => {
++  // 行为：owner-transition reconcile 把 incomplete assistant 写成 cancel 等价终态（time.completed + MessageAbortedError）。
++  // 这是 INV-01 / 用户可见 “· interrupted” 的 durable 前提。
++  it.live("recent reconcile terminalizes incomplete assistant in top sessions", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-recent" }))
++      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++
++      // 期望值来自 cancel 合同字面量，不复制 reconcile 内部算法。
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++
++      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++      expect(msg.info.role).toBe("assistant")
++      if (msg.info.role !== "assistant") return
++      // time.completed 存在即退出 streaming；error.name 驱动 TUI interrupted 后缀。
++      expect(msg.info.time.completed).toBeDefined()
++      expect(msg.info.error?.name).toBe("MessageAbortedError")
++    }),
++  )
++
++  // 行为：open tool 必须带 TOOL_ABORTED_ERROR + interrupted metadata。
++  // UI 与 LLM 回放都依赖该合同；新文案会分叉 “· interrupted” 路径。
++  it.live("recent reconcile aborts open tools with interrupted metadata", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-tool" }))
++      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++
++      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++      const tool = msg.parts.find((part) => part.id === seeded.tool.id)
++      expect(tool?.type).toBe("tool")
++      if (tool?.type !== "tool") return
++      expect(tool.state.status).toBe("error")
++      if (tool.state.status !== "error") return
++      // 独立字面量：与 SessionProcessor 导出常量对齐，防止实现方另造 error 字符串。
++      expect(tool.state.error).toBe(SessionProcessor.TOOL_ABORTED_ERROR)
++      expect(tool.state.metadata?.interrupted).toBe(true)
++    }),
++  )
++
++  // 行为：running usage 必须变为 aborted，避免计费/状态聚合长期卡在 running。
++  it.live("recent reconcile aborts running request usage", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-usage" }))
++      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++
++      const row = Database.use((db) =>
++        db
++          .select()
++          .from(RequestUsageTable)
++          .where(eq(RequestUsageTable.request_id, seeded.userID))
++          .get(),
++      )
++      // status 与 time_completed 对齐 RequestUsage.complete(aborted) 字段合同。
++      expect(row?.status).toBe("aborted")
++      expect(row?.time_completed).toBeDefined()
++    }),
++  )
++
++  // INV-08：reconcile 不得依赖 InstanceRef（必须走 publish:false）。
++  // worker boot/exit 没有 directory instance；若误走 Session.update* 会在 InstanceState.context 处失败。
++  it.live("reconcile succeeds without instance context", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-no-instance" }))
++      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++
++      // 在无 InstanceRef 的 fiber 上调用：不得抛 InstanceState.context 错误。
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++
++      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++      if (msg.info.role !== "assistant") throw new Error("expected assistant")
++      // 成功本身即证明无 InstanceRef 路径可写 durable 终态。
++      expect(msg.info.time.completed).toBeDefined()
++    }),
++  )
++
++  // 行为：exit-full C 步关闭“message 已 completed 但 tool 仍 open”的孤儿。
++  // cancelSnapshot 故意跳过 completed assistant，因此必须 tool-only 终端化且不改写 message.error。
++  it.live("exit-full closes orphan open tool on completed message", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-orphan" }))
++      const userID = MessageID.ascending()
++      yield* provideInstance(dir)(
++        sessions.updateMessage({
++          id: userID,
++          sessionID: chat.id,
++          role: "user",
++          time: { created: Date.now() },
++          agent: "build",
++          model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
++        }),
++      )
++      const assistantID = MessageID.ascending()
++      yield* provideInstance(dir)(
++        sessions.updateMessage({
++          id: assistantID,
++          sessionID: chat.id,
++          role: "assistant",
++          parentID: userID,
++          mode: "build",
++          agent: "build",
++          path: { cwd: "/tmp", root: "/tmp" },
++          cost: 0,
++          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          modelID: ModelID.make("test"),
++          providerID: ProviderID.make("test"),
++          time: { created: Date.now(), completed: Date.now() },
++          error: new MessageV2.AbortedError({ message: "Aborted" }).toObject(),
++        }),
++      )
++      const partID = PartID.ascending()
++      yield* provideInstance(dir)(
++        sessions.updatePart({
++          id: partID,
++          sessionID: chat.id,
++          messageID: assistantID,
++          type: "tool",
++          tool: "bash",
++          callID: "call_orphan",
++          state: { status: "running", input: {}, time: { start: Date.now() } },
++        }),
++      )
++
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 5_000 }))
++
++      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: assistantID })
++      const tool = msg.parts.find((part) => part.id === partID)
++      expect(tool?.type).toBe("tool")
++      if (tool?.type !== "tool" || tool.state.status !== "error") throw new Error("expected aborted tool")
++      expect(tool.state.error).toBe(SessionProcessor.TOOL_ABORTED_ERROR)
++      // message 已 terminal：孤儿路径不得改写 error（历史终态语义）。
++      if (msg.info.role !== "assistant") throw new Error("expected assistant")
++      expect(msg.info.error?.name).toBe("MessageAbortedError")
++    }),
++  )
++
++  // 行为：budgetMs=0 表示 dispose 吃光 worker 5s 窗口，exit-full 必须整段跳过（残留交给下次 L1）。
++  it.live("exit-full with budgetMs 0 leaves incomplete state unchanged", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-budget-zero" }))
++      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++
++      // budgetMs=0 是 worker residual 计算的边界：remaining<=0 时不得触碰 SQLite 行。
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 0 }))
++
++      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++      if (msg.info.role !== "assistant") throw new Error("expected assistant")
++      expect(msg.info.time.completed).toBeUndefined()
++    }),
++  )
++
++  // 行为：二次 reconcile 幂等，防止 double-start / 重复 exit 改写已终态字段。
++  it.live("second reconcile is idempotent", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const dir = yield* tmpdirScoped({ git: true })
++      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-idempotent" }))
++      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++      const first = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++      const second = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++
++      if (first.info.role !== "assistant" || second.info.role !== "assistant") throw new Error("expected assistant")
++      // 二次调用不得推进 time.completed 或改写 tool 快照（幂等 INV-05）。
++      expect(second.info.time.completed).toBe(first.info.time.completed)
++      expect(second.info.error).toEqual(first.info.error)
++      const firstTool = first.parts.find((part) => part.id === seeded.tool.id)
++      const secondTool = second.parts.find((part) => part.id === seeded.tool.id)
++      expect(secondTool).toEqual(firstTool)
++    }),
++  )
++})

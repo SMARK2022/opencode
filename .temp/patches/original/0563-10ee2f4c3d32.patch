@@ -1,0 +1,98 @@
+From 10ee2f4c3d32589224fe21d018db125b893cd3d8 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 2 Sep 2026 01:39:47 +0800
+Subject: [PATCH] =?UTF-8?q?fix(permission):=20reviewer=20=E9=BB=98?=
+ =?UTF-8?q?=E8=AE=A4=E8=B6=85=E6=97=B6=E6=8F=90=E8=87=B3=20120s=20?=
+ =?UTF-8?q?=E5=B9=B6=E5=9C=A8=E8=B6=85=E6=97=B6=E9=87=8D=E8=AF=95=E6=B3=A8?=
+ =?UTF-8?q?=E5=85=A5=E6=97=B6=E9=97=B4=E9=A2=84=E7=AE=97=E5=90=8E=E7=BC=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+生产 DB 取证：glm-5.3 系成功 attempt p90=77s，90s 红线切在自然长尾腰部（185 次 ≈90s 截断、多连超时链 62% 全灭、极端 9 连 993s）；被截断 attempt 的 reasoning 中位 15.8k 字符是成功中位 4.8k 的 3.3 倍，属 overthinking 而非模型慢。默认 per-attempt 超时调整为 120s（总最差 3x 不变），超时触发的重试由保持原 prompt 改为追加显式 600 词时间预算后缀（Think concisely + 内容清单防欠思考 + 禁虚构上一轮引用），首次 attempt 不受影响。
+
+混合重试链（协议错误→超时）只保留时间后缀：超时 attempt 的绑定约束是时长而非提交格式。超时重试集成测试扩展断言：第 2 次请求含 Time advisory/600 words 标记、第 1 次不含。
+
+diff --git a/packages/opencode/src/config/permission.ts b/packages/opencode/src/config/permission.ts
+index 75d0a51691a72fb01c0de06a98224b404b2ed37a..670e8f6be38e3655ff69a60e6af80dd128fdfa32 100644
+--- a/packages/opencode/src/config/permission.ts
++++ b/packages/opencode/src/config/permission.ts
+@@ -19,7 +19,7 @@ export const AutoReview = Schema.Struct({
+   // `action: "auto"` is resolved, but these fields are not themselves rules and
+   // are skipped by Permission.fromConfig.
+   model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
+-  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000." }),
++  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000." }),
+   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
+   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
+   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index 70331c2d307d028764042e2522cb7e25339adebf..031f51e8d58f07d85bc26e1b046053c3c17f9777 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -80,6 +80,16 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
+ // that owns these hidden child-session turns and prevents future hidden-message
+ // consumers from confusing protocol retry cleanup with undo or session repair.
+ const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
++// [local-smark] 超时重试的时间预算后缀：只在超时后的重试注入（首次 attempt 不动，
++// 零常规质量影响）。措辞依据文献与生产取证：显式字数锚点比抽象 efficiency 更可
++// 控制（Token-Budget-Aware Reasoning）；正向内容清单（意图/风险/策略）防欠思考
++// （NovaSky：负面"少想"指令在最难任务上崩塌）；禁引用模型看不见的"上一轮分析"
++// （重试为重建全新上下文）。600 词 ≈ 成功评审 reasoning 中位（~800 词）的 3/4，
++// 压掉 15k+ 字符的打转循环同时留足判断空间。
++const TIME_BUDGET_RETRY_USER_ITEM = {
++  type: "text" as const,
++  text: "Time advisory: a previous attempt at this review exceeded its time budget. Think concisely now: keep reasoning within roughly 600 words. State the user's intent and authorization, the action's concrete risk, and the policy rule that matches, then submit the decision. Do not re-derive the transcript, do not re-check alternatives repeatedly, and do not stall in 'wait, but…' loops.",
++}
+ const PROTOCOL_RETRY_USER_ITEM = {
+   type: "text" as const,
+   // [local-smark] R-REQ-4 avoid-xxx 防御纵深 nudge：重试请求不含失败回合（重建
+@@ -187,7 +197,11 @@ export const layer = Layer.effect(
+           // ReviewerTimedOut 在 catchIf 之外，无法被捕获重试。修复后 timeoutOrElse 在
+           // catchIf 内层，超时可被 catchIf 捕获并触发重试。
+           const MAX_REVIEWER_ATTEMPTS = 3
+-          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
++          // [local-smark] 默认 per-attempt 超时 90s→120s：生产 DB 实测 glm-5.3 系成功
++          // attempt p90=77s，90s 红线切在其自然长尾腰部（185 次 ≈90s 截断、多连链
++          // 62% 全灭）；120s 覆盖 p90 留余量，配合超时重试的时间预算后缀压缩
++          // overthinking（截断时 reasoning 中位 15.8k 字符 vs 成功中位 4.8k）。
++          const perAttemptTimeout = autoReview?.timeout_ms ?? 120_000
+ 
+           function reviewerRetry(
+             attemptNum: number,
+@@ -205,10 +219,15 @@ export const layer = Layer.effect(
+               // 旧代码顺序相反，超时绕过了重试。
+               Effect.catchIf(isReviewerRetryable, (error) => {
+                 if (attemptNum >= MAX_REVIEWER_ATTEMPTS - 1) return Effect.fail(error)
+-                // 协议错误：附加 protocol nudge 修复提交格式；超时：保持原 prompt
++                // 协议错误：附加 protocol nudge 修复提交格式；超时：附加时间预算
++                // 后缀压缩 overthinking（重试不会自我压缩：实测后继 attempt 40/76
++                // 不比被截断者短）。混合链（协议错误→超时）只保留时间后缀：超时
++                // attempt 的问题在时长而非提交格式，时间约束是当时主绑定。
+                 const nextMessages = isReviewerDecisionProtocolError(error)
+                   ? buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] })
+-                  : currentMessages
++                  : error instanceof ReviewerTimedOut
++                    ? buildMessages({ system, userItems: [...userItems, TIME_BUDGET_RETRY_USER_ITEM] })
++                    : currentMessages
+                 return reviewerRetry(attemptNum + 1, nextMessages, false)
+               }),
+             )
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 4d5cf2b7843a4d1ea50ecce0a1f7e6f3835a811f..f9403bdfc74a5295753df497979b7fdbf85b1682 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -2099,6 +2099,13 @@ it.instance(
+ 
+       // 超时后重试成功：共 2 次 provider 调用
+       expect(yield* llm.calls).toBe(2)
++      // [local-smark] 超时重试注入时间预算后缀：首次请求不含，重试请求含显式
++      // 字数锚点（600 words）与凝练指令——针对 glm-5.3 系 90s 截断时 reasoning
++      // 中位 15.8k 字符（成功中位 4.8k）的 overthinking 实测形态。
++      const timeoutInputs = yield* llm.inputs
++      expect(JSON.stringify(timeoutInputs[0])).not.toContain("Time advisory")
++      expect(JSON.stringify(timeoutInputs[1])).toContain("Time advisory")
++      expect(JSON.stringify(timeoutInputs[1])).toContain("600 words")
+       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+       expect(reviewer).toBeDefined()
+       if (!reviewer) return

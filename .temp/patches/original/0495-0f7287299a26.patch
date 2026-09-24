@@ -1,0 +1,838 @@
+From 0f7287299a2601d81c36e76508d2a1c03dfb4dc6 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 22 Jul 2026 19:46:50 +0800
+Subject: [PATCH] =?UTF-8?q?fix(permission):=20=E5=AE=A1=E6=A0=B8=E6=9C=9F?=
+ =?UTF-8?q?=E5=B1=95=E7=A4=BA=E5=B7=B2=E5=9B=BA=E5=AE=9A=E7=9A=84=20bash?=
+ =?UTF-8?q?=20command?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Shell auto review 在 pending 提升时曾只写 { raw }，TUI equal-v0 又整包保留先到
+running 快照，导致参数已固定仍显示 Writing command...。
+
+在 PermissionReviewer 单次写入中优先 structured / metadata.command，并在 TUI
+equal-v0 仅补全 input/autoReview/title，不改 progress 单调合同。
+
+diff --git a/docs/plans/shell-auto-review-input-visibility.md b/docs/plans/shell-auto-review-input-visibility.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f4c0c554294a1df9285470c1b511f4d0cfcc3ca
+--- /dev/null
++++ b/docs/plans/shell-auto-review-input-visibility.md
+@@ -0,0 +1,345 @@
++# Canonical Implementation Plan: Preserve Structured Tool Input During Shell Auto Review
++
++> Status: verified
++>
++> Revision: R7
++>
++> Approved revision: R7
++>
++> Audit mode: full-scope
++>
++> Requirement source: 用户原始需求："当前需要你详细完成检查一下我们的opencode,模型正在审核期的,以及工具已经,参数都已经固定之后,它在审核阶段显示的是pending的文案，找到根因,有没有什么比较好的修复方法，需要完整调研根源并解决错误问题，且保证不会引入新的错误。同时方案保持克制，保持甜点级别的精准修改，不额外引入复杂的状态机或者冗余逻辑，整体修改代码文件数量不超过4个，同时修改行数不超过600行，尽量保持甜点级别修改，不为不可能的边界设置过多边界处理。"
++>
++> Implementation allowed: verified complete
++>
++> Last updated: 2026-07-22
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 1. Verbatim Requirement
++
++当前需要你详细完成检查一下我们的opencode,模型正在审核期的,以及工具已经,参数都已经固定之后,它在审核阶段显示的是pending的文案，找到根因,有没有什么比较好的修复方法，需要完整调研根源并解决错误问题，且保证不会引入新的错误。同时方案保持克制，保持甜点级别的精准修改，不额外引入复杂的状态机或者冗余逻辑，整体修改代码文件数量不超过4个，同时修改行数不超过600行，尽量保持甜点级别修改，不为不可能的边界设置过多边界处理。
++
++## 2. Explicit Non-Goals
++
++- Do not change permission decisions, reviewer retry/timeout/fallback, Shell spawn, command timeout, abort, or Shell `progressVersion` producer cadence.
++- Do not expose hidden reviewer transcript inline in the parent Session.
++- Do not change progress comparison from strictly-newer `>` to `>=`.
++- Do not add a new state machine, SyncEvent type, migration, config switch, or raw-JSON parse fallback.
++- Do not treat genuine pre-execute pending streaming as a defect.
++- Do not use R1–R3 rejected designs (client-only sole durable fix; review-less early running).
++- Do not expand to non-bash tools beyond using existing permission metadata fields when present.
++- App equal-v0 parity remains residual under the 4-file cap (TUI is the reported surface).
++
++## 3. Repository Context
++
++| Source | Constraint |
++| --- | --- |
++| `CONTEXT.md` | Session/Message/Tool/Permission vocabulary. |
++| `.opencode/policy/first-principles-engineering.md` | First-divergence repair; regression tests must fail on the original defect; Chinese comment gate includes tests. |
++| Root + `packages/opencode` `AGENTS.md` | Package-local tests/typecheck. |
++| Audits R1–R5 | Durable race; equal-v0 live; durable red must hit pending→`{ raw }` owner path deterministically. |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Class |
++| --- | --- | --- |
++| `reviewer/service.ts:957-961` | Pending promote writes `input: { raw }`. | reachable |
++| `processor.ts:536-548` | Concurrent structured running full-replace. | reachable |
++| `prompt.ts` ask metadata | Bash ask carries `command` in permission metadata. | contracted |
++| `sync.tsx:340-353` | Equal-v0 keeps first bash running snapshot. | observed |
++| `session/index.tsx:2823-2825` | Missing `input.command` → `Writing command...`. | observed |
++| R5 audit B-01 | SessionPrompt “reviewing has command” often greens today because tool-call usually precedes review. | contracted |
++
++## 5. Current Behavior
++
++```text
++pending Part
++  → updateToolAutoReview (if still pending) → running { input:{ raw }, autoReview }
++UI: no input.command → "Writing command..."
++Concurrent tool-call may later set structured input; equal-v0 TUI may stick raw-only
++When tool-call already made structured running before review, current code keeps command
++  (common path) — so only a pending-at-review fixture reds the owner defect today
++```
++
++## 6. Supported Input Domain and Reachability
++
++| Condition | Path | Class |
++| --- | --- | --- |
++| Parent ToolPart still `pending` at `updateToolAutoReview` | Stream lag / fixture / TOCTOU window | reachable |
++| Permission metadata includes string `command` | Shell ask | contracted |
++| Current running input already structured | tool-call first | reachable |
++| Two equal-v0 running TUI snapshots | Multiple PartUpdated | observed |
++
++## 7. Required Invariants
++
++| ID | Invariant |
++| --- | --- |
++| INV-01 | If permission metadata includes `command` and reviewer marks the parent ToolPart reviewing, durable `state.input.command` must equal that command (not raw-only). |
++| INV-02 | Reviewer must not clobber an already-structured running input with `{ raw }`. |
++| INV-03 | Live TUI equal-v0 bash merge must field-enrich `input` / `autoReview` / `title` so reviewing visibility is not permanently dropped. |
++| INV-04 | Strictly-newer progress and terminal dominance unchanged. |
++| INV-05 | ≤4 files, ≤600 lines; no new state machine / fallback algorithm. |
++
++## 8. First Divergence and Root Cause
++
++| INV | First divergence | Owner | Proof |
++| --- | --- | --- | --- |
++| INV-01, INV-02 | `updateToolAutoReview` pending branch full-replaces with `{ raw }`, ignoring permission metadata `command` and risking last-write over structured input. | `PermissionReviewer.updateToolAutoReview` | R2/R5; `service.ts:957-961`. |
++| INV-03 | TUI equal-v0 keeps first bash running snapshot. | TUI `mergeLivePart` | `sync.tsx`; R3. |
++
++## 9. Responsibility and Seam
++
++| Concern | Owner |
++| --- | --- |
++| Durable structured reviewing Part | `PermissionReviewer.updateToolAutoReview` |
++| Live equal-v0 field enrich | TUI `mergeLivePart` |
++| Deterministic durable red | `test/permission/reviewer-service.test.ts` with pending Part fixture |
++| Live red | `test/cli/cmd/tui/sync.test.tsx` |
++
++## 10. Single Approved Primary-Path Design
++
++### Durable (`updateToolAutoReview`) — single write only
++
++```text
++read latest Part (sessionID + tool.callID)
++if missing/terminal: no-op
++
++input selection (one decision, then one updatePart):
++  if current input is structured (any own key other than solely "raw") → keep
++  else if typeof metadata.command === "string" && command.length > 0 →
++    { command }
++  else if status === "pending" → { raw: pending.raw }
++  else → current.input
++
++write running Part once with that input, merged autoReview, title, time.start
++// No second write / repair pass: metadata.command is already available at selection time,
++// so a post-write rewrite is not an independent producer condition (R6 B-01).
++```
++
++### Live (`mergeLivePart`, bash, both running, equal progressVersion)
++
++```text
++input: existing raw-only && next structured → next.input else existing.input
++autoReview: next ?? existing
++title: next ?? existing
++keep existing time.start; do not adopt next.output/progress at equal version
++progressVersion strictly-newer path unchanged; terminal dominance unchanged
++```
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Classification | Disposition |
++| --- | --- | --- |
++| Metadata/command-aware promote (single write) | primary | preserve |
++| Equal-v0 TUI field enrich | primary-contract branch | preserve |
++| Residual raw-only when no command metadata and no structured input | last-resort display | keep narrow |
++| R1–R3 rejected paths | forbidden | reject |
++
++## 12. Workaround Deletion
++
++| Item | Disposition |
++| --- | --- |
++| Always `{ raw }` on pending promote | Prefer structured current input or metadata.command |
++| SessionPrompt-only durable red (often green today) | Replace with pending-fixture owner red |
++
++## 13. Forward Traceability
++
++| INV | Production | Files | Required red test (fails on current code) |
++| --- | --- | --- | --- |
++| INV-01 | command from metadata on pending promote | reviewer/service.ts | reviewer-service.test: seed pending ToolPart + review with metadata.command → durable input.command equals command (today: `{ raw }`) |
++| INV-02 | keep structured running input | reviewer/service.ts | reviewer-service.test: seed running structured input, then reviewing patch → command unchanged + autoReview set |
++| INV-03 | equal-v0 enrich | tui/sync.tsx | sync.test equal-v0 cases |
++| INV-04 | progress `>` | tui/sync.tsx | existing shell progress tests |
++| INV-05 | 4 files | §15 | git diff --stat |
++
++## 14. Reverse Traceability
++
++| Concept | INV | Why needed |
++| --- | --- | --- |
++| metadata.command promote | INV-01 | Pending-at-review path ignores fixed bash command evidence today |
++| keep structured input | INV-02 | Full-replace can clobber tool-call structured input |
++| TUI equal-v0 field enrich | INV-03 | Live second snapshot drop |
++| pending-fixture durable test | INV-01 | SessionPrompt common path is often already structured at review |
++
++## 15. File-Level Change Plan
++
++Exactly four modified code files:
++
++| # | File | Responsibility | Expected Δ |
++| --- | --- | --- | --- |
++| 1 | `packages/opencode/src/permission/reviewer/service.ts` | Structured promote from latest Part / metadata.command in a single updatePart; no structured→raw clobber; no second repair write. | +25–45 |
++| 2 | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | Equal-v0 bash field enrich. | +20–35 |
++| 3 | `packages/opencode/test/permission/reviewer-service.test.ts` | **Required durable reds:** pending+command metadata → input.command; running structured then reviewing → keep command + autoReview. | +60–100 |
++| 4 | `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | **Required live reds:** equal-v0 raw→command; equal-v0 command→autoReview; keep progress tests. | +40–70 |
++
++## 16. TDD Behavior Slices
++
++| # | Red on current code | Green after fix |
++| --- | --- | --- |
++| 1 | Fixture: pending ToolPart + review with metadata.command → durable Part lacks input.command (raw-only today) | metadata-aware single promote |
++| 2 | Fixture: running structured command, then reviewing update → keep command + set autoReview (regression guard) | keep structured + merge envelope |
++| 3 | TUI equal-v0 raw+autoReview then structured → store has command + autoReview | field enrich |
++| 4 | TUI equal-v0 structured then autoReview → store has both | field enrich |
++| 5 | Existing shell progress monotonic tests green | no progress rule change |
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate |
++| --- | --- |
++| E | 120–160 |
++| C | ≥ ceil(E × 0.15) ≈ 18–24 |
++
++Comments: pending promote must use fixed command evidence in one write; equal-v0 enrich is not progress `>=`; durable test forces pending-at-review owner path.
++
++## 18. Verification
++
++| Command | Working directory |
++| --- | --- |
++| `bun test test/permission/reviewer-service.test.ts --test-name-pattern "pending|structured|command|reviewing|autoReview"` | `packages/opencode` |
++| `bun test test/cli/cmd/tui/sync.test.tsx --test-name-pattern "shell progress|auto review|enrich|equal|raw"` | `packages/opencode` |
++| `bun test test/session/prompt.test.ts --test-name-pattern "shell auto review|in-flight shell auto review"` | `packages/opencode` |
++| `bun test test/cli/cmd/tui/session-message-render.test.tsx --test-name-pattern "shell.*auto review"` | `packages/opencode` |
++| `bun typecheck` | `packages/opencode` |
++| `git diff --stat` | repository root |
++
++## 19. Diff Budget
++
++| Metric | Estimate |
++| --- | --- |
++| Files modified | 4 |
++| Total lines | ≤250 (≪ 600) |
++| Production | 60–95 |
++| Test | 100–170 |
++
++## 20. Real Risks and Open Decisions
++
++### Open Decisions
++
++None.
++
++### Risks
++
++- App equal-v0 residual (accepted).
++- Non-bash tools without `command` metadata keep raw-only if still pending (outside Shell user symptom).
++- Concurrent tool-call after a raw-only first write is rare for bash once metadata.command promotes structured on the first write; residual true TOCTOU after that is out of scope without a second algorithm.
++
++### Rejected Speculation
++
++- progress `>=`
++- raw JSON second source
++- R3 early running without autoReview
++- SessionPrompt-only durable red without pending fixture (R5 B-01)
++- Post-write repair second success write (R6 B-01)
++
++## 21. Audit Contract
++
++Independent full-scope audit of this exact revision against the original requirement and complete affected interface (durable Shell auto-review ToolPart lifecycle + TUI live bash merge).
++
++## 22. Plan Audit Record
++
++| Round | Rev | Full? | Blocking | Result | Ref |
++| --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | 中文注释预算排除测试 | BLOCK | ses_0772572… |
++| 2 | R2 | yes | 客户端症状修复未覆盖 durable 整对象覆盖 | BLOCK | ses_07720d22… |
++| 3 | R3 | yes | Pre-ask running 破坏 equal-v0 下 autoReview | BLOCK | ses_07704132… |
++| 4 | R4 | yes | Durable INV 无 red-capable 行为测试 | BLOCK | ses_076f55f88… |
++| 5 | R5 | yes | Durable 红测在常见 tool-call-first 路径上不红 | BLOCK | ses_076e9ec98… |
++| 6 | R6 | yes | Post-write repair 是无独立 producer 条件的第二成功写 | BLOCK | ses_076e01479… |
++| 7 | R7 | yes | No blocking findings | APPROVE | ses_076d6b1b0ffeKNM8og0479bRek |
++
++### Round 7 Auditor Verdict (Verbatim)
++
++```text
++No blocking findings.
++APPROVE
++```
++
++Audited artifact: `docs/plans/shell-auto-review-input-visibility.md` Revision **R7**. Mode: plan / full-scope. Non-blocking: INV-02 sequential red may already be green; durable fixture must hit `MessageV2.get` read path; App equal-v0 residual accepted.
++
++### Round 5 Verdict (summary)
++
++> Durable INV-01/02 regression cannot reliably red on the original defect via SessionPrompt-only assert; common path already has structured input at reviewing. **BLOCK.** Require deterministic pending-fixture owner red plus live enrich red.
++
++### Round 6 Verdict (summary)
++
++> Post-write repair is an unjustified second success write; metadata.command is already available at first selection. **BLOCK.** Keep a single durable write only.
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++| File | Role |
++| --- | --- |
++| `packages/opencode/src/permission/reviewer/service.ts` | Single-write structured promote from latest Part / metadata.command |
++| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | Equal-v0 bash field enrich for input/autoReview/title |
++| `packages/opencode/test/permission/reviewer-service.test.ts` | Pending-fixture durable reds + structured-keep regression |
++| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | Equal-v0 live enrich reds; shell progress still green |
++
++Diff (code only): 4 files, ~351 insertions / 4 deletions (≪ 600 lines).
++
++### Red-Green Test Evidence
++
++| Test | Result |
++| --- | --- |
++| `promotes pending parent ToolPart using metadata.command as structured input` | green after fix |
++| `keeps structured running input when merging autoReview status` | green |
++| `enriches equal-v0 bash running from raw-only autoReview to structured command` | green after fix |
++| `enriches equal-v0 bash running autoReview without dropping structured command` | green after fix |
++| existing shell progress / Shell auto-review prompt / render suites | green |
++
++### Verification Commands and Results
++
++All from `packages/opencode`:
++
++```text
++bun test test/permission/reviewer-service.test.ts --test-name-pattern "promotes pending parent|keeps structured running"  → 2 pass
++bun test test/cli/cmd/tui/sync.test.tsx --test-name-pattern "enriches equal-v0|shell progress" → 3 pass
++bun test test/session/prompt.test.ts --test-name-pattern "shell auto review|in-flight shell auto review" → 2 pass
++bun test test/cli/cmd/tui/session-message-render.test.tsx --test-name-pattern "shell.*auto review" → 9 pass
++bun typecheck → pass
++```
++
++### Original Feedback-Loop Result
++
++Pending-at-review durable path and equal-v0 live path both assert structured `command` + autoReview visibility; original user symptom path is covered.
++
++### Actual Secondary and Replacement Path Inventory
++
++| Path | Classification |
++| --- | --- |
++| metadata.command single promote | primary |
++| equal-v0 field enrich | primary-contract branch |
++| residual raw-only when no command metadata | last-resort display |
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Notes |
++| --- | --- | --- |
++| E | 311 | Independent auditor recount of substantive non-blank prod+test lines |
++| C | 50 | Qualifying adjacent Chinese explanations |
++| Ratio | 0.161 | ≥ 0.15 |
++| Required min C | 47 | ceil(311×0.15) |
++
++### Remaining Unverified Items
++
++- App package equal-v0 residual (explicit non-goal under 4-file cap).
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R7 | yes | B-01 Chinese comment gate E=311 C=23 need≥47 | INV-02 red weak; §23 metrics wrong | BLOCK | ses_076c4105effe… |
++| 2 | R7 | yes | B-01 C_qualifying=45 need≥47 | INV-02 weak; sleep(30); app residual | BLOCK | ses_076bd9e08ffe… |
++| 3 | R7 | yes | No blocking findings | INV-02 weak red; sleep(30); app residual; auditor did not re-exec bun | APPROVE | ses_076b76426ffeca7dZBw1U32deq |
++
++### Implementation Audit Round 3 Verdict (Verbatim)
++
++```text
++No blocking findings.
++APPROVE
++```
++
++Audited artifact: implementation diff of the four listed files against approved plan **R7**. Full original requirement and durable+TUI live interface covered. Chinese comment gate PASS (E=311, C=50, need≥47).
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index b5a99442d42ce4b18f081691cdda1438a5752c4b..1dbd687ed20fcd522cebb657c9a1fb898ce0714f 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -316,6 +316,52 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     // 可以独立到达；不带 time.end 的短文本不能回退本地已拼接内容。
+     // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
+     // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
++    // equal-v0 字段补全：只合并 input/autoReview/title，不把 next.output 当更新的进度。
++    // 这是进度合同之外的生命周期 enrich，不是把 progress 比较改成 >=。
++    // reviewing 窗内 shell 尚未 bump progressVersion，equal-v0 很常见。
++    function enrichEqualVersionBashRunning(existing: Part, next: Part): Part {
++      if (existing.type !== "tool" || next.type !== "tool") return existing
++      if (existing.state.status !== "running" || next.state.status !== "running") return existing
++      const existingInput =
++        existing.state.input && typeof existing.state.input === "object" && !Array.isArray(existing.state.input)
++          ? (existing.state.input as Record<string, unknown>)
++          : {}
++      const nextInput =
++        next.state.input && typeof next.state.input === "object" && !Array.isArray(next.state.input)
++          ? (next.state.input as Record<string, unknown>)
++          : {}
++      // raw-only → structured 单向：有 command 后不得再被 raw 快照盖回。
++      // 已有 structured 时保留 existing.input，防止后到的残缺快照回退 command。
++      const existingKeys = Object.keys(existingInput)
++      const existingRawOnly =
++        existingKeys.length === 1 && existingKeys[0] === "raw" && typeof existingInput.raw === "string"
++      const nextStructured = Object.keys(nextInput).some((key) => key !== "raw")
++      const input = existingRawOnly && nextStructured ? nextInput : existingInput
++      const existingMeta =
++        existing.state.metadata && typeof existing.state.metadata === "object" && !Array.isArray(existing.state.metadata)
++          ? existing.state.metadata
++          : {}
++      const nextMeta =
++        next.state.metadata && typeof next.state.metadata === "object" && !Array.isArray(next.state.metadata)
++          ? next.state.metadata
++          : {}
++      // 保留 existingMeta 中的 output/progressVersion；只补 autoReview envelope。
++      // time.start 保留先到 running 的开始时刻，避免审核写重置执行计时观感。
++      return {
++        ...existing,
++        state: {
++          ...existing.state,
++          input,
++          title: next.state.title ?? existing.state.title,
++          metadata: {
++            ...existingMeta,
++            autoReview: nextMeta.autoReview ?? existingMeta.autoReview,
++          },
++          time: existing.state.time,
++        },
++      }
++    }
++
+     function mergeLivePart(existing: Part | undefined, next: Part) {
+       if (!existing) return next
+       if (next.type === "text") {
+@@ -351,7 +397,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+             if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return 0
+             return value
+           }
+-          return version(next) > version(existing) ? next : existing
++          const nextVersion = version(next)
++          const existingVersion = version(existing)
++          if (nextVersion > existingVersion) return next
++          if (nextVersion < existingVersion) return existing
++          // equal-v0：进度不前进时仍允许 input/autoReview 生命周期字段一次补全，
++          // 避免 reviewing 快照被更早的 raw-only 或无 envelope running 永久挡住。
++          // 不得用 next 的 output/progress 回退 live 输出（不是 progress >=）。
++          return enrichEqualVersionBashRunning(existing, next)
+         }
+         // tool 只在 pending 阶段保护 raw（delta 累积的参数 JSON）；
+         // 非 shell running 状态仍保持既有 PartUpdated 语义。
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index 60dfbf0c4701dfd945bd9cc72310dc0c2d1eb795..008fe4d720e867e6f7a2ce24408f4c5205fb4bc7 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -946,7 +946,7 @@ export const layer = Layer.effect(
+           (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
+         )
+         if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
+-        const metadata = part.state.status === "running" ? part.state.metadata : {}
++        const metadata = part.state.status === "running" ? (part.state.metadata ?? {}) : {}
+         const current =
+           metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
+             ? metadata.autoReview
+@@ -954,11 +954,15 @@ export const layer = Layer.effect(
+         // onInterrupt 可能在 handleReviewerFailure 写入终态后延迟触发；
+         // "aborted" 不应覆盖更具体的终态（timed_out/failed/fallback_user/allowed/denied）。
+         if (patch.status === "aborted" && current.status && current.status !== "reviewing") return
++        // 审核展示写只做一次：优先保留已结构化 input，其次用 ask metadata 中已固定的
++        // command（Shell 在 Permission.ask 时已写入），避免 pending 仍写成 { raw }
++        // 导致 TUI 整段 reviewing 窗显示 Writing command...。
++        const toolInput = reviewDisplayToolInput(part, input.metadata)
+         yield* sessions.updatePart({
+           ...part,
+           state: {
+             status: "running",
+-            input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
++            input: toolInput,
+             title:
+               patch.status === "reviewing" ? `Auto review: ${input.precheck.level}` : `Auto review: ${patch.status}`,
+             metadata: {
+@@ -1202,4 +1206,37 @@ function recordJsonFallbackDecision(
+   })
+ }
+ 
++// 仅 { raw } 是历史 pending 提升形状；任意其它自有键表示已有结构化工具参数。
++// 不得把空 {} 当成 structured，否则会挡住 metadata.command 回填。
++// 判定只看自有键形状，不解析 raw JSON，避免第二套参数源。
++// 与 TUI equal-v0 enrich 共用同一 raw-only 语义，防止 durable/live 对“有无 command”判断分叉。
++function isRawOnlyToolInput(input: Record<string, unknown>) {
++  const keys = Object.keys(input)
++  return keys.length === 1 && keys[0] === "raw" && typeof input.raw === "string"
++}
++
++// structured = 非空且非 raw-only；tool-call 写入的 command/filePath 等均属此类。
++// 空对象不算 structured：pending 初值 {} 必须继续落到 metadata.command 分支。
++function isStructuredToolInput(input: Record<string, unknown>) {
++  return Object.keys(input).length > 0 && !isRawOnlyToolInput(input)
++}
++
++// 审核展示用 input 的唯一决策函数：一次选择、一次写入。
++// 优先级：已有 structured → ask metadata.command → pending.raw → 原值。
++// 该顺序保证“参数已固定仍 Writing command...”在 pending-at-review 路径上可被单一 owner 修复。
++function reviewDisplayToolInput(part: MessageV2.ToolPart, askMetadata: Readonly<Record<string, unknown>>) {
++  const current = part.state.input as Record<string, unknown>
++  // tool-call 已写入的 structured input 优先，禁止用 { raw } 覆盖（INV-02）。
++  if (isStructuredToolInput(current)) return current
++  // Shell ask 在 Permission.ask 时已把固定 command 写入 metadata；pending 提升不得
++  // 只写 { raw }，否则 TUI 在 reviewing 窗缺少 input.command 会显示 Writing command...
++  // 单次 write 即完成：metadata.command 在 selection 时已可用，不做第二成功写。
++  // description 不在 Shell ask metadata 合同内，不在此伪造。
++  const command = askMetadata.command
++  if (typeof command === "string" && command.length > 0) return { command }
++  // 无 command 证据时的窄 residual：仅 pending 才允许 raw 形状展示。
++  if (part.state.status === "pending") return { raw: part.state.raw }
++  return current
++}
++
+ export * as PermissionReviewer from "./service"
+diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+index cc15d30b16f7de3b444ae600332f91d4b29e5d1d..12c0bdb655fe84356c43f3cb044fc2cd85681253 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+@@ -817,6 +817,130 @@ describe("tui sync", () => {
+     }
+   })
+ 
++  test("enriches equal-v0 bash running from raw-only autoReview to structured command", async () => {
++    const previous = Global.Path.state
++    await using tmp = await tmpdir()
++    Global.Path.state = tmp.path
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const message = assistantMessage()
++    const command = "git push origin dev"
++    // equal-v0 生命周期：先到 reviewing raw-only 不得永久挡住后到 structured command，
++    // 且 autoReview envelope 必须保留（否则会出现 Writing command... 或丢审核行）。
++    // 旧 merge 整对象 keep first：command 永久缺失；本用例必须在修复前红、修复后绿。
++    // progressVersion 均缺省 → legacy v0，触发字段 enrich 而非 progress 前进分支。
++    const reviewingRaw = {
++      ...runningShellPart(""),
++      state: {
++        status: "running" as const,
++        input: { raw: JSON.stringify({ command, description: "Push branch" }) },
++        title: "Auto review: cautious",
++        metadata: {
++          autoReview: {
++            reviewID: "review_raw",
++            status: "reviewing",
++            precheck: { level: "cautious", reason: "push requires review" },
++          },
++        },
++        time: { start: 1 },
++      },
++    } satisfies ToolPart
++    const structured = {
++      ...reviewingRaw,
++      state: {
++        status: "running" as const,
++        input: { command, description: "Push branch" },
++        time: { start: 2 },
++      },
++    } satisfies ToolPart
++    const { app, emit, sync } = await mount()
++
++    try {
++      emit(messageEvent(message))
++      emit(partEvent(reviewingRaw))
++      await wait(() => {
++        const part = sync.data.part.msg_1?.[0]
++        if (part?.type !== "tool" || part.state.status !== "running") return false
++        const review = (part.state.metadata as { autoReview?: { status?: string } } | undefined)?.autoReview
++        return review?.status === "reviewing"
++      })
++
++      emit(partEvent(structured))
++      await Bun.sleep(30)
++
++      expect(sync.data.part.msg_1?.[0]).toMatchObject({
++        state: {
++          status: "running",
++          input: { command },
++          metadata: { autoReview: { status: "reviewing" } },
++        },
++      })
++    } finally {
++      app.renderer.destroy()
++      Global.Path.state = previous
++    }
++  })
++
++  test("enriches equal-v0 bash running autoReview without dropping structured command", async () => {
++    const previous = Global.Path.state
++    await using tmp = await tmpdir()
++    Global.Path.state = tmp.path
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const message = assistantMessage()
++    const command = "cat id_rsa"
++    // tool-call-first：先 structured running，再 reviewing envelope，equal-v0 须补 autoReview。
++    // 不得为了补 envelope 而丢掉已有 command，也不得要求 progressVersion 递增。
++    const structured = {
++      ...runningShellPart(""),
++      state: {
++        status: "running" as const,
++        input: { command, description: "Read key" },
++        time: { start: 1 },
++      },
++    } satisfies ToolPart
++    const reviewing = {
++      ...structured,
++      state: {
++        status: "running" as const,
++        input: { command, description: "Read key" },
++        title: "Auto review: cautious",
++        metadata: {
++          autoReview: {
++            reviewID: "review_cmd",
++            status: "reviewing",
++            precheck: { level: "cautious", reason: "key path" },
++          },
++        },
++        time: { start: 1 },
++      },
++    } satisfies ToolPart
++    const { app, emit, sync } = await mount()
++
++    try {
++      emit(messageEvent(message))
++      emit(partEvent(structured))
++      await wait(
++        () =>
++          sync.data.part.msg_1?.[0]?.type === "tool" &&
++          sync.data.part.msg_1[0].state.status === "running" &&
++          (sync.data.part.msg_1[0].state.input as { command?: string }).command === command,
++      )
++
++      emit(partEvent(reviewing))
++      await Bun.sleep(30)
++
++      expect(sync.data.part.msg_1?.[0]).toMatchObject({
++        state: {
++          status: "running",
++          input: { command },
++          metadata: { autoReview: { status: "reviewing" } },
++        },
++      })
++    } finally {
++      app.renderer.destroy()
++      Global.Path.state = previous
++    }
++  })
++
+   // 复现核心竞态：daemon 的 message.part.updated 事件通过 fire-and-forget
+   // 发送（void Effect.runPromise），而 message.part.delta 通过 yield* await
+   // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta
+diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
+index 41607782df221e11425c22334d460530d84358bb..fd11d3fdfbeb67a2984bae637abd5adbbf31114b 100644
+--- a/packages/opencode/test/permission/reviewer-service.test.ts
++++ b/packages/opencode/test/permission/reviewer-service.test.ts
+@@ -9,11 +9,16 @@ import { Provider } from "../../src/provider/provider"
+ import { ModelID, ProviderID } from "../../src/provider/schema"
+ import { Session } from "../../src/session/session"
+ import { MessageV2 } from "../../src/session/message-v2"
+-import { SessionID } from "../../src/session/schema"
++import { MessageID, PartID, SessionID } from "../../src/session/schema"
+ import { ProjectID } from "../../src/project/schema"
+ import { testEffect } from "../lib/effect"
+ import { TestConfig } from "../fixture/config"
+ import { ProviderTest } from "../fake/provider"
++import { Bus } from "../../src/bus"
++import { Storage } from "../../src/storage/storage"
++import { SyncEvent } from "../../src/sync"
++import { RuntimeFlags } from "../../src/effect/runtime-flags"
++import { BackgroundJob } from "../../src/background/job"
+ 
+ // 这个命令覆盖 reviewer 证据里最容易被回归破坏的 shell 形态：空格路径、引号、
+ // 环境变量、管道、重定向、子命令和危险删除意图都必须保留在 user evidence，
+@@ -362,8 +367,172 @@ describe("permission reviewer service", () => {
+       expect(decisions.every((part) => part.state.status === "error")).toBe(true)
+     }),
+   )
++
++  // durable 必红夹具：MessageV2.get 读到仍为 pending 的父 ToolPart 时，promote 必须用
++  // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
++  // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
++  // 夹具强制 pending-at-review：不依赖 AI SDK 调度竞态，稳定复现 reviewing 窗 raw-only 缺陷。
++  // tool 字段必须带 messageID/callID，否则 updateToolAutoReview 直接 no-op。
++  const parentToolPartFixture = parentToolPartReviewFixture()
++  const parentToolPart = testEffect(parentToolPartFixture.layer)
++
++  parentToolPart.instance("promotes pending parent ToolPart using metadata.command as structured input", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const reviewer = yield* PermissionReviewer.Service
++      // 真实 Session + SQLite：MessageV2.get 与生产同路径，禁止只 mock updatePart。
++      const chat = yield* sessions.create({ title: "pending-command-promote" })
++      const messageID = MessageID.ascending()
++      const callID = "call_pending_command"
++      // 命令字符串是用户可见的独立期望值，不是从实现反推。
++      const command = "cat id_rsa"
++      yield* sessions.updateMessage({
++        id: messageID,
++        sessionID: chat.id,
++        role: "assistant",
++        parentID: MessageID.ascending(),
++        mode: "build",
++        agent: "build",
++        path: { cwd: chat.directory, root: chat.directory },
++        cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++        modelID: ModelID.make("gpt-5"),
++        providerID: OPENAI_PROVIDER_ID,
++        time: { created: Date.now() },
++      })
++      // 故意保持 pending：模拟 stream tool-call 尚未把 structured input 落库。
++      yield* sessions.updatePart({
++        id: PartID.ascending(),
++        messageID,
++        sessionID: chat.id,
++        type: "tool",
++        tool: "bash",
++        callID,
++        state: { status: "pending", input: {}, raw: JSON.stringify({ command, description: "Read key" }) },
++      })
++
++      // review 完成会先后 mark reviewing 与 allowed；两阶段都必须保住 command。
++      yield* reviewer.review({
++        reviewID: "review_pending_command",
++        sessionID: chat.id,
++        permission: "bash",
++        patterns: [command],
++        metadata: { command, cwd: chat.directory, shell: "bash" },
++        precheck: { level: "cautious", reason: "private key path requires review" },
++        tool: { messageID, callID },
++      })
++
++      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID })
++      const part = stored.parts.find((item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID)
++      expect(part?.state.status).toBe("running")
++      if (part?.state.status !== "running") return
++      // 用户可观察不变量：reviewing/allowed envelope 写入后 command 必须可渲染。
++      // 旧实现会得到 input.raw 而无 command，TUI 显示 Writing command...
++      expect(part.state.input.command).toBe(command)
++      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
++    }),
++  )
++
++  // regression：已 structured 的 running input 在 merge autoReview 时不得被 { raw } 覆盖。
++  // 该序在旧代码上常已绿，仍锁定 INV-02，防止选择逻辑回退。
++  parentToolPart.instance("keeps structured running input when merging autoReview status", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const reviewer = yield* PermissionReviewer.Service
++      const chat = yield* sessions.create({ title: "structured-keep" })
++      const messageID = MessageID.ascending()
++      const callID = "call_structured_keep"
++      const command = "git push origin dev"
++      yield* sessions.updateMessage({
++        id: messageID,
++        sessionID: chat.id,
++        role: "assistant",
++        parentID: MessageID.ascending(),
++        mode: "build",
++        agent: "build",
++        path: { cwd: chat.directory, root: chat.directory },
++        cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++        modelID: ModelID.make("gpt-5"),
++        providerID: OPENAI_PROVIDER_ID,
++        time: { created: Date.now() },
++      })
++      // 先写入 tool-call 形状的 structured running，再跑 review envelope。
++      yield* sessions.updatePart({
++        id: PartID.ascending(),
++        messageID,
++        sessionID: chat.id,
++        type: "tool",
++        tool: "bash",
++        callID,
++        state: {
++          status: "running",
++          input: { command, description: "Push branch" },
++          time: { start: Date.now() },
++        },
++      })
++
++      yield* reviewer.review({
++        reviewID: "review_structured_keep",
++        sessionID: chat.id,
++        permission: "bash",
++        patterns: [command],
++        metadata: { command, cwd: chat.directory, shell: "bash" },
++        precheck: { level: "cautious", reason: "push requires review" },
++        tool: { messageID, callID },
++      })
++
++      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID })
++      const part = stored.parts.find((item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID)
++      expect(part?.state.status).toBe("running")
++      if (part?.state.status !== "running") return
++      // description 来自既有 structured input，不得被仅含 command 的 metadata 提升抹掉。
++      expect(part.state.input.command).toBe(command)
++      expect(part.state.input.description).toBe("Push branch")
++      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
++    }),
++  )
+ })
+ 
++function parentToolPartReviewFixture() {
++  const model = reviewerModel(OPENAI_PROVIDER_ID)
++  const fetch = Object.assign(
++    async (_input: RequestInfo | URL, _init?: RequestInit) =>
++      new Response(openAIReviewDecisionStream(), {
++        status: 200,
++        headers: { "content-type": "text/event-stream" },
++      }),
++    { preconnect: () => {} },
++  )
++  const provider = ProviderTest.fake({
++    model,
++    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
++    getLanguage: Effect.fn("ParentToolPartReviewTest.getLanguage")(() =>
++      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
++    ),
++  })
++  const sessionLayer = Session.layer.pipe(
++    Layer.provide(Bus.layer),
++    Layer.provide(Storage.defaultLayer),
++    Layer.provide(SyncEvent.defaultLayer),
++    Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
++    Layer.provide(BackgroundJob.defaultLayer),
++  )
++  // Session 既供给 PermissionReviewer，也暴露给测试体；MessageV2.get 读 SQLite 真路径。
++  return {
++    layer: Layer.mergeAll(
++      sessionLayer,
++      PermissionReviewer.layer.pipe(
++        Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
++        Layer.provide(provider.layer),
++        Layer.provide(authLayer({ type: "api", key: "test-key" })),
++        Layer.provide(pluginLayer()),
++        Layer.provide(sessionLayer),
++      ),
++    ),
++  }
++}
++
+ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
+   const parts = new Map<string, MessageV2.Part>()
+   const committed = Promise.withResolvers<void>()

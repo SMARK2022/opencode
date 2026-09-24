@@ -1,0 +1,43 @@
+From 3f8f39de2a06ab6f11dfc33c31bd013c267999b4 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 5 Sep 2026 23:30:43 +0800
+Subject: [PATCH] =?UTF-8?q?feat(permission):=20reviewer=20=E6=99=AE?=
+ =?UTF-8?q?=E9=80=9A=E6=A8=A1=E5=BC=8F=E6=B3=A8=E5=85=A5=E8=BD=AF=E5=87=9D?=
+ =?UTF-8?q?=E7=BB=83=E5=BC=95=E5=AF=BC=E5=AF=B9=E9=BD=90=20Codex=20Low=20e?=
+ =?UTF-8?q?ffort?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+对齐 Codex guardian 首次请求即 ReasoningEffort=Low 的思想（GLM 强制思考无 effort 参数，以提示词等价物承载）：system 契约尾部新增软凝练段——内容清单（意图/风险/规则）+ 反打转（针对实测 15k 字符循环形态）+ rationale 一两句约束（对齐 Codex policy_template one concise sentence），无硬字数锚避免最难任务欠思考退化（NovaSky 证据）；DECISION_DIRECTIVE 尾指令加 efficiently 一词钉 recency。600 词硬预算仍仅由超时重试分层承担，普通/超时双层语义不变。
+
+零红测：reviewer-prompt 19/0、permission 281/0、reviewer 集成 8/0、typecheck clean。
+
+diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
+index 0fea16573930df92a53e7cab420168df3c2f2f22..bb72d79eb74ce989fff3565c9a51dc91de9e2390 100644
+--- a/packages/opencode/src/permission/reviewer/prompt.ts
++++ b/packages/opencode/src/permission/reviewer/prompt.ts
+@@ -39,14 +39,21 @@ Use this tool input schema for every decision, including low-risk allows:
+   "user_authorization": "unknown" | "low" | "medium" | "high",
+   "outcome": "allow" | "deny",
+   "rationale": string
+-}`
++}
++
++Work efficiently: this is a bounded judgment, not an open-ended analysis. Identify the user's intent, the action's concrete risk, and the matching policy rule — then decide. Do not re-derive the transcript, re-check alternatives repeatedly, or stall in 'wait, but…' loops. Keep rationale to one or two sentences.`
++
++// [local-smark] 普通模式软凝练（对齐 Codex guardian 首次即 Low effort 的提示词等价物）：
++// 无硬字数锚——NovaSky 证据表明强约束在最难任务上欠思考退化；内容清单（意图/风险/
++// 规则）+ 反打转针对实测 15k 字符循环形态；rationale 一两句约束与 Codex policy_template
++// "one concise sentence" 对齐。硬预算（600 词）仍仅由超时重试的 TIME_BUDGET 分层承担。
+ 
+ // [local-smark] 决策入口尾指令（R-REQ-3b）：长混乱 transcript 会把小模型漂移成
+ // 「反问/自认无法执行」（生产 DB 失败现场 6/6 attempt 同形）；planned action JSON
+ // 之后紧跟一条祈使指令，把漂移形态重新映射回结构化决策路径。
+ const DECISION_DIRECTIVE_USER_ITEM = {
+   type: "text" as const,
+-  text: "Decide now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
++  text: "Decide efficiently now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
+ }
+ 
+ export function buildSystemPrompt(tenantPolicy: string) {
