@@ -1,0 +1,41 @@
+From 748d3243a45e9452cacd3e2381c38156912a71ed Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 21 Jul 2026 08:46:37 +0800
+Subject: [PATCH] =?UTF-8?q?chore(opentui):=20=E8=AE=B0=E5=BD=95=E6=9C=80?=
+ =?UTF-8?q?=E7=BB=88=E9=AA=8C=E8=AF=81=E8=BE=B9=E7=95=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+记录 clean isolated tree 的 typecheck 结果、无关 worktree 排除边界和用户确认的最终验证结论。
+
+diff --git a/docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md b/docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md
+index 7c638bc84590bd57594d96cddfa196b406af764c..e81d9dfbd7b9cd3db9960e698ec11d98207d41a6 100644
+--- a/docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md
++++ b/docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md
+@@ -1,6 +1,6 @@
+ # Canonical Implementation Plan: OpenTUI CJK Overlay and Terminal Corruption Repair
+ 
+-> Status: implementation-audit-required
++> Status: verified
+ >
+ > Revision: R16
+ >
+@@ -448,10 +448,15 @@ Complete only after implementation and only for the approved revision.
+ 
+ ### Remaining Unverified Items
+ 
+-- Independent implementation audit must verify the exact R16 diff, recompute the comment gate, and confirm no unrelated parent worktree changes enter the final commit.
++- The shared worktree still contains unrelated edit-tool changes; they were excluded from the parent commit. The required OpenCode typecheck passed in the isolated clean verification tree containing the committed parent baseline, and this boundary was accepted by the user as resolving the audit-only verification blocker.
+ 
+ ## 24. Implementation Audit Record
+ 
+ | Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+ | --- | --- | --- | --- | --- | --- | --- |
+-|  |  | yes | pending | pending | pending |  |
++| 3 | R16 | yes | typecheck failed only in the shared worktree because of unrelated edit-tool changes | clean isolated-tree typecheck passed; user accepted this verification boundary | BLOCK, resolved by accepted clean-tree evidence | `ses_07e0e997fffewD4qqC7N6wx7xI` |
++
++### Post-Audit Resolution
++
++- The auditor's only remaining blocker was the shared worktree typecheck boundary, not the R16 implementation. The same required command passed in the isolated clean verification tree, with all unrelated user changes preserved in the original worktree.
++- The user explicitly accepted that clean-tree evidence as resolving the blocker and authorized recording this plan as `verified`.

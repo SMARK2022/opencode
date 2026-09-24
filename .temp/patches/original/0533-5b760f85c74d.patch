@@ -1,0 +1,229 @@
+From 5b760f85c74d1a3a29e49b54a9486eeacebbc0f6 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 9 Aug 2026 02:05:36 +0800
+Subject: [PATCH] =?UTF-8?q?chore(opencode):=20=E5=90=8C=E6=AD=A5OpenTUI=20?=
+ =?UTF-8?q?0.4.3-smark.7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+在远端immutable release和四平台package closure通过后，将OpenCode catalog、tarball overrides、lockfile integrity、provenance和submodule gitlink统一到0.4.3-smark.7。
+
+diff --git a/bun.lock b/bun.lock
+index a264c8a7e7b186067999583b16f4e9da61b07d26..f42ff25c158509d263d753a7e30f433a744f9143 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -709,17 +709,17 @@
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+   },
+   "overrides": {
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-0.4.3-smark.6.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-arm64-0.4.3-smark.6.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-x64-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-musl-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-musl-0.4.3-smark.6.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-arm64-0.4.3-smark.6.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-x64-0.4.3-smark.6.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-keymap-0.4.3-smark.6.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-solid-0.4.3-smark.6.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-0.4.3-smark.7.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-darwin-arm64-0.4.3-smark.7.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-darwin-x64-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-arm64-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-arm64-musl-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-x64-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-x64-musl-0.4.3-smark.7.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-win32-arm64-0.4.3-smark.7.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-win32-x64-0.4.3-smark.7.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-keymap-0.4.3-smark.7.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-solid-0.4.3-smark.7.tgz",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+     "poe-oauth": "0.0.6",
+@@ -735,9 +735,9 @@
+     "@npmcli/arborist": "9.4.0",
+     "@octokit/rest": "22.0.0",
+     "@openauthjs/openauth": "0.0.0-20250322224806",
+-    "@opentui/core": "0.4.3-smark.6",
+-    "@opentui/keymap": "0.4.3-smark.6",
+-    "@opentui/solid": "0.4.3-smark.6",
++    "@opentui/core": "0.4.3-smark.7",
++    "@opentui/keymap": "0.4.3-smark.7",
++    "@opentui/solid": "0.4.3-smark.7",
+     "@pierre/diffs": "1.1.0-beta.18",
+     "@playwright/test": "1.60.0",
+     "@sentry/solid": "10.36.0",
+@@ -1616,27 +1616,27 @@
+ 
+     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.40.0", "https://registry.npmmirror.com/@opentelemetry/semantic-conventions/-/semantic-conventions-1.40.0.tgz", {}, "sha512-cifvXDhcqMwwTlTK04GBNeIe7yyo28Mfby85QXFe1Yk8nmi36Ab/5UQwptOx84SsoGNRg+EVSjwzfSZMy6pmlw=="],
+ 
+-    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-0.4.3-smark.6.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.6", "@opentui/core-darwin-x64": "0.4.3-smark.6", "@opentui/core-linux-arm64": "0.4.3-smark.6", "@opentui/core-linux-arm64-musl": "0.4.3-smark.6", "@opentui/core-linux-x64": "0.4.3-smark.6", "@opentui/core-linux-x64-musl": "0.4.3-smark.6", "@opentui/core-win32-arm64": "0.4.3-smark.6", "@opentui/core-win32-x64": "0.4.3-smark.6" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-02wCR/RsNKFHaCfaoHl0VdtCU36awIsM4Mgi3rT6pmynrFhujfAqqRHeBk8cpjf7zKu0kU0jyBbiuhxplHG4aQ=="],
++    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-0.4.3-smark.7.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.7", "@opentui/core-darwin-x64": "0.4.3-smark.7", "@opentui/core-linux-arm64": "0.4.3-smark.7", "@opentui/core-linux-arm64-musl": "0.4.3-smark.7", "@opentui/core-linux-x64": "0.4.3-smark.7", "@opentui/core-linux-x64-musl": "0.4.3-smark.7", "@opentui/core-win32-arm64": "0.4.3-smark.7", "@opentui/core-win32-x64": "0.4.3-smark.7" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-IktedMDFR2LPZX5DdzarLRr2bfXMKasjyr4aH5TAyaR5a3PrYksKDbxYuV3PpCQxItXXT2dppCyxvJY3owM3jA=="],
+ 
+-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-arm64-0.4.3-smark.6.tgz", {}, "sha512-38riEmFGM3Hx/ZUoabRTy75ZdSKMlzJys7MKVJig/bPv8ZX8QLKm9n3oXjujmJlYRecKhYcNUUSieDuEkAbH1Q=="],
++    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-darwin-arm64-0.4.3-smark.7.tgz", {}, "sha512-+TMNs4octiNSVq/u0zkVYmO8wFuWSl31q/ESvvkw4NR9Clb5x0t56avSNk6pziKa9ro9lVCwHrOuigB7MIs0xg=="],
+ 
+-    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-x64-0.4.3-smark.6.tgz", {}, "sha512-1lCRH4h7+rp76ndcUw8KqYXqZV6mKvNiBmykxbqJ1tm9bR8sL0+Rdj8RgxyaxitFDYRESTwhABbfhakt1uQYSg=="],
++    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-darwin-x64-0.4.3-smark.7.tgz", {}, "sha512-r7S+YWX15cXG2+JNc7xEAIHpH/3/o+Dob76Uq/BmoGQsV8ouivzglpNRHUWxNzqB4W7jxCjhaab+QeBFr77b/g=="],
+ 
+-    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-0.4.3-smark.6.tgz", {}, "sha512-86tC7b9xNMi2+3whDoCwHWAgV2rqKIRBPfvod1occY0NtXw0KE3JRJ+X6h1HrswG38czPg3yNQKcDY7GRVMhdg=="],
++    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-arm64-0.4.3-smark.7.tgz", {}, "sha512-JiBywCaep3FUYhUHhVt3TzFA4NNLzGc9NMfRS5IM0iLHHKtwGX9DLzV3Py77VM59i82TZKL4sWm2u2a6dcu0Gw=="],
+ 
+-    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-musl-0.4.3-smark.6.tgz", {}, "sha512-JaXgCINJqdUZoJjGefzsJJo5FhGJSvc2/kiKfI/GwOZXLhhrpfp4Zej0kkYsrSJyZI9JnDK6gojfvC7LPadsRA=="],
++    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-arm64-musl-0.4.3-smark.7.tgz", {}, "sha512-GAvVuDIK8udOHvMAVsauRw3bKCZiATIDVftJH69t9/Er2L9O37fpZGRTYMjZ2IOFkbHgmOV+GRZP42DlAEkYtA=="],
+ 
+-    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-0.4.3-smark.6.tgz", {}, "sha512-7WFdq9E32RBmb0/viamVSS/1qHhPeizk0Gn4lsvJWhcxTr5I4jo9R6xBPbHArvY8P6NbBBFxrUkqXLKl2wGgBw=="],
++    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-x64-0.4.3-smark.7.tgz", {}, "sha512-LGf/LbB/LeoDStyEF39y4UPK7KFYMQEf9BwvXg/+JiOx5PsiyLoXx7Dfp5bFwK9sXrymnzzhx6WKjdziUb6WYw=="],
+ 
+-    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-musl-0.4.3-smark.6.tgz", {}, "sha512-iLy3BsGt2GHJw03OGWBPW2XH3BzJihGxQT+1gQQKvGBvRT1Wwm/vBR2C4YD5+OepT7FJhWOKlOi1Ll6+XT35vA=="],
++    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-x64-musl-0.4.3-smark.7.tgz", {}, "sha512-7a3z6yzBzhl22SDz/V49mnihMBA9Le3zwL4LHH0Kw5VqGbRCZnm2OZjf83CxZiAZ6z3OwxmqkJbxdK9zZzGuew=="],
+ 
+-    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-arm64-0.4.3-smark.6.tgz", {}, "sha512-+qZ8jk4OBSjO2vqyNJswsho7naRUM3/kzO3wmkJZVqVTAZ2nwGYD6NIyN37KRw6VtCJmA8i6gG6UdsviuvDApA=="],
++    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-win32-arm64-0.4.3-smark.7.tgz", {}, "sha512-CS3d6kRuJ3gtKPpADMN5SuqJN3QwMOOvZkc08I4qYSM67dafCSu3Y5n8sQy1UwG4Zyn4PERVN4XDsjfgzM0T2Q=="],
+ 
+-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-x64-0.4.3-smark.6.tgz", {}, "sha512-z41eZwAggLfLPHGBCNZYGUvCaOAdBwgi68YkogJ4ozxDO1LZ8r6lOfdP9emDPF2QcbCkMzC3U5rXPGT7hNWS/A=="],
++    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-win32-x64-0.4.3-smark.7.tgz", {}, "sha512-u9/A6tMY8CDzaTZHTtJtT8gs/7f7TTdgapSRrUr/siBZBSfG3PHx5HpJitxWfDCelQLrhiAsxRIjShFcdAC4CA=="],
+ 
+-    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-keymap-0.4.3-smark.6.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.6" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.6", "@opentui/solid": "0.4.3-smark.6", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-mOwiCb8x35+7xupFoV8vdyKbItiYExWSekAbtc5L4CPIL4KacM0RE/rxF5TI2wZNhZPmgFQYbKRtnBdGLk49Tg=="],
++    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-keymap-0.4.3-smark.7.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.7" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.7", "@opentui/solid": "0.4.3-smark.7", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-cYcTWEx3cqlVj7EPhdqpa5NKZdjbxKN4fHGheoCUFdhxz5vIijdMa9B1pDQkyn/RTX9Ac5CJ9etcpZyD9HOvIw=="],
+ 
+-    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-solid-0.4.3-smark.6.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.6", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-J/QveIjtB6UKdx3Y0mOdbfZ7Ba4lHHxEtE+jUVAuoPsYIO0f0W8dcYN3A4QEzpWoxHoLxbig8LsFGcdKzgVsGA=="],
++    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-solid-0.4.3-smark.7.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.7", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-VcJdkAAeSxGKIB2N4BHRUN4B0UcQXSquR/DrYxW+/HbbEr/kOIfAdPU/6aV5zNf/2mFxkZcyl9/k6czBvxZpcQ=="],
+ 
+     "@oslojs/asn1": ["@oslojs/asn1@1.0.0", "https://registry.npmmirror.com/@oslojs/asn1/-/asn1-1.0.0.tgz", { "dependencies": { "@oslojs/binary": "1.0.0" } }, "sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA=="],
+ 
+diff --git a/package.json b/package.json
+index 8f651464d9948c892a298b2c85394b0a7f5f3b6b..8d24206ea505a09322d0763b63ee034416070b72 100644
+--- a/package.json
++++ b/package.json
+@@ -36,9 +36,9 @@
+       "@types/cross-spawn": "6.0.6",
+       "@octokit/rest": "22.0.0",
+       "@hono/zod-validator": "0.4.2",
+-      "@opentui/core": "0.4.3-smark.6",
+-      "@opentui/keymap": "0.4.3-smark.6",
+-      "@opentui/solid": "0.4.3-smark.6",
++      "@opentui/core": "0.4.3-smark.7",
++      "@opentui/keymap": "0.4.3-smark.7",
++      "@opentui/solid": "0.4.3-smark.7",
+       "ulid": "3.0.1",
+       "@kobalte/core": "0.13.11",
+       "@types/luxon": "3.7.1",
+@@ -128,17 +128,17 @@
+     "electron"
+   ],
+   "overrides": {
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-0.4.3-smark.6.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-keymap-0.4.3-smark.6.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-solid-0.4.3-smark.6.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-arm64-0.4.3-smark.6.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-x64-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-musl-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-0.4.3-smark.6.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-musl-0.4.3-smark.6.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-arm64-0.4.3-smark.6.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-x64-0.4.3-smark.6.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-0.4.3-smark.7.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-keymap-0.4.3-smark.7.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-solid-0.4.3-smark.7.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-darwin-arm64-0.4.3-smark.7.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-darwin-x64-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-arm64-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-arm64-musl-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-x64-0.4.3-smark.7.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-linux-x64-musl-0.4.3-smark.7.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-win32-arm64-0.4.3-smark.7.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.7/opentui-core-win32-x64-0.4.3-smark.7.tgz",
+     "solid-js": "catalog:",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+diff --git a/packages/opencode/script/opentui-provenance.ts b/packages/opencode/script/opentui-provenance.ts
+index ef68994917ab3ecd9dfae76c4c0132a75c58e613..05c10207044e89d4bb0a240b9f6c5236709ec6a0 100644
+--- a/packages/opencode/script/opentui-provenance.ts
++++ b/packages/opencode/script/opentui-provenance.ts
+@@ -1,7 +1,7 @@
+ export interface OpenTuiSourceRevisionManifest {
+   schema: 1
+   sourceGitlink: string
+-  releaseTag: "v0.4.3-smark.6"
++  releaseTag: "v0.4.3-smark.7"
+   releaseCommit: string
+ }
+ 
+diff --git a/packages/opencode/script/opentui-source-revision.json b/packages/opencode/script/opentui-source-revision.json
+index 8ad408a8db6c31ee0d0e80352c0fd0be44fdd9e5..299bd7bae4b89169e9d82cd53d6caa2ecb5b1996 100644
+--- a/packages/opencode/script/opentui-source-revision.json
++++ b/packages/opencode/script/opentui-source-revision.json
+@@ -1,6 +1,6 @@
+ {
+   "schema": 1,
+-  "sourceGitlink": "afd11de829e5745de83695d877b98833219a2f8c",
+-  "releaseTag": "v0.4.3-smark.6",
+-  "releaseCommit": "afd11de829e5745de83695d877b98833219a2f8c"
++  "sourceGitlink": "0ed2c93ae09445cbad516a622b1b420d7b4036bd",
++  "releaseTag": "v0.4.3-smark.7",
++  "releaseCommit": "0ed2c93ae09445cbad516a622b1b420d7b4036bd"
+ }
+diff --git a/packages/opencode/script/verify-opentui-closure.ts b/packages/opencode/script/verify-opentui-closure.ts
+index b4b0cd603a6e59b28988b2705893d2b61ed28b6c..2cea9c3e029f0add9d37ac4ad6980c45b0646773 100644
+--- a/packages/opencode/script/verify-opentui-closure.ts
++++ b/packages/opencode/script/verify-opentui-closure.ts
+@@ -5,7 +5,7 @@ import path from "node:path"
+ import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
+ 
+ const root = path.resolve(import.meta.dir, "../../..")
+-const version = "0.4.3-smark.6"
++const version = "0.4.3-smark.7"
+ const tag = `v${version}`
+ const repository = "https://github.com/SMARK2022/opentui"
+ const release = `${repository}/releases/download/${tag}`
+diff --git a/packages/opencode/test/script/opentui-provenance.test.ts b/packages/opencode/test/script/opentui-provenance.test.ts
+index 9d556a1faef1ae89377339d62609c93125c46ccb..98391483be178b7e89b3e3fc79093d3995fd38ed 100644
+--- a/packages/opencode/test/script/opentui-provenance.test.ts
++++ b/packages/opencode/test/script/opentui-provenance.test.ts
+@@ -16,7 +16,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   await Bun.write(path.join(source, "source.txt"), "immutable source\n")
+   await git(["add", "source.txt"], source)
+   await git(["commit", "-m", "release source"], source)
+-  await git(["tag", "-a", "v0.4.3-smark.6", "-m", "immutable release"], source)
++  await git(["tag", "-a", "v0.4.3-smark.7", "-m", "immutable release"], source)
+   await git(["tag", "v0.4.3-lightweight"], source)
+   const commit = (await git(["rev-parse", "HEAD"], source)).stdout.trim()
+   // tag后再提交生成同仓库的有效mismatch，避免用伪造hash绕过远端确实包含该commit的现实条件。
+@@ -34,7 +34,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   expect(
+     await verifyRemoteAnnotatedTagCommit({
+       repository,
+-      tag: "v0.4.3-smark.6",
++      tag: "v0.4.3-smark.7",
+       cwd: shallow,
+       expectedCommit: commit,
+     }),
+@@ -43,7 +43,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   await expect(
+     verifyRemoteAnnotatedTagCommit({
+       repository,
+-      tag: "v0.4.3-smark.6",
++      tag: "v0.4.3-smark.7",
+       cwd: shallow,
+       expectedCommit: mismatch,
+     }),
+@@ -75,7 +75,7 @@ test("source-authorized closure rejects a clean source revision outside the mani
+   const manifest = {
+     schema: 1 as const,
+     sourceGitlink: authorized,
+-    releaseTag: "v0.4.3-smark.6" as const,
++    releaseTag: "v0.4.3-smark.7" as const,
+     releaseCommit: "c".repeat(40),
+   }
+ 
+diff --git a/thirdparty/opentui b/thirdparty/opentui
+index 80a46c4d4cf0cb357f353cd52f8e9192f11e5157..0ed2c93ae09445cbad516a622b1b420d7b4036bd 160000
+--- a/thirdparty/opentui
++++ b/thirdparty/opentui
+@@ -1 +1 @@
+-Subproject commit 80a46c4d4cf0cb357f353cd52f8e9192f11e5157
++Subproject commit 0ed2c93ae09445cbad516a622b1b420d7b4036bd

@@ -1,0 +1,179 @@
+From 2cfe9feccaee63154aab982aa7ea8b63472c1f19 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 12 Sep 2026 23:27:18 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tool):=20apply=5Fpatch=20Delete+Add=20?=
+ =?UTF-8?q?=E5=90=8C=E6=96=87=E4=BB=B6=E5=AF=B9=E6=8A=98=E5=8F=A0=E4=B8=BA?=
+ =?UTF-8?q?=E8=A6=86=E5=86=99?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+恰好 [Delete, Add] 顺序对按覆写意图处理：delete 不执行（Add 对已有路径本就是完整覆写），权限审批面只见 add（precheck 的 delete 提升不触发，与 write 覆写同构走 general 放行），diff 以真实旧内容为基线保证审计可见完整替换。Add+Delete 倒序、三项及以上等其余组合维持 Conflicting operations 拒绝。
+
+成功后附一句提醒（直接 Add 即可），apply_patch.txt 的 Add File 条目与 remember 列表补齐覆写语义。
+
+diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
+index eb2dc8e230ee07c4ceb3ce53038bb6cbc9d46cee..47d725e24e306b04ce6ebad90dbf1099d0589e68 100644
+--- a/packages/opencode/src/tool/apply_patch.ts
++++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -39,7 +39,7 @@ type FileChange = {
+   expected: Mutation.MutationRead[]
+ }
+ 
+-type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
++type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[]; rewrite?: boolean }
+ 
+ // group 代表一个 canonical source proposal；update entries 会合并 chunks，且只派生一个最终 FileChange。
+ // add/delete 不合并，避免把同 source 的冲突操作猜成新语义。
+@@ -63,7 +63,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+       const ending =
+         snapshot.version.state === "file" ? detectLineEnding(Bom.split(Mutation.decode(snapshot)).text) : undefined
+       // 不读取 Project 配置或邻近文件推断 EOL，missing Add 因此继续严格服从 patch 内容。
+-      const oldContent = ""
++      // rewrite 折叠对：旧基线取真实既有内容而非空串，让 diff/审计可见完整替换
++      // （delete 未执行，旧内容不经 rewriteMarker 之外的路径丢失）。
++      const oldContent =
++        group.rewrite && snapshot.version.state === "file" ? Bom.split(Mutation.decode(snapshot)).text : ""
+       const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
+       const next = Bom.split(newContent)
+       // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
+@@ -250,6 +253,20 @@ export const ApplyPatchTool = Tool.define(
+       const hunkErrors: string[] = []
+ 
+       const groups = groupHunks(hunks, instance)
++      // [local-smark] Delete+Add 同文件顺序对折叠为覆写：Add 对已有路径本就是完整覆写，
++      // delete 永不执行、也不进入权限审批面（metadata.files 只见 add，precheck 的
++      // delete 提升不触发，与 write 覆写同构走 general 放行）。diff 以真实旧内容为基线，
++      // 审计可见完整替换。只认恰好 [Delete, Add] 的顺序对；Add+Delete、三项及以上等
++      // 其余组合维持 Conflicting operations 拒绝。
++      const rewritten: string[] = []
++      for (const group of groups) {
++        const [first, second] = group.hunks
++        if (group.hunks.length === 2 && first.type === "delete" && second.type === "add") {
++          group.hunks = [second]
++          group.rewrite = true
++          rewritten.push(group.filePath)
++        }
++      }
+       validateOwnership(groups, instance)
+       for (const group of groups) {
+         for (const hunk of group.hunks) {
+@@ -416,6 +433,10 @@ export const ApplyPatchTool = Tool.define(
+         return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
+       })
+       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
++      if (rewritten.length > 0) {
++        // 折叠成功后的提醒：下次直接 Add 即可，模型无需发明 Delete+Add。
++        output += `\n\nNote: a *** Delete File + *** Add File pair on the same path was applied as an in-place rewrite; the delete was redundant. Use *** Add File alone to rewrite a file.`
++      }
+ 
+       // [local-smark] per-file atomicity：部分 hunk 失败时在 output 中报告失败文件
+       if (hunkErrors.length > 0) {
+diff --git a/packages/opencode/src/tool/apply_patch.txt b/packages/opencode/src/tool/apply_patch.txt
+index eac1e3522dfeb562e711f99311ee5d5b81374e4b..1876d4c783c5ab7287787b0b04979682fbd20510 100644
+--- a/packages/opencode/src/tool/apply_patch.txt
++++ b/packages/opencode/src/tool/apply_patch.txt
+@@ -8,7 +8,7 @@ Within that envelope, you get a sequence of file operations.
+ You MUST include a header to specify the action you are taking.
+ Each operation starts with one of three headers:
+ 
+-*** Add File: <path> - create a new file only when the user explicitly requires it. Every following line is a + line (the initial contents).
++*** Add File: <path> - create a new file (or fully rewrite an existing one in place) only when the user explicitly requires it. Every following line is a + line (the initial contents). A rewrite never needs a *** Delete File first — Add alone replaces the whole file.
+ *** Delete File: <path> - remove an existing file. Nothing follows.
+ *** Update File: <path> - patch an existing file in place (optionally with a rename).
+ 
+@@ -34,4 +34,5 @@ It is important to remember:
+ - Update old lines are matched exactly as complete lines first. If that fails, the complete old block may match one exact literal substring while preserving all surrounding text.
+ - A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
+ - Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.
++- To fully rewrite an existing file, use *** Add File alone with the complete new content — it overwrites in place. A *** Delete File + *** Add File pair on the same path is treated as the rewrite; the Delete is redundant.
+ - A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
+diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
+index 3a1d18a0d4b15731029e44920f15864098d5fdcf..c69356c53fdb9298e76604c8438a20a3e517b72c 100644
+--- a/packages/opencode/test/tool/apply_patch.test.ts
++++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -437,6 +437,74 @@ describe("tool.apply_patch freeform", () => {
+     }),
+   )
+ 
++  // Delete+Add 同文件对 = 覆写意图：折叠为单个 Add（delete 不执行、不进权限审批），
++  // diff 以真实旧内容为基线，output 附一句提醒。其它组合（Add+Delete、三项以上）维持冲突拒绝。
++  it.instance("collapses a Delete+Add pair into an in-place rewrite without executing the delete", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx, calls } = makeCtx()
++      const target = path.join(test.directory, "rewrite.txt")
++      yield* writeText(target, "old line one\nold line two\n")
++
++      const patchText = [
++        "*** Begin Patch",
++        "*** Delete File: rewrite.txt",
++        "*** Add File: rewrite.txt",
++        "+brand new content",
++        "*** End Patch",
++      ].join("\n")
++      const result = yield* execute({ patchText }, ctx)
++
++      // 覆写语义：内容为新内容；旧内容进入 diff（delete 不曾真实执行，审计可见完整替换）。
++      expect(yield* readText(target)).toBe("brand new content\n")
++      expect(result.metadata.files[0].type).toBe("add")
++      expect(result.metadata.diff).toContain("-old line one")
++      expect(result.metadata.diff).toContain("+brand new content")
++      // 权限审批面看不到 delete：preprocess 后只剩 add，与 write 覆写同构（general 放行）。
++      expect(calls[0].metadata.files.map((f) => f.type)).toEqual(["add"])
++      // 成功后提醒：下次直接 Add 即可。
++      expect(result.output).toContain("Add File alone")
++    }),
++  )
++
++  it.instance("still rejects Add+Delete (wrong order) and Delete+Add+Update on the same path", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "order.txt")
++      yield* writeText(target, "old\n")
++
++      const addThenDelete = [
++        "*** Begin Patch",
++        "*** Add File: order.txt",
++        "+new",
++        "*** Delete File: order.txt",
++        "*** End Patch",
++      ].join("\n")
++      const first = yield* execute({ patchText: addThenDelete }, ctx).pipe(Effect.exit)
++      expect(Exit.isFailure(first)).toBe(true)
++      if (Exit.isFailure(first)) {
++        expect(String(Cause.squash(first.cause))).toContain("Conflicting operations")
++      }
++
++      const deleteAddUpdate = [
++        "*** Begin Patch",
++        "*** Delete File: order.txt",
++        "*** Add File: order.txt",
++        "+new",
++        "*** Update File: order.txt",
++        "@@\n-old\n+x",
++        "*** End Patch",
++      ].join("\n")
++      const second = yield* execute({ patchText: deleteAddUpdate }, ctx).pipe(Effect.exit)
++      expect(Exit.isFailure(second)).toBe(true)
++      if (Exit.isFailure(second)) {
++        expect(String(Cause.squash(second.cause))).toContain("Conflicting operations")
++      }
++      expect(yield* readText(target)).toBe("old\n")
++    }),
++  )
++
+   // INV-10：description 必须携带陈旧转写禁令与 more-than-3-lines 诱导。文案即合同。
+   it.instance("description carries staleness and context-size guidance", () =>
+     Effect.gen(function* () {
+@@ -444,6 +512,9 @@ describe("tool.apply_patch freeform", () => {
+       const tool = yield* info.init()
+       expect(tool.description).toContain("latest read")
+       expect(tool.description).toContain("more than 3 lines")
++      // 覆写条目：Add 即覆写、Delete+Add 折叠语义都必须在 description 中可见。
++      expect(tool.description).toContain("overwrites in place")
++      expect(tool.description).toContain("Delete is redundant")
+     }),
+   )
+ 

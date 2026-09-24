@@ -1,0 +1,99 @@
+From c356fa0bacd9a4a39c6be176bc27213963daa7e6 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 3 Aug 2026 17:40:26 +0800
+Subject: [PATCH] =?UTF-8?q?fix(opencode):=20=E5=90=8C=E6=AD=A5=20OpenTUI?=
+ =?UTF-8?q?=20closure/provenance=20=E6=A0=A1=E9=AA=8C=E8=87=B3=20v0.4.3-sm?=
+ =?UTF-8?q?ark.6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+48add250a0 的依赖 bump 覆盖了 package.json/bun.lock，但 closure verifier 的
+版本常量、provenance releaseTag 字面量类型、source-revision manifest 与测试
+fixture 仍钉在 smark.5，CI 的 opentui-closure 与 consumer gate 因此拒绝新 lock。
+
+按 94f19ae42b 的既有 bump 面同步四处：verify-opentui-closure.ts 版本常量、
+opentui-provenance.ts releaseTag、opentui-source-revision.json 的
+gitlink/tag/releaseCommit（afd11de82，与远端 annotated tag peeled commit 一致）、
+provenance 测试 fixture。verifier 本地通过：11 包闭包、gitlink/tag/manifest 一致。
+
+diff --git a/packages/opencode/script/opentui-provenance.ts b/packages/opencode/script/opentui-provenance.ts
+index adc0369666f74b7255e7c4bf3c8c3bcae253524d..ef68994917ab3ecd9dfae76c4c0132a75c58e613 100644
+--- a/packages/opencode/script/opentui-provenance.ts
++++ b/packages/opencode/script/opentui-provenance.ts
+@@ -1,7 +1,7 @@
+ export interface OpenTuiSourceRevisionManifest {
+   schema: 1
+   sourceGitlink: string
+-  releaseTag: "v0.4.3-smark.5"
++  releaseTag: "v0.4.3-smark.6"
+   releaseCommit: string
+ }
+ 
+diff --git a/packages/opencode/script/opentui-source-revision.json b/packages/opencode/script/opentui-source-revision.json
+index 887d853bd74ee96387740541ee36ba512d0680b6..8ad408a8db6c31ee0d0e80352c0fd0be44fdd9e5 100644
+--- a/packages/opencode/script/opentui-source-revision.json
++++ b/packages/opencode/script/opentui-source-revision.json
+@@ -1,6 +1,6 @@
+ {
+   "schema": 1,
+-  "sourceGitlink": "2ce7e0d5f571bc6572b0eb0cee9d681f8cdaca4d",
+-  "releaseTag": "v0.4.3-smark.5",
+-  "releaseCommit": "2ce7e0d5f571bc6572b0eb0cee9d681f8cdaca4d"
++  "sourceGitlink": "afd11de829e5745de83695d877b98833219a2f8c",
++  "releaseTag": "v0.4.3-smark.6",
++  "releaseCommit": "afd11de829e5745de83695d877b98833219a2f8c"
+ }
+diff --git a/packages/opencode/script/verify-opentui-closure.ts b/packages/opencode/script/verify-opentui-closure.ts
+index 330abe764db18686122ae436f4d7cbe3176dd97f..b4b0cd603a6e59b28988b2705893d2b61ed28b6c 100644
+--- a/packages/opencode/script/verify-opentui-closure.ts
++++ b/packages/opencode/script/verify-opentui-closure.ts
+@@ -5,7 +5,7 @@ import path from "node:path"
+ import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
+ 
+ const root = path.resolve(import.meta.dir, "../../..")
+-const version = "0.4.3-smark.5"
++const version = "0.4.3-smark.6"
+ const tag = `v${version}`
+ const repository = "https://github.com/SMARK2022/opentui"
+ const release = `${repository}/releases/download/${tag}`
+diff --git a/packages/opencode/test/script/opentui-provenance.test.ts b/packages/opencode/test/script/opentui-provenance.test.ts
+index b948fc328a674e732aa69ce08509cee0aa15e100..9d556a1faef1ae89377339d62609c93125c46ccb 100644
+--- a/packages/opencode/test/script/opentui-provenance.test.ts
++++ b/packages/opencode/test/script/opentui-provenance.test.ts
+@@ -16,7 +16,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   await Bun.write(path.join(source, "source.txt"), "immutable source\n")
+   await git(["add", "source.txt"], source)
+   await git(["commit", "-m", "release source"], source)
+-  await git(["tag", "-a", "v0.4.3-smark.5", "-m", "immutable release"], source)
++  await git(["tag", "-a", "v0.4.3-smark.6", "-m", "immutable release"], source)
+   await git(["tag", "v0.4.3-lightweight"], source)
+   const commit = (await git(["rev-parse", "HEAD"], source)).stdout.trim()
+   // tag后再提交生成同仓库的有效mismatch，避免用伪造hash绕过远端确实包含该commit的现实条件。
+@@ -34,7 +34,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   expect(
+     await verifyRemoteAnnotatedTagCommit({
+       repository,
+-      tag: "v0.4.3-smark.5",
++      tag: "v0.4.3-smark.6",
+       cwd: shallow,
+       expectedCommit: commit,
+     }),
+@@ -43,7 +43,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout
+   await expect(
+     verifyRemoteAnnotatedTagCommit({
+       repository,
+-      tag: "v0.4.3-smark.5",
++      tag: "v0.4.3-smark.6",
+       cwd: shallow,
+       expectedCommit: mismatch,
+     }),
+@@ -75,7 +75,7 @@ test("source-authorized closure rejects a clean source revision outside the mani
+   const manifest = {
+     schema: 1 as const,
+     sourceGitlink: authorized,
+-    releaseTag: "v0.4.3-smark.5" as const,
++    releaseTag: "v0.4.3-smark.6" as const,
+     releaseCommit: "c".repeat(40),
+   }
+ 

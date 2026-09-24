@@ -1,0 +1,818 @@
+From 6428dc3cb6dc244001e15a93cfbff65e813b7972 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 19 Sep 2026 04:46:47 +0800
+Subject: [PATCH] =?UTF-8?q?fix(voice):=20=E4=BF=AE=E5=A4=8D=E7=BC=96?=
+ =?UTF-8?q?=E8=AF=91=E7=89=88=E4=B8=8A=E4=BC=A0=E5=B4=A9=E6=BA=83=E4=B8=8E?=
+ =?UTF-8?q?=E5=93=8D=E5=BA=94=E5=8F=96=E6=B6=88=E8=A7=82=E6=B5=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+上传前取得独立字节正文并保留读取前后的取消语义，避免 Bun 1.3.14 standalone 加载录音原生模块后释放文件正文时崩溃。取消测试改由原生 Request.signal 观察响应生命周期，保持认证、期限与清理合同。
+
+补充真实编译回归并通过 Windows 完整录音上传验证、Linux 全量等价检查和 R19 独立全范围审计；保留 Darwin 未直接实跑的验收边界。
+
+diff --git a/docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md b/docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md
+index d08bb0115f8708a37520bdff11aff4f305b549b0..584e53e485c05e3c6fb44f637b4ba4653b31cc4c 100644
+--- a/docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md
++++ b/docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md
+@@ -1,15 +1,15 @@
+ # Canonical Plan：共享后端语音转录、Profile Cookie 与完整取消
+ 
+ > Status: verified
+-> Revision: R17
+-> Approved revision: R17
++> Revision: R19
++> Approved revision: R19
+ > Implementation allowed: no further material changes without revision or rework
+ > Audit mode: full-scope
+ > Requirement source: 本会话用户原文，见 §1
+ > Target: verified-implementation-and-commit
+-> Last updated: 2026-09-18
++> Last updated: 2026-09-19
+ 
+-本文件是唯一实施规格。当前R17保持Bun1.3.14及完整语音、CI与HTTP生命周期修复范围，最新修订见§37。800行按增加侧计量，注释保持完整解释深度。历史批准、用户旧指令与交付记录保留其发生时语境，仅作历史证据；当前实施只执行R17批准范围，最终完整验证和独立实现审计通过后才可按最新授权提交。
++本文件是唯一实施规格。当前R19保持R18全部修复与行为范围，仅按用户最新原文采用等价平台检查替代远端macOS CI放行方式，见§43。Bun保持1.3.14，800行按增加侧计量，注释保持完整解释深度。R19方案及实现均获独立full-scope批准，最终验证与边界见§45-46；按最新授权仅本地提交，不push。
+ 
+ ## 1. 用户原始要求
+ 
+@@ -949,3 +949,271 @@ Non-blocking findings最终原文：
+ 全范围路径裁决：共享后端唯一编排、用户指定profile/浏览器恢复、浏览器认证所有权、固定120/40秒、完整取消及原fatal终止合同通过；无新增隐藏重发、替代成功算法、取消状态机。此前R16 B-01生产问题通过R17修复和敏感回归关闭。最终4425个OpenCode、360个core测试、HttpApi三门各158、73个MCP跨平台覆盖、构建/Worker smoke及独立typecheck已核验。真实账户验收保留历史运行时属性，其后listener与fatal差异由当前1.3.14回归覆盖。
+ 
+ 状态据本轮原文切为verified；按用户最新明确授权进入本地提交，保留hooks与无关工作区，不push。这次提交不宣称Windows MCP单次全套通过，不宣称已执行远端CI。
++
++## 39. R18 发布后回归证据与修正方案
++
++### 原始新证据与执行约束
++
++用户报告：“近期就只有你的改动”“之前的1.3.14都是正常的，只有你这次有问题”“每次只有进行alt+v的转录，结束的时候必定出crash”，并要求检查远端macOS testCI、禁止task、完整调查。当前已发布基线为父仓库5d1a74dea6、子仓库725cee4。调查不重启现用daemon、不修改账户配置、不升级Bun、不操作远端历史。曾出现的user_abort输出只反映工具abort状态；output-notice.ts:98不记录取消发起者，日志中daemon继续运行，尚无证据把该标记等同用户点击停止或daemon退出。
++
++### I12：编译版上传正文的有效所有权
++
++Observed：截图崩溃发生于Windows Bun1.3.14 standalone；解码链为FetchTasklet.clearData:246 → request_body.detach → Blob.InternalBlob.bytes.clearAndFree:4712 → allocator free。首次偏离在新增submitVoice:16将Bun.file直接交给fetch，进入文件转内部正文分配/释放分支。原native录音器可以保留，不能因native参与就改其生命周期。
++
++已实际运行的最小反馈：D:/Temp/opencode/actual-submit-voice.exe由Bun1.3.14编译，直接import当前生产submitVoice，仅加载已安装pv_recorder.node并向隔离回环HTTP上传已有fixture WAV。约195ms崩溃、exit3，堆栈与用户相同的Blob.detach/FetchTasklet.clearData，不调用用户daemon或外部转录服务。更小的native-loaded-file.exe只require native addon和fetch(Bun.file)，约177ms崩溃，无Worker、录音和音频删除。
++
++单变量对照compiled-native-voice-matrix.exe保持同一真实Worker、短录音、回环响应及清理：file正文第一次崩溃；no-terminate仍崩溃；bytes（先arrayBuffer）和内存Blob均连续两轮通过。源码模式真实录音通过、没有native addon的单次编译file上传通过；故原单元测试和只确认Worker可启动的smoke不足以覆盖组合。复现只使用本地回环，测试录音已清理；崩溃退出的专属临时目录可能保留，仅含诊断音频，不属仓库修改。
++
++修正owner是submitVoice上传入口：先signal.throwIfAborted()，await Bun.file(file).arrayBuffer()，再次signal.throwIfAborted()，然后现有sdk.fetch使用这份bytes。整个读取和上传继续受现有120秒调用信号约束，读取期间不能强行中断文件API，但完成后禁止被取消请求进入网络。URL、认证头、directory、Content-Type、响应解析和本地WAV清理保持原样。统一走字节正文，不增加Windows版本分支、尝试失败后fallback或第二次请求。
++
++### I13：取消测试观察响应生命周期
++
++远端run35359491055的attempt1/job105646939765与attempt2/job105654416613均在voice-auth.test.ts相同四项30秒超时：never advances/cache、profile-post，以及keeps body/cache、profile。两次均4428通过、21跳过、4失败；不是未确认的随机CI波动。原始日志tool_0b535ce0b001hFQ0VKH9UeQqOu、tool_0b5301ce5001iKboSFDlJoHY0s保存在既有tool-output目录。
++
++四项都用未结束响应正文制造等待，并只靠IncomingMessage.aborted兑现closed.promise。该事件描述请求体销毁，不等同响应读取取消。Bun1.3.14本地对照中，正文读完后client为AbortError、request.complete/readableEnded均true，却没有request.aborted；Node标准HTTP对照同样只得到response.close。真实macOS未插入阶段日志，因此当前不能断言每项停在哪一个await；已证明的是其共同取消观测前提不成立，后续必须保留macOS实跑门禁。
++
++拟在既有voice-auth.test.ts原backendFixture中以Bun.serve提供模拟外部转录上游，handler改为标准Request → Response/Promise<Response>。正常用例消费上传后返回原状态/JSON；取消用例在读取正文后监听原Request.signal，返回含原未完成JSON的真实ReadableStream；/ready CLI握手保留可控Promise响应与既有就绪信号。用原生signal观察连接取消，不依赖node:http的请求体事件。该fixture测试的是后端原生fetch事务，不是Effect HTTP middleware；真实生产HTTP/Effect取消继续由tui-provider-endpoint-status.test.ts覆盖，生产serverLayer不修改。已有macOS/Windows不对称事件路径不通过复制生产HTTP补丁解决。
++
++原生fixture的本地可行性探针已经执行：服务端先await request.arrayBuffer()，监听request.signal；返回未完成响应；客户端解析期间abort，输出client AbortError及server Request.signal aborted。只证明该seam本地成立，不替代macOS最终结果。closed就绪等等待使用已有withTimeout明确给出失败阶段，保持原30秒测试总期限，不添加skip或放宽时间，不删除服务端取消、禁止后继步骤、配置字节不变和独立40秒断言。
++
++### 双向映射、范围和TDD
++
++| 要求/不变量 | owner与生产链 | 文件与行为证明 |
++| --- | --- | --- |
++| R01/R07/I12 | submitVoice拥有上传bytes的生命周期；已有SDK负责认证与目标连接 | 既有prompt-voice-input.ts仅改正文准备；既有prompt-voice-input.test.ts编译真实函数、加载native、单次回环上传后正常退出 |
++| R07/R09/I13 | 模拟外部转录上游拥有连接断开事实；请求体完成不代表响应完成 | 既有voice-auth.test.ts调整backendFixture和handler表达；保留四项及全部相关原断言，macOS必须实跑 |
++| owned bytes → I12 | native加载后的file正文原生释放已确定性崩溃，内存字节同条件通过 | 不能只断言类型或重新抄写submitVoice，回归必须import真实生产函数 |
++| 原生Request.signal → I13 | 旧aborted事件仅保证未完成请求体，不能承载响应取消观测 | 请求正文先完成再取消仍观察服务端断连；不把client抛错代替server资源收尾 |
++
++生产文件仍16（修改现有submitVoice所在文件），新增仓库文件0。测试编译产物及源入口仅放测试专属tmp并在finally释放；Windows用已安装pvrecorder包解析native路径，fixture WAV由已知PCM字节生成，不依赖未checkout的子模块音频或录音权限。兼容回归属于Windows standalone输入域，在Windows CI自动运行，其他平台仍运行原上传/取消测试。构建使用当前process.execPath及Bun.build，不安装或升级工具。
++
++新增生产实质代码预计E4、邻近解释C2，含替换增加侧预算不超过10行，原全任务A₀520加本轮仍远低于800；所有改写注释和测试adapter重写按实质新增计量，不凭相似度扣除语义变化。测试预计E120/C至少20，最终逐文件及总量按原门槛重算。旧fixture所有说明保留其完整意图，描述已失效事件假设的注释改为准确说明响应取消所有权，不能降低详细程度。
++
++TDD顺序：生产import编译回归先跑RED exit3；改submitVoice最小字节准备后同exe回归GREEN，并检查预取消不进入fetch、读取结束后取消不上传、已知音频字节/认证/响应保持。然后原backendFixture迁移，先用“上传读完、响应尚未结束”触发旧事件红信号，再验证标准signal的新fixture；运行voice-auth整文件和原生产HTTP生命周期文件。命令在packages/opencode：bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "compiled|submits|cancels the HTTP"；bun test test/cli/tui/voice-auth.test.ts --timeout 30000；bun test test/server/tui-provider-endpoint-status.test.ts --timeout 30000；bun typecheck。最终Windows实际编译artifact必须执行新增组合smoke，macOS四项及完整testCI必须保留真实结果。未经用户授权不推送实验分支或触发发布来测试。
++
++### 当前门禁
++
++R17已发布实现存在本轮真实回归，其历史APPROVE不能作为R18实施授权。用户先禁止task，随后明确“授权task”，现已完成独立R18方案审计，记录见§40。Windows根因已复现；macOS具体await阶段和修正后的平台结果仍待补齐，不将本地对照说成远端通过。
++
++## 40. R18 独立方案审计
++
++Invocation: ses_f4a956730ffeL0jcs2xtHDwg4T；Audit mode: plan；Revision: R18；full-scope。
++
++首次裁决原文：“No blocking findings.” “BLOCK — R18 暂不批准，独立证据核验未完成。” 独立核验获准后复用同一审计会话，最终裁决原文如下：
++
++### Blocking findings
++
++No blocking findings.
++
++### Non-blocking findings
++
++- **N-01：R18 的 Windows 根因已独立复现。** `D:/Temp/opencode/actual-submit-voice.exe` 和 `D:/Temp/opencode/native-loaded-file.exe` 均在 Bun 1.3.14 standalone 环境中发生 segmentation fault，退出码为 3；前者输出 `Blob`/上传路径相关 Bun 崩溃，后者在 native addon 已加载后直接执行文件正文上传也崩溃。该证据支持 §39 将 owner 定位到 `submitVoice` 的 `Bun.file(file)` 请求正文路径。
++- **N-02：`compiled-native-voice-matrix.exe` 未完成完整对照矩阵。** 本次独立执行只记录 `recorded file 0 48128`，随后同样在 Bun 内崩溃，没有产生 bytes/no-terminate 等后续对照输出。因此 §39 中“bytes 与内存 Blob 连续通过”的历史描述不能由当前 artifact 独立确认；计划已经要求新增真实编译回归，不将该历史摘要作为唯一验收证据。
++- **N-03：本地现状测试为绿，不能替代 standalone RED。** `bun test test/cli/tui/voice-auth.test.ts --timeout 30000` 得到 51 pass、0 fail；上传/取消定向测试得到 3 pass、0 fail。这些测试覆盖源码运行时和协议行为，无法触发 standalone + native-loaded + `Bun.file` 的崩溃组合。§39 规定的编译产物回归仍是必要门禁。
++- **N-04：macOS 原始失败证据已核验。** 两份只读 CI 日志均记录同四项测试在 30 秒超时，结果为 4428 passed、21 skipped、4 failed：cache、profile-post 两个取消等待，以及 cache/profile 两个 response-body deadline 测试。该结果与 §39 的 fixture 事件假设冲突一致。
++- **N-05：授权记录存在行政性过时文本。** §39 第957、996行仍保留“禁止task”等历史约束；本轮用户消息已明确授权 task。该项不改变 R18 行为规格，也不阻断计划批准，但实施前应由记录方单独更新。
++
++### Release verdict
++
++**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R18，full-scope plan audit。**
++
++批准仅适用于 R18 方案本身，不代表 R18 已实施或已通过实现审计。实施后必须继续取得：
++
++- standalone 编译上传 RED/GREEN 原始证据；
++- `submitVoice` 预取消、读取完成后取消、正文/认证/响应保持的行为证据；
++- macOS 四项取消测试及完整 testCI 结果；
++- 最终独立实现审计和实际 E/C 计量。
++
++## 41. R18 实施证据
++
++本轮仅修改已有生产prompt-voice-input.ts及两个既有测试文件；记录方修改本canonical。其他config.json、sdks/vscode/.gitignore、未跟踪调查文档及thirdparty/opencode-11720均不属本轮，保持原样。Bun保持1.3.14。未提交、推送、访问账户或重启现用daemon。
++
++### Red / Green 与集成验证
++
++所有测试和typecheck从packages/opencode执行。
++
++| 命令/反馈 | 实际结果 |
++| --- | --- |
++| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable"，修正前 | RED：真实生产import、已安装native、回环HTTP的EXE segmentation fault，exit3；构建准备错误不计为RED |
++| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable\|already cancelled\|after the file has been read"，修正后 | 3 pass、0 fail、8断言 |
++| bun test test/cli/tui/prompt-voice-input.test.ts | 34 pass、3既有账户E2E skip、0 fail、109断言，含真实120秒测试 |
++| 旧Node HTTP fixture先消费完正文，再跑 never advances after cancellation / keeps body consumption | RED：7 pass、4 fail；cache/profile/profile-post/browser旧aborted观测在约30秒超时，随后移除诊断变更 |
++| bun test test/cli/tui/voice-auth.test.ts --timeout 30000 | 51 pass、0 fail、188断言 |
++| bun test test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | 11 pass、0 fail、76断言 |
++| bun test test/cli/tui/prompt-voice-input.test.ts test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | primary集成实跑：107 pass、3既有skip、0 fail、410断言，194.51秒 |
++| bun typecheck | agent并行准备期曾出现编译target类型错误；最终agent及primary独立执行均退出0 |
++| git diff --check（仓库根） | 退出0 |
++
++实现主路径为预取消检查→读取独立ArrayBuffer→读后取消检查→原sdk.fetch；没有新重试或fallback、没有生产HTTP/Worker/状态机变更。fixture统一完整读取请求体后交给handler，并使用原生Request.signal观察响应取消；旧依赖未消费请求体触发aborted的临时策略已移除。行为测试保留协议字节、认证、directory、文字结果、请求禁止推进、配置原字节和40秒尝试期限。
++
++### 完整Windows artifact与原始反馈
++
++Invocation ses_f4a739783ffe09TCpWIqf5n6Q1；使用临时隔离副本的原script/build.ts执行 bun run script/build.ts --single --skip-install，包含完整Web UI。未在用户工作树执行会删除dist/改写models snapshot的构建。原构建脚本Sharp、version、voice Worker smoke通过。
++
++完整artifact：D:/Temp/opencode/r18-artifact-verification-20260919/repo/packages/opencode/dist/opencode-windows-x64/bin/opencode.exe；169604096 bytes；SHA256 dfef91fd88bedd6e77725e933527559dd487af586bb0ff44c877ce904fa5a0b3。
++
++ConPTY真实Alt+V组合验证：两个独立完整EXE attach进程共四轮录音→停止→生产submitVoice→回环响应→文字回填→WAV清理，exit均0。上传52268、51244、53292、51244 bytes，均RIFF/WAVE、16kHz、单声道、audio/wav，directory和测试认证头正确；两次录音目录无残留WAV，native哈希与已安装依赖相同。证据位于D:/Temp/opencode/r18-artifact-verification-20260919/verification-final.json及combined-smoke6、combined-smoke7；primary已读取汇总原文件。
++
++隔离构建曾遇到跨盘native导入与OpenTUI重复依赖造成的renderer/WrongGeneration错误，仅修正临时副本的依赖布局后通过，失败日志保留；不是上传回归GREEN证据。核验4949个原仓库输入文件无变化，副本仅构建自动生成models snapshot文本变化，JSON等价。回环返回固定文字，不代表真实ChatGPT账户或MCP外部链路验收；未测试baseline/ARM64或长压。
++
++### 计量与开放门禁
++
++本轮生产增加侧6行（4实质代码、2解释），替换前1行删除；全任务生产仍16文件，历史A₀520加6为526，低于800。prompt-voice-input.test.ts增加165行，E135/C22，排除空行及import-only；voice-auth.test.ts +88/-60，E74/C13，排除import-only。本轮E213/C37=17.37%，分文件50%、16.30%、17.57%。无纯移动或formatter扣减。代表性解释为上传正文所有权、不可中断读取后的取消边界、真实compiled seam、PCM格式、请求EOF与响应取消区别及fixture清理。
++
++完整macOS testCI及修正后的四项平台结果尚不可验证：当前是Windows主机，未获准推送改动到远端分支/触发新CI，也没有已提供macOS执行环境。旧run重跑只会测试旧commit，不能用来验证本地diff。该缺口保留为发布门禁，不能将Windows通过写成macOS通过。独立实现审计尚待裁决，不标记verified或完成、不按旧批准提交。
++
++## 42. R18 独立实现审计第一轮
++
++Invocation: ses_f4a5c4f71ffe5taTTmOWKa9Vjj；Audit mode: implementation；Revision R18；full-scope。同一会话补齐本地执行授权澄清后，保留完整范围复核，最终原文：
++
++### Blocking findings
++
++### B-01 修正后的 macOS 回归与完整 testCI 门禁仍未关闭
++
++- Violated invariant: R18 要求在原失败平台验证四项取消测试及完整 testCI。
++- Evidence class: contracted
++- Producer and execution path: macOS testCI → `backendFixture` → 实际转录请求 → 未完成响应正文 → 取消或超时 → 服务端断连断言。
++- Source evidence: `.github/workflows/test.yml:92`；`packages/opencode/test/cli/tui/voice-auth.test.ts:287`；`packages/opencode/test/cli/tui/voice-auth.test.ts:372`。
++- Canonical-plan evidence: §39 I13、§40 验收要求；`docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md:1063`。
++- Responsibility owner: R18 跨平台验证及发布流程。
++- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 原 macOS 四项失败尚无当前差异的成功运行结果，平台回归反馈循环未闭合。
++- Why this is not speculative: 历史失败已有两次原始 CI 记录，macOS 验收属于批准版本的明确门禁。
++- Minimal correction direction: 对当前差异取得 macOS 四项回归及完整 testCI 原始结果，再进行全范围复审；Windows 结果不能替代。
++
++### Non-blocking findings
++
++**上一轮“本地独立复跑未执行”的验证缺口已关闭。** 本轮从 `packages/opencode` 独立执行，运行时为 Bun 1.3.14：
++
++| 验证 | 实际结果 |
++|---|---|
++| standalone 上传、预取消、读取后取消 | 3 pass、0 fail、8 断言；6.08 秒 |
++| 两个修改测试文件＋录音器＋生产 HTTP 生命周期 | 107 pass、3 skip、0 fail、410 断言；196.03 秒 |
++| `bun typecheck` | 成功退出 |
++| 定向 `git diff --check` | 成功退出，仅 LF/CRLF 提示 |
++
++显式关闭账户 E2E，3 个 skip 为既有账户用例。没有访问账户、重启用户 daemon、修改实现或计划、进行远端写操作。修复前 standalone RED 的历史证据未在本轮重新执行；本轮直接确认了当前实现的 GREEN。
++
++### Release verdict
++
++**BLOCK — R18 与当前指定 diff。**
++
++本地独立验证已通过，未发现额外实现缺陷。B-01 的 macOS 四项回归及完整 testCI 门禁继续保留，当前不能标记 verified 或发布完成。
++
++记录方判定：B-01直接对应原用户macOS CI回归和批准要求，保留此项，不扩大生产修改。现有test.yml支持workflow_dispatch，可在获准的临时远端验证分支运行原CI，无需修改workflow；临时分支提交/推送及dispatch尚待用户明确授权，当前工作树不提交、不发布。
++
++## 43. R19 用户指定等价验收
++
++### 最新原文与边界
++
++用户对临时CI分支明确答复：“不得进行相应的CI临时分支，但仍需完成任务，做等价检查，不得进行block，最终完整完成后进行审计+commit”。此消息改变验收方式并明确本地commit授权，禁止临时远端分支与相关CI操作。R19不改R18生产或测试修复；保留所有原有行为断言、时间期限和独立全范围审计，不以跳过失败构造完成。
++
++R18 B-01作为历史发布门禁记录保留；本版以用户要求的等价检查矩阵替代“必须远端macOS实跑”条件，不把Linux运行写成Darwin验证。不增加生产fallback、版本分支、状态机、仓库文件或测试skip。本轮新增生产/测试E0/C0，R18实际E213/C37和累计增加侧预算保持。
++
++### 当前证据与执行环境
++
++已直接读取当前test-ci.ts：原CI默认core/TUI两个子进程，固定每项30秒，保留退出码和JUnit；Windows可选分片但本轮Linux不设置分片。test.yml的macOS命令为bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream。当前Windows两轮primary/auditor的107tests、完整EXE四轮Alt+V和typecheck证据见§41-42。
++
++WSL Ubuntu-22.04可用，普通用户smark/UID1000，Linux6.6.114.1 x86_64、glibc2.35；已有Bun1.3.14与Node24.16.0，位于/home/smark/.cache/opencode-r15-tools/{bun,node}/package/bin。历史/home/smark/.cache/opencode-r16-worktree仅用作Linux依赖复制源；根lock/package/bunfig与当前一致，依赖解析探针通过，但历史测试成绩不计入本轮。实际无依赖回环探针输出：{"bun":"1.3.14","platform":"linux","bytes":4,"client":"AbortError","serverRequestSignalAborted":true}，exit0；上传正文已读完后才取消未结束响应，复现I13相同公开seam。
++
++### 等价映射与命令
++
++| 原验收责任 | 本版执行证据 | 保留限制 |
++| --- | --- | --- |
++| I12 Windows native + standalone原始崩溃闭环 | 保留当前真实生产import RED/GREEN、完整EXE Alt+V四轮、native/正文/清理证据 | 仅Windows x64，账户服务使用隔离回环 |
++| I13原macOS四项失败的取消语义 | 当前相同测试在独立Linux/POSIX Bun1.3.14执行；fixture完整消费正文，原生Request.signal、禁止推进、配置字节与40秒断言全部保留；Windows对应敏感旧fixture RED已实跑 | 不证明Darwin特定运行时或内核实现 |
++| 完整testCI回归 | 从当前工作树隔离复制，真实运行原Turbo依赖构建与opencode test:ci，禁用旧缓存命中，不设置shard，不删测试 | 当前源码哈希、命令、日志和JUnit关联；不能用旧R16成绩替代 |
++| 类型与资源清理 | Linux及Windows包级typecheck；原fixture显式收尾、真实进程退出码及无残留WAV | 本轮不执行真实账户E2E，其既有skip保持 |
++
++隔离位置为Linux /tmp/opencode-r19.XXXXXX，复制当前受跟踪源码的工作树内容（含未提交修复），排除真实账户配置、.git、Windows node_modules和缓存；使用独立HOME/XDG/TMPDIR，无继承账户凭据。复制历史Linux依赖但不硬链接、不改源副本，检查workspace manifest/lock/patch哈希、符号链接与native加载。必要正常依赖构建只发生在副本；不改CI配置、不操作远端。测试在专属临时fixture内的git init/commit/config和fixture daemon收尾属于测试自身资源，不涉及用户仓库或现用daemon；最新完整验证/commit要求允许这些既有测试步骤，不能误读成禁止运行测试。
++
++packages/opencode工作目录：bun test test/cli/tui/voice-auth.test.ts --test-name-pattern 'never advances after cancellation|keeps .* body consumption' --timeout 30000；bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts --timeout 30000；bun typecheck。隔离repo根只运行Turbo编排（不直接bun test）：bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream --force --cache=local:。以45分钟外层上限和原测试30秒期限保留真实失败；全量依赖构建及退出结果写专属evidence。完整CI环境保持OPENCODE_DISABLE_LSP_DOWNLOAD=true、Linux FILEWATCHER=false、关闭账户E2E，NODE/Bun路径明确。禁用测试缓存不改变行为或断言。
++
++所有失败先判断是否本轮实际引入或环境配置问题，只修正隔离环境中确证缺失条件；新生产/测试范围变更必须重新修订审计。最终完整full-scope实现审计覆盖原需求及当前全部diff，核对等价矩阵每项真实结果与未验证限制。只有R19审计APPROVE和本地验证完成后才标记verified，并按用户原要求仅本地commit相关四文件，保留hooks和无关改动、不push。
++
++## 44. R19 独立方案批准
++
++Invocation ses_f4a4cf655ffeUy0tCUtFO58vgg；Audit mode: plan；Revision R19；full-scope。以下分类与裁决原文记录：
++
++### Blocking findings
++
++No blocking findings.
++
++### Non-blocking findings
++
++- **N-01：等价检查有明确平台边界。** R19 §43 保留相同取消断言、Bun 1.3.14、完整 `test:ci` 编排及真实退出码，符合本次交接中用户明确要求的“做等价检查”。Linux 结果只能证明对应 Linux/POSIX 执行路径；Darwin 特定运行时行为仍须列为未验证项，不能报告为 macOS CI 通过。
++- **N-02：计划批准不代表验证完成。** §43 的当前源码隔离复制、哈希关联、禁用缓存后的完整 CI、Linux typecheck 尚属于待执行验收。本轮仅进行了只读源码、diff、计划和已有证据检查，没有执行测试，也没有将历史审计结论作为当前实现批准。
++
++### Release verdict
++
++**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R19，full-scope plan audit。**
++
++批准仅适用于 R19 方案。R18 的 macOS 阻断保留为历史结论；R19 依据交接中的明确用户原文采用等价验收，并保留平台限制。完成 §43 验证及新的全范围独立实现审计前，不能标记实现完成或据此直接提交。
++
++## 45. R19 等价验收实际结果
++
++Invocation ses_f4a525157ffeBcwEPEprY7lm2T；Linux副本/home/smark/.cache/opencode-r19-clean-DP5rF6/repo；证据/home/smark/.cache/opencode-r19-clean-evidence-20260919。使用普通用户smark、独立HOME/XDG/TMPDIR及Git配置，无账户继承，Bun1.3.14、Node24.16.0。未修改共享生产/测试或CI，未远端操作；测试只在隔离fixture使用Git/daemon。primary读取原始日志/汇总及最终更正记录，不采用agent错误摘要。
++
++### 当前源码与依赖对应
++
++复制当前工作树5426个tracked输入，包含本轮未提交实现；排除.git、真实配置/账户、两个子模块、Windows node_modules与产物。共享源码前后变化0；副本仅原依赖build生成sdk.gen.ts和types.gen.ts两个既有生成文件变化。33个manifest/patch无变化。Linux依赖初始复制285903文件哈希匹配，无硬链接，6972链接检查无外部或悬空指向。最终补齐本机缓存中的turbo-linux-64、workspace-local anthropic3.0.71、OpenTUI nested diff9.0.0；native加载及版本探针通过。中间verification-summary.json保留修正前diff8.0.2错误，不能作为最终无错误证明；最终索引为dependency-final-record.txt、native-dependency-versions.json及r19-final-fact-corrections.txt。
++
++### 实跑与命令兼容修正
++
++- 定向原取消场景：7 pass、0 fail、exit0，日志副本evidence/directed.log。
++- voice-auth + prompt-voice-input两文件：84 pass、4 skip、0 fail、294断言、137.85秒；其中3个既有账户E2E，1个本轮Windows-only standalone在Linux按批准输入域skip。agent首次“4个全既有”摘要已由primary据原log纠正；Windows该compiled测试已真实执行通过。
++- 包级bun typecheck：exit0，日志副本evidence/typecheck.log。
++- 原计划--force与--cache=local:同时使用被Turbo2.8.13在测试前拒绝，exit1，失败日志副本evidence/turbo-exact.log。此为工具参数兼容修正，不改测试范围、期限或缓存验收：使用原完整命令加--cache=local:，日志证实三个任务均cache bypass/force executing、0 cached。
++- 最终实际命令（隔离repo根）：timeout --signal=TERM --kill-after=30s 2700s bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream --cache=local:。未设置shard，执行原依赖构建与完整core/TUI子进程，保留30秒每项期限。exit0，core3656 pass/19 skip/0 fail；TUI771 pass/10 skip/0 fail；合计4427 pass/29 skip/0 fail；3 successful/3 total、0 cached/3 total、15m39.477秒。
++- 原始日志turbo-equivalent.log与turbo-equivalent-status.txt；JUnit junit-core.xml SHA256 743618b91a8d960d9a81ab0e78103910a0827389245e77a2f55b6a8f426d6705；junit-tui.xml SHA256 a46b966798da52e93e447250b27d6078a2808842e88e24acc3b1c200f47b3678，均在最终证据目录。
++
++准备期失败全部保留：缺turbo-linux-64导致未开跑；Turbo参数冲突；中间副本的空Darwin @types/plist、@types/verror触发TS2688；错误workspace anthropic3.0.64造成一项失败；OpenTUI误解析diff8.0.2。仅修正隔离依赖布局与无效类型目录，恢复manifest要求版本后取得最终全量结果，无共享源文件修改或测试弱化。
++
++### 平台与skip解释
++
++最终FILEWATCHER=false（即禁用开关值为false）；七项FileWatcher skip来自既有FileWatcher.hasNativeBinding()条件，Linux source-run中的OPENCODE_LIBC未定义导致capability=false，filewatcher-runtime-probe.json保留原始stderr和结果；本轮没有新增或修改该skip。其余skip由原平台/账户条件及已批准Windows专用compiled输入域决定。该限制不扩展到本轮语音取消七项，后者全执行通过。Linux不能表述为macOS实跑，Darwin内核/native runner仍未直接验证；本轮按用户明确要求完成等价检查。
++
++R19没有额外生产/测试代码修改，R18 E213/C37及独立计量仍有效；当前三个代码文件与Windows审计时相同。最终full-scope实现审计待执行；不得将验证agent自述的审计桥接失败当本会话审计结果，primary使用正常adversarial-auditor入口。
++
++## 46. R19 最终独立实现批准
++
++Invocation ses_f49c3d8c9ffe6TQhDdouaqglx8；Audit mode: implementation；Revision R19；full-scope。首次裁决为验证待完成，同一会话实际执行后最终原文如下。此前C37为builder/R18计量，最终以本轮独立剔除两条复述后的C35为准，仍满足门槛。
++
++### Blocking findings
++
++No blocking findings.
++
++### Non-blocking findings
++
++- **N-01：等价验收的平台边界保留。** Linux/POSIX 验证符合 R19 用户指定的等价检查方式；Darwin 特定运行时行为仍未直接验证，不能报告为 macOS CI 通过。
++- **N-02 已关闭：独立执行验证完成。** 本轮在 `packages/opencode` 使用 Bun 1.3.14 运行四文件回归：107 pass、3 skip、0 fail、410 断言，188.30 秒。三个 skip 为关闭的既有账户 E2E。`bun typecheck` 成功退出。
++- **N-03 已关闭：原始崩溃独立复现。** 本轮执行 `actual-submit-voice.exe` 和 `native-loaded-file.exe`，分别在约 230ms、239ms 出现 Bun segmentation fault，均退出 3。当前真实生产 import 的 native-loaded standalone 回归在四文件测试中通过。
++- 定向 `git diff --check` 通过，仅有 LF/CRLF 提示。本轮未编辑实现、访问外部账户、操作远端或用户现用 daemon。
++
++### Primary-path and fallback verdict
++
++**通过。**
++
++上传保持唯一权威路径：预取消检查 → 独立字节读取 → 读后取消检查 → 原 SDK 上传。修正落在拥有正文生命周期的 `submitVoice`，没有失败后改走其他正文实现。
++
++既有后端缓存、profile、浏览器编排保持原用户合同，本轮没有增加备用成功路径。新增生产诊断路径为 0。
++
++### Code quality and Chinese-comment verdict
++
++**通过。** 独立按实际 diff 增加侧计算：
++
++| 文件 | E | 合格 C | C/E |
++|---|---:|---:|---:|
++| `prompt-voice-input.ts` | 4 | 2 | 50.00% |
++| `prompt-voice-input.test.ts` | 135 | 21 | 15.56% |
++| `voice-auth.test.ts` | 74 | 12 | 16.22% |
++| 合计 | 213 | 35 | 16.43% |
++
++排除空行、文档、import-only，以及两处仅复述行为的注释；没有使用纯移动或格式化扣减。三个文件均达到 15% 目标。未发现新增类型逃逸、测试断言弱化、生产职责泄漏或无依据的实现概念。
++
++### Release verdict
++
++**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R19，当前指定四文件相对 HEAD 的实际 diff，full-scope implementation audit。**
++
++前次待核验事项已关闭。批准仅适用于本次核验的 R19 和实际差异，保留 Darwin 未直接验证及账户 E2E 未执行的明确边界。
++
++记录方据此设置verified。方案审计R18、R19各一轮（R18补齐执行授权后同会话批准），实现审计R18一轮保留旧平台门禁、R19一轮按新用户验收完成。R19没有增加生产行为；全量Linux CI等价、Windows原始崩溃反馈、源码回归、typecheck、完整artifact与独立计量均已获得证据。提交仅包含canonical、prompt-voice-input.ts及两个测试文件，保留无关工作树与hooks，不创建CI分支、不push。
+diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+index 39d9c67b717391038df221e9bbbb6488788bb98e..c99f7493ee59eaf38880df908802f2b2083844a6 100644
+--- a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
++++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+@@ -10,10 +10,15 @@ export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
+ export async function submitVoice(file: string, signal: AbortSignal, sdk: {
+   url: string; directory?: string; fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
+ }): Promise<string> {
++  signal.throwIfAborted()
++  // standalone + native addon 的 Bun.file 正文释放会触发运行时崩溃；先取得独立字节所有权保护上传完成点。
++  const bytes = await Bun.file(file).arrayBuffer()
++  // 文件读取本身不可中断，但读取完成后的取消必须阻止请求进入认证传输。
++  signal.throwIfAborted()
+   // 每次提交读取当前连接，重连后的端口与 attach 认证沿 SDK 一起生效。
+   const url = new URL("/tui/voice/transcribe", sdk.url)
+   if (sdk.directory) url.searchParams.set("directory", sdk.directory)
+-  const response = await sdk.fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: Bun.file(file), signal })
++  const response = await sdk.fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: bytes, signal })
+   // 响应正文仍归本轮信号；取消优先于响应解析和文字交付。
+   const body: unknown = await response.json().catch(() => undefined)
+   signal.throwIfAborted()
+diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+index 6ffaad24db27610fd51f7df7815e9f9768f5ed26..e07f99cac334faea3e1995ebb79d20e61ecfa4b3 100644
+--- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
++++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, spyOn, test } from "bun:test"
+ import fs from "node:fs/promises"
++import { createRequire } from "node:module"
+ import os from "node:os"
+ import path from "path"
+ import { createRoot, createSignal } from "solid-js"
+@@ -29,6 +30,59 @@ async function browserFixture(directory: string, source: string): Promise<VoiceT
+ 
+ const voiceE2E = process.env.CHATGPT_VOICE_E2E === "1" ? test : test.skip
+ const defaultProfileE2E = process.env.CHATGPT_VOICE_E2E === "1" && process.env.CHATGPT_VOICE_DEFAULT_PROFILE_E2E === "1" ? test : test.skip
++const compiledVoice = process.platform === "win32" ? test : test.skip
++
++// standalone 必须加载真实 native addon 后再走上传，才能覆盖 Bun.file 正文的实际所有权，而非只验证源码运行时。
++async function compileVoiceUploadFixture(directory: string, file: string, native: string) {
++  // 入口和产物都放在测试临时目录，避免编译测试依赖仓库外的音频或留下仓库文件。
++  const entry = path.join(directory, "compiled-submit-voice.ts")
++  const production = path.resolve(import.meta.dir, "../../../src/cli/cmd/tui/prompt-voice-input.ts")
++  // 入口绝对导入当前生产模块，不能复制 submitVoice 实现来制造假绿。
++  await Bun.write(entry, `
++    import { createRequire } from "node:module"
++    import { submitVoice } from ${JSON.stringify(production.replaceAll("\\", "/"))}
++    const require = createRequire(import.meta.url)
++    require(${JSON.stringify(native)})
++    const received = Promise.withResolvers<{ authorization: string | null; directory: string | null; bytes: number[] }>()
++    // 回环服务只观察真实上传协议，正文消费完成后才返回响应。
++    const server = Bun.serve({
++      hostname: "127.0.0.1",
++      port: 0,
++      async fetch(request) {
++        received.resolve({
++          authorization: request.headers.get("authorization"),
++          directory: new URL(request.url).searchParams.get("directory"),
++          bytes: [...new Uint8Array(await request.arrayBuffer())],
++        })
++        // 固定响应正文验证 compiled 请求完成后仍能交付文字。
++        return Response.json({ text: "standalone transcript" })
++      },
++    })
++    try {
++      const text = await submitVoice(${JSON.stringify(file)}, new AbortController().signal, {
++        url: server.url.href,
++        directory: "standalone-directory",
++        fetch: (input, init) => fetch(input, {
++          ...init,
++          // 认证从 SDK fetch 边界进入，submitVoice 不能绕过既有认证传输。
++          headers: { ...init?.headers, authorization: "Bearer standalone-token" },
++        }),
++      })
++      console.log(JSON.stringify({ text, ...(await received.promise) }))
++    } finally {
++      // 失败路径也关闭测试自己的 listener，避免污染后续测试。
++      await server.stop(true)
++    }
++  `)
++  const outfile = path.join(directory, process.platform === "win32" ? "compiled-submit-voice.exe" : "compiled-submit-voice")
++  const result = await Bun.build({
++    entrypoints: [entry],
++    // 不指定跨平台 target，直接使用当前 Bun 的 standalone runtime，避免下载不同版本掩盖回归。
++    compile: { outfile, autoloadBunfig: false, autoloadDotenv: false },
++  })
++  if (!result.success) throw new AggregateError(result.logs, "compiled submitVoice fixture failed to build")
++  return { outfile, entry }
++}
+ 
+ async function writeLateMarkerWav(source: string, target: string, seconds: number) {
+   const input = Buffer.from(await Bun.file(source).arrayBuffer())
+@@ -94,6 +148,117 @@ describe("prompt voice input", () => {
+     expect(text).toBe("daemon transcript")
+   })
+ 
++  // standalone 的 exe 只在 Windows 执行：native addon、真实生产 import 和本地回环必须处于同一进程。
++  // 回环服务独立检查认证、目录、响应和完整字节，避免测试重新实现 submitVoice 的正文逻辑。
++  compiledVoice("uploads bytes safely from a native-loaded standalone executable", async () => {
++    await using tmp = await tmpdir()
++    const file = path.join(tmp.path, "standalone.wav")
++    const wav = Buffer.alloc(48)
++    // fixture 使用独立已知 PCM 字节，不依赖麦克风、Worker 或未 checkout 的音频资源。
++    wav.write("RIFF", 0, "ascii")
++    wav.writeUInt32LE(40, 4)
++    wav.write("WAVE", 8, "ascii")
++    wav.write("fmt ", 12, "ascii")
++    wav.writeUInt32LE(16, 16)
++    wav.writeUInt16LE(1, 20)
++    wav.writeUInt16LE(1, 22)
++    // 单声道 8kHz、16-bit PCM 的 byteRate 为 16000；头部长度与两个 sample 的 data 长度一致。
++    wav.writeUInt32LE(8_000, 24)
++    wav.writeUInt32LE(16_000, 28)
++    wav.writeUInt16LE(2, 32)
++    wav.writeUInt16LE(16, 34)
++    wav.write("data", 36, "ascii")
++    wav.writeUInt32LE(4, 40)
++    wav.writeInt16LE(321, 44)
++    wav.writeInt16LE(-321, 46)
++    await Bun.write(file, wav)
++
++    const packageRoot = path.dirname(createRequire(import.meta.url).resolve("@picovoice/pvrecorder-node/package.json"))
++    const native = path.join(packageRoot, "lib", "windows", process.arch === "x64" ? "amd64" : "arm64", "pv_recorder.node")
++    // 缺少已安装 addon 时必须失败，不能回退到源码路径来绕过 native 输入域。
++    expect(await Bun.file(native).exists()).toBe(true)
++    const compiled = await compileVoiceUploadFixture(tmp.path, file, native)
++    // 子进程上界早于测试期限，挂起时先结束 exe，临时目录才不会因 Windows 文件占用而清理失败。
++    const child = Bun.spawn([compiled.outfile], { stdout: "pipe", stderr: "pipe", timeout: 10_000 })
++    const [exit, stdout, stderr] = await Promise.all([
++      // 同时消费两个管道，避免崩溃输出反压掩盖 standalone 的真实退出码。
++      child.exited,
++      new Response(child.stdout).text(),
++      new Response(child.stderr).text(),
++    ])
++    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" })
++    // 期望值来自回环协议和 fixture 字面量，不从 submitVoice 重新计算。
++    expect(JSON.parse(stdout.trim())).toEqual({
++      text: "standalone transcript",
++      authorization: "Bearer standalone-token",
++      directory: "standalone-directory",
++      bytes: [...wav],
++    })
++  }, 30_000)
++
++  // 预取消必须在读取文件前结束，避免取消请求仍建立网络副作用。
++  test("does not read or fetch when submission is already cancelled", async () => {
++    const abort = new AbortController()
++    abort.abort()
++    let read = false
++    let fetched = false
++    const originalFile = Bun.file
++    const file = originalFile("voice.wav")
++    const reading = spyOn(file, "arrayBuffer").mockImplementation(async () => {
++      read = true
++      return new ArrayBuffer(0)
++    })
++    const fileCall = spyOn(Bun, "file").mockReturnValue(file)
++    // 只替代文件系统边界；被测入口仍是实际 submitVoice。
++    try {
++      await expect(PromptVoiceInput.submitVoice("voice.wav", abort.signal, {
++        url: "http://localhost:1234",
++        fetch: async () => {
++          fetched = true
++          return Response.json({ text: "unexpected" })
++        },
++      })).rejects.toMatchObject({ name: "AbortError" })
++      expect(read).toBe(false)
++      expect(fetched).toBe(false)
++    } finally {
++      // 还原全局文件入口，防止取消测试影响后续真实文件读取。
++      fileCall.mockRestore()
++      reading.mockRestore()
++    }
++  })
++
++  // 读取完成后取消仍不得进入 SDK fetch；该闸门直接保护“读取后再检查 signal”的批准顺序。
++  test("does not fetch when cancellation arrives after the file has been read", async () => {
++    await using tmp = await tmpdir()
++    const filePath = path.join(tmp.path, "voice.wav")
++    await Bun.write(filePath, "known wav bytes")
++    const abort = new AbortController()
++    const originalFile = Bun.file
++    const file = originalFile(filePath)
++    const reading = spyOn(file, "arrayBuffer").mockImplementation(async () => {
++      // 取消点位于真实字节读取完成之后，用来区分读后检查与 fetch 内检查。
++      const bytes = await originalFile(filePath).arrayBuffer()
++      abort.abort()
++      return bytes
++    })
++    const fileCall = spyOn(Bun, "file").mockReturnValue(file)
++    let fetched = false
++    try {
++      await expect(PromptVoiceInput.submitVoice(filePath, abort.signal, {
++        url: "http://localhost:1234",
++        fetch: async () => {
++          fetched = true
++          return Response.json({ text: "unexpected" })
++        },
++      })).rejects.toMatchObject({ name: "AbortError" })
++      expect(fetched).toBe(false)
++    } finally {
++      // 闸门结束后恢复文件边界，保持其它上传协议测试相互独立。
++      fileCall.mockRestore()
++      reading.mockRestore()
++    }
++  })
++
+   // R9 将上传、等锁和转录合并为固定整轮预算，不再保留浏览器四轮重试窗口。
+   test("limits the complete submission to 120 seconds", () => {
+     expect(VOICE_TRANSCRIBE_TIMEOUT_MS).toBe(120_000)
+diff --git a/packages/opencode/test/cli/tui/voice-auth.test.ts b/packages/opencode/test/cli/tui/voice-auth.test.ts
+index c986437f945028ba6cc27614b63d4973baa3946d..f65e579fc4bc3af5c3a67c3912b8367713f1f7d4 100644
+--- a/packages/opencode/test/cli/tui/voice-auth.test.ts
++++ b/packages/opencode/test/cli/tui/voice-auth.test.ts
+@@ -7,6 +7,7 @@ import path from "path"
+ import { tmpdir } from "../../fixture/fixture"
+ import { ConfigParse } from "../../../src/config/parse"
+ import { ConfigMCP } from "../../../src/config/mcp"
++import { withTimeout } from "../../../src/util/timeout"
+ import {
+   authFromHarvest,
+   buildDirectTranscribeRequest,
+@@ -134,7 +135,7 @@ describe("voice auth helpers", () => {
+ })
+ 
+ // 只替换网络目的地址；正文解析、请求取消和 CLI 生命周期全部由生产入口负责。
+-async function backendFixture(dir: string, handler: Http.RequestListener, command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))") {
++async function backendFixture(dir: string, handler: (request: Request) => Response | Promise<Response>, command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))") {
+   const config = path.join(dir, "opencode.json")
+   const file = path.join(dir, "voice.wav")
+   const script = path.join(dir, "agent.cjs")
+@@ -146,14 +147,21 @@ async function backendFixture(dir: string, handler: Http.RequestListener, comman
+   await Bun.write(script, `const stage = process.argv[2]; require('fs').appendFileSync(${JSON.stringify(log)}, stage+'\\n');
+ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'profile' : 'browser',expires:-1}],fetchedAt:'2026-09-18T00:00:00Z'};
+ (async () => { ${command} })().catch(error => { console.error(error.message); process.exitCode = 1 });`)
+-  const server = Http.createServer(handler)
+-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+-  const address = server.address()
+-  if (!address || typeof address === "string") throw new Error("Fixture listener missing")
+-  const url = `http://127.0.0.1:${address.port}`
++  // 原生 Request 的 signal 只在请求正文完成后仍能观察响应读取取消，避免把 body EOF 误当成连接结束。
++  // fixture 统一先消费上传字节，再把响应生命周期交给标准 fetch；handler 不再接触 Node 专属事件。
++  const server = Bun.serve({
++    port: 0,
++    hostname: "127.0.0.1",
++    fetch: async (request) => {
++      await request.arrayBuffer()
++      return handler(request)
++    },
++  })
++  const url = `http://127.0.0.1:${server.port}`
+   const headers = Promise.withResolvers<void>()
+   const requests: { url: string; cookie: string | null; signal: AbortSignal | null | undefined }[] = []
+   // 记录原始 URL，额外 session 刷新或绕路请求不能被重定向偷偷掩盖。
++  // fetch 返回只表示响应头可用，正文是否结束仍由生产解析阶段决定。
+   const fetch = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
+     requests.push({ url: String(input), cookie: new Headers(init?.headers).get("cookie"), signal: init?.signal })
+     const response = await globalThis.fetch(url, init)
+@@ -168,9 +176,9 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
+     commands: () => Bun.file(log).text(),
+     async [Symbol.asyncDispose]() {
+       fetch.mockRestore()
+-      // 取消测试会刻意留下未结束的正文；关闭连接后再释放监听端口，防止污染下个用例。
+-      server.closeAllConnections()
+-      await new Promise<void>((resolve) => server.close(() => resolve()))
++      // 取消测试会刻意留下未结束的正文；先关闭连接再释放端口，防止残留响应污染下个用例。
++      // 强制停止只属于 fixture 收尾，不能改变被测请求的取消结果。
++      await server.stop(true)
+     },
+   }
+ }
+@@ -180,12 +188,14 @@ describe("backend Cookie attempts", () => {
+   test("reuses the browser account snapshot after anonymous dictation is rejected", async () => {
+     await using tmp = await tmpdir()
+     const seen: (string | undefined)[] = []
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      seen.push(request.headers.authorization)
++    await using fixture = await backendFixture(tmp.path, async (request) => {
++      const authorization = request.headers.get("authorization") ?? undefined
++      const cookie = request.headers.get("cookie")
++      seen.push(authorization)
+       // 只认独立已知的账户值，避免Cookie单独成功掩盖授权字段在持久化中丢失。
+-      const account = request.headers.authorization === "Bearer browser-token" && request.headers.cookie === "oai-did=browser"
+-      response.writeHead(account ? 200 : 429).end(JSON.stringify({ text: "authenticated transcript" }))
++      // 标准 Headers 读取保持与线上请求相同的大小写无关语义。
++      const account = authorization === "Bearer browser-token" && cookie === "oai-did=browser"
++      return new Response(JSON.stringify({ text: "authenticated transcript" }), { status: account ? 200 : 429 })
+     }, "console.log(JSON.stringify({text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))")
+     expect(await fixture.run()).toBe("browser transcript")
+     // 第二轮从文件读取，经真实HTTP发送；仅检查转换helper不足以覆盖完整消费链。
+@@ -198,10 +208,8 @@ describe("backend Cookie attempts", () => {
+   // 401 与 403 都是凭据恢复入口，其余 HTTP 失败跳过 profile，直接进入完整浏览器转录。
+   test.each([401, 403, 400, 429, 500])("routes HTTP %i to the contracted next step", async (status) => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      response.writeHead(request.headers.cookie === "oai-did=profile" ? 200 : status)
+-      response.end(JSON.stringify({ text: "profile transcript" }))
++    await using fixture = await backendFixture(tmp.path, async (request) => {
++      return new Response(JSON.stringify({ text: "profile transcript" }), { status: request.headers.get("cookie") === "oai-did=profile" ? 200 : status })
+     })
+     expect(await fixture.run()).toBe(status === 401 || status === 403 ? "profile transcript" : "browser transcript")
+     expect(await fixture.commands()).toBe(status === 401 || status === 403 ? "auth-export\n" : "transcribe-file\n")
+@@ -213,10 +221,7 @@ describe("backend Cookie attempts", () => {
+   // 未写入快照和格式错误的旧节点都不可用于直连，不能先发一个空凭据请求。
+   test.each([undefined, { access_token: "old" }])("reads profile when cache is unavailable: %j", async (cached) => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      response.end(JSON.stringify({ text: "profile transcript" }))
+-    })
++    await using fixture = await backendFixture(tmp.path, async () => new Response(JSON.stringify({ text: "profile transcript" })))
+     await Bun.write(fixture.config, JSON.stringify({ mcp: { chatgpt: { auth: cached } } }))
+     expect(await fixture.run()).toBe("profile transcript")
+     expect(await fixture.commands()).toBe("auth-export\n")
+@@ -227,9 +232,8 @@ describe("backend Cookie attempts", () => {
+   // profile 的读取错误、协议错误和 POST 错误都进入末级；不允许重复离线读取。
+   test.each(["exit", "json", "shape", "post"])("advances after profile %s failure", async (failure) => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      response.writeHead(403).end("{}")
++    await using fixture = await backendFixture(tmp.path, async () => {
++      return new Response("{}", { status: 403 })
+     }, `if (stage === 'auth-export') { if (${JSON.stringify(failure)} === 'exit') process.exit(3); console.log(${JSON.stringify(failure)} === 'json' ? 'invalid JSON' : JSON.stringify(${JSON.stringify(failure)} === 'shape' ? {} : exported)); return; } console.log(JSON.stringify({text:'browser transcript',auth:exported}));`)
+     expect(await fixture.run()).toBe("browser transcript")
+     expect(await fixture.commands()).toBe("auth-export\ntranscribe-file\n")
+@@ -240,7 +244,7 @@ describe("backend Cookie attempts", () => {
+   // 静音的空串是成功；缺 text、类型错误和无效 JSON 是可观察的协议失败。
+   test.each(['{"text":""}', '{}', 'null', '{"text":7}', 'not JSON'])("consumes direct response %s", async (body) => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => { request.resume(); response.end(body) })
++    await using fixture = await backendFixture(tmp.path, async () => new Response(body))
+     expect(await fixture.run()).toBe(body === '{"text":""}' ? "" : "browser transcript")
+     expect(await fixture.commands()).toBe(body === '{"text":""}' ? "" : "transcribe-file\n")
+     // 即使解析失败也不能把它改判为认证失败，从而触发未批准的 profile 分支。
+@@ -255,7 +259,7 @@ describe("backend Cookie attempts", () => {
+     ["console.log(JSON.stringify({text:'text',auth:{}}))", "Invalid voice Cookie export"],
+   ])("propagates terminal CLI failure %s", async (command, message) => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => { request.resume(); response.writeHead(500).end("{}") }, command)
++    await using fixture = await backendFixture(tmp.path, async () => new Response("{}", { status: 500 }), command)
+     const before = await Bun.file(fixture.config).text()
+     await expect(fixture.run()).rejects.toThrow(message)
+     expect(await fixture.commands()).toBe("transcribe-file\n")
+@@ -267,10 +271,10 @@ describe("backend Cookie attempts", () => {
+   // 写回属于提交阶段，不在恢复 catch 内；真实文件消失必须导致失败，不能返回内存态成功。
+   test("propagates writeback failure without advancing to browser", async () => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      if (request.headers.cookie !== "oai-did=profile") { response.writeHead(401).end("{}"); return }
+-      void fs.unlink(path.join(tmp.path, "opencode.json")).then(() => response.end(JSON.stringify({ text: "must not deliver" })))
++    await using fixture = await backendFixture(tmp.path, async (request) => {
++      if (request.headers.get("cookie") !== "oai-did=profile") return new Response("{}", { status: 401 })
++      await fs.unlink(path.join(tmp.path, "opencode.json"))
++      return new Response(JSON.stringify({ text: "must not deliver" }))
+     })
+     await expect(fixture.run()).rejects.toThrow(/ENOENT/)
+     expect(await fixture.commands()).toBe("auth-export\n")
+@@ -286,17 +290,25 @@ describe("backend cancellation and deadlines", () => {
+     const closed = Promise.withResolvers<void>()
+     const controller = new AbortController()
+     const reason = new Error("cancel voice transaction")
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
++    await using fixture = await backendFixture(tmp.path, (request) => {
++      const pathname = new URL(request.url).pathname
+       // CLI 用就绪握手证明已经启动；不靠固定 sleep 猜测进程是否到达取消点。
+-      if (request.url === "/ready" || stage === "cache" || stage === "profile-post") {
+-        // Bun 的 HTTP 兼容层在请求已被排空后不发 aborted；保留未读请求以观察真实断开。
+-        request.once("aborted", () => closed.resolve())
+-        if (request.url !== "/ready") response.write('{"text":"')
+-        ready.resolve()
+-        return
++      if (pathname === "/ready" || stage === "cache" || stage === "profile-post") {
++        // 握手与转录响应都只发布响应头；正文故意不关闭以观察原生 signal 的断连事实。
++        // 取消回调只关闭测试流并发布完成点，不能替代生产请求的取消传播。
++        const body = new ReadableStream<Uint8Array>({
++          start(controller) {
++            request.signal.addEventListener("abort", () => {
++              closed.resolve()
++              controller.close()
++            }, { once: true })
++            if (pathname !== "/ready") controller.enqueue(new TextEncoder().encode('{"text":"'))
++            ready.resolve()
++          },
++        })
++        return new Response(body, { headers: { "content-type": "application/json" } })
+       }
+-      request.resume()
+-      response.writeHead(stage === "profile" ? 401 : 500).end("{}")
++      return new Response("{}", { status: stage === "profile" ? 401 : 500 })
+     }, stage === "profile-post" ? "console.log(JSON.stringify(exported))" : "await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify({text:'late',auth:exported}));")
+     // 无缓存使 profile POST 成为第一条直连，避免把缓存的响应头误作正文就绪。
+     if (stage === "profile-post") await Bun.write(fixture.config, handwritten)
+@@ -306,10 +318,11 @@ describe("backend cancellation and deadlines", () => {
+     // 先附拒绝处理再触发取消，避免异步失败在就绪握手期间成为未处理异常。
+     const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
+     try {
+-      if (stage !== "before") { await ready.promise; controller.abort(reason) }
++      if (stage !== "before") { await withTimeout(ready.promise, 30_000, `voice cancellation ${stage} readiness timed out`); controller.abort(reason) }
+       expect(await outcome).toEqual({ error: reason })
+-      // 服务端观察请求被中断，避免只丢弃 Promise 的假取消；不依赖兼容层的响应 close 事件。
+-      if (stage !== "before") await closed.promise
++      // 服务端观察响应读取请求被中断，避免只丢弃 Promise 的假取消。
++      // 阶段标签让30秒总期限内的失败能区分握手缺失与服务端未收取消。
++      if (stage !== "before") await withTimeout(closed.promise, 30_000, `voice cancellation ${stage} server abort timed out`)
+       expect(await fixture.commands()).toBe(stage === "profile" || stage === "profile-post" ? "auth-export\n" : stage === "browser" ? "transcribe-file\n" : "")
+       expect(fixture.requests).toHaveLength(stage === "before" ? 0 : 1)
+       expect(await Bun.file(fixture.config).text()).toBe(before)
+@@ -319,9 +332,8 @@ describe("backend cancellation and deadlines", () => {
+   // rename 是提交点：之前取消不得改配置，之后取消保留快照但绝不交付本轮文字。
+   test.each(["before", "after"])("cancels %s atomic rename without delivering text", async (when) => {
+     await using tmp = await tmpdir()
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      response.writeHead(request.headers.cookie === "oai-did=profile" ? 200 : 401).end(JSON.stringify({ text: "must not deliver" }))
++    await using fixture = await backendFixture(tmp.path, (request) => {
++      return new Response(JSON.stringify({ text: "must not deliver" }), { status: request.headers.get("cookie") === "oai-did=profile" ? 200 : 401 })
+     })
+     const controller = new AbortController()
+     const reason = new Error(`cancel ${when} rename`)
+@@ -359,7 +371,7 @@ describe("backend cancellation and deadlines", () => {
+   // 受控时钟仅替换 timeout 信号，真实 fetch 收到响应头后仍须等待并取消真实正文。
+   test.each(["cache", "profile"])("keeps %s body consumption inside one fixed 40-second attempt", async (stage) => {
+     await using tmp = await tmpdir()
+-    const readingProfile = Promise.withResolvers<Http.ServerResponse>()
++    const readingProfile = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>()
+     const closed = Promise.withResolvers<void>()
+     const controllers: AbortController[] = []
+     const durations: number[] = []
+@@ -371,20 +383,37 @@ describe("backend cancellation and deadlines", () => {
+       controllers.push(controller)
+       return controller.signal
+     })
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      if (request.url === "/ready") { readingProfile.resolve(response); return }
++    await using fixture = await backendFixture(tmp.path, (request) => {
++      if (new URL(request.url).pathname === "/ready") {
++        // CLI 只需要响应头继续启动；控制器由测试在既有计时点显式结束正文。
++        const response = new Response(new ReadableStream<Uint8Array>({
++          start(controller) {
++            readingProfile.resolve(controller)
++          },
++        }), { headers: { "content-type": "text/plain" } })
++        return response
++      }
+       // 不发送结束花括号，确保返回响应头并不等于完成转录正文解析。
+-      request.once("aborted", () => closed.resolve())
+-      response.writeHead(200, { "content-type": "application/json" })
+-      response.write('{"text":"unfinished')
++      const body = new ReadableStream<Uint8Array>({
++        start(controller) {
++          request.signal.addEventListener("abort", () => {
++            closed.resolve()
++            controller.close()
++          }, { once: true })
++          controller.enqueue(new TextEncoder().encode('{"text":"unfinished'))
++        },
++      })
++      return new Response(body, { status: 200, headers: { "content-type": "application/json" } })
+     }, "if (stage === 'auth-export') await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));")
+     if (stage === "profile") await Bun.write(fixture.config, handwritten)
+     const request = new AbortController()
+     const pending = fixture.run(request.signal)
+     try {
+       // profile CLI 尚未结束时计时器就已存在，POST 不能另开一个新的 40 秒窗口。
+-      if (stage === "profile") { const response = await readingProfile.promise; expect(durations).toEqual([40_000]); response.end("ready") }
+-      await fixture.headers
++      // 这里只释放握手正文，不缩短真实转录请求的固定尝试期限。
++      if (stage === "profile") { const response = await withTimeout(readingProfile.promise, 30_000, "profile CLI readiness timed out"); expect(durations).toEqual([40_000]); response.close() }
++      // 响应头、正文取消和下一步推进分别有独立阶段信号，避免单一超时掩盖顺序错误。
++      await withTimeout(fixture.headers, 30_000, `${stage} response headers timed out`)
+       expect(durations).toEqual([40_000])
+       expect(fixture.requests).toHaveLength(1)
+       const attempt = controllers[0]
+@@ -393,7 +422,7 @@ describe("backend cancellation and deadlines", () => {
+       attempt.abort(new DOMException("attempt timed out", "TimeoutError"))
+       // 单次超时仍允许下一契约步骤；整轮信号保持有效，浏览器获得独立完整窗口。
+       expect(await pending).toBe("browser transcript")
+-      await closed.promise
++      await withTimeout(closed.promise, 30_000, `${stage} response cancellation timed out`)
+       expect(request.signal.aborted).toBe(false)
+       expect(fixture.requests[0]?.signal?.aborted).toBe(true)
+       expect(durations).toEqual([40_000, 40_000])
+@@ -415,17 +444,16 @@ describe("backend cancellation and deadlines", () => {
+       controllers.push(controller)
+       return controller.signal
+     })
+-    await using fixture = await backendFixture(tmp.path, (request, response) => {
+-      request.resume()
+-      if (request.url === "/ready") { ready.resolve(); return }
+-      response.writeHead(401).end("{}")
++    await using fixture = await backendFixture(tmp.path, (request) => {
++      if (new URL(request.url).pathname === "/ready") { ready.resolve(); return new Response("ready") }
++      return new Response("{}", { status: 401 })
+     }, `if (stage === ${JSON.stringify(stage === "profile" ? "auth-export" : "transcribe-file")}) await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));`)
+     const request = new AbortController()
+     const reason = new DOMException("CLI deadline", "TimeoutError")
+     const pending = fixture.run(request.signal)
+     const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
+     try {
+-      await ready.promise
++      await withTimeout(ready.promise, 30_000, `${stage} CLI readiness timed out`)
+       // 快速 401 必须立即推进，既不等满 40 秒，也不从末级扣除之前的耗时。
+       expect(durations).toEqual(stage === "profile" ? [40_000, 40_000] : [40_000, 40_000, 40_000])
+       const attempt = controllers[stage === "profile" ? 1 : 2]
