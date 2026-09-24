@@ -17,7 +17,7 @@ index 1111111111..2222222222 100644
  import path from "path"
  
  const normalizedDirectory = new Map<string, string>()
-@@ -35,10 +36,25 @@
+@@ -35,10 +36,26 @@
    workspace: string | undefined
  }
  
@@ -37,9 +37,10 @@ index 1111111111..2222222222 100644
 +
  export function useEvent() {
    const sdk = useSDK()
++  // 插件可在异步回调中订阅；在 hook 创建时捕获 context，投递时仍读取当前项目。
++  const project = useProject()
  
    function subscribe(handler: (event: Event, metadata: EventMetadata) => void) {
-+    const project = useProject()
      return sdk.event.on("event", (event) => {
        if (event.payload.type === "sync") {
          return
@@ -89,6 +90,18 @@ index 0000000000..2222222222
 +    expect(shouldDeliverScopedEvent({ directory: "/workspace" }, "proj-a")).toBe(true)
 +  })
 +})
+diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cli/tui/use-event.test.tsx
+--- a/packages/tui/test/cli/tui/use-event.test.tsx
++++ b/packages/tui/test/cli/tui/use-event.test.tsx
+@@ -93,5 +93,7 @@
+-  onMount(() => {
++  onMount(async () => {
++    // 对齐插件初始化跨 Promise 的调用方式，订阅不能再依赖当前 Solid owner。
++    await Promise.resolve()
+     event.subscribe((evt, { workspace }) => {
+       props.seen.push(evt)
+       props.workspaces.push(workspace)
+     })
 --
 2.39.0
 

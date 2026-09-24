@@ -356,3 +356,52 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
 +)
+diff --git a/packages/opencode/test/cli/run/run-process.test.ts b/packages/opencode/test/cli/run/run-process.test.ts
+--- a/packages/opencode/test/cli/run/run-process.test.ts
++++ b/packages/opencode/test/cli/run/run-process.test.ts
+@@ -84,3 +84,3 @@
+-  // The test provider's SSE error item is interpreted by the SDK as an unknown
+-  // finish, not a fatal provider/session error. Lock that distinction in so it
+-  // is not accidentally used as the failure compatibility oracle.
++  // A stream ending after partial text is normalized to an unknown finish.
++  // Keep output and transport failure in the same provider turn to distinguish
++  // this case from an empty continuation, which intentionally triggers retry.
+@@ -91,10 +91,6 @@
+-        yield* llm.push(
+-          reply().text("partial response").tool("bash", {
+-            command: "printf tool",
+-            description: "Print deterministic output",
+-          }),
+-        )
+-        yield* llm.fail("upstream provider exploded mid-stream")
++        // 当前轮已有正文时必须保留，不应依赖前一工具轮的输出掩盖空完成。
++        // 将断流放在同一个响应，精确 stdout 断言才能真正防止意外重试。
++        yield* llm.push(reply().text("partial response").streamError("upstream provider exploded mid-stream"))
+         const result = yield* opencode.run("trigger midstream error", { timeoutMs: 30_000 })
+         expect(result.exitCode).toBe(0)
+         expect(result.stdout).toBe("partial response\n")
+@@ -219,21 +215,14 @@
+-        yield* llm.push(
+-          reply().text("partial json").tool("bash", {
+-            command: "printf tool",
+-            description: "Print deterministic output",
+-          }),
+-        )
+-        yield* llm.fail("provider failed")
++        // JSON 同样锁定单轮 partial；另一个空轮必须重试，不能混作本场景。
++        // 工具及续轮顺序仍由相邻的完整 tool continuation 测试覆盖。
++        yield* llm.push(reply().text("partial json").streamError("provider failed"))
+         const result = yield* opencode.run("fail after output", { format: "json" })
+ 
+         const events = opencode.parseJsonEvents(result.stdout)
+         expect(result.exitCode).toBe(0)
+         expect(events.map((event) => event.type)).toEqual([
+           "step_start",
+           "text",
+-          "tool_use",
+           "step_finish",
+-          "step_start",
+-          "step_finish",
+         ])
+         expect(events[1]?.part).toEqual(expect.objectContaining({ type: "text", text: "partial json" }))
+         expect(events.at(-1)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "mode": "typecheck",
-  "startedAt": "2026-09-17T09:38:23.141Z",
+  "startedAt": "2026-09-24T01:22:47.519Z",
   "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
   "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
   "sourceRef": "dev-smark",
@@ -14,22 +14,21 @@
   "rebuild": false,
   "appliedThisRun": 0,
   "materializedIndex": 452,
-  "sourceRepoHeadBefore": "361aeb664bef26a7dbec832416eae4a81e6712f7",
-  "sourceRepoFingerprintBefore": "0ef0c4af8ee256829096ea0752a517f89d2e32b40ba3e8557dee46f3c5358d98",
-  "targetRepoFingerprintBefore": "5ce70a514c2124ca444e0b099fdd2e5cc5ad2ff019c992f3c283d217a190506b",
+  "sourceRepoHeadBefore": "ac4568b10f773a6167b5f0e68d6e310e9cf6a228",
+  "sourceRepoFingerprintBefore": "3e1f176c98034bcdf47b2d483a7a6283ab0d617394bb9d5046dec59bcc516a0f",
+  "targetRepoFingerprintBefore": "25ab367697adaa8dd8d39f26f6625db6d8febb71c46a313c53f71eb294d42220",
   "outcomes": [],
   "stateDirectory": "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\opencode-11720\\.temp\\patches\\states\\0452-d0ceb4690114",
   "retainedStates": [
-    "0452-d0ceb4690114",
-    "0141-190d962e1dd8"
+    "0452-d0ceb4690114"
   ],
   "test": {
     "index": 452,
     "workspace": "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\opencode-11720\\.temp\\patches\\states\\.test-workspace\\repo",
-    "install": "installed",
+    "install": "reused",
     "installInputSha256": "02cb1c9055216e2a1e1f79247eb3146962aeceec50059570a894f3180d40dbe6",
     "installStdout": "",
-    "installStderr": "Resolving dependencies\nResolved, downloaded and extracted [33]\nSaved lockfile\n\n$ bun run --cwd packages/core fix-node-pty\n$ bun run script/fix-node-pty.ts\n$ husky\n",
+    "installStderr": "",
     "typechecks": [
       {
         "workspace": "packages/app",
@@ -243,8 +242,8 @@
       }
     ]
   },
-  "finishedAt": "2026-09-17T09:39:57.845Z",
-  "sourceRepoHeadAfter": "361aeb664bef26a7dbec832416eae4a81e6712f7",
-  "sourceRepoFingerprintAfter": "0ef0c4af8ee256829096ea0752a517f89d2e32b40ba3e8557dee46f3c5358d98",
-  "targetRepoFingerprintAfter": "5ce70a514c2124ca444e0b099fdd2e5cc5ad2ff019c992f3c283d217a190506b"
+  "finishedAt": "2026-09-24T01:25:12.175Z",
+  "sourceRepoHeadAfter": "ac4568b10f773a6167b5f0e68d6e310e9cf6a228",
+  "sourceRepoFingerprintAfter": "3e1f176c98034bcdf47b2d483a7a6283ab0d617394bb9d5046dec59bcc516a0f",
+  "targetRepoFingerprintAfter": "25ab367697adaa8dd8d39f26f6625db6d8febb71c46a313c53f71eb294d42220"
 }

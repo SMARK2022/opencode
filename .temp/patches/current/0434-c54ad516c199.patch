@@ -256,10 +256,10 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +  const expire = () => {
 +    timer = undefined
 +    // 首个 chunk 之前也必须复用 SSE_READ_TIMEOUT，否则 MessageV2 会把同一个无进度失败误判成用户取消。
-+    // 这个错误进入现有 retryable transport 分类，不新增 Session prompt 或 retry policy。
++    // 保留目标的 ResponseStreamError 类型及 retryable transport code，不退化成普通 Error。
 +    // 先保存 expired 再 abort，确保迟到的 fetch fulfillment 仍会观察到同一个可分类错误。
 +    // rejectRead 只唤醒当前 pull；cancelReader 负责通知底层 body，二者缺一都会留下悬挂请求。
-+    const error = Object.assign(new globalThis.Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
++    const error = Object.assign(new ProviderError.ResponseStreamError("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
 +    expired = error
 +    timing(timingInput, "sse.timeout", {
 +      chunkTimeoutMs: ms,
@@ -602,15 +602,14 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
                status: 200,
                headers: { "Content-Type": "text/event-stream" },
              }),
-@@ -868,6 +884,79 @@ describe("session.llm.stream", () => {
+@@ -868,6 +884,77 @@ describe("session.llm.stream", () => {
    // [local-smark] 默认超时回退验证：未配置 timeout/chunkTimeout 时回退 600000/180000。
    // 快路径流式毫秒级完成不会真正触发死线，通过 fetch.start 日志字段断言默认值；
    // 同时断言 sse.end 出现，证明默认 chunk 超时已启用 wrapSSE（此前未配置时不启用）。
 +  it.instance(
 +    "times out before delayed provider headers at the configured chunk boundary",
 +    () =>
-+      Effect.gen(function* () {
-+        const captured = captureProviderConsole()
++      withProviderLogs((logs) => Effect.gen(function* () {
 +        const providerID = "delayed-header-openai-compatible"
 +        const responseReady = deferred<void>()
 +        const requestAborted = deferred<void>()
@@ -654,8 +653,7 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +        }).pipe(Effect.exit)
 +        expect(Exit.isFailure(exit)).toBe(true)
 +        yield* Effect.promise(() => Promise.allSettled([request, responseReady.promise, requestAborted.promise]))
-+        captured.restore()
-+        events = providerFetchEvents(captured.logs)
++        events = providerFetchEvents(logs)
 +        // 首个 raw chunk 尚未到达时也必须记录同一个 no-progress 失败，不能退回 Bun 的五分钟 idle timeout。
 +        expect(events.map((event) => event.phase)).toContain("sse.timeout")
 +        // chunkCount=0 区分 headers 前超时与首 chunk 后 stall；chunkTimeoutMs 断言配置 provenance。
@@ -663,7 +661,7 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
 +        // abort 必须传播到真实 transport（server handler 的 abort listener 已被触发）。
 +        expect(requestAborted).toBeDefined()
-+      }),
++      })),
 +    {
 +      config: () => ({
 +        enabled_providers: ["delayed-header-openai-compatible"],
@@ -691,15 +689,15 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
              models: {
                "gpt-test": {
                  name: "GPT Test",
-@@ -1233,11 +1322,13 @@ describe("session.llm.stream", () => {
+@@ -1233,11 +1320,12 @@ describe("session.llm.stream", () => {
  
    const alibabaQwenFixture = { providerID: "alibaba", modelID: "qwen-plus" }
    it.instance(
 -    "service stream cancellation cancels provider response body promptly",
 +    "service stream cancellation before first progress cancels the deadline promptly",
      () =>
-       Effect.gen(function* () {
-+        const captured = captureProviderConsole()
+-      Effect.gen(function* () {
++      withProviderLogs((logs) => Effect.gen(function* () {
          const fixture = loadFixture(alibabaQwenFixture.providerID, alibabaQwenFixture.modelID)
 -        const pending = waitStreamingRequest("/chat/completions")
 +        // 延迟首个 raw chunk，确保 user abort 发生在 headers/first-progress deadline 仍在等待时。
@@ -707,15 +705,15 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
  
          const resolved = yield* Provider.use.getModel(
            ProviderV2.ID.make(alibabaQwenFixture.providerID),
-@@ -1281,13 +1372,17 @@ describe("session.llm.stream", () => {
+@@ -1281,13 +1369,16 @@ describe("session.llm.stream", () => {
            expect(Cause.hasInterrupts(inner.cause)).toBe(true)
          }
          yield* Effect.promise(() => Promise.race([pending.requestAborted, timeout(500)]).catch(() => undefined))
-+        captured.restore()
-+        const events = providerFetchEvents(captured.logs)
++        const events = providerFetchEvents(logs)
 +        // 取消先于 chunkTimeout(25ms) 到达：deadline 不得发出 sse.timeout（否则取消不够 prompt）。
 +        expect(events.map((event) => event.phase)).not.toContain("sse.timeout")
-       }),
+-      }),
++      })),
      {
        config: () => ({
          enabled_providers: [alibabaQwenFixture.providerID],

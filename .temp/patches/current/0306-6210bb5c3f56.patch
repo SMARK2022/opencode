@@ -6,8 +6,8 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
    return {
      roots: true,
 -    limit: search ? 30 : 100,
-+    // #306：与 sync 侧一致使用 90 天窗口，避免全历史检索拖慢预览；搜索态保持窄结果集。
-+        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
++    // #306：仅搜索限制 90 天；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
++    ...(search ? { start: Date.now() - 90 * 24 * 60 * 60 * 1000 } : {}),
 +        limit: 100,
      ...(search ? { search } : {}),
      ...input.filter,
@@ -40,23 +40,24 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 diff --git a/packages/tui/test/component/dialog-session-list.test.ts b/packages/tui/test/component/dialog-session-list.test.ts
 --- a/packages/tui/test/component/dialog-session-list.test.ts
 +++ b/packages/tui/test/component/dialog-session-list.test.ts
-@@ -3,8 +3,10 @@ import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/c
+@@ -3,8 +3,9 @@ import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/c
  
  describe("dialog session list", () => {
    test("requests root sessions for the default browse list", () => {
-+    // #306：query 新增 start 时间窗口，断言用 expect.any(Number) 保持时间无关。
++    // #306：精确匹配无 start 的浏览请求，防止搜索窗口泄漏到历史浏览。
      expect(createDialogSessionListQuery({ filter: { path: "packages/tui" } })).toEqual({
        roots: true,
-+      start: expect.any(Number),
        limit: 100,
        path: "packages/tui",
      })
-@@ -13,6 +15,7 @@ describe("dialog session list", () => {
+@@ -13,6 +14,8 @@ describe("dialog session list", () => {
    test("requests root sessions for search results", () => {
      expect(createDialogSessionListQuery({ search: " deploy ", filter: { scope: "project" } })).toEqual({
        roots: true,
 +      start: expect.any(Number),
-       limit: 30,
+-      limit: 30,
++      // #306：原始需求扩大搜索上限，不能沿用迁移前的 30 项断言。
++      limit: 100,
        search: "deploy",
        scope: "project",
 

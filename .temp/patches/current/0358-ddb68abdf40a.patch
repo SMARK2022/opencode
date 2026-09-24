@@ -99,7 +99,7 @@ diff --git a/packages/sdk/js/src/gen/types.gen.ts b/packages/sdk/js/src/gen/type
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -864,6 +864,79 @@ describe("session.llm.stream", () => {
+@@ -864,6 +864,77 @@ describe("session.llm.stream", () => {
      )
    }
  
@@ -110,8 +110,7 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +  it.instance(
 +    "applies default overall and chunk timeouts when neither is configured",
 +    () =>
-+      Effect.gen(function* () {
-+        const captured = captureProviderConsole()
++      withProviderLogs((logs) => Effect.gen(function* () {
 +        const request = waitRequest(
 +          "/chat/completions",
 +          new Response(createChatStream("Hello"), {
@@ -146,15 +145,14 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +          tools: {},
 +        })
 +        yield* Effect.promise(() => request)
-+        captured.restore()
-+        const events = providerFetchEvents(captured.logs)
++        const events = providerFetchEvents(logs)
 +        // 默认 chunk 超时启用 wrapSSE，完整 SSE 里程碑都会出现
 +        expect(events.map((event) => event.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
 +        // 默认整请求绝对超时 10 分钟（从请求发起计时的硬死线）
 +        expect(events.find((event) => event.phase === "fetch.start")?.timeoutMs).toBe("600000")
 +        // 默认 chunk 空闲超时 3 分钟（两个 SSE 字节之间无数据才触发）
 +        expect(events.find((event) => event.phase === "fetch.start")?.chunkTimeoutMs).toBe("180000")
-+      }),
++      })),
 +    {
 +      config: () => ({
 +        enabled_providers: ["default-timeout-openai-compatible"],
@@ -176,6 +174,6 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +      }),
 +    },
 +  )
-   // #240：provider fetch/SSE timing milestone 顺序与负载无关性（读 console 捕获的 Effect.logInfo）
+   // #240：从真实 Effect logger 检查 fetch/SSE 顺序，CLI stdout 不承担诊断传输。
    it.instance(
      "logs provider response and first raw SSE chunk when chunk timeout is enabled",

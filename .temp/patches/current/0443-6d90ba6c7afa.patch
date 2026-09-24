@@ -807,15 +807,15 @@ index 6fc2dfda6..d32f6d31c 100644
  import z from "zod"
 -import { LLM } from "../../src/session/llm"
 +import { LLM, streamErrorSummary } from "../../src/session/llm"
-@@ -956,4 +956,105 @@ describe("session.llm.stream", () => {
+@@ -956,4 +956,113 @@ describe("session.llm.stream", () => {
        }),
      },
    )
  
 +  it.instance(
-+    "bounds stream error logs without changing the error event",
++    "bounds stream error logs without changing the failure cause",
 +    () =>
-+      Effect.gen(function* () {
++      withProviderLogs((logs) => Effect.gen(function* () {
 +        const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
 +        const request = waitRequest(
 +          "/chat/completions",
@@ -837,9 +837,9 @@ index 6fc2dfda6..d32f6d31c 100644
 +          permission: [{ permission: "*", pattern: "*", action: "allow" }],
 +        } satisfies Agent.Info
 +
-+        // runCollect 正常返回证明底层 Effect 没有被日志 callback 改成 failure；
-+        // 日志丢弃敏感请求，但 error event 保留原始 error，避免越权改变 processor 的分类输入。
-+        const events = yield* LLM.Service.use((svc) =>
++        // 目标 HTTP 500 从 Effect failure 通道返回，不能为匹配旧事件断言改写生产语义。
++        // 诊断仅脱敏日志；交给 processor 的原始错误必须保持请求与响应信息。
++        const exit = yield* LLM.Service.use((svc) =>
 +          svc
 +            .stream({
 +              user: {
@@ -861,13 +861,20 @@ index 6fc2dfda6..d32f6d31c 100644
 +              tools: {},
 +            })
 +            .pipe(Stream.runCollect, Effect.map((chunk) => [...chunk])),
-+        )
-+        const event = events.find((item) => item.type === "provider-error")
-+        if (!event || event.type !== "provider-error") throw new Error("Provider error event was not preserved")
-+        expect(JSON.stringify(event)).toContain("requestBodyValues")
-+        expect(JSON.stringify(event)).toContain(requestMarker)
++        ).pipe(Effect.exit)
++        expect(Exit.isFailure(exit)).toBe(true)
++        if (Exit.isSuccess(exit)) throw new Error("Provider failure was not preserved")
++        const failure = Cause.squash(exit.cause)
++        expect(APICallError.isInstance(failure)).toBe(true)
++        expect(JSON.stringify(failure)).toContain("requestBodyValues")
++        expect(JSON.stringify(failure)).toContain(requestMarker)
 +
 +        yield* Effect.promise(() => request)
++        // 检查实际 onError 日志，而不只测试独立 summary 函数。
++        const logged = logs.find((entry) => "error" in entry)
++        expect(logged?.error).toEqual(expect.objectContaining({ name: "APICallError", statusCode: 500 }))
++        expect(JSON.stringify(logged)).not.toContain(requestMarker)
++        expect(JSON.stringify(logged)).not.toContain("requestBodyValues")
 +
 +        // 日志侧净化合同：进入 Effect.logError 的唯一 error 形态是 streamErrorSummary；
 +        // provider-controlled message/URL/body 都不得出现在返回结构里，
@@ -876,6 +883,7 @@ index 6fc2dfda6..d32f6d31c 100644
 +          message: requestMarker,
 +          url: "http://bounded.test/v1/chat",
 +          requestBodyValues: { body: requestMarker },
++          responseBody: requestMarker + "R".repeat(12_000),
 +          statusCode: 500,
 +          isRetryable: false,
 +          // 当前 ai 包版本的 APICallError 构造不含 isRetryableByUsageLimit，省略。
@@ -888,7 +896,7 @@ index 6fc2dfda6..d32f6d31c 100644
 +        expect(summary.isRetryable).toBe(false)
 +        expect(summary.responseBytes).toBeGreaterThan(12_000)
 +        expect(streamErrorSummary(new Error("plain")).name).toBe("UnknownError")
-+      }),
++      })),
 +    {
 +      config: () => ({
 +        enabled_providers: ["bounded-error-compatible"],
@@ -917,13 +925,16 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 index 714861b5a..e0cc78e4b 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -5,6 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -5,9 +5,10 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { SessionProjector } from "@opencode-ai/core/session/projector"
  import { eq } from "drizzle-orm"
  import { EventV2Bridge } from "@/event-v2-bridge"
 +import { GlobalBus } from "@/bus/global"
  import { expect } from "bun:test"
  import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+ import { NodeFileSystem } from "@effect/platform-node"
+ import { Logging } from "@opencode-ai/core/observability/logging"
+ import { Logger, References } from "effect"
  import path from "path"
 @@ -3005,6 +3006,55 @@ it.instance("shell rejects with BusyError when loop running", () =>
    }),
@@ -955,7 +966,7 @@ index 714861b5a..e0cc78e4b 100644
 +        sessionID: chat.id,
 +        agent: "build",
 +        command:
-+          "bun -e \"for(let i=1;i<=40;i++){process.stdout.write('DIRECT_PROGRESS_'+i+'\r');await Bun.sleep(10)}\"",
++          "bun -e \"for(let i=1;i<=40;i++){process.stdout.write('DIRECT_PROGRESS_'+i+'\\r');await Bun.sleep(10)}\"",
 +      })
 +      yield* pollWithTimeout(
 +        Effect.sync(() => durable.some((part) => part.state.status === "completed") || undefined),

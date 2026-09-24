@@ -197,7 +197,7 @@ diff --git a/packages/opencode/test/installation/install-script.test.ts b/packag
    )
  }
  
-@@ -160,17 +163,27 @@ async function writeExecutable(file: string, content: string) {
+@@ -160,17 +163,30 @@ async function writeExecutable(file: string, content: string) {
  }
  
  // #167：清空 GITHUB_ACTIONS，避免测试误写 GITHUB_PATH
@@ -210,6 +210,9 @@ diff --git a/packages/opencode/test/installation/install-script.test.ts b/packag
      GITHUB_ACTIONS: "",
 -    ...env,
 +    ...bashEnv(env),
++    // Empty overrides make installer profile discovery fall back to the fixture HOME.
++    XDG_CONFIG_HOME: "",
++    ZDOTDIR: "",
 +  }
 +  return runCommand(bashCommand(bashPathForFile(script), args, scriptEnv), path.dirname(INSTALL_SCRIPT), {
 +    ...process.env,
@@ -229,7 +232,17 @@ diff --git a/packages/opencode/test/installation/install-script.test.ts b/packag
    expect(result.code).toBe(0)
    return result.stdout.trim()
  }
-@@ -200,3 +213,73 @@ function expectSuccess(result: { code: number; output: string }) {
+@@ -180,7 +196,8 @@ async function runCommand(command: string[], cwd: string, env?: Record<string, string | undefined>) {
+   const proc = Bun.spawn(command, {
+     cwd,
+-    env,
++    // Non-interactive Bash must not source a host startup file before the wrapper runs.
++    env: { ...process.env, ...env, BASH_ENV: "" },
+     stdout: "pipe",
+     stderr: "pipe",
+   })
+   const [stdout, stderr, code] = await Promise.all([
+@@ -200,3 +217,73 @@ function expectSuccess(result: { code: number; output: string }) {
  function count(text: string, needle: string) {
    return text.split(needle).length - 1
  }
@@ -274,7 +287,7 @@ diff --git a/packages/opencode/test/installation/install-script.test.ts b/packag
 +  return [
 +    BASH,
 +    "-c",
-+    ["exec", "env", ...assignments, "/bin/bash", quoteForSh(script), ...args.map((arg) => quoteForSh(bashPathForFile(arg)))].join(" "),
++    ["exec", "/usr/bin/env", "-u", "BASH_ENV", ...assignments, "/bin/bash", quoteForSh(script), ...args.map((arg) => quoteForSh(bashPathForFile(arg)))].join(" "),
 +  ]
 +}
 +
