@@ -109,7 +109,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 index 1111111111..2222222222 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -181,6 +181,34 @@
+@@ -181,6 +181,42 @@
  }
  
  describe("tool.shell", () => {
@@ -119,21 +119,29 @@ index 1111111111..2222222222 100644
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const seen: string[] = []
++        // 数字源码跨 shell 不需嵌套引号；当前 Bun 路径不依赖 PATH 中同名程序。
++        const code = "process.stdout.write(Buffer.from([115,97,102,101,7,101,110,100,10]))"
 +        const result = yield* run(
 +          {
-+            command: `bun -e ${JSON.stringify("process.stdout.write('safe\u0007end')")}`,
++            command: `${PS.has(sh()) ? "& " : ""}${bin} -e ${evalarg(code)}`,
 +          },
 +          {
-+            metadata: (input: any) => {
++            // 保留权限、取消及会话上下文，只观察 metadata，不能绕开真实执行前置条件。
++            ...ctx,
++            metadata: (input) => {
 +              const out = input?.metadata?.output
 +              if (typeof out === "string") seen.push(out)
 +              return Effect.void
 +            },
-+          } as any,
++          },
 +        )
 +        // #155：断言转义后可见文本，原始 BEL 不得出现
++        expect(result.metadata.exit).toBe(0)
 +        expect(result.output).toContain("safe\\x07end")
 +        expect(result.output.includes("\u0007")).toBe(false)
++        expect(result.metadata.output).not.toContain("\u0007")
++        // 必须实际收到消毒后的进度，空数组上的全称断言不能证明 streaming 安全。
++        expect(seen.some((item) => item.includes("safe\\x07end"))).toBe(true)
 +        for (const item of seen) {
 +          expect(item.includes("\u0007")).toBe(false)
 +        }

@@ -79,7 +79,7 @@ index cc5ab75ac..7f3179e99 100644
 +      ScopedCache.invalidateAll(state.cache),
 +    )
 +
-     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
+     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>, bridge: EffectBridge.Shape) {
        try {
          const provider = s.providers[model.providerID]
 @@ -2337,7 +2346,7 @@ for (const [id, provider] of configProviders) {

@@ -241,36 +241,59 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        yield* llm.wait(1)
  
        // #150：等到 task running 且带 child sessionId
-@@ -1960,7 +1960,8 @@ it.instance(
+@@ -1960,7 +1962,10 @@ it.instance(
            })
            .item(),
        )
 +      // [local-smark] permission 请求由 loop fiber 内的工具发出，fork 后主体才能轮询并批准
 -      const fiber = yield* prompt.loop({ sessionID: chat.id })
 +      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
++      if (process.platform === "win32")
++        yield* awaitWithTimeout(llm.wait(1), "auto metadata model request never started", "20 seconds")
        const [request] = yield* waitForPermission(1)
        expect(request.permission).toBe("todowrite")
        // Tool implementations should not each remember to copy ctx.agent into
-@@ -2014,7 +2014,8 @@ it.instance(
+@@ -1969,7 +1974,7 @@ it.instance(
+       expect(request.metadata.agent).toBe("auto")
+       yield* permission.reply({ requestID: request.id, reply: "reject" })
+       yield* Fiber.await(fiber)
+     }),
+   { git: true },
+-  10_000,
++  process.platform === "win32" ? 30_000 : 10_000,
+ )
+@@ -2014,7 +2019,10 @@ it.instance(
        )
  
        // #216：fork loop 使 cancel 可在 review 进行中并发触发
 +      // [local-smark] #216：review 进行中 cancel 必须可并发触发，loop 必须在 fiber 上
 -      const fiber = yield* prompt.loop({ sessionID: chat.id })
 +      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
++      if (process.platform === "win32")
++        yield* awaitWithTimeout(llm.wait(1), "shell review model request never started", "20 seconds")
        // #216：等待 shell 工具进入 reviewing 状态——确认 auto-review 已启动
        const reviewing = yield* pollWithTimeout(
          Effect.gen(function* () {
-@@ -2156,7 +2156,8 @@ it.instance("subtask child inherits parent session external_directory rules tied
-     const msg = yield* user(chat.id, "hello")
-     yield* addSubtask(chat.id, msg.id)
+@@ -2047,7 +2055,8 @@ it.instance(
+       // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
+       yield* prompt.cancel(chat.id)
+       gate.resolve()
+-      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
++      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds")
++      expect(Exit.isSuccess(exit)).toBe(true)
  
-+      // [local-smark] 子会话继承断言在 loop 完成后读取 children，fork 保证主体不被阻塞
--    yield* prompt.loop({ sessionID: chat.id })
-+    yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-     const kids = yield* sessions.children(chat.id)
-     expect(kids).toHaveLength(1)
+       const shell = yield* pollWithTimeout(
+         Effect.gen(function* () {
+@@ -2093,8 +2102,8 @@ it.instance(
+       // #216：reviewer 不应执行 bash——中止阻止了 reviewer 代理执行被审查的命令
+       expect(
+         reviewerParts.some((part) => part.type === "tool" && part.tool === "bash"),
+       ).toBe(false)
+     }),
+   { git: true },
+-  15_000,
++  process.platform === "win32" ? 30_000 : 15_000,
+ )
 @@ -2212,7 +2212,7 @@ it.instance(
        const msg = yield* user(chat.id, "hello")
        yield* addSubtask(chat.id, msg.id)
@@ -355,18 +378,31 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        yield* llm.wait(1)
  
        const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-@@ -2616,9 +2616,9 @@ it.instance(
+@@ -2616,9 +2628,13 @@ it.instance(
        yield* llm.hang
        yield* user(chat.id, "hello")
  
 -      const a = yield* prompt.loop({ sessionID: chat.id })
 +      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
+-      yield* llm.wait(1)
++      yield* (
++        process.platform === "win32"
++          ? awaitWithTimeout(llm.wait(1), "queued callers model request never started", "20 seconds")
++          : llm.wait(1)
++      )
 -      const b = yield* prompt.loop({ sessionID: chat.id })
 +      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
        yield* Effect.sleep(50)
  
        yield* prompt.cancel(chat.id)
+@@ -2629,6 +2645,6 @@ it.instance(
+         expect(exitA.value.info.id).toBe(exitB.value.info.id)
+       }
+     }),
+   { git: true },
+-  10_000,
++  process.platform === "win32" ? 30_000 : 10_000,
+ )
 @@ -2745,7 +2745,7 @@ it.instance("assertNotBusy fails with BusyError when loop running", () =>
      const chat = yield* sessions.create({})
      yield* user(chat.id, "hi")
@@ -432,15 +468,15 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        yield* Effect.sleep(50)
  
        yield* prompt.cancel(chat.id)
-@@ -3836,7 +3836,7 @@ it.instance(
-       // 子会话只需要返回文本即可完成
-       yield* llm.push(reply().text("review done").stop().item())
- 
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       // 找到 task 工具 part 拿到子会话 ID
-       const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+@@ -3840,6 +3856,7 @@
+       expect(hasExtAuto).toBe(true)
+       expect(hasBashAuto).toBe(true)
+     }),
+   { git: true },
+-  15_000,
++  // 父子会话各自保留真实模型与 Git 路径，Windows 总预算覆盖两轮初始化。
++  process.platform === "win32" ? 60_000 : 15_000,
+ )
 @@ -3877,7 +3877,7 @@ it.instance(
        // 第一轮：hang 住 LLM，让 agent loop 卡住
        yield* llm.hang

@@ -836,12 +836,31 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -2,4 +2,5 @@ import { expect } from "bun:test"
+@@ -2,4 +2,7 @@ import { expect } from "bun:test"
  import { Effect, Exit, Layer, Option } from "effect"
  import { Session as SessionNs } from "@/session/session"
  import { SessionGoal } from "@/session/goal"
 +import { Database } from "@opencode-ai/core/database/database"
++import path from "path"
++import { provideInstance, tmpdirScoped } from "../fixture/fixture"
  import { RuntimeFlags } from "@/effect/runtime-flags"
+@@ -21,3 +24,3 @@
+-const it = testEffect(
++const testLayer = (replacements: LayerNode.Replacements = []) =>
+   AppNodeBuilder.build(
+     LayerNode.group([
+@@ -38,7 +41,9 @@
+       [Config.node, TestConfig.layer()],
++      ...replacements,
+     ],
+-  ),
+-)
++  )
++
++const it = testEffect(testLayer())
+ 
+ // #364：新建 goal 默认 active，usage 归零，id 非空
+ it.instance(
 @@ -372,14 +372,23 @@ it.instance(
        const result = yield* goalSvc.get(session.id)
        if (Option.isSome(result)) {
@@ -919,7 +938,7 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
        const r2 = yield* goalSvc.modelTransition(session.id, {
          snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
        })
-@@ -877,6 +877,95 @@ it.instance(
+@@ -877,6 +877,103 @@ it.instance(
  )
  
  // previousTurnID 不匹配说明 attempt 链断裂，streak 从 1 重计，防止跨中断累积
@@ -959,58 +978,66 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 +
 +  // [local-smark] 多 daemon 共享同一 SQLite 文件；第二个 writer 在生产 set 获锁前提交 C，
 +  // set 必须在 immediate transaction 内重新读取 C，不能基于锁外旧 A 复用 generation 2。
-+  it.instance(
++  it.live(
 +    "concurrent objective edits preserve a unique generation",
 +    () =>
 +      Effect.gen(function* () {
-+        const goalSvc = yield* SessionGoal.Service
-+        const sessions = yield* SessionNs.Service
-+        const session = yield* sessions.create({})
-+        const initial = yield* goalSvc.set(session.id, { objective: "objective A" })
-+        const script = `
-+          import { Database } from "bun:sqlite"
-+          const [path, sessionID] = process.argv.slice(-2)
-+          const db = new Database(path)
-+          db.exec("PRAGMA busy_timeout = 30000")
-+          db.exec("BEGIN IMMEDIATE")
-+          db.query("UPDATE session_goal SET objective = ?, generation = generation + 1 WHERE session_id = ?").run("objective C", sessionID)
-+          console.log("lock-ready")
-+          await Bun.sleep(1000)
-+          db.exec("COMMIT")
-+          db.close()
-+        `
-+        const dbPath = Database.path()
-+        const worker = Bun.spawn([process.execPath, "-e", script, dbPath, session.id], {
-+          stdout: "pipe",
-+          stderr: "pipe",
-+        })
-+        const ready = yield* Effect.promise(async () => {
-+          const chunk = await worker.stdout.getReader().read()
-+          if (chunk.done) {
-+            throw new Error(`lock worker exited before readiness for ${dbPath}: ${await new Response(worker.stderr).text()}`)
-+          }
-+          return new TextDecoder().decode(chunk.value)
-+        })
-+        expect(ready).toContain("lock-ready")
++        const directory = yield* tmpdirScoped({ git: true })
++        const dbPath = path.join(directory, "goal-concurrency.db")
++        // 在同一替换图内创建 Project/Session/Goal，保留真实迁移和外键，避免 fixture 另建内存库。
++        // local memo map 隔离外层测试图；文件连接释放后才清理临时目录，不修改全局 DB 配置。
++        return yield* Effect.gen(function* () {
++          const goalSvc = yield* SessionGoal.Service
++          const sessions = yield* SessionNs.Service
++          const session = yield* sessions.create({})
++          const initial = yield* goalSvc.set(session.id, { objective: "objective A" })
++          const script = `
++            import { Database } from "bun:sqlite"
++            const [path, sessionID] = process.argv.slice(-2)
++            const db = new Database(path)
++            db.exec("PRAGMA busy_timeout = 30000")
++            db.exec("BEGIN IMMEDIATE")
++            db.query("UPDATE session_goal SET objective = ?, generation = generation + 1 WHERE session_id = ?").run("objective C", sessionID)
++            console.log("lock-ready")
++            await Bun.sleep(1000)
++            db.exec("COMMIT")
++            db.close()
++          `
++          const worker = Bun.spawn([process.execPath, "-e", script, dbPath, session.id], {
++            stdout: "pipe",
++            stderr: "pipe",
++          })
++          const ready = yield* Effect.promise(async () => {
++            const chunk = await worker.stdout.getReader().read()
++            if (chunk.done) {
++              throw new Error(`lock worker exited before readiness for ${dbPath}: ${await new Response(worker.stderr).text()}`)
++            }
++            return new TextDecoder().decode(chunk.value)
++          })
++          expect(ready).toContain("lock-ready")
 +
-+        const updated = yield* goalSvc.set(session.id, { objective: "objective B" }).pipe(
-+          Effect.ensuring(Effect.promise(() => worker.exited).pipe(Effect.ignore)),
++          const updated = yield* goalSvc.set(session.id, { objective: "objective B" }).pipe(
++            Effect.ensuring(Effect.promise(() => worker.exited).pipe(Effect.ignore)),
++          )
++          expect(updated.objective).toBe("objective B")
++          // set 在 immediate 事务内读到 C 的 generation=2 并递增为 3，证明未复用锁外旧快照
++          expect(updated.generation).toBe(3)
++
++          // C 的 generation-2 snapshot 在 B 提交后必须 stale，不能终态化当前 Goal。
++          const stale = yield* goalSvc.modelTransition(session.id, {
++            snapshot: { goalID: initial.id, generation: 2, status: "active" },
++            turnID: "turn1",
++            userInitiated: true,
++            status: "complete",
++            reason: "finished C",
++          }).pipe(Effect.exit)
++          expect(Exit.isFailure(stale)).toBe(true)
++        }).pipe(
++          provideInstance(directory),
++          Effect.provide(testLayer([[Database.node, Database.layerFromPath(dbPath)]]), { local: true }),
 +        )
-+        expect(updated.objective).toBe("objective B")
-+        // set 在 immediate 事务内读到 C 的 generation=2 并递增为 3，证明未复用锁外旧快照
-+        expect(updated.generation).toBe(3)
-+
-+        // C 的 generation-2 snapshot 在 B 提交后必须 stale，不能终态化当前 Goal。
-+        const stale = yield* goalSvc.modelTransition(session.id, {
-+          snapshot: { goalID: initial.id, generation: 2, status: "active" },
-+          turnID: "turn1",
-+          userInitiated: true,
-+          status: "complete",
-+          reason: "finished C",
-+        }).pipe(Effect.exit)
-+        expect(Exit.isFailure(stale)).toBe(true)
 +      }),
-+    { git: true },
++    10_000,
 +  )
  it.instance(
    "modelTransition skipped turn resets streak",

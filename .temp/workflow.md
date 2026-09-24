@@ -1,4 +1,6 @@
-你当前就在目标工作区 `/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark` 中执行任务；当前目标代码起点是 upstream `v1.17.20`（尽管目录名含 `v1.17.18`，仍保持原目录名不变）。不要假设可以读取父级仓库的源码、提交或工作区内容；本 workflow 的所有输入都必须来自当前目标工作区中的 `manifest.json`、`manifest.tsv`、`original/`、`current/`、`records/`、`reports/`、`states/`、目标源码、目标测试和仓库指令。你的任务是把父级仓库已经形成的完整 SMARK Git 提交序列，按原始顺序重放到这个新的目标分支中。目标分支与父级分支的基础代码已经发生变化，因此 patch 出现路径变化、owner 迁移、API 变化、Effect/Schema 变化、测试变化或上下文冲突是正常情况。你的工作是完成高质量的行为重建和目标适配，不能把无法直接 apply 当作跳过理由。
+你应当准确完整推进直到最终全部完成，期间不得停下，不得以tool-free结尾。
+
+你当前就在目标工作区 `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720` 中执行任务；当前目标代码起点是 upstream `v1.17.20`。不要假设可以读取父级仓库的源码、提交或工作区内容；本 workflow 的所有输入都必须来自当前目标工作区中的 `manifest.json`、`manifest.tsv`、`original/`、`current/`、`records/`、`reports/`、`states/`、目标源码、目标测试和仓库指令。你的任务是把父级仓库已经形成的完整 SMARK Git 提交序列，按原始顺序重放到这个新的目标分支中。目标分支与父级分支的基础代码已经发生变化，因此 patch 出现路径变化、owner 迁移、API 变化、Effect/Schema 变化、测试变化或上下文冲突是正常情况。你的工作是完成高质量的行为重建和目标适配，不能把无法直接 apply 当作跳过理由。
 
 ## 任务背景和事实来源
 
@@ -32,9 +34,11 @@
 
 注意，即使你把 `B/G` 修改好了也必须重新并行启动两个全新的独立 sub-agent 审计！只有两份结果一致、当前批次全部 `PASS` 且没有未关闭 `B/G` 时，你才可以推进下一批。任一 sub-agent 调用失败最多连续重试三次；仍失败时记录 `independent-audit-unavailable` 并保持阻塞，不得退化为自审或继续推进。任何未完成双重审计的批次都不是完成状态。
 
-## 一些提示
+## 重要要求(50为单位推进)
 
-当前状态下我们已经进行完成了全部的patch的修改，因此目前主要进入到审计阶段来复审部分实现是否符合仓库设计思想（兼顾V1->V2的迁移，同时避免在部分已经完全弃用的V1架构上进行部分feature实现，这种情况应当检查V2中的相关功能是否已有较好实现并进行结合我们的SMARK分支以及相应的修改）；整体工作流可以遵循：一次性首先序列化相应的+10、+20、+30、+40、50个之后的状态到state，然后一次性调用20个独立审计来进行升序以及降序的5个为间隔的审计。再次提醒：除current之外其他修改均需要在全局缓存文件夹`D:/Temp/opencode/`中进行，同时需要避免将整个worktree或者整个state复制到其中，因为这会在长程任务中逐渐消耗完全磁盘空间；不得修改 `original/`、`state/`等其他文件夹
+全部 patch 已重放，当前复查以上游优势与 SMARK 有效语义的融合、真实 V1/V2 职责为重点。主 agent 用官方脚本物化累计终点并验证，再按完整五项批次并行正反审计；审计员只读，不运行物化、安装、测试或复制工作区。复查不以历史 PASS 闭合、中间 state 保留、source Git 再生成或逐项 typecheck 为准入条件；直接核对完整 original/current、manifest、source proof、最终源码及同版本累计验证证据。当前证据缺失仍报告，但继续完成行为调查；不倒填历史 verdict，不以末态通过掩盖前项语义丢失。逐 hunk 行为、E/C、错误/并发/清理及双审要求不变。批量复查优先一次并行 50 项；同轮审计员不得互读对方结论。只修改 current 与对应 record，临时内容放 `D:/Temp/opencode/`，不得手改 original/state 或复制工作区。
+
+同时请注意，第一次接触一批patch时，不需要自己进行explore，直接进入批量审计模式以及优化阶段
 
 ## 总体完成和提交
 

@@ -44,6 +44,8 @@ Verify every material claim independently. A file list, grep result, builder exp
 
 ## Admission and Serial Gate
 
+The serial admission rules below govern first replay. For an explicitly user-requested post-replay review, audit the supplied complete batch against its original/current patches, manifest, upstream implementation, final materialized source and current validation evidence. Do not require historical PASS closure, retained intermediate states, source Git regeneration or per-index typechecks as admission prerequisites. Verify identity and cumulative provenance from the manifest, immutable originals, source proof and materialization report; use the matching cumulative endpoint's install, affected-workspace typecheck and behavior-test evidence. Missing or inconsistent current evidence remains a finding; complete the behavior investigation rather than stopping at that gate. Never infer historical PASS, rewrite old verdicts, certify uninspected entries, or let a later patch conceal an earlier semantic loss. All per-commit behavior, E/C and independent review requirements remain in force. Reviewer independence prohibits reading the concurrent counterpart's conclusions, not existing historical evidence.
+
 Before auditing, read `.temp/workflow.md`, `.temp/patches/AUDIT_CONTRACT.md`, the target policy, and the target `adversarial-audit` skill. Normal input must contain exactly five consecutive manifest entries. The only terminal exception is the exact two-entry batch `451-452`. Reject fewer, more, duplicate, non-contiguous, range-only, or summary-only input without auditing a visible subset:
 
 ```text

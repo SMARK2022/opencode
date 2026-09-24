@@ -14,7 +14,7 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -82,17 +82,68 @@ export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
+@@ -82,17 +82,70 @@ export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
    return headerUserAgent ?? (typeof options["header-ua"] === "string" ? options["header-ua"] : undefined)
  }
  
@@ -28,11 +28,13 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +  modelID: string
 +  sessionID?: string
 +  startedAt: number
++  log: (fields: Record<string, unknown>) => void
 +}
 +
 +function timing(input: FetchTiming, phase: string, extra?: Record<string, unknown>) {
 +  // phase 字符串是稳定契约：区分停滞发生在响应头前、原始 SSE 块前还是 AI SDK 语义事件前
-+  Effect.logInfo("timing", {
++  // 原生回调必须复用所属 Provider 的 logger；裸 runSync 会把诊断写进 CLI stdout。
++  input.log({
 +    phase,
 +    requestID: input.requestID,
 +    providerID: input.providerID,
@@ -40,7 +42,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +    sessionID: input.sessionID,
 +    elapsedMs: Date.now() - input.startedAt,
 +    ...extra,
-+  }).pipe(Effect.runSync)
++  })
 +}
 +
 +function errorFields(error: unknown) {
@@ -84,7 +86,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
            ctl.abort(err)
            void reader.cancel(err)
            reject(err)
-@@ -105,16 +156,29 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+@@ -105,16 +158,29 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
            },
            (err) => {
              clearTimeout(id)
@@ -114,7 +116,12 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
        ctrl.enqueue(part.value)
      },
      async cancel(reason) {
-@@ -1992,6 +2056,21 @@ for (const [id, provider] of configProviders) {
+@@ -1880,3 +1946,3 @@
+-    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
++    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>, bridge: EffectBridge.Shape) {
+       try {
+         const provider = s.providers[model.providerID]
+@@ -1992,6 +2058,24 @@ for (const [id, provider] of configProviders) {
  
            // #83：customFetch 仅鉴权透传；默认走 NetworkProxy.fetch 主路由
            // #83：provider 请求 purpose=provider，区别于基础设施和 npm
@@ -125,6 +132,9 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +            modelID: model.id,
 +            sessionID: timingHeaders.get("x-session-affinity") ?? timingHeaders.get("x-opencode-session") ?? undefined,
 +            startedAt: Date.now(),
++            // 保留 Effect 运行环境的 logger 与级别，计时回调不自行创建全局运行时。
++            log: (fields: Record<string, unknown>) =>
++              bridge.fork(Effect.logInfo("timing", fields).pipe(Effect.annotateLogs({ service: "provider.fetch" }))),
 +          }
 +          // 诊断刻意只保留 provider 本地的传输里程碑与请求大小：
 +          // 不记录 body 内容、鉴权头、prompt、工具输出或原始 chunk
@@ -136,7 +146,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
            const res = await (
              customFetch
                ? NetworkProxy.fetchWithRoute(customFetch, input, {
-@@ -2006,11 +2085,23 @@ for (const [id, provider] of configProviders) {
+@@ -2006,11 +2090,23 @@ for (const [id, provider] of configProviders) {
                    // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
                    timeout: false,
                  })
@@ -162,10 +172,25 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
          }
  
          const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
+@@ -2099,8 +2195,10 @@
+       if (s.models.has(key)) return s.models.get(key)!
+ 
++      // 在 Effect 主路径捕获实例与观测环境，再交给 SDK 的异步 fetch/SSE 回调。
++      const bridge = yield* EffectBridge.make()
+       const provider = s.providers[model.providerID]
+       return yield* EffectPromise.refineRejection(
+         async () => {
+-          const sdk = await resolveSDK(model, s, envs)
++          const sdk = await resolveSDK(model, s, envs, bridge)
+           const language = s.modelLoaders[model.providerID]
+             ? await s.modelLoaders[model.providerID](
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -749,6 +749,42 @@
+@@ -1,1 +1,2 @@
++import { Logger } from "effect"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+@@ -749,6 +750,40 @@
      status: 200,
      headers: { "Content-Type": "text/event-stream" },
    })
@@ -186,39 +211,36 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +  )
 +}
 +
-+// #240：测试进程无 fileLogger 接线，Effect.logInfo 走 console——用捕获断言 timing milestone 链路
-+function captureProviderConsole() {
-+  const logs: string[] = []
-+  const original = console.log
-+  console.log = (...args: unknown[]) => {
-+    logs.push(args.map((arg) => String(arg)).join(" "))
-+  }
-+  return {
-+    logs,
-+    restore() {
-+      console.log = original
-+    },
-+  }
++function withProviderLogs<A, E, R>(fn: (logs: Record<string, unknown>[]) => Effect.Effect<A, E, R>) {
++  return Effect.suspend(() => {
++    // 每次执行独立收集，不替换全局 console，也不依赖文件 logger 的批量刷盘时序。
++    const logs: Record<string, unknown>[] = []
++    const logger = Logger.make(({ message }) => {
++      for (const value of Array.isArray(message) ? message : [message]) {
++        // 捕获真实结构化字段；timing 与错误日志分别在各自断言中筛选。
++        if (value && typeof value === "object" && !Array.isArray(value)) logs.push(value)
++      }
++    })
++    // 整个测试 Effect 都带此 logger，SDK 构建时捕获的 bridge 才能继承它。
++    return fn(logs).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger])))
++  })
 +}
 +
-+function providerFetchEvents(lines: string[]) {
-+  return lines
-+    .filter((line) => line.includes("timing") && line.includes("requestID"))
-+    .map((line) => Object.fromEntries(Array.from(line.matchAll(/([A-Za-z]+)=([^\s]+)/g), (match) => [match[1], match[2]])))
++function providerFetchEvents(lines: Record<string, unknown>[]) {
++  return lines.filter((line) => "phase" in line && "requestID" in line).map((line) => Object.fromEntries(Object.entries(line).map(([key, value]) => [key, String(value)])))
 +}
 +
  describe("session.llm.stream", () => {
-@@ -827,5 +863,76 @@
+@@ -827,5 +862,74 @@
        },
      )
    }
  
-+  // #240：provider fetch/SSE timing milestone 顺序与负载无关性（读 console 捕获的 Effect.logInfo）
++  // #240：从真实 Effect logger 检查 fetch/SSE 顺序，CLI stdout 不承担诊断传输。
 +  it.instance(
 +    "logs provider response and first raw SSE chunk when chunk timeout is enabled",
 +    () =>
-+      Effect.gen(function* () {
-+        const captured = captureProviderConsole()
++      withProviderLogs((logs) => Effect.gen(function* () {
 +        const request = waitRequest(
 +          "/chat/completions",
 +          new Response(createChatStream("Hello"), {
@@ -254,15 +276,14 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +          tools: {},
 +        })
 +        yield* Effect.promise(() => request)
-+        captured.restore()
 +
-+        const events = providerFetchEvents(captured.logs)
++        const events = providerFetchEvents(logs)
 +        expect(events.map((event) => event.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
 +        expect(events.find((event) => event.phase === "fetch.response")?.status).toBe("200")
 +        expect(events.find((event) => event.phase === "fetch.response")?.isSSE).toBe("true")
 +        expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
 +        expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
-+      }),
++      })),
 +    {
 +      config: () => ({
 +        enabled_providers: ["timed-openai-compatible"],

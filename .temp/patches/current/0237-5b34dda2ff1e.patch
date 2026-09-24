@@ -197,37 +197,37 @@ diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/sessio
 +          // 所以这里补同一组 daemon-log milestone。只记录 phase/source、
 +          // sessionID、工具名、callID、status 和耗时；不记录 argsJson、结果、
 +          // metadata，避免 workflow 参数或输出进入日志。
-+          Effect.logInfo("tool timing", { phase: "tool.start", ...timing }).pipe(Effect.runSync)
++          await bridge.promise(Effect.logInfo("tool timing", { phase: "tool.start", ...timing }))
            if (!t || !t.execute) {
-+            Effect.logInfo("tool timing", {
++            await bridge.promise(Effect.logInfo("tool timing", {
 +              phase: "tool.end",
 +              ...timing,
 +              status: "error",
 +              durationMs: Date.now() - startedAt,
-+            }).pipe(Effect.runSync)
++            }))
              return { result: "", error: `Unknown tool: ${toolName}` }
            }
            try {
 @@ -138,10 +156,22 @@
              const output = typeof result === "string" ? result : (result?.output ?? JSON.stringify(result))
-+            Effect.logInfo("tool timing", {
++            await bridge.promise(Effect.logInfo("tool timing", {
 +              phase: "tool.end",
 +              ...timing,
 +              status: "completed",
 +              durationMs: Date.now() - startedAt,
-+            }).pipe(Effect.runSync)
++            }))
              return {
                result: output,
                metadata: typeof result === "object" ? result?.metadata : undefined,
                title: typeof result === "object" ? result?.title : undefined,
              }
            } catch (e: any) {
-+            Effect.logInfo("tool timing", {
++            await bridge.promise(Effect.logInfo("tool timing", {
 +              phase: "tool.end",
 +              ...timing,
 +              status: "error",
 +              durationMs: Date.now() - startedAt,
-+            }).pipe(Effect.runSync)
++            }))
              return { result: "", error: e.message ?? String(e) }
            }
          }
@@ -518,19 +518,38 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -10,2 +10,3 @@
+@@ -10,2 +10,5 @@
++import { NodeFileSystem } from "@effect/platform-node"
++import { Logging } from "@opencode-ai/core/observability/logging"
++import { Logger, References } from "effect"
  import path from "path"
-+import { Global } from "@opencode-ai/core/global"
  import { fileURLToPath } from "url"
-@@ -1264,5 +1265,24 @@
+@@ -1249,6 +1252,15 @@
+     yield* llm.tool("glob", { pattern: "**/*.txt" })
+     yield* llm.text("done")
+ 
+-    const result = yield* prompt.loop({ sessionID: session.id })
++    // Install the real file logger locally; closing its scope flushes before the assertions.
++    const result = yield* prompt.loop({ sessionID: session.id }).pipe(
++      Effect.provide(
++        Logger.layer([Logging.fileLogger(path.join(dir, "timing.log"))]).pipe(
++          Layer.provide(NodeFileSystem.layer),
++          Layer.orDie,
++        ),
++      ),
++      Effect.provideService(References.MinimumLogLevel, "Info"),
++    )
+     expect(result.info.role).toBe("assistant")
+ 
+@@ -1264,5 +1276,24 @@
      expect(tool.state.output).toContain(file)
      expect(tool.state.output).not.toContain("No context found for instance")
      expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
 +
-+    // 行为断言读取真实 daemon log：必须能串起 processor/tool timing，
++    // 行为断言读取测试局部的真实 Effect file log：必须能串起 processor/tool timing，
 +    // 同时确认诊断日志没有泄漏工具输入 pattern 或工具输出路径。
 +    const timing = yield* pollWithTimeout(
-+      Effect.promise(() => Bun.file(Global.Path.log + "/opencode.log").text().catch(() => "")).pipe(
++      Effect.promise(() => Bun.file(path.join(dir, "timing.log")).text().catch(() => "")).pipe(
 +        Effect.map((content) => {
 +          const lines = content.split("\n").filter((line) => line.includes(`${session.id}`) && line.includes(" timing"))
 +          return lines.some((line) => line.includes("phase=processor.end")) &&

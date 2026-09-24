@@ -152,18 +152,17 @@ diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybin
 diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
 --- a/packages/opencode/src/config/tui.ts
 +++ b/packages/opencode/src/config/tui.ts
-@@ -139,6 +139,11 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
-       // Flatten a nested "tui" key so users who wrote `{ "tui": { ... } }` inside tui.json
-       // (mirroring the old opencode.json shape) still get their settings applied.
-       const normalized = dropUnknownKeybinds(normalize(data))
-+  // #317：macOS 终端里 Option/Alt 常被当作文本输入，Ctrl+Shift+字母也可能退化成 Ctrl+字母；F8 避开粘贴键和既有 Ctrl+R。
-+  // 只在用户未配置 prompt_voice_toggle 时填默认值，避免破坏已有自定义 keybind。
-+  if (process.platform === "darwin" && isRecord(normalized.keybinds)) {
-+    ;(normalized.keybinds as Record<string, unknown>).prompt_voice_toggle ??= "f8"
-+  }
-       const parsed = ConfigParse.schema(Info, normalized, configFilepath)
-       const validated = parsed.attention?.sounds
-         ? {
+@@ -294,5 +294,10 @@
+   const result = TuiConfig.resolve(
+     {
+       ...acc.result,
++      // #317：合并全部文件后才补 macOS F8 默认，无配置时也生效。
++      // 显式快捷键（包括 none）最后覆盖，较高优先级的无关配置不能重置用户选择。
++      keybinds: process.platform === "darwin"
++        ? { prompt_voice_toggle: "f8", ...acc.result.keybinds }
++        : acc.result.keybinds,
+       // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
+       // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
 
 
 diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
