@@ -174,7 +174,8 @@ export const layer = Layer.effect(
       if (!session.revert) return
       // 本次 owner 固定使用同一个边界，后续异步写入不能改变这次 cleanup 的解释范围。
       const boundary = session.revert
-      const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
+      // cleanup 可在边界已隐藏后重入；只读本次边界之后的原始范围，避免扩到完整审计历史。
+      const msgs = yield* sessions.messages({ sessionID, fromMessageID: boundary.messageID, includeHidden: true }).pipe(Effect.orDie)
       const messageID = boundary.messageID
       const boundaryMessage = msgs.find((msg) => msg.info.id === messageID)
       // cleanup 与首次 revert 共用同一 boundary tuple，hidden/删除不能重新解释范围。
@@ -195,16 +196,19 @@ export const layer = Layer.effect(
         remove.push(msg)
       }
       for (const msg of remove) {
+        const incomplete = msg.info.role === "assistant" && !msg.info.time.completed
         const next = {
           ...msg.info,
-          hidden: { time: Date.now(), reason: "undo" as const },
+          // 重试和旧 tombstone 保留原时间/原因；隐藏状态不能被反复改写。
+          hidden: msg.info.hidden ?? { time: Date.now(), reason: "undo" as const },
         }
         if (next.role === "assistant" && !next.time.completed) {
           next.time.completed = next.hidden.time
           next.error ??= new MessageV2.AbortedError({ message: "Aborted by undo" }).toObject()
         }
-        yield* sessions.updateMessage(next)
+        if (!msg.info.hidden || incomplete) yield* sessions.updateMessage(next)
         if (next.role === "assistant" && next.parentID) {
+          // hide 已提交而记账中断时仍需重放此幂等 owner，之后才能清除 revert 边界。
           const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
           if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next })
         }
@@ -216,6 +220,7 @@ export const layer = Layer.effect(
           const removeParts = target.parts.slice(idx)
           target.parts = target.parts.slice(0, idx)
           for (const part of removeParts) {
+            if (part.hidden) continue
             yield* sessions.updatePart({
               ...part,
               hidden: { time: Date.now(), reason: "undo" },

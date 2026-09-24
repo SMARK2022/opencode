@@ -133,9 +133,11 @@ describe("SessionStaleTurn", () => {
       const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-tool" }))
       const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
 
+      // 修复扫描的 raw opt-in 必须能关闭已隐藏但物理上仍 open 的工具。
+      yield* provideInstance(dir)(sessions.updatePart({ ...seeded.tool, hidden: { time: Date.now(), reason: "undo" } }))
       yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
 
-      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
+      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id, includeHidden: true })
       const tool = msg.parts.find((part) => part.id === seeded.tool.id)
       expect(tool?.type).toBe("tool")
       if (tool?.type !== "tool") return

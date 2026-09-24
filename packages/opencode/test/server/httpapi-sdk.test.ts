@@ -684,7 +684,7 @@ describe("HttpApi SDK", () => {
         )
         const hiddenMessage = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
         const hiddenParentPatch = yield* updatePart({ ...seeded.part, text: "resurrected message" })
-        const hiddenParentRaw = yield* MessageV2.get({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id })
+        const hiddenParentRaw = yield* MessageV2.get({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id, includeHidden: true })
         expect([
           hiddenPart.status, array(record(hiddenPart.data).parts).length,
           hiddenMessage.status, hiddenParentPatch.status, firstPartText(hiddenParentRaw),

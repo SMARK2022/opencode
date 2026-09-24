@@ -21,7 +21,7 @@ import { or } from "drizzle-orm"
 import { sql } from "drizzle-orm"
 import { SyncEvent } from "../sync"
 import type { SQL } from "drizzle-orm"
-import { PartTable, SessionTable } from "./session.sql"
+import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage/storage"
 import * as Log from "@opencode-ai/core/util/log"
@@ -572,7 +572,7 @@ export interface Interface {
   readonly clearRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly setSummary: (input: { sessionID: SessionID; summary: Info["summary"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
-  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<MessageV2.WithParts[], NotFound>
+  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID; includeHidden?: boolean }) => Effect.Effect<MessageV2.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -583,6 +583,7 @@ export interface Interface {
     sessionID: SessionID
     messageID: MessageID
     partID: PartID
+    includeHidden?: boolean
   }) => Effect.Effect<MessageV2.Part | undefined>
   readonly updatePart: <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
   readonly publishPartProgress: <T extends MessageV2.ToolPart>(part: T) => Effect.Effect<T>
@@ -772,6 +773,13 @@ export const layer: Layer.Layer<
               eq(PartTable.session_id, input.sessionID),
               eq(PartTable.message_id, input.messageID),
               eq(PartTable.id, input.partID),
+              // 单 Part 读取与 MessageV2 默认一致；内部终态写者才能显式读取隐藏 owner。
+              input.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
+              input.includeHidden ? undefined : sql`exists (
+                select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
+                and ${MessageTable.session_id} = ${PartTable.session_id}
+                and json_type(${MessageTable.data}, '$.hidden') is null
+              )`,
             ),
           )
           .get(),
@@ -888,14 +896,14 @@ export const layer: Layer.Layer<
       // 每页 cursor 在 storage thaw 提交后推进，读取中断不会把尚未请求的后续历史意外预热。
       // reverse 组合保持旧 oldest-first 返回顺序，而 MessageV2.page 自身继续提供 newest-first 页面。
       if (input.limit !== undefined) {
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID })).items
+        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID, includeHidden: input.includeHidden })).items
       }
 
       const size = 50
       const result: MessageV2.WithParts[] = []
       let before: string | undefined
       while (true) {
-        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before, fromMessageID: input.fromMessageID })
+        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before, fromMessageID: input.fromMessageID, includeHidden: input.includeHidden })
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
           const item = page.items[i]

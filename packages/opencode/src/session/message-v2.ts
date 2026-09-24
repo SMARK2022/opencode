@@ -951,12 +951,15 @@ export function goalChronology(sessionID: SessionID): ChronologyMessage[] {
 
 // cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant 定点 hydrate，
 // 因而已完成 assistant 的冷 Tool history 不会因一次取消操作被扫描并预热。
-export function cancelSnapshot(sessionID: SessionID) {
+export function cancelSnapshot(sessionID: SessionID, options?: { includeHidden?: boolean }) {
   const messages = Database.use((db) =>
     db
       .select()
       .from(MessageTable)
-      .where(eq(MessageTable.session_id, sessionID))
+      .where(and(
+        eq(MessageTable.session_id, sessionID),
+        options?.includeHidden ? undefined : sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      ))
       .orderBy(MessageTable.time_created, MessageTable.id)
       .all()
       .map(hotInfo),
@@ -1000,18 +1003,20 @@ const atOrNewer = (row: Cursor) =>
 // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
 function hydrate(
   rows: (typeof MessageTable.$inferSelect)[],
-  includeHidden = true,
+  includeHidden = false,
   messageProjection?: "viewer",
 ) {
+  // 可见性先决定 owner 集合；隐藏父消息不能触发自身或子 Part 的冷数据恢复。
+  const admitted = includeHidden ? rows : rows.filter((row) => !row.data.hidden)
   // 默认业务读取仍批量 thaw 完整 Message；viewer 只使用热投影，完整消费者合同不被削弱。
   // projection 在 thawMessageRows 之前决定，防止出现“response 删除字段但 cold owner 已解压并持久预热”的假优化。
   // Parts 仍走唯一 cold-aware decoder；Tool/Text/Reasoning 内容不因 Message summary 收窄而缺失。
   const infos =
     messageProjection === "viewer"
-      ? rows.map(viewerInfo)
-      : ColdStorage.thawMessageRows(rows).map(infoFromRestored)
+      ? admitted.map(viewerInfo)
+      : ColdStorage.thawMessageRows(admitted).map(infoFromRestored)
   // 只按选中 Message IDs 查询 children，范围外 archive 不进入 JS 或持久预热。
-  const ids = rows.map((row) => row.id)
+  const ids = admitted.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
   if (ids.length > 0) {
     // Part query 的 persisted order 是最终 child order，Map 只做 message_id join。
@@ -1522,15 +1527,6 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const slice = more ? rows.slice(0, input.limit) : rows
   const items = hydrate(slice, Boolean(input.includeHidden), input.messageProjection)
   items.reverse()
-  if (!input.includeHidden) {
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i].info.hidden) {
-        items.splice(i, 1)
-        continue
-      }
-      items[i].parts = items[i].parts.filter((p) => !p.hidden)
-    }
-  }
   const tail = slice.at(-1)
   return {
     items,
@@ -1543,7 +1539,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 // newest-first predicate 与旧 findMessage 顺序一致；只有首个匹配 row 才 hydrate 成完整 WithParts。
 // 无匹配返回 Option.none 且保持所有 scanned cold owner 原状，适合 role/model 等高频定位。
 // hidden Message 在 SQL 阶段排除，最终 Parts 也按旧 Session.messages 可见性过滤，优化不能改变 caller 结果面。
-// hidden Part 仍只在最终一条 hydrate 后过滤；无匹配扫描不会为可见性判断查询任何 Part row。
+// 命中后沿用 hydrate 默认可见读取，隐藏 Part 在解压前排除。
 export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
   sessionID: SessionID
   predicate: (info: HotInfo) => boolean
@@ -1579,7 +1575,6 @@ export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
       if (!input.predicate(hotInfo(row))) continue
       const found = hydrate([row])[0]
       if (!found) throw new Error(`Message row disappeared during find: ${row.id}`)
-      found.parts = found.parts.filter((part) => !part.hidden)
       return Option.some(found)
     }
     if (!more) return Option.none<WithParts>()
@@ -1614,6 +1609,8 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
       .where(
         and(
           eq(MessageTable.session_id, input.sessionID),
+          // target 和 children 同属普通摘要输入；隐藏 target 不能留下孤立的 children 结果。
+          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
           or(
             lt(MessageTable.time_created, through.time),
             and(eq(MessageTable.time_created, through.time), lte(MessageTable.id, through.id)),
@@ -1672,9 +1669,8 @@ export function rawForkRows(input: { sessionID: SessionID; messageID?: MessageID
 export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
   const size = 50
   let before: string | undefined
-  // Compaction recovery needs hidden structural anchors; callers that build a
-  // visible transcript pass includeHidden=false and let page() apply that filter.
-  const includeHidden = opts?.includeHidden ?? true
+  // 普通流式消费者与 page 共用可见默认值；结构定位和修复必须显式选择原始历史。
+  const includeHidden = opts?.includeHidden ?? false
   while (true) {
     const next = Effect.runSync(
       page({ sessionID, limit: size, before, includeHidden, fromMessageID: opts?.fromMessageID }).pipe(
@@ -1693,9 +1689,17 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean; 
   }
 }
 
-export function parts(message_id: MessageID) {
+export function parts(message_id: MessageID, options?: { includeHidden?: boolean }) {
   const rows = Database.use((db) =>
-    db.select().from(PartTable).where(eq(PartTable.message_id, message_id)).orderBy(PartTable.id).all(),
+    db.select().from(PartTable).where(and(
+      eq(PartTable.message_id, message_id),
+      // 已知 message ID 也不能绕过父级隐藏；判定在 thaw 前完成。
+      options?.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
+      options?.includeHidden ? undefined : sql`exists (
+        select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
+        and json_type(${MessageTable.data}, '$.hidden') is null
+      )`,
+    )).orderBy(PartTable.id).all(),
   )
   return ColdStorage.thawPartRows(rows).map(partFromRestored)
 }
@@ -1703,12 +1707,21 @@ export function parts(message_id: MessageID) {
 // usage 只需要 step-finish 热字段；专用 SQL 防止统计同 message 时 thaw tool/reasoning/file payload。
 // 返回 data 不含 owner IDs，但 RequestUsage 只消费 tokens/cost/reason，保持最小读取合同。
 // discriminator 在 SQL 与 TS 双重确认，外部损坏 JSON 不会被静默当成 StepFinishPart。
-export function stepFinishParts(messageID: MessageID) {
+export function stepFinishParts(messageID: MessageID, options?: { includeHidden?: boolean }) {
   const rows = Database.use((db) =>
     db
       .select({ data: PartTable.data })
       .from(PartTable)
-      .where(and(eq(PartTable.message_id, messageID), sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
+      .where(and(
+        eq(PartTable.message_id, messageID),
+        sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`,
+        // 费用 owner 显式读原始热字段；其他调用仍遵循父子可见性且不 hydrate 正文。
+        options?.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
+        options?.includeHidden ? undefined : sql`exists (
+          select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
+          and json_type(${MessageTable.data}, '$.hidden') is null
+        )`,
+      ))
       .orderBy(PartTable.id)
       .all(),
   )
@@ -1770,18 +1783,23 @@ export function previousAssistantToolTail(input: {
   return ColdStorage.thawPartRows(rows).map(partFromRestored).reverse()
 }
 
-export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
+export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID; includeHidden?: boolean }) {
   const row = Database.use((db) =>
     db
       .select()
       .from(MessageTable)
-      .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+      .where(and(
+        eq(MessageTable.id, input.messageID),
+        eq(MessageTable.session_id, input.sessionID),
+        // 默认在 owner 查询处返回 NotFound，避免先读取隐藏正文再让 HTTP 等调用方丢弃。
+        input.includeHidden ? undefined : sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      ))
       .get(),
   )
   if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
   return {
     info: info(row),
-    parts: parts(input.messageID),
+    parts: parts(input.messageID, { includeHidden: input.includeHidden }),
   }
 })
 
@@ -1795,14 +1813,11 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   // history and inflate the next compaction request past the model limit.
   const ordered = Array.from(msgs).toSorted((a, b) => compareChronology(b.info, a.info))
   const result = [] as WithParts[]
-  const completed = new Map<MessageID, boolean>()
+  const completed = new Set<MessageID>()
   let retain: MessageID | undefined
-  // Hidden messages can still be structural compaction anchors, but they must
-  // never be replayed to providers after undo/repair. Keep them during the
-  // boundary walk and strip them only from the returned prompt window. A
-  // compaction marker is replayable only after a successful summary exists;
-  // dangling markers are maintenance scratch state and would otherwise revive a
-  // stale compact or inject "What did we do so far?" into later user prompts.
+  // 隐藏的普通消息仍可定位有效 Compaction 的 tail，不能在扫描前统一滤掉。
+  // Compaction 自身被隐藏时，其摘要与裁剪边界必须一起失效。
+  // 只有成功配对的 marker 才能回放，避免未完成的压缩请求再次进入上下文。
   const visible = (items: WithParts[]) =>
     visibleCompactions(items)
       .filter((msg) => !msg.info.hidden)
@@ -1817,10 +1832,10 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       continue
     }
     if (msg.info.role === "user") {
-      const summaryHidden = completed.get(msg.info.id)
-      if (summaryHidden === undefined) continue
+      if (!completed.has(msg.info.id)) continue
       const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction" && !item.hidden)
-      if (!part || Boolean(msg.info.hidden) !== summaryHidden) {
+      // 同时撤销候选资格，避免后面的 tail 重排重新采用已隐藏的 marker。
+      if (!part || msg.info.hidden) {
         completed.delete(msg.info.id)
         continue
       }
@@ -1829,8 +1844,8 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       if (msg.info.id === retain) break
       continue
     }
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
-      completed.set(msg.info.parentID, Boolean(msg.info.hidden))
+    if (msg.info.role === "assistant" && !msg.info.hidden && msg.info.summary && msg.info.finish && !msg.info.error) {
+      completed.add(msg.info.parentID)
     }
   }
   result.reverse()
@@ -1853,7 +1868,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
           msg.info.parentID === compaction.info.id &&
           msg.info.finish &&
           !msg.info.error &&
-          Boolean(msg.info.hidden) === Boolean(compaction.info.hidden),
+          !msg.info.hidden,
       )
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
@@ -1882,7 +1897,8 @@ function visibleCompactions(items: WithParts[]) {
       if (msg.info.role !== "assistant") return []
       if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
       const marker = compactions.get(msg.info.parentID)
-      if (!marker || !marker.parts.some((part) => part.type === "compaction" && !part.hidden) || Boolean(marker.info.hidden) !== Boolean(msg.info.hidden)) return []
+      // 回放与裁剪遵守同一规则：任一侧隐藏，整对 Compaction 都不再生效。
+      if (!marker || marker.info.hidden || msg.info.hidden || !marker.parts.some((part) => part.type === "compaction" && !part.hidden)) return []
       return [msg.info.parentID]
     }),
   )
@@ -1898,7 +1914,8 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
   const cutoff = boundary?.tailStartID ?? boundary?.markerID
   // cutoff 先于任何 business hydrate 决定；无 tail 时 marker 本身就是 head 终点，
   // 有 tail 时从原始 retained turn 开始读取，再由 filterCompacted 恢复 provider 顺序。
-  return filterCompacted(stream(sessionID, { fromMessageID: cutoff }))
+  // 此内部结构扫描要识别隐藏的普通 tail anchor；对外仍只返回 filterCompacted 的可见窗口。
+  return filterCompacted(stream(sessionID, { fromMessageID: cutoff, includeHidden: true }))
 })
 
 export type PromptWindowProof = {

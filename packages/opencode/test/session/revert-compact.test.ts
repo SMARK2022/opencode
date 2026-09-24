@@ -490,6 +490,13 @@ describe("revert + compact workflow", () => {
           yield* usage.recordAssistant({ sessionID: sid, requestID: u1.id, assistant: a1 })
           expect((yield* usage.get({ sessionID: sid, requestID: u1.id }))?.status).toBe("running")
 
+          // 非零 step usage 在隐藏后仍需由真实 accounting owner 汇总，不能只检查 aborted 状态。
+          yield* session.updatePart({
+            id: PartID.ascending(), sessionID: sid, messageID: a1.id,
+            type: "step-finish", reason: "stop", cost: 0,
+            tokens: { ...tokens, input: 37, output: 5 },
+          })
+
           yield* session.setRevert({
             sessionID: sid,
             revert: { messageID: u1.id },
@@ -497,7 +504,7 @@ describe("revert + compact workflow", () => {
           })
           yield* revert.cleanup(yield* session.get(sid))
 
-          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id })
+          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id, includeHidden: true })
           const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
           const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
 
@@ -508,6 +515,7 @@ describe("revert + compact workflow", () => {
             expect(stored.info.error?.name).toBe("MessageAbortedError")
           }
           expect(request?.status).toBe("aborted")
+          expect(request?.tokens.input).toBe(37)
           expect(assistants.find((item) => item.assistantMessageID === a1.id)?.status).toBe("aborted")
         }),
       { git: true },
@@ -763,7 +771,7 @@ describe("revert + compact workflow", () => {
   )
 
   it.live(
-    "cleanup preserves hidden messages in database",
+    "cleanup resumes from a hidden boundary and preserves audit messages",
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
@@ -784,18 +792,15 @@ describe("revert + compact workflow", () => {
             summary: { additions: 0, deletions: 0, files: 0 },
           })
 
+          // 模拟 cleanup 已提交边界隐藏、却尚未处理后继的中断点；重入保留原审计时间。
+          const hidden = { time: 123, reason: "undo" as const }
+          yield* session.updateMessage({ ...u1, hidden })
           yield* revert.cleanup(yield* session.get(sid))
 
-          const visible = yield* session.messages({ sessionID: sid })
-          expect(visible.length).toBe(0)
-
-          const hidden = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
-          expect(hidden.info.hidden).toBeDefined()
-          expect(hidden.info.hidden!.reason).toBe("undo")
-
-          const u1raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
-          expect(u1raw.info.id).toBe(u1.id)
-          expect(u1raw.info.hidden?.reason).toBe("undo")
+          expect(yield* session.messages({ sessionID: sid })).toEqual([])
+          const u1raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id, includeHidden: true })
+          expect(u1raw.info.hidden).toEqual(hidden)
+          expect((yield* session.get(sid)).revert).toBeUndefined()
 
           yield* session.remove(sid)
         }),

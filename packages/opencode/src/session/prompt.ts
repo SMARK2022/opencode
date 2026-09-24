@@ -747,7 +747,8 @@ export const layer = Layer.effect(
       yield* Effect.gen(function* () {
         yield* elog.info("cancel", { sessionID })
         // 所有 cancel 归属都从同一同步快照推导，避免多次扫描把 replacement prompt 混入旧边界。
-        const snapshot = MessageV2.cancelSnapshot(sessionID)
+        // 取消属于持久终态修复，隐藏记录上的执行权与费用也必须结清。
+        const snapshot = MessageV2.cancelSnapshot(sessionID, { includeHidden: true })
         const pendingIds = new Set(snapshot.pendingAssistantIDs)
         const orphanIDs = snapshot.orphanUserIDs
         // orphan集合在cancel前冻结，后续replacement prompt不会被旧取消操作误标为aborted。
@@ -784,9 +785,9 @@ export const layer = Layer.effect(
 
     const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<MessageID>) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<MessageID>) {
       const pending = [] as (MessageV2.WithParts & { info: MessageV2.Assistant })[]
-      const ids = pendingIds ?? new Set(MessageV2.cancelSnapshot(sessionID).pendingAssistantIDs)
+      const ids = pendingIds ?? new Set(MessageV2.cancelSnapshot(sessionID, { includeHidden: true }).pendingAssistantIDs)
       for (const id of ids) {
-        const msg = yield* MessageV2.get({ sessionID, messageID: id }).pipe(
+        const msg = yield* MessageV2.get({ sessionID, messageID: id, includeHidden: true }).pipe(
           Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)),
         )
         if (!msg || msg.info.role !== "assistant") continue

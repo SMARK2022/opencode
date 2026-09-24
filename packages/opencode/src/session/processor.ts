@@ -285,10 +285,12 @@ export const layer = Layer.effect(
       const readToolCall = Effect.fn("SessionProcessor.readToolCall")(function* (toolCallID: string) {
         const call = ctx.toolcalls[toolCallID]
         if (!call) return
+        // 此处是已登记 Tool 的状态写者，需保留 hidden 元数据并完成取消/结果的终态竞争。
         const part = yield* session.getPart({
           partID: call.partID,
           messageID: call.messageID,
           sessionID: call.sessionID,
+          includeHidden: true,
         })
         if (!part || part.type !== "tool") {
           delete ctx.toolcalls[toolCallID]
@@ -751,7 +753,7 @@ export const layer = Layer.effect(
             // 当前 message 只取 tool 终态，避免 step-finish/text 挤占 slice 尾部导致漏检。
             const currentTools = MessageV2.parts(ctx.assistantMessage.id).filter(
               // current Tool 与历史 Tool 使用同一 visible contract，hidden error 不计入阈值。
-              (part) => part.type === "tool" && !part.hidden && part.state.status !== "pending",
+              (part) => part.type === "tool" && part.state.status !== "pending",
             )
             const preceding = MessageV2.previousAssistantToolTail({
               sessionID: ctx.sessionID,

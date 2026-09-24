@@ -820,6 +820,8 @@ export const layer = Layer.effect(
                     sessionID: persist.sessionID,
                     messageID: persist.messageID,
                     partID,
+                    // 原始状态更新必须保留已有 hidden，不能重建为可见记录。
+                    includeHidden: true,
                   })
                   if (!part || part.type !== "tool" || part.state.status !== "pending") return
                   yield* sessions.updatePart({
@@ -843,6 +845,7 @@ export const layer = Layer.effect(
                         sessionID: persist.sessionID,
                         messageID: persist.messageID,
                         partID,
+                        includeHidden: true,
                       })
                     : undefined
                   yield* sessions.updatePart({
@@ -1293,7 +1296,8 @@ function closeOpenReviewerTools(
     // durable 失败（无 DB / mock）降级为仅 map，避免拖垮整个 finalize。
     // MessageV2.parts 走 SQLite；单元 mock 无库时 catch 后 partIDs 仅含 knownPartIDs。
     const durable = yield* Effect.try({
-      try: () => MessageV2.parts(input.messageID),
+      // attempt 退出要结束所有 owned open tools，隐藏记录仍属于终态清理范围。
+      try: () => MessageV2.parts(input.messageID, { includeHidden: true }),
       catch: (cause) => cause,
     }).pipe(Effect.catch(() => Effect.succeed([] as MessageV2.Part[])))
     for (const part of durable) {
@@ -1310,6 +1314,7 @@ function closeOpenReviewerTools(
           sessionID: input.sessionID,
           messageID: input.messageID,
           partID,
+          includeHidden: true,
         })
         if (!part || part.type !== "tool") return
         if (part.state.status !== "pending" && part.state.status !== "running") return
@@ -1343,7 +1348,7 @@ function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: Ses
     // visible attempt prevents users from reading a malformed JSON/prose answer
     // as an approved decision before the protocol repair completes.
     yield* sessions.updateMessage({ ...request.info, hidden })
-    const assistant = Array.from(MessageV2.stream(sessionID, { includeHidden: true })).find(
+    const assistant = Array.from(MessageV2.stream(sessionID)).find(
       (msg) => msg.info.role === "assistant" && msg.info.parentID === requestID,
     )
     if (assistant?.info.role === "assistant") {

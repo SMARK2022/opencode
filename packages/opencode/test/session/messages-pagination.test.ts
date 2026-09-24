@@ -246,6 +246,25 @@ describe("MessageV2.page", () => {
         const result = yield* MessageV2.page({ sessionID, limit: 1 })
         expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sessionID)]).toEqual([ids[2], [], 1])
         expect(result.more).toBe(true)
+        // per-user 摘要同时要求目标可见、子消息可见，隐藏 child 不应混入仍可见的父轮次。
+        const childID = yield* addAssistant(sessionID, ids[2])
+        const child = yield* MessageV2.get({ sessionID, messageID: childID })
+        yield* session.updateMessage({ ...child.info, hidden: { time: Date.now(), reason: "undo" } })
+        // 同一份隐藏父子记录检验各公开入口，不能只让分页过滤而单条/流式读取仍穿透。
+        expect({
+          get: (yield* Effect.result(MessageV2.get({ sessionID, messageID: ids[3] })))._tag,
+          parentParts: MessageV2.parts(ids[3]),
+          childParts: (yield* MessageV2.get({ sessionID, messageID: ids[2] })).parts,
+          part: yield* session.getPart({ sessionID, messageID: ids[2], partID: part.id }),
+          stream: Array.from(MessageV2.stream(sessionID)).map((message) => message.info.id),
+          target: yield* MessageV2.targetWithAssistantChildren({ sessionID, messageID: ids[3], throughMessageID: ids[3] }),
+          children: (yield* MessageV2.targetWithAssistantChildren({ sessionID, messageID: ids[2], throughMessageID: childID })).map((message) => message.info.id),
+        }).toEqual({ get: "Failure", parentParts: [], childParts: [], part: undefined, stream: ids.slice(0, 3).toReversed(), target: [], children: [ids[2]] })
+        // hidden cold Part 必须仍在冷层；仅在明确审计读取时才允许 thaw。
+        expect(sessionColdOwners(sessionID)).toBe(1)
+        const raw = yield* MessageV2.get({ sessionID, messageID: ids[3], includeHidden: true })
+        expect(raw.parts.map((item) => item.id)).toEqual(hidden.parts.map((item) => item.id))
+        expect((yield* session.getPart({ sessionID, messageID: ids[2], partID: part.id, includeHidden: true }))?.id).toBe(part.id)
       }),
     ),
   )
@@ -1068,7 +1087,7 @@ describe("MessageV2.filterCompacted", () => {
     ),
   )
 
-  it.instance("uses hidden retained-tail anchors as boundaries without returning hidden messages", () =>
+  it.instance("restores history after hiding a compaction with a hidden retained-tail anchor", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const old = yield* addUser(sessionID, "old request")
@@ -1101,6 +1120,8 @@ describe("MessageV2.filterCompacted", () => {
           type: "text",
           text: "summary",
         })
+        // 普通 anchor 隐藏仍可定位 tail；撤销的是整次 Compaction 时才恢复旧历史。
+        expect((yield* MessageV2.filterCompactedEffect(sessionID)).map((item) => item.info.id)).toEqual([compact, summary])
         for (const id of [compact, summary]) {
           const message = yield* MessageV2.get({ sessionID, messageID: id })
           yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
@@ -1109,7 +1130,9 @@ describe("MessageV2.filterCompacted", () => {
 
         const result = yield* MessageV2.filterCompactedEffect(sessionID)
 
-        expect(result.map((item) => item.info.id)).toEqual([next])
+        // DB 预裁剪与纯过滤必须一致，否则后续压缩仍可能沿用被撤销的边界。
+        expect(result.map((item) => item.info.id)).toEqual([old, oldReply, next])
+        expect(MessageV2.filterCompacted(MessageV2.stream(sessionID)).map((item) => item.info.id)).toEqual([old, oldReply, next])
       }),
     ),
   )

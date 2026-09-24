@@ -115,7 +115,8 @@ function incompleteAssistants(sessionIDs?: SessionID[]) {
     return rows.flatMap((row) => {
       const info = hotInfo(row)
       if (info.role !== "assistant" || info.time.completed) return []
-      return [{ info, parts: MessageV2.parts(info.id) }]
+      // crash 修复按物理 open 状态收口，不能把隐藏工具遗漏或误判为零 Part。
+      return [{ info, parts: MessageV2.parts(info.id, { includeHidden: true }) }]
     })
   })
 }
@@ -228,7 +229,8 @@ async function terminalizeOrphanTools(deadlineMs: number) {
       log.info("orphan tool write budget exhausted", { remaining: found.length })
       return
     }
-    const part = MessageV2.parts(row.message_id as MessageID).find((item) => item.id === row.id)
+    // 与上面的原始 open-tool 扫描保持一致；隐藏仅影响业务显示，不代表执行已结束。
+    const part = MessageV2.parts(row.message_id as MessageID, { includeHidden: true }).find((item) => item.id === row.id)
     if (!part || !isOpenToolPart(part)) continue
     await AppRuntime.runPromise(
       SyncEvent.Service.use((sync) =>
