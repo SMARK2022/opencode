@@ -304,10 +304,12 @@ const layer = Layer.effect(
       const readToolCall = Effect.fn("SessionProcessor.readToolCall")(function* (toolCallID: string) {
         const call = ctx.toolcalls[toolCallID]
         if (!call) return undefined
+        // 此处是已登记 Tool 的状态写者，需保留 hidden 元数据并完成取消/结果的终态竞争。
         const part = yield* session.getPart({
           partID: call.partID,
           messageID: call.messageID,
           sessionID: call.sessionID,
+          includeHidden: true,
         })
         if (!part || part.type !== "tool") {
           delete ctx.toolcalls[toolCallID]
@@ -561,7 +563,7 @@ const layer = Layer.effect(
             Effect.provideService(Database.Service, database),
           )
           const currentTools = parts.filter(
-            (part) => part.type === "tool" && !part.hidden && part.state.status !== "pending",
+            (part) => part.type === "tool" && part.state.status !== "pending",
           )
           const preceding = yield* MessageV2.previousAssistantToolTail({
             sessionID: ctx.sessionID,

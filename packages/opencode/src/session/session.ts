@@ -29,7 +29,7 @@ import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import type { SQL } from "drizzle-orm"
-import { PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { MessageV2 } from "./message-v2"
 // #0500：diff 聚合的唯一 DB 权威在 SummaryCache——session.diff 只是镜像写出与读取 seam。
@@ -416,7 +416,7 @@ export interface Interface {
   readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   // fromMessageID：尾部裁剪读取（0393 revert messages 裁剪优化）
-  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<SessionV1.WithParts[], NotFound>
+  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID; includeHidden?: boolean }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
@@ -428,6 +428,7 @@ export interface Interface {
     sessionID: SessionID
     messageID: MessageID
     partID: PartID
+    includeHidden?: boolean
   }) => Effect.Effect<SessionV1.Part | undefined>
   readonly updatePart: <T extends SessionV1.Part>(part: T) => Effect.Effect<T>
   readonly publishPartProgress: (part: SessionV1.ToolPart) => Effect.Effect<void>
@@ -662,6 +663,13 @@ const layer: Layer.Layer<
             eq(PartTable.session_id, input.sessionID),
             eq(PartTable.message_id, input.messageID),
             eq(PartTable.id, input.partID),
+            // 单Part读取先约束父子可见性；内部终态写者才能显式选择raw。
+            input.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
+            input.includeHidden ? undefined : sql`exists (
+              select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
+              and ${MessageTable.session_id} = ${PartTable.session_id}
+              and json_type(${MessageTable.data}, '$.hidden') is null
+            )`,
           ),
         )
         .get()
@@ -830,7 +838,7 @@ const layer: Layer.Layer<
       // #493：0 是显式有界空范围而非“未提供”——退化为全量会在 cold session 上触发无意义持久预热。
       if (input.limit !== undefined) {
         // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID }).pipe(
+        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID, includeHidden: input.includeHidden }).pipe(
           Effect.provideService(Database.Service, database),
         )).items
       }
@@ -838,7 +846,7 @@ const layer: Layer.Layer<
       // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
       yield* get(input.sessionID)
       // 把边界交给既有分页查询，不能全量hydrate后再作内存过滤。
-      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID: input.fromMessageID }).pipe(
+      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID: input.fromMessageID, includeHidden: input.includeHidden }).pipe(
         Effect.provideService(Database.Service, database),
       )
       // stream 为 newest-first；Session.messages 契约为 chronological oldest-first

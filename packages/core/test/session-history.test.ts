@@ -221,6 +221,47 @@ describe("SessionV2.history", () => {
     }),
   )
 
+  it.effect("restores the previous Native compaction after committing a warm cached suffix revert", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const store = yield* SessionStore.Service
+      const created = yield* session.create({ location })
+      const ids = Array.from({ length: 6 }, () => SessionMessage.ID.create())
+      // A后的中间原文不复制进B摘要；撤回后必须从真实旧行恢复。
+      for (const [index, id] of ids.slice(0, 5).entries()) {
+        if (index === 0 || index === 3) {
+          yield* events.publish(SessionEvent.Compaction.Ended, {
+            sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index),
+            reason: "manual", text: index === 0 ? "summary A" : "summary B", recent: "",
+          })
+          continue
+        }
+        yield* events.publish(SessionEvent.Synthetic, {
+          sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index), text: `sentinel-${index}`,
+        })
+      }
+      const cache = SessionHistory.makeCache()
+      const warm = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
+      expect(warm.map(entry => entry.message.id)).toEqual([ids[3], ids[4]])
+      expect((yield* SessionHistory.entriesForRunner(db, created.id, -1, cache))[0]?.message).toBe(warm[0]?.message)
+      // 只准备合法撤回状态，公开commit执行真实事件投影；不调用文件快照或复制删除算法。
+      yield* events.publish(SessionEvent.RevertEvent.Staged, {
+        sessionID: created.id, timestamp: DateTime.makeUnsafe(5), revert: { messageID: ids[2] },
+      })
+      yield* session.revert.commit(created.id)
+      const restored = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
+      expect(restored.map(entry => entry.message.id)).toEqual(ids.slice(0, 3))
+      expect(restored.map(entry => entry.message)).toMatchObject([{ summary: "summary A" }, { text: "sentinel-1" }, { text: "sentinel-2" }])
+      expect(yield* store.message(ids[3], created.id)).toBeUndefined()
+      expect((yield* store.get(created.id))?.revert).toBeUndefined()
+      // 后续消息沿同一cache追加，不能重新启用已删除的B窗口。
+      yield* events.publish(SessionEvent.Synthetic, { sessionID: created.id, messageID: ids[5], timestamp: DateTime.makeUnsafe(6), text: "after undo" })
+      expect((yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)).map(entry => entry.message.id)).toEqual([...ids.slice(0, 3), ids[5]])
+    }),
+  )
+
   it.effect("fails with NotFoundError for a missing Session", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service

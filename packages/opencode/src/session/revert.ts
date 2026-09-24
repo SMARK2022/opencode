@@ -179,7 +179,8 @@ const layer = Layer.effect(
       const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
       if (!session.revert) return
       const boundary = session.revert
-      const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
+      // cleanup 可在边界已隐藏后重入；只读本次边界之后的原始范围，避免扩到完整审计历史。
+      const msgs = yield* sessions.messages({ sessionID, fromMessageID: boundary.messageID, includeHidden: true }).pipe(Effect.orDie)
       const messageID = boundary.messageID
       const boundaryMessage = msgs.find((msg) => msg.info.id === messageID)
       // #557：cleanup 与首次 revert 共用同一 boundary tuple，hidden/删除不能重新解释范围。
@@ -202,10 +203,12 @@ const layer = Layer.effect(
       for (const msg of remove) {
         // #98：软隐藏而非物理删除，保留 DB 行
         // #153：undo 时未完成 assistant 先终态化再 soft-hide
+        const incomplete = msg.info.role === "assistant" && !msg.info.time.completed
         const next = {
           ...msg.info,
           // #98：cleanup 写 hidden 而非 MessageRemoved
-          hidden: { time: Date.now(), reason: "undo" as const },
+          // 重试和旧 tombstone 保留原时间/原因；隐藏状态不能被反复改写。
+          hidden: msg.info.hidden ?? { time: Date.now(), reason: "undo" as const },
         }
         if (next.role === "assistant" && !next.time.completed) {
           // #153：补 completed，避免 UI 仍显示 streaming
@@ -215,10 +218,11 @@ const layer = Layer.effect(
           next.error ??= new SessionV1.AbortedError({ message: "Aborted by undo" }).toObject()
         }
         // 复用 updateMessage 的事件路径，订阅方以普通消息更新感知撤销
-        yield* sessions.updateMessage(next)
+        if (!msg.info.hidden || incomplete) yield* sessions.updateMessage(next)
         // #153：undo 终态化绕过 processor，补记 usage 让 UI 与 token 统计识别被撤销请求
         // 有 parentID 才存在关联的请求记录，user 根消息等无需补记
         if (next.role === "assistant" && next.parentID) {
+          // hide 已提交而记账中断时仍需重放此幂等 owner，之后才能清除 revert 边界。
           const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
           // Interface 声明为 Effect<any, any>，收窄以维持 cleanup 的 never 契约
           if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next }) as Effect.Effect<void>
@@ -232,6 +236,7 @@ const layer = Layer.effect(
           const removeParts = target.parts.slice(idx)
           target.parts = target.parts.slice(0, idx)
           for (const part of removeParts) {
+            if (part.hidden) continue
             // #98：部件软隐藏保留工具输出。
             yield* sessions.updatePart({
               ...part,
