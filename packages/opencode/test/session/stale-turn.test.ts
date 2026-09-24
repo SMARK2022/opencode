@@ -156,9 +156,11 @@ describe("SessionStaleTurn", () => {
         const chat = yield* sessions.create({ title: "stale-tool" })
         const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 
+        // 修复的物理open扫描必须关闭隐藏工具，不能被业务可见性过滤截断。
+        yield* sessions.updatePart({ ...seeded.tool, hidden: { time: Date.now(), reason: "undo" } })
         yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
 
-        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
+        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id, includeHidden: true })
         const tool = msg.parts.find((part) => part.id === seeded.tool.id)
         expect(tool?.type).toBe("tool")
         if (tool?.type !== "tool") return

@@ -2162,8 +2162,8 @@ describe("session.compaction.process", () => {
           const ledger = yield* SessionRequestUsage.Service
           expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({ rootRequestID: msg.id, status: "aborted", assistantCount: 0, stepCount: 0, tokens: { total: 0 } })
         }).pipe(withCompaction({ plugin: plugin(ready) }))
-        // 同一取消 case 再覆盖 summary 已提交的通知与真实 snapshot.track 两个初始化窗口。
-        for (const phase of ["publish", "snapshot"] as const) {
+        // 快照已延后到副作用工具；仍在通知与真实processor初始化边界分别验证取消责任。
+        for (const phase of ["publish", "processor"] as const) {
           const gate = yield* Deferred.make<void>()
           const release = yield* Deferred.make<void>()
           const stub = llm()
@@ -2197,7 +2197,7 @@ describe("session.compaction.process", () => {
             expect(summary?.info).toMatchObject({ parentID: parent.id, error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) } })
             expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({ rootRequestID: parent.id, source: "system_compaction", status: "aborted", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 } })
             expect(calls).toBe(0)
-          }).pipe(withCompaction({ llm: stub.llmLayer, ...(phase === "snapshot" ? { snapshot: Layer.mock(Snapshot.Service)({ track: () => Deferred.succeed(gate, void 0).pipe(Effect.andThen(Effect.never)) }) } : {}) }))
+          }).pipe(withCompaction({ llm: stub.llmLayer, ...(phase === "processor" ? { processor: Layer.mock(SessionProcessorModule.SessionProcessor.Service)({ create: () => Deferred.succeed(gate, void 0).pipe(Effect.andThen(Effect.never)) }) } : {}) }))
         }
       }),
     { git: true },

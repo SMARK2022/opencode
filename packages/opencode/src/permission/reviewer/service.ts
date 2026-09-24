@@ -805,6 +805,8 @@ export const layer = Layer.effect(
                     sessionID: persist.sessionID,
                     messageID: persist.messageID,
                     partID,
+                    // 原始状态更新必须保留已有 hidden，不能重建为可见记录。
+                    includeHidden: true,
                   })
                   if (!part || part.type !== "tool" || part.state.status !== "pending") return
                   yield* session.updatePart({
@@ -830,6 +832,7 @@ export const layer = Layer.effect(
                         sessionID: persist.sessionID,
                         messageID: persist.messageID,
                         partID,
+                        includeHidden: true,
                       })
                     : undefined
                   yield* session.updatePart({
@@ -1284,7 +1287,8 @@ function closeOpenReviewerTools(
   return Effect.gen(function* () {
     const end = Date.now()
     const known = new Set(input.knownPartIDs ?? [])
-    const durable = yield* MessageV2.parts(input.messageID).pipe(
+    // 隐藏只影响展示；attempt-owned的物理open工具仍须结清。
+    const durable = yield* MessageV2.parts(input.messageID, { includeHidden: true }).pipe(
       Effect.catchDefect((cause) => Effect.logWarning("reviewer durable tool scan failed", { cause, sessionID: input.sessionID, messageID: input.messageID }).pipe(Effect.as([]))),
     )
     // durable 只补 tool 类型——text/reasoning 的收尾走既有 drain 路径，不在闭合范围
@@ -1297,6 +1301,7 @@ function closeOpenReviewerTools(
         sessionID: input.sessionID,
         messageID: input.messageID,
         partID,
+        includeHidden: true,
       })
       if (!part || part.type !== "tool") continue
       if (part.state.status !== "pending" && part.state.status !== "running") continue

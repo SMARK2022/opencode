@@ -348,7 +348,8 @@ const layer = Layer.effect(
             const children = yield* sessions.children(sessionID)
             // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
             // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
-            const snapshot = yield* MessageV2.cancelSnapshot(sessionID).pipe(Effect.provideService(Database.Service, database))
+            // 隐藏只改变展示，不撤销旧消息上的执行权与计费责任。
+            const snapshot = yield* MessageV2.cancelSnapshot(sessionID, { includeHidden: true }).pipe(Effect.provideService(Database.Service, database))
             const pending = snapshot.pendingAssistantIDs
             const orphanIDs = snapshot.orphanUserIDs
             yield* state.cancel(sessionID)
@@ -380,7 +381,7 @@ const layer = Layer.effect(
 
     const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID, messageID: MessageID) {
       // 仅重读冻结 ID 的最新快照，processor/ownAssistant 的终态不得被取消前的旧对象覆盖。
-      const match = yield* MessageV2.get({ sessionID, messageID }).pipe(
+      const match = yield* MessageV2.get({ sessionID, messageID, includeHidden: true }).pipe(
         Effect.provideService(Database.Service, database),
         Effect.option,
       )

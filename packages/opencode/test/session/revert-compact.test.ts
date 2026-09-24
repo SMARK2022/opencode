@@ -432,7 +432,7 @@ describe("revert + compact workflow", () => {
           expect(msgs[0].parts[0].id).toBe(p1.id)
 
           // #98：原始读取保留隐藏部件及完整工具输出。
-          const raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
+          const raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id, includeHidden: true })
           expect(raw.info.hidden).toBeUndefined()
           expect(raw.parts).toEqual([
             p1,
@@ -551,7 +551,7 @@ describe("revert + compact workflow", () => {
 
 
   it.live(
-    "cleanup preserves hidden messages in database",
+    "cleanup resumes from a hidden boundary and preserves audit messages",
     provideTmpdirInstance(
       (dir) =>
         Effect.gen(function* () {
@@ -573,15 +573,19 @@ describe("revert + compact workflow", () => {
             summary: { additions: 0, deletions: 0, files: 0 },
           })
 
+          // 模拟边界已隐藏而后继未处理的中断点；重入必须保留旧审计时间。
+          const hidden = { time: 123, reason: "undo" as const }
+          yield* session.updateMessage({ ...u1, hidden })
           const state = yield* session.get(sid)
           yield* revert.cleanup(state)
 
           const visible = yield* session.messages({ sessionID: sid })
           expect(visible.length).toBe(0)
 
-          const hidden = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
-          expect(hidden.info.hidden).toBeDefined()
-          expect(hidden.info.hidden!.reason).toBe("undo")
+          const u1raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id, includeHidden: true })
+          expect(u1raw.info.id).toBe(u1.id)
+          expect(u1raw.info.hidden).toEqual(hidden)
+          expect((yield* session.get(sid)).revert).toBeUndefined()
         }),
       { git: true },
     ),
@@ -791,6 +795,13 @@ describe("revert + compact workflow", () => {
           // 前置断言：补记前请求必须处于 running，排除 begin 缺失导致的假阳性
           expect((yield* usage.get({ sessionID: sid, requestID: u1.id }))?.status).toBe("running")
 
+          // 非零 step usage 在隐藏后仍需由真实 accounting owner 汇总，不能只检查 aborted 状态。
+          yield* session.updatePart({
+            id: PartID.ascending(), sessionID: sid, messageID: a1.id,
+            type: "step-finish", reason: "stop", cost: 0,
+            tokens: { ...tokens, input: 37, output: 5 },
+          })
+
           yield* session.setRevert({
             sessionID: sid,
             revert: { messageID: u1.id },
@@ -799,7 +810,7 @@ describe("revert + compact workflow", () => {
           // cleanup 自行读取 revert 状态并终态化 assistant，调用方无需预清理
           yield* revert.cleanup(yield* session.get(sid))
 
-          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id })
+          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id, includeHidden: true })
           const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
           const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
 
@@ -810,6 +821,7 @@ describe("revert + compact workflow", () => {
             expect(stored.info.error?.name).toBe("MessageAbortedError")
           }
           expect(request?.status).toBe("aborted")
+          expect(request?.tokens.input).toBe(37)
           expect(assistants.find((item) => item.assistantMessageID === a1.id)?.status).toBe("aborted")
         }),
       { git: true },

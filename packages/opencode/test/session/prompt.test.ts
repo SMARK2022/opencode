@@ -1466,10 +1466,12 @@ it.instance(
         },
       })
 
+      // 隐藏只影响业务可见性；取消仍须关闭这条持久记录上的pending/running工具。
+      yield* sessions.updateMessage({ ...assistant, hidden: { time: Date.now(), reason: "undo" } })
       // #173：cancel 后断言 tool error+interrupted，而非仍 pending
       yield* prompt.cancel(chat.id)
 
-      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id, includeHidden: true })
       const tools = stored.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool")
       expect(tools.length).toBe(2)
       for (const tool of tools) {
@@ -6015,7 +6017,7 @@ it.instance(
       expect(body).not.toContain("withdrawn-continuation-only")
       expect(body).toContain("<objective>finish after undo</objective>")
       // 被撤的原消息仍可按 ID 读取；hidden 状态证明使用既有生命周期，而非删除历史。
-      const old = yield* MessageV2.get({ sessionID: chat.id, messageID: parts[0].messageID })
+      const old = yield* MessageV2.get({ sessionID: chat.id, messageID: parts[0].messageID, includeHidden: true })
       expect(old.info.hidden?.reason).toBe("undo")
       expect((yield* sessions.get(chat.id)).revert).toBeUndefined()
     }),
@@ -6435,13 +6437,15 @@ dynamicSurfaces.instance(
 )
 
 it.instance(
-  "invalidates a retained window after successful Compaction",
+  "rebuilds a retained window after Compaction and its undo",
   () =>
     Effect.gen(function* () {
-      const { llm } = yield* useServerConfig(providerCfg)
+      // 不保留 tail，确保撤回后的旧内容来自恢复的边界，而非 B 原本就携带的副本。
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), compaction: { tail_turns: 0 } }))
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const compaction = yield* SessionCompaction.Service
+      const revert = yield* SessionRevert.Service
       const chat = yield* sessions.create({ title: "Compaction cache" })
       yield* textTurn(chat.id, "history before compaction", "first response")
       yield* llm.text("canonical compacted summary")
@@ -6461,6 +6465,22 @@ it.instance(
       expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages)).toContain("canonical compacted summary")
       // 同次 warm 请求的 Tool 开关证明 Tool surface 未进入 Message cache。
       expect(JSON.stringify((yield* llm.inputs).at(-1)?.tools)).not.toContain('"bash"')
+
+      yield* llm.text("second compacted summary")
+      expect(yield* compaction.run({ sessionID: chat.id, agent: "build", model: ref, auto: true })).toBe("continue")
+      const second = (yield* sessions.messages({ sessionID: chat.id })).findLast(
+        (message) => message.info.role === "assistant" && message.info.summary,
+      )
+      if (!second || second.info.role !== "assistant") throw new Error("Expected second Compaction summary")
+      // 先实际发送 B 窗口，再公开撤回；否则只验证冷加载，无法发现旧缓存复用。
+      yield* textTurn(chat.id, "warm second window", "second window response")
+      yield* revert.revert({ sessionID: chat.id, messageID: second.info.parentID })
+      yield* revert.cleanup(yield* sessions.get(chat.id))
+      yield* textTurn(chat.id, "continue after undo", "restored response")
+      const restored = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      // assistant 文本不会进入 recent-user memento，两项正向断言证明 A 与中间历史恢复。
+      expect(restored).toContain("canonical compacted summary")
+      expect(restored).toContain("final response")
     }),
   { git: true },
 )

@@ -702,7 +702,7 @@ describe("HttpApi SDK", () => {
         const rawPart = yield* InstanceStore.Service.use((store) =>
           store.provide(
             { directory },
-            SessionNs.Service.use((svc) => svc.getPart({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id, partID: seeded.part.id })),
+            SessionNs.Service.use((svc) => svc.getPart({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id, partID: seeded.part.id, includeHidden: true })),
           ),
         )
         expect([
