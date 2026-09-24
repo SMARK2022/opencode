@@ -1,0 +1,215 @@
+From f453ffa6ad23db8e32ce45c212a2ccaa81342fd4 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 21 May 2026 04:25:01 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E4=BC=9A=E8=AF=9D?=
+ =?UTF-8?q?=E8=A7=86=E5=8F=A3=E7=AE=A1=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C?=
+ =?UTF-8?q?=E4=BC=98=E5=8C=96=E6=BB=9A=E5=8A=A8=E8=A1=8C=E4=B8=BA=E5=92=8C?=
+ =?UTF-8?q?=E6=B5=81=E5=AA=92=E4=BD=93=E5=8A=A9=E6=89=8B=E7=9A=84=E5=A4=84?=
+ =?UTF-8?q?=E7=90=86=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
+index 78c82301a6e70660333359f4202793f1feed91e1..76d95c51547138533063d364496fd598480dfe3d 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
+@@ -1,13 +1,14 @@
+ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+ import type { InternalTuiPlugin } from "../../plugin/internal"
+ import { useSyncV2 } from "@tui/context/sync-v2"
++import { shouldCullSessionViewport } from "@tui/util/session-pending"
+ import { SplitBorder } from "@tui/component/border"
+ import { Spinner } from "@tui/component/spinner"
+ import { useTheme } from "@tui/context/theme"
+ import { useLocal } from "@tui/context/local"
+ import { reasoningTitle, useThinkingMode } from "@tui/context/thinking"
+ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+-import { TextAttributes, type BoxRenderable, type SyntaxStyle } from "@opentui/core"
++import { TextAttributes, type BoxRenderable, type ScrollBoxRenderable, type SyntaxStyle } from "@opentui/core"
+ // [local-smark] Flag needed for markdown experimental check
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { useBindings } from "../../keymap"
+@@ -31,7 +32,7 @@ import type {
+   ToolFileContent,
+   ToolTextContent,
+ } from "@opencode-ai/sdk/v2"
+-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
++import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack } from "solid-js"
+ 
+ const id = "internal:session-v2-debug"
+ const route = "session.v2.messages"
+@@ -50,9 +51,17 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
+   const messages = createMemo(() => sync.data.messages[props.sessionID] ?? [])
+   const renderedMessages = createMemo(() => messages().toReversed())
+   const lastAssistant = createMemo(() => renderedMessages().findLast((message) => message.type === "assistant"))
+-  const streamingActive = createMemo(() =>
+-    messages().some((message) => message.type === "assistant" && !message.time.completed),
++  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
++  const viewportCulling = createMemo(() =>
++    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+   )
++  let scroll: ScrollBoxRenderable | undefined
++  function syncSessionViewportStuckToBottom() {
++    if (!scroll || scroll.isDestroyed) return
++    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
++    if (stuckToBottom === untrack(viewportStuckToBottom)) return
++    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
++  }
+   const lastUserCreated = (index: number) =>
+     renderedMessages()
+       .slice(0, index)
+@@ -80,7 +89,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
+       <box flexDirection="row">
+         <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
+           <scrollbox
+-            viewportCulling={!streamingActive()}
++            ref={(r) => (scroll = r)}
++            viewportCulling={viewportCulling()}
++            renderAfter={syncSessionViewportStuckToBottom}
+             viewportOptions={{ paddingRight: 0 }}
+             verticalScrollbarOptions={{ visible: false }}
+             stickyScroll={true}
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 3cd852e606f6eea23212a230a1e5859a426b1843..2ff78724fb9c9c6ec81d88b76a78ff2ca0d32cc2 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -106,7 +106,7 @@ import { PathFormatterProvider, usePathFormatter } from "../../context/path-form
+ // [local-smark] Local TUI features
+ import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
+ import { previewDiff } from "@tui/util/preview-diff"
+-import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
++import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
+ import { ConnectionError } from "../../util/connection-error"
+ import { ContextUsagePanel } from "./context-usage"
+ 
+@@ -230,7 +230,10 @@ export function Session() {
+     const status = sync.data.session_status?.[route.sessionID]
+     return pendingAssistantID(messages(), status)
+   })
+-  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
++  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
++  const viewportCulling = createMemo(() =>
++    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
++  )
+ 
+   const lastAssistant = createMemo(() => {
+     return messages().findLast((x) => x.role === "assistant")
+@@ -384,6 +387,13 @@ export function Session() {
+   const dialog = useDialog()
+   const renderer = useRenderer()
+ 
++  function syncSessionViewportStuckToBottom() {
++    if (!scroll || scroll.isDestroyed) return
++    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
++    if (stuckToBottom === untrack(viewportStuckToBottom)) return
++    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
++  }
++
+   event.on("session.status", (evt) => {
+     if (evt.properties.sessionID !== route.sessionID) return
+     if (evt.properties.status.type !== "retry") return
+@@ -1190,7 +1200,8 @@ export function Session() {
+             <Show when={session()}>
+               <scrollbox
+                 ref={(r) => (scroll = r)}
+-                viewportCulling={!streamingActive()}
++                viewportCulling={viewportCulling()}
++                renderAfter={syncSessionViewportStuckToBottom}
+                 viewportOptions={{
+                   paddingRight: showScrollbar() ? 1 : 0,
+                 }}
+diff --git a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
+index 587aeb84509fed5a49c56546ddc2165615a74fb0..73680b4d06f7330508ae75a8cd7657a61b678a93 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
+@@ -1,9 +1,36 @@
+ import type { Message, SessionStatus } from "@opencode-ai/sdk/v2"
+ 
++type SessionViewportMessage = {
++  role?: string
++  type?: string
++  time: {
++    created: number
++    completed?: number
++  }
++}
++
++type SessionViewportState = {
++  stuckToBottom?: boolean
++}
++
+ export function hasStreamingAssistant(messages: Message[]) {
+   return messages.some((message) => message.role === "assistant" && !message.time.completed)
+ }
+ 
++export function shouldCullSessionViewport(
++  messages: readonly SessionViewportMessage[],
++  state: SessionViewportState = {},
++) {
++  // Keep the hot sticky-bottom streaming path culled, but let off-screen
++  // streaming code blocks continue measuring when the user scrolls into history.
++  if (!messages.some(isStreamingViewportAssistant)) return true
++  return state.stuckToBottom ?? true
++}
++
++function isStreamingViewportAssistant(message: SessionViewportMessage) {
++  return (message.role ?? message.type) === "assistant" && !message.time.completed
++}
++
+ export function pendingAssistantID(messages: Message[], status: SessionStatus | undefined) {
+   if (!status || status.type === "idle") return undefined
+   return messages.findLast((message) => message.role === "assistant" && !message.time.completed)?.id
+diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+index 9011025c5163a977093765022fce45db9348eb6a..211fd2ecea3aca06dfccfd9b3267bc4354b29bf7 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+@@ -45,8 +45,11 @@ describe("Session route integration points", () => {
+       expect(sessionSource).toContain('"scrollbar_enabled"')
+     })
+ 
+-    test("scrollbox has viewportCulling tied to streamingActive", () => {
+-      expect(sessionSource).toContain("viewportCulling={!streamingActive()}")
++    test("scrollbox uses session viewport culling helper", () => {
++      expect(sessionSource).toContain("shouldCullSessionViewport")
++      expect(sessionSource).toContain("stuckToBottom: viewportStuckToBottom()")
++      expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
++      expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
+     })
+ 
+     test("scrollbox has contentOptions paddingRight for scrollbar", () => {
+diff --git a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
+index 230bbdf86eec6464963a942a691fc3901378b420..91cb9ca746b8ceebd5d14c29052cc62069374cce 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
+@@ -1,6 +1,11 @@
+ import { describe, expect, test } from "bun:test"
+ import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
+-import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "../../../../src/cli/cmd/tui/util/session-pending"
++import {
++  hasStreamingAssistant,
++  pendingAssistantID,
++  shouldCullSessionViewport,
++  shouldRefreshStaleBusyStatus,
++} from "../../../../src/cli/cmd/tui/util/session-pending"
+ 
+ const assistant = (id: string, completed?: number): AssistantMessage => ({
+   id,
+@@ -31,4 +36,16 @@ describe("session pending helpers", () => {
+     expect(shouldRefreshStaleBusyStatus([assistant("open")], { type: "busy" })).toBe(false)
+     expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "idle" })).toBe(false)
+   })
++
++  test("keeps session viewport culling enabled while an assistant message streams", () => {
++    expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
++  })
++
++  test("pauses session viewport culling while streaming away from sticky bottom", () => {
++    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(false)
++  })
++
++  test("keeps session viewport culling enabled after the assistant message completes", () => {
++    expect(shouldCullSessionViewport([assistant("done", 2)])).toBe(true)
++  })
+ })

@@ -1,0 +1,846 @@
+From f9b0b6c89f92119d8c169c919b62e7a924b62d16 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 17 Sep 2026 13:39:06 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E7=BC=A9=E5=B0=8F=E6=9E=84=E5=BB=BA?=
+ =?UTF-8?q?=E4=BE=9D=E8=B5=96=E8=8C=83=E5=9B=B4=E5=B9=B6=E7=A8=B3=E5=AE=9A?=
+ =?UTF-8?q?=E7=BC=93=E5=AD=98=E8=BA=AB=E4=BB=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/actions/setup-bun/action.yml b/.github/actions/setup-bun/action.yml
+index 9f099ec046c636b933b9bb8f1ca7000910a2dcfe..ff5298ce8151f5cbc261f0e3b55a133b65dd2875 100644
+--- a/.github/actions/setup-bun/action.yml
++++ b/.github/actions/setup-bun/action.yml
+@@ -5,6 +5,11 @@ inputs:
+     description: "Additional flags to pass to 'bun install'"
+     required: false
+     default: ""
++  # CLI 的过滤安装不能继承全仓缓存；默认 scope 保留现有调用方的完整依赖范围。
++  cache-scope:
++    description: "Dependency cache scope for the selected workspace graph"
++    required: false
++    default: "workspace"
+ runs:
+   using: "composite"
+   steps:
+@@ -37,7 +42,9 @@ runs:
+       id: cache
+       if: runner.os != 'Windows'
+       shell: bash
+-      run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
++      run: |
++        echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
++        echo "version=$(bun --version)" >> "$GITHUB_OUTPUT"
+ 
+     - name: Restore Bun dependencies
+       id: bun-cache
+@@ -45,9 +52,11 @@ runs:
+       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+       with:
+         path: ${{ steps.cache.outputs.dir }}
+-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
++        # v2 截断历史全仓缓存前缀，过滤安装才能从自己的依赖材料开始积累。
++        # 宿主架构和 Bun 版本限定原生包材料；根安装不消费 VSIX 或 submodule 的锁文件。
++        key: ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-${{ hashFiles('bun.lock', 'bunfig.toml', 'patches/**') }}
+         restore-keys: |
+-          ${{ runner.os }}-bun-
++          ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-
+ 
+     - name: Install setuptools for distutils compatibility
+       run: python3 -m pip install setuptools || pip install setuptools || true
+@@ -84,4 +93,5 @@ runs:
+       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+       with:
+         path: ${{ steps.cache.outputs.dir }}
+-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
++        # install 可重写 lock；保存必须复用恢复时的请求身份，不能重算成已存在的 matched key。
++        key: ${{ steps.bun-cache.outputs.cache-primary-key }}
+diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
+index a4fa0f4d1259cb0790d27596fca40b66b28e5aa2..86c2350d7b3b111360000d1c7a747f929593f1a7 100644
+--- a/.github/workflows/build-opencode.yml
++++ b/.github/workflows/build-opencode.yml
+@@ -70,6 +70,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # 两个发布架构都在首次安装中准备，编译阶段复用同一依赖图。
++          install-flags: --filter './packages/opencode' --os=darwin --cpu='*'
+ 
+       - name: Build macOS binaries
+         shell: bash
+@@ -79,6 +83,7 @@ jobs:
+           bun run script/build.ts \
+             --version=${{ needs.version.outputs.version }} \
+             --os=darwin \
++            --skip-install \
+             --skip-embed-web-ui
+ 
+       - name: Sign and package macOS assets
+@@ -137,6 +142,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # ARM64 资源也由此安装；后面的 x64 宿主编译无需再次扩大 workspace 范围。
++          install-flags: --filter './packages/opencode' --os=linux --cpu='*'
+ 
+       - name: Install Linux packaging tools
+         shell: bash
+@@ -153,6 +162,7 @@ jobs:
+           bun run script/build.ts \
+             --version=${{ needs.version.outputs.version }} \
+             --os=linux \
++            --skip-install \
+             --skip-embed-web-ui
+ 
+       - name: Package Linux assets
+@@ -274,14 +284,16 @@ jobs:
+             python -m pip install setuptools
+           }
+ 
+-          bun install --linker hoisted
++          # 使用路径区分同名根包；只准备当前发布的 Windows x64 依赖闭包。
++          bun install --linker hoisted --filter './packages/opencode' --os=win32 --cpu=x64
+ 
+       - name: Build Windows x64 binary
+         shell: pwsh
+         run: |
+           $ErrorActionPreference = "Stop"
+           cd packages/opencode
+-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
++          # 原生包已由首次安装准备，避免 build.ts 再进入未过滤的 workspace 安装。
++          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-install --skip-embed-web-ui
+ 
+       - name: Package Windows assets
+         shell: pwsh
+@@ -340,6 +352,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # fixture 静态加载 Solid/Core，保留 CLI 声明的 dev、peer 与 optional 依赖。
++          install-flags: --filter './packages/opencode'
+ 
+       - name: Download macOS archive
+         uses: actions/download-artifact@v4
+@@ -367,6 +383,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # 从与构建相同的 CLI 闭包准备 harness，验证对象仍是下载后的归档。
++          install-flags: --filter './packages/opencode'
+ 
+       - name: Download Linux archives
+         uses: actions/download-artifact@v4
+@@ -394,6 +414,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # ARM runner 按自身架构安装 harness；不复用 x64 的 node_modules。
++          install-flags: --filter './packages/opencode'
+ 
+       - name: Download Linux archives
+         uses: actions/download-artifact@v4
+@@ -433,7 +457,8 @@ jobs:
+           PUPPETEER_SKIP_DOWNLOAD: "1"
+           CYPRESS_INSTALL_BINARY: "0"
+           HUSKY: "0"
+-        run: bun install --linker hoisted
++        # 独立 runner 保留干净产物验证，只减少源码 harness 的安装范围。
++        run: bun install --linker hoisted --filter './packages/opencode'
+ 
+       - name: Download Windows archive
+         uses: actions/download-artifact@v4
+diff --git a/docs/plans/ci-build-dependency-preparation-optimization.md b/docs/plans/ci-build-dependency-preparation-optimization.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2193c3a57c405b91cc26a81607fe150ae46738d
+--- /dev/null
++++ b/docs/plans/ci-build-dependency-preparation-optimization.md
+@@ -0,0 +1,677 @@
++# Canonical Implementation Plan: CLI Build 依赖准备与缓存优化
++
++> Status: verified
++>
++> Revision: R1
++>
++> Approved revision: R1
++>
++> Audit mode: full-scope
++>
++> Requirement source: 本文件第 1 节的原始用户请求
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-09-17
++
++本文件是本任务唯一实施规格。聊天中的建议、旧版本与预测不构成另一份实施规格。本轮仅编写计划，计划通过审计也不代表已经修改 CI、执行 Build 或获准推送和发布。
++
++## 1. Verbatim Requirement
++
++原始调查请求：
++
++> 下面请你使用GH去检查一下我们OPNCODE远端进行相应的test以及相应的build，主要是build。你看一看build期间它为什么build所消耗的时间那么长，看一看build整体的时间是否有任何机会可以进行相应的优化，同时使得这个相应的时间适当减少，或者显著减少，因此请你全面完成我检查一下，看一看相应的内容。请注意是主要主要是 Build，你先看 Build 吧，Test 你可以等会儿再检查。
++
++本轮计划请求：
++
++> 请你完整准确地根据这些内容，根据这些问题，以及你的建议给出具体可行的实施方案，包括，就是实施方案，包括但不限于这个代码应该怎么修，就是代码或者说配置文件应该怎么修改，就是给出DIFF层级的相应的内容。然后同时你要将这个整体的这个 plan 写在我们的小写的 DOCS Plan 的那个现有的文件夹里面构建一个相应的 plan，使用你的 first principle。然后同时请注意你不需要包含任何的 TDD 内容，因为这本质上就是正在进行相应的这个，就是你不需要进行 defensive 或者否定式审计，否定式的测试断言。就譬如说你如果把一个东西改掉了，那你不需要加一个否定式断言，断言那个东西不存在。所以请注意这一点，你不需要加任何的测试，你也不需要做任何的测试断言等等内容去判定你这个内容。也就是说你本次由于只是在进行相应配置文件修改，可以不按 TDD 来实施，那因此请你按照 first principle 的原则去进行相应的 planning 的构建。其中每一个相应的问题都应该包含主要的一个原因，一个产生机制，然后以及对应的准确的修改的一个 DIFF 是如何的。然后之后在你完成准备之后，让一个相应的 auditor 去审计。
++
++用户明确豁免：不新增测试、不新增断言、不执行 TDD，不用源代码字符串存在/不存在检查代替性能证据。依照工程政策的显式用户要求优先规则，第 16 节保留模板位置并标记不适用。保留已有 Build 的 smoke 与 closure 门禁；本计划不增加其用例或断言。独立 auditor 审核实际依赖链、diff 可执行性与要求覆盖，不引入没有证据的防御性设计。
++
++## 2. Explicit Non-Goals
++
++- 不改变 CLI 业务源码、依赖版本、manifest、bun.lock、Bun 版本或 linker。
++- 不优化独立 Test 工作流，也不修改 Test、typecheck、VSIX 的安装范围；共享 action 的缓存身份修复会自然作用于它们。
++- 不合并 Windows build/smoke job；保留独立 runner 对下载后产物的验证边界。
++- 不删减最终归档解压验证、平台 smoke、OpenTUI closure、签名、checksums 或 Release 上传。
++- 不增加 cache server、node_modules 打包传输、专用 smoke manifest、动态 import 重构、全仓安装失败回退、安装重试或新的 CI 验证脚本。
++- 不改变任务并发策略、runner 型号、发布目标、artifact 名称/内容或压缩参数。
++- 不把预计收益写成已经测得的收益；不在本轮触发远端发布。
++
++## 3. Repository Context
++
++| Source                                             | Why it constrains this task                                                             |
++| -------------------------------------------------- | --------------------------------------------------------------------------------------- |
++| `AGENTS.md`                                        | 最小正确变更、复用现有接口；origin 是 SMARK fork；禁止未经请求的 git 提交/推送          |
++| `CONTEXT.md`                                       | CLI 位于 packages/opencode，core/sdk/ui 等是 workspace 依赖；保留 Session/Goal 产物行为 |
++| `packages/opencode/AGENTS.md`                      | package 约定；本次不修改其源码                                                          |
++| `packages/opencode/test/AGENTS.md`                 | fixture 生命周期约定；只阅读 smoke 导入，不修改测试                                     |
++| `.opencode/policy/first-principles-engineering.md` | 根因所属接口修复、单一主路径、canonical revision、独立全范围审计、中文解释注释预算      |
++| `.opencode/templates/canonical-plan.md`            | 本文件章节和审计记录结构                                                                |
++| `docs/adr/README.md`                               | 已有索引仅包含 triage ADR，无 Build 安装/缓存相关 accepted ADR                          |
++| `.github/`、`docs/` 下 AGENTS 查找                 | 无额外局部 AGENTS                                                                       |
++
++工作基线：远端 `SMARK2022/opencode:dev-smark` 与本地 HEAD 为 `d3d430db5f63c5e369dd185bcd939a52a4072523`。本地已有 notebook、测试和 thirdparty 修改不属于本任务，不覆盖、不整理。
++
++## 4. Files and Evidence Read
++
++| Evidence                                                                                                                                          | Relevance                                                                                     | Evidence class |
++| ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------- |
++| `.github/workflows/build-opencode.yml:35-601`                                                                                                     | version → 三平台构建 → 五个产物 smoke → checksums/Release；closure 独立门禁                   | observed       |
++| `.github/actions/setup-bun/action.yml:3-87`                                                                                                       | install-flags 已有接口；恢复和保存分别 hashFiles；全局 Bun PM cache；Windows 跳过缓存         | observed       |
++| `.github/workflows/typecheck.yml`、`test.yml` 中 setup-bun 调用搜索                                                                               | 默认调用没有 install-flags；共享 action 的外部消费者                                          | observed       |
++| `.github/workflows/build-vsix.yml`                                                                                                                | 独立 sdks/vscode 安装，未使用共享 action                                                      | observed       |
++| 根 `package.json`、`bunfig.toml`                                                                                                                  | Bun 1.3.14、hoisted、workspace 范围、root lifecycle、overrides/patches、minimumReleaseAge     | observed       |
++| `packages/opencode/package.json:37-184`                                                                                                           | core/script/sdk/plugin/ui、Babel/xterm、OpenTUI、watcher、Sharp/PvRecorder 已声明             | observed       |
++| `packages/core/package.json`、`packages/script/package.json`、`packages/script/src/index.ts`                                                      | workspace 依赖及 build 时版本/semver/TEAM_MEMBERS 消费                                        | observed       |
++| `packages/opencode/script/build.ts:18-182,212-268,439-603`、`install-target.ts`、`generate.ts`                                                    | 生成模型快照、目标选择、native 资源收集、两次增量 install、已有 skip-install 分支             | observed       |
++| `packages/opencode/script/fix-node-pty.ts:11-28`                                                                                                  | root postinstall 仅修复 package-local node-pty 的 Unix spawn-helper；Windows 无操作           | observed       |
++| `packages/opencode/script/smoke-opentui-artifact.ts:3-26,87-120`、`test/cli/cmd/tui/sync-fixture.tsx:1-12`、`src/pty/pty.bun.ts`、package bunfig  | smoke 静态导入 fixture，保留 dev/peer/optional 与 Solid preload；实际 PTY 走 bun-pty          | observed       |
++| `packages/opencode/script/verify-opentui-closure.ts:31-107,111-154`                                                                               | 检查所有 OpenTUI 平台包、root/app/plugin realpath 和 submodule provenance，因此保持原安装范围 | observed       |
++| [CLI run 35139390176](https://github.com/SMARK2022/opencode/actions/runs/35139390176) 及 job 日志                                                 | 最新端到端 746 秒；缓存漂移与安装耗时                                                         | observed       |
++| [CLI run 35104871562](https://github.com/SMARK2022/opencode/actions/runs/35104871562) 及 job 104823439664 日志                                    | 第二次独立运行出现相同 cache key 漂移                                                         | observed       |
++| run 35072303770、34943767206、34774226796、34602819481                                                                                            | 六次步骤样本，Windows 两阶段安装持续占主导                                                    | observed       |
++| 最近 12 次 CLI run 列表                                                                                                                           | 11 次成功中位数 782 秒，范围 717–945 秒；1 次失败不混入成功基线                               | observed       |
++| [actions/cache 固定 SHA 的 restore/action.yml](https://github.com/actions/cache/blob/0057852bfaa89a56745cba8c7296529d2fc39830/restore/action.yml) | 已存在 cache-primary-key 输出，语义为本次请求 key；区别于 cache-matched-key                   | contracted     |
++| [Bun 1.3.14 workspace 用例](https://github.com/oven-sh/bun/blob/bun-v1.3.14/test/cli/install/bun-workspaces.test.ts#L1402-L1692)                  | 路径 filter 排除 root；root lifecycle 不执行；被选 workspace 的传递 workspace 依赖仍安装      | contracted     |
++| [Bun install 文档](https://bun.sh/docs/pm/cli/install)、[workspace 文档](https://bun.sh/docs/pm/workspaces)                                       | filter、默认 dev/optional/peer、OS/CPU 安装目标；未用新版独有选项                             | contracted     |
++
++GitHub 检查均显式 `-R SMARK2022/opencode`，避免 GH 默认解析到 upstream。job API 中出现的零耗时外部 check 不当作 Build 执行 job。
++
++## 5. Current Behavior
++
++```text
++push/dev-smark 或 workflow_dispatch
++  → version
++  → build-macos / build-linux / build-windows（并行）
++      → 安装全仓 workspace
++      → build.ts 再安装 OpenTUI 与 watcher（默认会再次进入 workspace 安装器）
++      → 编译、现有内置 smoke、签名/打包、artifact 上传
++  → 对应独立 smoke runner
++      → 再安装全仓 workspace
++      → 下载归档、解压、运行现有 smoke
++  → 与 opentui-closure 汇合
++  → checksums、Release 资产发布
++```
++
++macOS/Linux 环境准备内部：恢复整个 Bun 包缓存 → 安装（可改写 lock）→ 再次计算保存 key → 压缩缓存 → 尝试保存。安装目录与包下载缓存是不同职责，后者不能替代安装器的解析和完整性处理。
++
++最新 run 的关键耗时：
++
++| Job               | 总计 |            依赖/环境 |       Build 或产物验证 |
++| ----------------- | ---: | -------------------: | ---------------------: |
++| build-windows     | 316s |         install 264s |              build 17s |
++| smoke-windows     | 353s |         install 306s |      extract+smoke 27s |
++| build-macos       | 237s |           setup 178s |              build 24s |
++| smoke-macos x64   | 342s |           setup 243s |      extract+smoke 76s |
++| smoke-macos arm64 | 196s |           setup 161s |      extract+smoke 19s |
++| build-linux       | 155s |            setup 76s | build 15s，package 42s |
++| checksums         |  60s | artifact download 7s |     Release upload 31s |
++
++关键路径为 Windows build → Windows smoke → checksums。两次 Windows install 共 570s，占 746s 的约 76%。六次样本的 Windows build install 为 238–436s，smoke install 为 306–500s。最新一次安装均为 2336 packages。
++
++最新 macOS build 的恢复请求 key 以 `98c609` 开头，通过前缀命中 `df5c32`；安装输出 Saved lockfile；保存时重新求值得到 `df5c32`，压缩约 70s 后无法保留该 key。上一次同样压缩约 90s。最新 macOS x64 smoke 类似压缩约 85s。缓存压缩后 macOS 2416368146 bytes、Linux 2433900858 bytes；x64 macOS smoke 恢复约 112s，实际 install 9.11s。
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition              | Producer                                    | Upstream guarantees                     | Reachable path                            | Owner                       | Classification |
++| ------------------------------- | ------------------------------------------- | --------------------------------------- | ----------------------------------------- | --------------------------- | -------------- |
++| 三平台目标与版本                | workflow 固定参数、version job              | CLI Build 固定 skip-embed-web-ui        | workflow → install/build                  | Build workflow              | observed       |
++| macOS/Linux 跨 CPU native 依赖  | 每平台同时产出 arm64/x64                    | build.ts 选择该 OS 的普通 ABI/AVX2 目标 | Sharp/OpenTUI/watcher/PvRecorder 资源收集 | workflow 的 initial install | observed       |
++| Windows x64 native 依赖         | 固定 --arch=x64                             | runner Windows；不编译 Windows ARM      | install → compile → ConPTY smoke          | Build workflow              | observed       |
++| lockfile 在安装中改变           | Bun install                                 | 当前没有 frozen-lockfile                | restore key → install → save key          | setup-bun cache 配对        | observed       |
++| cache miss / 同 scope 的旧 lock | GitHub cache                                | 缓存是下载加速，不是 node_modules 成品  | restore → 同一 bun install                | setup-bun                   | contracted     |
++| Test/typecheck 全仓安装         | 默认 setup-bun 调用                         | 没有 CLI filter 参数                    | action 默认输入                           | setup-bun 兼容默认值        | observed       |
++| all-platform OpenTUI closure    | verifier assets map 与 root/plugin 消费起点 | 既有 full workspace install             | installed graph → closure                 | closure job                 | observed       |
++| smoke 源码 fixture 依赖         | 静态 imports 和 package preload             | dev/peer/optional 默认安装              | fixture → SDK/Core/OpenTUI                | 现有 manifest closure       | observed       |
++
++## 7. Required Invariants
++
++| ID     | Behavioral invariant                                                          | Evidence                            | 既有运行信号                        |
++| ------ | ----------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------- |
++| INV-01 | 一次缓存恢复与保存使用同一请求身份                                            | 两次 key 漂移日志                   | restore/save key 与 cache-hit 日志  |
++| INV-02 | CLI Build 与 smoke 的安装范围等于其声明依赖闭包，避免全仓消费                 | CLI manifest、过滤契约、2336 包安装 | 既有安装日志和完整 Build            |
++| INV-03 | 首次安装备齐本 job 所有构建 target 的 native 资源；编译阶段不重新扩大安装范围 | build.ts/resolveInstallTarget       | 既有多目标 build、Sharp/voice smoke |
++| INV-04 | 精简缓存不会恢复旧的全仓大缓存；宿主 OS/arch/Bun 与安装范围明确               | 大缓存日志、多架构 job              | 新 key、恢复大小与耗时              |
++| INV-05 | 所有既有 artifact 验证、独立 runner、closure 和发布依赖关系保持               | workflow needs、下载/解压步骤       | 既有各平台 smoke 和 Release gate    |
++| INV-06 | 默认 action 消费者继续全仓安装；VSIX 不受影响                                 | setup-bun 调用搜索                  | 默认输入与既有工作流行为            |
++| INV-07 | 当前交付是单一计划和独立审计；不新增测试/断言/实现变更                        | 用户原话                            | 文件 diff、审计记录                 |
++
++## 8. First Divergence and Root Cause
++
++### P1. Windows 两次全仓安装
++
++第一分歧：Build 与 smoke 的依赖准备步骤没有选择当前消费 workspace，根安装器因此遍历整个 monorepo。第二个独立 runner 再次执行同样安装，且在 build 之后串行发生。独立产物验证有明确价值；成本错误在安装范围，无须通过合并 runner 消除该边界。
++
++所属接口：workflow 中 initial bun install 和调用 composite 时的既有 install-flags。修复：对 3 个 build 和 5 个 smoke job 使用同一个路径 filter，保留声明的 dev/optional/peer/transitive workspace 依赖。准确修改见 D2。
++
++### P2. 恢复/保存 key 漂移
++
++第一分歧：save step 重算 hashFiles，此时 install 已改写 lockfile。恢复没有 exact hit 导致 save 被调度，但 save 最终指向已经存在的 matched key，付出压缩成本后失败。log 的 “another job may be creating” 不是并发竞争的充分证据。
++
++所属接口：共享 action 的 restore/save 配对。修复：保存 `steps.bun-cache.outputs.cache-primary-key`，不保存 matched key、不再 hash 当前文件。准确修改见 D1。该修复不要求禁止安装器写 lock；缓存是包下载材料，不承担锁文件冻结职责。
++
++### P3. 2.4 GB 缓存反复搬运
++
++第一分歧：恢复 key 的范围只区分 OS 与所有 lock 的哈希，所有安装用途共享宽泛前缀。即使随后增加 CLI filter，也会继续恢复包含桌面/console 等旧下载的 cache，save 会把历史内容继续带入。
++
++所属接口：action 缓存身份与 workflow 对依赖范围的声明。修复：新增 `cache-scope` 输入，默认 workspace，CLI 消费者传 cli；新 key 命名空间 v2 包括 OS、宿主 arch、实际 Bun 版本、scope、根 lock/bunfig/patches 哈希；restore prefix 严格保持同一个 OS/arch/Bun/scope。不匹配旧 `OS-bun-`，不清理现有远端缓存。准确修改见 D1、D2。
++
++### P4. build.ts 内部安装会再次扩大范围
++
++第一分歧：只修改 initial install 而保留默认 build.ts 路径，会在 build.ts:448-449 再次进入未过滤安装器。OpenTUI 和 watcher 本已是 CLI manifest 的直接依赖。
++
++所属接口：workflow 对 initial install 与 build.ts 的编排。修复：initial install 同时传递与 `resolveInstallTarget` 等价的 OS/CPU，之后使用已有 `--skip-install`。macOS=darwin/_，Linux=linux/_，Windows=win32/x64。准确修改见 D2。
++
++此处只选择已有编排接口，不改 build.ts 的本地构建默认行为。它的三次重试/cache 清除代码仍供其他默认调用者使用；CI 首次安装与当前 setup 一样直接传播安装失败，不新增第二安装路径。
++
++### P5. 并行关键路径转移
++
++第一分歧：若把某个 job 的节省直接当作总耗时下降，会忽略 macOS 分支的汇合点。最新样本仅删除 Windows 第二次安装，整体只从 746s 到约 665s，非减少 306s。
++
++这属于性能评估模型而非另一个生产缺陷；D1/D2 同时覆盖 Windows 和 macOS。无需为 P5 增加配置或断言。实现后按完整 run 和各分支完成时间计算实际收益。
++
++### 反馈信号与本轮豁免
++
++本次是已有远端性能 trace 的配置优化，用户明确不要 TDD 或任何新增测试断言，因此不制造返回非零的性能“红灯测试”。复用已执行的只读 GH 命令记录原始症状：
++
++```powershell
++gh run view 35139390176 -R SMARK2022/opencode --job 104939848394 --log
++gh run view 35139390176 -R SMARK2022/opencode --job 104941661013 --log
++gh api 'repos/SMARK2022/opencode/actions/runs/35139390176/jobs?per_page=100'
++```
++
++观察结果为上表、98c609→df5c32 key 漂移、264s+306s 安装。最小证据是单个 macOS job 的 restore/install/save 时间线和两个串行 Windows job 的 install 步骤。没有新增断言、临时 profiler 或安装实验；改后速度与干净 runner 上的完整闭包仍需实际 Build 观察，不能在本计划中声称验证完毕。
++
++## 9. Responsibility and Seam
++
++| Concern              | Owner                      | Interface promise                        | Why it belongs here          | Why another module does not own it    |
++| -------------------- | -------------------------- | ---------------------------------------- | ---------------------------- | ------------------------------------- |
++| 安装范围与目标 CPU   | Build workflow             | 本次产物和验证需要哪些 workspace/targets | 调用方拥有 build 目标        | 不给通用 build.ts 强加 CI-only filter |
++| 缓存配对与 namespace | setup-bun                  | 为一次安装恢复/保存下载材料              | action 同时控制 restore/save | 不让业务源码或 smoke 操纵缓存         |
++| filtered graph       | Bun + 现有 manifests       | 传递 workspace/dev/optional/peer 解析    | 已有安装器职责               | 不手写包清单或复制 node_modules       |
++| 发布质量门禁         | 原 workflow 与现有 harness | 最终归档和 native 行为可用               | 原有权威入口                 | 本任务不新增检查实现                  |
++| 性能测量             | GH run/job/step 日志       | 实际端到端时间                           | 已有可观测接口               | 不向业务函数插入计时                  |
++
++## 10. Single Approved Primary-Path Design
++
++此处描述待审计主路径；只有第 22 节对当前 revision 的 clean verdict 才构成批准。
++
++```text
++原 version/targets
++  → 同 scope 的包缓存（macOS/Linux；Windows 保持不缓存）
++  → 根目录 bun install --linker hoisted --filter './packages/opencode'
++      build jobs 附加 OS/CPU；smoke jobs 使用原宿主目标
++  → build.ts --skip-install --skip-embed-web-ui（仅 build jobs）
++  → 原签名/归档/上传
++  → 原独立 smoke runner / 下载 / 解压 / harness
++  → 原 closure + checksums + Release
++```
++
++唯一新输入 `cache-scope` 描述依赖范围，不是功能开关或失败回退。仓库调用值仅 `workspace` 与 `cli`。同 CLI scope 的 build 与 smoke 共享包下载材料；安装器始终依据本 job 的 OS/CPU 再安装，缓存不是安装完成证明。
++
++构建 job 使用 `--cpu='*'` 是继承现有 build.ts 的安装策略，保证双架构资源；它不增加新的构建目标。Mac/Linux build 的 skip-install 与 initial target flags 必须在同一次 diff 中落地。
++
++closure 保持 default workspace 安装，因其读取所有 native package 的 provenance；Linux ARM smoke 保留原生 ARM runner，缓存按 runner.arch 独立。macOS x64 仍按当前 macos-latest 运行方式执行，不宣称增加了原生 Intel runner 覆盖。
++
++filtered install 的 root hooks：Bun 1.3.14 会略过不在 filter 中的 root lifecycle。root prepare 是 HUSKY=0 的 husky；root postinstall 是 fix-node-pty（Windows 无操作，Unix 修复 package-local node-pty helper）。当前 Build/harness 的 PTY 走 Bun 条件分支和 bun-pty；本任务不新增 root hook 转发或 --ignore-scripts。依赖自身的可信 lifecycle 仍交给安装器处理。默认 workspace consumers 原 hooks 继续运行。
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path                                                                                | Current or proposed               | Classification          | Produces success?  | Decision-surface share | Disposition |
++| ----------------------------------------------------------------------------------- | --------------------------------- | ----------------------- | ------------------ | ---------------------- | ----------- |
++| 缓存 exact/prefix miss 后仍执行同一安装器                                           | current                           | primary-contract branch | 由安装器决定       | 原路径                 | preserve    |
++| Windows 跳过 Bun PM cache                                                           | current                           | primary-contract branch | 由安装器决定       | 原路径                 | preserve    |
++| CLI / workspace scope                                                               | proposed                          | primary-contract branch | 仅区分缓存身份     | 无新增失败分支         | preserve    |
++| CI 选择已有 skip-install                                                            | current interface, new caller use | primary-contract branch | 首次安装后编译     | 不绕过安装失败         | preserve    |
++| build.ts 默认调用的 native install retry                                            | current                           | existing compatibility  | 默认路径使用       | 本任务无变更           | preserve    |
++| 原 Linux packaging 对缺失可选 tar 的处理、Release upload retry、setuptools 兼容命令 | current                           | existing compatibility  | 原契约             | 本任务无变更           | preserve    |
++| filtered install 失败改为 full install                                              | 未引入                            | forbidden fallback      | 会伪装优化路径可用 | 0                      | reject      |
++
++新增 alternate success paths = 0；新增 diagnostic production decision surface = 0%。不增加生产 guard、retry、临时文件或异常转换。
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate     | Why it existed           | Why the approved route supersedes it | Delete or collapse location       |
++| ------------------------------------ | ------------------------ | ------------------------------------ | --------------------------------- |
++| save step 二次计算锁文件 hash        | restore/save 分开编写    | primary-key 已由 restore 权威给出    | D1 save key                       |
++| OS-bun 宽泛恢复前缀                  | 全仓缓存用途未区分       | CLI profile 需要独立缓存身份         | D1 key/prefix 替换                |
++| CLI build/smoke 全仓安装             | 复用通用默认安装         | 现有 filter 可以表达声明依赖闭包     | D2 install flags                  |
++| CI 编译前两次 native package install | 单独补充目标 native 变体 | initial install 已声明相同 OS/CPU    | D2 skip-install；保留默认脚本实现 |
++
++不删除远端缓存，也不清理用户 worktree。历史缓存可由 GitHub 自然淘汰。
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path                    | Planned file/change                   | 既有运行证据（用户豁免新增测试）           |
++| ------------------------ | ---------------------------------- | ------------------------------------- | ------------------------------------------ |
++| INV-01 / P2              | restore → save                     | D1 primary-key                        | 两个 step 的同一请求 key、热运行 exact hit |
++| INV-02 / P1              | CLI 安装                           | D2 所有 build/smoke filter            | 安装日志和现有 Build/harness 结果          |
++| INV-03 / P4              | initial targets → skip-install     | D2 三个 build job                     | 现有两架构 build 与 native smoke           |
++| INV-04 / P3              | scoped cache                       | D1 namespace + D2 scope               | cache key、大小、restore/save 耗时         |
++| INV-05                   | 下载后独立 smoke / closure / needs | 全部原步骤保留                        | 当前工作流原门禁                           |
++| INV-06                   | 默认 action callers                | D1 默认 workspace；不改其他 workflows | default input 的完整安装命令               |
++| INV-07                   | docs/plans 与 auditor              | 本文件及第 22 节                      | revision 对应审计结果                      |
++| P5 / 用户耗时目标        | 全流水线关键路径                   | D1+D2，GH 统计                        | run wall time 与 job end time              |
++
++## 14. Reverse Traceability
++
++| Proposed production concept       | Requirement ID | Evidence                            | Why existing logic cannot carry it                     |
++| --------------------------------- | -------------- | ----------------------------------- | ------------------------------------------------------ |
++| cache-scope 默认 workspace        | INV-04/06      | CLI 与默认全仓消费者共享 action     | 仅 OS/lock 无法隔离依赖用途                            |
++| v2 + OS/arch/Bun/scope key        | INV-04         | 2.4 GB 历史缓存，多 runner 架构     | 旧 prefix 会继续恢复宽缓存；Bun 版本/host 改变材料范围 |
++| 根 lock/bunfig/patches 哈希       | INV-01/04      | 根 workspace 安装读取这些输入       | recursive submodule/VSIX lock 与本安装无关             |
++| 保存 primary-key                  | INV-01         | pinned action 明确提供输出          | 重算 hash 已被 trace 证实漂移                          |
++| 复用 install-flags 传 path filter | INV-02         | pinned Bun 的 path filtering 契约   | 当前默认全仓安装                                       |
++| initial OS/CPU + skip-install     | INV-03         | resolveInstallTarget 与 direct deps | 单加 filter 会被编译脚本再安装扩大                     |
++
++## 15. File-Level Change Plan
++
++| File                                   | Add / modify / delete | Exact responsibility of the change                                    | Expected line delta |
++| -------------------------------------- | --------------------- | --------------------------------------------------------------------- | ------------------- |
++| `.github/actions/setup-bun/action.yml` | modify                | scoped/versioned cache identity；save 使用 restore primary-key        | 约 +15/-4           |
++| `.github/workflows/build-opencode.yml` | modify                | build/smoke path filter；build initial native targets 与 skip-install | 约 +25/-5           |
++| 本 canonical plan                      | add（本轮）           | 唯一规格与审计记录                                                    | 文档，不是生产实现  |
++
++以下 D1/D2 使用 apply_patch 的精确上下文 diff 格式，旧行基于 HEAD d3d430db5f。它们是计划内容，本轮不应用。两者构成一次完整实施，不单独发布一半。
++
++### D1. 缓存身份与范围
++
++```diff
++*** Begin Patch
++*** Update File: .github/actions/setup-bun/action.yml
++@@
++   install-flags:
++     description: "Additional flags to pass to 'bun install'"
++     required: false
++     default: ""
+++  # CLI 的过滤安装不能继承全仓缓存；默认 scope 保留现有调用方的完整依赖范围。
+++  cache-scope:
+++    description: "Dependency cache scope for the selected workspace graph"
+++    required: false
+++    default: "workspace"
++@@
++     - name: Get cache directory
++       id: cache
++       if: runner.os != 'Windows'
++       shell: bash
++-      run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+++      run: |
+++        echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
+++        echo "version=$(bun --version)" >> "$GITHUB_OUTPUT"
++@@
++       with:
++         path: ${{ steps.cache.outputs.dir }}
++-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+++        # v2 截断历史全仓缓存前缀，过滤安装才能从自己的依赖材料开始积累。
+++        # 宿主架构和 Bun 版本限定原生包材料；根安装不消费 VSIX 或 submodule 的锁文件。
+++        key: ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-${{ hashFiles('bun.lock', 'bunfig.toml', 'patches/**') }}
++         restore-keys: |
++-          ${{ runner.os }}-bun-
+++          ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-
++@@
++     - name: Save Bun dependencies
++       # runner.os != 'Windows' 必须在最前短路：Windows 跳过了 restore(id=bun-cache)，
++       # cache-hit 输出不存在；若不短路会以空 path 触发 cache/save。
++       if: runner.os != 'Windows' && steps.bun-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
++       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
++       with:
++         path: ${{ steps.cache.outputs.dir }}
++-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+++        # install 可重写 lock；保存必须复用恢复时的请求身份，不能重算成已存在的 matched key。
+++        key: ${{ steps.bun-cache.outputs.cache-primary-key }}
++*** End Patch
++```
++
++命中语义：新命名空间首次运行是冷缓存，这是一次性成本；后续同输入运行 exact hit 跳过保存。lock 更新时只恢复同 OS/arch/Bun/scope 的包材料，再用同一安装器完成安装并保存本次 primary-key。仍可能有首次冷运行多个默认 workspace job 并发写同 key，这是已有 GitHub cache 的不可变写入竞争，本计划不为它添加锁或协调服务。CLI macOS 的两个 smoke 在 build job 结束后启动，正常可以读取 build 已保存的同 profile 缓存。
++
++### D2. 安装范围与目标准备
++
++```diff
++*** Begin Patch
++*** Update File: .github/workflows/build-opencode.yml
++@@
++   build-macos:
++     needs: version
++     runs-on: macos-latest
++     steps:
++       - uses: actions/checkout@v4
++
++       - uses: ./.github/actions/setup-bun
+++        with:
+++          cache-scope: cli
+++          # 两个发布架构都在首次安装中准备，编译阶段复用同一依赖图。
+++          install-flags: --filter './packages/opencode' --os=darwin --cpu='*'
++@@
++           bun run script/build.ts \
++             --version=${{ needs.version.outputs.version }} \
++             --os=darwin \
+++            --skip-install \
++             --skip-embed-web-ui
++@@
++   build-linux:
++     needs: version
++     runs-on: ubuntu-latest
++     steps:
++       - uses: actions/checkout@v4
++
++       - uses: ./.github/actions/setup-bun
+++        with:
+++          cache-scope: cli
+++          # ARM64 资源也由此安装；后面的 x64 宿主编译无需再次扩大 workspace 范围。
+++          install-flags: --filter './packages/opencode' --os=linux --cpu='*'
++@@
++           bun run script/build.ts \
++             --version=${{ needs.version.outputs.version }} \
++             --os=linux \
+++            --skip-install \
++             --skip-embed-web-ui
++@@
++           if ($LASTEXITCODE -ne 0) {
++             python -m pip install setuptools
++           }
++
++-          bun install --linker hoisted
+++          # 使用路径区分同名根包；只准备当前发布的 Windows x64 依赖闭包。
+++          bun install --linker hoisted --filter './packages/opencode' --os=win32 --cpu=x64
++
++       - name: Build Windows x64 binary
++@@
++           $ErrorActionPreference = "Stop"
++           cd packages/opencode
++-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
+++          # 原生包已由首次安装准备，避免 build.ts 再进入未过滤的 workspace 安装。
+++          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-install --skip-embed-web-ui
++@@
++       - uses: ./.github/actions/setup-bun
+++        with:
+++          cache-scope: cli
+++          # fixture 静态加载 Solid/Core，保留 CLI 声明的 dev、peer 与 optional 依赖。
+++          install-flags: --filter './packages/opencode'
++
++       - name: Download macOS archive
++@@   smoke-linux-x64:
++       - uses: ./.github/actions/setup-bun
+++        with:
+++          cache-scope: cli
+++          # 从与构建相同的 CLI 闭包准备 harness，验证对象仍是下载后的归档。
+++          install-flags: --filter './packages/opencode'
++
++       - name: Download Linux archives
++@@   smoke-linux-arm64:
++       - uses: ./.github/actions/setup-bun
+++        with:
+++          cache-scope: cli
+++          # ARM runner 按自身架构安装 harness；不复用 x64 的 node_modules。
+++          install-flags: --filter './packages/opencode'
++
++       - name: Download Linux archives
++@@
++           CYPRESS_INSTALL_BINARY: "0"
++           HUSKY: "0"
++-        run: bun install --linker hoisted
+++        # 独立 runner 保留干净产物验证，只减少源码 harness 的安装范围。
+++        run: bun install --linker hoisted --filter './packages/opencode'
++
++       - name: Download Windows archive
++*** End Patch
++```
++
++D2 中 Linux archive 前的两个同形旧块由 `@@   smoke-linux-x64:` 与 `@@   smoke-linux-arm64:` 锚点分别定位；其余上下文按文件顺序匹配。完整 patch 按上述顺序执行。
++
++## 16. TDD Behavior Slices
++
++Not applicable：用户明确要求不加入 TDD、测试用例或测试断言。本计划不新增、不修改、不手动执行测试；不添加“某段源码不存在”的否定式检查。第 18 节只使用现有 GH 日志和未来正常 Build 产物作运行观察，现有发布门禁保持原样。
++
++## 17. Chinese Comment Budget
++
++| Metric                         | Estimate                      | Method                                                                           |
++| ------------------------------ | ----------------------------- | -------------------------------------------------------------------------------- |
++| Effective changed code lines E | 约 36–46                      | YAML 新增/实质修改非空非注释行；排除纯文档                                       |
++| Required C                     | 至少 ceil(E × 0.15)，预计 6–7 | 实施时按实际 E 计算，不以下界代替实际值                                          |
++| Planned C                      | 预计 10                       | 分布在 scope、namespace、save 身份、双架构准备、Windows filter、smoke dev 依赖处 |
++
++注释解释安装闭包、跨架构 native 来源和 lock 写入导致 key 漂移的真实约束；不为凑比例翻译字段名称。若实际 E 增长，保持 C >= max(1, ceil(E × 0.15))。
++
++## 18. Verification
++
++本节是现有运行证据的观察，不定义新测试或断言，也不是本轮运行 Build 的授权。所有命令工作目录为仓库根。
++
++| Command                                                                                                                               | Evidence produced                                             |
++| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
++| `gh run list -R SMARK2022/opencode --workflow build-opencode.yml --limit 12 --json databaseId,headSha,createdAt,updatedAt,conclusion` | 按成功运行统计端到端中位数/范围                               |
++| `gh api 'repos/SMARK2022/opencode/actions/runs/<run-id>/jobs?per_page=100'`                                                           | build/smoke/checksums 的实际开始结束时间、步骤时间和关键路径  |
++| `gh run view <run-id> -R SMARK2022/opencode --job <job-id> --log`                                                                     | 安装包数量、restore/save 请求 key、缓存大小、实际已有门禁结果 |
++| `gh api 'repos/SMARK2022/opencode/actions/caches?per_page=100'`                                                                       | 新 profile 缓存身份和大小                                     |
++| `git diff -- .github/actions/setup-bun/action.yml .github/workflows/build-opencode.yml`                                               | 人工 review 实际配置 diff；不增加 source-text assertion       |
++
++未来用户授权实施并正常触发 Build 后，记录首个 v2 冷运行和至少三个热运行，分别列出 Windows 两次 install、Mac restore/save、三平台 build 和整个 run 的耗时。用新 run SHA 标识配置，不把跨源码版本测量描述成严格同源码 A/B。
++
++首次冷缓存不代表稳态。现有 smoke/closure 对产物的正常结果是质量信号；性能从 GH 原始时间读取，不新增固定秒数失败阈值。若安装或原门禁失败，保持原失败状态并修订主路径；不回退 full install 或跳过门禁。若未实际观察到性能改善，实施报告应写“未证实提速”，不能依据 filter 参数存在就声称成功。
++
++## 19. Diff Budget
++
++| Metric           | Estimate                     | Justification                |
++| ---------------- | ---------------------------- | ---------------------------- |
++| Files added      | 1 文档，0 实施文件           | 本 canonical plan            |
++| Files modified   | 实施 2 YAML                  | action + Build workflow      |
++| Files deleted    | 0                            | 保留所有脚本、job、缓存      |
++| Production lines | 约 36–46 新增/实质修改配置行 | 现有接口组合，不新增源码模块 |
++| Test lines       | 0                            | 用户明确豁免                 |
++| Generated lines  | 0                            | 不重建 lock/SDK/artifacts    |
++
++## 20. Real Risks and Open Decisions
++
++- Bun 1.3.14 已有 filtered workspace 契约，但本任务没有在干净三平台 runner 执行该仓库的完整安装与构建。精简后的实际包数量、文件 I/O 时间和 native resolution 必须由正常 Build 观察，不能从文档推算为测得结果。
++- root lifecycle 被排除的差异已在第 10 节说明；不新增全仓 hook 执行来扩大作用域。当前 Bun PTY 路径不依赖旧 node-pty helper 修复。
++- filtered closure 仍包含 UI、Core、SDK 等较大的声明依赖，不会缩成两个 harness 包；Bun 可能仍解析全锁，因此不承诺安装成本按包数线性下降。
++- v2 namespace 首次需要填充，之后历史 prefix 也会累积同范围旧版本包；本计划处理 scope 污染，不新增 cache GC。
++- lockfile 写入的确切 manifest/解析变化尚未逐项重现。它不是缓存正确性的前提，本次不改变冻结锁文件策略，不编造 lock diff。
++- skip-install 使 CI 不再进入 build.ts 的 native 安装重试；所有 native 包在首次安装准备，该步骤与当前 initial install 一样失败即停止。包下载偶发故障不会由第二条安装路径掩盖。
++- 共享 action 的 v2 命名空间会让 Test/typecheck 默认调用也经历一次冷缓存；它们仍用原安装范围与命令，不以本计划审计代替其性能调查。
++- Windows 不缓存，两次独立安装仍存在；本修复降低每次安装范围，不声称消灭第二次安装。保留干净 runner 是明确取舍。
++- macOS x64 的既有执行时间较长，但缺少排除其他因素的 runner 对照；本次不据此更换 runner 或宣称 Rosetta 是唯一根因。
++
++### 收益边界
++
++可直接消除的历史开销是热缓存 key 漂移导致的重复压缩，macOS 单 job 已观察到约 70–90s。filtered install 的收益尚未量化。先前聊天中“约 8 分 30 秒”的推算包含合并/省去 Windows 第二次安装的假设，本计划保留独立 smoke，故该数字不作为本计划预测或验收承诺。
++
++构建编译仅 15–24s、VSIX 最近一次 33s，故不新增编译并行或 VSIX cache。Linux 打包约 42s、Release 上传约 31s且多数运行不在主要瓶颈，保留当前压缩和重试语义。后续是否继续优化应由新关键路径决定，另行规划。
++
++### Open Decisions Requiring the User
++
++本计划设计无待选路线。实际 CI 改动、推送和会发布 Release 的远端触发均留待用户另行授权；本轮只交付计划与审计。
++
++### Rejected Speculation
++
++没有证据将 Windows 安装全归因于杀毒、磁盘或网络；不据此关闭安全软件或更换主机。没有证据证明简单恢复 Windows 大缓存更快；不恢复它。没有 evidence 支持手工剔除 optional/dev 依赖、将 smoke 改为只执行 --version，或增加配置字符串否定式断言。
++
++## 21. Audit Contract
++
++独立 auditor 读取原始请求和当前 revision，自行核对真实配置、Bun 参数契约、调用方与产物消费链。每轮覆盖完整原始范围，不只检查修订片段。所有 Blocking finding 必须给出可达路径、证据、实际后果和最小主路径修正。
++
++按用户要求不要求 TDD、不新增测试或否定式断言；审计的重点是配置是否可执行、依赖是否充分、性能根因是否在所属接口修复、默认消费者是否保持原职责、已有门禁是否保持，以及中文解释注释预算。没有源码证据的防御性边界不得成为新需求。
++
++## 22. Plan Audit Record
++
++| Round             | Audited revision | Full scope?                  | Blocking findings        | Non-blocking findings          | Result             | Invocation reference                      |
++| ----------------- | ---------------- | ---------------------------- | ------------------------ | ------------------------------ | ------------------ | ----------------------------------------- |
++| 1（首次返回）     | R1               | 本地范围完成，远端证据待核对 | 未形成可定案的阻断性缺陷 | 暂无已确认的非阻断性缺陷       | 审计待完成，未批准 | `ses_f52833b09ffewLkvWiXaR686rD` 首次调用 |
++| 1（同轮续审完成） | R1               | yes                          | No blocking findings.    | 无需要修改 R1 才能实施的问题。 | APPROVE            | `ses_f52833b09ffewLkvWiXaR686rD` 续审调用 |
++
++仅独立 auditor 对当前 revision 返回 `No blocking findings` 后，可在不改变设计的行政编辑中更新批准字段。实质修订增加 revision 并重新全范围审计。
++
++首次返回 release verdict 原文：
++
++> **BLOCK — R1 审计待完成，原因是必要证据核对尚待执行授权，不是已证明设计存在缺陷。**
++
++续审依据原始用户已授权 GH 只读调查的要求继续；未变更设计。以下为同一 R1 全范围审计完成后的原文结论，记录日期 2026-09-17：
++
++### Blocking findings
++
++No blocking findings.
++
++### Non-blocking findings
++
++无需要修改 R1 才能实施的问题。
++
++实际提速仍需实施后的正常 Build 记录确认。R1 第 18、20 节已明确区分冷缓存、热缓存和跨源码版本测量，没有把过滤安装的预期收益当成已测得收益。
++
++### Rejected speculation
++
++- **过滤安装必然破坏 PTY：不成立。** 当前 artifact smoke 直接使用 `pty.bun.ts` → `bun-pty`；root postinstall 修复的是另一条 `node-pty` helper 路径。
++- **`--skip-install` 必然遗漏跨架构资源：不成立。** D2 在首次安装同时指定对应 OS/CPU，与当前 CI 调用的 `resolveInstallTarget` 结果对应，且保留 dev、optional、peer 依赖。
++- **必须新增测试或否定式断言：不成立。** 原始用户要求明确豁免；计划保留现有 Build、smoke 和 closure 门禁。
++- **必须增加全仓安装回退、缓存锁或 Windows 缓存：无证据支持。** 这些措施不属于本次已证明问题的必要修复。
++- 未将同文件中未改变的历史重试、打包或兼容分支扩大为本次阻断项。
++
++### Requirement and traceability coverage
++
++本轮延续同一 R1 全范围审计，覆盖完整原始需求、D1/D2 全部变更，以及安装、编译、产物验证、缓存和默认 action 消费者的直接影响链。
++
++#### 独立远端核对结果
++
++只读 GH 命令正常执行，没有工具拒绝。
++
++- [Run 35139390176](https://github.com/SMARK2022/opencode/actions/runs/35139390176)：端到端 **746 秒**；Windows build 安装步骤 **264 秒**，Windows smoke 安装步骤 **306 秒**；后者日志显示 **2336 packages installed [305.16s]**。Windows build → Windows smoke → checksums 确为该次关键路径。
++- macOS build 日志确认：恢复请求 `98c609…`，前缀命中 `df5c32…`，安装后出现 `Saved lockfile`，保存 key 变成 `df5c32…`；压缩约 **70 秒**后无法保留该 key。
++- [Run 35104871562](https://github.com/SMARK2022/opencode/actions/runs/35104871562)：再次出现相同 key 漂移，压缩约 **90 秒**后保存失败。
++- 最近 12 次运行中，11 次成功的耗时中位数 **782 秒**，范围 **717–945 秒**，与计划一致。
++- 固定 SHA 的 actions/cache restore 契约确认提供 `cache-primary-key`，其语义是本次请求匹配的 key。
++- Bun **1.3.14** 的 workspace 用例确认路径过滤、排除 root lifecycle，以及选中 workspace 对其他 workspace 的依赖仍被安装；固定版本安装文档确认 dev/optional/peer 默认保留和 OS/CPU 选择接口。
++
++#### 要求映射
++
++| 要求 / 不变量                    | 审计结论                                                                    |
++| -------------------------------- | --------------------------------------------------------------------------- |
++| INV-01：恢复与保存身份一致       | D1 在 setup-bun 所属接口复用 restore 的 primary key，修复已观察到的首次分歧 |
++| INV-02：减少 CLI 安装范围        | D2 覆盖三个 build 和五个 smoke 实例，使用现有路径 filter                    |
++| INV-03：首次备齐 native 目标     | OS/CPU 参数与现有目标选择对应；`--skip-install` 与首次安装变更一并落地      |
++| INV-04：隔离旧全仓缓存           | v2、OS、arch、Bun、scope 命名空间及恢复前缀保持一致                         |
++| INV-05：保留发布质量门禁         | 独立 runner、下载归档验证、closure、checksums 和 Release 依赖关系均保留     |
++| INV-06：默认消费者保持行为       | 默认 scope 为 workspace，默认安装命令不变；VSIX 继续独立安装                |
++| INV-07：仅计划与审计，无新增测试 | 满足原始交付范围和用户豁免                                                  |
++| 性能验证                         | 原始日志可复查；改后采用既有 Build 与 GH 时间观察，不新增断言               |
++
++反向检查中，新增 scope、缓存身份组成、primary-key、filter、首次目标参数和 skip-install 均有对应需求及可达调用链，没有发现无依据的生产概念。
++
++### Primary-path and fallback verdict
++
++**通过。**
++
++唯一权威路径为：
++
++`缓存材料 → 按声明闭包安装 → 编译 → 原有归档与独立 smoke → closure/checksums/Release`
++
++缓存命中不替代安装成功；过滤安装失败不转入全仓安装；`--skip-install` 仅消除首次安装之后的重复安装。新增 alternate success path 为 **0**，新增诊断决策面为 **0%**。
++
++职责归属明确：workflow 选择依赖范围和构建目标，setup-bun 管理缓存身份，Bun 与 manifests 负责解析依赖闭包。
++
++**计划阶段代码质量与中文注释：**两个 YAML 的拟议改动克制，没有新增脚本、依赖或重复实现。第 17 节明确承诺实际实施时满足 `C >= max(1, ceil(E × 0.15))`，邻近中文注释解释了缓存身份、目标资源和依赖边界，预算可行。本轮没有实施 diff，实际配置变更 **E=0、C=0，比例不适用**；实现审计仍须重新计算。
++
++### Release verdict
++
++**APPROVE — 仅批准 `docs/plans/ci-build-dependency-preparation-optimization.md` 的 R1。**
++
++此前因远端证据未核对而暂缓的状态已解除。本次结论是同一 R1 的完整计划审计结论，可据此记录批准状态。
++
++本批准不代表已实施或已证明提速，也不授权推送、触发工作流或发布 Release。审计期间未修改文件，未执行测试、安装或 Build。
++
++## 23. Implementation Evidence
++
++2026-09-17 用户追加实施授权：
++
++> 那你可以自行进行相应的一个 CI 配置的一个修改。然后测试并提交推送。而测试之后，然后你要再次审计一遍，审计完通过之后再去提交和推送。
++
++执行顺序为修改、既有构建验证、独立实现审计、通过后提交推送。本授权允许运行验证，保持此前不新增测试/断言的要求。第 1–22 节保留 R1 规划时的授权和证据快照；历史“本轮仅计划/不手动执行测试”不限制本次追加授权。
++
++实施基线 HEAD 为 `26b75e7da7`（新增 notebook 修复提交）；与 d3d430db5f 比较，本计划两个 YAML、build.ts、根/CLI manifests、bun.lock 均无变化，不构成设计漂移。
++
++用户随后追加要求：
++
++> 同时也注意检查是否会有现有的测试会断言相应的 CI 文件。如果有的话请你看一看会不会报红测。
++
++已搜索 packages、sdks、script 的工作流路径和 action 引用，检查现有 `packages/opencode/test/ci`；发现 `upstream-e2e-workflow.test.ts` 读取 `.github/workflows/test.yml` 并检查 Playwright 安装配置。未发现对本次两个 YAML 的直接断言。既有配置断言和 install-target 用例全部通过；没有新增或改写测试来适配实现。
++
++### Actual Files and Diff
++
++已应用 D1/D2 到 `.github/actions/setup-bun/action.yml`（+14/-4）及 `.github/workflows/build-opencode.yml`（+28/-3）。两个 Linux smoke 片段实际应用时扩展完整 job 上下文以避免 patch 工具歧义，生成结果与批准内容相同；无设计变更。第三个文件是本 canonical plan 的实施证据/审计记录。
++
++保留全部现有 job、needs、归档下载解压、closure 和发布流程；业务源码、manifest、锁文件、测试文件均无本任务修改。用户既有 notebook commit 和其他未提交修改未纳入本次 diff。
++
++### Red-Green Test Evidence
++
++Not applicable：用户明确豁免新增测试和 TDD。本次依照追加授权执行既有测试、真实安装/构建与归档 smoke，不制造红灯或新增断言。
++
++### Verification Commands and Results
++
++提交前验证环境：Windows x64，Bun 1.3.14。源码通过 `git archive --format=zip ... HEAD` 和 `Expand-Archive` 导出到 `D:\Temp\opencode\ci-build-r1-20260917\checkout`；没有借用当前工作区 node_modules。独立初始 Bun cache 为 `D:\Temp\opencode\ci-build-r1-20260917\cold-cache`。导出只包含已提交源码，实际命令使用 D2 的新参数，生成物和 lockfile 写入均留在临时目录。
++
++官方 actionlint 1.7.12 Windows AMD64 归档 SHA256 为 `6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9`，与 Release checksums 一致。工具位于 `D:\Temp\opencode\actionlint-1.7.12\bin\actionlint.exe`。
++
++| 命令                                                                                                                                                                      | 工作目录                        | 结果                                                                              |
++| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------- |
++| `git diff --check`                                                                                                                                                        | 工作仓库根                      | exit 0                                                                            |
++| `actionlint.exe -color .github/workflows/build-opencode.yml`                                                                                                              | 工作仓库根                      | exit 0，无诊断                                                                    |
++| `actionlint.exe -color`                                                                                                                                                   | 工作仓库根                      | 全部现有 workflow exit 0，无诊断                                                  |
++| `bun install --linker hoisted --filter './packages/opencode' --os=win32 --cpu=x64`                                                                                        | 临时 checkout 根                | exit 0；1048 packages installed [105.38s]；计时 105.64s                           |
++| `bun run script/build.ts --version=1.15.14-smark --os=win32 --arch=x64 --skip-install --skip-embed-web-ui`                                                                | 临时 checkout/packages/opencode | exit 0；15.62s；原有 Sharp 构建 smoke、版本输出、Compiled voice Worker smoke 完成 |
++| `Compress-Archive -Path <dist>/opencode.exe -DestinationPath <temp>/opencode-windows-x64.zip -CompressionLevel Optimal`，随后 `Expand-Archive` 到独立 artifact-smoke 目录 | 临时 checkout 根                | exit 0；生成最终 ZIP 并重新解压                                                   |
++| `bun run script/smoke-opentui-artifact.ts --binary D:\Temp\opencode\ci-build-r1-20260917\artifact-smoke\opencode.exe`                                                     | 临时 checkout/packages/opencode | exit 0；24.26s；初始/缩放/恢复 frame、spinner、Session/Goal、daemon 退出均完成    |
++| `bun test ./test/ci/upstream-e2e-workflow.test.ts`                                                                                                                        | 工作仓库 packages/opencode      | 1 pass，0 fail，26 expects                                                        |
++| `bun test ./test/ci ./test/script/install-target.test.ts`                                                                                                                 | 工作仓库 packages/opencode      | 9 pass，0 fail，37 expects，2 files                                               |
++| `bun typecheck`                                                                                                                                                           | 工作仓库 packages/opencode      | exit 0，tsgo --noEmit                                                             |
++
++安装命令保留 workflow 的 ELECTRON_SKIP_BINARY_DOWNLOAD、ELECTRON_SKIP_DOWNLOAD、PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD、PUPPETEER_SKIP_DOWNLOAD=1、CYPRESS_INSTALL_BINARY=0、HUSKY=0。没有 `--ignore-scripts`、`--production` 或 optional 排除。
++
++Windows executable 为 151408128 bytes，SHA256 `d4cfb642609676ed6325562443a2475449fc52be50226ffb255960125928907a`。OpenTUI native SHA256 `5fd5f3610be1dadbb1736f4bd757b6046c1c04fa55624552cd389e838722faf7`。artifact smoke 输出 sourceCount=2、renderedCount=2、modelRequests=1，scenario=normal。
++
++验证环境问题：第一次使用系统 tar 解压导出时，4 个中文文档路径导致 tar 返回错误；随后改用新的 ZIP 导出和独立 checkout，完整解压成功。实际安装/构建使用成功的 ZIP checkout；没有修改源文件或忽略构建失败。
++
++### Original Feedback-Loop Result
++
++历史基线仍为 11 次成功运行中位数 782s。新参数的本地干净 Windows 安装已完成，安装包数由远端旧步骤的 2336 减为 1048；本地耗时不能与 GitHub runner 做同环境性能对照。缓存 v2 热命中、跨平台流水线和最终 wall time 需推送后的远端运行记录，当前不声称已证明端到端提速。
++
++### Actual Secondary and Replacement Path Inventory
++
++与第 11 节一致。新增 fallback=0，新增诊断决策面=0%。未增加 catch、retry、配置失败回退或降级门禁。
++
++### Chinese Comment Calculation
++
++统计两个 YAML 的 `git diff --unified=0` 中新增非空行，排除注释后 E=30；邻近新增中文解释注释 C=12。没有 import、生成代码或纯移动行；文档不计入分母。要求 ceil(30 × 0.15)=5，实际比率 12/30=40%。注释解释 cache scope、原始 key、跨架构资源、同名根包选择和独立 artifact 验证边界。
++
++### Remaining Unverified Items
++
++提交前未执行 GitHub Actions 的真实 restore/save、macOS/Linux 原生 runner、GitHub artifact 上传下载和 Release。用户要求审计通过之后才提交推送，因此这些只能在推送后观察。现有 Windows 本地 ZIP 解压 smoke 不能冒充 GitHub artifact 传输或其他宿主验证。至少三个热运行的性能样本仍属于后续远端观察，不阻止对当前配置实现作静态/本地可执行性审计，也不构成已验证提速的声明。
++
++## 24. Implementation Audit Record
++
++| Round         | Plan revision | Full original scope?             | Blocking findings     | Non-blocking findings                      | Result            | Invocation reference             |
++| ------------- | ------------- | -------------------------------- | --------------------- | ------------------------------------------ | ----------------- | -------------------------------- |
++| 1（首次返回） | R1            | 静态范围完成，独立命令复核待完成 | 无已证明配置缺陷      | 验证证据边界                               | BLOCK，审计待完成 | `ses_f5225a038ffeqNIQz4vRCHVSLl` |
++| 1（续审完成） | R1            | yes                              | No blocking findings. | 实际提速仍待远端观察；本地构建证据边界保留 | APPROVE           | `ses_f5225a038ffeqNIQz4vRCHVSLl` |
++
++以下为独立 auditor 最终结论原文（2026-09-17），本次仅行政记录，未修改设计或实现：
++
++### Blocking findings
++
++No blocking findings.
++
++### Non-blocking findings
++
++- **实际提速仍待远端观察。** 当前可以确认配置修复了已观察到的开销来源；v2 缓存冷热运行、三平台完整流水线和端到端耗时尚未验证，不能宣称已经提速。
++- **本地构建证据边界保留。** 本轮直接读取了 Windows build report，但没有重新执行干净安装、编译和归档 smoke。计划记录的这些命令耗时与成功结果不列为本轮独立复现结果。
++
++这两项不要求修改 R1；计划已明确披露验证边界。
++
++### Release verdict
++
++**APPROVE — 仅批准 canonical plan R1 对应的当前两个 YAML 实现 diff。**
++
++此前因执行授权确认而暂缓的审计状态解除。本轮独立验证通过，完整原始范围内无阻断项。
++
++该批准允许实现进入用户要求的后续提交推送阶段；不代表远端三平台构建、缓存热命中或端到端提速已经验证。推送后仍须按计划观察正常 Build 和性能样本。
++
++审计期间未编辑文件、未提交、未推送、未触发 workflow。
++
++独立复核元数据：全 workflow actionlint exit 0；`bun test ./test/ci ./test/script/install-target.test.ts` 为 9 pass、0 fail、37 expects；package `bun typecheck` 成功；两 YAML `git diff --check` exit 0；E=30、C=12、40%。审计通过的范围是配置实现与已执行的本地验证，`verified` 不代表远端性能测量完成。

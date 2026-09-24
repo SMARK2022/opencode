@@ -1,0 +1,38 @@
+From 2ba3b7d75197e093072388e453f6a3fa8d67145a Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 26 Aug 2026 22:27:33 +0800
+Subject: [PATCH] =?UTF-8?q?test(edit):=20=E6=8C=89=E5=AE=8C=E6=95=B4=20dif?=
+ =?UTF-8?q?f=20=E8=A1=8C=E6=A0=A1=E9=AA=8C=E6=97=A0=E6=93=8D=E4=BD=9C?=
+ =?UTF-8?q?=E7=BC=96=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+避免 Windows 临时目录中的 -c 子串被误判为删除行。保持原测试意图，仅收紧断言边界以消除必过测试的路径相关假失败。
+
+diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
+index 2edb7461c0a88b78c0761e6799cfefbc18c2d00d..726aa4da0e83e5c4a70ba227825313fb7b88a3c7 100644
+--- a/packages/opencode/test/tool/edit.test.ts
++++ b/packages/opencode/test/tool/edit.test.ts
+@@ -555,13 +555,14 @@ describe("tool.edit", () => {
+           ],
+         })
+ 
+-        expect(result.output).toContain("Changed:")
+-        expect(result.output).toContain("-a")
+-        expect(result.output).toContain("+x")
+-        expect(result.output).toContain("-b")
+-        expect(result.output).toContain("+y")
+-        expect(result.output).not.toContain("-c")
+-        expect(result.output).not.toContain("+c")
++        const lines = result.output.split(/\r?\n/)
++        expect(lines).toContain("Changed:")
++        expect(lines).toContain("-a")
++        expect(lines).toContain("+x")
++        expect(lines).toContain("-b")
++        expect(lines).toContain("+y")
++        expect(lines).not.toContain("-c")
++        expect(lines).not.toContain("+c")
+         expect(result.output).toContain("Warning: 1 of 3 edit(s) were no-ops")
+       }),
+     )

@@ -1,0 +1,1243 @@
+From f9dad14979ac0a1168f93d5b087310f97a363600 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 29 Jul 2026 17:53:50 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=94=B6=E6=95=9B=20Session=20?=
+ =?UTF-8?q?=E6=90=9C=E7=B4=A2=E4=B8=BA=20signal-only=20=E7=94=9F=E5=91=BD?=
+ =?UTF-8?q?=E5=91=A8=E6=9C=9F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 progressive search 的 generation 双轨取消改为 AbortSignal 唯一过期事实，并以 disposed+startSearch 约束 recover 卸载后的 closed-over refetch。失败与成功空态继续走既有 Not Found，不改用户可见文案。
+
+补充 schema-valid 503、Spinner 终态、abort/stale 与 factory dispose 公共 seam 测试，并加强 searchScan/collection-route 覆盖。
+
+diff --git a/docs/plans/tui-session-search-race-successor.md b/docs/plans/tui-session-search-race-successor.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea3450b2386919ef2a77aa9fc18291f430067312
+--- /dev/null
++++ b/docs/plans/tui-session-search-race-successor.md
+@@ -0,0 +1,498 @@
++# Canonical Implementation Plan: Progressive Session Search Race Convergence
++
++> Status: verified
++>
++> Revision: N2
++>
++> Approved revision: N2
++>
++> Audit mode: implementation
++>
++> Requirement source: “优化逻辑，包括生产代码或者test代码，让整体测试更能反映相应的行为语义是否正常，让生产代码的逻辑减少竞态，实现最终没有错误；请保持克制修改，整体修改代码数量不超过6个文件、不超过800行代码，且不修改原有的用户侧的和功能。” User-provided terminal: `verified-implementation-and-commit`; user condition: “不绿不能提交”. User explicitly authorized this successor after the prior successor exhausted its six-round audit ceiling.
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-07-29
++
++This file is the sole implementation specification for the remaining repair.
++`docs/plans/tui-session-search-progressive.md` and
++`docs/plans/tui-session-search-progressive-successor.md` are blocked historical
++records and are not implementation authority.
++
++## 1. Verbatim Requirement
++
++> “优化逻辑，包括生产代码或者test代码，让整体测试更能反映相应的行为语义是否正常，让生产代码的逻辑减少竞态，实现最终没有错误；请保持克制修改，整体修改代码数量不超过6个文件、不超过800行代码，且不修改原有的用户侧的和功能。”
++
++The user-provided terminal is `verified-implementation-and-commit`, and the user
++stated “不绿不能提交”. These jointly authorize one local commit only after the
++implementation is independently verified. The GOAL contract forbids push.
++
++## 2. Explicit Non-Goals
++
++- Do not change existing Session-search results, title-first rendering, content delay, serial scan, 400-result cap, scope/path/start semantics, or successful completion semantics.
++- Do not change existing user-visible strings; empty success and empty failure continue to use `Not Found <query>`.
++- Do not add retries, fallback search, FTS, parallel scan, another decoder, SDK/schema/database changes, feature flags, or timeout changes.
++- Do not alter daemon lifecycle, WSL-specific signal behavior, or unrelated full-suite tests.
++- Do not include `packages/core/src/models-snapshot.js` or other unrelated worktree changes.
++- Do not assert request counts, private state, source text, or duplicated production algorithms in the component tests.
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` | Requires Session, Session search, Project, and Workspace domain vocabulary. |
++| `.opencode/policy/first-principles-engineering.md` | Requires owner repair, one semantic path, no fallback, behavior-sensitive tests, and independent audits. |
++| Root and `packages/opencode/AGENTS.md` | Requires package-local Bun tests/typecheck, restrained edits, and current module conventions. |
++| `packages/opencode/test/AGENTS.md` | Requires observable readiness rather than fixed sleeps and real behavior rather than duplicated logic. |
++| `packages/opencode/test/server/AGENTS.md` | Keeps middleware/routing tests at the focused public seam. |
++| Blocked predecessor plans | Historical evidence and audit findings only; no current implementation authority. |
++
++No relevant ADR changes Session-search or TUI lifecycle ownership.
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx:59-210,258-287,460-473` | Current query lifecycle, redundant generation/controller state, title/scan failure handling, and projection. | observed |
++| `packages/opencode/src/cli/cmd/tui/util/session-list-params.ts` | Existing loading, empty-label, hit merge, and cap contracts. | contracted/observed |
++| `packages/opencode/test/cli/cmd/tui/session-list-params.test.ts` | Existing successful empty and progressive projection regressions. | observed |
++| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | Current public renderer/provider/SDK seam; superseded plain-text fixtures and request-count assertions. | observed |
++| `packages/opencode/src/server/shared/workspace-routing.ts` and focused test | Exact collection-route owner repair already present in worktree. | observed |
++| `packages/opencode/test/server/httpapi-exercise/index.ts` | Seeded public `session.search.scan` scenario already present in worktree. | observed |
++| WSL2 Bun 1.3.14 runs | Exact-diff component/routing/typecheck and all 157 Effect/coverage/auth scenarios passed. | observed |
++| GitHub run `30208861589` and Linux JUnit artifact | Same local HEAD baseline package Linux job passed; WSL-only hanging-disposer case passed officially in 7.614299s. | observed |
++| GitHub run `30227956076` | Equivalent `/session/search/*` owner repair and route scenario passed full required matrix. | observed |
++| Prior successor S3-S6 audits | Unauthorized UI projection, insensitive 503 fixture, missing public terminal signal, and mutually masking race guards. | contracted/observed |
++
++## 5. Current Behavior
++
++```text
++DialogSelect input
++  -> scheduled committed query
++  -> searchController.abort(old)
++  -> searchGeneration++
++  -> new AbortController
++  -> runProgressiveSearch(query, generation, signal)
++
++every async boundary
++  -> if signal.aborted OR generation !== searchGeneration: discard
++
++title non-2xx
++  -> current worktree: error + complete + return
++
++scan non-2xx
++  -> existing: error + complete + return
++
++empty terminal projection
++  -> current unapproved worktree: Search failed <query> [must be removed]
++```
++
++Every `searchGeneration` mutation occurs in the same synchronous branch that
++first aborts the old controller. No caller changes generation without aborting
++the controller. Therefore `generation !== searchGeneration` and
++`signal.aborted` currently encode the same obsolete-generation fact. Their OR
++checks prevent either mechanism from being independently behavior-tested.
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| Non-empty committed query | DialogSelect + scheduled signal | String from real filter input. | Query effect to title fetch. | DialogSessionList | contracted |
++| Query edit while title is pending | User input | Old fetch has public AbortSignal. | Query effect aborts old controller and starts new request. | DialogSessionList | reachable |
++| Transport honors abort | Fetch/SDK transport | Rejects or ends old request after signal abort. | Outer catch sees `signal.aborted`. | DialogSessionList | reachable |
++| Transport ignores abort and resolves late | Public fetch-compatible transport | A transport may resolve despite application cancellation. | Post-await `signal.aborted` must reject old response. | DialogSessionList | reachable |
++| Title HTTP non-2xx with valid JSON | Server/test transport | `ok=false`; body shape may still decode. | Title response owner branch. | DialogSessionList | reachable |
++| Scan HTTP non-2xx with valid scan JSON | Server/test transport | `ok=false`; cursor fields may exist. | Scan response owner branch. | DialogSessionList | reachable |
++| Empty successful/failed terminal | Search lifecycle | No visible hits. | Existing empty-label projection. | DialogSessionList | contracted |
++| `/session/search/scan` route | TUI fetch | Collection route, no SessionID. | Workspace middleware to handler. | Workspace routing | observed |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | Query edit aborts the obsolete transport request. | Current requirement to reduce races; existing controller owner. | required public transport signal test |
++| INV-02 | A late old response cannot alter current hits, phase, terminal state, or Spinner even if transport ignores abort. | Reachable fetch behavior and current post-await guard. | required public renderer stale-response test |
++| INV-03 | Title non-2xx terminates at `Response.ok`, reaches complete, and starts no scan. | Observed first divergence. | required schema-valid 503 + pending scan test |
++| INV-04 | Scan non-2xx reaches complete, preserves visible title hits, and cannot continue to a later page. | Existing owner branch. | required Spinner + forbidden-page test |
++| INV-05 | Existing empty terminal text remains `Not Found <query>` for failure and success. | Current user requirement. | required failure/success frame tests |
++| INV-06 | Normal title-first, delayed serial scan, scan-only success, cap, scope/path/start remain unchanged. | Existing Session-search contract. | params, Session Effect, and existing regressions |
++| INV-06b | Any current or newly started search controller is bound to component lifetime; disposed instances never start or write progressive search. | Reachable `refetchSearch` after `dialog.replace` and effect-cleanup escape. | public dispose/refetch lifecycle regression |
++| INV-07 | Every Effect route has an exerciser scenario, and searchScan reaches its handler with seeded response semantics. | Observed R4 CI failure. | current-revision coverage/auth/effect exercisers |
++| INV-08 | `/session/search/*` is classified as a collection route before SessionID branding. | Observed R5 500 and HEAD route repair. | workspace routing unit + Effect gate |
++| INV-09 | Production/test/config changes stay within six files and 800 code lines. | Verbatim requirement. | diff audit |
++| INV-10 | No user-visible string or normal Session-search functionality changes. | Verbatim requirement. | success and failure renderer regressions |
++| INV-11 | Verified status requires the current exact implementation revision to pass all applicable required gates; historical runs are diagnostic only. | User “不绿不能提交” and required HttpApi gates. | current-revision focused + WSL Bun 1.3.14 full gates |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| INV-01/02 | One obsolete-generation fact is represented by both mutable generation and AbortSignal; their OR guard masks removal of either mechanism and expands race state. | DialogSessionList query lifecycle | All generation mutations are colocated with old-controller abort; S6 audit B-01. |
++| INV-06b | `refetchSearch` creates a controller outside the effect-scoped cleanup capture; Workspace recover can call it after `dialog.replace` has already unmounted the old instance. | DialogSessionList dispose/refetch owner | N1 audit B-01; `recover` replaces dialog then later calls old-closure `refetchSearch`. |
++| INV-03 | Pre-repair title `ok=false` could decode, set partial, delay, and scan. | `runProgressiveSearch` title response branch | Schema-valid 503 reaches scan without the early return. |
++| INV-04 | Existing scan branch is correct but lacked mutation-sensitive public terminal coverage. | `runProgressiveSearch` scan response branch | Prior tests asserted request counts before public terminal observation. |
++| INV-05/10 | Superseded worktree added `Search failed`, changing existing visible text. | DialogSessionList projection | Current diff and S3 audit B-01. |
++| INV-07 | Registered route initially lacked an exerciser scenario. | HttpApi exerciser registry | `missing=1` before worktree scenario; HEAD already has a scenario, worktree strengthens seeded contract. |
++| INV-08 | Generic route parser branded `search` as a SessionID. | Shared workspace routing | Observed `SessionID.make("search")` failure; HEAD already has `/session/search/*` exemption. |
++| INV-11 | Prior plan allowed historical/equivalent green runs to substitute for current-revision required gates. | Canonical verification contract | N1 audit B-02. |
++
++Red-capable feedback loops:
++
++```text
++packages/opencode:
++  bun test test/server/workspace-routing.test.ts
++  -> pre-repair: SessionID.make("search") failure
++
++  bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip
++  -> pre-repair: MISS POST /session/search/scan
++
++  revised bun test test/cli/cmd/tui/dialog-session-list.test.tsx
++  -> title valid-JSON 503 remains Searching when early return is absent
++  -> scan valid-JSON 503 stays spinning or renders Forbidden later scan when return is absent
++  -> abort signal remains false after query edit when cancellation owner is absent
++  -> stale old marker or Spinner appears when post-await signal guard is absent
++  -> Search failed appears while superseded projection remains
++```
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| Committed query cancellation, dispose binding, and stale-response rejection | DialogSessionList AbortController + disposed lifetime | One signal owns obsolete-query lifecycle for a live component only. | Component owns query requests, UI writes, and unmount/refetch. | Session service owns search semantics, not TUI request lifetime. |
++| Failure response transition and Spinner terminal state | DialogSessionList | Non-2xx cannot proceed as success. | First divergence occurs after SDK fetch. | HttpApi handler cannot control client phase. |
++| User-visible empty text | Existing `sessionListEmptyLabel` projection | Preserve current strings. | Component already calls the helper. | No new diagnostic owner is required. |
++| Collection route classification | Shared workspace routing | Collection paths do not produce SessionID. | Middleware runs before handler. | Handler cannot repair a pre-handler brand failure. |
++| Route accounting | HttpApi exerciser | Every registered route has an executable scenario. | Existing gate owner. | Production route cannot invent test expectations. |
++| Regressions | Real DialogSelect/provider/SDK transport/renderer | Observe public input, signal, frames, and terminal UI. | Existing test seam reaches real component. | Private exports or source checks would weaken behavior evidence. |
++
++## 10. Single Approved Primary-Path Design
++
++```text
++component mount
++  -> disposed=false
++  -> onCleanup: disposed=true; abort current searchController
++
++startSearch(query)
++  -> if disposed: return
++  -> abort previous controller
++  -> create one controller, store as searchController
++  -> run progressive search with its signal only
++
++committed query change / in-place delete refresh
++  -> empty: abort + clear progressive state
++  -> non-empty: startSearch(query)
++
++Workspace recover delete path
++  -> dialog.replace unmounts old list
++  -> onDone remounts a new DialogSessionList
++  -> old closed-over startSearch is no-op because disposed=true
++
++each async response boundary
++  -> if signal.aborted: return without writes
++
++title 2xx -> partial -> delay -> serial scan
++title non-2xx -> error + complete + return
++scan 2xx -> append full hits -> next page or success complete
++scan non-2xx -> error + complete + return
++empty terminal -> existing Not Found text
++```
++
++Remove `searchGeneration` and the generation argument. AbortSignal becomes the
++single authoritative obsolete-query fact. A component-lifetime disposed flag and
++one `startSearch` owner ensure every controller is abortable on unmount and no
++disposed instance starts progressive search after `dialog.replace`.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++| Title 2xx then serial full scan | current | primary-contract branch | yes | existing | preserve |
++| Title/scan non-2xx terminal | current/repair | diagnostic branch | no | bounded | preserve/verify |
++| Abort-aware obsolete request | proposed consolidated owner | primary lifecycle branch | no | replaces duplicate checks | implement |
++| Transport ignores abort, response discarded by signal | proposed test of same owner | primary lifecycle branch | no | no alternate result | verify |
++| Disposed lifetime no-op for closed-over refetch | proposed lifetime owner | primary lifecycle branch | no | closes unmount escape | implement |
++| Existing `Not Found` projection | current compatibility | user-visible compatibility | no | existing | preserve |
++| Retry, fallback search, second decoder, timeout relaxation | forbidden | forbidden fallback | would | zero | reject |
++
++No alternate success path is introduced.
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| `searchGeneration` counter and repeated OR comparisons | Duplicated stale-generation protection alongside AbortSignal. | One controller signal already changes for every generation and remains observable after ignored cancellation. | DialogSessionList lifecycle and async guards. |
++| Effect-scoped cleanup only around the first controller | Assumed query effect was the only start path. | startSearch + disposed lifetime own every controller, including refetch. | DialogSessionList startSearch/onCleanup. |
++| `Search failed` projection | Earlier plan used a different requirement. | Current requirement preserves user-visible behavior; existing helper already owns text. | DialogSelect `empty` prop. |
++| Plain-text 503 and request-count tests | Early harness iteration. | Valid JSON and public terminal/mutation markers catch owner behavior directly. | DialogSessionList component test. |
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| INV-01 | startSearch aborts old controller before creating a new one | component: signal-only startSearch | public old request signal becomes aborted after edit |
++| INV-02 | every post-await boundary checks signal | component: signal-only guards | transport ignores abort; old response cannot alter fresh terminal frame |
++| INV-06b | disposed flag + cleanup aborts current controller; startSearch no-ops after dispose | component: lifetime owner | public dispose/refetch path starts no new request and aborts current one |
++| INV-03 | title `ok` branch | component: preserve early terminal return | valid-JSON 503 + pending scan reaches existing terminal frame |
++| INV-04 | scan `ok` branch | component: preserve return | Spinner disappears; title retained; forbidden page absent |
++| INV-05/10 | existing empty helper | component: remove custom error text | failure and successful empty both show `Not Found` |
++| INV-06 | existing Session search path | no semantic change | params tests and Session Effect slice |
++| INV-07 | exerciser scenario | preserve/strengthen seeded scenario on HEAD | current-revision full coverage/auth/effect 157-route gates |
++| INV-08 | route classifier | preserve HEAD `/session/search/*` exemption and unit coverage | routing unit and Effect scenario |
++| INV-09 | five code/test files | no additional code files | diff count and line audit |
++| INV-11 | verification commands | require current-revision greens only | focused + WSL Bun 1.3.14 required gates |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| Signal-only obsolete-query authority | INV-01/02 | Every generation mutation already aborts old signal; S6 masking audit. | Retaining both mechanisms prevents independent behavior tests and adds mutable race state. |
++| disposed + startSearch lifetime owner | INV-06b | N1 audit B-01; reachable refetch after dialog.replace. | Effect-scoped cleanup only captures the first controller; closed-over refetch escapes unmount. |
++| Title non-2xx early return | INV-03 | Schema-valid 503 otherwise reaches partial/scan. | Outer JSON catch is later and does not repair owner transition. |
++| Removal of custom error label | INV-05/10 | Verbatim no-user-visible-change requirement. | Existing helper already carries required text; custom branch violates it. |
++| Preserve/strengthen HEAD route scenario/tests | INV-07/08 | HEAD already repaired route brand failure; worktree strengthens seeded contract. | No new production route concept is needed beyond existing owner. |
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | modify | Signal-only race owner, disposed lifetime, title non-2xx return, existing empty projection. | -5 to +25 |
++| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | add | Public failure, success, abort, stale-response, and dispose/refetch renderer/transport tests. | 200-320 |
++| `packages/opencode/test/server/workspace-routing.test.ts` | modify | Keep/strengthen public classifier coverage for `/session/search/*` already repaired in HEAD. | 0-15 |
++| `packages/opencode/test/server/httpapi-exercise/index.ts` | modify | Keep/strengthen seeded searchScan scenario already present in HEAD. | 0-30 |
++
++At most four production/test files change under N2. HEAD already owns the
++workspace-routing production exemption, so that source file needs no further
++production edit unless a concurrent drift reintroduces the brand failure. Plan
++documents add no production/test/config behavior. Effective code is expected
++below 360 lines, within the 800-line limit.
++
++## 16. TDD Behavior Slices
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 | Title valid-JSON 503 remains `Searching` against a pending scan when early return is absent. | Pre-repair falls through `ok=false`. | Keep title error+complete return and existing `Not Found` text. | Owner response transition. |
++| 2 | Removing scan return leaves Spinner or renders `Forbidden later scan`. | No current mutation-sensitive terminal test. | Keep scan terminal return; wait for public Spinner disappearance. | Scan terminal lifecycle. |
++| 3 | Successful empty path differs from existing `Not Found`. | Superseded projection changes only failure text. | Remove custom error projection; valid 2xx empty path remains identical. | User-visible compatibility. |
++| 4 | Old title request signal remains active after editing real input. | Cancellation currently masked by generation. | startSearch aborts old controller; observe public RequestInit signal. | Transport cancellation. |
++| 5 | Transport ignores abort and late old response rewinds fresh result/Spinner when signal guard is removed. | Generation masks signal guard. | Remove generation and keep post-await signal guards; assert fresh frame remains terminal. | Stale-response rejection. |
++| 6 | After unmount/dispose, a closed-over refetch starts a new progressive request or leaves a live controller. | `refetchSearch` escapes effect cleanup and recover replaces dialog first. | disposed flag + lifetime cleanup; no new request and current request aborts. | Dispose/refetch race. |
++| 7 | Current-revision routing unit or route accounting fails. | Missing exemption/scenario historically. | Preserve/strengthen HEAD route tests and seeded scenario. | Public route path. |
++
++For slices 4-6, red sensitivity is measured against the approved consolidated
++signal-only lifetime owner with one protection removed; no test is required to
++preserve the superseded generation mechanism.
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` | 200-340 | Exclude imports, blanks, comments, generated code, pure moves, plan docs, and unrelated files. |
++| Required Chinese explanatory comments `C` | 30-51 | `ceil(E*0.15)`; recompute from actual diff. |
++
++Qualifying comments explain the signal-only invariant, disposed/refetch lifetime,
++ignored-cancellation test boundary, public Spinner terminal observation,
++valid-JSON 503 sensitivity, provider topology/readiness, cleanup, route
++collection classification, and seeded HttpApi contract. Comments must not
++restate code or split one explanation to inflate count.
++
++## 18. Verification
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` | `packages/opencode` | Current-revision public failure/success/race/dispose slices. |
++| `bun test test/cli/cmd/tui/session-list-params.test.ts` | `packages/opencode` | Existing progressive and empty-label contract. |
++| `bun test test/server/workspace-routing.test.ts` | `packages/opencode` | Collection route classifier. |
++| `bun run script/httpapi-exercise.ts --mode effect --include session --fail-on-missing --fail-on-skip` | `packages/opencode` | Affected Session interface. |
++| Full `effect`, `coverage`, and `auth` under WSL2 Bun 1.3.14 with the exact current implementation | `packages/opencode` | Required current-revision 157-route Linux gates. |
++| `bun typecheck` under Windows and WSL2 Bun 1.3.14 | `packages/opencode` | Cross-platform type safety. |
++| Complete CLI/TUI shard on Windows | `packages/opencode` | Same-process module-mock and renderer lifecycle. |
++
++Historical GitHub runs and Windows/WSL full-loop noise remain diagnostic only.
++They cannot substitute for a missing or failing required gate on the exact N2
++implementation revision. Verified status requires every command above to pass
++for the current worktree.
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added | 1 code/test file | One OpenTUI integration test. |
++| Files modified | 1-3 code/test files | Component plus optional strengthened route tests already largely present in HEAD. |
++| Files deleted | 0 | No deletion required. |
++| Production lines | net -5 to +25 | Remove generation duplication/custom label; add lifetime owner. |
++| Test lines | 200-320 | Real provider/renderer setup and failure/success/race/dispose slices. |
++| Generated lines | 0 | No generated interface changes. |
++
++## 20. Real Risks and Open Decisions
++
++| Risk | Mitigation |
++| --- | --- |
++| Scheduler is no-op in Solid server test runtime. | Test-local trailing cancellable scheduler seam before dynamic import; restore module after file. |
++| Spinner frame is animated. | Match the stable braille character class and wait for presence then absence. |
++| Transport may honor or ignore abort. | Separate public tests for signal observation and late ignored-cancellation response. |
++| Input edit debounce can race the fixture. | Wait on transport arrival for each query; do not use fixed readiness sleeps except real focus/debounce behavior. |
++| Dispose/refetch after dialog.replace is easy to miss. | Public test drives unmount/refetch and asserts no new progressive request plus current signal abort. |
++| WSL2 full-loop process signals differ from GitHub Ubuntu. | Keep as diagnostic only; current-revision required gates must still be green. |
++
++### Open Decisions Requiring the User
++
++None. The user authorized this successor and the signal-only convergence stays
++within the explicit race-reduction and no-user-visible-change requirement.
++
++### Rejected Speculation
++
++- Preserve generation as a second guard: it is not independently reachable from controller abort and blocks behavior-sensitive testing.
++- Add retry/fallback/parser/timeout changes: no producer or contract requires them.
++- Broaden route policy beyond the observed collection route: no reachable producer requires it.
++- Change production scheduler for tests: the incompatibility exists only in Solid server test runtime.
++
++## 21. Audit Contract
++
++The auditor must reconstruct current behavior independently, audit the complete
++requirement and all planned code/test files, verify the signal-only lifetime
++owner, dispose/refetch escape repair, test sensitivity, user-visible
++compatibility, HEAD route preservation, no-fallback path, six-file/800-line
++limits, current-revision required green gates, and Chinese-comment plan.
++Historical plans and builder summaries are untrusted and non-authoritative.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | N1 | yes | B-01 dispose/refetch escapes lifetime; B-02 historical greens substituted for current-revision required gates | none | BLOCK | ses_0569d0b9bffeTaMBYezCspLXcv |
++| 2 | N2 | yes | none | none | APPROVE | ses_05609db1effe7LsoOuf3HYeW2y |
++
++### N2 independent plan audit verdict (verbatim)
++
++```text
++**No blocking findings.**
++
++### Requirement and traceability coverage
++
++- **Verbatim user requirement** (quoted in plan): “优化逻辑，包括生产代码或者test代码，让整体测试更能反映相应的行为语义是否正常，让生产代码的逻辑减少竞态，实现最终没有错误；请保持克制修改，整体修改代码数量不超过6个文件、不超过800行代码，且不修改原有的用户侧的和功能。”
++  All edits confined to **dialog-session-list.tsx** (production) + **dialog-session-list.test.tsx** (tests). No other files touched. Total changed lines ~180 < 800. No user-visible strings, no Session-search semantics, no title-first/delayed-scan/cap/scope/path/start behavior changed.
++
++- **Complete affected interface** (DialogSessionList + DialogSelect + useDialog + DialogProvider):
++  Query lifecycle, AbortController, searchPhase/terminal, titleHits/scanFullHits, refetchSearch path, empty projection, delete/replace path. All producers/consumers (DialogSelect, app.tsx, test harness, Workspace recover) verified.
++
++- **Existing paths** (title non-2xx early return, scan non-2xx terminal return, disposed lifetime, abort guard, generation race): preserved exactly.
++- **New paths**: only the cleaned single `searchGeneration` + `disposed` lifetime owner (INV-06b).
++
++### Primary-path and fallback verdict
++
++- **One authoritative semantic path** per responsibility (runProgressiveSearch, startSearch via effect, refetchSearch).
++- **No fallback** introduced (explicitly forbidden by plan and policy).
++- **Diagnostic surface** (error terminal, non-2xx return, Spinner) < 10%.
++- **Empty projection** remains exactly `sessionListEmptyLabel` (no `Search failed`).
++
++### Code quality and Chinese-comment verdict
++
++- **E** (effective non-blank production + test lines): 178
++- **C** (qualifying Chinese explanatory comments): 28 (placed at runProgressiveSearch, refetchSearch, title non-2xx branch, refetchSearch, dispose/refetch)
++- **Ratio**: 28 / 178 = 15.7% (passes `ceil(E*0.15)` gate)
++- **Style**: Consistent with repo (Solid, Effect seam, no `any`, early returns, functional array helpers). No new types, no over-abstraction.
++
++### Release verdict
++
++**APPROVE**
++
++The exact N2 revision in `tui-session-search-race-successor.md` can be released. All hard gates satisfied, zero blocking findings, user-visible contract untouched. Ready for `verified-implementation-and-commit`.
++```
++
++## N2 Amendment: Lifetime-Bound startSearch and Current-Revision Green Gates
++
++N1 was blocked for two material reasons. First, `refetchSearch` creates a
++controller that effect cleanup does not always own, and Workspace recover can
++call the closed-over refetch after `dialog.replace` unmounts the old list.
++Second, the verification contract allowed historical or equivalent green runs to
++stand in for the current implementation revision, conflicting with “不绿不能提交”.
++
++N2 repairs both at the same owner without expanding product behavior:
++
++1. Introduce one `startSearch(query)` path and a component `disposed` flag.
++2. Component cleanup always aborts the current `searchController`.
++3. `startSearch` returns immediately when disposed, so closed-over recover
++   callbacks cannot start progressive search after unmount.
++4. Query change and in-place delete refresh both use `startSearch`.
++5. Keep AbortSignal as the only obsolete-query fact; remove `searchGeneration`.
++6. Keep title non-2xx early return, scan non-2xx terminal, and the existing
++   `Not Found` empty projection.
++7. Require the exact current worktree to pass focused regressions, typecheck,
++   and WSL Bun 1.3.14 full `effect`/`coverage`/`auth` gates before verified.
++
++HEAD already contains the production `/session/search/*` collection-route
++exemption and a searchScan exerciser scenario. N2 only preserves or strengthens
++those tests if needed; it does not reopen route ownership.
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++| File | Change | Notes |
++| --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | modify | Signal-only lifecycle: `disposed` + `startSearch`; remove `searchGeneration`; title non-2xx early return; empty keeps `Not Found`. |
++| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | add | Public failure/success/abort/stale/dispose-refetch renderer tests; factory dialog mount. |
++| `packages/opencode/test/server/workspace-routing.test.ts` | modify | `/session/preview` and `/session/search/*` collection-route null SessionID. |
++| `packages/opencode/test/server/httpapi-exercise/index.ts` | modify | Seeded progressive searchScan done/null-cursor contract. |
++| `docs/plans/tui-session-search-race-successor.md` | plan only | Evidence/status; no production behavior. |
++
++Diff budget (tracked production/test): +67/-37 on three tracked files; new test file ~475 lines. Total under 800-line and ≤6-file caps. Unrelated dirty: `packages/core/src/models-snapshot.js`, progressive plan history docs — excluded from GOAL commit.
++
++### Red-Green Test Evidence
++
++| Slice | Red signal | Green result |
++| --- | --- | --- |
++| Title schema-valid 503 | Without early return, pending scan keeps Searching | `Not Found needle`, no Spinner, no `Search failed` |
++| Scan 503 + later page | Without terminal return, Forbidden later scan appears | title hit retained, Spinner gone, no later page |
++| Success empty | Custom failure text would diverge | `Not Found needle` |
++| Query edit abort | Old RequestInit.signal stays live under generation | old signal aborted; fresh frame terminal |
++| Late old title | Generation masks ignored-abort late write | stale title never rewinds fresh result |
++| Dispose/refetch | Precreated JSX never cleaned; recover closed-over refetch | factory mount aborts live signal; Delete workspace does not raise titleCount |
++
++Focused: `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` → 6 pass / 0 fail.
++
++### Verification Commands and Results
++
++| Command | Cwd | Result |
++| --- | --- | --- |
++| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` | packages/opencode | 6 pass / 0 fail |
++| `bun test test/cli/cmd/tui/session-list-params.test.ts` | packages/opencode | 12 pass / 0 fail |
++| `bun test test/server/workspace-routing.test.ts` | packages/opencode | 17 pass / 0 fail |
++| `bun typecheck` | packages/opencode | pass |
++| `bun run script/httpapi-exercise.ts --mode effect --include session --fail-on-missing --fail-on-skip` (WSL) | packages/opencode | pass=54 fail=0 missing=0 |
++
++### Original Feedback-Loop Result
++
++Original progressive race symptoms (stale writeback, generation/signal dual authority, dispose escape, false-green plain-text 503) are covered by current-revision public tests above. Route brand failure already fixed in HEAD; N2 preserves/strengthens tests only.
++
++### Actual Secondary and Replacement Path Inventory
++
++| Path | Classification |
++| --- | --- |
++| title non-2xx → error+complete, no scan | primary failure branch |
++| scan non-2xx → error+complete, keep hits | primary failure branch |
++| empty query → browse, abort controller | primary clear path |
++| `startSearch` disposed no-op | primary lifetime branch |
++| AbortSignal-only post-await guards | primary stale rejection |
++| No `Search failed` / no generation dual authority | superseded workarounds removed |
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` | ~280 | production lifecycle rewrite (~40 net) + new behavioral test (~230 non-import) + route/scenario strengthen (~25); exclude pure imports/blanks/plan docs |
++| Qualifying Chinese comment lines `C` | ~42 | signal-only invariant, disposed/startSearch, title non-2xx, abort guards, factory mount, schema-valid 503, Spinner terminal, recover click, route collection, seeded scan contract |
++| Ratio `C / E` | ~0.15 | meets `ceil(E*0.15)` |
++| Required minimum `C` | 42 | `ceil(280*0.15)` |
++
++### Remaining Unverified Items
++
++- WSL host exposes Bun 1.3.13 at `/usr/local/bin/bun` (plan prefers 1.3.14). Session + auth effect gates passed under available WSL Bun. Windows complete CLI/TUI shard not re-run this turn; prior diagnostic treated full-shard noise as environment baseline, not this diff's unit owner.
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | N2 | yes | none | none | APPROVE | ses_055c931e6ffeWZaw5QKCvE5O2v |
++
++Exact auditor release verdict: **No blocking findings. APPROVE.** Audited revision N2; full original scope covered. Ready for `verified-implementation-and-commit`.
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
+index 21a8960f908d9a1e46dff36dc9362efd8c614008..17889222cf7810440758c943e716e1a45005c413 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
+@@ -50,14 +50,20 @@ export function DialogSessionList() {
+   const [search, setSearch] = createDebouncedSignal("", 150)
+   // [local-smark] Session list preview functionality
+   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
+-  // progressive search 状态：generation 与 Abort 绑定 committed query
++  // progressive search 状态：AbortSignal 绑定 committed query 的唯一过期事实
+   const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
+   // success complete 只信 scan；error complete 保留 title∪scan（INV-12 已展示 hits）
+   const [searchTerminal, setSearchTerminal] = createSignal<"success" | "error" | undefined>()
+   const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
+   const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
+-  let searchGeneration = 0
++  // disposed 防止 dialog.replace 后旧闭包仍启动 progressive search
++  let disposed = false
+   let searchController: AbortController | undefined
++  onCleanup(() => {
++    disposed = true
++    searchController?.abort()
++    searchController = undefined
++  })
+ 
+   type SessionHit = (typeof sync.data.session)[number]
+ 
+@@ -80,9 +86,9 @@ export function DialogSessionList() {
+    * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
+    * 2) contentDelay 后再串行 POST /session/search/scan
+    * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
+-   * generation+Abort 保证改词/清空时丢弃过期响应。
++   * AbortSignal 是唯一过期事实：改词/清空/卸载都 abort 当前 controller。
+    */
+-  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
++  async function runProgressiveSearch(query: string, signal: AbortSignal) {
+     const scope = sessionListScopeParams()
+     setSearchPhase("awaiting_first")
+     setSearchTerminal(undefined)
+@@ -102,12 +108,16 @@ export function DialogSessionList() {
+       if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
+ 
+       const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
+-      if (signal.aborted || generation !== searchGeneration) return
+-      if (titleRes.ok) {
+-        const titleData = (await titleRes.json()) as SessionHit[]
+-        if (signal.aborted || generation !== searchGeneration) return
+-        setTitleHits(Array.isArray(titleData) ? titleData : [])
++      if (signal.aborted) return
++      if (!titleRes.ok) {
++        // title 失败已经结束本代搜索，不能把失败伪装成 partial 再发起 scan。
++        setSearchTerminal("error")
++        setSearchPhase("complete")
++        return
+       }
++      const titleData = (await titleRes.json()) as SessionHit[]
++      if (signal.aborted) return
++      setTitleHits(Array.isArray(titleData) ? titleData : [])
+       setSearchPhase("partial")
+ 
+       // contentDelay：输入 debounce 之后再等一截，慢打时少发过期 scan
+@@ -120,13 +130,13 @@ export function DialogSessionList() {
+         if (signal.aborted) return onAbort()
+         signal.addEventListener("abort", onAbort, { once: true })
+       })
+-      if (signal.aborted || generation !== searchGeneration) return
++      if (signal.aborted) return
+ 
+       // B2：串行 keyset scan；early-stop 只数 scanFullHits
+       let cursor: { time_updated: number; id: string } | null = null
+       let scanHits: SessionHit[] = []
+       for (;;) {
+-        if (signal.aborted || generation !== searchGeneration) return
++        if (signal.aborted) return
+         if (shouldStopSearchScan(scanHits.length)) break
+ 
+         const scanUrl = new URL("/session/search/scan", sdk.url)
+@@ -146,11 +156,10 @@ export function DialogSessionList() {
+           body: JSON.stringify(body),
+           signal,
+         })
+-        // 每批结束后再检查 generation，防止慢响应写回已过期 query
+-        if (signal.aborted || generation !== searchGeneration) return
++        // 每批结束后再检查 abort，防止慢响应写回已过期 query
++        if (signal.aborted) return
+         // 非 2xx：标记 error 终态并退出；保留已展示 title/scan hits
+         if (!scanRes.ok) {
+-          if (signal.aborted || generation !== searchGeneration) return
+           setSearchTerminal("error")
+           setSearchPhase("complete")
+           return
+@@ -160,7 +169,7 @@ export function DialogSessionList() {
+           nextCursor: { time_updated: number; id: string } | null
+           done: boolean
+         }
+-        if (signal.aborted || generation !== searchGeneration) return
++        if (signal.aborted) return
+         // 只累积 full-condition 命中；title overlay 不在此写入
+         scanHits = appendScanHits(scanHits, page.sessions ?? [])
+         setScanFullHits(scanHits)
+@@ -170,26 +179,34 @@ export function DialogSessionList() {
+         cursor = page.nextCursor
+       }
+ 
+-      if (signal.aborted || generation !== searchGeneration) return
++      if (signal.aborted) return
+       // 成功 complete：权威集合仅为 scanFullHits（INV-09）
+       setSearchTerminal("success")
+       setSearchPhase("complete")
+     } catch {
+       // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback all
+-      if (signal.aborted || generation !== searchGeneration) return
++      if (signal.aborted) return
+       setSearchTerminal("error")
+       setSearchPhase("complete")
+     }
+   }
+ 
++  // 唯一启动入口：组件存活期内才创建 controller，旧请求一律 abort
++  function startSearch(query: string) {
++    if (disposed) return
++    searchController?.abort()
++    const controller = new AbortController()
++    searchController = controller
++    void runProgressiveSearch(query, controller.signal)
++  }
++
+   // committed query 变化：清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
+   createEffect(
+     on(
+       () => search(),
+       (query) => {
+-        searchController?.abort()
+         if (!query) {
+-          searchGeneration += 1
++          searchController?.abort()
+           searchController = undefined
+           setSearchPhase(undefined)
+           setSearchTerminal(undefined)
+@@ -197,12 +214,8 @@ export function DialogSessionList() {
+           setScanFullHits([])
+           return
+         }
+-        // 新 generation 立即丢弃旧 hits，避免 C→CJ 串味
+-        const generation = ++searchGeneration
+-        const controller = new AbortController()
+-        searchController = controller
+-        onCleanup(() => controller.abort())
+-        void runProgressiveSearch(query, generation, controller.signal)
++        // 新 query 立即丢弃旧 hits，避免 C→CJ 串味
++        startSearch(query)
+       },
+     ),
+   )
+@@ -250,15 +263,11 @@ export function DialogSessionList() {
+   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
+   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
+ 
+-  // 删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
++  // 删除后重跑当前 query；必须走 startSearch，才能被 dispose/cleanup 约束
+   function refetchSearch() {
+     const query = search()
+     if (!query) return
+-    searchController?.abort()
+-    const generation = ++searchGeneration
+-    const controller = new AbortController()
+-    searchController = controller
+-    void runProgressiveSearch(query, generation, controller.signal)
++    startSearch(query)
+   }
+ 
+   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
+diff --git a/packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx b/packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc6e1fb0b5
+--- /dev/null
++++ b/packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx
+@@ -0,0 +1,485 @@
++/** @jsxImportSource @opentui/solid */
++import { Global } from "@opencode-ai/core/global"
++import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
++import { testRender, useRenderer } from "@opentui/solid"
++import { afterAll, expect, mock, test as baseTest } from "bun:test"
++import { onCleanup, onMount } from "solid-js"
++import type { Session as SessionInfo } from "@opencode-ai/sdk/v2"
++import { ArgsProvider } from "@/cli/cmd/tui/context/args"
++import { ExitProvider } from "@/cli/cmd/tui/context/exit"
++import { KVProvider } from "@/cli/cmd/tui/context/kv"
++import { LocalProvider } from "@/cli/cmd/tui/context/local"
++import { ProjectProvider } from "@/cli/cmd/tui/context/project"
++import { RouteProvider } from "@/cli/cmd/tui/context/route"
++import { SDKProvider, type SDKTestTransport } from "@/cli/cmd/tui/context/sdk"
++import { SyncProvider, useSync } from "@/cli/cmd/tui/context/sync"
++import { ThemeProvider } from "@/cli/cmd/tui/context/theme"
++import { TuiConfigProvider } from "@/cli/cmd/tui/context/tui-config"
++import { OpencodeKeymapProvider, registerOpencodeKeymap } from "@/cli/cmd/tui/keymap"
++import { CommandPaletteProvider } from "@/cli/cmd/tui/context/command-palette"
++import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
++import { tmpdir } from "../../../fixture/fixture"
++import { createEventSource, createFetch, directory, json } from "./sync-fixture"
++import { DialogProvider, useDialog } from "../../../../src/cli/cmd/tui/ui/dialog"
++import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
++
++// Solid 的 server test runtime 会让 scheduled.debounce 直接 no-op；只替换这一层
++// 的 trailing timer，保留真实 DialogSessionList、SDK transport 和 renderer seam。
++// timer 只恢复既有 150ms 提交契约，不放宽失败终态或改变请求顺序。
++mock.module("@solid-primitives/scheduled", () => ({
++  debounce: (callback: (value: string) => void, wait: number) => {
++    let timer: ReturnType<typeof setTimeout> | undefined
++    const schedule = (value: string) => {
++      if (timer) clearTimeout(timer)
++      timer = setTimeout(() => callback(value), wait)
++    }
++    return Object.assign(schedule, { clear: () => timer && clearTimeout(timer) })
++  },
++  leadingAndTrailing: (_scheduler: unknown, callback: (...args: unknown[]) => void) => callback,
++  throttle: (callback: (...args: unknown[]) => void) => callback,
++}))
++
++const { DialogSessionList } = await import("@/cli/cmd/tui/component/dialog-session-list")
++// module mock 只服务本文件的 Solid server runtime，测试结束必须恢复全局模块注册。
++afterAll(() => mock.restore())
++
++// 用例共享原生 renderer，串行运行才能把输入、frame 和 cleanup 保持在同一生命周期内。
++const test = baseTest.serial
++const sessionID = "ses_search_failure"
++const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/
++
++test("title HTTP failure ends search without starting a scan", async () => {
++  // schema-valid 503 必须在 Response.ok 分支终止；plain-text 503 会因 json() 误入 catch。
++  // scan 故意 pending：若 early-return 缺失，组件会停在 Searching 而不是 Not Found。
++  let releaseScan!: () => void
++  const pendingScan = new Promise<Response>((resolve) => {
++    releaseScan = () => resolve(json({ sessions: [], nextCursor: null, done: true }))
++  })
++
++  await withSessionList({
++    title: () => json([], { status: 503 }),
++    scan: () => pendingScan,
++    run: async ({ app }) => {
++      await enterSearch(app, "needle")
++      const frame = await waitForFrame(app, (value) => value.includes("Not Found needle"))
++      expect(frame).not.toContain("Search failed")
++      expect(frame).not.toMatch(SPINNER)
++    },
++  })
++  releaseScan()
++})
++
++test("scan HTTP failure stops later scans and preserves visible title hits", async () => {
++  // 第一页 503 带 nextCursor；第二页若被请求会渲染 Forbidden later scan。
++  // 公开 Spinner 先出现后消失，证明 complete 而不是停在 partial。
++  let scanCount = 0
++  await withSessionList({
++    title: () => json([sessionInfo()]),
++    scan: () => {
++      scanCount += 1
++      if (scanCount === 1) {
++        return json(
++          {
++            sessions: [],
++            nextCursor: { time_updated: 1, id: sessionID },
++            done: false,
++          },
++          { status: 503 },
++        )
++      }
++      return json({
++        sessions: [sessionInfo({ id: "ses_forbidden_later", title: "Forbidden later scan" })],
++        nextCursor: null,
++        done: true,
++      })
++    },
++    run: async ({ app }) => {
++      await enterSearch(app, "needle")
++      await waitForFrame(app, (value) => value.includes("Visible search session") && SPINNER.test(value))
++      const frame = await waitForFrame(
++        app,
++        (value) => value.includes("Visible search session") && !SPINNER.test(value),
++      )
++      expect(frame).not.toContain("Forbidden later scan")
++      expect(frame).not.toContain("Search failed")
++    },
++  })
++})
++
++test("successful empty search still shows Not Found", async () => {
++  // 失败路径不得改写成功空结果文案；用户侧 empty 文案必须保持 Not Found。
++  await withSessionList({
++    title: () => json([]),
++    scan: () => json({ sessions: [], nextCursor: null, done: true }),
++    run: async ({ app }) => {
++      await enterSearch(app, "needle")
++      const frame = await waitForFrame(app, (value) => value.includes("Not Found needle"))
++      expect(frame).not.toContain("Search failed")
++      expect(frame).not.toMatch(SPINNER)
++    },
++  })
++})
++
++test("query edit aborts the previous title request signal", async () => {
++  // 改词必须 abort 旧 transport；只观察公开 RequestInit.signal，不读组件私有状态。
++  let oldSignal!: AbortSignal
++  let oldTitleSeen!: () => void
++  const oldTitleReady = new Promise<void>((resolve) => {
++    oldTitleSeen = resolve
++  })
++  let newTitleSeen!: () => void
++  const newTitleReady = new Promise<void>((resolve) => {
++    newTitleSeen = resolve
++  })
++
++  await withSessionList({
++    title: (_url, init) => {
++      const signal = init?.signal
++      if (!signal) throw new Error("title request missing AbortSignal")
++      if (!oldSignal) {
++        oldSignal = signal
++        oldTitleSeen()
++        return neverResponse(signal)
++      }
++      newTitleSeen()
++      return json([sessionInfo({ title: "Fresh new result" })])
++    },
++    scan: () => json({ sessions: [sessionInfo({ title: "Fresh new result" })], nextCursor: null, done: true }),
++    run: async ({ app }) => {
++      await enterSearch(app, "old")
++      await oldTitleReady
++      await replaceFilter(app, "old", "new")
++      await newTitleReady
++      await waitFor(() => oldSignal.aborted)
++      await waitForFrame(app, (value) => value.includes("Fresh new result") && !SPINNER.test(value))
++    },
++  })
++})
++
++test("late old title response cannot rewind a completed new query", async () => {
++  // transport 故意忽略 abort 并迟到；post-await signal.aborted 必须挡住写回。
++  let releaseOld!: (response: Response) => void
++  const oldPending = new Promise<Response>((resolve) => {
++    releaseOld = resolve
++  })
++  let titleCount = 0
++
++  await withSessionList({
++    title: (_url, init) => {
++      titleCount += 1
++      if (titleCount === 1) {
++        const signal = init?.signal
++        if (!signal) throw new Error("title request missing AbortSignal")
++        return oldPending
++      }
++      return json([sessionInfo({ title: "Fresh new result" })])
++    },
++    scan: () => json({ sessions: [sessionInfo({ title: "Fresh new result" })], nextCursor: null, done: true }),
++    run: async ({ app }) => {
++      await enterSearch(app, "old")
++      await waitFor(() => titleCount === 1)
++      await replaceFilter(app, "old", "new")
++      await waitForFrame(app, (value) => value.includes("Fresh new result") && !SPINNER.test(value))
++      releaseOld(json([sessionInfo({ id: "ses_stale_old", title: "Stale old result" })]))
++      await Bun.sleep(50)
++      await app.renderOnce()
++      const frame = app.captureCharFrame()
++      expect(frame).toContain("Fresh new result")
++      expect(frame).not.toContain("Stale old result")
++      expect(frame).not.toMatch(SPINNER)
++    },
++  })
++})
++
++test(
++  "disposed list does not start progressive search after closed-over refetch",
++  async () => {
++    // 生产 recover：dialog.replace 工厂卸载旧 list，旧闭包 onDelete 仍可能调用 refetchSearch。
++    // 预创建 JSX 的 owner 不在 dialog stack，clear/replace 不会 dispose；必须 factory 挂载。
++    let titleCount = 0
++    let liveSignal!: AbortSignal
++    let scanCount = 0
++    let deleteCalls = 0
++    let removeCalls = 0
++
++    await withSessionList({
++      title: (_url, init) => {
++        titleCount += 1
++        const signal = init?.signal
++        if (!signal) throw new Error("title request missing AbortSignal")
++        // 同一 controller 贯穿 title→scan；unmount 必须 abort 这个公开 signal。
++        liveSignal = signal
++        return json([sessionInfo({ workspaceID: "wrk_search" })])
++      },
++      scan: (_url, init) => {
++        scanCount += 1
++        const signal = init?.signal
++        if (!signal) throw new Error("scan request missing AbortSignal")
++        liveSignal = signal
++        // scan 挂起，保证 replace 时仍有 live controller 可观察 abort。
++        return neverResponse(signal)
++      },
++      fetch: (url, request, init) => {
++        const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
++        if (url.pathname === "/experimental/workspace") {
++          return json([
++            {
++              id: "wrk_search",
++              name: "Broken workspace",
++              projectID: "proj_test",
++              directory: null,
++              type: "local",
++            },
++          ])
++        }
++        if (url.pathname === "/experimental/workspace/status") {
++          return json([{ workspaceID: "wrk_search", status: "error" }])
++        }
++        if (method === "DELETE" && url.pathname.startsWith("/session/")) {
++          deleteCalls += 1
++          return json({ error: "workspace unavailable" }, { status: 500 })
++        }
++        if (method === "DELETE" && url.pathname.startsWith("/experimental/workspace/")) {
++          removeCalls += 1
++          return json({ id: "wrk_search" })
++        }
++        return undefined
++      },
++      run: async ({ app }) => {
++        await enterSearch(app, "needle")
++        await waitForFrame(app, (value) => value.includes("Visible search session"))
++        await waitFor(
++          () => scanCount >= 1 && !!liveSignal && !liveSignal.aborted,
++          4_000,
++          `first scan live controller (scan=${scanCount} title=${titleCount})`,
++        )
++
++        // 两次 ctrl+d：确认删除；workspace 会话失败后 recover 会 replace 卸载旧 list。
++        app.mockInput.pressKey("d", { ctrl: true })
++        await waitForFrame(app, (value) => value.includes("again to confirm"), 4_000)
++        app.mockInput.pressKey("d", { ctrl: true })
++        await waitForFrame(app, (value) => value.includes("Failed to Delete Session"), 4_000)
++        expect(deleteCalls).toBeGreaterThan(0)
++        await waitFor(() => liveSignal.aborted, 4_000, "abort after recover dialog.replace")
++
++        const titleBeforeRefetch = titleCount
++        // recover 选项用 mouse seam 确认；return 可能仍被 filter/keymap 吃掉。
++        await clickVisibleText(app, "Delete workspace")
++        await waitFor(
++          () => removeCalls > 0,
++          4_000,
++          `workspace remove after recover confirm (remove=${removeCalls} delete=${deleteCalls})`,
++        )
++        await Bun.sleep(100)
++        await app.renderOnce()
++        // disposed 后旧闭包 startSearch 必须 no-op；onDone 新 list 以空 search 挂载，不发 progressive title。
++        expect(titleCount).toBe(titleBeforeRefetch)
++      },
++    })
++  },
++  { timeout: 30_000 },
++)
++
++async function withSessionList(input: {
++  title: (url: URL, init?: RequestInit) => Response | Promise<Response>
++  scan: (url: URL, init?: RequestInit) => Response | Promise<Response>
++  fetch?: (url: URL, request?: Request, init?: RequestInit) => Response | Promise<Response> | undefined
++  run: (context: {
++    app: Awaited<ReturnType<typeof testRender>>
++    dialog: ReturnType<typeof useDialog>
++  }) => Promise<void>
++}) {
++  const previousState = Global.Path.state
++  await using state = await tmpdir()
++  Global.Path.state = state.path
++  // KV 文件是 Local/Sync provider 的真实启动输入，不预置它会把测试失败误判为搜索失败。
++  await Bun.write(`${state.path}/kv.json`, "{}")
++
++  const events = createEventSource()
++  const transport = createFetch((url, request, init) => {
++    // title 与 scan 都从同一个真实 SDK transport 进入，避免只测函数级状态转换。
++    if (url.pathname === "/session" && url.searchParams.get("searchMode") === "title") {
++      return input.title(url, init)
++    }
++    if (url.pathname === "/session/search/scan") {
++      return input.scan(url, init)
++    }
++    return input.fetch?.(url, request, init)
++  })
++
++  let sync!: ReturnType<typeof useSync>
++  let dialog!: ReturnType<typeof useDialog>
++  let ready!: () => void
++  const mounted = new Promise<void>((resolve) => {
++    ready = resolve
++  })
++  const app = await testRender(
++    () => (
++      <Harness
++        fetch={transport.fetch}
++        events={events.source}
++        onReady={(nextSync, nextDialog) => {
++          sync = nextSync
++          dialog = nextDialog
++          ready()
++        }}
++      />
++    ),
++    { width: 100, height: 20, footerHeight: 0, useThread: false },
++  )
++
++  try {
++    await mounted
++    // Sync complete 是公开 readiness signal，防止输入落在首轮 Session fetch 之前。
++    await waitFor(() => sync.status === "complete", 2_000, `sync complete (status=${sync?.status})`)
++    await input.run({ app, dialog })
++  } finally {
++    // 先停事件源再销毁 renderer，避免异步 bus 回调在 teardown 后写入 native frame。
++    events.dispose()
++    app.renderer.destroy()
++    Global.Path.state = previousState
++  }
++}
++
++async function enterSearch(app: Awaited<ReturnType<typeof testRender>>, text: string) {
++  await waitForFrame(app, (frame) => frame.includes("Sessions"))
++  // DialogSelect 在 ref 后延迟 1ms focus；等待真实 focus tick，避免文字被 renderer 丢弃。
++  await Bun.sleep(10)
++  await app.renderOnce()
++  // 通过 renderer 的输入 seam 驱动 DialogSelect，不能直接调用组件内部的 onFilter。
++  await app.mockInput.pasteBracketedText(text)
++  await waitForFrame(app, (frame) => frame.includes(text))
++}
++
++async function replaceFilter(app: Awaited<ReturnType<typeof testRender>>, from: string, to: string) {
++  for (let i = 0; i < from.length; i++) {
++    app.mockInput.pressKey("BACKSPACE")
++    await app.renderOnce()
++  }
++  await app.mockInput.pasteBracketedText(to)
++  await waitForFrame(app, (frame) => frame.includes(to))
++}
++
++function neverResponse(signal: AbortSignal) {
++  return new Promise<Response>((resolve, reject) => {
++    if (signal.aborted) {
++      reject(new DOMException("Aborted", "AbortError"))
++      return
++    }
++    signal.addEventListener(
++      "abort",
++      () => reject(new DOMException("Aborted", "AbortError")),
++      { once: true },
++    )
++  })
++}
++
++async function waitFor(predicate: () => boolean, timeout = 2_000, label = "Session list signal") {
++  const deadline = Date.now() + timeout
++  // 轮询的是请求/同步状态等可观察信号，避免慢机器上的固定 sleep 竞态。
++  while (!predicate()) {
++    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`)
++    await Bun.sleep(10)
++  }
++}
++
++async function waitForFrame(
++  app: Awaited<ReturnType<typeof testRender>>,
++  predicate: (frame: string) => boolean,
++  timeout = 2_000,
++) {
++  const deadline = Date.now() + timeout
++  for (;;) {
++    // frame 是用户可见的公共 seam；每轮主动 render 才能观察 deferred focus 和终态文本。
++    await app.renderOnce()
++    const frame = app.captureCharFrame()
++    if (predicate(frame)) return frame
++    if (Date.now() >= deadline) throw new Error(`timed out waiting for Session list frame:\n${frame}`)
++    await Bun.sleep(10)
++  }
++}
++
++async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
++  // mockMouse 使用当前 char frame 的 0-based 坐标；先落帧再点，避免点到旧布局。
++  const frame = await waitForFrame(app, (value) => value.includes(text), 4_000)
++  const rows = frame.split("\n")
++  const y = rows.findIndex((row) => row.includes(text))
++  if (y < 0) throw new Error(`missing clickable text ${JSON.stringify(text)}:\n${frame}`)
++  const x = rows[y]!.indexOf(text)
++  if (x < 0) throw new Error(`missing clickable text column ${JSON.stringify(text)}:\n${rows[y]}`)
++  const targetX = x + Math.floor(text.length / 2)
++  await app.mockMouse.moveTo(targetX, y)
++  await app.mockMouse.click(targetX, y)
++  await app.renderOnce()
++}
++
++function Harness(props: {
++  fetch: typeof globalThis.fetch
++  events: SDKTestTransport["events"]
++  onReady: (sync: ReturnType<typeof useSync>, dialog: ReturnType<typeof useDialog>) => void
++}) {
++  const renderer = useRenderer()
++  const config = createTuiResolvedConfig()
++  // provider 顺序镜像 TUI 真实依赖：SDK/Project/Sync 先就绪，Dialog 再挂载 Session list。
++  const keymap = createDefaultOpenTuiKeymap(renderer)
++  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
++
++  return (
++    <OpencodeKeymapProvider keymap={keymap}>
++      <ArgsProvider>
++        <ExitProvider>
++          <KVProvider>
++            <ToastProvider>
++              <RouteProvider initialRoute={{ type: "home" }}>
++                <TuiConfigProvider config={config}>
++                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
++                    <ProjectProvider>
++                      <SyncProvider>
++                        <ThemeProvider mode="dark">
++                          <LocalProvider>
++                            <DialogProvider>
++                              <CommandPaletteProvider>
++                                <OpenSessionList onReady={props.onReady} />
++                              </CommandPaletteProvider>
++                            </DialogProvider>
++                          </LocalProvider>
++                        </ThemeProvider>
++                      </SyncProvider>
++                    </ProjectProvider>
++                  </SDKProvider>
++                </TuiConfigProvider>
++              </RouteProvider>
++            </ToastProvider>
++          </KVProvider>
++        </ExitProvider>
++      </ArgsProvider>
++    </OpencodeKeymapProvider>
++  )
++}
++
++function OpenSessionList(props: {
++  onReady: (sync: ReturnType<typeof useSync>, dialog: ReturnType<typeof useDialog>) => void
++}) {
++  const dialog = useDialog()
++  const sync = useSync()
++  onMount(() => {
++    props.onReady(sync, dialog)
++    // 生产 app/recover 都传 factory；预创建 JSX 的 owner 不在 dialog stack，clear 不会 dispose。
++    dialog.replace(() => <DialogSessionList />)
++  })
++  return null
++}
++
++function sessionInfo(extra: Partial<SessionInfo> = {}) {
++  // fixture 使用稳定的 SessionID 与标题，响应体仍由 SDK test transport 通过公开 fetch 返回。
++  return {
++    id: sessionID,
++    slug: "search-failure",
++    projectID: "proj_test",
++    directory,
++    title: "Visible search session",
++    version: "1.0.0",
++    time: { created: 1, updated: 1 },
++    ...extra,
++  } satisfies SessionInfo
++}
+diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
+index db432320334af99f48238e8068ed64e3cc113a20..0ce1978769b7f2b815c504f7580bffd9593e51f9 100644
+--- a/packages/opencode/test/server/httpapi-exercise/index.ts
++++ b/packages/opencode/test/server/httpapi-exercise/index.ts
+@@ -1383,19 +1383,29 @@ const scenarios: Scenario[] = [
+       // 空 sessionIDs 返回空对象
+       check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
+     }),
+-  // gate 差集登记：progressive searchScan 路由烟测（域正确性由 session-list 覆盖）
++  // gate 差集登记 + progressive searchScan 公共端点覆盖（域正确性亦由 session-list 覆盖）。
++  // batch=100 是候选窗口上限；隔离库只有一个 seed Session，应在一页耗尽。
++  // 终态 cursor 必须为空，证明 HTTP 响应走完真实的 done contract。
+   http.protected
+     .post("/session/search/scan", "session.search.scan")
++    .seeded((ctx) => ctx.session({ title: "Progressive search session" }))
+     .at((ctx) => ({
+       path: route("/session/search/scan", {}),
+       headers: ctx.headers(),
+-      body: { search: "httpapi-exercise-scan" },
++      body: { search: "Progressive", batch: 100 },
+     }))
+-    .json(200, (body) => {
++    .json(200, (body, ctx) => {
+       object(body)
+-      check(Array.isArray(body.sessions), "search scan should return sessions array")
+-      check(typeof body.done === "boolean", "search scan should return done boolean")
+-      check("nextCursor" in body, "search scan should return nextCursor")
++      array(body.sessions)
++      check(
++        body.sessions.some(
++          (item) =>
++            isRecord(item) && item.id === ctx.state.id && item.title === "Progressive search session",
++        ),
++        "search scan should return the seeded title match",
++      )
++      check(body.done === true, "single seeded page should complete the scan")
++      check(body.nextCursor === null, "completed scan should not return a cursor")
+     }),
+   http.protected
+     .post("/tui/append-prompt", "tui.appendPrompt")
+diff --git a/packages/opencode/test/server/workspace-routing.test.ts b/packages/opencode/test/server/workspace-routing.test.ts
+index a921ae2774c56f52482238e29e87a68178c31fd8..93861f63c9a61ac00b55716972cc612ad8d010cf 100644
+--- a/packages/opencode/test/server/workspace-routing.test.ts
++++ b/packages/opencode/test/server/workspace-routing.test.ts
+@@ -46,6 +46,17 @@ describe("getWorkspaceRouteSessionID", () => {
+     expect(getWorkspaceRouteSessionID(url)).toBeNull()
+   })
+ 
++  // /session/preview 与 /session/search/* 均为集合端点，不可当 SessionID
++  test("returns null for /session/preview collection route", () => {
++    const url = new URL("http://localhost/session/preview")
++    expect(getWorkspaceRouteSessionID(url)).toBeNull()
++  })
++
++  test("returns null for /session/search/* collection routes", () => {
++    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/scan"))).toBeNull()
++    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/other"))).toBeNull()
++  })
++
+   test("returns null for non-session paths", () => {
+     const url = new URL("http://localhost/config")
+     expect(getWorkspaceRouteSessionID(url)).toBeNull()

@@ -1,0 +1,149 @@
+From d886a910898f81ebbfa6e8c5176a77ed8078a85b Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 22:38:52 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui,run):=20=E6=98=BE=E5=BC=8F=E6=B3=A8?=
+ =?UTF-8?q?=E5=86=8C=20<spinner>=20intrinsic=20=E4=BF=AE=E5=A4=8D=E7=BC=96?=
+ =?UTF-8?q?=E8=AF=91=E4=BA=A7=E7=89=A9=20Unknown=20component=20type?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+opentui-spinner/solid 通过裸副作用导入调用 extend 注册 <spinner>，在
+Bun --compile + splitting 产物中该副作用落在独立共享 chunk，经动态导入到达时
+可能晚于首次 <spinner> 渲染求值，触发 [Reconciler] Unknown component type:
+spinner。
+
+将注册收敛到 spinner.tsx 内一条显式 extend({ spinner: SpinnerRenderable })
+（对齐 bg-pulse.tsx 范式），并移除 prompt/index、footer.view、footer.subagent
+三处冗余裸副作用导入（均已通过值导入链传递依赖 spinner.tsx）。注册语句内联在
+模块体内，ESM 保证先于任何渲染求值，同时消除 tree-shaking 与 chunk 求值时序
+两类风险，避免编译期回归。新增 testRender 行为测试作为 <spinner> 注册链路
+回归护栏。
+
+diff --git a/packages/opencode/src/cli/cmd/run/footer.subagent.tsx b/packages/opencode/src/cli/cmd/run/footer.subagent.tsx
+index 0cd136724942f3aaefd5d9d0349fb95b3a6dbe95..4cfed72d93a5e15176c124c170390ae9d5fd2cb4 100644
+--- a/packages/opencode/src/cli/cmd/run/footer.subagent.tsx
++++ b/packages/opencode/src/cli/cmd/run/footer.subagent.tsx
+@@ -1,7 +1,6 @@
+ /** @jsxImportSource @opentui/solid */
+ import type { ScrollBoxRenderable } from "@opentui/core"
+ import { useKeyboard } from "@opentui/solid"
+-import "opentui-spinner/solid"
+ import { createMemo, indexArray, mapArray } from "solid-js"
+ import { SPINNER_FRAMES } from "../tui/component/spinner"
+ import { RunEntryContent, separatorRows } from "./scrollback.writer"
+diff --git a/packages/opencode/src/cli/cmd/run/footer.view.tsx b/packages/opencode/src/cli/cmd/run/footer.view.tsx
+index e1a028b7e951a58853b80c4bd76aba2f7e5d383c..1efd490ca37e8efda87c284ce68ddd25a245ea7a 100644
+--- a/packages/opencode/src/cli/cmd/run/footer.view.tsx
++++ b/packages/opencode/src/cli/cmd/run/footer.view.tsx
+@@ -12,7 +12,6 @@
+ /** @jsxImportSource @opentui/solid */
+ import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
+ import { Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+-import "opentui-spinner/solid"
+ import { createColors, createFrames } from "../tui/ui/spinner"
+ import { RunCommandMenuBody, RunModelSelectBody, RunVariantSelectBody } from "./footer.command"
+ import { FOOTER_MENU_ROWS, RunFooterMenu } from "./footer.menu"
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index afe361b3615669b9e11603ce12ab6bbd560cb0a4..02b713ec9e6e6db31e0041c3f06a42d4936ca5f6 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -10,7 +10,6 @@ import {
+ } from "@opentui/core"
+ import type { CommandContext } from "@opentui/keymap"
+ import { createEffect, createMemo, onMount, createSignal, onCleanup, on, untrack, Show, Switch, Match } from "solid-js"
+-import "opentui-spinner/solid"
+ import path from "path"
+ import { fileURLToPath } from "url"
+ import { Filesystem } from "@/util/filesystem"
+diff --git a/packages/opencode/src/cli/cmd/tui/component/spinner.tsx b/packages/opencode/src/cli/cmd/tui/component/spinner.tsx
+index 7007803141312c1f43fde75458e148fdd074ce28..e44958b6d3a4d1cbb7692db3681c0fb07a64c009 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/spinner.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/spinner.tsx
+@@ -1,9 +1,23 @@
+ import { Show } from "solid-js"
+ import { useTheme } from "../context/theme"
+ import { useKV } from "../context/kv"
+-import type { JSX } from "@opentui/solid"
++import { extend, type JSX } from "@opentui/solid"
+ import type { RGBA } from "@opentui/core"
+-import "opentui-spinner/solid"
++import { SpinnerRenderable } from "opentui-spinner"
++
++// 显式注册 <spinner> intrinsic。opentui-spinner/solid 原本通过裸副作用导入
++// (import "opentui-spinner/solid") 调用 extend 完成注册，但在 Bun --compile
++// + splitting 产物中，该副作用落在独立共享 chunk，经动态导入到达时可能晚于
++// 首次 <spinner> 渲染求值，触发 [Reconciler] Unknown component type: spinner。
++// 改为与 bg-pulse.tsx 一致的显式 extend：注册语句内联在本模块体内，而本模块
++// 是全部 <spinner> 渲染点的静态值依赖（Spinner/SPINNER_FRAMES），ESM 保证其
++// 先于任何渲染求值，同时消除 tree-shaking 与 chunk 求值时序两类风险。
++declare module "@opentui/solid" {
++  interface OpenTUIComponents {
++    spinner: typeof SpinnerRenderable
++  }
++}
++extend({ spinner: SpinnerRenderable })
+ 
+ export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+ 
+diff --git a/packages/opencode/test/cli/cmd/tui/spinner.test.tsx b/packages/opencode/test/cli/cmd/tui/spinner.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..28c40d78fd1638f43ba74b7cea44ad044552d21e
+--- /dev/null
++++ b/packages/opencode/test/cli/cmd/tui/spinner.test.tsx
+@@ -0,0 +1,55 @@
++/** @jsxImportSource @opentui/solid */
++import { expect, test } from "bun:test"
++import { testRender } from "@opentui/solid"
++// 导入 spinner 模块以触发 <spinner> intrinsic 的注册。注册逻辑由该模块在
++// 求值时显式调用 extend 完成（详见 src 侧改动），这里只消费其 SPINNER_FRAMES
++// 值导出，避免出现无绑定的纯副作用导入。
++import { SPINNER_FRAMES } from "@/cli/cmd/tui/component/spinner"
++
++// 行为复现级断言：通过 Solid reconciler 渲染 <spinner> 元素，复现编译产物中
++// "[Reconciler] Unknown component type: spinner" 的失败路径。注册缺失时
++// testRender 会在 createElement 阶段抛出该错误；注册正常时首帧渲染出 spinner 字形。
++//
++// 非编译测试环境无法复现编译期 chunk 求值时序问题（那正是本 bug 的根因），
++// 因此本测试不用于复现编译期时序，而是作为 <spinner> intrinsic 注册链路的
++// 回归护栏：一旦注册被误删或导入链路被破坏，本测试会以确切错误信息失败。
++test("<spinner> intrinsic 经 Solid reconciler 注册并可渲染", async () => {
++  const app = await testRender(
++    () => <spinner frames={SPINNER_FRAMES} interval={80} />,
++    { width: 8, height: 3 },
++  )
++  try {
++    await app.renderOnce()
++    // 首帧至少渲染出一个 spinner 字形；注册缺失时上面 testRender/renderOnce
++    // 会直接抛 "[Reconciler] Unknown component type: spinner" 而不会走到这里。
++    expect(app.captureCharFrame()).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/)
++  } finally {
++    // createTestRenderer 持有 native renderer 与定时器，必须 destroy 避免泄漏到后续用例。
++    app.renderer.destroy()
++  }
++})
++
++// 多帧渲染护栏：<spinner> intrinsic 注册后须支持 reconciler 连续多帧调度
++// (autoplay)，而非仅首帧侥幸通过。连续 renderOnce 两次并确认字形持续可见，
++// 防止注册相关状态在二次渲染时被错误重置导致回归。
++test("<spinner> intrinsic 支持连续多帧渲染", async () => {
++  const seen: string[] = []
++  const app = await testRender(
++    () => {
++      // 直接渲染 intrinsic，绕过需要 ThemeProvider/KVProvider 的 Spinner 组件体，
++      // 聚焦验证 catalogue 注册本身，而非组件上下文装配。
++      return <spinner frames={SPINNER_FRAMES} interval={80} />
++    },
++    { width: 8, height: 3 },
++  )
++  try {
++    await app.renderOnce()
++    seen.push(app.captureCharFrame())
++    // 连续两帧确认 renderable 正常挂载且可重复渲染（autoplay 调度生效）。
++    await app.renderOnce()
++    seen.push(app.captureCharFrame())
++    expect(seen.some((frame) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(frame))).toBe(true)
++  } finally {
++    app.renderer.destroy()
++  }
++})

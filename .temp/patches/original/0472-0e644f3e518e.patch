@@ -1,0 +1,52 @@
+From 0e644f3e518e671d62c28859c60accad2b27d19e Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 13:29:47 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E5=A4=8D=20DialogGoalMenu?=
+ =?UTF-8?q?=20=E5=AE=BD=E5=BA=A6=E5=92=8C=E9=AB=98=E5=BA=A6=E4=B8=8D?=
+ =?UTF-8?q?=E8=B6=B3=E5=AF=BC=E8=87=B4=E9=80=89=E9=A1=B9=E9=9C=80=E6=BB=9A?=
+ =?UTF-8?q?=E5=8A=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DialogGoalMenu 使用 DialogSelect 但未调用 dialog.setSize()，继承默认
+medium（60 chars），选项标题和 objective 描述空间不足。同时搜索 filter
+占用 2 行垂直空间，导致小终端（≤18 行）scrollbox 高度不够，只能显示
+1-2 个选项，Resume/Clear 需滚动才能看到。
+
+修复：
+- dialog.setSize("large")：宽度 60→88 chars，与 dialog-session-list /
+  dialog-skill 等列表型对话框一致
+- renderFilter={false}：3-4 个选项无需搜索，节省 2 行高度，14 行终端
+  也能完整显示 3 个选项
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index 6f4da61e8670acb2e115856fe226fbc06b257c9c..be86dad119ac7980f256bc2476f03976bbdc214d 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -4,7 +4,7 @@ import { useDialog } from "@tui/ui/dialog"
+ import { useSync } from "@tui/context/sync"
+ import { useSDK } from "@tui/context/sdk"
+ import { useToast } from "@tui/ui/toast"
+-import { createMemo } from "solid-js"
++import { createMemo, onMount } from "solid-js"
+ import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
+ 
+ // [local-smark] goal 管理 dialog
+@@ -109,9 +109,16 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+ 
+   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
+ 
++  // 使用 large 宽度（88 chars），让 goal objective 描述和选项标题有足够显示空间，
++  // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
++  onMount(() => dialog.setSize("large"))
++
+   return (
+     <DialogSelect
+       title="Manage Goal"
++      // 只有 3-4 个选项，不需要搜索 filter；隐藏 filter 节省 2 行垂直空间，
++      // 让小终端（≤18 行）也能完整显示所有选项无需滚动
++      renderFilter={false}
+       options={[
+         {
+           title: "Edit objective",

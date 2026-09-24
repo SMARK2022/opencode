@@ -1,0 +1,21 @@
+From ef0c4e011b70c405a02ac8354feb6dbc7034e173 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 6 Sep 2026 19:53:24 +0800
+Subject: [PATCH] =?UTF-8?q?chore(tui):=20=E5=90=8C=E6=AD=A5=20chatgpt-brow?=
+ =?UTF-8?q?ser-agent=20=E5=AD=90=E6=A8=A1=E5=9D=97=E6=8C=87=E9=92=88?=
+ =?UTF-8?q?=E8=87=B3=E5=B7=B2=E6=8E=A8=E9=80=81=20tip?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+子模块 ef9bacc 经 cherry-pick 变基到 smark/main tip 538be56 之上成为
+825adc2 并已推送；父仓库指针同步更新，修复 CI submodule checkout
+报 upload-pack: not our ref（指针远端不可达）。
+
+diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+index ef9bacc1d4f3e9660e56fa90625fe3bc94be49d4..825adc2f9c3264ad657046d2158e84c15574c30c 160000
+--- a/thirdparty/chatgpt-browser-agent
++++ b/thirdparty/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit ef9bacc1d4f3e9660e56fa90625fe3bc94be49d4
++Subproject commit 825adc2f9c3264ad657046d2158e84c15574c30c

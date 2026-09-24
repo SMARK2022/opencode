@@ -1,0 +1,143 @@
+From 71ff3e1a3a8896e1c61dd95727816854ac8e4ee4 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 21 May 2026 02:13:58 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E4=BC=9A=E8=AF=9D?=
+ =?UTF-8?q?=E5=8E=8B=E7=BC=A9=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=B7=BB=E5=8A=A0?=
+ =?UTF-8?q?=E8=BE=93=E5=85=A5=E4=BC=B0=E7=AE=97=E5=AD=98=E5=82=A8=E8=87=B3?=
+ =?UTF-8?q?=E6=91=98=E8=A6=81=E5=8A=A9=E6=89=8B=EF=BC=8C=E6=9B=B4=E6=96=B0?=
+ =?UTF-8?q?=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
+index c1b1d05d86e15e3652d189d516c2e1137f880813..ae714bc9b94de7953c2b187caf64b915683049c9 100644
+--- a/packages/opencode/src/session/compaction.ts
++++ b/packages/opencode/src/session/compaction.ts
+@@ -5,6 +5,7 @@ import { SessionID, MessageID, PartID } from "./schema"
+ import { Provider } from "@/provider/provider"
+ import { MessageV2 } from "./message-v2"
+ import { Token } from "@/util/token"
++import { AttachmentToken } from "@/util/attachment-token"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { SessionProcessor } from "./processor"
+ import { Agent } from "@/agent/agent"
+@@ -433,6 +434,32 @@ export const layer = Layer.effect(
+         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+       })
+       const ctx = yield* InstanceState.context
++      const compactionMessages = [
++        ...modelMessages,
++        {
++          role: "user" as const,
++          content: [{ type: "text" as const, text: nextPrompt }],
++        },
++      ]
++      const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(compactionMessages)
++      const rawMessagesText = JSON.stringify(compactionMessages)
++      const estimatedInput = Token.estimate(messageEstimate.text) + messageEstimate.attachments.tokens
++      const inputBreakdown = {
++        system: 0,
++        instructions: 0,
++        skills: 0,
++        tools: 0,
++        messages: {
++          userText: nextPrompt.length,
++          assistantText: Math.max(0, messageEstimate.textChars - nextPrompt.length),
++          reasoning: 0,
++          toolInput: 0,
++          toolOutput: 0,
++          attachments: messageEstimate.attachments.rawChars,
++          total: rawMessagesText.length,
++        },
++        ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
++      }
+       const msg: MessageV2.Assistant = {
+         id: MessageID.ascending(),
+         role: "assistant",
+@@ -449,10 +476,18 @@ export const layer = Layer.effect(
+         cost: 0,
+         tokens: {
+           output: 0,
+-          input: 0,
++          // The compaction request is uploaded through SessionProcessor directly,
++          // bypassing prompt.ts where normal assistant requests get their pending
++          // input snapshot.  Seed the same estimate here so the TUI does not show
++          // 0 tokens while the summary request is streaming; finish-step replaces
++          // this with provider-confirmed usage once the model responds.
++          input: estimatedInput,
+           reasoning: 0,
+           cache: { read: 0, write: 0 },
+         },
++        inputChars: rawMessagesText.length,
++        inputTokens: estimatedInput,
++        inputBreakdown,
+         modelID: model.id,
+         providerID: model.providerID,
+         time: {
+@@ -465,19 +500,19 @@ export const layer = Layer.effect(
+         sessionID: input.sessionID,
+         model,
+       })
++      // SessionProcessor copies these fields into step-start/step-finish parts.
++      // Without this handoff, the assistant message has a pending estimate but
++      // the streaming parts still look empty, which makes live context accounting
++      // flicker back to zero during manual or automatic compaction.
++      processor.inputChars = rawMessagesText.length
++      processor.inputBreakdown = inputBreakdown
+       const result = yield* processor.process({
+         user: userMessage,
+         agent,
+         sessionID: input.sessionID,
+         tools: {},
+         system: [],
+-        messages: [
+-          ...modelMessages,
+-          {
+-            role: "user",
+-            content: [{ type: "text", text: nextPrompt }],
+-          },
+-        ],
++        messages: compactionMessages,
+         model,
+       })
+ 
+diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
+index ac1f7afc18c60d5430847ef684a4226f4bf9104a..247db46c9ac5c7a0bc3a18a80a525410f782cb66 100644
+--- a/packages/opencode/test/session/compaction.test.ts
++++ b/packages/opencode/test/session/compaction.test.ts
+@@ -875,6 +875,33 @@ describe("session.compaction.process", () => {
+     }),
+   )
+ 
++  it.instance(
++    "stores pending input estimate on summary assistant before streaming",
++    Effect.gen(function* () {
++      const ssn = yield* SessionNs.Service
++      const session = yield* ssn.create({})
++      const msg = yield* createUserMessage(session.id, "hello")
++      const msgs = yield* ssn.messages({ sessionID: session.id })
++
++      yield* SessionCompaction.use.process({
++        parentID: msg.id,
++        messages: msgs,
++        sessionID: session.id,
++        auto: false,
++      })
++
++      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
++        (item) => item.info.role === "assistant" && item.info.summary,
++      )
++
++      expect(summary?.info.role).toBe("assistant")
++      if (summary?.info.role !== "assistant") return
++      expect(summary.info.inputTokens).toBeGreaterThan(0)
++      expect(summary.info.inputChars).toBeGreaterThan(0)
++      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
++    }),
++  )
++
+   itCompaction.instance(
+     "marks summary message as errored on compact result",
+     Effect.gen(function* () {

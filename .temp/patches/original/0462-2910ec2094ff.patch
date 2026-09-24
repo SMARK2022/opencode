@@ -1,0 +1,54 @@
+From 2910ec2094ff38be6b7252cc84206de447d6e651 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 30 May 2026 04:19:02 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20=E4=BF=AE=E5=A4=8D=20Bun=20exitCod?=
+ =?UTF-8?q?e=20=E6=B8=85=E7=90=86=E5=AF=BC=E8=87=B4=20Linux=20=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95=E8=AF=AF=E5=A4=B1=E8=B4=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bun 中将 process.exitCode 设回 undefined 不会清除已存在的退出码。
+
+TUI thread 测试在断言 CLI 校验分支后改为恢复 0，避免 0 fail 仍 exit 1。
+
+diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
+index 43d02519545cd5a2ed39eed309ab68d1ac50918b..4ee629230139794ca7bee09cbfdaedc97f4cee0a 100644
+--- a/packages/opencode/test/cli/tui/thread.test.ts
++++ b/packages/opencode/test/cli/tui/thread.test.ts
+@@ -55,7 +55,7 @@ describe("tui thread", () => {
+     // validation errors. Tests assert those branches directly, so reset the
+     // process-global value after each case; otherwise Bun can report 0 failed
+     // tests but still exit 1 on Linux when the final process exitCode leaks.
+-    process.exitCode = originalExitCode
++    restoreExitCode(originalExitCode)
+   })
+ 
+   async function call(project?: string, overrides?: Partial<ThreadArgs>) {
+@@ -211,7 +211,7 @@ describe("tui thread", () => {
+         expect(seen.errors[0]).toContain("https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge")
+         expect(seen.tuiUrls).toHaveLength(0)
+       } finally {
+-        process.exitCode = exitCode
++        restoreExitCode(exitCode)
+       }
+     })
+ 
+@@ -226,7 +226,7 @@ describe("tui thread", () => {
+         expect(seen.tuiUrls).toHaveLength(0)
+       } finally {
+         process.argv = argv
+-        process.exitCode = exitCode
++        restoreExitCode(exitCode)
+       }
+     })
+ 
+@@ -727,3 +727,8 @@ describe("tui thread", () => {
+     })
+   })
+ })
++
++function restoreExitCode(exitCode: typeof process.exitCode) {
++  // Bun treats assigning undefined as a no-op once exitCode has been set.
++  process.exitCode = exitCode ?? 0
++}

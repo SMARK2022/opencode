@@ -1,0 +1,51 @@
+From 361aeb664bef26a7dbec832416eae4a81e6712f7 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 17 Sep 2026 16:04:15 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E6=AD=A3=E8=AF=AD?=
+ =?UTF-8?q?=E9=9F=B3=E8=BD=AC=E5=BD=95=E4=BC=9A=E8=AF=9D=E5=88=B7=E6=96=B0?=
+ =?UTF-8?q?=E5=8F=82=E6=95=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+为 session 请求补充 refresh=true，避免返回已被转录服务拒绝的旧 token；沿用现有凭据回写及 401 重试，恢复后续请求的无浏览器直连。
+
+补充刷新 URL 回归测试；相关测试 51 通过、2 跳过。使用 OpenCode 配置凭据完成真实验证：首次刷新写回后转录成功，第二次直接命中缓存，无浏览器收割。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts b/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts
+index 4d33d12046f4683cd2e82d9715680aa3e61ac2a2..2bca71f6edc101fbe99c1e4f59a73943e082b48d 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts
+@@ -26,7 +26,7 @@ export const VOICE_HARVEST_TIMEOUT_MS = 240_000
+ export const VOICE_REFRESH_TIMEOUT_MS = 60_000
+ export const VOICE_DIRECT_TIMEOUT_MS = 30_000
+ 
+-export const VOICE_SESSION_URL = "https://chatgpt.com/api/auth/session"
++export const VOICE_SESSION_URL = "https://chatgpt.com/api/auth/session?refresh=true"
+ // 与 agent 页面路径同一私有端点（chatgpt-dom.js:796）；请求形态变化时两处必须同源更新。
+ export const VOICE_TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe"
+ // 刷新授权链只由 NextAuth 会话令牌族承载；其它 cookie（如 __cf_bm）无授权语义，不参与状态机门控。
+diff --git a/packages/opencode/test/cli/tui/voice-auth.test.ts b/packages/opencode/test/cli/tui/voice-auth.test.ts
+index ace0408d41848670dfee3373e762b00926f2c791..688befa28828db82841d36329d006f73793dc697 100644
+--- a/packages/opencode/test/cli/tui/voice-auth.test.ts
++++ b/packages/opencode/test/cli/tui/voice-auth.test.ts
+@@ -6,6 +6,7 @@ import { ConfigMCP } from "../../../src/config/mcp"
+ import {
+   authFromHarvest,
+   buildDirectTranscribeRequest,
++  buildSessionRequest,
+   ensureVoiceCredential,
+   jwtExpiresAt,
+   mergeSetCookieCookies,
+@@ -43,6 +44,11 @@ const handwritten = `{
+ `
+ 
+ describe("voice auth node", () => {
++  // 普通 session 查询可能返回已被转录服务拒绝的旧 token；刷新必须显式使用 true。
++  test("requests a forced session refresh", () => {
++    expect(buildSessionRequest(auth).input).toBe("https://chatgpt.com/api/auth/session?refresh=true")
++  })
++
+   // 写入方唯一合同：只替换 mcp.<key>.auth 节点，注释、缩进与兄弟字段逐字保留。
+   // 手写内容含 trailing comma 与嵌套缩进，是注释保真写入的最严输入域。
+   test("writes only the auth node and preserves comments and sibling fields", async () => {

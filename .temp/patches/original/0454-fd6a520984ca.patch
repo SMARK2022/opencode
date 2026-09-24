@@ -1,0 +1,11 @@
+From fd6a520984ca9a8f0e4a0c892139d6ef1aca481c Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 17 May 2026 21:14:02 +0800
+Subject: [PATCH] chore: rename README.zh.md to README.md (step 2/2 for Chinese
+ default)
+
+
+diff --git a/README.zh.md b/README.md
+similarity index 100%
+rename from README.zh.md
+rename to README.md

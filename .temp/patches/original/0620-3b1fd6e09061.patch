@@ -1,0 +1,849 @@
+From 3b1fd6e090611c03e861553196febd6f65c3f8f4 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 13 Sep 2026 01:06:54 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E9=87=87=E7=BA=B3=20OpenTUI=200.4.?=
+ =?UTF-8?q?3-smark.13=20=E4=BF=AE=E5=A4=8D=E9=83=A8=E5=88=86=E4=B8=AD?=
+ =?UTF-8?q?=E6=96=87=E7=BC=BA=E5=A4=B1=E4=B8=8E=E8=A1=8C=E5=B0=BE=E6=88=AA?=
+ =?UTF-8?q?=E5=AD=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+OpenTUI 侧两个根因修复（子仓库 362be301）：裁剪路径的 grapheme 分配
+原先无同步 owner，被拒绝的写入泄漏槽位并耗尽 65536 个 class0 容量，
+导致长会话中部分中文持续缺字；word 换行扫描回退断点索引但列换算
+游标已前进，虚拟行可从宽字形内部开始，导致行尾字符缺失或重复。
+
+采纳已发布的 v0.4.3-smark.13：root 与 packages 的 catalog/overrides
+指向新 tarball，bun.lock 刷新，gitlink 指向发布 commit b0cf2535。
+本地验证：closure 门禁通过（11 包/单 solid owner/native sha256），
+原始 65534 帧缺字复现用例在发布包上通过，方案与实现均经独立审计
+APPROVE（详见 docs/plans/tui-grapheme-pool-clipping-repair.md）。
+
+diff --git a/bun.lock b/bun.lock
+index b28e66ab0589029c2744866f4dd6dcb12708acd7..ed06bc5d98a2f1d14ad41381058bca893c3273ee 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -384,7 +384,7 @@
+     },
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.15.13-smark",
++      "version": "1.15.14-smark",
+       "bin": {
+         "opencode": "./bin/opencode",
+       },
+@@ -541,9 +541,9 @@
+         "typescript": "catalog:",
+       },
+       "peerDependencies": {
+-        "@opentui/core": ">=0.4.3-smark.12",
+-        "@opentui/keymap": ">=0.4.3-smark.12",
+-        "@opentui/solid": ">=0.4.3-smark.12",
++        "@opentui/core": ">=0.4.3-smark.13",
++        "@opentui/keymap": ">=0.4.3-smark.13",
++        "@opentui/solid": ">=0.4.3-smark.13",
+       },
+       "optionalPeers": [
+         "@opentui/core",
+@@ -709,17 +709,17 @@
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+   },
+   "overrides": {
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-x64-0.4.3-smark.13.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-keymap-0.4.3-smark.13.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-solid-0.4.3-smark.13.tgz",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+     "poe-oauth": "0.0.6",
+@@ -735,9 +735,9 @@
+     "@npmcli/arborist": "9.4.0",
+     "@octokit/rest": "22.0.0",
+     "@openauthjs/openauth": "0.0.0-20250322224806",
+-    "@opentui/core": "0.4.3-smark.12",
+-    "@opentui/keymap": "0.4.3-smark.12",
+-    "@opentui/solid": "0.4.3-smark.12",
++    "@opentui/core": "0.4.3-smark.13",
++    "@opentui/keymap": "0.4.3-smark.13",
++    "@opentui/solid": "0.4.3-smark.13",
+     "@pierre/diffs": "1.1.0-beta.18",
+     "@playwright/test": "1.60.0",
+     "@sentry/solid": "10.36.0",
+@@ -1616,27 +1616,27 @@
+ 
+     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.40.0", "https://registry.npmmirror.com/@opentelemetry/semantic-conventions/-/semantic-conventions-1.40.0.tgz", {}, "sha512-cifvXDhcqMwwTlTK04GBNeIe7yyo28Mfby85QXFe1Yk8nmi36Ab/5UQwptOx84SsoGNRg+EVSjwzfSZMy6pmlw=="],
+ 
+-    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.12", "@opentui/core-darwin-x64": "0.4.3-smark.12", "@opentui/core-linux-arm64": "0.4.3-smark.12", "@opentui/core-linux-arm64-musl": "0.4.3-smark.12", "@opentui/core-linux-x64": "0.4.3-smark.12", "@opentui/core-linux-x64-musl": "0.4.3-smark.12", "@opentui/core-win32-arm64": "0.4.3-smark.12", "@opentui/core-win32-x64": "0.4.3-smark.12" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-LGVJWpnCkK+DZaHzctBZSjsGdzLkqKTlGLb+PiCReE8072xIRotb6QrxoFOSnH99RdrCHD0PTMikUtwQ5yJnDg=="],
++    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.13", "@opentui/core-darwin-x64": "0.4.3-smark.13", "@opentui/core-linux-arm64": "0.4.3-smark.13", "@opentui/core-linux-arm64-musl": "0.4.3-smark.13", "@opentui/core-linux-x64": "0.4.3-smark.13", "@opentui/core-linux-x64-musl": "0.4.3-smark.13", "@opentui/core-win32-arm64": "0.4.3-smark.13", "@opentui/core-win32-x64": "0.4.3-smark.13" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-vXHFEghKp/mNnaE4CbX3w0pyqhdKaJ8okFvD186L1M+VQXN/QCxCkHTzkzSS3dTptWvYWsF63TAnUwWyal2sdw=="],
+ 
+-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz", {}, "sha512-X7Ti59iiAqiS+MctJKSaxNdq1upFa4uVqPixzZpi5e0vN6DvJETpxyNchyAYOblhXbRotPreZII/s6SPm1VH3A=="],
++    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-arm64-0.4.3-smark.13.tgz", {}, "sha512-IQVj5J6WL77x3o2ebo0rOtXU7us3bLQGBhDuN5SaBJKg7GVHJcCMrE4X2WW/yvwEqJG0hNYuPQrkxBdZeLhrHw=="],
+ 
+-    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz", {}, "sha512-LnvsOGyIgb+sEq4VYnAUzPrL6rGGYNVpKQGX9j3X3to8gIKxLPpcO032gA5TeX7Q97cVbgbHiG374KpOFdjwkw=="],
++    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-x64-0.4.3-smark.13.tgz", {}, "sha512-50SYX56C7OKF/L6Miu73f5YkiluWvReFbrdMIKHNkE639cGaKjEILZfxb4d0Og0u0NZIgVp3UIMoKcOjE6hONw=="],
+ 
+-    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz", {}, "sha512-64N3xqov96lN/XoV9tnzKlSjJXPxrT95eppr4P8NYkaeWPFbtNbThutgAAXPmmd5hBee4EB0Rdq+nMTODGVBRQ=="],
++    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-0.4.3-smark.13.tgz", {}, "sha512-TAaWZ5x6qgesUKwYdT70ujS9FW+BeG4Po4srKzg0bzUBYYS9Yyd0zWsQeQexM7tKBeVq7EuEPNL3DQxI3LOrvQ=="],
+ 
+-    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz", {}, "sha512-dx51XRvLjQc0Wt73tDK5uj8j8ndJzz1iqP6oIcphDRpNE3+9pRhgrtGmgebKArol6yvKQxY1vAqI+fr+tvK59A=="],
++    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-musl-0.4.3-smark.13.tgz", {}, "sha512-pYgUrqYh9VNT0DVImRvfJ/RaomehV3MvR44U7WW+jTBkph250coj4KXygDEGgd7/nNzMWxuCp5Va5VG2L4orlw=="],
+ 
+-    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz", {}, "sha512-Abw1EmvKh0lA2zSuMnPrqD0pi6nmFooYpjH/wyyxefsSS9SYBVq5we7IFev3hUM6P38oibFTuRMpBAq06oKN6Q=="],
++    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-0.4.3-smark.13.tgz", {}, "sha512-Vw6+qSnjVa3SAObwxycscc3sQzql8TgBTdI05SLX+KUdtc4N7W7Yt3uxhhuAqMQS2y/1MyRqWXFC6BVbj1Am4g=="],
+ 
+-    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz", {}, "sha512-nr1E67xJ3taU0YLN6xW/mzD4eHiRToJnTAhdfckI21ues9iSolKbQpe/lo/IMX+3k4ebAKakwkDZIYS25cbHJg=="],
++    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-musl-0.4.3-smark.13.tgz", {}, "sha512-ZWe1GDt4ZBHrSV65t8kZ0CWHLjTTOr/duZy1xly7MSrhb//Btw76nHTDFY99WFFNBKKoZ+MsSNPMgsPXr4E/qQ=="],
+ 
+-    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz", {}, "sha512-5y7/E56F7FObVZdLvDmd/n7Lyp2twkSkhvTNhvRQrwb3iASXuiK2xlct6YgT+t35TthpVGmrgJip6dALMce3jw=="],
++    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-arm64-0.4.3-smark.13.tgz", {}, "sha512-IOFCYZ2cDuIMFYCwuHxZNtNN+47Yps0YCGODBSLsJqGeYSJ4usRzpY4gj0xdx5TNLEZp7vHD1h3ezkReKO66eA=="],
+ 
+-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz", {}, "sha512-xs38fltR0unoSYoRveMgwOy9A1+PZzLQRHVRwIFR71gYE/ojUJ1y6RVJ0B8RXJ950Qmu++jkDxT1tPeW9sd5Yg=="],
++    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-x64-0.4.3-smark.13.tgz", {}, "sha512-tt+ZS85wpRSccejdT7adf0EnIGcZM0zH+9QgJ0D1gdejKSplh2lcG0Sx3VZp4VDXURPiAxMxjZwTZRS6j/DuEw=="],
+ 
+-    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.12" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.12", "@opentui/solid": "0.4.3-smark.12", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-J1KFnA8c1nmBTbI3i56zzpmdo/rbS03zUNTOexS5CeB5oUs2mNhIhrsodK5jamhOosRI00S6IcRUWvA7ACpr4Q=="],
++    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-keymap-0.4.3-smark.13.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.13" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.13", "@opentui/solid": "0.4.3-smark.13", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-NrfcLjXbrOOdF3ER2Ry5jx5EdPYofcspZHwvf7Knq+17yzgaLg0V/nnZnD7gkw6N7fZ/NE7E421CDj4/ip0cLg=="],
+ 
+-    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.12", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-eMJSLeZnHB/6bAMGs6PwcIvxMG+s2b3DRO+PjM+7YwGV2pT/BDrqdFo8cCifAw+ub/s90HZL9N74ummC9b4G3A=="],
++    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-solid-0.4.3-smark.13.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.13", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-p1n7JOvwNKrGlELQIGN2hemOLnWePhmXTNGdrtEbepjwGOgi9+h9zghM+Lagdb7kUPSN91WFiqcENZwIBR6DWQ=="],
+ 
+     "@oslojs/asn1": ["@oslojs/asn1@1.0.0", "https://registry.npmmirror.com/@oslojs/asn1/-/asn1-1.0.0.tgz", { "dependencies": { "@oslojs/binary": "1.0.0" } }, "sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA=="],
+ 
+diff --git a/docs/plans/tui-freeze-native-handle-exhaustion.md b/docs/plans/tui-freeze-native-handle-exhaustion.md
+index 4a1c1a80cba8772b0006f23a8ed3b0e899e8ca33..4970ba6a6691160ac1b972d7f3f15f25fa43624e 100644
+--- a/docs/plans/tui-freeze-native-handle-exhaustion.md
++++ b/docs/plans/tui-freeze-native-handle-exhaustion.md
+@@ -389,3 +389,126 @@ const hasPreview = createMemo(() => previewTree() !== undefined)
+ **次要/替代路径清单**：无。无 fallback、无接口变化、无新增生产概念。
+ 
+ **未决/未验证项**：`zz-repro-freeze.test.tsx`（调查脚本）按惯例应移至 `.temp/Testing\`，但移动被权限预检拦截（需要用户显式授权文件移动）；该文件不进 commit（untracked，commit 用 `--only` 显式路径排除），待用户确认后清理。dialog-select 的同模式 JSX 存在性检查为低频对话框路径，按审计结论不扩 scope。
++
++## 10. 后续独立问题：全局中文持续缺字（调查中）
++
++本节不属于前述 revision 3 的实施授权或 verified 结论。尚未确认现场触发源，不宣称新问题已修复。用户确认二进制包含此前修复；本轮未运行或替换生产 OpenCode 二进制，未修改生产代码。
++
++后续纠正：用户强调是部分中文缺失；本节 OSC 66 全部吞字实验不满足该完整症状，不能作为现场主结论。§11 已通过实际组件树复现部分中文缺失，优先依据 §11。
++
++### 10.1 现象与证据边界
++
++用户报告运行一段时间后，历史消息、纯文本、GOAL 和 Session 侧栏同时出现缺字；ASCII 多数正常，中文部分呈空白。Ctrl+P 重绘不恢复，resize 后仍缺字但缺失位置改变。不能将此直接归为 Markdown、高亮或 renderable 耗尽。
++
++此前新鲜画布测试及 200 次滑窗后的字符探针没有发现缺字，但存在测试边界：`core/src/testing/test-renderer.ts:227-230` 的 `captureCharFrame()` 直接读取 native 画布，并未解释发送给终端的 ANSI；`:367-374` 默认使用 memory output。设置 `useThread: true` 不能证明覆盖了真实终端输出。此前“因此证明渐进式缓存腐化”的判断证据不足，撤回。
++
++### 10.2 新实证：迟到 CPR 导致输出协议被错误切换
++
++实验脚本 `.temp/Testing/garbled-render.test.tsx` 使用真实 `CliRenderer`、`TextRenderable`、stdin 事件路由和 native output feed，将 ANSI 输入 `@xterm/headless` 后与内存画布比较。终端模拟器未实现 OSC 66；这用于验证不支持该协议的终端，不等同于直接捕获用户 Windows Terminal。
++
++命令（cwd `.temp/Testing`）：`bun test garbled-render.test.tsx --test-name-pattern "late CPR"`。等待真实启动探测超时 5.2 秒，再通过 stdin 注入完整光标位置报告 `ESC[1;80R`；初次复现和扩展重绘复测均出现 red。扩展复测耗时约 5.7 秒：
++
++| 阶段 | capabilityTimeoutId | explicit_width | 内存画布 | 终端画面 |
++|---|---|---|---|---|
++| 超时后、未注入 | null | false | A中文B | A中文B |
++| 注入 ESC[1;80R | null | true | A中文B | AB |
++| 再注入 ESC[1;1R | null | true | A中文B | AB |
++| 强制完整重绘 | null | true | A中文B | AB |
++| resize 40→32 | null | true | A中文B | AB |
++
++确认的传导链（以下路径均相对 `thirdparty/opentui/packages/core/src`）：
++
++1. `lib/terminal-capability-detection.ts:26-32` 把第一行、非 1 列的 CPR 认作宽度能力响应，未核实对应的查询。
++2. `renderer.ts:3205-3223,3332-3336` 允许这种响应绕过已结束的探测窗口，进入 native 能力解析并请求重绘。
++3. `zig/terminal.zig:1110-1122` 捕获启动光标位置后仍继续执行能力判断；任何 row=1、col>=2 的报告都会打开 `explicit_width`，col>=3 还会打开 `scaled_text`。后续 col=1 不复位。
++4. `zig/renderer.zig:1434-1464` 将 grapheme 文本改为 OSC 66 输出，ASCII 仍直接输出；不支持 OSC 66 的终端忽略其中中文。内存画布依然更新为完整字符，后续差量比较也无法发现屏幕缺字。
++5. 强制重绘和 resize 继续使用同一错误能力，不能恢复。独立 Explore 复核得到相同结果，task `ses_f6e0d2896ffefdMIDjfMmwYDIa`。
++
++### 10.3 尚未闭合的现场证据
++
++正常协议对照：`bun test garbled-render.test.tsx --test-name-pattern "ANSI CJK"` 使用固定 seed=731 的 500 个混合中英文样本及 6 个固定平移样本，按输入原文与终端实际字符比较，506 帧通过（14 秒）。中途以内存读取为 oracle 的版本出现“内存读出空行、终端实际正确”的实验失败；因此改用单行原文作为独立期望，不把该中间失败当作用户缺字的复现。该对照未注入能力响应。
++
++- 实验确认一个可导致持久缺字的生产缺陷，尚未证明用户现场收到了对应 CPR，或当时 `explicit_width` 已翻转。
++- 尚未完整复现“部分中文保留，resize 改变缺失位置”的具体分布；不能把全部缺字的最小实验直接视为截图的完整复现。
++- 在 `C:/Users/Lenovo/.local/share/opencode/log/*.log` 检索未找到现场终端输入、OSC 66 或能力变化记录。搜索命中的相关关键词主要是本次调查命令的 permission 日志，不能当作现场证据。
++- 源码中的启动查询确会发送 CPR 请求（`zig/terminal.zig:304-328`），但尚无证据说明为何在用户长运行时刻发生。需要故障实例的输入报告、能力快照或实际输出字节才能闭合此环；不以猜测“长会话导致晚回复”替代证据。
++
++### 10.4 修复方向与实验清理
++
++已确认缺陷应在能力协商的生产端修：区分启动光标位置与宽度探针回复，并由有效探针生命周期约束能力提升，避免无关 CPR 改写全局输出协议。不能简单屏蔽所有能力变化，也不能通过反复重绘、重建组件或 catch 丢弃错误处理。具体方案须在后续 plan 阶段确定，当前没有实施授权变更。
++
++按用户已授权的脚本移动要求，包内 `zz-repro-freeze.test.tsx` 已移至 `.temp/Testing/zz-repro-freeze-threaded.test.tsx`，保留另一个已有非线程实验文件，不删除历史脚本。包外 context 初始化错误的原因未证实，不能继续把“双模块实例”当成事实。新 ANSI 实验直接在 `.temp/Testing` 运行，未产生正式测试目录中的新红测；实验 red 保留用于记录未修复缺陷。
++
++## 11. 部分中文缺失：裁剪拒绝泄漏 GraphemePool 槽位（已复现，未实施）
++
++### 11.1 用户纠正与结论
++
++用户最新要求：必须解释部分中文消失、其他中文及 ASCII 保留，不能用全部中文消失替代；全面检查当前新版 TUI 的日志。本轮只读生产代码，实验在 `.temp/Testing`，未运行或替换生产二进制。
++
++确认的生产缺陷：宽字符在分配字形 ID 后，因跨 scissor 右边界被整字拒绝，刚分配的槽位既未交给 buffer tracker，也未释放。反复绘制同一个被裁字符即可填满进程共享 GraphemePool 的 class 0，随后普通 TextRenderable 会保留已经 intern 的中文字、跳过无法新分配的中文字，ASCII 不受该池分配限制。它与先前 Renderable 生命周期/65535 native handle 问题是不同的资源池。
++
++### 11.2 最小复现与精确阈值
++
++脚本 `.temp/Testing/garbled-render.test.tsx`。每个实验必须单独启动 Bun 进程，以隔离故意耗尽的全局池。cwd `.temp/Testing`：
++
++| 命令/环境 | 结果 |
++|---|---|
++| `CJK_DRAWS=65533`，`bun test garbled-render.test.tsx --test-name-pattern "clipped CJK"` | PASS，`中试文ABC` 完整 |
++| `CJK_DRAWS=65534`，同命令 | RED，`中  文ABC`，只缺 `试`，ASCII 完整 |
++| `CJK_DRAWS=100000 CJK_CLIP_WIDTH=2`，同命令 | PASS，整字可容纳时 10 万次绘制不耗尽 |
++| `bun test garbled-render.test.tsx --test-name-pattern "real clipped"` | RED，真实 Box/Text 组件树令另一处普通 TextRenderable 输出 `中  文ABC` |
++
++PowerShell 设置环境使用 `$env:CJK_DRAWS='65534'` 等；表中环境项不是 Bash 命令。容量实验约 0.6 秒/进程，真实组件树实验约 0.5 秒/进程。
++
++实验先用独立 buffer 持有 `中`、`文` 两个 live 字形，然后将 TextBufferView 的 `测` 绘制到宽 4 列 buffer、宽 1 列 scissor。TextBufferView 内部宽度合法，但父级只允许第一列，两个 cell 的中文字被拒绝。每次 clear 与重绘仍漏一个槽位；`2 + 65534 = 65536` 正好耗尽 class 0。
++
++真实树实验使用 `BoxRenderable({width:1, height:1, overflow:"hidden"})` 和其 `TextRenderable({content:"测", width:4, height:1, wrapMode:"none"})`，直接执行 `renderer.root.render()`；没有构造非法 cell 或直接修改池。染坏池后隐藏该 box，再添加 `中试文ABC` 的新 TextRenderable，同样只缺 `试`。
++
++独立 Explore 复核 task `ses_f6c0093caffeOSH0aVh4rB456x` 重跑阈值/整字对照/真实树，并将真实 native ANSI 交给 `@xterm/headless`：内存及终端均为 `中  文ABC`，无 OSC 66。不是终端单纯缓存旧帧，也不依赖 Markdown。
++
++### 11.3 第一处偏离与传导链
++
++路径相对 `thirdparty/opentui/packages/core/src`：
++
++1. `Renderable.ts:1423-1434,1819-1825`：普通 overflow-hidden 父组件产生 scissor；`renderables/TextBufferRenderable.ts:475` 在该边界内绘制 TextBufferView。主仓库工具行也存在 overflow-hidden 与不换行文本组合（`packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2687,2725`），但尚未识别现场哪一个具体边界。
++2. `zig/buffer.zig:1800-1811`：多字节字形先 `pool.alloc`；ASCII 直接编码。
++3. `zig/buffer.zig:1825-1829 → :901-929 → :475-483`：写入发现右半字符越出 scissor，提前 return；没有调用 tracker，也没有释放先前新分配的 ID。buffer 级“无 mutation”不等于共享池无分配副作用。
++4. `zig/grapheme.zig:124-153,195-207,407-448`：新槽位 `is_owned=1,is_allocated=1,refcount=0`，只对 live referenced ID 做复用。被拒字符没有 live ID 可复用，因此每次重复绘制都再分配一个。这里 `is_owned=1` 表示字节由池持有，不代表有 buffer 持有引用。
++5. `zig/grapheme.zig:25-33,369-374`：16-bit slot index，class 0 最多 65536 个槽位；`中文测` 的 3-byte UTF-8 都进入容量不超过 8 bytes 的 class 0。耗尽不代表系统 RAM 不够。
++6. `zig/buffer.zig:1804-1809`：新字形分配失败后警告、按字符宽度推进并 continue，于是形成空格，同时保留后续缓存字形和 ASCII。直接 `drawText` 的 `:1280` 会提前结束整次 draw；二者不可混为一谈。
++7. 字形池进程全局共享，销毁 renderable/buffer 只能释放已记录的引用，无法找回漏掉的 refcount=0 槽位。独立实验销毁此前全部 renderer/buffer 后再建 renderer，仍能复现池容量残缺。
++
++`git blame` 将右边界提前拒绝定位到 OpenTUI commit `f933876c7`（`fix(core): 宽 grapheme 跨 scissor 右边界时整字裁剪且无副作用`）。这里只确认该分支来源，不把它等同于用户首次安装或首次故障的时间。
++
++### 11.4 为什么持久、部分缺失、位置会变化
++
++- 已 live/intern 的字形无需新槽位，可继续显示；其他字形分配失败，ASCII 不走该分配。因而是部分中文消失。
++- 实验对已耗尽场景 resize 到 18、20 列并重绘，仍为 `中  文ABC`。重绘不回收没有 tracker owner 的槽位。
++- 释放原先 live 字形并改变绘制顺序后，仅剩两个可用槽位被 `试`、`中` 抢先使用；同一批字改成 `试中文ABC` 时输出 `试中  ABC`。缺字由 `试` 变为 `文`，证明 residency/绘制顺序变化可改变缺失集合。尚未声称单独 resize 必然触发这一步，也未复现截图每个坐标。
++- 无需新建消息或 renderable；每次帧绘制都可能分配被拒字形。仅按“一帧漏一个、每秒 60 帧”的假设估算，65536 槽约 18.2 分钟耗尽；30 帧约 36.4 分钟。实际帧率、拒绝数及 live 字形复用需现场测量，不能把估算当作实测发生时间。
++
++### 11.5 当前全部日志核查
++
++只读核查 `C:/Users/Lenovo/.local/share/opencode/log` 内 13 个日志，统计固定截止本地 2026-09-12 12:44:34（UTC 04:44:34），仅统计真正行首 severity，不把 permission 中的实验命令当作故障。当前六个 TUI 的启动记录均为 1.15.14-smark；PID 除 daemon 外按实际进程启动时间关联，日志本身没有 TUI PID。
++
++| PID / 角色 | 日志文件 | ERROR / WARN | 结论 |
++|---|---|---|---|
++| 33160 daemon | 2026-09-11T190839.log | 59 / 9 | 共享后端记录，非单个 TUI |
++| 12104 TUI | 2026-09-11T190841.log | 0 / 0 | 启动 Session `ses_f6e2c6ab7ffevJGNceQ26VbQIv` |
++| 61492 TUI | 2026-09-11T190844.log | 0 / 0 | 启动 Session `ses_1762e23a2ffeYBi6TXLUSjJuKP` |
++| 68736 TUI | 2026-09-11T190848.log | 1 / 0 | `ses_041cd5549ffeSiDWyPpcy8Xrsl`，重复 tui-smoke 插件 ID |
++| 54464 TUI | 2026-09-11T190851.log | 0 / 0 | 启动 Session `ses_f8b378e68ffePzMwT7iii55Nw7` |
++| 18112 TUI | 2026-09-11T192614.log | 0 / 0 | args=[]，无法据启动日志确定后来打开的 Session |
++| 70948 TUI | 2026-09-12T042118.log | 0 / 0 | args=[]，同上 |
++
++daemon 错误分类：34 次 HTTP 502、1 次 HTTP 500、3 次未记录状态码 API 错误、5 次 Provider stream failed、7 次 Copilot 模型元数据缺字段、7 次 claudecode provider 不在列表、2 次 Aborted process。警告为 6 次 plugin@1.15.14-smark 无匹配 npm 版本、3 次 snapshot GC 已运行。可说明请求重试/配置问题，不能据此归因缺字。
++
++另外两个 TUI 日志 `190837`、`191013` 都记录正常退出；`190827`、`190831` 是较早 1.15.13 的 daemon stop；`dev.log`、`opencode.log` 是历史文件，不属于当前启动。TUI 日志大多只覆盖启动数秒，0 ERROR 不证明随后绘制正常。
++
++本缺陷真实 warning：`GraphemePool.alloc FAILED for grapheme ... error.OutOfMemory`。它经 `zig/logger.zig:17-25 → zig.ts:2615-2631 → console.warn` 进入 OpenTUI console 内存缓存，不保证写入应用 Log 文件。`console.ts:1227-1246` 仅在手动导出时写工作目录 `_console_<timestamp>.log`。已在 `F:/Project`、仓库、`D:/Temp/opencode` 搜索 `_console_*.log` / `opentui_debug_*.log`，未找到可用导出；因此目前没有用户故障实例的该 warning 作为归因证据。
++
++### 11.6 修复方向与未完成项
++
++治本方向：字形生产者必须在分配新池槽前确认它能被实际写入；若其他真实路径在分配后拒绝，也必须由分配者对未交付的引用负责。保留整字裁剪与既有字形引用语义，不通过扩大池、周期性全局清空、反复重建 TUI 或 catch 后继续来隐藏泄漏。后续需核实同类分配调用点及可见性/混合分支，再制定可审计实施方案。
++
++已经定位并重复证明足以产生本类部分缺字的生产根因，尚未捕获用户故障实例的字形池状态或具体漏字组件。因此“当前截图唯一来自此路径”仍不能定为事实。当前无生产修改、无 commit，§11 为调查证据，不继承旧 revision 的实施批准。
+diff --git a/docs/plans/tui-grapheme-pool-clipping-repair.md b/docs/plans/tui-grapheme-pool-clipping-repair.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a32587f4503656e1494344de57c9988d10aa529
+--- /dev/null
++++ b/docs/plans/tui-grapheme-pool-clipping-repair.md
+@@ -0,0 +1,448 @@
++# Canonical Implementation Plan: TUI 部分中文缺失的字形生产端修复
++
++> Status: verified
++>
++> Revision: R5
++>
++> Approved revision: R5
++>
++> Audit mode: full-scope
++>
++> Requirement source: 本会话用户原文，见 §1
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-09-12
++
++本文是本次字形泄漏及行尾换行修复的唯一实施规格；`tui-freeze-native-handle-exhaustion.md` §11 是调查证据，旧 renderable 修复的 verified/批准不适用于本文。目标为 verified-implementation-and-commit。R5 已获完整范围方案批准，实施证据待产生；类型检查验收按用户最新答复及现有线上 CI 配置，见 §18。R5 相对 R4 只整理有效需求与审计来源，生产设计不变。
++
++## 1. Verbatim Requirement
++
++> 那您当去进行一下分析，看一看这个如果需要修改的话，理论来说应该去如何进行相应的精准修改，同时又不会造成大范围的这个兼容性或者大范围的结构性调整。就是比如说把这个时序啊等等一些完整全部的一些内容去进行一下分析，看一看。
++
++> 主要是需要提出一套完整的像这种修复的一个方式，或者说修复的一个方法。
++
++新增 GOAL 原始需求：
++
++> 完整全面找到相应的具体泄露点并解决完整根治 由于裁切不当导致的字符消失问题；应当准确解决相应文本既有的消失、以及行尾显示不下未正常换行却被截断的行为。
++> 整体修改预算为生产代码不超过四个文件，生产代码修改行数不超过六百行，整体修改保持精简且尽量避免让上下游的调用等等发生冲突，并适当修改移除掉不必要的，避免或者不合适的调用。同时整体的最终行为精确度又不改，上下游不会受到基础设施修改而被影响。其准确度不能出现问题。最终方案同时需要完整调研相应测试是否会引发红测，最终的 commit 版本不得引入新的红测或出现已有红测。所有的红测都应当得到解决，如生产代码，时序不稳定，请修改生产代码；如测试语义过旧，请谨慎修改。
++
++症状约束：部分中文消失，其他中文和 ASCII 保留；跨消息/侧栏；重绘不能恢复，重排后缺失集合可能改变。正常正文开启 word/char 换行时，行尾剩余空间不足应将完整字形移到后续行，不丢失、重复或切开字形。显式 nowrap/省略标签与仅 1 列却要求显示 2 列字形的几何限制须区别验证，不把绘制 setter 改成布局引擎。
++
++## 2. Explicit Non-Goals
++
++不修改消息滑窗、Solid reconciler、Token Accounting、Markdown 解析、SyntaxStyle 生命周期、OSC 66 协商、日志系统或 daemon。它们不是本次已复现字形池泄漏的 owner。不扩大池、不定期清空全局池、不重建 TUI、不新增配置/依赖/FFI API。不删除文件，不替换正在运行的二进制。
++
++## 3. Repository Context
++
++| Source | 约束 |
++|---|---|
++| 根 AGENTS.md、CONTEXT.md | 本地包测试/typecheck；保护无关 worktree；Session/Message 与 native glyph 所有权分开 |
++| thirdparty/opentui/AGENTS.md | Zig 修改后需 native build；跨运行时 FFI 不变；不无复现修复 |
++| docs/adr/README.md | 当前 ADR 仅 triage，无字形池设计约束；此局部修复无需新 ADR |
++| first-principles-engineering.md、canonical-plan.md | 修首次偏离、双向映射、无 fallback、批准前不实施 |
++
++core 子目录没有额外 AGENTS.md。所有下文 `core/...` 路径相对 `thirdparty/opentui/packages/core/`。
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++|---|---|---|
++| core/src/zig/buffer.zig:475-612,901-998,1183-1296,1424-1859 | 写入拒绝、混合、两处分配点；TextBufferView 与 EditorView 共享实现 | reachable |
++| core/src/zig/text-buffer-view.zig:1143-1191,1288-1299；text-buffer-iterators.zig:351-380 | word 断点与递增列换算游标必须一起向前 | reachable |
++| core/src/zig/tests/text-buffer-view_test.zig | word/char 行布局公开 seam 与缓存/选择回归 | contracted |
++| core/src/zig/grapheme.zig:124-297,369-553,697-793 | alloc 返回新 ref=0 或已有 live ID；tracker 第一/最后引用语义 | reachable |
++| core/src/zig/lib.zig:2657-2775 | encodeUnicode 已显式 incref 交付调用者，不是同一个无 owner 绘制路径 | reachable |
++| core/src/Renderable.ts:1423-1460,1768-1834；renderables/TextBufferRenderable.ts:475 | overflow-hidden 到绘制的真实调用链 | reachable |
++| core/src/zig/tests/buffer_test.zig:243-323,1978-2035 | 背景元数据、整字裁剪、原有 span 不得破坏 | contracted |
++| core/src/tests/renderer.custom-stdout.test.ts | 现成 native output feed 收集测试，不新增终端模拟器依赖 | reachable |
++| .temp/Testing/garbled-render.test.tsx | 原始红测、精确阈值及真实组件树 | observed |
++| docs/plans/tui-freeze-native-handle-exhaustion.md §11 | 日志和独立复现记录；不作为批准依据 | observed |
++| core/package.json、opentui/package.json、core/src/zig.ts:110-141 | build/test 命令及实际 native package 加载路径 | contracted |
++
++全量搜索 production 的 grapheme alloc 调用：buffer.zig 两处，lib.zig encodeUnicode 一处；其余 pool.alloc 命中是 link pool。allocUnowned 无额外 production 调用点。不得修改不同责任的 link pool。
++
++## 5. Current Behavior
++
++```text
++overflow-hidden 父组件 -> scissor -> drawText / drawTextBufferInternal
++-> 字形分配（新 ref=0）-> set/alpha blending
++-> scissor 拒绝 / 行尾填空 / 混合保留旧字形 / tracker 接管
++```
++
++写入没有接管时，新槽位没有 owner 回收；clear/destroy 只知道 tracker 中的引用。分配和写入是同一同步 native 调用内的顺序，不存在必须等待 nextTick 的理由；输出线程不是这个顺序问题的 owner。
++
++另一条首次偏离发生在绘制前：word wrap 扫描调用 charOffsetToColumn 推进 grapheme_idx/col_delta，却用 saved_wrap_idx 回退 wrap_idx；跳过过时断点后回读旧索引，导致列换算状态错位，虚拟行起点可落入双宽字形内部，末尾字消失或重复。正文与 sidebar 都使用现有 TextBufferView 换行，不需要改上层全部调用点。
++
++## 6. Supported Input Domain and Reachability
++
++| 条件 | Producer / 上游保证 | 路径与 owner | Classification |
++|---|---|---|---|
++| CJK 右半越过 scissor | 合法父裁剪可小于子文本宽度 | 两个绘制入口 -> buffer setter | observed |
++| 同字形已被其他 buffer 持有 | alloc 可返回已有 live ID，不承诺总是新分配 | pool/tracker | reachable |
++| 整字落在 scissor 内 | 正常多字节文本 | 原有 set/混合/track | contracted |
++| 实体 buffer 行尾放不下 | 起点有效、编码 span 超过物理行宽 | setInternal 原有填空语义 | reachable |
++| 透明/半透明与背景保留 | view fg/bg、opacity、既有 destination | 原有 blending 可不保留输入字形 | reachable |
++| 编辑器/选择/样式文本 | EditorView 与 TextBufferView 共用模板 | drawTextBufferInternal | reachable |
++| word 行尾空间不足、混合 CJK/emoji/ASCII | 有效内容、word 模式、完整行宽至少容纳该字形 | TextBufferView 虚拟行生产者 | observed |
++| 字形第一引用 interning 失败 | incref 的 StringHashMap 分配可失败 | 同步分配交付事务 | reachable |
++| 现场截图唯一触发组件 | 当前日志没有池快照 | 无证据，不能确定 | speculative |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence / test |
++|---|---|---|
++| INV-01 | 被裁掉的重复文本不得耗尽共享字形容量、影响其他组件 | 原始部分缺字红测 |
++| INV-02 | scissor 整字拒绝不得修改既有字形或边界外 cell | 现有 buffer_test 两个 scissor 测试 |
++| INV-03 | 每个新绘制分配都有明确同步 owner；借用 live ID 不得误释放 | alloc/track 合同，新增共享 ID 测试 |
++| INV-04 | 原有字宽、选择、颜色、透明混合及低层明确裁剪语义不变；修复上层换行错误 | 现有 buffer/render 测试及补充边界用例 |
++| INV-05 | clear/destroy 后可继续绘制新字形，不能靠全局清池 | 跨 buffer/renderer 容量复现 |
++| INV-06 | TS/FFI/public API、数据库、消息内容、线程模式不变 | 用户要求局部兼容修复 |
++| INV-07 | 启用换行的正文在行尾移到下一行，虚拟行不切开字形，不遗漏或重复原文 | 两列 word 实测 red 与原文 oracle |
++
++## 8. First Divergence and Root Cause
++
++首次偏离：buffer.zig 分配新 glyph 后，将无引用 ID 交给允许“不接管”的 setter；`:483` 拒绝时没有任何 owner 负责新槽位。不是 setter 应该偷偷释放所有传入 ID，因为部分 ID 属于别的 buffer。
++
++当前轮实际重跑（cwd `.temp/Testing`）：
++
++`bun test garbled-render.test.tsx --test-name-pattern "real clipped"`
++
++结果 RED，约 0.55 秒：65534 次真实组件树重绘后 `中试文ABC` -> `中  文ABC`，日志 `GraphemePool.alloc ... error.OutOfMemory`。前轮独立进程对照：65533 次正常；2 列容纳整字，100000 次正常。两个 live 字形 + 65534 个无引用槽位 = 65536。这里只证明可复现缺陷，不承诺已追溯现场唯一触发源。
++
++换行 red：当前轮从 core 包运行以下 inline 命令，无测试文件修改：
++
++```powershell
++bun -e 'import assert from "node:assert/strict";import {TextBuffer,TextBufferView,OptimizedBuffer} from "./src/index.ts";for(const mode of ["char","word"]){const tb=TextBuffer.create("unicode"),v=TextBufferView.create(tb),b=OptimizedBuffer.create(2,16,"unicode");const text="丁丁b😀甲.丁乙";tb.setText(text);v.setWrapMode(mode);v.setViewportSize(2,16);b.drawTextBuffer(v,0,0);const actual=new TextDecoder().decode(b.getRealCharBytes(true)).replace(/\s/g,"");console.log(JSON.stringify({mode,text,actual,starts:v.logicalLineInfo.lineStartCols}));v.destroy();tb.destroy();b.destroy();assert.equal(actual,text);}'
++```
++
++结果 exit 1：char 正确；word 实际 `丁丁b😀甲.丁丁`。char 起点 `[0,2,4,5,7,9,10,12]`，word 错误起点 `[0,2,4,6,8,10,11,13]`，6 落在 emoji 的第二列。独立 Explore `ses_f6ba54e2effeqZVIcgW1iyGMOI` 另以带 padding 的真实 Box/Text 树复现，height=8 足够，原始 plainText 完整；不是容器高度压缩。常规四种短样例在 word/char、2/3/4/5/7 列全部通过，因此不能用仅这些样例放行。
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | 原因 |
++|---|---|---|
++| 分配前确认整字能进入裁剪区域 | buffer 内字形绘制生产者 | 已持有坐标、字宽、scissor、颜色；不需要上层 UI 猜测 |
++| 分配到 buffer 引用的交接 | 同一同步绘制调用 | 生产者知道 ID 从何而来；setter 还接收外部已持有的 ID |
++| 存活字形复用/最后引用释放 | 既有 GraphemePool/GraphemeTracker | 复用 incref/decref，不改 ID 格式或全局生命周期 |
++| 视觉兼容 | 既有 set/alpha blending | 保留唯一实际写入实现，不复制绘制算法 |
++| 行尾换行与断点列换算 | text-buffer-view.zig | 该模块生产虚拟行；低层 setter 不知道逻辑行或 word 边界 |
++
++## 10. Single Primary-Path Design
++
++生产修改落在 `core/src/zig/buffer.zig` 和 `core/src/zig/text-buffer-view.zig`。前者两个分配点汇入一个私有同步字形写入方法（下称 `writeGrapheme`，非 public/FFI API）；后者修复原有 word 扫描。ASCII/tab 的既有绘制快速路径保留。
++
++### 10.1 前置几何判断
++
++从 setInternal 的右边界判定抽取一个私有纯 predicate，由 setter 与生产者共用，避免维护两套裁剪规则。生产者在 alloc 前检查起点；右边界 predicate 只在实际路径确定调用普通 setter 时前置，即 `!blend || isFullyOpaque(getCurrentOpacity(), fg, bg)`。半透明 blending 不前置右边界拒绝，必须执行原 alpha 写入方法。
++
++- 右边界判定严格保留原条件：编码 span 本可装入物理行宽、但右端在 scissor 外才整字拒绝。
++- 编码 span 使用 `min(logical_width, CHAR_EXT_MASK + 1)`，与 packGraphemeStart 保持一致；逻辑列推进仍用原始字宽，不能把 ZWJ/wcwidth 的逻辑宽度改成编码宽度。
++- 物理行尾放不下不能简单提前 return：保留 setInternal 原有行尾填空及样式行为。
++- 已知全透明、原 alpha setter 确定 no-op 的情况仅在 `blend` 为真时可在分配前使用既有 isFullyTransparent 判断。非 blending 原始 set 不受 opacity 改写。透明背景但不透明文字仍正常绘制。
++- 跳过字形只跳过分配/写入，调用者的 byte/col/currentX/globalCharPos 推进不变、不重复。
++
++### 10.2 同步所有权交接
++
++几何有效后仍可能遇到行尾填空；半透明路径还可能在 setter 中被整字裁剪，或者命中同一个 live ID 而只更新样式。所以不能假定“调用 setter 就一定接管”。普通空格不是两处分配点的产物，但相同 live grapheme 的 encoded char 相等仍可触发 `preservesWide`。保留原 alpha 调用，不复制其内容匹配规则；使用既有引用计数完成一次短作用域持有：
++
++```text
++alloc ID -> 生产者 incref -> 原 setter/混合逻辑
++                       -> 若 buffer 接管：tracker 获得自己的引用
++                       -> 调用结束：生产者 decref
++```
++
++新字形接管计数 `0 -> 1(生产者) -> 2(buffer) -> 1`；未接管 `0 -> 1 -> 0`，立即回收。已有 live ID 从 `n -> n+1 -> ... -> n`，不触碰其他 owner 的引用。这是同步资源交接，不是失败后重试、补画或异步销毁队列。
++
++方法实现约束：
++
++1. 参数包含 bytes、逻辑字宽、x/y、fg/bg、attributes、是否沿用 alpha-blending 写入；禁止创建第二套 blending。
++2. `pool.alloc` 失败按既有调用者语义返回。
++3. `pool.incref` 成功后立即登记同步 `defer decref`，setter 执行结束才释放生产者引用；不能把 defer 放在提前结束的编码分支中。
++4. 首次 incref 可能在 internLiveId 分配失败。此时尚未写入，释放其未引用的新槽位并返回原错误；已有 live ID 的 incref 不分配 interning 项。无 catch-and-success、无丢弃所有 borrowed ID。
++5. direct drawText 保留原非透明/混合选择；TextBufferView/EditorView 继续调用原 alpha blending。颜色解析、背景 metadata、selection、零宽符号处理均在原位置。
++6. 两个入口对真正 OOM 的现有区别不改：drawText 返回原失败；view 保留原 warning/推进行为。本修复消除无效绘制生产的泄漏，不以掩盖系统 OOM 为目标。
++
++对已建立的同步临时引用，decref 或其 ID 有效性失败属于内部 invariant 破坏，沿用 GraphemeTracker 的明确 panic 语义，不 `catch {}` 忽略。首次 incref 的真实分配错误仍返回调用者；两者不可混为“失败就继续”。
++
++### 10.3 为什么不只在 return 前 free
++
++setter 的输入可能是其他 buffer 正持有的 interned ID。无条件 free 会引入 use-after-free；用失败 catch 判断是否应释放也会掩盖 owner 错误。生产者持有自己的引用，setter 无需猜测输入所有权。encodeUnicode 已有显式引用交付，不改；GraphemePool、GraphemeTracker、renderer 的 public 接口均不变。
++
++### 10.4 修复 word 换行扫描的单调性
++
++在 text-buffer-view.zig:1169-1191 删除 saved_wrap_idx 声明、成功边界处的备份赋值、扫描后的索引恢复。保留原 while 增量：被消费或已经过时的断点向前跳过；遇到第一个放不下的断点时 break，索引留在该点供下一行重新评估。charOffsetToColumn 的 grapheme_idx/col_delta 与输入断点顺序保持单调，不新增第二套宽度算法或 reset 全表回扫。
++
++既有 byte_offset/char_offset 推进、word 边界、首行偏移、超过整行宽度的完整字形处理原样使用。不得用全局 word->char 切换掩盖根因。先以 INV-07 red 验证最小修改，再检查宽度 2..80、流式 append、resize、选中文本、emoji 和换行上下文。
++
++物理 framebuffer setter 仍保留明确截断语义：它不能擅自把字符写到下一个组件。自动换行必须在 view 的行布局阶段完成。InlineTool 的显式 wrapMode=none、sidebar 文件名省略不改成正文多行，这是调用方明确的显示合同；正文原本 word 模式必须完整保留文本。
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | 分类 | 处理 |
++|---|---|---|
++| 整字裁剪 no-op、物理行尾填空、混合保留原字形 | 既有 primary-contract 分支 | 保留，前置可确定的拒绝，不改变输出 |
++| 同步持有/释放 | 正常资源生命周期 | 新字形分配 owner 的唯一交接方式 |
++| 分配错误传给原调用者 | 既有 error/diagnostic 路径 | 保留，不新增恢复成功路径 |
++| 定时 GC、扩大池、重绘兜底、修改滑窗 | forbidden workaround | 不引入 |
++
++新增 alternate success=0；新增日志/诊断决策=0。异常分支预计少于改动生产代码的 10%，实际以 diff 核算；大部分修改为前置判定及同步正常写入。
++
++## 12. Workaround Deletion and Replacement
++
++删除两个绘制循环中裸 alloc 后直接交付无 owner ID 的重复实现，由 writeGrapheme 承担。裁剪拒绝本身是既有正确行为，保留；将右边界谓词抽取共用，不删除。此前 reconciler/BlockTool 修复不被本方案取代，不回退、不清理无关文件。
++
++删除 word 扫描中不完整的 saved_wrap_idx 回退；既有转换器无需重写。保留唯一字形转换逻辑与正常 word 包裹行为。
++
++## 13. Forward Traceability
++
++| Requirement/invariant | 路径/修改 | Behavioral test |
++|---|---|---|
++| INV-01/02 | 两分配点前置裁剪，复用 setter 谓词 | 超容量重复裁剪后新文本完整；既有 span 不变 |
++| INV-03/05 | 同步持有交接 | 共享字形、行尾拒绝、clear/destroy 后重新绘制 |
++| INV-03 首次引用失败 | writeGrapheme -> 原 pool.incref -> 返回原错误并清理未交付槽 | slice 6：生产入口失败注入、剩余容量及原 live 引用完整 |
++| INV-04 | 两入口复用原 setter，ASCII 快速路径不变 | CJK/emoji/selection/alpha/物理行尾结果与旧合同相同 |
++| INV-04 同字形半透明更新 | 不前置拒绝 alpha 路径 | live 中字跨 scissor 重绘，可见首 cell 样式按原 blend 更新，右侧不变且 ID/refcount 保持 |
++| INV-06 | 仅 buffer.zig 私有方法 | 相关包 typecheck、native build、FFI/真实树回归 |
++| INV-07 | text-buffer-view.zig word 断点单调扫描 | 窄行原文守恒、准确虚拟行起点、resize/append/selection |
++
++## 14. Reverse Traceability
++
++| Concept | 对应 invariant | 现有逻辑不足 |
++|---|---|---|
++| 共用右边界 predicate | INV-01/02 | 既有判定只发生在分配后，生产者无法避免无效分配 |
++| 私有 writeGrapheme | INV-01/03/05 | 两个分配点都向允许拒绝的 setter 交付无 owner ID |
++| 同步临时引用 | INV-03/04 | 几何有效也可能不接管；前置裁剪不能覆盖物理行尾及依赖目标 cell 的 alpha 路径 |
++| 首次引用失败释放 | INV-03 | interning 可真实 OOM；未交付槽不能遗留，必须返回原错误 |
++| 去除 word 索引局部回退 | INV-07 | 旧索引回退但换算游标前进，导致从错误字形列继续 |
++
++## 15. File-Level Change Plan
++
++| File | Action | 精确内容 | 估算 |
++|---|---|---|---|
++| core/src/zig/buffer.zig | modify | 共用裁剪 predicate、writeGrapheme、替换两处分配与写入，保留 counters/ASCII | 80–150 行生产 diff |
++| core/src/zig/text-buffer-view.zig | modify | 删除 saved_wrap_idx 局部回退，说明游标单调 invariant | 3–12 行生产 diff |
++| core/src/zig/tests/buffer_test.zig | modify | 两入口容量、shared ID、边界/透明/行尾、EditorView、首次 interning 失败回收 | 180–300 行 |
++| core/src/zig/tests/text-buffer-view_test.zig | modify | INV-07 精确起点/原文守恒，resize/append/selection/宽度矩阵 | 80–160 行 |
++| core/src/tests/renderer.custom-stdout.test.ts | modify | 真实 clipped Box/Text 重绘后其他普通文本与输出字节完整 | 50–90 行 |
++| 本文件 | add/update | 唯一 canonical plan | 文档不计生产预算 |
++
++不修改 grapheme.zig/lib.zig/TS 生产组件；不新增测试依赖。@xterm/headless 仅用于已有本地调查，core/package.json 未声明它，不能直接作为正式测试依赖。正式集成断言源文字、完整 native 输出及内存字符；实验的 headless 校验作为补充证据。最终提交包含 OpenTUI 子仓库相关文件的 commit、父仓库本 plan 与 submodule pointer commit；不得 push。调查文档 §11 的本任务证据可单独纳入，先确认同文件无他人混合修改。
++
++## 16. TDD Behavior Slices
++
++按批准后的公开 seam 执行，当前不写测试。
++
++| Order | Red/兼容行为 | 为什么会失败 | Green 与保护 |
++|---|---|---|---|
++| 1 | drawTextBuffer 裁剪 65536 次后绘制含新中文字的原文 | 裁剪不引用、不释放分配 | 前置判断 + scoped ownership，原文逐字相等 |
++| 2 | drawText 同条件、新字在中间仍保留后缀 | 相同 owner 缺陷，但失败会提前结束 draw | 同一方法覆盖，不另写恢复逻辑 |
++| 3 | scissor 精确容纳/拒绝；物理行尾、透明 overlay、shared ID、清理重绘 | 后者为兼容用例，部分现有 green，不伪称全部 red | 测借用 ID 不误释放、已有像素/metadata 不变 |
++| 4 | EditorView 共用入口；真实 Box/Text 影响另一文本及输出 | 当前真实树已 red | 相同原文、无 missing CJK、后续新文本正常 |
++| 5 | 两列 word 下 `丁丁b😀甲.丁乙` 完整换行且起点不切分 emoji | wrap_idx 回退导致末字替换 | 删除局部回退；宽度、连续 append、resize、选中文本完整 |
++| 6 | 生产绘制入口的首次 interning 分配失败 | 未持有时旧 tracker 的首次引用可能 panic；漏掉新清理时容量减少 | drawText 保持 OutOfMemory；view 保持既有失败输出；槽位可重用，原 live 字形不变 |
++| 7 | 同一 live 字形跨 scissor 的半透明样式重绘 | 现状 green；R3 过宽前置判断会使颜色不更新 | 足够宽时先画中，再 scissor 仅首列，改 fg/半透明 bg 重画中；可见 cell 的颜色/属性必须匹配原 blend，外侧 cell 不变，字形及引用数不变；两入口均覆盖 |
++
++slice 6 使用 buffer_test.zig 的本地 pool 注入点，无 production API 改动。参考既有 memory_leak_regression_test.zig:59-74，预先建立本地 buffer、池容量和另一 buffer 的 live 字形，然后仅替换 pool.allocator 为 std.testing.FailingAllocator，令下一次 internLiveId 的 key 分配失败。分配前后恢复 allocator 的 defer 顺序先于池销毁。分别走 drawText 和 drawTextBuffer，不直接调用新私有 helper；确认确实 has_induced_failure、direct 返回原 OutOfMemory，view 保持失败字形空位及 ASCII 后缀，已有 live 引用的 bytes/refcount 不变。解除故障后占满剩余 class0 槽并断言预期可用数量（扣除明确 live 数量），检出遗漏 freeUnreferenced，随后清理所有实验槽。第一次 key 分配与 map 扩容的失败都需覆盖：空 interning map、预先分配 class 页的本地池可令 fail_index=0/1 分别失败于 key/map；已有 live 引用场景另行验证。原错误、资源归还和引用存活三者不能用仅“不崩溃”代替。
++
++容量测试用各自本地池，避免故意耗尽污染其他用例；真实树失败放隔离子进程运行，不能依赖测试顺序。原文是独立 oracle，不仅检查 tracker 计数（未跟踪分配恰好会漏过这种断言）。可额外验证被拒绝分配没有侵占 pool 可用容量，但不得以 private helper 调用次数替代行为。
++
++## 17. Chinese Comment Budget
++
++估计生产有效 E=65–120、测试 E=270–480；实际 C 必须满足 `ceil(E*0.15)`，按上界 E=600 预留至少 90 行合格中文说明，分散于实际边界和测试意图，不凑行。解释：编码/逻辑宽度区别、scissor 与物理行尾区别、借用 ID 与临时 owner、首次引用失败、容量测试为何不能只看 tracker、word 游标单调性、测试隔离和确定性源文字。实际 E=0 时 C=0。
++
++## 18. Verification
++
++| Command | Cwd | Evidence |
++|---|---|---|
++| `bun run test:native -Dtest-filter="grapheme"` | thirdparty/opentui/packages/core | 字形、裁剪相关 native 回归 |
++| `bun run test:native -Dtest-filter="drawTextBuffer"` | 同上 | view、metadata、Editor 共用路径 |
++| `bun run test:native -Dtest-filter="alpha"` | 同上 | 混合行为回归 |
++| `bun run test:native -Dtest-filter="renderer"` | 同上 | 输出与 buffer 同步回归 |
++| `bun run test:native -Dtest-filter="wrap"` | 同上 | word/char、编辑器换行、宽字/测量回归 |
++| `bun run build` | thirdparty/opentui | native 及本地依赖包构建；不得替换生产安装 |
++| `bun test src/tests/renderer.custom-stdout.test.ts src/tests/opacity.test.ts src/tests/renderer.selection.test.ts` | thirdparty/opentui/packages/core | 真实组件/输出/选择 |
++| `bun typecheck` | opencode | 全应用类型兼容；不直接调用 tsc |
++| `bun typecheck --project tsconfig.build.json`、`bun typecheck --project ../solid/tsconfig.build.json`、`bun typecheck --project ../react/tsconfig.build.json` | core | 复用已有脚本验证真实发布类型项目；同时执行现有 build 的声明生成，不新增或弱化 tsconfig |
++| `bun run bench:text-table` | thirdparty/opentui/packages/core | 修前后同参数重复基线，检查正常绘制成本 |
++
++正式 native/JS 测试必须确认加载本次构建产物：当前 zig.ts 由平台 native package 解析 DLL；禁止用旧 node_modules DLL 的 green 冒充修复验证。版本和路径从 package.json/正常 build 解析，不硬编码版本或另建 manifest。
++
++原始 `.temp/Testing` 实验也须在明确加载修复产物的隔离测试环境复跑，不替换线上 DLL；否则只记录它是未修复基线。所有受影响测试无红测后再实施独立审核。当前不跑全仓库耗时全量测试，不声称远端 CI 已验证。
++
++用户测试范围原文：『不要尝试跑全量的 test，你可以只跑你受影响的那部分 test。因为全量 test 整体要将近一个小时，很慢的。』上表是窄反馈入口，不能代替最终受影响集合。最终集合与执行顺序如下；每组必须有非零执行数和成功结果，不能靠过滤名恰好没命中放行：
++
++| 集合 / 行为映射 | 最终命令与目录 |
++|---|---|
++| native 所有 buffer 模块（两个入口、alpha、selection、TextBuffer/View、编辑历史、metadata）、字形池/泄漏、renderer/输出、native consumer、wrap/utf8 | core 下逐个 `bun run test:native -Dtest-filter="<filter>"`，filter 为 `buffer`、`grapheme`、`memory_leak_regression`、`renderer`、`native-span-feed`、`native-renderable`、`wrap`、`editor-view`、`utf8`、`split-scrollback`；使用完整模块路径匹配确认实际清单，重复命中只重复验证、不豁免其他组 |
++| JS 直接 FFI buffer/view/editor 与 glyph 序列、抓帧 | core 下 `bun test src/buffer.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/edit-buffer.test.ts src/editor-view.test.ts src/testing/capture-spans.test.ts` |
++| 各实际文本消费者，包括 Markdown/Code/Diff、选择器、输入、TextArea、LineNumber、表格及 Box 裁剪 | core 下 `bun test src/renderables`，该目录是完整受影响组件集合，不是全 core 测试 |
++| renderer 输出/生命周期/selection、滚动裁剪、动态测量/resize、透明叠层 | core 下 `bun test src/tests/renderer. src/tests/renderable src/tests/scrollbox src/tests/native-backed-measurement src/tests/native-span-feed src/tests/wrap-resize-perf.test.ts src/tests/opacity.test.ts src/tests/absolute-positioning.snapshot.test.ts src/tests/destroy-`；这些参数是 Bun 文件路径子串筛选 |
++| Solid 动态挂载/移除、字形树与排版、选择/编辑及 React 对应消费者 | solid 下 `bun test tests/box.test.tsx tests/control-flow tests/dynamic- tests/layout.test.tsx tests/link.test.tsx tests/line-number tests/scroll tests/sticky-scroll.test.tsx tests/textarea.test.tsx tests/diff.test.tsx tests/reconciler-destroy-backlog.test.tsx`；react 下 `bun test tests/layout.test.tsx tests/link.test.tsx tests/slot.test.tsx tests/destroy-crash.test.tsx` |
++| 应用真实 TUI 对接 | opencode 下 `bun test test/cli/cmd/tui`，必须记录 core/solid/DLL 解析路径均绑定此次构建；不能把原发布版本上的绿测作为此次集成证据 |
++
++以上没有修改 tokenizer、音频、网络/模型、数据库、消息分页协议、独立 Yoga layout 算法、插件发现；不扩大到相应无关全量 test。若实际调用证据显示另一个直接消费者遗漏，纳入同一受影响集合，记录原因。任何已知或本次发现的红测均须处理，无法覆盖的必要路径阻止 verified/commit。禁止 skip、删除断言、更新错误快照来制造 green；对旧测试语义的修改先核对真实生产合同并进入文件计划。
++
++2026-09-12 基线实测（尚无生产变更）：opencode `bun typecheck` exit 0；core `bun typecheck` exit 2，输出 `tool_09471f0350013YRtk1vyXA9xyQ`，包含 Yoga upstream tests 缺少 test/expect 全局类型、renderer.render-stats 旧 Pointer/RendererHandle 类型及 dev 旧接口；core 下检查 solid 默认项目的命令 exit 2，输出 `tool_0947147e5001SOlONAsl1C4xF8`，包含更严格索引检查、slot 类型与 three 示例传递错误。完整发布项目 core 和 solid 的 typecheck 均 exit 0。默认项目的红测如实保留，不宣称已解决。
++
++用户最新澄清的稳定记录（本会话 question 工具交互，2026-09-12）：
++
++> 问题全文：出现了需要你决定的验收范围分歧：OpenTUI core/Solid 的现有发布配置（tsconfig.build.json）类型检查通过，OpenCode 完整 typecheck 也通过；但 OpenTUI 默认配置把旧测试、dev 和 examples 一并检查，会报大量既有类型错误。字形修复仍只需两个生产文件。是否把这些与字形修复无关的类型错误也纳入本次方案？
++> 用户自行填写的回答原文：只要保证线上正常进行CI没有问题即可。
++
++当前有效类型验收范围由该答复明确为真实线上 CI 门禁，不将默认开发项目的额外检查自动扩为本次生产改造；不改变用户对实际 CI 红测、受影响行为准确性、文件/行数预算及完整实施审计的要求。
++
++CI 证据：smark-ci.yml:17-21 调用 build-native.yml；后者 :66-94 执行 native regression、core build:lib、solid/keymap build、JS/framework tests 与 packed smoke。core/scripts/build.ts:381-383 明确以原有 tsconfig.build.json 生成类型声明；不是本任务为绕过错误创建的配置。SMARK 平台矩阵还验证实际安装包行为。build-core.yml:122-146 也以原有 build:lib 与 native/JS/dist gates 验证，未执行默认开发项目 typecheck。
++
++本地执行完整受影响集合、原有发布 build 和 core/solid/keymap 的 `bun run test:dist --skip-build`（各包目录），保持 CI 配置与测试未被弱化。远端 CI 仍会跑其既有全套及多平台矩阵，不能以本地局部结果宣称远端已绿；最新 GOAL 禁止 push，本轮不擅自触发共享发布。若后续取得 push 授权，必须 watch 精确 commit 的现有 CI，所有失败需处理，不沿用其他 commit 的绿状态。仅修改这两处 native 生产路径，发布版本与包清单不改；CI 门禁本身不得删除或跳过。
++
++## 19. Diff Budget
++
++用户硬预算生产不超过 4 文件、600 行；本 revision 计划 2 个生产文件，预计 83–162 修改行，内部预计上限 200；测试 3 文件约 310–550 行；新增/删除生产文件 0，新增依赖/配置/迁移/ABI 0。按用户最新 CI 验收答复，默认开发项目额外类型错误只记录，不纳入生产文件预算。超出已计划范围或需要改变 pool/API 时停止、说明新证据并修订，不静默扩张。
++
++## 20. Real Risks and Open Decisions
++
++- 临时引用多两次引用计数操作，必须测正常文本成本；不可在无测量下承诺一定更快。被拒绝字形不再分配，消除其积累与错误日志洪泛。
++- 原有第一引用 interning 有分配错误路径，必须保持失败语义和无泄漏；不引入成功伪装。
++- EOL/混合仍复用原实现，避免为了省分配重写颜色/字宽算法。不能简单把“物理行尾放不下”当 scissor reject。
++- 已经耗尽的旧进程不能靠安装新文件自动恢复；正常部署后须启动新进程。此方案不提供运行中全局池重置。
++- 现场没有 pool dump/warning 导出，不能断言修复覆盖截图所有可能原因；验收能确认已复现的具体传导链被消除。
++
++### Open Decisions Requiring the User
++
++当前无待用户决定的产品行为选择。目标已变为实施、验证、提交；独立审计批准前不得实施。有效验收范围（§18 用户最新澄清的 CI 类型门禁及完整受影响行为集合）内所有实际红测必须归因并解决，不将其标为预存后放行；不得 weaken 测试。范围外默认开发类型检查失败如实记录，不宣称已修复。不得 push、amend 或跳过 hooks。
++
++### Rejected Speculation
++
++不因潜在其他 TUI bug 加日志框架、线程锁、GC、消息虚拟化或 OSC 协商修改。持续 native 字形池泄漏无需“300 条消息全量重建”假设。用户截图唯一归因仍是未验证项。
++
++## 21. Audit Contract
++
++独立 auditor 审计本文原始要求、两个绘制入口及其同步 owner/输出路径，重建证据，不以旧修复批准代替本方案批准。检查完整行为、最早偏离、零 fallback、forward/reverse 映射及注释门禁。不得仅因接触 buffer.zig 就要求重写全文件。
++
++## 22. Plan Audit Record
++
++第 1 轮：R2；独立 task `ses_f6b9788e8ffeSlfR5tcWQmYGhB`。首次 release verdict 原样：
++
++> **BLOCK — `docs/plans/tui-grapheme-pool-clipping-repair.md`，Revision R2。**
++> 修复 owner 与总体路径有源码依据，但 B-01、B-02 尚未闭环。修订后须递增 revision、保持 implementation disallowed，并重新进行完整范围计划审计。
++
++同 task 复议后的本轮最终 release verdict 原样：
++
++> **BLOCK — R2，B-01、B-02 保留。**
++> B-01 不要求执行全量测试；要求补齐受影响验证闭环。当前 R2 未修订，B-02 也未发生证据变化，尚不能批准实施。
++
++结论事实：B-01 要求完整受影响测试映射；B-02 要求验证新引入的首次 interning 失败分支。两项 non-blocking record correction 为不存在的 solid/react typecheck scripts、混合保留旧字形的过宽描述。R3 补充 §13/15/16/18，并记录新发现的类型检查失败；随后进入第 2 轮审计。后续仍须完整范围审计，不以本文修订自授批准。
++
++第 2 轮：R3，复用同 task。release verdict 原样：
++
++> **BLOCK — `docs/plans/tui-grapheme-pool-clipping-repair.md`，Revision R3。**
++> **B-01、B-02 已解决；新增 B-03 阻塞。** 修订前置拒绝的实际适用路径并补齐对应回归后，需要再次进行完整范围计划审计。
++
++B-03 证据复核：buffer.zig:924-948 可对同一 live encoded char 的半透明重绘执行 span 样式更新，而不是 setInternal 的整字拒绝。R4 限定前置 predicate 为实际普通 setter 路径，增加 slice 7，保留原 blending 实现；未增加生产文件。R4 尚未批准。
++
++第 3 轮：R4，仍复用同 task。首次 release verdict 原样：
++
++> **BLOCK — `docs/plans/tui-grapheme-pool-clipping-repair.md`，Revision R4。**
++> **B-01、B-02、B-03 已解决；B-04 阻塞最终验收合同。** 当前生产修复设计未发现新的阻塞缺陷，但本轮不能依据后续主代理转述放宽初始零红测要求。
++
++复议后最终 release verdict 原样：
++
++> **BLOCK — R4；B-04 保留，原因是当前审计任务的需求授权尚未更新。**
++> 要解决此项，应更新独立审计的首次权威交接或上层授权；无需继续在同一受限任务中重复转述 question 答案。
++
++同 task 明确其上层指令禁止接受续接中的用户需求变更，并要求重新创建独立审计，在首次交接包含用户完整澄清。R5 因此建立新 task 的完整范围审计；原 B-04 不自行撤销，新 auditor 按当前完整原始需求及澄清裁定。此前三轮计数不清零。
++
++## 23. Implementation Evidence
++
++### 实际变更文件（git diff，相对 OpenTUI 子仓库 HEAD）
++
++| File | 变更 | 内容 |
++|---|---|---|
++| packages/core/src/zig/buffer.zig | modify | 新增私有 `clipsGraphemeRight` 与 `writeGrapheme`（同步引用交接 + 首引用失败回收 + 仅普通 setter 路径的前置裁剪），setInternal 复用 predicate，两处裸 alloc 入口改经 writeGrapheme |
++| packages/core/src/zig/text-buffer-view.zig | modify | 删除 saved_wrap_idx 声明/备份/恢复，断点索引与列换算游标单调同向 |
++| packages/core/src/zig/tests/buffer_test.zig | modify | 新增容量回归（view/direct）、首引用失败回收（两入口×三场景）、同 live 字形半透明样式回归（两入口） |
++| packages/core/src/zig/tests/text-buffer-view_test.zig | modify | 新增 word 断点不切字形回归（精确虚拟行起点/宽度 oracle） |
++| packages/core/src/tests/renderer.custom-stdout.test.ts | modify | 新增隔离进程真实树 65534 帧回归：内存帧与 native 输出字节双重 oracle |
++
++生产文件 2 个（预算≤4），生产修改约 48 行净增（预算≤600）。未新增 public API、FFI、依赖、配置或迁移。
++
++### Red-Green 证据
++
++| Slice | Red（修复前实测） | Green（修复后实测） |
++|---|---|---|
++| 1 view 容量 | `中试文ABC` → `中  文ABC`（65534 次真实树重绘） | 87/87 buffer 套件通过，原文逐字相等 |
++| 2 direct 容量 | 第 65537 次 drawText 抛 OutOfMemory（grapheme.zig:373 grow） | 同套件通过 |
++| 5 word 断点 | `丁丁b😀甲.丁乙` → `丁丁b😀甲.丁丁`，起点含 emoji 第二列 6 | 147/147 view 套件通过，起点/宽度与字面 oracle 一致 |
++| 6 首引用失败 | 旧路径在 tracker 首引用处可能 panic 且未交付槽泄漏 | 两入口返回原错误语义、槽位可复用、live 引用完整 |
++| 7 同 ID 半透明 | R3 设计缺陷（前置拒绝跳过样式更新）在 R4/R5 修正；现状与新实现均保持样式更新 | 两入口可见 cell 样式更新、scissor 外 continuation 逐字节不变 |
++
++### 验证命令与结果（全部 cwd 均为包目录，native 使用同盘 cache）
++
++| 命令 | 结果 |
++|---|---|
++| `bun run test:native -Dtest-filter=<buffer/grapheme/memory_leak_regression/renderer/native-span-feed/native-renderable/wrap/editor-view/utf8/split-scrollback>` | 全 10 组通过（1676 passed / 5 skipped / 0 failed） |
++| `bun test src/buffer.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/edit-buffer.test.ts src/editor-view.test.ts src/testing/capture-spans.test.ts` | 339 pass / 0 fail |
++| `bun test src/renderables` | 1330 pass / 0 fail |
++| `bun test src/tests/renderer. src/tests/renderable src/tests/scrollbox src/tests/native-backed-measurement src/tests/native-span-feed src/tests/wrap-resize-perf.test.ts src/tests/opacity.test.ts src/tests/absolute-positioning.snapshot.test.ts src/tests/destroy-` | 741 pass / 0 fail |
++| solid：`bun test tests/box.test.tsx tests/control-flow tests/dynamic- tests/layout.test.tsx tests/link.test.tsx tests/line-number tests/scroll tests/sticky-scroll.test.tsx tests/textarea.test.tsx tests/diff.test.tsx tests/reconciler-destroy-backlog.test.tsx` | 176 pass / 0 fail |
++| react：`bun test tests/layout.test.tsx tests/link.test.tsx tests/slot.test.tsx tests/destroy-crash.test.tsx` | 49 pass / 0 fail（输出中的 error 文本为 error-boundary 测试夹具的预期日志） |
++| opencode：`bun test test/cli/cmd/tui`（先将重建的 core dist/DLL/solid dist 绑定进根 node_modules，DLL SHA256 前缀 DA8692A626177C84 与构建一致） | 324 pass / 0 fail；测后已无损恢复原发布包（82F26AA9E6EE3701），node_modules 不进入提交 |
++| 原始反馈环：`.temp/Testing` `bun test garbled-render.test.tsx --test-name-pattern "real clipped"`（绑定重建 DLL） | 65534 帧后 `中试文ABC` 完整，802ms |
++| 原始反馈环：`--test-name-pattern "plain text CJK survival"` | 12 组宽度×文本块 missing=0 |
++| `bun run build`（opentui 根，ZIG_GLOBAL_CACHE_DIR 同盘） | core/qrcode/three/solid/react/keymap/ssh 全部构建与声明生成成功 |
++| `bun typecheck`（packages/opencode）；`bun typecheck --project tsconfig.build.json`（core）及 `../solid`、`../react` 的 tsconfig.build.json | 全部 exit 0 |
++| `bun run test:dist --skip-build`（core/solid/keymap，使用 D:\Temp\opencode 便携 Node v26.3.0，未改系统 Node） | 三包 packed dist smoke 全部通过 |
++| `bun run bench:text-table` 修前/修后 | 修复前后同量级（如 replace_tables avg 13.45→14.86ms，同机方差范围内），无异常回归 |
++
++### E/C 门禁（实际）
++
++E=231（有效新增/修改代码行，排除空行与注释行；git diff --unified=0 统计），C=35（邻近修改点的合格中文注释），ceil(231×0.15)=35，35≥35 满足。代表性注释：writeGrapheme 的借用 ID/首引用失败/defer 覆盖说明、clipsGraphemeRight 的 EOL 与 scissor 合同区分、text-buffer-view 的游标单调性、各容量/失败/半透明测试的阈值与 oracle 意图说明。
++
++### Secondary / replacement path 实际清单
++
++| Path | 分类 |
++|---|---|
++| 整字裁剪 no-op、物理行尾填空、alpha 保留/同 ID 样式更新 | 既有 primary-contract 分支（保留，不改语义） |
++| 同步持有/释放、首引用失败回收 | 正常资源生命周期（本修复的唯一新机制） |
++| drawText OOM 返回 / view OOM warning+推进 | 既有错误语义（原样保留） |
++| 新增 alternate success | 0 |
++
++### 未验证项 / 剩余风险
++
++- 现场截图的唯一归因：已修复两条可复现的实证缺陷链，但无运行时池快照，不能证明线上截图仅由此两因导致。
++- 远端 CI：本 GOAL 禁止 push，远端未触发；本地已复现 CI 的全部关键门禁（native 全套、JS/framework、发布类型、packed dist smoke）。
++- 默认开发 tsconfig（含 dev/examples/tests）的既有类型错误如实保留，未宣称修复（用户澄清以线上 CI 为准）。
++- Windows 上 zig 全局缓存跨盘导致 runner panic：以同盘 ZIG_GLOBAL_CACHE_DIR 解决，属本机环境 workaround，不进入生产或 CI 修改。
++
++第 4 轮方案审计，task `ses_f6b682a69ffeDyXCosNkJn5VFV`，R5，完整范围。原样分类及 verdict：
++
++> No blocking findings.
++> **APPROVE — `docs/plans/tui-grapheme-pool-clipping-repair.md`，Revision R5，完整范围计划审计。**
++> 批准仅适用于当前 R5。主代理可按政策原样记录本次 verdict，再进入实施。最终 verified／commit 仍须完成受影响验证、原始反馈闭环、实际预算与注释核算，以及独立完整实现审计；不得 push、amend 或跳过 hooks。
++
++原样 non-blocking findings：
++
++> **实施证据尚待产生。** 本轮直接核对了源码、现有测试、调查用例和 CI 配置，未执行 shell、测试或构建。计划中记载的运行结果不作为本轮独立复跑结果；批准计划不代表实现、性能或 CI 已验证。
++> §18 已明确要求核实 native 测试实际命中数量，以及应用测试加载的 core/Solid/DLL 路径。实施时必须保留这些证据，避免过滤器未命中或旧 DLL 造成假绿。
++
++尚未实施。Actual Files/Diff、Red-Green、验证命令结果、原始 loop、实际 secondary paths、E/C 均待批准后填入；本轮仅重跑未修复 red。方案估算不等于实测 green。
++
++## 24. Implementation Audit Record
++
++第 1 轮实现审计，task `ses_f6b31d0daffeXU7avesLktLLD1`，R5，完整范围，涵盖全部实际 diff hunk 及直接行为路径。原样 verdict：
++
++> No blocking findings.
++> **APPROVE — implementation diff against `docs/plans/tui-grapheme-pool-clipping-repair.md`, Revision R5.** The approval applies only to the exact audited diff (5 files under `packages/core`, as exported in `.temp/r5-impl.diff`). Per the plan's own §18 and the user's constraint, remote CI remains untriggered and unverified by this audit; the recorded local evidence plus this audit's spot reproduction cover the affected seams, and the commit step still requires the user's explicit request.
++
++原样 non-blocking findings：
++
++1. 无专门 EditorView 入口测试；drawEditorView 是纯委托，view 入口测试与 editor-view 套件已覆盖共享路径。
++2. §15 测试行数估计高于实际（估计漂移，非覆盖缺口）。
++3. 35 条中文注释中 2 条处于合格边界（defer rationale、ASCII 路由说明）；最严口径 C=33/E=228≈14.5%，仍高于 10% 阻塞下限，属质量备注。
++
++审计独立复核：E=228/C=35≈15.4%；两生产文件约 85 行；INV-01..07 全部覆盖；无 fallback、无 catch-and-success、无 public API/依赖/配置变更；encodeUnicode 既有显式交付正确地未被触碰。审计独立重跑 native `clipped` 7/7、`first-reference` 1/1、`same live grapheme` 1/1、`skipped boundaries` 1/1 与 TS `clipped text subtree` 全绿。
++
++关于“commit 需用户显式请求”的审计备注：本会话 GOAL 终态为 verified-implementation-and-commit，用户原始需求与 GOAL 合同已含 commit 授权（不得 push）；按 GOAL 可选 Commit 条款执行。
++
++状态：verified。
+diff --git a/package.json b/package.json
+index a02a7e45e77b587bf7cf3cd916f978c7599560dd..1df56197896923dc3258952d59e38b3eb1106972 100644
+--- a/package.json
++++ b/package.json
+@@ -36,9 +36,9 @@
+       "@types/cross-spawn": "6.0.6",
+       "@octokit/rest": "22.0.0",
+       "@hono/zod-validator": "0.4.2",
+-      "@opentui/core": "0.4.3-smark.12",
+-      "@opentui/keymap": "0.4.3-smark.12",
+-      "@opentui/solid": "0.4.3-smark.12",
++      "@opentui/core": "0.4.3-smark.13",
++      "@opentui/keymap": "0.4.3-smark.13",
++      "@opentui/solid": "0.4.3-smark.13",
+       "ulid": "3.0.1",
+       "@kobalte/core": "0.13.11",
+       "@types/luxon": "3.7.1",
+@@ -128,17 +128,17 @@
+     "electron"
+   ],
+   "overrides": {
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-keymap-0.4.3-smark.13.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-solid-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-x64-0.4.3-smark.13.tgz",
+     "solid-js": "catalog:",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+diff --git a/packages/core/package.json b/packages/core/package.json
+index a4394482a167342e54762a6ae92a97810343a0d5..a505a071f48554aedab8da345506082a646e9202 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -73,16 +73,16 @@
+   },
+   "overrides": {
+     "drizzle-orm": "catalog:",
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz"
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-keymap-0.4.3-smark.13.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-solid-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-x64-0.4.3-smark.13.tgz"
+   }
+ }
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index d8e8841482941167a0ea6d08b2324e3726b28e6b..540d57c1c75da8e596f00e719528f059235bee36 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -166,17 +166,17 @@
+   },
+   "overrides": {
+     "drizzle-orm": "catalog:",
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz"
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-keymap-0.4.3-smark.13.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-solid-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-darwin-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-arm64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-0.4.3-smark.13.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-linux-x64-musl-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-arm64-0.4.3-smark.13.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-win32-x64-0.4.3-smark.13.tgz"
+   },
+   "optionalDependencies": {
+     "@picovoice/pvrecorder-node": "1.2.9",
+diff --git a/packages/plugin/package.json b/packages/plugin/package.json
+index 5d11f744ea5f9cf412fac30640ec38c0c795c210..2824d3fe83f13a811dd65c7fc46669432bd16090 100644
+--- a/packages/plugin/package.json
++++ b/packages/plugin/package.json
+@@ -22,9 +22,9 @@
+     "zod": "catalog:"
+   },
+   "peerDependencies": {
+-    "@opentui/core": ">=0.4.3-smark.12",
+-    "@opentui/keymap": ">=0.4.3-smark.12",
+-    "@opentui/solid": ">=0.4.3-smark.12"
++    "@opentui/core": ">=0.4.3-smark.13",
++    "@opentui/keymap": ">=0.4.3-smark.13",
++    "@opentui/solid": ">=0.4.3-smark.13"
+   },
+   "peerDependenciesMeta": {
+     "@opentui/core": {
+diff --git a/thirdparty/opentui b/thirdparty/opentui
+index 2145b934ea8ef9da3faf63a6cb362879eaadb82d..b0cf25352ca75b964eca476af3554e6aa8dd8b20 160000
+--- a/thirdparty/opentui
++++ b/thirdparty/opentui
+@@ -1 +1 @@
+-Subproject commit 2145b934ea8ef9da3faf63a6cb362879eaadb82d
++Subproject commit b0cf25352ca75b964eca476af3554e6aa8dd8b20
