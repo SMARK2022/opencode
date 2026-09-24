@@ -1,19 +1,37 @@
 import { mkdir, mkdtemp, readdir, rename, rm, stat } from "node:fs/promises"
+import { Database } from "bun:sqlite"
 
-// Windows 上 .git/objects 可能被 git 进程锁定（EPERM/EBUSY），
-// 导致 rm(recursive) 崩溃并阻止 typecheck 执行。safeRm 跳过锁定的目录而非中断整个流程。
+function isBusy(error: unknown) {
+  return error instanceof Error && "code" in error && ["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"].includes(String(error.code))
+}
+
+// 删除失败只延期回收；失效状态另行排除，不能把仍存在的坏目录当作健康前缀。
 async function safeRm(path: string, opts?: { recursive?: boolean; force?: boolean }) {
   try {
-    await rm(path, opts)
+    await rm(path, { ...opts, maxRetries: 3, retryDelay: 200 })
+    return true
   } catch (error) {
-    if (error instanceof Error && (error.code === "EPERM" || error.code === "EBUSY")) return
+    if (isBusy(error)) {
+      console.warn(`cleanup deferred: ${path}`)
+      return false
+    }
     throw error
   }
 }
-import { cpSync, existsSync } from "node:fs"
+async function renameWithRetry(source: string, destination: string) {
+  for (const delay of [0, 200, 600, 1200]) {
+    if (delay) await Bun.sleep(delay)
+    try {
+      await rename(source, destination)
+      return
+    } catch (error) {
+      if (!isBusy(error) || delay === 1200) throw error
+    }
+  }
+}
+import { cpSync } from "node:fs"
 import { createHash, randomUUID } from "node:crypto"
 import { join, relative, resolve } from "node:path"
-import { tmpdir } from "node:os"
 
 type PatchEntry = {
   // index 是迁移的唯一串行位置，任何缺口或重复都表示 source 范围被改写。
@@ -36,7 +54,7 @@ type Manifest = {
   // schema 版本阻止旧生成器产物被新验证逻辑静默解释。
   schemaVersion: 1
   generatedAt: string
-  // sourceRepo 和 sourceRef 共同确定重新枚举 452 项历史的权威来源。
+  // sourceRepo 和 sourceRef 共同确定重新枚举完整历史的权威来源。
   sourceRepo: string
   sourceRef: string
   // sourceTip 固定生成时的 commit；移动中的分支名只保留为人类可读标签。
@@ -89,7 +107,7 @@ type Report = {
   sourceRef: string
   sourceTip: string
   targetBaseline: string
-  // patchCount 是本次实际请求的前缀长度；全局总数仍由 manifest 固定为 452。
+  // patchCount 是本次实际请求的前缀长度；总数由完整 manifest 决定。
   patchCount: number
   passed: number
   // reusedPrefix 与 appliedThisRun 防止把历史状态复用伪装成本次重放。
@@ -178,7 +196,7 @@ type SourceProof = {
   // 两份 manifest 哈希确保机器视图和人工视图来自同一输入集合。
   manifestJsonSha256: string
   manifestTsvSha256: string
-  // sourceTip 固定 452 项证明边界，移动分支不能命中旧缓存。
+  // sourceTip 固定完整序列的证明边界，移动分支不能命中旧缓存。
   sourceTip: string
   // 每项同时绑定 commit、parent 和 immutable original patch 内容。
   entries: Array<{ sha: string; parent: string; originalSha256: string }>
@@ -188,7 +206,7 @@ type MaterializedState = {
   schemaVersion: 1
   // builtAt 是成功发布时间；它决定最近五个状态的回收顺序。
   builtAt: string
-  // index 0 表示 exact baseline，1..452 表示对应 current 前缀。
+  // index 0 表示 exact baseline，正数表示对应 current 前缀。
   index: number
   // sha 在 index 0 绑定 target baseline，其余 index 绑定 source commit。
   sha: string
@@ -211,9 +229,9 @@ type MaterializedState = {
 const targetRepo = resolve(import.meta.dir, "../../..")
 const sourceRepo = resolve(targetRepo, "../..")
 const patchRoot = resolve(targetRepo, ".temp/patches")
-const reportsDir = resolve(patchRoot, "reports")
-// statesDir 只保存成功发布态；所有未完成构建使用隐藏 staging 目录。
-const statesDir = resolve(patchRoot, "states")
+const reportsDir = resolve(patchRoot, "reports/v1.18.32")
+// 新基线独立命名空间，避免清理旧版状态或覆盖旧报告；物化机制保持原样。
+const statesDir = resolve(patchRoot, "states/v1.18.32")
 // source proof 放在已忽略的状态区，缓存写入不能改变目标工作树指纹。
 const sourceProofPath = resolve(statesDir, ".source-proof.json")
 // testWorkspaceRoot 保存唯一可安装的执行环境，不污染可审计 materialized state。
@@ -223,6 +241,9 @@ const testWorkspaceRepo = resolve(testWorkspaceRoot, "repo")
 const testWorkspaceState = resolve(testWorkspaceRoot, "install-state.json")
 // 五个状态正好覆盖一个普通审计批次，同时限制完整 clone 的磁盘占用。
 const maxMaterializedStates = 5
+const rejectedStates = new Set<string>()
+let stagingRoot: string | undefined
+class RetryBuild extends Error {}
 
 function runProcess(cwd: string, cmd: string[]): CommandResult {
   // Git 输出必须完整捕获到报告，避免终端截断后只剩 builder 的失败摘要。
@@ -232,6 +253,7 @@ function runProcess(cwd: string, cmd: string[]): CommandResult {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
+    timeout: 120_000,
   })
   return {
     exitCode: result.exitCode,
@@ -247,21 +269,27 @@ function runGit(cwd: string, args: string[]) {
 function runBun(cwd: string, args: string[]) {
   // Windows 上 bun install 需要显式设置临时目录，否则 tarball 解压会因路径过长失败
   const env = { ...process.env, BUN_TMPDIR: process.env.BUN_TMPDIR || (process.platform === "win32" ? "D:\\Temp" : undefined) }
-  const result = Bun.spawnSync({ cmd: ["bun", ...args], cwd, stdout: "pipe", stderr: "pipe", env })
+  const result = Bun.spawnSync({ cmd: ["bun", ...args], cwd, stdout: "pipe", stderr: "pipe", env, timeout: 300_000 })
   return { exitCode: result.exitCode, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) }
 }
 
-function runGitBytes(cwd: string, args: string[]) {
+async function runGitBytes(cwd: string, args: string[]) {
   // 原始邮件 patch 必须按字节比较；文本解码会掩盖二进制 diff 的身份变化。
-  const result = Bun.spawnSync({
+  const process = Bun.spawn({
     cmd: ["git", "-C", cwd, ...args],
     stdout: "pipe",
     stderr: "pipe",
+    timeout: 60_000,
   })
-  if (result.exitCode !== 0) {
-    throw new Error(`git ${args.join(" ")} failed (${result.exitCode})\n${new TextDecoder().decode(result.stderr)}`)
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).arrayBuffer(),
+    new Response(process.stderr).text(),
+  ])
+  if (exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed (${exitCode})\n${stderr}`)
   }
-  return new Uint8Array(result.stdout)
+  return new Uint8Array(stdout)
 }
 
 function sha256(value: string | Uint8Array) {
@@ -299,7 +327,7 @@ function isPatchEntry(value: unknown): value is PatchEntry {
 }
 
 function isManifest(value: unknown): value is Manifest {
-  // manifest 直接驱动 452 次文件读取和 Git 操作，必须在任何路径解析前验证完整 shape。
+  // manifest 直接驱动全部文件读取和 Git 操作，必须在任何路径解析前验证完整 shape。
   if (!value || typeof value !== "object") return false
   if (!("schemaVersion" in value) || value.schemaVersion !== 1) return false
   if (!("generatedAt" in value) || typeof value.generatedAt !== "string") return false
@@ -398,8 +426,17 @@ async function validateManifest(manifest: Manifest, manifestTsvPath: string, man
     throw new Error("manifest repository layout does not match this workspace")
   }
   if (manifest.sourceRef !== "dev-smark") throw new Error(`unexpected manifest source ref ${manifest.sourceRef}`)
-  // 452 是当前迁移的封闭集合，数量漂移必须在应用任何 patch 前终止。
-  if (manifest.commits.length !== 452) throw new Error(`expected 452 manifest entries, got ${manifest.commits.length}`)
+  // 原 452 项是不可重排的前缀；新增项的数量和顺序由独立 source 枚举核实。
+  if (manifest.commits.length < 452) throw new Error(`expected at least 452 manifest entries, got ${manifest.commits.length}`)
+  // 命名与顺序每次检查；缓存只省略昂贵的 Git 原始提交重建。
+  const seen = new Set<string>()
+  for (const [position, entry] of manifest.commits.entries()) {
+    if (entry.index !== position + 1) throw new Error(`manifest index gap at position ${position + 1}`)
+    if (seen.has(entry.sha)) throw new Error(`duplicate manifest commit ${entry.sha}`)
+    seen.add(entry.sha)
+    const filename = `${String(entry.index).padStart(4, "0")}-${entry.sha.slice(0, 12)}.patch`
+    if (entry.originalPatch !== `original/${filename}` || entry.currentPatch !== `current/${filename}`) throw new Error(`manifest patch path mismatch for ${entry.sha}`)
+  }
   // TSV 仍然逐次验证，因为它是 auditor 读取的第二权威视图。
   // source proof 只能缓存昂贵的 commit 重建，不能绕过 manifest 一致性。
   const expectedTsv = [
@@ -492,43 +529,69 @@ async function validateManifest(manifest: Manifest, manifestTsvPath: string, man
   if (requireGit(sourceRepo, ["rev-parse", manifest.firstSmarkCommit + "^"]).trim() !== manifest.forkBase) {
     throw new Error("manifest fork base does not match the first SMARK commit parent")
   }
-  // 独立重建第一父线序列，防止被缩短或重排的 manifest 获得局部通过。
-  const expected = requireGit(sourceRepo, [
+  // 固定旧边界保留 1–452 的身份；补入支线时只调整其后的编号。
+  const preservedTip = "d0ceb469011412b4ac5058a12d5fe4f247bdac79"
+  requireGit(sourceRepo, ["merge-base", "--is-ancestor", preservedTip, manifest.sourceTip])
+  const prefix = requireGit(sourceRepo, [
     "rev-list",
     "--first-parent",
     "--reverse",
     "--no-merges",
-    manifest.firstSmarkCommit + "^.." + manifest.sourceTip,
+    manifest.firstSmarkCommit + "^.." + preservedTip,
   ])
     .trim()
     .split("\n")
     .filter(Boolean)
+  if (prefix.length !== 452) throw new Error("preserved source prefix must contain 452 commits")
+  const prefixSet = new Set(prefix)
+  // 按祖先优先顺序枚举所有可达的 SMARK 普通提交，merge 只承载历史关系。
+  const suffix = requireGit(sourceRepo, [
+    "log", "--reverse", "--topo-order", "--no-merges", "--format=%H%x00%an%x00%ae",
+    manifest.forkBase + ".." + manifest.sourceTip,
+  ]).trim().split("\n").filter(Boolean).flatMap((line) => {
+    const [sha, author, email] = line.split("\0")
+    return !prefixSet.has(sha) && isSmarkAuthor(author, email) ? [sha] : []
+  })
+  const expected = [...prefix, ...suffix]
   if (expected.length !== manifest.commits.length || expected.some((sha, index) => sha !== manifest.commits[index]?.sha)) {
-    throw new Error("manifest commit sequence does not match an independent first-parent source enumeration")
+    throw new Error("manifest sequence must preserve 1-452 and append all remaining SMARK commits in topological order")
   }
-  const seen = new Set<string>()
-  for (const [position, entry] of manifest.commits.entries()) {
-    // index、SHA 和真实第一父提交共同确定单项身份，不能只相信显示顺序。
-    if (entry.index !== position + 1) throw new Error(`manifest index gap at position ${position + 1}`)
-    if (seen.has(entry.sha)) throw new Error(`duplicate manifest commit ${entry.sha}`)
-    seen.add(entry.sha)
-    const metadata = requireGit(sourceRepo, ["show", "-s", "--format=%H%n%P", entry.sha]).trim().split("\n")
-    if (metadata[0] !== entry.sha || metadata[1]?.split(" ")[0] !== entry.parent) {
-      throw new Error(`manifest metadata mismatch for ${entry.sha}`)
-    }
-    const filename = `${String(entry.index).padStart(4, "0")}-${entry.sha.slice(0, 12)}.patch`
-    if (entry.originalPatch !== `original/${filename}` || entry.currentPatch !== `current/${filename}`) {
-      throw new Error(`manifest patch path mismatch for ${entry.sha}`)
-    }
-    // original 和 current 必须成对存在；缺少任何一侧都无法建立可审计映射。
-    const originalPatch = resolve(patchRoot, entry.originalPatch)
-    if (!(await Bun.file(originalPatch).exists())) throw new Error(`missing original patch ${entry.originalPatch}`)
-    if (!(await Bun.file(resolve(patchRoot, entry.currentPatch)).exists())) throw new Error(`missing current patch ${entry.currentPatch}`)
-    // original 必须逐字等于 source commit 的 fresh format-patch，不能靠历史哈希自证。
-    const sourcePatch = runGitBytes(sourceRepo, ["format-patch", "--stdout", "--no-stat", "--full-index", "--binary", "--no-signature", "-1", entry.sha])
-    if ((await lfNormalizedSha256(originalPatch)) !== sha256(sourcePatch)) throw new Error(`original patch changed for ${entry.sha}`)
+  // 每批十六项共用 Git 进程，避免 Windows 为每条 patch 启动两次进程。
+  for (let offset = 0; offset < manifest.commits.length; offset += 16) {
+    const batch = manifest.commits.slice(offset, offset + 16)
+    const ids = batch.map((entry) => entry.sha)
+    const [metadataBytes, patchBytes] = await Promise.all([
+      runGitBytes(sourceRepo, ["show", "-s", "--no-walk=unsorted", "--format=%H%x00%P", ...ids]),
+      runGitBytes(sourceRepo, ["format-patch", "--stdout", "--no-stat", "--full-index", "--binary", "--no-signature", "--no-numbered", "--no-walk=unsorted", ...ids]),
+    ])
+    const metadataBySha = new Map(new TextDecoder().decode(metadataBytes).trim().split("\n").filter(Boolean).map((line) => {
+      const [sha, parent] = line.split("\0")
+      return [sha, parent] as const
+    }))
+    const bytes = Buffer.from(patchBytes)
+    const boundaries = ids.map((sha) => ({ sha, offset: bytes.indexOf(`From ${sha} Mon Sep 17 00:00:00 2001\n`) })).sort((a, b) => a.offset - b.offset)
+    if (boundaries.some((entry) => entry.offset < 0)) throw new Error("batch format-patch omitted a source commit")
+    // mbox 在两封邮件间添加一个换行；去掉分隔符后逐字比较原始单提交邮件。
+    const patchesBySha = new Map(boundaries.map((entry, index) => {
+      const next = boundaries[index + 1]?.offset
+      if (next !== undefined && bytes[next - 1] !== 0x0a) throw new Error("invalid format-patch mail separator")
+      return [entry.sha, bytes.subarray(entry.offset, next === undefined ? bytes.length : next - 1)] as const
+    }))
+    await Promise.all(batch.map(async (entry) => {
+      if (metadataBySha.get(entry.sha) !== entry.parent) {
+        throw new Error(`manifest metadata mismatch for ${entry.sha}`)
+      }
+      // original 和 current 必须成对存在；缺少任何一侧都无法建立可审计映射。
+      const originalPatch = resolve(patchRoot, entry.originalPatch)
+      if (!(await Bun.file(originalPatch).exists())) throw new Error(`missing original patch ${entry.originalPatch}`)
+      if (!(await Bun.file(resolve(patchRoot, entry.currentPatch)).exists())) throw new Error(`missing current patch ${entry.currentPatch}`)
+      // original 必须逐字等于 source commit 的 fresh format-patch，不能靠历史哈希自证。
+      const sourcePatch = patchesBySha.get(entry.sha)!
+      if ((await lfNormalizedSha256(originalPatch)) !== sha256(sourcePatch)) throw new Error(`original patch changed for ${entry.sha}`)
+    }))
+    if ((offset + 16) % 64 === 0) console.log(`verified source ${Math.min(offset + 16, manifest.commits.length)}/${manifest.commits.length}`)
   }
-  // 只有所有 452 项 fresh format-patch 通过后才发布新的 source proof。
+  // 只有全部 fresh format-patch 通过后才发布新的 source proof。
   // 写入内容包含 original 哈希，后续热路径仍能发现任何本地证据改写。
   await Bun.write(
     sourceProofPath,
@@ -586,7 +649,7 @@ async function cumulativePatchSha256(entries: PatchEntry[]) {
   return sha256(identities.join("\n"))
 }
 
-async function removeInterruptedBuilds() {
+async function removeInterruptedBuilds(manifest: Manifest) {
   await mkdir(statesDir, { recursive: true })
   // backup 目录表示一次未完成的发布事务；目标已出现时丢弃旧版本，否则恢复旧状态。
   for (const entry of (await readdir(statesDir, { withFileTypes: true })).filter(
@@ -602,18 +665,28 @@ async function removeInterruptedBuilds() {
         return
       }
     })()
-    const published = targetName ? await Bun.file(join(statesDir, targetName, "state.json")).exists() : false
+    const published = targetName ? await validMaterializedState(targetName, manifest) : false
+    let recovered = true
     if (!published) {
       // 未出现新目标说明发布没有完成；逐个恢复被替换和预回收的成功状态。
       for (const state of (await readdir(backup, { withFileTypes: true })).filter(
         (state) => state.isDirectory() && /^\d{4}-[0-9a-f]{12}$/.test(state.name),
       )) {
         const destination = join(statesDir, state.name)
-        if (await Bun.file(join(destination, "state.json")).exists()) continue
-        await rename(join(backup, state.name), destination)
+        if (await validMaterializedState(state.name, manifest)) continue
+        if (!(await safeRm(destination, { recursive: true, force: true }))) {
+          recovered = false
+          continue
+        }
+        try {
+          await renameWithRetry(join(backup, state.name), destination)
+        } catch (error) {
+          recovered = false
+          console.warn(`backup recovery deferred: ${state.name}: ${String(error)}`)
+        }
       }
     }
-    await rm(backup, { recursive: true, force: true })
+    if (recovered) await safeRm(backup, { recursive: true, force: true })
   }
   // `.building-*` 没有发布语义；启动时删除可确保中断不会持续占用磁盘。
   // EBUSY（杀毒/索引/残留句柄）不阻断主流程：陈旧 staging 不参与指纹复用，留待下次清理。
@@ -622,7 +695,7 @@ async function removeInterruptedBuilds() {
       .filter((entry) => entry.isDirectory() && entry.name.startsWith(".building-"))
       .map(async (entry) => {
         try {
-          await rm(join(statesDir, entry.name), { recursive: true, force: true })
+          await safeRm(join(statesDir, entry.name), { recursive: true, force: true })
         } catch (error) {
           console.error(`stale staging cleanup skipped: ${entry.name} (${(error as Error).message.split("\n")[0]})`)
         }
@@ -637,52 +710,49 @@ async function materializedStateDirectories() {
     .map((entry) => entry.name)
 }
 
-async function removeStaleMaterializedStates(
-  manifest: Manifest,
-  manifestJsonSha256: string,
-  manifestTsvSha256: string,
-) {
+async function validMaterializedState(name: string, manifest: Manifest) {
+  const directory = join(statesDir, name)
+  try {
+    // 发布和中断恢复共用完整校验；存在 state.json 本身不等于发布成功。
+    const value: unknown = await Bun.file(join(directory, "state.json")).json()
+    if (!isMaterializedState(value) || value.index > manifest.commits.length) return false
+    const metadata = value
+    const entry = manifest.commits[metadata.index - 1]
+    const expectedSha = metadata.index === 0 ? manifest.targetBaseline : entry?.sha
+    if (!expectedSha || metadata.sha !== expectedSha || name !== materializedStateName(metadata.index, expectedSha)) return false
+    if (metadata.head !== manifest.targetBaseline || metadata.targetBaseline !== manifest.targetBaseline) return false
+    // 全清单的尾部追加不影响旧前缀；实际复用绑定基线与完整前缀内容。
+    if (metadata.cumulativePatchSha256 !== (await cumulativePatchSha256(manifest.commits.slice(0, metadata.index)))) return false
+    const repo = join(directory, metadata.repo)
+    if (!(await Bun.file(join(repo, ".git", "HEAD")).exists())) return false
+    if (requireGit(repo, ["rev-parse", "HEAD"]).trim() !== manifest.targetBaseline) return false
+    if (requireGit(repo, ["ls-files", "--others", "--directory", "-z"])) return false
+    const status = requireGit(repo, ["status", "--porcelain", "--untracked-files=all"])
+    const worktreeDiff = requireGit(repo, ["diff", "--binary", "--full-index", "--no-ext-diff"])
+    const indexDiff = requireGit(repo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])
+    return metadata.statusSha256 === sha256(status) && metadata.worktreeDiffSha256 === sha256(worktreeDiff) && metadata.indexDiffSha256 === sha256(indexDiff)
+  } catch {
+    return false
+  }
+}
+
+async function removeStaleMaterializedStates(manifest: Manifest) {
   // 早期 current patch 变化会使所有后续状态失真；状态身份必须覆盖完整前缀。
   for (const name of await materializedStateDirectories()) {
-    const directory = join(statesDir, name)
-    const valid = await (async () => {
-      try {
-        // metadata 必须同时绑定顺序、source 身份、target 基线和两份 manifest 内容。
-        // repo 存在但 provenance 不匹配时仍是 stale，不能提供给主 agent 调查。
-        const value: unknown = await Bun.file(join(directory, "state.json")).json()
-        if (!isMaterializedState(value) || value.index > manifest.commits.length) return false
-        const metadata = value
-        const entry = manifest.commits[metadata.index - 1]
-        const expectedSha = metadata.index === 0 ? manifest.targetBaseline : entry?.sha
-        if (!expectedSha || metadata.sha !== expectedSha || name !== materializedStateName(metadata.index, expectedSha)) return false
-        if (metadata.head !== manifest.targetBaseline || metadata.targetBaseline !== manifest.targetBaseline) return false
-        if (metadata.manifestJsonSha256 !== manifestJsonSha256 || metadata.manifestTsvSha256 !== manifestTsvSha256) return false
-        if (metadata.cumulativePatchSha256 !== (await cumulativePatchSha256(manifest.commits.slice(0, metadata.index)))) return false
-        const repo = join(directory, metadata.repo)
-        if (!(await Bun.file(join(repo, ".git", "HEAD")).exists())) return false
-        if (requireGit(repo, ["rev-parse", "HEAD"]).trim() !== manifest.targetBaseline) return false
-        const status = requireGit(repo, ["status", "--porcelain", "--untracked-files=all"])
-        const worktreeDiff = requireGit(repo, ["diff", "--binary", "--full-index", "--no-ext-diff"])
-        const indexDiff = requireGit(repo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])
-        return (
-          metadata.statusSha256 === sha256(status) &&
-          metadata.worktreeDiffSha256 === sha256(worktreeDiff) &&
-          metadata.indexDiffSha256 === sha256(indexDiff)
-        )
-      } catch {
-        // 无法解析的 metadata 没有可证明身份，必须视为中断或损坏状态并回收。
-        return false
-      }
-    })()
+    const valid = await validMaterializedState(name, manifest)
     // stale 状态不能为了便于回退而保留；回退必须重新物化可证明的历史前缀。
-    if (!valid) await safeRm(directory, { recursive: true, force: true })
+    if (!valid) {
+      console.log(`discarding stale state ${name}; selecting a healthy prefix`)
+      rejectedStates.add(name)
+      await safeRm(join(statesDir, name), { recursive: true, force: true })
+    }
   }
 }
 
 async function orderedMaterializedStates() {
   const states = (
     await Promise.all(
-      (await materializedStateDirectories()).map(async (name) => {
+      (await materializedStateDirectories()).filter((name) => !rejectedStates.has(name)).map(async (name) => {
         try {
           const value: unknown = await Bun.file(join(statesDir, name, "state.json")).json()
           if (!isMaterializedState(value)) {
@@ -833,16 +903,15 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
     requireGit(testWorkspaceRoot, ["clone", "--local", "--no-checkout", targetRepo, testWorkspaceRepo])
     // Windows 默认 core.symlinks=false 会把仓库符号链接物化为普通文本文件（如
     // custom-elements.d.ts），导致类型检查读取链接目标文本而报 TS1128；本机支持创建符号链接。
-    requireGit(testWorkspaceRepo, ["config", "core.symlinks", "true"])
     // 命令级 -c 零持久化：工作区保持 LF，与 current patch（LF 归一化后）行尾一致，
     // 避免 autocrlf 检出的 CRLF 工作区使 git apply 的删除/上下文行精确匹配失败。
-    requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "checkout", "--detach", targetBaseline])
+    requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "-c", "core.symlinks=true", "checkout", "--detach", targetBaseline])
   }
 
   // 保留 node_modules，只清理源码和构建残留，再应用 state 的权威 staged diff。
   // reset 只作用于派生工作区，不改变 materialized state 或目标仓库。
    // 同样用命令级 -c 保持 LF：reset --hard 若走 autocrlf 会把工作树写回 CRLF
-  requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "reset", "--hard", targetBaseline])
+  requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "-c", "core.symlinks=true", "reset", "--hard", targetBaseline])
   requireGit(testWorkspaceRepo, ["clean", "-fdx", "-e", "node_modules", "-e", "*/node_modules"])
   const stateDiff = Bun.spawnSync({
     cmd: ["git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff"],
@@ -854,7 +923,7 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
   // test workspace 只消费 materialized staged diff，不重新解释单个 current patch。
   const stateDiffPath = join(testWorkspaceRoot, ".state.patch")
   await Bun.write(stateDiffPath, stateDiff.stdout)
-  if (stateDiff.stdout.byteLength > 0) requireGit(testWorkspaceRepo, ["apply", "--index", stateDiffPath])
+  if (stateDiff.stdout.byteLength > 0) requireGit(testWorkspaceRepo, ["-c", "core.autocrlf=false", "-c", "core.symlinks=true", "apply", "--index", stateDiffPath])
   await rm(stateDiffPath, { force: true })
 
   const input = await installInputFingerprint(testWorkspaceRepo)
@@ -869,27 +938,16 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
   const canReuseInstall =
     isInstallState(previous) &&
     previous.installInputSha256 === input.sha256 &&
-    previous.bunVersion === input.bunVersion
+    previous.bunVersion === input.bunVersion &&
+    (await stat(join(testWorkspaceRepo, "node_modules")).catch(() => undefined))?.isDirectory() === true
   let install: TestReport["install"] = canReuseInstall ? "reused" : "installed"
   let installStdout = ""
   let installStderr = ""
   if (!canReuseInstall) {
-    // ghostty-web 的 GitHub tarball 在 Windows 上无法解压；它只被 packages/app 使用，
-    // 不影响 packages/opencode 的 typecheck。在 test workspace 中移除该依赖以跳过下载。
-    const appPkgPath = join(testWorkspaceRepo, "packages", "app", "package.json")
-    if (existsSync(appPkgPath)) {
-      try {
-        const appPkg = await Bun.file(appPkgPath).json()
-        if (appPkg.dependencies?.["ghostty-web"]) {
-          delete appPkg.dependencies["ghostty-web"]
-          await Bun.write(appPkgPath, JSON.stringify(appPkg, null, 2))
-        }
-      } catch {}
-    }
-    // 仅在隔离 test workspace 中允许 Bun 补齐依赖 lockfile，目标状态不被改写。
+    // 安装消费已物化的完整依赖图，禁止临时删依赖或改写锁文件掩盖失败。
     // clonefile 显式利用当前 Mac APFS，避免从 Bun cache 复制重复数据块。
     // clonefile 后端只在 macOS APFS 上可用；Windows/Linux 使用默认 hardlink 后端。
-    const result = runBun(testWorkspaceRepo, ["install", `--backend=${process.platform === "darwin" ? "clonefile" : "hardlink"}`, "--no-progress", "--no-summary"])
+    const result = runBun(testWorkspaceRepo, ["install", "--frozen-lockfile", `--backend=${process.platform === "darwin" ? "clonefile" : "hardlink"}`, "--no-progress", "--no-summary"])
     installStdout = result.stdout
     installStderr = result.stderr
     if (result.exitCode !== 0) install = "failed"
@@ -922,7 +980,7 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
       // 独立 bun.lock 表示该 workspace 不属于根安装图，必须在自己的依赖边界安装。
       // 独立安装仍限制在 test workspace 和自身依赖边界内，不读取根 node_modules。
       if (await Bun.file(join(testWorkspaceRepo, workspace, "bun.lock")).exists()) {
-        const standalone = runBun(join(testWorkspaceRepo, workspace), ["install", `--backend=${process.platform === "darwin" ? "clonefile" : "hardlink"}`, "--no-progress", "--no-summary"])
+        const standalone = runBun(join(testWorkspaceRepo, workspace), ["install", "--frozen-lockfile", `--backend=${process.platform === "darwin" ? "clonefile" : "hardlink"}`, "--no-progress", "--no-summary"])
         installStdout += `\n[${workspace}]\n${standalone.stdout}`
         installStderr += `\n[${workspace}]\n${standalone.stderr}`
         if (standalone.exitCode !== 0) {
@@ -968,85 +1026,31 @@ async function publishMaterializedState(tempRoot: string, stateName: string) {
   const backup = await mkdtemp(join(statesDir, `.backup-${randomUUID()}-`))
   await Bun.write(join(backup, "publication.json"), `${JSON.stringify({ target: stateName })}\n`)
   try {
+    // 失效同名目录可能因删除受限而残留，先整体移开，绝不与新状态合并。
+    if (!moving.some((state) => state.name === stateName) && await stat(stateDirectory).catch(() => undefined)) {
+      await renameWithRetry(stateDirectory, join(backup, stateName))
+    }
     for (const state of moving) {
-      // #244-注：Windows 上 Defender/索引器会长时间持住大目录树句柄使 rename 持续 EPERM；
-      // 退避重试耗尽后用同卷 copy+rm 完成同一备份动作；rm 仍被锁时改为直接删除旧状态
-      const src = join(statesDir, state.name)
-      const dst = join(backup, state.name)
-      let moved = false
-      let failed = false
-      for (let attempt = 0; attempt < 3 && !moved; attempt++) {
-        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 2000))
-        try {
-          await rename(src, dst)
-          moved = true
-        } catch {
-          if (attempt === 2) {
-            try {
-              await cpSync(src, dst, { recursive: true })
-              await rm(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 })
-              moved = true
-            } catch {
-              // 常驻 watcher 持久锁住旧目录时，eviction 失败不阻塞发布——
-              // states 总数短暂超限无害，后续运行会重新收敛；
-              // 同 index 旧状态被进程 CWD/watcher 句柄钉死时也不阻塞：
-              // 改走发布阶段的 cpSync 覆盖合并（staging → stateDirectory），
-              // 文件级覆盖不要求删除被句柄钉住的目录，产物与完整重发布等价。
-              failed = true
-            }
-          }
-        }
-      }
-      if (failed) continue
+      await renameWithRetry(join(statesDir, state.name), join(backup, state.name))
     }
-    // rename 在同一文件系统内发布完整 staging；失败时 catch 会恢复全部旧成功状态。
-    // Windows 上 Defender/索引器会长时间持住新写入大目录树的句柄使 rename 持续 EPERM；
-    // 退避重试耗尽后用同卷 copy+rm 完成同一发布事务，产物位置与内容完全等价。
-    let published = false
-    const backoffs = [3000, 6000, 12000]
-    for (let attempt = 0; attempt <= backoffs.length && !published; attempt++) {
-      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, backoffs[attempt - 1]))
-      try {
-        await rename(tempRoot, stateDirectory)
-        published = true
-      } catch (error) {
-        if (attempt === backoffs.length) {
-          await cpSync(tempRoot, stateDirectory, { recursive: true })
-          await rm(tempRoot, { recursive: true, force: true })
-          published = true
-        }
-      }
-    }
+    // 完整目录原子发布，不把新状态递归覆盖到旧目录中。
+    await renameWithRetry(tempRoot, stateDirectory)
+    rejectedStates.delete(stateName)
   } catch (error) {
-    // Windows 下 Defender/索引服务会短暂锁住刚写入的大目录树，导致恢复 rename
-    // 也 EPERM；恢复失败不致命（backup 保留现场，下次运行重建前缀），故逐项容错。
+    // 恢复失败的备份留给下次维护，不删除唯一的健康副本。
     for (const state of moving) {
       const source = join(backup, state.name)
       if (!(await Bun.file(join(source, "state.json")).exists())) continue
       const target = join(statesDir, state.name)
-      let restored = false
-      for (const delay of [250, 1000, 3000]) {
-        try {
-          await rename(source, target)
-          restored = true
-          break
-        } catch {
-          await Bun.sleep(delay)
-        }
-      }
-      if (!restored) {
-        try {
-          await cpSync(source, target, { recursive: true })
-          await rm(source, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
-        } catch {
-          // backup 现场保留，不阻塞主错误上报
-        }
+      try {
+        await renameWithRetry(source, target)
+      } catch (restoreError) {
+        console.warn(`publication backup retained: ${source}: ${String(restoreError)}`)
       }
     }
-    await rm(backup, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }).catch(() => {})
     throw error
   }
-  await rm(backup, { recursive: true, force: true })
+  await safeRm(backup, { recursive: true, force: true })
   return stateDirectory
 }
 
@@ -1137,10 +1141,10 @@ async function checkpoint(repo: string, path: string) {
 
 async function restore(repo: string, baseline: string, checkpointPath: string) {
   // 先回到 exact baseline，再恢复最后成功快照，保证失败 patch 没有残留状态。
-  requireGit(repo, ["reset", "--hard", baseline])
+  requireGit(repo, ["-c", "core.autocrlf=false", "reset", "--hard", baseline])
   requireGit(repo, ["clean", "-fdx"])
   if ((await Bun.file(checkpointPath).arrayBuffer()).byteLength === 0) return
-  requireGit(repo, ["apply", "--index", checkpointPath])
+  requireGit(repo, ["-c", "core.autocrlf=false", "apply", "--index", checkpointPath])
 }
 
 async function main() {
@@ -1153,7 +1157,7 @@ async function main() {
   const manifestJsonSha256 = await lfNormalizedSha256(manifestPath)
   const manifestTsvSha256 = await lfNormalizedSha256(manifestTsvPath)
   const request = parseReplayRequest(manifest)
-  // manifest 验证发生在模式解析之前，任何命令都不能绕过 452 项集合证明。
+  // 执行前验证完整 manifest，任何物化编号都不能绕过集合证明。
   await validateManifest(manifest, manifestTsvPath, manifestJsonSha256, manifestTsvSha256, request.verifySource)
   if (request.verifySource) {
     console.log(`verified ${manifest.commits.length} source commits through ${manifest.sourceTip}`)
@@ -1162,10 +1166,20 @@ async function main() {
   const materializeIndex = request.index
   const typecheck = request.typecheck
   const selectedCommits = manifest.commits.slice(0, materializeIndex ?? manifest.commits.length)
+  const inputHashes = await Promise.all(selectedCommits.map((entry) => lfNormalizedSha256(resolve(patchRoot, entry.currentPatch))))
+  const inputFingerprint = sha256(selectedCommits.map((entry, index) => `${entry.index}\t${entry.sha}\t${inputHashes[index]}`).join("\n"))
+  // 只绑定本次实际消费的输入；主工作区的无关编辑和 HEAD 前进仅记录在报告里。
+  const verifyInputs = async () => {
+    if (await lfNormalizedSha256(manifestPath) !== manifestJsonSha256 ||
+        await lfNormalizedSha256(manifestTsvPath) !== manifestTsvSha256 ||
+        await cumulativePatchSha256(selectedCommits) !== inputFingerprint) {
+      throw new RetryBuild("replay inputs changed; rebuilding from the latest consistent prefix")
+    }
+  }
   let baseState: { name: string; metadata: MaterializedState } | undefined
   if (materializeIndex !== undefined) {
-    await removeInterruptedBuilds()
-    await removeStaleMaterializedStates(manifest, manifestJsonSha256, manifestTsvSha256)
+    await removeInterruptedBuilds(manifest)
+    await removeStaleMaterializedStates(manifest)
     // 中断恢复可能还原第六个旧状态，正式构建前再次收敛到最近五个。
     await pruneMaterializedStates()
     // rebuild 排除 exact state，但仍复用更小的有效前缀以保持增量主路径。
@@ -1215,14 +1229,7 @@ async function main() {
     report.sourceRepoHeadAfter = requireGit(sourceRepo, ["rev-parse", "HEAD"]).trim()
     report.sourceRepoFingerprintAfter = await repositoryFingerprint(sourceRepo, targetRepo)
     report.targetRepoFingerprintAfter = await repositoryFingerprint(targetRepo, targetRepo)
-    // Source repo fingerprint may change due to parent worktree edits (docs/plans etc);
-    // only fail if the HEAD changed, not the fingerprint, to avoid false positives.
-    if (report.sourceRepoHeadAfter !== sourceRepoHeadBefore) {
-      report.integrityFailure = "source repository HEAD changed during dry-run"
-    }
-    if (report.targetRepoFingerprintAfter !== report.targetRepoFingerprintBefore) {
-      report.integrityFailure = "target repository changed during dry-run"
-    }
+    await verifyInputs()
     await writeReports(report, runID)
     console.log(`passed ${report.passed}/${report.patchCount}`)
     const testFailed = report.test?.install === "failed" || report.test?.typechecks.some((result) => result.status === "failed")
@@ -1235,26 +1242,40 @@ async function main() {
   }
 
   // 物化构建位于 states 同一文件系统，成功目录发布可以使用原子 rename。
-  const tempRoot = await mkdtemp(
-    materializeIndex === undefined ? join(tmpdir(), "smark-patch-dry-run-") : join(statesDir, ".building-"),
-  )
+  const tempRoot = await mkdtemp(join(statesDir, ".building-"))
+  stagingRoot = tempRoot
   const simulationRepo = join(tempRoot, "repo")
   const checkpointPath = join(tempRoot, "last-success.patch")
   await Bun.write(checkpointPath, new Uint8Array())
   if (baseState) {
     // 已验证前缀使用 APFS COW 复制；只为新增 patch 分配变化块。
-    await copyOnWriteDirectory(join(statesDir, baseState.name, "repo"), simulationRepo)
+    try {
+      await copyOnWriteDirectory(join(statesDir, baseState.name, "repo"), simulationRepo)
+    } catch (error) {
+      rejectedStates.add(baseState.name)
+      throw new RetryBuild(`prefix ${baseState.name} became unavailable during copy: ${String(error)}`)
+    }
   } else {
     // 初始状态使用本地对象共享 clone，避免复制完整 Git object database。
     // Windows 适配：clone 后用命令级 -c checkout（零持久化）保持 LF 工作区，
     // 与 LF 归一化后的 current patch 行尾一致，避免 git apply 匹配失败。
-    requireGit(tempRoot, ["clone", "--no-checkout", "file:///" + targetRepo.replaceAll("\\", "/"), simulationRepo])
+    requireGit(tempRoot, ["clone", "--local", "--no-checkout", targetRepo, simulationRepo])
     requireGit(simulationRepo, ["-c", "core.autocrlf=false", "checkout", "--detach", manifest.targetBaseline])
   }
-  const simulationStatus = requireGit(simulationRepo, ["status", "--porcelain", "--untracked-files=all"])
-  const simulationWorktreeDiff = requireGit(simulationRepo, ["diff", "--binary", "--full-index", "--no-ext-diff"])
-  const simulationIndexDiff = requireGit(simulationRepo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])
-  const simulationHead = requireGit(simulationRepo, ["rev-parse", "HEAD"]).trim()
+  const [simulationStatus, simulationWorktreeDiff, simulationIndexDiff, simulationHead] = (() => {
+    try {
+      return [
+        requireGit(simulationRepo, ["status", "--porcelain", "--untracked-files=all"]),
+        requireGit(simulationRepo, ["diff", "--binary", "--full-index", "--no-ext-diff"]),
+        requireGit(simulationRepo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"]),
+        requireGit(simulationRepo, ["rev-parse", "HEAD"]).trim(),
+      ] as const
+    } catch (error) {
+      if (!baseState) throw error
+      rejectedStates.add(baseState.name)
+      throw new RetryBuild(`prefix ${baseState.name} became unreadable during copy: ${String(error)}`)
+    }
+  })()
   report.simulationPreflight = {
     head: simulationHead,
     statusSha256: sha256(simulationStatus),
@@ -1262,6 +1283,10 @@ async function main() {
     indexDiffSha256: sha256(simulationIndexDiff),
   }
   if (simulationHead !== manifest.targetBaseline || (!baseState && (simulationStatus || simulationWorktreeDiff || simulationIndexDiff))) {
+    if (baseState) {
+      rejectedStates.add(baseState.name)
+      throw new RetryBuild(`prefix ${baseState.name} changed during copy; selecting an earlier healthy prefix`)
+    }
     throw new Error("simulation clone is not a clean exact target-baseline clone")
   }
   if (
@@ -1270,11 +1295,11 @@ async function main() {
       sha256(simulationWorktreeDiff) !== baseState.metadata.worktreeDiffSha256 ||
       sha256(simulationIndexDiff) !== baseState.metadata.indexDiffSha256)
   ) {
-    throw new Error(`reused materialized state ${baseState.name} changed during copy`)
+    rejectedStates.add(baseState.name)
+    throw new RetryBuild(`prefix ${baseState.name} changed during copy; selecting an earlier healthy prefix`)
   }
 
-  // 注：曾尝试循环前全仓 LF 规范化 + add --all，实测会使后续 git apply 对已落地
-  // 文件全部失配（E4 实验）；触及级 LF 规范化（循环内）是已验证成功的安全形态。
+  // 只规范化本项涉及的文本，避免全仓行尾变化污染已经物化的前缀。
 
   // 循环严格按 manifest 前缀推进；首个失败会阻断所有更高 index。
   for (const entry of selectedCommits.slice(baseState?.metadata.index ?? 0)) {
@@ -1294,9 +1319,11 @@ async function main() {
     }
     // Windows checkout（core.autocrlf=true）会把 patch 文本转成 CRLF，而 git apply 无法匹配 CRLF patch；
     // 因此在 check/apply 前把 patch 内容规范化为 LF，写入 staging 内的临时文件。
-    const normalizedPatch = join(tempRoot, `normalized-${String(entry.index).padStart(4, "0")}.patch`)
+    const normalizedPatch = join(tempRoot, "current.patch")
     const normalizedPatchText = (await Bun.file(patchPath).text()).replace(/\r\n/g, "\n")
+    if (sha256(normalizedPatchText) !== inputHashes[entry.index - 1]) throw new RetryBuild(`patch ${entry.index} changed before application`)
     await Bun.write(normalizedPatch, normalizedPatchText)
+    await checkpoint(simulationRepo, checkpointPath)
 
     // 仓库内部分 blob 以 CRLF 存储（上游 checkout 遗留），LF patch 的上下文
     // 无法字节匹配且 --ignore-whitespace 对行尾 CR 无效（实测）。对本次 patch
@@ -1305,19 +1332,18 @@ async function main() {
     const touchedFiles = [...normalizedPatchText.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map((m) => m[2])
     for (const touched of touchedFiles) {
       const abs = join(simulationRepo, touched)
-      if (!(await Bun.file(abs).exists())) { console.error(`EOL-NORM skip(missing): ${touched}`); continue }
+      if (!(await Bun.file(abs).exists())) continue
       // 二进制文件（含 NUL 字节）不得参与文本规范化：UTF-8 解码再编码会破坏 blob 内容，
-      // 导致后续 binary patch 的 pre-image 校验失败（0089 identity PNG 事故）。
+      // 否则会破坏后续 binary patch 的 pre-image 身份。
       const bytes = new Uint8Array(await Bun.file(abs).arrayBuffer())
-      if (bytes.includes(0)) { console.error(`EOL-NORM skip(binary): ${touched}`); continue }
+      if (bytes.includes(0)) continue
       const text = new TextDecoder().decode(bytes)
-      if (!text.includes("\r\n")) { console.error(`EOL-NORM skip(lf): ${touched}`); continue }
+      if (!text.includes("\r\n")) continue
       await Bun.write(abs, text.replace(/\r\n/g, "\n"))
       requireGit(simulationRepo, ["add", "--", touched])
       console.error(`EOL-NORM normalized: ${touched}`)
     }
 
-    await checkpoint(simulationRepo, checkpointPath)
     // check 与 apply 使用同一个 patch 和 index；check 失败后禁止尝试后续项。
     // -c core.autocrlf=false：staging 继承全局 autocrlf=true 时，git apply 会把 patch
     // 上下文按 CRLF 转换后匹配 LF 工作区，导致必然失配（字节级诊断证实）；
@@ -1352,22 +1378,20 @@ async function main() {
   report.sourceRepoHeadAfter = sourceRepoHeadAfter
   report.sourceRepoFingerprintAfter = await repositoryFingerprint(sourceRepo, targetRepo)
   report.targetRepoFingerprintAfter = await repositoryFingerprint(targetRepo, targetRepo)
-  if (sourceRepoHeadAfter !== sourceRepoHeadBefore) {
-    report.integrityFailure = "source repository HEAD changed during dry-run"
-  }
-  if (report.targetRepoFingerprintAfter !== report.targetRepoFingerprintBefore) {
-    report.integrityFailure = "target repository changed during dry-run"
-  }
+  await verifyInputs()
   if (report.stoppedAt !== undefined || report.integrityFailure) {
     // 物化失败始终回收 staging；保留失败 clone 只适用于显式 dry-run 诊断。
-    if (keepFailure || materializeIndex === undefined) report.temporaryRepo = simulationRepo
-    else await rm(tempRoot, { recursive: true, force: true })
+    if (keepFailure) {
+      report.temporaryRepo = simulationRepo
+      stagingRoot = undefined
+    } else await safeRm(tempRoot, { recursive: true, force: true })
   } else if (materializeIndex !== undefined) {
     // 只有完整前缀通过且仓库指纹未漂移时，staging 才具有发布资格。
     const entry = selectedCommits.at(-1)
     const stateIndex = entry?.index ?? 0
     const stateSha = entry?.sha ?? manifest.targetBaseline
     const stateName = materializedStateName(stateIndex, stateSha)
+    if (requireGit(simulationRepo, ["ls-files", "--others", "--directory", "-z"])) throw new RetryBuild("untracked files appeared in staging; rebuilding a clean prefix")
     const stateStatus = requireGit(simulationRepo, ["status", "--porcelain", "--untracked-files=all"])
     const stateWorktreeDiff = requireGit(simulationRepo, ["diff", "--binary", "--full-index", "--no-ext-diff"])
     const stateIndexDiff = requireGit(simulationRepo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])
@@ -1381,7 +1405,7 @@ async function main() {
       targetBaseline: manifest.targetBaseline,
       manifestJsonSha256,
       manifestTsvSha256,
-      cumulativePatchSha256: await cumulativePatchSha256(selectedCommits),
+      cumulativePatchSha256: inputFingerprint,
       statusSha256: sha256(stateStatus),
       worktreeDiffSha256: sha256(stateWorktreeDiff),
       indexDiffSha256: sha256(stateIndexDiff),
@@ -1389,6 +1413,7 @@ async function main() {
     }
     // metadata 与 repo 在 staging 中共同完成后才替换旧的同 index 状态。
     await rm(checkpointPath, { force: true })
+    await rm(join(tempRoot, "current.patch"), { force: true })
     await Bun.write(join(tempRoot, "state.json"), `${JSON.stringify(metadata, null, 2)}\n`)
     const stateDirectory = await publishMaterializedState(tempRoot, stateName)
     // 同 index 重建先替换旧目录，再按发布时间回收，保证全局最多五个成功状态。
@@ -1413,4 +1438,33 @@ async function main() {
   }
 }
 
-await main()
+async function withMaintenanceLock(work: () => Promise<void>) {
+  await mkdir(statesDir, { recursive: true })
+  // SQLite 的进程锁随异常退出自动释放；锁库只位于物化缓存，隔离于应用数据库。
+  const lock = new Database(join(statesDir, ".maintenance.sqlite"), { create: true })
+  try {
+    lock.exec("PRAGMA busy_timeout = 60000; BEGIN IMMEDIATE")
+    await work()
+  } finally {
+    lock.close()
+  }
+}
+
+async function run() {
+  await withMaintenanceLock(async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await main()
+        return
+      } catch (error) {
+        if (!(error instanceof RetryBuild) || attempt === 2) throw error
+        console.warn(`automatic recovery ${attempt + 1}/2: ${error.message}`)
+      } finally {
+        if (stagingRoot) await safeRm(stagingRoot, { recursive: true, force: true })
+        stagingRoot = undefined
+      }
+    }
+  })
+}
+
+if (import.meta.main) await run()

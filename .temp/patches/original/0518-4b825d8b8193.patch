@@ -1,0 +1,1560 @@
+From 4b825d8b81933804bf5af57fda449eecdac29425 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 21 Jul 2026 19:19:04 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tool):=20=E5=8D=8F=E8=B0=83=E5=86=85?=
+ =?UTF-8?q?=E7=BD=AE=E6=96=87=E4=BB=B6=20mutation=20=E5=B9=B6=E5=8F=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+edit/write/apply_patch 共享 process-local coordinator：提案耦合读版本、Permission 后再持锁、提交前 recheck。
+拒绝过期 proposal，保留不同文件并发，formatter 留在 commit critical section，不扩展到跨进程 CAS。
+
+diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
+index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec6a667138 100644
+--- a/packages/opencode/src/tool/apply_patch.ts
++++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -18,6 +18,7 @@ import { File } from "../file"
+ import { Format } from "../format"
+ import * as Bom from "@/util/bom"
+ import { normalizeLineEndings } from "@/util/line-ending"
++import * as Mutation from "./file-mutation-coordinator"
+ 
+ // [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
+ // 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
+@@ -32,82 +33,153 @@ type FileChange = {
+   additions: number
+   deletions: number
+   bom: boolean
++  expected: Mutation.MutationRead[]
+ }
+ 
+-const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function* (
+-  hunk: Patch.Hunk,
+-  filePath: string,
++type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
++
++// group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
++// 这样既能一次 commit，也能保留每个 entry 的 Patch owner 语义。
++
++const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* (
++  group: HunkGroup,
+   instance: InstanceContext,
+   afs: AppFileSystem.Interface,
+-  ctx: Tool.Context,
+-  patchText: string,
+ ) {
+-  switch (hunk.type) {
++  const first = group.hunks[0]
++  switch (first.type) {
+     case "add": {
++      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
++      const snapshot = yield* Mutation.read(afs, group.filePath)
++      // add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
++      if (snapshot.version.state === "other") throw new Error(`Path is not a file: ${group.filePath}`)
+       const oldContent = ""
+-      const newContent = hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
++      const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
+       const next = Bom.split(newContent)
+       const diffOld = normalizeLineEndings(oldContent)
+       const diffNew = normalizeLineEndings(next.text)
+-      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+-      let additions = 0
+-      let deletions = 0
+-      for (const change of diffLines(diffOld, diffNew)) {
+-        if (change.added) additions += change.count || 0
+-        if (change.removed) deletions += change.count || 0
+-      }
+-      return { filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom }
++      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
++      const { additions, deletions } = countDiff(diffOld, diffNew)
++      // add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
++      return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
+     }
+     case "update": {
+-      const stats = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+-      if (!stats || stats.type === "Directory") {
+-        return yield* Effect.fail(new Error(`Failed to read file to update: ${filePath}`))
+-      }
+-      const source = yield* Bom.readFile(afs, filePath)
++      const snapshot = yield* Mutation.read(afs, group.filePath)
++      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
++      // update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
++      const source = Bom.split(Mutation.decode(snapshot))
++      // source BOM 随 working copy 传给 Patch owner，最终 BOM 仍由既有 Bom contract 决定。
+       const oldContent = source.text
+-      let newContent = oldContent
+-      let bom = source.bom
++      let working = Bom.join(source.text, source.bom)
++      let movePath: string | undefined
++      let moveCanonicalPath: string | undefined
+       try {
+-        const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks, Bom.join(source.text, source.bom))
+-        newContent = fileUpdate.content
+-        bom = fileUpdate.bom
++        // 每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
++        // 下一 entry 只接收上一 entry 的最终 content，entry 内部生成文本仍由 Patch owner 隔离。
++        for (const hunk of group.hunks) {
++          if (hunk.type !== "update") throw new Error(`Conflicting operations for ${group.filePath}`)
++          const fileUpdate = Patch.deriveNewContentsFromChunks(group.filePath, hunk.chunks, working)
++          working = Bom.join(fileUpdate.content, fileUpdate.bom)
++          if (hunk.move_path) {
++            const nextMovePath = path.resolve(instance.directory, hunk.move_path)
++            const nextMoveCanonicalPath = AppFileSystem.resolve(nextMovePath)
++            if (moveCanonicalPath && moveCanonicalPath !== nextMoveCanonicalPath) {
++              throw new Error(`Conflicting move destinations for ${group.filePath}`)
++            }
++            movePath = nextMovePath
++            moveCanonicalPath = nextMoveCanonicalPath
++          }
++        }
+       } catch (error) {
+-        // Patch owner 仍持有失败 chunk 身份与 persisted text；Tool 只聚合其错误，不能运行第二套 matcher。
++        // 每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
+         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
+       }
++      const next = Bom.split(working)
+       const diffOld = normalizeLineEndings(oldContent)
+-      const diffNew = normalizeLineEndings(newContent)
+-      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+-      let additions = 0
+-      let deletions = 0
+-      for (const change of diffLines(diffOld, diffNew)) {
+-        if (change.added) additions += change.count || 0
+-        if (change.removed) deletions += change.count || 0
+-      }
+-      const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
++      const diffNew = normalizeLineEndings(next.text)
++      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
++      const { additions, deletions } = countDiff(diffOld, diffNew)
++      const expected = [snapshot]
+       if (movePath) {
+-        yield* assertExternalDirectoryEffect(ctx, movePath, {
+-          metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText },
+-        })
++        // move destination 也是 proposal 的 expected state，不能只锁 source。
++        // destination 既要参与 version recheck，也要参与 canonical key 排序。
++        const destination = yield* Mutation.read(afs, movePath)
++        if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
++        expected.push(destination)
+       }
+-      return { filePath, oldContent, newContent, type: hunk.move_path ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom }
++      return { filePath: group.filePath, oldContent, newContent: next.text, type: movePath ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom: next.bom, expected }
+     }
+     case "delete": {
+-      const source = yield* Bom.readFile(afs, filePath)
+-      const contentToDelete = source.text
+-      const diffOld = normalizeLineEndings(contentToDelete)
+-      const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
+-      let deletions = 0
+-      for (const change of diffLines(diffOld, "")) {
+-        if (change.removed) deletions += change.count || 0
+-      }
+-      return { filePath, oldContent: contentToDelete, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom }
++      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
++      const snapshot = yield* Mutation.read(afs, group.filePath)
++      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
++      const source = Bom.split(Mutation.decode(snapshot))
++      const diffOld = normalizeLineEndings(source.text)
++      const deleteDiff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, ""))
++      const { deletions } = countDiff(diffOld, "")
++      // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
++      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom, expected: [snapshot] }
+     }
+     default:
+-      return yield* Effect.fail(new Error(`Unknown hunk type: ${(hunk as { type: string }).type}`))
++      return yield* Effect.fail(new Error(`Unknown hunk type: ${(first as { type: string }).type}`))
+   }
+ })
+ 
++function countDiff(oldContent: string, newContent: string) {
++  let additions = 0
++  let deletions = 0
++  for (const change of diffLines(oldContent, newContent)) {
++    if (change.added) additions += change.count || 0
++    if (change.removed) deletions += change.count || 0
++  }
++  return { additions, deletions }
++}
++
++function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
++  const groups = new Map<string, HunkGroup>()
++  for (const hunk of hunks) {
++    const filePath = path.resolve(instance.directory, hunk.path)
++    const canonicalPath = AppFileSystem.resolve(filePath)
++    const group = groups.get(canonicalPath)
++    // realpath alias 归并到同一 source proposal，避免同一文件生成两个完整-file writes。
++    // missing leaf 继续使用 resolved fallback，保持 AppFileSystem.resolve 的既有边界。
++    if (group) group.hunks.push(hunk)
++    else groups.set(canonicalPath, { filePath, canonicalPath, hunks: [hunk] })
++  }
++  return [...groups.values()]
++}
++
++function validateOwnership(groups: HunkGroup[], instance: InstanceContext) {
++  const sources = new Set(groups.map((group) => group.canonicalPath))
++  const destinations = new Set<string>()
++  // source/destination ownership 在 Permission 前解析；锁排序不能替代语义冲突判断。
++  for (const group of groups) {
++    const first = group.hunks[0]
++    const compatible = group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1)
++    // ownership conflict 在 Permission 前拒绝；锁排序只能避免死锁，不能选择语义。
++    // 同 source 的 update entry 是唯一允许聚合的组合；add/delete 不凭猜测重建新语义。
++    if (!compatible) throw new Error(`Conflicting operations for ${group.filePath}`)
++    if (first.type !== "update") continue
++    const groupDestinations = new Set<string>()
++    for (const hunk of group.hunks) {
++      if (hunk.type !== "update") continue
++      if (!hunk.move_path) continue
++      // move 同时消费 source 并产生 destination，任何交叉 ownership 都会改变另一个操作的结果。
++      const destination = AppFileSystem.resolve(path.resolve(instance.directory, hunk.move_path))
++      if (
++        destination === group.canonicalPath ||
++        sources.has(destination) ||
++        destinations.has(destination) ||
++        (groupDestinations.size > 0 && !groupDestinations.has(destination))
++      ) {
++        throw new Error(`Conflicting mutation ownership for ${group.filePath}`)
++      }
++      groupDestinations.add(destination)
++    }
++    for (const destination of groupDestinations) destinations.add(destination)
++  }
++}
++
+ export const Parameters = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
+ })
+@@ -148,17 +220,7 @@ export const ApplyPatchTool = Tool.define(
+       const instance = yield* InstanceState.context
+ 
+       // Validate file paths and check permissions
+-      const fileChanges: Array<{
+-        filePath: string
+-        oldContent: string
+-        newContent: string
+-        type: "add" | "update" | "delete" | "move"
+-        movePath?: string
+-        diff: string
+-        additions: number
+-        deletions: number
+-        bom: boolean
+-      }> = []
++      const fileChanges: FileChange[] = []
+ 
+       let totalDiff = ""
+ 
+@@ -168,17 +230,27 @@ export const ApplyPatchTool = Tool.define(
+       // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
+       const hunkErrors: string[] = []
+ 
+-      for (const hunk of hunks) {
+-        const filePath = path.resolve(instance.directory, hunk.path)
+-        yield* assertExternalDirectoryEffect(ctx, filePath, {
+-          metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
+-        })
++      const groups = groupHunks(hunks, instance)
++      validateOwnership(groups, instance)
++      for (const group of groups) {
++        for (const hunk of group.hunks) {
++          const filePath = path.resolve(instance.directory, hunk.path)
++          yield* assertExternalDirectoryEffect(ctx, filePath, {
++            metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
++          })
++          if (hunk.type === "update" && hunk.move_path) {
++            const movePath = path.resolve(instance.directory, hunk.move_path)
++            yield* assertExternalDirectoryEffect(ctx, movePath, {
++              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
++            })
++          }
++        }
+ 
+-        // 用 Effect.exit 捕获 hunk 处理的成功/失败
+-        const exit = yield* Effect.exit(processSingleHunk(hunk, filePath, instance, afs, ctx, params.patchText))
++        // 同一 source 的所有 entry 共享一次 proposal；失败时只丢弃 working copy。
++        const exit = yield* Effect.exit(processHunkGroup(group, instance, afs))
+         if (Exit.isFailure(exit)) {
+           const err = Cause.squash(exit.cause)
+-          hunkErrors.push(`${hunk.path}: ${err instanceof Error ? err.message : String(err)}`)
++          hunkErrors.push(`${group.filePath}: ${err instanceof Error ? err.message : String(err)}`)
+           continue
+         }
+         const change = exit.value
+@@ -219,48 +291,60 @@ export const ApplyPatchTool = Tool.define(
+ 
+       // Apply the changes
+       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
+-
+-      for (const change of fileChanges) {
+-        const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
+-        switch (change.type) {
+-          case "add":
+-            // Create parent directories (recursive: true is safe on existing/root dirs)
+-
+-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
+-            updates.push({ file: change.filePath, event: "add" })
+-            break
+-
+-          case "update":
+-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
+-            updates.push({ file: change.filePath, event: "change" })
+-            break
+-
+-          case "move":
+-            if (change.movePath) {
+-              // Create parent directories (recursive: true is safe on existing/root dirs)
+-
+-              yield* afs.writeWithDirs(change.movePath!, Bom.join(change.newContent, change.bom))
+-              yield* afs.remove(change.filePath)
+-              updates.push({ file: change.filePath, event: "unlink" })
+-              updates.push({ file: change.movePath, event: "add" })
++      const editedFiles: string[] = []
++      const expected = fileChanges.flatMap((change) => change.expected)
++      // 所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
++
++      yield* Mutation.commit({
++        fs: afs,
++        expected,
++        execute: Effect.gen(function* () {
++          for (const change of fileChanges) {
++            const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
++            switch (change.type) {
++              case "add":
++                // Create parent directories (recursive: true is safe on existing/root dirs)
++
++                yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
++                updates.push({ file: change.filePath, event: "add" })
++                break
++
++              case "update":
++                yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
++                updates.push({ file: change.filePath, event: "change" })
++                break
++
++              case "move":
++                if (change.movePath) {
++                  // Create parent directories (recursive: true is safe on existing/root dirs)
++
++                  yield* afs.writeWithDirs(change.movePath, Bom.join(change.newContent, change.bom))
++                  yield* afs.remove(change.filePath)
++                  updates.push({ file: change.filePath, event: "unlink" })
++                  updates.push({ file: change.movePath, event: "add" })
++                }
++                break
++
++              case "delete":
++                yield* afs.remove(change.filePath)
++                updates.push({ file: change.filePath, event: "unlink" })
++                break
+             }
+-            break
+-
+-          case "delete":
+-            yield* afs.remove(change.filePath)
+-            updates.push({ file: change.filePath, event: "unlink" })
+-            break
+-        }
+ 
+-        if (edited) {
+-          if (yield* format.file(edited)) {
+-            yield* Bom.syncFile(afs, edited, change.bom)
++            if (edited) {
++              if (yield* format.file(edited)) {
++                yield* Bom.syncFile(afs, edited, change.bom)
++              }
++              editedFiles.push(edited)
++            }
+           }
+-          yield* bus.publish(File.Event.Edited, { file: edited })
+-        }
+-      }
++        }),
++      }).pipe(Effect.orDie)
+ 
+       // Publish file change events
++      for (const file of editedFiles) {
++        yield* bus.publish(File.Event.Edited, { file })
++      }
+       for (const update of updates) {
+         yield* bus.publish(FileWatcher.Event.Updated, update)
+       }
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index 0ce596da196f31bb9222f45d9c873bfe5912af42..ba3113e13071bc90de54e6c3b9a369fd5c15df7c 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -1,5 +1,5 @@
+ import * as path from "path"
+-import { Effect, Schema, Semaphore } from "effect"
++import { Effect, Schema } from "effect"
+ import * as Tool from "./tool"
+ import { LSP } from "@/lsp/lsp"
+ import { createTwoFilesPatch, diffLines } from "diff"
+@@ -16,6 +16,7 @@ import * as Bom from "@/util/bom"
+ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+ import { closestWindow } from "@/patch/match"
+ import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
++import * as Mutation from "./file-mutation-coordinator"
+ 
+ /**
+  * 兼容导出：单点替换 = applyEdits 单元素，保证测试与外部调用仍见 replace API。
+@@ -25,18 +26,6 @@ export function replace(content: string, oldString: string, newString: string, r
+   return applyExactReplace(content, oldString, newString, replaceAll)
+ }
+ 
+-const locks = new Map<string, Semaphore.Semaphore>()
+-
+-function lock(filePath: string) {
+-  const resolvedFilePath = AppFileSystem.resolve(filePath)
+-  const hit = locks.get(resolvedFilePath)
+-  if (hit) return hit
+-
+-  const next = Semaphore.makeUnsafe(1)
+-  locks.set(resolvedFilePath, next)
+-  return next
+-}
+-
+ const EditItem = Schema.Struct({
+   oldString: Schema.String.annotate({
+     description:
+@@ -182,36 +171,46 @@ export const EditTool = Tool.define(
+           let contentNew = ""
+           let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
+ 
+-          yield* lock(filePath).withPermits(1)(
+-            Effect.gen(function* () {
+-              if (isCreate(edits)) {
+-                const existed = yield* afs.existsSafe(filePath)
+-                const source = existed ? yield* Bom.readFile(afs, filePath) : { bom: false, text: "" }
+-                const next = Bom.split(edits[0].newString)
+-                const desiredBom = source.bom || next.bom
+-                contentOld = source.text
+-                contentNew = next.text
+-                diff = trimDiff(
+-                  createTwoFilesPatch(
+-                    filePath,
+-                    filePath,
+-                    normalizeLineEndings(contentOld),
+-                    normalizeLineEndings(contentNew),
+-                  ),
+-                )
+-                yield* ctx.ask({
+-                  permission: "edit",
+-                  patterns: [path.relative(instance.worktree, filePath)],
+-                  always: ["*"],
+-                  metadata: {
+-                    filepath: filePath,
+-                    diff,
+-                  },
+-                })
++          // 先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
++          const proposal = yield* Mutation.read(afs, filePath)
++          const source = Bom.split(Mutation.decode(proposal))
++          // source.text 只供当前 edit-apply owner 使用；coordinator 不知道 edits[] 的匹配规则。
++          if (proposal.version.state === "other") {
++            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
++            throw new Error(`Path is not a file: ${filePath}`)
++          }
++
++          if (isCreate(edits)) {
++            const next = Bom.split(edits[0].newString)
++            const desiredBom = source.bom || next.bom
++            const existed = proposal.version.state === "file"
++            // create/overwrite 继续允许覆盖 unchanged existing file；只有 Permission 后的变化产生 conflict。
++            contentOld = source.text
++            contentNew = next.text
++            diff = trimDiff(
++              createTwoFilesPatch(
++                filePath,
++                filePath,
++                normalizeLineEndings(contentOld),
++                normalizeLineEndings(contentNew),
++              ),
++            )
++            yield* ctx.ask({
++              permission: "edit",
++              patterns: [path.relative(instance.worktree, filePath)],
++              always: ["*"],
++              metadata: {
++                filepath: filePath,
++                diff,
++              },
++            })
++            // 旧 edit 的 create/overwrite 语义保留，只有 commit 阶段新增 state recheck。
++            yield* Mutation.commit({
++              fs: afs,
++              expected: [proposal],
++              execute: Effect.gen(function* () {
+                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-                if (yield* format.file(filePath)) {
+-                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-                }
++                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+                 // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
+                 const finalLF = normalizeLineEndings(contentNew)
+                 const wroteLF = normalizeLineEndings(next.text)
+@@ -219,101 +218,105 @@ export const EditTool = Tool.define(
+                   filePath,
+                   edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
+                 }
+-                yield* bus.publish(File.Event.Edited, { file: filePath })
+-                yield* bus.publish(FileWatcher.Event.Updated, {
+-                  file: filePath,
+-                  event: existed ? "change" : "add",
+-                })
+-                return
+-              }
+-
+-              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+-              if (!info) throw new Error(`File ${filePath} not found`)
+-              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+-              const source = yield* Bom.readFile(afs, filePath)
+-              contentOld = source.text
+-
+-              // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
+-              const ending = detectLineEnding(contentOld)
+-              const baseLF = normalizeLineEndings(contentOld)
+-              const editsLF = edits.map((edit) => ({
+-                oldString: normalizeLineEndings(edit.oldString),
+-                newString: normalizeLineEndings(edit.newString),
+-                replaceAll: edit.replaceAll,
+-              }))
+-
+-              let applied
+-              try {
+-                // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
+-                applied = applyEdits(baseLF, editsLF, filePath)
+-              } catch (error) {
+-                const message = error instanceof Error ? error.message : String(error)
+-                if (message.includes("Could not find") || message.includes("Could not find oldString")) {
+-                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
+-                  const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
+-                  throw new Error(
+-                    message +
+-                      (closest
+-                        ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+-                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+-                  )
+-                }
+-                throw error
++              }),
++            }).pipe(Effect.orDie)
++            // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
++            yield* bus.publish(File.Event.Edited, { file: filePath })
++            yield* bus.publish(FileWatcher.Event.Updated, {
++              file: filePath,
++              event: existed ? "change" : "add",
++            })
++          } else {
++            if (proposal.version.state === "absent") throw new Error(`File ${filePath} not found`)
++            contentOld = source.text
++
++            // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
++            const ending = detectLineEnding(contentOld)
++            const baseLF = normalizeLineEndings(contentOld)
++            // normalize 只属于 edit-apply owner 的 proposal 阶段，commit 不会重新解释模型输入。
++            const editsLF = edits.map((edit) => ({
++              oldString: normalizeLineEndings(edit.oldString),
++              newString: normalizeLineEndings(edit.newString),
++              replaceAll: edit.replaceAll,
++            }))
++
++            let applied
++            try {
++              // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
++              applied = applyEdits(baseLF, editsLF, filePath)
++            } catch (error) {
++              const message = error instanceof Error ? error.message : String(error)
++              if (message.includes("Could not find") || message.includes("Could not find oldString")) {
++                const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
++                const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
++                throw new Error(
++                  message +
++                    (closest
++                      ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
++                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
++                )
+               }
++              throw error
++            }
+ 
+-              contentNew = convertToLineEnding(applied.contentNew, ending)
+-              const desiredBom = source.bom || Bom.split(contentNew).bom
+-              contentNew = Bom.split(contentNew).text
++            contentNew = convertToLineEnding(applied.contentNew, ending)
++            const desiredBom = source.bom || Bom.split(contentNew).bom
++            contentNew = Bom.split(contentNew).text
+ 
+-              diff = trimDiff(
+-                createTwoFilesPatch(
+-                  filePath,
+-                  filePath,
+-                  normalizeLineEndings(contentOld),
+-                  normalizeLineEndings(contentNew),
+-                ),
+-              )
+-              yield* ctx.ask({
+-                permission: "edit",
+-                patterns: [path.relative(instance.worktree, filePath)],
+-                always: ["*"],
+-                metadata: {
+-                  filepath: filePath,
+-                  diff,
+-                },
+-              })
+-
+-              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-              if (yield* format.file(filePath)) {
+-                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-              }
+-              yield* bus.publish(File.Event.Edited, { file: filePath })
+-              yield* bus.publish(FileWatcher.Event.Updated, {
+-                file: filePath,
+-                event: "change",
+-              })
+-              diff = trimDiff(
+-                createTwoFilesPatch(
+-                  filePath,
+-                  filePath,
+-                  normalizeLineEndings(contentOld),
+-                  normalizeLineEndings(contentNew),
+-                ),
+-              )
+-
+-              // INV-16：成功后始终发完整参数面 { filePath, edits }，
+-              // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
+-              // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
+-              syncInput = {
++            diff = trimDiff(
++              createTwoFilesPatch(
+                 filePath,
+-                edits: applied.syncEdits.map((edit) => ({
+-                  oldString: convertToLineEnding(edit.oldString, ending),
+-                  newString: convertToLineEnding(edit.newString, ending),
+-                  ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
+-                })),
+-              }
+-            }).pipe(Effect.orDie),
+-          )
++                filePath,
++                normalizeLineEndings(contentOld),
++                normalizeLineEndings(contentNew),
++              ),
++            )
++            yield* ctx.ask({
++              permission: "edit",
++              patterns: [path.relative(instance.worktree, filePath)],
++              always: ["*"],
++              metadata: {
++                filepath: filePath,
++                diff,
++              },
++            })
++
++            // applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
++            yield* Mutation.commit({
++              fs: afs,
++              expected: [proposal],
++              execute: Effect.gen(function* () {
++                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
++                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
++              }),
++            }).pipe(Effect.orDie)
++            // diagnostics 在 commit 后执行，LSP 观察到的是已经完成 formatter 的磁盘内容。
++            yield* bus.publish(File.Event.Edited, { file: filePath })
++            yield* bus.publish(FileWatcher.Event.Updated, {
++              file: filePath,
++              event: "change",
++            })
++            diff = trimDiff(
++              createTwoFilesPatch(
++                filePath,
++                filePath,
++                normalizeLineEndings(contentOld),
++                normalizeLineEndings(contentNew),
++              ),
++            )
++
++            // INV-16：成功后始终发完整参数面 { filePath, edits }，
++            // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
++            // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
++            syncInput = {
++              filePath,
++              edits: applied.syncEdits.map((edit) => ({
++                oldString: convertToLineEnding(edit.oldString, ending),
++                newString: convertToLineEnding(edit.newString, ending),
++                ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
++              })),
++            }
++          }
+ 
+           const diffOld = normalizeLineEndings(contentOld)
+           const diffNew = normalizeLineEndings(contentNew)
+@@ -373,7 +376,7 @@ export const EditTool = Tool.define(
+             title: `${path.relative(instance.worktree, filePath)}`,
+             output,
+           }
+-        }),
++        }).pipe(Effect.orDie),
+     }
+   }),
+ )
+diff --git a/packages/opencode/src/tool/file-mutation-coordinator.ts b/packages/opencode/src/tool/file-mutation-coordinator.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf9db6a6b6
+--- /dev/null
++++ b/packages/opencode/src/tool/file-mutation-coordinator.ts
+@@ -0,0 +1,151 @@
++import { Effect, Semaphore } from "effect"
++import { AppFileSystem } from "@opencode-ai/core/filesystem"
++import { Hash } from "@opencode-ai/core/util/hash"
++
++export type FileVersion =
++  | { state: "absent" }
++  | { state: "file"; fingerprint: string }
++  | { state: "other"; kind: string }
++
++// coordinator 只保存一次 execute 内的短生命周期事实，不把 version 放进 Tool schema、Message 或 DB。
++// `file` 的 fingerprint 覆盖完整 raw bytes，避免 size/mtime 或 head sample 把变化隐藏起来。
++// `absent`/`file` 的区分只解决可观测的状态变化，不扩展成 inode generation 或跨进程事务。
++// 这使 coordinator 保持在 built-in Tool seam，而不是吸收 filesystem 全局治理职责。
++
++export type MutationRead = {
++  path: string
++  canonicalPath: string
++  version: FileVersion
++  bytes: Uint8Array
++}
++
++// proposal owner 消费 bytes，commit owner 消费 version/path；两个字段必须来自同一 read。
++
++export class MutationConflict extends Error {
++  constructor(filePath: string) {
++    // conflict 是 diagnostic/error outcome；调用方必须重新 read，不能复用旧 Permission。
++    super(`File changed while waiting for permission: ${filePath}. Read the file again and retry.`)
++    this.name = "MutationConflict"
++  }
++}
++
++// version 同时描述路径状态和内容身份；空文件必须与不存在路径分开，避免 create proposal
++// 在 Permission 等待期间遇到外部创建的空文件时仍被误判为 unchanged。
++
++type QueueEntry = {
++  semaphore: Semaphore.Semaphore
++  users: number
++}
++
++// users 是引用计数而非 permit 数：等待者尚未取得 permit，也必须阻止历史 entry 被删除。
++// 这避免新调用创建第二个 semaphore 后与旧 waiter 并行写入同一 canonical path。
++
++const queues = new Map<string, QueueEntry>()
++
++export function read(fs: AppFileSystem.Interface, filePath: string) {
++  return Effect.gen(function* () {
++    const canonicalPath = AppFileSystem.resolve(filePath)
++    // canonicalization 只复用既有 realpath/resolved fallback，不扩展 hard-link 或 lstat identity。
++    const info = yield* fs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
++    if (!info) {
++      // 缺失路径保留 resolved fallback key；后续路径变成 existing file 会在 commit recheck 冲突。
++      // proposal owner 仍可把 bytes 当作空文本，但 version 永远保留 absent 标签。
++      return {
++        path: filePath,
++        canonicalPath,
++        version: { state: "absent" as const },
++        bytes: new Uint8Array(),
++      }
++    }
++    if (info.type !== "File") {
++      // Directory 等非文件状态不进入 proposal 成功域，避免 writeFile 的底层错误成为隐式分支。
++      // 这里返回 other 供 Tool 在 Permission 前拒绝，而不是把错误延迟到 commit callback。
++      return {
++        path: filePath,
++        canonicalPath,
++        version: { state: "other" as const, kind: String(info.type) },
++        bytes: new Uint8Array(),
++      }
++    }
++    // fingerprint 与 proposal 消费的 bytes 来自同一次读取，禁止在 proposal 后补读版本。
++    const bytes = yield* fs.readFile(filePath)
++    return {
++      path: filePath,
++      canonicalPath,
++      version: { state: "file" as const, fingerprint: Hash.fast(Buffer.from(bytes)) },
++      bytes,
++    }
++  })
++}
++
++export function decode(readResult: MutationRead) {
++  // decoder 与原 Bom.readFile 保持 UTF-8/ignoreBOM 语义，coordinator 不接管文本匹配。
++  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(readResult.bytes)
++}
++
++export type CommitInput<A, E> = {
++  fs: AppFileSystem.Interface
++  expected: readonly MutationRead[]
++  execute: Effect.Effect<A, E>
++}
++
++// caller 必须先完成 proposal 与 Permission；commit 只接受已构造的 content，不重新匹配输入文本。
++
++export function commit<A, E>(input: CommitInput<A, E>) {
++  // Permission 已在 caller 完成；这里才注册 key，因此审批时间不会阻塞同文件的其他 proposal。
++  const entries = register(input.expected)
++  const run = withLocks(
++    entries,
++    Effect.gen(function* () {
++      for (const expected of input.expected) {
++        const current = yield* read(input.fs, expected.path)
++        // 所有 expected state 都在第一笔写入前检查；冲突不触发 retry 或 stale partial commit。
++        if (!sameVersion(expected.version, current.version)) {
++          return yield* Effect.fail(new MutationConflict(expected.path))
++        }
++      }
++      return yield* input.execute
++    }),
++  )
++  // ensuring 覆盖 success、conflict、I/O error、formatter error 和 interruption。
++  return run.pipe(Effect.ensuring(Effect.sync(() => unregister(entries))))
++}
++
++function register(reads: readonly MutationRead[]) {
++  const entries = new Map<string, QueueEntry>()
++  // 同一次多文件 commit 只注册每个 canonical key 一次，避免重复 permit 与错误 cleanup。
++  for (const readResult of reads) {
++    if (entries.has(readResult.canonicalPath)) continue
++    // canonical key 使用 path identity，而不是 content fingerprint；同内容不同文件仍可并发。
++    const current = queues.get(readResult.canonicalPath)
++    const entry = current ?? { semaphore: Semaphore.makeUnsafe(1), users: 0 }
++    entry.users++
++    // users 覆盖 holder 与 waiter；只有最后一个引用离开时才允许删除 Map entry。
++    queues.set(readResult.canonicalPath, entry)
++    entries.set(readResult.canonicalPath, entry)
++  }
++  return [...entries.entries()].sort(([a], [b]) => a.localeCompare(b))
++}
++
++function withLocks<A, E>(entries: Array<[string, QueueEntry]>, effect: Effect.Effect<A, E>) {
++  // 所有 key 按 canonical 字典序嵌套，既保持不同文件并发，也避免 multi-file deadlock。
++  return entries.reduceRight((next, [, entry]) => entry.semaphore.withPermits(1)(next), effect)
++}
++
++function unregister(entries: Array<[string, QueueEntry]>) {
++  for (const [key, entry] of entries) {
++    entry.users--
++    // 已经有 successor 时 users 不会归零；旧 entry 继续服务原有 waiter。
++    // identity 检查防止旧 tail 释放时删除已被新 waiter 接管的 entry。
++    if (entry.users === 0 && queues.get(key) === entry) queues.delete(key)
++  }
++}
++
++function sameVersion(expected: FileVersion, current: FileVersion) {
++  // state 先比较，只有两个 file state 才比较 fingerprint；empty file 不会等同 absent。
++  if (expected.state !== current.state) return false
++  // absent -> empty 是状态变化；file -> same bytes 的 ABA 则保持明确的不可观测边界。
++  if (expected.state === "other" && current.state === "other") return expected.kind === current.kind
++  if (expected.state !== "file" || current.state !== "file") return true
++  return expected.fingerprint === current.fingerprint
++}
+diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
+index acf5f244fee14e3b1b57950921110e0d9c02b739..107efde032d394d46d70ec702015bfe380c13630 100644
+--- a/packages/opencode/src/tool/write.ts
++++ b/packages/opencode/src/tool/write.ts
+@@ -15,6 +15,7 @@ import { trimDiff } from "./edit"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import * as Bom from "@/util/bom"
+ import { normalizeLineEndings } from "@/util/line-ending"
++import * as Mutation from "./file-mutation-coordinator"
+ 
+ export const Parameters = Schema.Struct({
+   content: Schema.String.annotate({ description: "The content to write to the file" }),
+@@ -46,12 +47,20 @@ export const WriteTool = Tool.define(
+             metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
+           })
+ 
+-          const exists = yield* fs.existsSafe(filepath)
+-          const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
++          // write proposal 使用同一次 raw read 捕获 expected state，避免 Permission 后提交旧内容。
++          const proposal = yield* Mutation.read(fs, filepath)
++          if (proposal.version.state === "other") {
++            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filepath}`)
++            throw new Error(`Path is not a file: ${filepath}`)
++          }
++          const exists = proposal.version.state === "file"
++          const source = Bom.split(Mutation.decode(proposal))
++          // exists 只表示 proposal 时的 file state；commit recheck 仍以 tagged version 为准。
+           const next = Bom.split(params.content)
+           const desiredBom = source.bom || next.bom
+           const contentOld = source.text
+           const contentNew = next.text
++          // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
+ 
+           const diff = trimDiff(
+             createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+@@ -66,12 +75,20 @@ export const WriteTool = Tool.define(
+             },
+           })
+ 
+-          yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
+-          // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
+-          const formatted = yield* format.file(filepath)
+-          if (formatted) {
+-            yield* Bom.syncFile(fs, filepath, desiredBom)
+-          }
++          let formatted = false
++          let finalSource = source
++          // formatter 仍在同一 commit critical section，避免第二个 mutation 看到半完成内容。
++          yield* Mutation.commit({
++            fs,
++            expected: [proposal],
++            execute: Effect.gen(function* () {
++              yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
++              // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
++              formatted = yield* format.file(filepath)
++              if (formatted) yield* Bom.syncFile(fs, filepath, desiredBom)
++              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
++            }),
++          }).pipe(Effect.orDie)
+           // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
+           let metadataDiff: string | undefined
+           // [local-smark] 当 auto-format 改变了写入内容时，将格式化后的内容
+@@ -83,7 +100,7 @@ export const WriteTool = Tool.define(
+           // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
+           let formattedContent: string | undefined
+           if (exists || formatted) {
+-            const finalSource = yield* Bom.readFile(fs, filepath)
++            // finalSource 在 commit lock 内读取，metadata 不会引用另一个 mutation 的中间内容。
+             if (exists) {
+               metadataDiff = trimDiff(
+                 createTwoFilesPatch(
+diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
+index 2182fa57deecba2b36e0b891af67b9fc5e131976..218754c05e4db34577a31934eacb7f0efa77ea4e 100644
+--- a/packages/opencode/test/tool/apply_patch.test.ts
++++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -580,6 +580,46 @@ describe("tool.apply_patch freeform", () => {
+     }),
+   )
+ 
++  it.instance("accepts repeated identical move declarations for one source", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const original = path.join(test.directory, "old", "name.txt")
++      yield* makeDir(path.dirname(original))
++      yield* writeText(original, "old content\nsecond line\n")
++
++      const patchText =
++        "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n-old content\n+new content\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n-second line\n+third line\n*** End Patch"
++
++      yield* execute({ patchText }, ctx)
++
++      yield* expectReadFailure(original)
++      expect(yield* readText(path.join(test.directory, "renamed/name.txt"))).toBe("new content\nthird line\n")
++    }),
++  )
++
++  it.instance("accepts canonical-equivalent repeated move destinations", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const original = path.join(test.directory, "old", "name.txt")
++      const renamed = path.join(test.directory, "renamed")
++      yield* makeDir(path.dirname(original))
++      yield* makeDir(renamed)
++      yield* Effect.promise(() => fs.symlink(renamed, path.join(test.directory, "alias")))
++      yield* writeText(original, "old content\nsecond line\n")
++      yield* writeText(path.join(renamed, "name.txt"), "existing\n")
++
++      const patchText =
++        "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n-old content\n+new content\n*** Update File: old/name.txt\n*** Move to: alias/name.txt\n@@\n-second line\n+third line\n*** End Patch"
++
++      yield* execute({ patchText }, ctx)
++
++      yield* expectReadFailure(original)
++      expect(yield* readText(path.join(renamed, "name.txt"))).toBe("new content\nthird line\n")
++    }),
++  )
++
+   it.instance("moves file overwriting existing destination", () =>
+     Effect.gen(function* () {
+       const test = yield* TestInstance
+diff --git a/packages/opencode/test/tool/file-mutation-concurrency.test.ts b/packages/opencode/test/tool/file-mutation-concurrency.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290be882489
+--- /dev/null
++++ b/packages/opencode/test/tool/file-mutation-concurrency.test.ts
+@@ -0,0 +1,575 @@
++import { describe, expect } from "bun:test"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
++import path from "path"
++import { EditTool } from "../../src/tool/edit"
++import { WriteTool } from "../../src/tool/write"
++import { ApplyPatchTool } from "../../src/tool/apply_patch"
++import * as Tool from "../../src/tool/tool"
++import { LSP } from "@/lsp/lsp"
++import { AppFileSystem } from "@opencode-ai/core/filesystem"
++import { Format } from "../../src/format"
++import { Agent } from "../../src/agent/agent"
++import { Bus } from "../../src/bus"
++import { Truncate } from "@/tool/truncate"
++import { MessageID, PartID, SessionID } from "../../src/session/schema"
++import { MessageV2 } from "../../src/session/message-v2"
++import { ModelID, ProviderID } from "../../src/provider/schema"
++import { awaitWithTimeout, testEffect } from "../lib/effect"
++import { TestInstance } from "../fixture/fixture"
++
++const layer = Layer.mergeAll(
++  LSP.defaultLayer,
++  AppFileSystem.defaultLayer,
++  Format.defaultLayer,
++  Bus.layer,
++  Truncate.defaultLayer,
++  Agent.defaultLayer,
++)
++
++const it = testEffect(layer)
++
++const executeEdit = Effect.fn("FileMutationConcurrencyTest.executeEdit")(function* (
++  params: Tool.InferParameters<typeof EditTool>,
++  ctx: Tool.Context,
++) {
++  const info = yield* EditTool
++  const tool = yield* info.init()
++  return yield* tool.execute(params, ctx)
++})
++
++// helpers 只初始化真实 Tool，不替换 filesystem、Permission 或 formatter；测试因此到达生产 execute seam。
++
++const executeWrite = Effect.fn("FileMutationConcurrencyTest.executeWrite")(function* (
++  params: Tool.InferParameters<typeof WriteTool>,
++  ctx: Tool.Context,
++) {
++  const info = yield* WriteTool
++  const tool = yield* info.init()
++  return yield* tool.execute(params, ctx)
++})
++
++const executePatch = Effect.fn("FileMutationConcurrencyTest.executePatch")(function* (
++  params: Tool.InferParameters<typeof ApplyPatchTool>,
++  ctx: Tool.Context,
++) {
++  const info = yield* ApplyPatchTool
++  const tool = yield* info.init()
++  return yield* tool.execute(params, ctx)
++})
++
++function priorRead(filePath: string): MessageV2.WithParts[] {
++  // 当前 edit 的 blind-edit 门闩要求 completed read；这里构造最小完整 MessageV2 part。
++  // prior read 是 Session contract 证据，proposal version 仍由 coordinator 从磁盘重新读取。
++  const messageID = MessageID.make("msg_prior")
++  return [
++    {
++      info: {
++        id: messageID,
++        role: "assistant",
++        sessionID: SessionID.make("ses_mutation-test"),
++        parentID: MessageID.make("msg_root"),
++        agent: "build",
++        mode: "build",
++        path: { cwd: ".", root: "." },
++        cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++        modelID: ModelID.make("test"),
++        providerID: ProviderID.make("test"),
++        time: { created: 0 },
++      } satisfies MessageV2.Assistant,
++      parts: [
++        {
++          id: PartID.make("prt_prior"),
++          messageID,
++          sessionID: SessionID.make("ses_mutation-test"),
++          type: "tool",
++          tool: "read",
++          callID: "call_prior",
++          state: {
++            status: "completed",
++            input: { filePath },
++            output: "base\n",
++            title: "Read",
++            metadata: {},
++            time: { start: 0, end: 1 },
++          },
++        } satisfies MessageV2.ToolPart,
++      ],
++    } satisfies MessageV2.WithParts,
++  ]
++}
++
++function context(ask: Tool.Context["ask"], messages: MessageV2.WithParts[] = []): Tool.Context {
++  // 每个并发 caller 使用独立 ask gate，顺序由 Deferred 控制而非 scheduler timing。
++  return {
++    sessionID: SessionID.make("ses_mutation-test"),
++    messageID: MessageID.make("msg_mutation-test"),
++    callID: "call_mutation-test",
++    agent: "build",
++    abort: AbortSignal.any([]),
++    messages,
++    metadata: () => Effect.void,
++    ask,
++  }
++}
++
++describe("built-in file mutation coordination", () => {
++  // 这些测试统一从真实 Tool.execute seam 观察磁盘内容；permission Deferred 控制顺序，避免依赖固定 sleep。
++  // expected content 都是手写字面量，测试不会复制 coordinator 的匹配或版本逻辑。
++  // repeated parsed entry 要重置 Patch cursor，但仍只允许一个 source commit。
++  // 第一 entry 修改文件尾部，第二 entry 回到文件头部；若错误共享 cursor，第二条会被拒绝。
++  // 断言同时覆盖组合后的最终字节和一次性 proposal 的用户可见结果。
++  // 这里不观察 fileChanges 或 queue map，只观察 Tool 完成后的文件内容。
++  // 失败分支同样只通过 Tool Exit 和文件字节观察，避免把实现细节固化进回归测试。
++  // 测试中的 Permission gate 对应真实 ctx.ask，不替换 coordinator 的 commit boundary。
++  it.instance("composes repeated update entries without sharing their patch cursors", () =>
++    Effect.gen(function* () {
++      // fixture 顺序与 patch entry 顺序故意相反，确保测试能区分 entry boundary 和单一 chunks cursor。
++      // 预期值由原始四行文本手工推导，不调用 Patch 或 coordinator 生成 expected。
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const filePath = path.join(test.directory, "repeated-entry.txt")
++      yield* fs.writeWithDirs(filePath, "line1\nline2\nline3\nline4\n")
++
++      const patchText = [
++        "*** Begin Patch",
++        "*** Update File: repeated-entry.txt",
++        "@@",
++        "-line4",
++        "+last",
++        "*** Update File: repeated-entry.txt",
++        "@@",
++        "-line1",
++        "+first",
++        "*** End Patch",
++      ].join("\n")
++
++      yield* executePatch({ patchText }, context(() => Effect.void))
++      expect(yield* fs.readFileString(filePath)).toBe("first\nline2\nline3\nlast\n")
++    }),
++  )
++
++  // destination collision 必须在 Permission 前失败，避免后一个 move 静默覆盖前一个结果。
++  // 两个 source 都拥有同一个 destination，任何顺序都无法代表一个无损的 primary path。
++  // 失败后三个路径都保持原状，证明拒绝发生在 filesystem commit 之前。
++  // destination 不存在的断言也防止“先写后报错”的伪原子行为。
++  it.instance("rejects overlapping move ownership before permission or writes", () =>
++    Effect.gen(function* () {
++      // 两个 move 都来自 public patchText 输入，测试 ownership guard 的真实信任边界。
++      // 只检查失败和原始字节，避免把错误消息格式当成成功条件。
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const first = path.join(test.directory, "first.txt")
++      const second = path.join(test.directory, "second.txt")
++      yield* fs.writeWithDirs(first, "first\n")
++      yield* fs.writeWithDirs(second, "second\n")
++
++      const patchText = [
++        "*** Begin Patch",
++        "*** Update File: first.txt",
++        "*** Move to: destination.txt",
++        "@@",
++        "-first",
++        "+FIRST",
++        "*** Update File: second.txt",
++        "*** Move to: destination.txt",
++        "@@",
++        "-second",
++        "+SECOND",
++        "*** End Patch",
++      ].join("\n")
++
++      const exit = yield* executePatch({ patchText }, context(() => Effect.void)).pipe(Effect.exit)
++      expect(Exit.isFailure(exit)).toBe(true)
++      expect(yield* fs.readFileString(first)).toBe("first\n")
++      expect(yield* fs.readFileString(second)).toBe("second\n")
++      expect(yield* fs.existsSafe(path.join(test.directory, "destination.txt"))).toBe(false)
++    }),
++  )
++
++  // absent 与 empty existing 使用不同 tagged version，Permission 期间创建空文件也必须冲突。
++  // 这里的空文件由测试直接创建，绕过 coordinator，模拟真实外部 writer 状态转换。
++  // 旧 proposal 不得将空文件误认为原来的 missing path。
++  // expected state 的存在性标签是这个测试的独立输入，不由实现结果反推。
++  it.instance("rejects a missing-to-empty transition during write permission", () =>
++    Effect.gen(function* () {
++      // proposal 读取到 absent 后，测试在真实 ask 阻塞窗口中创建 empty file。
++      // 这是 state tag 回归，不依赖 mtime 分辨率或 filesystem timing。
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const filePath = path.join(test.directory, "created-during-ask.txt")
++      const asked = yield* Deferred.make<void>()
++      const release = yield* Deferred.make<void>()
++      const writeCtx = context(() =>
++        Effect.gen(function* () {
++          yield* Deferred.succeed(asked, undefined)
++          yield* Deferred.await(release)
++        }),
++      )
++
++      const fiber = yield* executeWrite({ content: "proposal\n", filePath }, writeCtx).pipe(Effect.exit, Effect.forkScoped)
++      yield* Deferred.await(asked)
++      yield* fs.writeWithDirs(filePath, "")
++      // 外部创建发生在 Permission 之后，故只有 commit recheck 能区分它与原始 missing proposal。
++      yield* Deferred.succeed(release, undefined)
++
++      const exit = yield* Fiber.join(fiber)
++      expect(Exit.isFailure(exit)).toBe(true)
++      expect(yield* fs.readFileString(filePath)).toBe("")
++    }),
++  )
++
++  // 两个 edit 都能完成 Permission，证明 lock 没有被错误地延伸到 ask 阶段。
++  // 第一个 commit 改变版本后，第二个 proposal 必须得到 diagnostic conflict，而不是静默合并。
++  // 这保留了冲突显式化策略，不引入自动 rebase。
++  // 第二个 edit 的 stale oldString 不得被重新匹配到 write 产生的新内容。
++  it.instance("lets same-file edit proposals ask before the first commit lock", () =>
++    Effect.gen(function* () {
++      // 两个 edit 的 oldString 都来自同一个初始文件，但只允许先取得 commit lock 的版本成功。
++      // 失败的第二 proposal 必须保持诊断性质，不能被当成部分成功。
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const filePath = path.join(test.directory, "permission-before-lock.txt")
++      yield* fs.writeWithDirs(filePath, "a\nb\n")
++      const firstAsked = yield* Deferred.make<void>()
++      const secondAsked = yield* Deferred.make<void>()
++      const releaseFirst = yield* Deferred.make<void>()
++      const releaseSecond = yield* Deferred.make<void>()
++      // 两个 proposal 都必须先进入 ask；否则旧的 edit-only lock 可能把第二个 caller 错误挡在 Permission 外。
++
++      const first = yield* executeEdit(
++        { filePath, edits: [{ oldString: "a", newString: "A" }] },
++        context(
++          () =>
++            Effect.gen(function* () {
++              yield* Deferred.succeed(firstAsked, undefined)
++              yield* Deferred.await(releaseFirst)
++            }),
++          priorRead(filePath),
++        ),
++      ).pipe(Effect.exit, Effect.forkScoped)
++      const second = yield* executeEdit(
++        { filePath, edits: [{ oldString: "b", newString: "B" }] },
++        context(
++          () =>
++            Effect.gen(function* () {
++              yield* Deferred.succeed(secondAsked, undefined)
++              yield* Deferred.await(releaseSecond)
++            }),
++          priorRead(filePath),
++        ),
++      ).pipe(Effect.exit, Effect.forkScoped)
++
++      yield* Deferred.await(firstAsked)
++      yield* Deferred.await(secondAsked)
++      // 两个 ask 都完成后才放行第一个 commit，断言的是 lock placement 而非调度偶然性。
++      yield* Deferred.succeed(releaseFirst, undefined)
++      expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
++      yield* Deferred.succeed(releaseSecond, undefined)
++      expect(Exit.isFailure(yield* Fiber.join(second))).toBe(true)
++      expect(yield* fs.readFileString(filePath)).toBe("A\nb\n")
++      yield* executeWrite({ content: "fresh\n", filePath }, context(() => Effect.void))
++      expect(yield* fs.readFileString(filePath)).toBe("fresh\n")
++    }),
++  )
++
++  // per-key queue 只串行相同 canonical path，不得退化成全局 Tool lock。
++  // 两个 Permission 都先完成，随后两个不同 key 都能完成 commit。
++  // 文件内容分别由独立字面量断言，避免只验证“没有抛错”。
++  // 两个 Permission gate 同时开放，验证并发边界位于 canonical key 而非 Tool 全局。
++  it.instance("keeps different-file mutations concurrent", () =>
++    Effect.gen(function* () {
++      const formatReady = [yield* Deferred.make<void>(), yield* Deferred.make<void>()]
++      const formatRelease = yield* Deferred.make<void>()
++      const formatLayer = Layer.succeed(Format.Service, {
++        init: () => Effect.void,
++        status: () => Effect.succeed([]),
++        file: (filePath) =>
++          Effect.gen(function* () {
++            const index = filePath.endsWith("parallel-a.txt") ? 0 : 1
++            yield* Deferred.succeed(formatReady[index], undefined)
++            yield* Deferred.await(formatRelease)
++            return false
++          }),
++      })
++
++      const run = Effect.gen(function* () {
++        // 两个 path 没有共享 content 或 expected state，formatter barrier 直接观察不同 key 的 commit overlap。
++        const test = yield* TestInstance
++        const fs = yield* AppFileSystem.Service
++        const firstPath = path.join(test.directory, "parallel-a.txt")
++        const secondPath = path.join(test.directory, "parallel-b.txt")
++        const firstAsked = yield* Deferred.make<void>()
++        const secondAsked = yield* Deferred.make<void>()
++        const releasePermission = yield* Deferred.make<void>()
++
++        const first = yield* executeWrite(
++          { content: "A\n", filePath: firstPath },
++          context(() =>
++            Effect.gen(function* () {
++              yield* Deferred.succeed(firstAsked, undefined)
++              yield* Deferred.await(releasePermission)
++            }),
++          ),
++        ).pipe(Effect.exit, Effect.forkScoped)
++        const second = yield* executeWrite(
++          { content: "B\n", filePath: secondPath },
++          context(() =>
++            Effect.gen(function* () {
++              yield* Deferred.succeed(secondAsked, undefined)
++              yield* Deferred.await(releasePermission)
++            }),
++          ),
++        ).pipe(Effect.exit, Effect.forkScoped)
++
++        yield* Deferred.await(firstAsked)
++        yield* Deferred.await(secondAsked)
++        yield* Deferred.succeed(releasePermission, undefined)
++        yield* awaitWithTimeout(Effect.all(formatReady.map(Deferred.await)), "different-file commits did not overlap", "5 seconds")
++        yield* Deferred.succeed(formatRelease, undefined)
++        expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
++        expect(Exit.isSuccess(yield* Fiber.join(second))).toBe(true)
++        expect(yield* fs.readFileString(firstPath)).toBe("A\n")
++        expect(yield* fs.readFileString(secondPath)).toBe("B\n")
++      })
++
++      yield* run.pipe(Effect.provide(formatLayer))
++    }),
++  )
++
++  // formatter 是 built-in writer，必须与目标写入共用 commit critical section。
++  // 第一个 formatter 阻塞时，第二个 proposal 可以读和 ask，但不能先完成写入。
++  // 释放 formatter 后两个 commit 按同一 key 顺序完成，最终内容应是第二次 write。
++  // formatter 本身不改变内容，结果只反映 coordinator 的锁范围和提交顺序。
++  it.instance("keeps the target formatter inside the mutation commit", () =>
++    Effect.gen(function* () {
++      const formatterStarted = yield* Deferred.make<void>()
++      const formatterRelease = yield* Deferred.make<void>()
++      const secondAsked = yield* Deferred.make<void>()
++      let formatCalls = 0
++      const formatLayer = Layer.succeed(Format.Service, {
++        init: () => Effect.void,
++        status: () => Effect.succeed([]),
++        file: () =>
++          Effect.gen(function* () {
++            formatCalls++
++            yield* Deferred.succeed(formatterStarted, undefined)
++            yield* Deferred.await(formatterRelease)
++            return false
++          }),
++      })
++
++      const run = Effect.gen(function* () {
++        const test = yield* TestInstance
++        const fs = yield* AppFileSystem.Service
++        const filePath = path.join(test.directory, "formatter-lock.txt")
++        const first = yield* executeWrite({ content: "A\n", filePath }, context(() => Effect.void)).pipe(Effect.exit, Effect.forkScoped)
++        yield* Deferred.await(formatterStarted)
++        // formatterStarted 发生在首个 write 后，第二个 proposal 可见已写内容但不能越过 formatter。
++
++        const second = yield* executeWrite(
++          { content: "B\n", filePath },
++          context(() =>
++            Effect.gen(function* () {
++              yield* Deferred.succeed(secondAsked, undefined)
++            }),
++          ),
++        ).pipe(Effect.exit, Effect.forkScoped)
++        yield* Deferred.await(secondAsked)
++        expect(formatCalls).toBe(1)
++        yield* Deferred.succeed(formatterRelease, undefined)
++        expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
++        expect(Exit.isSuccess(yield* Fiber.join(second))).toBe(true)
++        expect(yield* fs.readFileString(filePath)).toBe("B\n")
++      })
++
++      yield* run.pipe(Effect.provide(formatLayer))
++    }),
++  )
++
++  // 取消等待者不能删除 predecessor，也不能留下阻塞 tail。
++  // 第二个 write 在同一 key 的 formatter critical section 外等待并被 interrupt。
++  // 第三个 write 验证 queue tail 已清理且不会永久阻塞后续 mutation。
++  // interrupt 发生在 commit 等待阶段，覆盖 waiter 而不是 Permission reject 的简单路径。
++  it.instance("releases a cancelled waiter without blocking the next mutation", () =>
++    Effect.gen(function* () {
++      const formatterStarted = yield* Deferred.make<void>()
++      const formatterRelease = yield* Deferred.make<void>()
++      const secondAsked = yield* Deferred.make<void>()
++      let formatCalls = 0
++      const formatLayer = Layer.succeed(Format.Service, {
++        init: () => Effect.void,
++        status: () => Effect.succeed([]),
++        file: () =>
++          Effect.gen(function* () {
++            formatCalls++
++            if (formatCalls === 1) {
++              yield* Deferred.succeed(formatterStarted, undefined)
++              yield* Deferred.await(formatterRelease)
++            }
++            return false
++          }),
++      })
++
++      const run = Effect.gen(function* () {
++        const test = yield* TestInstance
++        const fs = yield* AppFileSystem.Service
++        const filePath = path.join(test.directory, "cancelled-waiter.txt")
++        const first = yield* executeWrite({ content: "A\n", filePath }, context(() => Effect.void)).pipe(Effect.exit, Effect.forkScoped)
++        yield* Deferred.await(formatterStarted)
++        const second = yield* executeWrite(
++          { content: "B\n", filePath },
++          context(() =>
++            Effect.gen(function* () {
++              yield* Deferred.succeed(secondAsked, undefined)
++            }),
++          ),
++        ).pipe(Effect.forkScoped)
++        yield* Deferred.await(secondAsked)
++        yield* Effect.yieldNow
++        // yieldNow 让 waiter 有机会注册到 semaphore；随后 interrupt 检验中途取消的 cleanup。
++        yield* Fiber.interrupt(second)
++        yield* Deferred.succeed(formatterRelease, undefined)
++        expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
++
++        yield* executeWrite({ content: "C\n", filePath }, context(() => Effect.void))
++        expect(yield* fs.readFileString(filePath)).toBe("C\n")
++      })
++
++      yield* run.pipe(Effect.provide(formatLayer))
++    }),
++  )
++
++  // 外部 writer 只在 final recheck 前可被发现；这里验证 detected conflict，不宣称 true CAS。
++  // Permission 已经通过，外部写入随后改变 fingerprint，旧 patch 必须失败。
++  // final check 与实际 write 之间的跨进程窗口仍由 plan 明确列为残余风险。
++  // 该测试只要求可观察的 pre-check conflict，不把文件系统误称为 CAS。
++  it.instance("rejects an external change after apply_patch permission", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const filePath = path.join(test.directory, "patch-external.txt")
++      yield* fs.writeWithDirs(filePath, "base\n")
++      const asked = yield* Deferred.make<void>()
++      const release = yield* Deferred.make<void>()
++      const patchText = "*** Begin Patch\n*** Update File: patch-external.txt\n@@\n-base\n+patch\n*** End Patch"
++      const fiber = yield* executePatch(
++        { patchText },
++        context(() =>
++          Effect.gen(function* () {
++            yield* Deferred.succeed(asked, undefined)
++            yield* Deferred.await(release)
++          }),
++        ),
++      ).pipe(Effect.exit, Effect.forkScoped)
++
++      yield* Deferred.await(asked)
++      yield* fs.writeWithDirs(filePath, "external\n")
++      // 外部内容不经过 coordinator，模拟 editor/shell writer 的真实边界。
++      yield* Deferred.succeed(release, undefined)
++      expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
++      expect(yield* fs.readFileString(filePath)).toBe("external\n")
++    }),
++  )
++
++  // 多文件 patch 任一 target 变化都不能留下已经写入的 stale partial commit。
++  // first target 的 proposal 没有变化，second target 在 Permission 期间被外部写入。
++  // coordinator 必须先完成全部 recheck，再允许任何一个 target 写盘。
++  // firstPath 保持原文是关键断言，证明没有出现 stale partial commit。
++  it.instance("checks every apply_patch target before the first multi-file write", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const firstPath = path.join(test.directory, "patch-first.txt")
++      const secondPath = path.join(test.directory, "patch-second.txt")
++      yield* fs.writeWithDirs(firstPath, "first\n")
++      yield* fs.writeWithDirs(secondPath, "second\n")
++      const asked = yield* Deferred.make<void>()
++      const release = yield* Deferred.make<void>()
++      const patchText = [
++        "*** Begin Patch",
++        "*** Update File: patch-first.txt",
++        "@@",
++        "-first",
++        "+FIRST",
++        "*** Update File: patch-second.txt",
++        "@@",
++        "-second",
++        "+SECOND",
++        "*** End Patch",
++      ].join("\n")
++      const fiber = yield* executePatch(
++        { patchText },
++        context(() =>
++          Effect.gen(function* () {
++            yield* Deferred.succeed(asked, undefined)
++            yield* Deferred.await(release)
++          }),
++        ),
++      ).pipe(Effect.exit, Effect.forkScoped)
++
++      yield* Deferred.await(asked)
++      yield* fs.writeWithDirs(secondPath, "external\n")
++      // 只改变第二个 target，第一目标也必须保持未提交，证明检查发生在所有写入之前。
++      yield* Deferred.succeed(release, undefined)
++      expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
++      expect(yield* fs.readFileString(firstPath)).toBe("first\n")
++      expect(yield* fs.readFileString(secondPath)).toBe("external\n")
++    }),
++  )
++
++  // 原始用户症状：write 先提交后，旧 edits[] proposal 必须失败而不是覆盖 write。
++  // 这条测试使用当前 public `edits[]` schema，而不是旧的顶层 oldString 兼容形态。
++  // final content 由先提交的 write 字面量决定，直接锁定 lost-update 修复。
++  // edit failure 是诊断结果，write success 才是唯一保留下来的文件版本。
++  it.instance("rejects a stale edits[] proposal after write commits first", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const fs = yield* AppFileSystem.Service
++      const filePath = path.join(test.directory, "target.txt")
++      yield* fs.writeWithDirs(filePath, "base\n")
++
++      const writeAsked = yield* Deferred.make<void>()
++      const releaseWrite = yield* Deferred.make<void>()
++      const editAsked = yield* Deferred.make<void>()
++      const releaseEdit = yield* Deferred.make<void>()
++      // 先同时完成两个 Permission，再释放 write，精确重现旧实现的 stale edit 覆盖窗口。
++
++      const writeCtx = context(() =>
++        Effect.gen(function* () {
++          yield* Deferred.succeed(writeAsked, undefined)
++          yield* Deferred.await(releaseWrite)
++        }),
++      )
++      const editCtx = context(
++        () =>
++          Effect.gen(function* () {
++            yield* Deferred.succeed(editAsked, undefined)
++            yield* Deferred.await(releaseEdit)
++          }),
++        priorRead(filePath),
++      )
++
++      const writeFiber = yield* executeWrite({ content: "write\n", filePath }, writeCtx).pipe(Effect.exit, Effect.forkScoped)
++      yield* Deferred.await(writeAsked)
++
++      const editFiber = yield* executeEdit(
++        { filePath, edits: [{ oldString: "base\n", newString: "edit\n" }] },
++        editCtx,
++      ).pipe(Effect.exit, Effect.forkScoped)
++      yield* Deferred.await(editAsked)
++
++      yield* Deferred.succeed(releaseWrite, undefined)
++      expect(Exit.isSuccess(yield* Fiber.join(writeFiber))).toBe(true)
++
++      yield* Deferred.succeed(releaseEdit, undefined)
++      const editExit = yield* Fiber.join(editFiber)
++      expect(Exit.isFailure(editExit)).toBe(true)
++      if (Exit.isFailure(editExit)) {
++        expect(Cause.pretty(editExit.cause)).toContain("changed")
++      }
++
++      expect(yield* fs.readFileString(filePath)).toBe("write\n")
++    }),
++  )
++})

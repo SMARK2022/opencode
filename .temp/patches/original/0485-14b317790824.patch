@@ -1,0 +1,1514 @@
+From 14b3177908247785cc36bb2d5f85b5718e5b2897 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 14 Jul 2026 14:02:22 +0800
+Subject: [PATCH] =?UTF-8?q?fix(image):=20=E4=BF=AE=E5=A4=8DTUI=20Sharp?=
+ =?UTF-8?q?=E5=8E=9F=E7=94=9F=E4=BE=9D=E8=B5=96=E9=93=BE=E5=B9=B6=E8=BF=81?=
+ =?UTF-8?q?=E7=A7=BB=E5=8E=86=E5=8F=B2=E5=9B=BE=E7=89=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+恢复Bun compiled TUI中Sharp addon与libvips的完整target依赖链，保留官方Linux x64 CPU guard，并移除Read、Prompt、Processor将未处理原图继续发送或落库的fallback。新增compiled真实Image.Service smoke、Prompt/Processor fail-closed回归测试，确保单一Sharp主链不会静默降级。
+
+提供仓库内可分发的图片附件迁移工具：默认dry-run，按完整源格式与hash校验，使用SQLite VACUUM INTO一致快照、validation clone、完整Part CAS和事务完整性检查，覆盖WAL、幂等、MIME边界与错误写入保护。相关测试、typecheck和compiled smoke均已通过。
+
+diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Proposal/tui-image-validation-and-history-repair.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c232ad17c2abd91f066e406c1eb9bd67636164c
+--- /dev/null
++++ b/docs/Proposal/tui-image-validation-and-history-repair.md
+@@ -0,0 +1,473 @@
++# TUI Sharp 打包链恢复与历史图片无损迁移方案
++
++Status: approved after independent audit; user selected a distributable repository migration script and authorized implementation
++
++Date: 2026-07-14
++
++## 0. 推荐方案摘要
++
++本次只做两件事：
++
++1. **生产端 A**：继续使用现有 Sharp 0.34.5，不引入 Bun.Image 或第二图片后端。修复 Bun compiled executable 对 Sharp native addon/libvips 的打包、释放和加载链，并删除三处会在 Sharp 不可用时发送原图的 fallback。
++2. **存储端 C**：在 TUI 再次消费目标 Session 前，事务化地把唯一损坏的 Tool attachment 替换为从已确认完整原件经过现有 Sharp 管线生成的有效附件。迁移前由SQLite生成包含已提交WAL页面的一致数据库快照，不删除任何不可恢复数据。
++
++**消费端 B 不修改。** C 完成迁移后，现有数据库读取和 `MessageV2.toModelMessagesEffect()` 自然只会读到修复后的有效附件。
++
++不修改图片格式支持、metadata fast path、GIF行为、base64规则、MIME策略、Provider转换、plugin、compaction、Assistant生命周期、数据库schema或通用日志。
++
++最终 Git 修改 **10个文件（包含本文）以内**，预计代码增删 **低于800行**；当前实现为9个任务文件，新增Processor定向回归测试后为10个。
++
++## 1. 已重新阅读和确认的文件
++
++### 1.1 Sharp生产与调用链
++
++| 文件 | 为什么相关 |
++| --- | --- |
++| `packages/opencode/src/image/image.ts` | 当前唯一图片处理实现，动态加载Sharp，执行metadata、resize和encode |
++| `packages/opencode/src/tool/read.ts` | 本次坏附件的首个生产入口；Sharp不可用时返回原始bytes |
++| `packages/opencode/src/session/processor.ts` | Tool result附件入库前再次normalize；Sharp不可用时再次返回原附件 |
++| `packages/opencode/src/session/prompt.ts` | 用户图片入库前normalize；Sharp不可用时返回原Part |
++| `packages/opencode/test/image/image.test.ts` | 已覆盖现有Sharp正常图片、尺寸、预算和SizeError行为 |
++| `packages/opencode/test/tool/read.test.ts` | 明确把“resizer不可用时返回原图”锁成现有测试契约，必须反转 |
++| `packages/opencode/test/session/prompt.test.ts` | 现有真实Prompt/Processor/LLM测试层可覆盖另外两处fallback的持久化行为 |
++| `packages/opencode/test/session/processor-effect.test.ts` | 真实Tool result链验证Sharp不可用时保留工具文本并省略图片 |
++
++### 1.2 Bun编译与发布链
++
++| 文件 | 为什么相关 |
++| --- | --- |
++| `packages/opencode/script/build.ts` | Bun executable构建、目标矩阵、虚拟资源、PvRecorder native嵌入先例和当前仅`--version` smoke |
++| `packages/opencode/script/install-target.ts` | build目标OS/CPU安装规则 |
++| `packages/opencode/package.json` | `sharp@0.34.5`已是optionalDependency |
++| `package.json` | 固定Bun 1.3.14；现有patchedDependencies和workspace安装边界 |
++| `bun.lock` | 已包含Sharp及各平台`@img/sharp-*`、`@img/sharp-libvips-*`包 |
++| `packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts` | 已有“原生文件嵌入exe、释放到cache、校验、绝对路径require”的同仓库先例 |
++| `.github/workflows/build-opencode.yml` | macOS/Linux/Windows发布构建和打包方式 |
++| `packages/opencode/script/postinstall.mjs` | npm平台包只复制最终binary的行为 |
++| `install` | curl安装器只安装最终binary的行为 |
++| `packages/opencode/Dockerfile` | 镜像只复制最终binary的行为 |
++
++### 1.3 B/C和迁移边界
++
++| 文件 | 为什么相关 |
++| --- | --- |
++| `packages/opencode/src/session/message-v2.ts` | Part hydration与Tool attachment转ModelMessage的现有消费链 |
++| `packages/opencode/src/session/session.ts` | `Session.updatePart()`写回边界；本方案不在运行期调用 |
++| `packages/opencode/src/session/session.sql.ts` | `part.data`是ToolPart JSON的真实持久化位置 |
++| `packages/opencode/src/data-migration.ts` | 现有通用后台迁移框架；经确认不适合本次用户特定文件恢复 |
++| `packages/opencode/src/effect/app-runtime.ts` | DataMigration异步启动，无法保证在B首次消费前完成 |
++
++### 1.4 Git历史
++
++已确认：
++
++- `981e00971a`：原Photon WASM打包修复，使用嵌入资源和运行时路径。
++- `edae95237e`：将Image.Service从Photon改成Sharp，并引入三处ResizerUnavailable原图fallback。
++- `1efc5c8a2a`：把Sharp 0.34.5加入optionalDependencies。
++
++Sharp业务实现已经存在；缺失的是compiled TUI的native dependency packaging，而不是图片后端能力。
++
++## 2. 通过搜索和实验确认的调用点
++
++### 2.1 A：图片生产
++
++1. `Image.Service.normalize()`：`packages/opencode/src/image/image.ts:68-158`
++2. Read构造图片并调用normalize：`packages/opencode/src/tool/read.ts:615-641`
++3. Processor处理Tool attachments：`packages/opencode/src/session/processor.ts:561-591`
++4. Prompt处理用户图片并随后入库：`packages/opencode/src/session/prompt.ts:1914-1962`
++
++三处原图fallback：
++
++- `read.ts:635-641`
++- `processor.ts:574-578`
++- `prompt.ts:1928-1933`
++
++### 2.2 B：历史消费
++
++1. 数据库Part hydration：`packages/opencode/src/session/message-v2.ts:734-769`
++2. 模型消息转换入口：`message-v2.ts:787-1092`
++3. Tool attachment成为media output：`message-v2.ts:815-842`、`955-984`
++4. 主请求调用转换：`packages/opencode/src/session/prompt.ts:2479-2480`
++
++B没有产生、截断或修改图片；它只是忠实消费C中的坏附件。本方案不在B增加校验、迁移、删除、重试或fallback。
++
++### 2.3 C：实际存储
++
++目标记录：
++
++| 字段 | 值 |
++| --- | --- |
++| Session | `ses_0c4482da0ffeHCysC6mhb0iR2d` |
++| Part | `prt_f5af04c69001KEtWbmwrZrOjt3` |
++| Message | `msg_f5aeda089001kbKBOGJGRw7PP3` |
++| Tool | `read` |
++| 状态 | completed |
++| 附件位置 | `part.data.state.attachments[0]` |
++| MIME | `image/png` |
++| 损坏bytes | 7,340,032 |
++| 损坏SHA-256 | `f4b050a0e963768712ce7bc5b241bc03faac0ad9ad8da3e654f945cdfe4dfe98` |
++
++数据库自身状态：
++
++- `PRAGMA integrity_check = ok`
++- `PRAGMA quick_check = ok`
++- `PRAGMA foreign_key_check`无违规
++- 全库441个图片附件中只有该附件无法完整解码
++
++所以C的问题是单条业务payload损坏，不是SQLite/WAL损坏。
++
++## 3. 根因已经如何确认
++
++### 3.1 图片不是被数据库或base64截断
++
++Tool输入路径为：
++
++```text
++E:\个人资料\本科荣誉证明\03_竞赛获奖\2024年_第十一届全国泰迪杯数据分析技能挑战赛_本科组_国家级三等奖.png
++```
++
++该磁盘文件当前也是7,340,032 bytes，与数据库附件SHA-256完全相同。Sharp metadata能读到3496x2355，但完整PNG decode返回：
++
++```text
++pngload_buffer: libspng read error
++```
++
++因此ReadTool完整读取了当时的磁盘文件；数据库和base64没有二次截断。
++
++### 3.2 完整原件仍存在，可以无损恢复
++
++完整副本：
++
++```text
++E:\个人资料\本科\03_学科竞赛与科研成果\03_泰迪杯数据挖掘\【“泰迪杯”数据挖掘挑战赛组委会】第十一届“泰迪杯”数据挖掘挑战赛本科组 国家三等奖.png
++```
++
++验证结果：
++
++| 项目 | 值 |
++| --- | --- |
++| 完整bytes | 7,835,144 |
++| 完整SHA-256 | `3777c34cb8bf42900875843715c05114693602e38863a48a80f9ddac1ed08202` |
++| 与坏文件关系 | 前7,340,032 bytes完全一致 |
++| 缺失尾部 | 495,112 bytes |
++| Sharp完整decode | 成功 |
++
++使用当前未改动的`Image.Service.normalize(..., { tokenBudget: 1600 })`处理完整原件，得到：
++
++| 项目 | 值 |
++| --- | --- |
++| 输出MIME | `image/jpeg` |
++| 输出尺寸 | 2000x1347 |
++| 输出bytes | 455,913 |
++| base64字符数 | 607,884 |
++| 输出SHA-256 | `91484e537ba88954efc9c7ebb95767e368c1a800b810420ade5b52fd76633d43` |
++
++这正是Sharp链正常时ReadTool本应生成的附件。
++
++### 3.3 Sharp compiled dependency chain确实断裂
++
++Sharp 0.34.5的JS loader在`node_modules/sharp/lib/sharp.js:13-30`动态require：
++
++```text
++@img/sharp-<runtime>/sharp.node
++```
++
++Windows x64真实运行文件为：
++
++```text
++@img/sharp-win32-x64/lib/sharp-win32-x64.node
++@img/sharp-win32-x64/lib/libvips-42.dll
++@img/sharp-win32-x64/lib/libvips-cpp-8.17.3.dll
++```
++
++Linux/macOS还需要对应`@img/sharp-libvips-<runtime>/lib/**`。
++
++当前`build.ts`没有显式导入这些动态native文件，所以Bun compile只打入Sharp JS，运行时找不到addon/libvips。
++
++### 3.4 三种打包假设的独立实验
++
++1. 默认bundle：compiled exe找不到Sharp native addon，失败。
++2. `--external sharp` + 邻近`node_modules`：Bun 1.3.14 compiled resolver仍无法稳定解析external package，失败；不采用sidecar发布方案。
++3. Sharp JS继续bundle，目标`@img`原生文件使用`with { type: "file" }`嵌入exe，运行时释放到真实目录，并让Sharp loader优先require该绝对`.node`路径：成功运行Sharp 0.34.5 metadata、resize和PNG encode。
++
++第三种方案保持单文件发布，不需要修改npm/curl/Homebrew/AUR/Docker安装方式。
++
++## 4. 必须保持的既有行为
++
++- Image.Service继续使用Sharp 0.34.5。
++- 现有metadata fast path保持，不增加“所有小图完整decode”。
++- PNG/JPEG/WebP/GIF及其他现有Sharp格式行为不变。
++- 现有resize尺寸、quality、alpha、tokenBudget和配置行为不变。
++- Processor仍保留“单个失败附件省略、Tool文本继续”的既有语义。
++- Prompt图片处理失败时不保存半条用户消息。
++- MessageV2、ProviderTransform、plugin、compaction和远程URL行为不变。
++- 发布产物仍是单个`opencode`/`opencode.exe`文件。
++- C迁移保留Tool input/title/output/metadata/time和所有其他Part字段。
++
++## 5. 推荐的最小实现
++
++### 5.1 `build.ts`完整嵌入目标Sharp native资源
++
++增加两个build-private函数：
++
++1. `sharpRuntimeTarget(item)`：把现有target映射为Sharp命名，例如`win32-x64`、`darwin-arm64`、`linux-x64`、`linuxmusl-x64`。
++2. `createSharpNativeFileMap(item)`：
++   - Windows嵌入`@img/sharp-<target>/lib/**`；
++   - macOS/Linux嵌入addon包和`@img/sharp-libvips-<target>/lib/**`；
++   - key保留`@img/.../lib/...`相对布局；
++   - 目标包缺失、没有`.node`或没有必要shared library时立即使build失败。
++
++每个target生成`opencode-sharp.gen.ts`虚拟模块，通过`with { type: "file" }`把16-20 MB目标native资源嵌入当前exe。该模块必须同时加入当前target的`files`和`entrypoints`；现有PvRecorder注释已经证明只有`files`不足以让compiled dynamic import可达。只嵌入当前target，不把全部平台资源塞入每个binary。
++
++增加一个build plugin，只在bundle Sharp 0.34.5的`lib/sharp.js`时完成两处精确替换：
++
++1. 把`globalThis.__OPENCODE_SHARP_NATIVE_PATH`加入候选路径首位；
++2. 把Linux x64官方`path.startsWith('@img/sharp-linux-x64')` CPU guard改为`runtimePlatform === 'linux-x64'`，避免绝对cache路径绕过`_isUsingX64V2()`检查。
++
++两处都必须各命中一次，否则build失败。Linux x64-v1旧CPU由Sharp官方guard明确fail closed；Bun baseline只表示不要求AVX2，不等于取消Sharp上游x86-64-v2最低边界。其余Sharp源码保持原样。
++
++### 5.2 `image.ts`负责compiled资源释放和Sharp加载
++
++只调整现有`loadSharp`前置步骤：
++
++1. 非compiled/dev路径仍直接`import("sharp")`。
++2. compiled路径导入`opencode-sharp.gen.ts`。
++3. 将资源按原相对布局释放到`Global.Path.cache/native/sharp/0.34.5/<target>/`。
++4. 已有文件只有在大小和SHA-256都等于嵌入资源时才复用。
++5. 写入使用同目录唯一temp + rename；`finally`始终清理自己的temp。
++6. rename遇到`EEXIST`、`EPERM`或Windows sharing violation时，重新校验winner目标；大小和SHA-256一致则复用，否则失败。所有资源校验完成后才能加载addon。
++7. 把释放后的`.node`绝对路径写入build plugin约定的global，再执行现有`import("sharp")`。
++8. 任一步失败仍返回现有`ResizerUnavailableError`，不增加第二后端。
++
++不修改metadata、resize、encode或错误类型。
++
++### 5.3 删除三处原图fallback
++
++- Read：Sharp不可用时Tool失败，不返回原始attachment。
++- Processor：删除ResizerUnavailable到原attachment的转换；后续现有`Effect.exit`会按既有附件省略语义处理。
++- Prompt：Sharp不可用时prompt失败，Part不会入库。
++
++这样未来即使Sharp打包再次回归，也只会暴露明确错误，不会把未经处理的原图写入C。
++
++### 5.4 C通过仓库内可分发脚本执行离线、可回滚、无损事务迁移
++
++C迁移不进入Prompt、MessageV2或后台通用DataMigration代码。新增`packages/opencode/script/migrate-image-attachment.ts`作为显式调用的离线维护工具，使其他用户可以对自己的`db + part + 完整source`执行同一修复，而不把用户路径/Part硬编码进运行时。
++
++脚本默认dry-run；`--apply`必须同时提供DB、Part、完整源、旧attachment SHA、源SHA、dry-run得到的新SHA和备份目录。步骤固定为：
++
++1. 解析显式参数并定位精确Part，只接受`completed ToolPart`中的`image/*` File attachment；不扫描数据库或目录。
++2. 验证旧attachment SHA和完整原件SHA，使用仓库真实`Image.Service`和Sharp生成新附件，再次由Sharp完整decode并验证dry-run得到的新SHA。
++3. 仅在`--apply`全部内容前置条件通过后检查备份盘空间，避免错误参数和幂等重跑制造2GB级无用副本。
++4. 对live连接执行SQLite原生`VACUUM INTO`，让SQLite在一个一致读快照中把主库及已提交WAL页面合并为单一master数据库，避免手工依次复制DB/WAL/SHM形成跨时间点备份。
++5. 记录master SHA-256；只复制master生成disposable validation clone，在clone上验证integrity和foreign keys，删除clone后再次验证master manifest。唯一master不被SQLite打开。
++6. 开启SQLite transaction，以`id + 原始data完整值`作为CAS条件，只替换目标attachment的`mime/url`。
++7. `changes`必须严格等于1；同一transaction内重读完整Part JSON并执行foreign-key/integrity检查，任一失败由SQLite自动rollback。
++8. 保留一致master、损坏磁盘副本和完整原件，不覆盖或删除任何外部文件。
++
++幂等规则：当前attachment等于预期新SHA时返回`already migrated`；等于旧SHA时才允许迁移；两者都不等时立即停止。脚本不扫描、不猜测、不按文件名寻找替代源。
++
++Master一致快照只作为灾难恢复源，不承诺跨D:到C:做不存在的原子覆盖恢复。若事务失败，live行由SQLite回滚；若后续需要灾难恢复，停止TUI后由用户从已验证master执行明确恢复，不由脚本自动覆盖2.14 GB live DB。
++
++UPDATE前失败是零写入，事务内失败是rollback。全程没有删除附件、占位文本、模糊文件搜索或自动猜测替代文件，master备份始终不可变。
++
++## 6. 为什么不修改B
++
++C事务在重新启动TUI前完成。之后：
++
++```text
++PartTable正确JSON -> MessageV2 hydrate -> 现有toModelMessagesEffect -> Provider
++```
++
++B看到的从一开始就是正确数据。给B增加图片校验或读时迁移会：
++
++- 混淆消费与存储职责；
++- 重复处理每次请求；
++- 影响compaction/title/summary/测试fixture；
++- 无法凭空恢复缺失的495,112 bytes；
++- 扩大本次不需要的行为面。
++
++因此B相关生产文件修改数为0。
++
++### 6.1 单一normalize链复核
++
++实现阶段再次搜索确认：生产代码只有Read、Processor、Prompt三处`image.normalize()`调用，全部进入同一个Sharp-backed `Image.Service`；三处`ResizerUnavailableError -> 原对象`分支均已删除。`src`中不存在Photon、`processImageWithTokenBudget`或第二resize backend。Processor的`Effect.exit`只保留既有“失败附件省略”语义，不调用替代处理器也不返回原图。Photon仅在`image.test.ts`中生成测试fixture，未进入生产bundle或normalize链，因此不作为生产fallback删除。
++
++## 7. 预计修改文件
++
++| # | 文件 | 修改 |
++| ---: | --- | --- |
++| 1 | `docs/proposal/tui-image-validation-and-history-repair.md` | 本方案与独立审计记录 |
++| 2 | `packages/opencode/script/build.ts` | target Sharp资源表、虚拟模块、Sharp loader build plugin和build-time完整性断言 |
++| 3 | `packages/opencode/src/image/image.ts` | compiled native资源释放、校验和现有Sharp加载 |
++| 4 | `packages/opencode/src/tool/read.ts` | 删除ResizerUnavailable原图fallback |
++| 5 | `packages/opencode/src/session/processor.ts` | 删除ResizerUnavailable原附件fallback |
++| 6 | `packages/opencode/src/session/prompt.ts` | 删除ResizerUnavailable原Part fallback |
++| 7 | `packages/opencode/test/tool/read.test.ts` | 把原图fallback测试改成fail-closed行为测试 |
++| 8 | `packages/opencode/script/migrate-image-attachment.ts` | 可分发的dry-run/apply、一致快照、Sharp重建、CAS和验证工具 |
++| 9 | `packages/opencode/test/session/prompt.test.ts` | 验证Prompt在Sharp不可用时不持久化用户图片请求 |
++| 10 | `packages/opencode/test/session/processor-effect.test.ts` | 验证Processor保留工具文本并省略无法normalize的图片 |
++
++不修改：
++
++- `package.json`、`packages/opencode/package.json`、`bun.lock`，因为Sharp 0.34.5及平台包已经存在；
++- `.github/workflows/build-opencode.yml`、`install`、`postinstall.mjs`、Dockerfile，因为native资源嵌入单exe；
++- MessageV2、LLM、ProviderTransform、plugin、compaction；
++- Drizzle schema/migration/snapshot、DataMigration；
++- SDK/generated文件；
++- Desktop。
++
++## 8. 正常、错误、并发、退出和安全边界
++
++### 正常路径
++
++- Dev/source：继续从node_modules加载Sharp。
++- Compiled TUI：释放当前target资源，Sharp从绝对`.node`路径加载，现有normalize逻辑不变。
++- 第二次使用：hash一致则复用cache，不重复写20 MB文件。
++- C迁移：完整原件经过同一Image.Service生成有效attachment，再事务替换。
++
++### 错误路径
++
++- 构建缺目标`@img`包/shared library：build立即失败。
++- Sharp loader源码升级导致plugin不再精确命中：build立即失败。
++- native释放/校验/import失败：现有ResizerUnavailableError向上传播，三处调用方不再发送原图。
++- C前置空间、backup/clone hash、decode、CAS或row count不匹配：零写入或rollback。
++- C收到非图片Part、未知hash或变化后的完整源：明确拒绝，不创建无用备份、不修改live行。
++- 完整原件不存在/变化：不迁移，不删除旧附件。
++
++### 并发与退出
++
++- Image.Service现有`Effect.cached`继续保证单进程只执行一次Sharp加载。
++- temp + rename及rename冲突后的winner复验保证多进程不会加载半写native文件，也不会把另一个进程的成功误报为ResizerUnavailable。
++- SQLite快照保证备份跨WAL一致，完整旧JSON CAS保证并发修改目标Part时拒绝覆盖；实际迁移仍应关闭TUI以减少无意义竞争。
++- C transaction只更新一行，不跨Sharp处理持有SQLite锁。
++
++### 数据安全
++
++- native cache只接受exe内嵌资源，复用前校验SHA-256。
++- C修改前生成包含已提交WAL页面的单文件一致master并记录SHA-256。
++- C只打开disposable clone验证，不打开或修改master，不删除坏attachment对应磁盘副本，也不覆盖两个磁盘文件。
++- 不把图片payload加入日志、commit或proposal。
++
++## 9. 行为级TDD与验证计划
++
++### Red 1：禁止原图fallback
++
++先修改`read.test.ts`现有`noResizer`测试：
++
++- 当前实现返回原图，测试先红；
++- 目标断言Read失败且没有attachment；
++- 再删除Read fallback。
++
++Processor和Prompt分别由现有真实链路测试覆盖：Prompt验证失败发生在持久化前，Processor验证工具文本保留且失败图片被省略。为满足行为级回归要求，新增测试仍控制在用户授权的10文件上限内。
++
++### Red 2：compiled Sharp依赖链
++
++使用`D:\Temp\opencode`临时harness，必须先复现：
++
++```text
++Could not load the "sharp" module using the win32-x64 runtime
++```
++
++随后由`build.ts`生成临时smoke entry，导入仓库真实`Image.Service`并复用同一个Sharp plugin、`opencode-sharp.gen.ts`和compiled define；在没有邻近node_modules的目录执行：
++
++- 用必定进入resize/encode分支的fixture调用真实`normalize()`；
++- 输出MIME、尺寸、payload budget和Sharp完整decode正确；
++- 首次释放后再次运行验证cache复用；
++- 两个进程对全新临时cache并发启动，验证rename loser复验winner后也成功；
++- 临时产物不进入Git。
++
++当前独立原型已经在Bun 1.3.14 Windows x64通过Sharp加载；正式实现的green标准必须升级为上述真实Image.Service链。当前CI宿主能运行的Windows/Linux/macOS target执行动态smoke；交叉架构target只做包名、恰好一个`.node`、shared library和相对布局静态断言，不伪称已执行。
++
++### C迁移dry-run和post-check
++
++迁移前dry-run必须打印且校验上述旧hash、完整源hash、预期新hash，但不写DB。正式事务后再验证：
++
++- 目标attachment MIME/bytes/hash正确；
++- Sharp完整decode成功；
++- 目标Part其他字段深相等；
++- DB integrity/foreign keys仍通过；
++- 目标Session下一次请求不再包含旧hash并不再出现invalid-image 400。
++
++`read.test.ts`中的CLI集成fixture验证dry-run零写入、真实Sharp迁移、master快照、already-migrated幂等和非图片拒绝；实现阶段还用临时SQLite独立验证错误旧hash拒绝。完整旧JSON CAS位于同一SQLite transaction，目标行在读取后发生变化时`changes !== 1`并rollback，不增加测试专用生产钩子。
++
++### 回归命令
++
++从`packages/opencode`执行：
++
++```powershell
++bun test test/tool/read.test.ts
++bun test test/session/prompt.test.ts
++bun test test/image/image.test.ts
++bun typecheck
++bun run script/build.ts --single --skip-install --skip-embed-web-ui
++& ".\dist\opencode-windows-x64\bin\opencode.exe" --version
++```
++
++再运行临时compiled Sharp harness和数据库只读验证。相关检查通过后才允许执行C写事务。
++
++## 10. Git规模与注释
++
++| 区域 | 预计增删行 |
++| --- | ---: |
++| `build.ts` | 150-220 |
++| `image.ts` | 100-150 |
++| 三处fallback | 15-25 |
++| `read.test.ts` | 90-110 |
++| `migrate-image-attachment.ts` | 250-290 |
++| 合计 | 610-680 |
++
++最终核算以Git有效代码行为计数，当前任务代码仍低于800行；任务Git文件数为 **10以内**（包含本文和两个定向回归测试文件）。
++
++中文注释至少占有效修改行15%，只解释：
++
++- 为什么Sharp动态native依赖必须显式嵌入；
++- target到`@img`包名的映射；
++- 为什么shared libraries必须保持相对布局；
++- 为什么虚拟模块必须同时进入`files`和`entrypoints`；
++- 为什么绝对路径不能绕过Sharp官方Linux x64 CPU guard；
++- 为什么cache复用前校验hash；
++- 为什么rename失败后必须复验并复用并发winner；
++- 为什么三处不得再回退原图；
++- 为什么C必须使用SQLite一致快照、不可打开的master、validation clone和完整旧JSON CAS。
++
++不通过格式性注释凑比例。
++
++## 11. 真实风险与开放问题
++
++### 已确认风险
++
++1. 每个binary增加约16-20 MB未压缩native资源。这是完整携带Sharp/libvips依赖的必要成本，不通过第二图片后端规避。
++2. Build plugin依赖Sharp 0.34.5 loader中的两个精确锚点。构建时分别强制单次命中，把升级风险转成显式build失败。
++3. Sharp Linux x64预编译包要求x86-64-v2；不满足的旧CPU由官方guard明确fail closed，不以Bun baseline名义绕过。
++4. native资源首次使用需要释放到cache。原子写、hash验证和并发winner复验防止半文件/错误复用。
++5. 当前损坏磁盘副本本身仍不可解码。本方案不擅自覆盖用户文件；C从已确认完整副本恢复数据库附件。
++
++### 无需用户决策的结论
++
++- 不使用Bun.Image。
++- 不删除损坏attachment。
++- 不在B做迁移。
++- 不新增schema、配置、公共API或通用迁移框架。
++- 不修改图片格式和解码策略。
++
++## 12. 独立审计状态
++
++前4轮围绕Bun.Image和消费端repair的方案均已作废，不构成放行依据。
++
++第5轮两位独立subagent对Sharp方向本身无异议，但提出5类阻塞项：virtual module entrypoint遗漏、真实Image.Service smoke不足、Processor/Prompt红测缺失、Windows rename竞态、C备份/commit后恢复顺序，以及一位审计者补充的Linux x64 CPU guard绕过。本文已全部按原范围修正，第5轮不能作为放行结果。
++
++第6轮必须重新完整审计：
++
++- Sharp addon/libvips每个现有target是否完整；
++- Bun virtual file、cache释放、loader plugin和单文件发布是否闭环；
++- 三处fallback删除后是否仍存在原图通路；
++- C是否真正无损、可回滚、在B消费前完成；
++- 是否误改任何图片行为或B边界；
++- 10文件、800行上限和15%中文注释是否可信。
++
++第6轮结果发生分歧：
++
++- 早期独立subagent给出明确`NO BLOCKING FINDINGS`，确认Sharp target资源、loader CPU guard、entrypoint、并发释放、真实Image.Service smoke、B不变、C的CAS闭环；后续实现审计按用户授权扩大至10文件并补齐Prompt/Processor定向测试。
++- 另一位独立subagent仅对C提出2个阻塞意见：唯一物理备份不能被SQLite打开验证；D:到C:无法对2.14 GB DB/WAL/SHM承诺跨盘三文件原子恢复。Sharp/A/B及代码预算没有其他阻塞。
++
++方案阶段最终将C收敛为immutable master + disposable validation clone，并删除“跨盘原子物理恢复”承诺。实现阶段第一轮独立复核进一步指出逐文件复制DB/WAL/SHM仍可能跨时间点；实现遂改用SQLite原生`VACUUM INTO`一致快照，删除不必要的commit后反向CAS，补充非图片硬拒绝和CLI集成测试。该变化减少分支并强化数据一致性，不改变Sharp/A/B/C职责边界。
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index fa4f25b1811144e7e38e0aa95152ac939d860839..db66968f3fa2eed998d5e561089054ee85cf8fd0 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -2,11 +2,13 @@
+ 
+ import { $ } from "bun"
+ import fs from "fs"
++import os from "os"
+ import path from "path"
+ import { createRequire } from "module"
+ import { fileURLToPath } from "url"
+ import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+ import { resolveInstallTarget } from "./install-target"
++import type { BunPlugin } from "bun"
+ 
+ const __filename = fileURLToPath(import.meta.url)
+ const __dirname = path.dirname(__filename)
+@@ -222,6 +224,154 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
+   return [...imports, "export default {", ...entries, "}"].join("\n")
+ }
+ 
++async function createSharpNativeFileMap(item: (typeof allTargets)[number]) {
++  // Sharp用linuxmusl而Bun target用linux+abi描述；资源包和运行时loader必须采用同一个target名。
++  // baseline与AVX2产物共享同一官方addon；CPU能力仍由Sharp官方loader在运行时判定。
++  const target = item.os === "linux" ? `${item.abi === "musl" ? "linuxmusl" : "linux"}-${item.arch}` : `${item.os}-${item.arch}`
++  // Windows把libvips DLL放在addon包内；Linux/macOS则依赖独立的同target libvips包。
++  // 只收集当前target，避免单个可执行文件携带其他平台永远不可达的native资源。
++  const packages = [`@img/sharp-${target}`, ...(item.os === "win32" ? [] : [`@img/sharp-libvips-${target}`])]
++  const files = (
++    await Promise.all(
++      packages.map(async (name) => {
++        const root = path.dirname(require.resolve(`${name}/package`))
++        return (await Array.fromAsync(new Bun.Glob("lib/**/*").scan({ cwd: root, onlyFiles: true }))).map((file) => ({
++          absolute: path.join(root, ...file.split("/")),
++          relative: `${name}/${file.replaceAll("\\", "/")}`,
++        }))
++      }),
++    )
++  ).flat()
++  const addons = files.filter((file) => file.relative.endsWith(".node"))
++  const libraries = files.filter((file) => /\.(?:dll|dylib|so(?:\..*)?)$/.test(file.relative))
++  // 动态require不会告诉Bun缺了哪个transitive文件；构建时先锁住每个target恰好一个addon和必要shared library。
++  // addon多于一个同样视为错误，否则运行时选择将依赖文件遍历顺序而失去确定性。
++  if (addons.length !== 1 || libraries.length === 0)
++    throw new Error(`Incomplete Sharp native package for ${target}: ${addons.length} addon(s), ${libraries.length} library file(s)`)
++  const imports = files.map((file, index) => {
++    // 保留@img包内相对布局，native RPATH/@loader_path才能从addon定位到对应libvips。
++    const spec = path.relative(dir, file.absolute).replaceAll("\\", "/")
++    return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
++  })
++  return {
++    source: [
++      ...imports,
++      "export default {",
++      `  target: ${JSON.stringify(target)},`,
++      `  version: ${JSON.stringify(pkg.optionalDependencies.sharp)},`,
++      `  addon: ${JSON.stringify(addons[0].relative)},`,
++      "  files: {",
++      ...files.map((file, index) => `    ${JSON.stringify(file.relative)}: file_${index},`),
++      "  },",
++      "}",
++    ].join("\n"),
++  }
++}
++
++function replaceSharpLoader(source: string, before: string, after: string) {
++  // Sharp升级若改变loader结构必须显式失败；宽松replace会生成“构建成功、运行缺addon”的假产物。
++  // 精确一次匹配同时防止补丁重复应用，保持打包链只有一个native入口。
++  if (source.indexOf(before) === -1 || source.indexOf(before) !== source.lastIndexOf(before))
++    throw new Error(`Sharp 0.34.5 loader changed; expected one occurrence of: ${before}`)
++  return source.replace(before, after)
++}
++
++const sharpPlugin: BunPlugin = {
++  name: "opencode-sharp-native",
++  setup(build) {
++    build.onLoad({ filter: /[\\/]sharp[\\/]lib[\\/]sharp\.js$/ }, async (args) => ({
++      // 绝对cache路径会改变path字符串，因此同时把上游CPU guard改为按runtime判断，不能绕过x64-v2检查。
++      // cache路径放在搜索首位，但其余官方路径仍由Sharp保留用于普通源码运行和诊断。
++      // 这里不捕获加载错误；addon或libvips缺失必须由唯一主链明确失败。
++      contents: replaceSharpLoader(
++        replaceSharpLoader(
++          await Bun.file(args.path).text(),
++          "const paths = [",
++          "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,",
++        ),
++        "path.startsWith('@img/sharp-linux-x64')",
++        "runtimePlatform === 'linux-x64'",
++      ),
++      loader: "js",
++    }))
++  },
++}
++
++const sharpSmokeSource = `
++import { Image } from "./src/image/image"
++import { TestConfig } from "./test/fixture/config"
++import { Effect, Layer } from "effect"
++import { PartID, MessageID, SessionID } from "./src/session/schema"
++
++const input = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVR4nGP4z8DQAMIMMAYAOOgF/REzMMkAAAAASUVORK5CYII=", "base64")
++const result = await Effect.runPromise(Effect.gen(function* () {
++  const image = yield* Image.Service
++  return yield* image.normalize({
++    id: PartID.make("prt_sharp_smoke"),
++    messageID: MessageID.make("msg_sharp_smoke"),
++    sessionID: SessionID.make("ses_sharp_smoke"),
++    type: "file",
++    mime: "image/png",
++    url: "data:image/png;base64," + input.toString("base64"),
++  })
++}).pipe(Effect.provide(Image.layer.pipe(Layer.provide(TestConfig.layer({
++  get: () => Effect.succeed({ attachment: { image: { auto_resize: true, max_width: 1, max_height: 1, max_base64_bytes: 100000 } } }),
++}))))))
++const data = Buffer.from(result.url.slice(result.url.indexOf(",") + 1), "base64")
++const sharp = (await import("sharp")).default
++const metadata = await sharp(data).metadata()
++if (metadata.width !== 1 || metadata.height !== 1 || data.length === 0) throw new Error("Compiled Image.Service smoke failed")
++console.log(JSON.stringify({ mime: result.mime, width: metadata.width, height: metadata.height, bytes: data.length }))
++`
++
++async function runSharpSmoke(item: (typeof allTargets)[number], name: string, sharpFiles: string) {
++  // 交叉架构只能做上面的静态资源断言；native smoke仅在当前宿主可执行的target运行。
++  // 不尝试模拟异构native ABI，因为那会制造“测试通过”但目标机器无法加载的伪信号。
++  if (item.os !== process.platform || item.arch !== process.arch || item.abi) return
++  const extension = item.os === "win32" ? ".exe" : ""
++  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-sharp-smoke-"))
++  const outfile = path.join(root, `sharp-smoke${extension}`)
++  const cache = path.join(root, "cache")
++  await fs.promises.mkdir(cache)
++  try {
++    // Smoke复用正式Image.Service和同一虚拟资源表，禁止用裸sharp示例掩盖生产loader接线错误。
++    // 强制2x2缩到1x1，使测试必经metadata、resize、encode，而非命中小图原样返回。
++    const result = await Bun.build({
++      conditions: ["browser"],
++      tsconfig: "./tsconfig.json",
++      plugins: [sharpPlugin],
++      compile: { target: name.replace(pkg.name, "bun") as any, outfile, autoloadBunfig: false, autoloadDotenv: false },
++      files: { "opencode-sharp.gen.ts": sharpFiles, "opencode-sharp-smoke.gen.ts": sharpSmokeSource },
++      entrypoints: ["opencode-sharp-smoke.gen.ts", "opencode-sharp.gen.ts"],
++      define: { OPENCODE_COMPILED: "true", OPENCODE_VERSION: `'${Script.version}'` },
++    })
++    if (!result.success) throw new AggregateError(result.logs, "Failed to build compiled Sharp smoke")
++    const run = async () => {
++      // 独立cache确保每次build都覆盖首次释放，而不是误用开发机以前留下的native文件。
++      // 子进程不共享内存，两个run才能真实覆盖跨进程同时创建同一cache文件的竞争。
++      const proc = Bun.spawn([outfile], {
++        cwd: cache,
++        env: { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache },
++        stdout: "pipe",
++        stderr: "pipe",
++      })
++      const [stdout, stderr, code] = await Promise.all([
++        new Response(proc.stdout).text(),
++        new Response(proc.stderr).text(),
++        proc.exited,
++      ])
++      if (code !== 0) throw new Error(stderr || stdout || `Sharp smoke exited ${code}`)
++    }
++    // 两个首次启动进程锁住Windows rename loser路径；第三次运行验证已落盘cache可复用。
++    // 任一子进程失败都会拒绝整个构建，发布物不会退化为运行时才发现缺少Sharp。
++    await Promise.all([run(), run()])
++    await run()
++  } finally {
++    // Windows可能在子进程退出后短暂保留exe/DLL句柄；smoke位于系统tmp，清理失败不能污染release目录或误判产品构建。
++    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {})
++  }
++}
++
+ await $`rm -rf dist`
+ 
+ const binaries: Record<string, string> = {}
+@@ -261,15 +411,16 @@ for (const item of targets) {
+   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
+   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
+   const workerPath = "./src/cli/cmd/tui/worker.ts"
++  const sharpFiles = (await createSharpNativeFileMap(item)).source
+ 
+   // Use platform-specific bunfs root path based on target OS
+   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
+   const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
+ 
+-  await Bun.build({
++  const result = await Bun.build({
+     conditions: ["browser"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [plugin],
++    plugins: [plugin, sharpPlugin],
+     external: ["node-gyp"],
+     format: "esm",
+     minify: true,
+@@ -289,6 +440,8 @@ for (const item of targets) {
+       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
+       // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
+       "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
++      // Sharp 的动态 addon/libvips require无法被Bun静态发现，必须按target显式嵌入完整native布局。
++      "opencode-sharp.gen.ts": sharpFiles,
+     },
+     entrypoints: [
+       "./src/index.ts",
+@@ -297,6 +450,7 @@ for (const item of targets) {
+       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
+       "opencode-pvrecorder.gen.ts",
++      "opencode-sharp.gen.ts",
+     ],
+     define: {
+       OPENCODE_VERSION: `'${Script.version}'`,
+@@ -309,6 +463,11 @@ for (const item of targets) {
+       OPENCODE_COMPILED: "true",
+     },
+   })
++  // 异构target无法在当前宿主执行，但编译失败仍必须阻止发布该target的空壳目录。
++  // 只把success交给后续smoke会掩盖跨架构解析错误，因此这里是生产构建的硬门槛。
++  if (!result.success) throw new AggregateError(result.logs, `Failed to build ${name}`)
++
++  await runSharpSmoke(item, name, sharpFiles)
+ 
+   // Smoke test: only run if binary is for current platform
+   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
+diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/opencode/script/migrate-image-attachment.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454ec38339a
+--- /dev/null
++++ b/packages/opencode/script/migrate-image-attachment.ts
+@@ -0,0 +1,287 @@
++#!/usr/bin/env bun
++
++import { Image } from "../src/image/image"
++import { Config } from "../src/config/config"
++import { MessageID, PartID, SessionID } from "../src/session/schema"
++import { Database } from "bun:sqlite"
++import { Effect, Layer } from "effect"
++import { createHash } from "node:crypto"
++import fs from "node:fs/promises"
++import path from "node:path"
++import { parseArgs } from "node:util"
++
++const usage = `Usage:
++  bun script/migrate-image-attachment.ts --db <opencode.db> --part <part-id> --source <complete-image> \\
++    --expected-old-sha <sha256> --expected-source-sha <sha256> [--expected-new-sha <sha256>] \\
++    [--attachment-index 0] [--token-budget 1600] [--backup-dir <dir>] [--apply]
++
++The default mode is read-only. Run it once to obtain expected-new-sha, then repeat with
++--apply, --expected-new-sha and --backup-dir. The script never searches for replacement files.`
++
++type Options = {
++  db: string
++  part: string
++  source: string
++  oldSha: string
++  sourceSha: string
++  newSha?: string
++  attachmentIndex: number
++  tokenBudget: number
++  apply: boolean
++  backupDir?: string
++}
++
++type PartRow = { id: string; message_id: string; session_id: string; data: string }
++type FileAttachment = { type: "file"; mime: string; url: string; [key: string]: unknown }
++
++const values = parseArgs({
++  // 所有恢复依据都由调用者显式提供；脚本不扫描目录或根据文件名猜测完整原件。
++  args: Bun.argv.slice(2),
++  options: {
++    help: { type: "boolean" },
++    db: { type: "string" },
++    part: { type: "string" },
++    source: { type: "string" },
++    "expected-old-sha": { type: "string" },
++    "expected-source-sha": { type: "string" },
++    "expected-new-sha": { type: "string" },
++    "attachment-index": { type: "string", default: "0" },
++    "token-budget": { type: "string", default: "1600" },
++    "backup-dir": { type: "string" },
++    apply: { type: "boolean", default: false },
++  },
++  strict: true,
++}).values
++
++if (values.help) {
++  console.log(usage)
++  process.exit(0)
++}
++
++const options: Options = {
++  db: path.resolve(required("db", values.db)),
++  part: required("part", values.part),
++  source: path.resolve(required("source", values.source)),
++  oldSha: required("expected-old-sha", values["expected-old-sha"]).toLowerCase(),
++  sourceSha: required("expected-source-sha", values["expected-source-sha"]).toLowerCase(),
++  newSha: values["expected-new-sha"]?.toLowerCase(),
++  attachmentIndex: finiteInteger("attachment-index", values["attachment-index"]),
++  tokenBudget: finiteInteger("token-budget", values["token-budget"]),
++  apply: values.apply ?? false,
++  backupDir: values["backup-dir"] ? path.resolve(values["backup-dir"]) : undefined,
++}
++
++if (options.apply && (!options.newSha || !options.backupDir))
++  throw new Error("--apply requires --expected-new-sha and --backup-dir")
++if (options.newSha === options.oldSha) throw new Error("--expected-new-sha must differ from --expected-old-sha")
++
++await main(options)
++
++async function main(input: Options) {
++  // Dry-run以只读方式打开数据库；任何写权限和备份成本都只在显式--apply后启用。
++  const db = input.apply ? new Database(input.db) : new Database(input.db, { readonly: true })
++  try {
++    const row = db.query<PartRow, [string]>("SELECT id, message_id, session_id, data FROM part WHERE id = ?").get(input.part)
++    // 只接受精确Part ID，不按session、文件名或附件内容模糊扫描历史数据。
++    if (!row) throw new Error(`Part not found: ${input.part}`)
++    const part = JSON.parse(row.data)
++    const state = isRecord(part) && part.type === "tool" && isRecord(part.state) ? part.state : undefined
++    const value = state?.status === "completed" && Array.isArray(state.attachments) ? state.attachments[input.attachmentIndex] : undefined
++    if (!isRecord(value) || value.type !== "file" || typeof value.mime !== "string" || typeof value.url !== "string")
++      throw new Error(`Completed Tool attachment ${input.attachmentIndex} was not found`)
++    // 维护工具只能修复图片；即使调用者提供了匹配hash，也不能把PDF或任意文件替换成Sharp输出。
++    if (!value.mime.startsWith("image/")) throw new Error(`Attachment ${input.attachmentIndex} is not an image`)
++    const attachment = value as FileAttachment
++    if (!attachment.url.startsWith(`data:${attachment.mime};base64,`))
++      throw new Error("Attachment MIME does not match its data URL")
++    const oldSha = digest(dataUrlBytes(attachment.url))
++    // oldSha描述数据库当前收到的payload；它不是文件名、MIME或source的替代品。
++    // 三个身份分别校验，避免把“内容看似正确”的错误记录当作已修复记录。
++    const migrated = input.newSha !== undefined && oldSha === input.newSha
++    if (!migrated && oldSha !== input.oldSha) throw new Error(`Attachment SHA mismatch: expected ${input.oldSha}, found ${oldSha}`)
++
++    const source = Buffer.from(await Bun.file(input.source).arrayBuffer())
++    const sourceSha = digest(source)
++    // 完整源hash是恢复的数据来源契约，必须在调用Sharp之前确认。
++    // 脚本不截断、拼接或尝试修补旧bytes；唯一新内容来自调用者确认的完整源文件。
++    // 即使当前记录已经命中新hash，也必须重新确认source，保证幂等结果仍可审计。
++    if (sourceSha !== input.sourceSha) throw new Error(`Source SHA mismatch: expected ${input.sourceSha}, found ${sourceSha}`)
++    const sharp = (await import("sharp")).default
++    const format = (await sharp(source).metadata()).format
++    // Sharp的format是解码器识别出的实际格式，不信任原记录的扩展名或MIME声明。
++    const sourceMime = format === "svg" ? "image/svg+xml" : format ? `image/${format}` : undefined
++    // 小图可能由Image.Service原样返回，因此必须用实际源格式而不是损坏附件声明的MIME。
++    if (!sourceMime) throw new Error(`Unsupported source image format: ${format ?? "unknown"}`)
++    const normalized = await normalize(row, sourceMime, source, input.tokenBudget)
++    const output = dataUrlBytes(normalized.url)
++    // normalized.url再次按其自报MIME校验，防止服务实现返回bytes与metadata不一致。
++    if (!normalized.url.startsWith(`data:${normalized.mime};base64,`)) throw new Error("Normalized MIME does not match its data URL")
++    // metadata成功不足以证明历史修复可用；迁移前强制Sharp走完整输出路径。
++    await sharp(output).toBuffer()
++    const newSha = digest(output)
++    if (input.newSha && newSha !== input.newSha)
++      throw new Error(`Normalized SHA mismatch: expected ${input.newSha}, found ${newSha}`)
++    // 幂等成功同样完整验证source和确定性输出，不能仅凭调用者把当前hash填进new参数就伪造成功。
++    if (migrated) {
++      // 幂等只表示同一份完整附件已存在，不表示可以修复错误的媒体声明。
++      if (attachment.mime !== normalized.mime || !attachment.url.startsWith(`data:${normalized.mime};base64,`))
++        throw new Error("Migrated attachment metadata does not match its bytes")
++      console.log(JSON.stringify({ status: "already migrated", part: input.part, sha256: oldSha }, null, 2))
++      return
++    }
++
++    // 只有所有内容前置条件通过后才生成2GB级备份；错误参数和幂等重跑不会制造无用副本。
++    // backup返回后master已通过独立clone校验，后续代码不得打开或修改master本身。
++    const backup = input.apply ? await backupDatabase(db, input.db, input.backupDir!) : undefined
++    const report = {
++      status: input.apply ? "ready" : "dry-run",
++      part: input.part,
++      attachment_index: input.attachmentIndex,
++      old_sha256: oldSha,
++      source_sha256: sourceSha,
++      new_sha256: newSha,
++      new_mime: normalized.mime,
++      new_bytes: output.length,
++      backup,
++    }
++    if (!input.apply) {
++      // Dry-run只给出确定的新hash，供第二次--apply形成old/source/new三重前置条件。
++      console.log(JSON.stringify(report, null, 2))
++      return
++    }
++
++    // 写事务前再次确认master没有被验证过程或外部程序改动。
++    // 备份hash失配时在UPDATE前终止，live数据库仍保持原值。
++    await verifyBackupManifest(backup!)
++    const next = structuredClone(part)
++    next.state.attachments[input.attachmentIndex] = { ...attachment, mime: normalized.mime, url: normalized.url }
++    const nextData = JSON.stringify(next)
++    db.transaction(() => {
++      // 完整旧JSON参与CAS，哪怕同一Part被别的进程改了非附件字段也会拒绝覆盖。
++      // 校验与UPDATE位于同一事务，任一检查抛错都由SQLite原子回滚。
++      const result = db.query("UPDATE part SET data = ? WHERE id = ? AND data = ?").run(nextData, input.part, row.data)
++      if (result.changes !== 1) throw new Error(`CAS updated ${result.changes} rows instead of 1`)
++      // 比较完整序列化JSON，确保目标附件之外的字段没有在构造或落库时丢失。
++      const stored = db.query<{ data: string }, [string]>("SELECT data FROM part WHERE id = ?").get(input.part)
++      if (stored?.data !== nextData) throw new Error("Stored Part does not match the intended JSON")
++      if (db.query("PRAGMA foreign_key_check").all().length !== 0) throw new Error("foreign_key_check failed")
++      const integrity = db.query<{ integrity_check: string }, []>("PRAGMA integrity_check").get()
++      if (integrity?.integrity_check !== "ok") throw new Error("integrity_check failed")
++    })()
++    console.log(JSON.stringify({ ...report, status: "migrated" }, null, 2))
++  } finally {
++    db.close()
++  }
++}
++
++async function normalize(row: PartRow, mime: string, source: Buffer, tokenBudget: number) {
++  // 迁移复用生产Image.Service；空Config只采用现有默认限制，不复制另一份resize算法。
++  const layer = Image.layer.pipe(
++    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.succeed({}) })),
++  )
++  return Effect.runPromise(
++    Effect.gen(function* () {
++      return yield* (yield* Image.Service).normalize(
++        {
++          id: PartID.make(row.id),
++          messageID: MessageID.make(row.message_id),
++          sessionID: SessionID.make(row.session_id),
++          type: "file",
++          mime,
++          url: `data:${mime};base64,${source.toString("base64")}`,
++        },
++        { tokenBudget },
++      )
++    }).pipe(Effect.provide(layer)),
++  )
++}
++
++async function backupDatabase(db: Database, dbPath: string, parent: string) {
++  // Master是SQLite生成的完整一致数据库，不依赖外部进程是否正在checkpoint WAL。
++  // VACUUM INTO由SQLite持有读快照，已提交WAL页面会被合并进单一可恢复数据库。
++  await fs.mkdir(parent, { recursive: true })
++  // page_count包含WAL可见页面，比主db文件大小更接近VACUUM快照的真实空间需求。
++  const pageCount = db.query<{ page_count: number }, []>("PRAGMA page_count").get()?.page_count ?? 0
++  const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()?.page_size ?? 0
++  const bytes = pageCount * pageSize
++  const disk = await fs.statfs(parent)
++  // 峰值同时存在master和validation clone；空间不足时必须在接触live DB前停止。
++  // validation结束即删除，因此长期只保留一份master和很小的manifest。
++  if (disk.bavail * disk.bsize < bytes * 2) throw new Error("Backup drive lacks space for master and validation clone")
++  const root = path.join(parent, `image-attachment-${new Date().toISOString().replaceAll(":", "-")}`)
++  // 每次apply使用独立目录，避免旧备份与本次manifest混合后被误认为同一快照。
++  const master = path.join(root, "master")
++  const clone = path.join(root, "validation")
++  await fs.mkdir(master, { recursive: true })
++  const name = path.basename(dbPath)
++  const masterDb = path.join(master, name)
++  // 路径由脚本生成，但仍转义单引号，避免合法目录名破坏VACUUM语句。
++  db.run(`VACUUM INTO '${masterDb.replaceAll("'", "''")}'`)
++  // VACUUM完成返回后master已是完整文件；此后只读hash，不再对其执行SQLite操作。
++  const manifest = { [name]: await fileDigest(masterDb) }
++  await fs.writeFile(path.join(root, "manifest.json"), JSON.stringify(manifest, null, 2))
++  // 打开clone可能触发SQLite WAL恢复，所以永远不能直接打开唯一master。
++  // clone同时做结构和外键检查，避免把不可恢复的备份当作写库许可。
++  await fs.cp(master, clone, { recursive: true })
++  const validation = new Database(path.join(clone, path.basename(dbPath)), { readonly: true })
++  try {
++    const result = validation.query<{ integrity_check: string }, []>("PRAGMA integrity_check").get()
++    if (result?.integrity_check !== "ok") throw new Error("Backup validation clone failed integrity_check")
++    if (validation.query("PRAGMA foreign_key_check").all().length !== 0)
++      throw new Error("Backup validation clone failed foreign_key_check")
++  } finally {
++    validation.close()
++    await fs.rm(clone, { recursive: true, force: true })
++  }
++  await verifyBackupManifest(root)
++  return root
++}
++
++async function verifyBackupManifest(root: string) {
++  // Manifest不接受“文件仍存在”作为成功，必须逐个验证原始物理内容。
++  const manifest = JSON.parse(await fs.readFile(path.join(root, "manifest.json"), "utf8")) as Record<string, string>
++  for (const [name, expected] of Object.entries(manifest)) {
++    if ((await fileDigest(path.join(root, "master", name))) !== expected) throw new Error(`Master backup changed: ${name}`)
++  }
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === "object" && value !== null && !Array.isArray(value)
++}
++
++function dataUrlBytes(url: string) {
++  // Hash比较针对Provider最终接收的bytes，而不是可能包含不同前缀文本的完整data URL。
++  // 无data前缀或分隔逗号立即失败，不把任意文本静默解释为空图片。
++  const marker = ";base64,"
++  const start = url.indexOf(marker)
++  if (!url.startsWith("data:") || start === -1) throw new Error("Attachment is not a base64 data URL")
++  return Buffer.from(url.slice(start + marker.length), "base64")
++}
++
++function digest(input: Buffer) {
++  return createHash("sha256").update(input).digest("hex")
++}
++
++async function fileDigest(file: string) {
++  // opencode.db可能超过2GB；流式hash避免为了备份校验把整库一次性装入内存。
++  // reader逐块更新同一SHA状态，内存占用与数据库大小无关。
++  const hash = createHash("sha256")
++  const reader = Bun.file(file).stream().getReader()
++  while (true) {
++    const next = await reader.read()
++    if (next.done) break
++    hash.update(next.value)
++  }
++  return hash.digest("hex")
++}
++
++function required(name: string, value: string | undefined) {
++  if (!value) throw new Error(`--${name} is required\n\n${usage}`)
++  return value
++}
++
++function finiteInteger(name: string, value: string | undefined) {
++  const result = Number(value)
++  if (!Number.isSafeInteger(result) || result < 0) throw new Error(`--${name} must be a non-negative integer`)
++  return result
++}
+diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
+index 5a25e0dd4f2e922d17ab0d1ff97e05f504617498..3dc7c66e1311b4be327c81ca949841cdbbc9ed32 100644
+--- a/packages/opencode/src/image/image.ts
++++ b/packages/opencode/src/image/image.ts
+@@ -1,7 +1,13 @@
+ import { Config } from "@/config/config"
+ import type { MessageV2 } from "@/session/message-v2"
++import { Global } from "@opencode-ai/core/global"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { Context, Effect, Layer, Schema } from "effect"
++import { createHash, randomUUID } from "node:crypto"
++import fs from "node:fs/promises"
++import path from "node:path"
++
++declare const OPENCODE_COMPILED: boolean | undefined
+ 
+ const MAX_BASE64_BYTES = 5 * 1024 * 1024
+ const MAX_WIDTH = 2000
+@@ -15,6 +21,12 @@ const JPEG_QUALITIES = [85, 70, 55, 40]
+ const log = Log.create({ service: "image" })
+ type Sharp = typeof import("sharp")
+ type SharpMetadata = import("sharp").Metadata
++type EmbeddedSharp = {
++  target: string
++  version: string
++  addon: string
++  files: Record<string, string>
++}
+ 
+ export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
+   "ImageResizerUnavailableError",
+@@ -72,10 +84,13 @@ export const layer = Layer.effect(
+     const loadSharp = yield* Effect.cached(
+       Effect.tryPromise({
+         try: async () => {
++          // compiled和源码路径只区别Sharp的装载位置，后续metadata/resize/encode始终共用同一Sharp实现。
++          // compiled资源准备失败直接映射为ResizerUnavailable，不允许绕过Sharp返回输入附件。
++          if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) await prepareCompiledSharp()
+           const mod = await import("sharp")
+           const value: unknown = Reflect.get(mod, "default")
++          // Sharp 0.34.5的动态import契约是default callable；其他形状不是可支持的第二后端。
+           if (isSharp(value)) return value
+-          if (isSharp(mod)) return mod
+           throw new Error("sharp module did not expose a callable export")
+         },
+         catch: (error) => {
+@@ -171,6 +186,62 @@ function isSharp(value: unknown): value is Sharp {
+   return typeof value === "function"
+ }
+ 
++async function prepareCompiledSharp() {
++  // build.ts 同时把虚拟模块放入files/entrypoints；compiled缺失时直接失败，不猜测开发机node_modules位置。
++  // @ts-expect-error generated at build time
++  const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
++  // Sharp版本和target共同隔离cache，升级或切换libc时不能复用ABI不兼容的addon。
++  const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
++  // addon加载前必须等待所有DLL/dylib/so完成校验，避免并发看到“node存在但依赖库未就绪”的半状态。
++  // Promise并行只影响释放速度；全量完成前不会向官方loader公开addon绝对路径。
++  await Promise.all(
++    Object.entries(embedded.files).map(([relative, source]) =>
++      ensureExtractedNativeFile(source, path.join(root, ...relative.split("/"))),
++    ),
++  )
++  // Sharp 的动态 package require 无法从 bunfs 找到 addon；build plugin 只让官方 loader优先读取该绝对路径。
++  // 全局值只承载打包产物确定的路径，不暴露配置入口，也不接受外部覆盖。
++  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH = path.join(
++    root,
++    ...embedded.addon.split("/"),
++  )
++}
++
++async function ensureExtractedNativeFile(source: string, target: string) {
++  // 已验证文件直接复用；只看存在/大小不足以防止崩溃遗留或同名错误native资源。
++  // source来自Bun内嵌只读资源，因此与target内容hash相等即可作为完整提交标志。
++  if (await sameFileContent(source, target)) return
++  await fs.mkdir(path.dirname(target), { recursive: true })
++  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
++  try {
++    // 临时文件和目标同目录，使rename保持同卷原子替换语义。
++    // PID和UUID避免同进程任务及不同进程之间复用未完成的临时文件。
++    await Bun.write(temp, Bun.file(source))
++    try {
++      await fs.rename(temp, target)
++    } catch (error) {
++      // Windows会锁住已加载的node/DLL；并发loser只在winner内容完全一致时复用，不能覆盖未知文件。
++      // 内容不同则保留原错误，防止用删除或覆盖绕过正在使用的ABI冲突文件。
++      if (await sameFileContent(source, target)) return
++      throw error
++    }
++    if (!(await sameFileContent(source, target))) throw new Error(`Extracted Sharp resource failed verification: ${target}`)
++  } finally {
++    await fs.rm(temp, { force: true }).catch(() => {})
++  }
++}
++
++async function sameFileContent(source: string, target: string) {
++  if (!(await Bun.file(target).exists())) return false
++  // 先比较大小避免每次图片请求都无条件hash较大的libvips文件。
++  if (Bun.file(source).size !== Bun.file(target).size) return false
++  return (await fileDigest(source)) === (await fileDigest(target))
++}
++
++async function fileDigest(file: string) {
++  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
++}
++
+ function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata, DecodeError> {
+   return Effect.tryPromise({
+     try: () => sharp(buffer).metadata(),
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 7aa134bd8816799f77f8b4a61940c22974e01c00..267bc5ecd64d59f68f4af73e86dcccec3b5b2dee 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -571,13 +571,7 @@ export const layer = Layer.effect(
+             )
+             const normalized = yield* Effect.forEach(toolAttachments, (attachment) =>
+               attachment.mime.startsWith("image/")
+-                ? image.normalize(attachment).pipe(
+-                    Effect.catchIf(
+-                      (error) => error instanceof Image.ResizerUnavailableError,
+-                      () => Effect.succeed(attachment),
+-                    ),
+-                    Effect.exit,
+-                  )
++                ? image.normalize(attachment).pipe(Effect.exit)
+                 : Effect.succeed(Exit.succeed<MessageV2.FilePart>(attachment)),
+             )
+             const omitted = normalized.filter(Exit.isFailure).length
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index e24214de21d9d7f8e5dbf272dc3a8ee3e93f5058..cbf9c18d57fd6e0c97e9f359f3e5c3eed9ed6318 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1925,12 +1925,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+       const parts = yield* Effect.forEach(resolvedParts, (part) =>
+         part.type === "file" && part.mime.startsWith("image/")
+-          ? image.normalize(part).pipe(
+-              Effect.catchIf(
+-                (error) => error instanceof Image.ResizerUnavailableError,
+-                () => Effect.succeed(part),
+-              ),
+-            )
++          ? image.normalize(part)
+           : Effect.succeed(part),
+       )
+ 
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 5bdb607cfe8505242485e6d69ba538a633b5f965..9a8b7722d074098bc78e76d72d388222891c8b76 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -632,12 +632,6 @@ export const ReadTool = Tool.define(
+             input,
+             // `read` results enter the model immediately, so keep its payload near the existing image token cap.
+             { tokenBudget: 1600 },
+-          ).pipe(
+-            // If the native resizer cannot load, preserve the old read behavior: attach the original bytes instead of failing.
+-            Effect.catchIf(
+-              (error) => error instanceof Image.ResizerUnavailableError,
+-              () => Effect.succeed(input),
+-            ),
+           )
+           const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
+           return {
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+index c65168bd0cdc6e736b6db9639ff467668aee5ccb..453520687fd819089901c9109fdd9bd4d39eb0fb 100644
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -194,8 +194,18 @@ const env = Layer.mergeAll(
+     Layer.provideMerge(deps),
+   ),
+ )
++const unavailableEnv = Layer.mergeAll(
++  TestLLMServer.layer,
++  SessionProcessor.layer.pipe(
++    Layer.provide(summary),
++    Layer.provide(Layer.succeed(Image.Service, Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }))),
++    Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
++    Layer.provideMerge(deps),
++  ),
++)
+ 
+ const it = testEffect(env)
++const unavailable = testEffect(unavailableEnv)
+ 
+ const boot = Effect.fn("test.boot")(function* () {
+   const processors = yield* SessionProcessor.Service
+@@ -204,6 +214,46 @@ const boot = Effect.fn("test.boot")(function* () {
+   return { processors, session, provider }
+ })
+ 
++unavailable.live("omits an image attachment when normalization is unavailable", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++        yield* llm.push(reply().tool("image_read", { path: "image.png" }))
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "read image")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const model = yield* provider.getModel(ref.providerID, ref.modelID)
++        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
++        const result = yield* handle.process({
++          user: {
++            id: parent.id,
++            sessionID: chat.id,
++            role: "user",
++            time: parent.time,
++            agent: parent.agent,
++            model: { providerID: ref.providerID, modelID: ref.modelID },
++          } satisfies MessageV2.User,
++          sessionID: chat.id,
++          model,
++          agent: agent(),
++          system: [],
++          messages: [{ role: "user", content: "read image" }],
++          tools: { image_read: imageRead },
++        })
++        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
++        expect(result).toBe("continue")
++        expect(part?.state.status).toBe("completed")
++        if (part?.state.status === "completed") {
++          // 失败图片不能回到provider，但工具文本仍需保留，避免丢失非图片结果。
++          expect(part.state.attachments).toBeUndefined()
++          expect(part.state.output).toContain("image omitted")
++        }
++      }),
++    { git: true, config: (url) => providerCfg(url) },
++  ),
++)
++
+ // ---------------------------------------------------------------------------
+ // consecutive-error breaker 测试工具
+ // ---------------------------------------------------------------------------
+@@ -221,6 +271,14 @@ const failingRead = aiTool({
+     throw new Error("File not found")
+   },
+ })
++const imageRead = aiTool({
++  description: "image read",
++  inputSchema: z.object({ path: z.string() }),
++  execute: async (): Promise<{ output: string; attachments: Array<{ type: "file"; mime: string; url: string }> }> => ({
++    output: "tool output",
++    attachments: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
++  }),
++})
+ 
+ // [local-smark] 构造并行工具调用的 SSE chunks。
+ // reply().tool() 硬编码 index=0（llm-server.ts toolStartLine），无法脚本并行调用——
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index d7e5fd3e5c4776ffb635909157abf79964353f6f..b3b18527c0af7d73928a507335dc619d20387b0a 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -170,6 +170,10 @@ const registryImage = Layer.succeed(
+     normalize: (input) => Effect.succeed(input),
+   }),
+ )
++const unavailableImage = Layer.succeed(
++  Image.Service,
++  Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
++)
+ 
+ const processorCreateStarted: Array<() => void> = []
+ const blockingProcessor = Layer.succeed(
+@@ -179,7 +183,7 @@ const blockingProcessor = Layer.succeed(
+   }),
+ )
+ 
+-function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
++function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "unavailable" }) {
+   const deps = Layer.mergeAll(
+     Session.defaultLayer,
+     Snapshot.defaultLayer,
+@@ -225,7 +229,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
+       ? blockingProcessor
+       : SessionProcessor.layer.pipe(
+           Layer.provide(summary),
+-          Layer.provide(Image.defaultLayer),
++          Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
+           Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+           Layer.provideMerge(deps),
+         )
+@@ -238,7 +242,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
+     TestLLMServer.layer,
+     SessionPrompt.layer.pipe(
+       Layer.provide(SessionRevert.defaultLayer),
+-      Layer.provide(Image.defaultLayer),
++       Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
+       Layer.provide(Reference.defaultLayer),
+       Layer.provide(summary),
+       Layer.provideMerge(run),
+@@ -257,8 +261,32 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
+ const it = testEffect(makeHttp())
+ const race = testEffect(makeHttp({ processor: "blocking" }))
+ const accounting = testEffect(makeHttp({ usage: true }))
++const unavailable = testEffect(makeHttp({ image: "unavailable" }))
+ const unix = process.platform !== "win32" ? it.instance : it.instance.skip
+ 
++unavailable.instance(
++  "fails before persisting an image when the resizer is unavailable",
++  () =>
++    Effect.gen(function* () {
++      yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Pinned" })
++      const result = yield* Effect.exit(
++        prompt.prompt({
++          sessionID: chat.id,
++          agent: "build",
++          noReply: true,
++          parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
++        }),
++      )
++      expect(Exit.isFailure(result)).toBe(true)
++      // normalize失败发生在updateMessage/updatePart之前，数据库中不应留下半个用户请求。
++      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
++    }),
++  { git: true },
++)
++
+ // Config that registers a custom "test" provider with a "test-model" model
+ // so provider model lookup succeeds inside the loop.
+ const cfg = {
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e855864fa5 100644
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -1,4 +1,5 @@
+-import { afterEach, describe, expect } from "bun:test"
++import { afterEach, describe, expect, test } from "bun:test"
++import { Database as SQLite } from "bun:sqlite"
+ import { Cause, Effect, Exit, Layer } from "effect"
+ import path from "path"
+ import { Agent } from "../../src/agent/agent"
+@@ -19,12 +20,28 @@ import { readOutline } from "../../src/tool/read-outline"
+ import { Truncate } from "@/tool/truncate"
+ import { Tool } from "@/tool/tool"
+ import { Filesystem } from "@/util/filesystem"
+-import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
++import { disposeAllInstances, provideInstance, TestInstance, tmpdir, tmpdirScoped } from "../fixture/fixture"
+ import { testEffect } from "../lib/effect"
+ import { Reference } from "@/reference/reference"
+ import { Image } from "@/image/image"
+ 
+ const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
++const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
++
++async function migrateImageAttachment(args: string[]) {
++  // 子进程覆盖用户实际调用的CLI边界，避免测试绕过参数校验、只读模式或进程退出码。
++  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], {
++    cwd: path.join(import.meta.dir, "../.."),
++    stdout: "pipe",
++    stderr: "pipe",
++  })
++  const [exitCode, stdout, stderr] = await Promise.all([
++    child.exited,
++    new Response(child.stdout).text(),
++    new Response(child.stderr).text(),
++  ])
++  return { exitCode, stdout, stderr }
++}
+ 
+ afterEach(async () => {
+   await disposeAllInstances()
+@@ -645,7 +662,7 @@ describe("tool.read truncation", () => {
+     }),
+   )
+ 
+-  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
++  noResizer.live("fails closed when the image resizer is unavailable", () =>
+     Effect.gen(function* () {
+       const dir = yield* tmpdirScoped()
+       const png = Buffer.from(
+@@ -654,13 +671,9 @@ describe("tool.read truncation", () => {
+       )
+       yield* put(path.join(dir, "image.png"), png)
+ 
+-      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+-      expect(result.output).toStartWith("Image read successfully")
+-      expect(result.attachments?.[0]).toMatchObject({
+-        type: "file",
+-        mime: "image/png",
+-        url: `data:image/png;base64,${png.toString("base64")}`,
+-      })
++      // 原图回退会把未经主处理链确认的数据继续交给模型；处理器不可用时必须终止本次 Read。
++      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
++      expect(error.message).toBe("Image resizer is unavailable")
+     }),
+   )
+ 
+@@ -1143,3 +1156,116 @@ describe("tool.read binary detection", () => {
+     }),
+   )
+ })
++
++describe("image attachment migration", () => {
++  test(
++    "dry-runs, migrates once, remains idempotent, and rejects non-images",
++    async () => {
++      await using tmp = await tmpdir()
++      const dbPath = path.join(tmp.path, "opencode.db")
++      const backupDir = path.join(tmp.path, "backups")
++      const source = path.join(FIXTURES_DIR, "large-image.png")
++      const sourceBytes = Buffer.from(await Bun.file(source).arrayBuffer())
++      const oldBytes = Buffer.from("known truncated image bytes")
++      // 旧bytes刻意不可解码：迁移不应读取或“修补”坏数据，只将其hash作为CAS前置条件。
++      const hash = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
++      const original = JSON.stringify({
++        type: "tool",
++        state: {
++          status: "completed",
++          attachments: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${oldBytes.toString("base64")}` }],
++        },
++      })
++      const db = new SQLite(dbPath)
++      db.run("PRAGMA journal_mode = WAL")
++      // 最小真实SQLite表保留脚本依赖的四列，让测试聚焦Part行为而非复制生产schema。
++      db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL)")
++      db.query("INSERT INTO part VALUES (?, ?, ?, ?)").run("prt_migrate", "msg_migrate", "ses_migrate", original)
++      db.query("INSERT INTO part VALUES (?, ?, ?, ?)").run("prt_unrelated", "msg_unrelated", "ses_unrelated", original)
++      const args = [
++        // source和两份旧hash全部显式传入，测试同时锁住“不扫描、不猜测”的CLI契约。
++        "--db",
++        dbPath,
++        "--part",
++        "prt_migrate",
++        "--source",
++        source,
++        "--expected-old-sha",
++        hash(oldBytes),
++        "--expected-source-sha",
++        hash(sourceBytes),
++      ]
++
++      // Dry-run必须实际经过Sharp才能给出新hash，但不能创建备份或改写目标行。
++      const dryRun = await migrateImageAttachment(args)
++      expect(dryRun.exitCode).toBe(0)
++      const report = JSON.parse(dryRun.stdout.slice(dryRun.stdout.lastIndexOf('{\n  "status"')))
++      expect(report.status).toBe("dry-run")
++      const dryRunDb = new SQLite(dbPath, { readonly: true })
++      expect(dryRunDb.query("SELECT data FROM part").get()).toEqual({ data: original })
++      dryRunDb.close()
++
++      // 错误source hash必须在创建备份和写库前失败。
++      const rejectedHash = await migrateImageAttachment([
++        ...args.slice(0, -1),
++        "0".repeat(64),
++        "--expected-new-sha",
++        report.new_sha256,
++        "--backup-dir",
++        backupDir,
++        "--apply",
++      ])
++      expect(rejectedHash.exitCode).not.toBe(0)
++      expect(await Bun.file(backupDir).exists()).toBe(false)
++
++      // Apply将dry-run产出的hash变成第三个前置条件，防止Sharp版本或编码结果漂移后静默写库。
++      const applyArgs = [...args, "--expected-new-sha", report.new_sha256, "--backup-dir", backupDir, "--apply"]
++      db.run("CREATE TRIGGER reject_part_update BEFORE UPDATE OF data ON part BEGIN SELECT RAISE(IGNORE); END")
++      const casRejected = await migrateImageAttachment(applyArgs)
++      expect(casRejected.exitCode).not.toBe(0)
++      // changes=0必须保持事务零写入；之后删除触发器再验证同一命令仍可正常迁移。
++      expect(db.query("SELECT data FROM part WHERE id = 'prt_migrate'").get()).toEqual({ data: original })
++      db.run("DROP TRIGGER reject_part_update")
++      const applied = await migrateImageAttachment(applyArgs)
++      expect(applied.exitCode).toBe(0)
++      expect(applied.stdout).toContain('"status": "migrated"')
++      const appliedReport = JSON.parse(applied.stdout.slice(applied.stdout.lastIndexOf('{\n  "status"')))
++      // Apply成功必须留下可独立恢复的一致master及其manifest，而不是只证明目标行已改变。
++      expect(await Bun.file(path.join(appliedReport.backup, "master", "opencode.db")).exists()).toBe(true)
++      expect(await Bun.file(path.join(appliedReport.backup, "manifest.json")).exists()).toBe(true)
++      const master = new SQLite(path.join(appliedReport.backup, "master", "opencode.db"), { readonly: true })
++      // 保持另一个WAL连接存活，确认一致快照包含已提交WAL中的无关行且仍保留迁移前目标值。
++      expect(master.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
++      expect(master.query("SELECT data FROM part WHERE id = 'prt_migrate'").get()).toEqual({ data: original })
++      master.close()
++      const migratedDb = new SQLite(dbPath)
++      // 直接回读数据库而非相信stdout，确认实际存储的是Sharp生成且hash匹配的附件。
++      const migrated = JSON.parse((migratedDb.query<{ data: string }, []>("SELECT data FROM part").get() as { data: string }).data)
++      expect(migrated.state.attachments[0].mime).toBe("image/jpeg")
++      expect(hash(Buffer.from(migrated.state.attachments[0].url.split(",")[1], "base64"))).toBe(report.new_sha256)
++      expect(migratedDb.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
++
++      // 第二次运行应在读取source和创建大备份前幂等退出，避免恢复命令重试产生副作用。
++      const repeated = await migrateImageAttachment(applyArgs)
++      expect(repeated.exitCode).toBe(0)
++      expect(repeated.stdout).toContain('"status": "already migrated"')
++
++      // 相同bytes但错误MIME不能走幂等短路，避免provider按错误媒体类型解释正确payload。
++      migrated.state.attachments[0].mime = "image/png"
++      migratedDb.query("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(migrated), "prt_migrate")
++      const mismatchedMime = await migrateImageAttachment(applyArgs)
++      expect(mismatchedMime.exitCode).not.toBe(0)
++      expect(mismatchedMime.stderr).toContain("MIME")
++
++      // 即使bytes与new hash一致，非图片MIME也不能借幂等分支绕过工具的图片专用边界。
++      migrated.state.attachments[0].mime = "application/pdf"
++      migratedDb.query("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(migrated), "prt_migrate")
++      migratedDb.close()
++      db.close()
++      const rejected = await migrateImageAttachment(applyArgs)
++      expect(rejected.exitCode).not.toBe(0)
++      expect(rejected.stderr).toContain("is not an image")
++    },
++    120_000,
++  )
++})

@@ -1,0 +1,2401 @@
+From aede70fbccdd1801ceb108de92593109d67a0c76 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 12 Sep 2026 21:49:27 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tool):=20=E7=BC=96=E8=BE=91=E4=B8=89?=
+ =?UTF-8?q?=E5=B7=A5=E5=85=B7=E4=B8=8A=E4=B8=8B=E6=96=87=E4=B8=80=E8=87=B4?=
+ =?UTF-8?q?=E6=80=A7=E5=8F=8D=E9=A6=88=E4=B8=8E=20diff=20=E9=A2=84?=
+ =?UTF-8?q?=E7=AE=97=E9=97=A8=E9=A2=84=E8=BF=87=E6=BB=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+失败诊断增肥（edit/apply_patch）：歧义错误附候选行号与经同域核验的最小唯一扩展建议；不匹配失败附自写晚于自读的时效事实（引导使用作用后 diff，不诱导 re-read）、已读区间列表（复用 read 可见性协议，含 compacted 过滤）与同名异路径提醒。
+
+成功 output 真值：apply_patch 附 post-formatter Changed 段，metadata.diff 对齐落盘内容（修复 H02）；write 仅在 formatter 实际改内容时回显差异段并持久化 formattedChanged（新建全文 diff 冗余不回显）；edit 的 Changed 段改为连续前缀裁剪（修复 C01 跳行截断）。预算探测前新增行多重集对称差下界预过滤（symDiff>K 时才跳过 jsdiff 探测，决策等价），事故规模重写在慢机器上恢复亚秒，既有红色性能用例转绿。
+
+工具文案：edit.txt/apply_patch.txt 各增陈旧转写禁令与 more-than-3-lines 歧义诱导，edit.txt 门禁条目劝导勿用 bash 输出作编辑依据。
+
+diff --git a/docs/plans/edit-harness-reliability-investigation.md b/docs/plans/edit-harness-reliability-investigation.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..d167e527247bd794ff35e6dccd3e86009432db3d
+--- /dev/null
++++ b/docs/plans/edit-harness-reliability-investigation.md
+@@ -0,0 +1,486 @@
++# Edit / Apply Patch Harness 可靠性调查记录
++
++> Status: investigation-in-progress
++>
++> Revision: R4
++>
++> Last updated: 2026-09-12
++>
++> Implementation allowed: no
++>
++> 本文是持续维护的证据台账，不是已审批的修复方案。记录已确认缺陷、现象、反证、统计修正和待调查项；不得将候选根因写成已确认事实。
++
++## 1. 用户目标与调查边界
++
++用户观察到 edit / apply_patch 大量失败，要求还原具体 Session 中模型如何得到 oldString，判断模型、工具反馈、上下文投影、格式化、并发和流重试分别承担什么原因。不能停留在“文本不匹配”的同义描述。
++
++- 主窗口为最近两周，同时比较最近三周、30天；避免旧实现污染当前结论。
++- 用户要求超过十个具体案例，并希望至少充分解释失败中的80%。**当前尚未达到80%逐事件因果解释覆盖率。**
++- 数据库：`C:\Users\Lenovo\.local\share\opencode\opencode.db`。
++- 查询通过 SQLite URI `mode=ro`、`PRAGMA query_only=ON`；后续批次使用只读事务保持批内一致。
++- 冷存储只在内存解压，不调用会持久 thaw 的业务 API，不修改业务数据库。
++- 本次授权允许新增、维护本文；没有授权实施生产修复。
++- 工具运行本身会产生对话、日志和 tool-output，这不等于执行了业务数据库维护。
++
++## 2. 证据等级与统计纪律
++
++1. **闭合事件**：具有历史工具输入/输出、失败参数、实际差异或后续成功见证，并能对应实现或日志。
++2. **实现确认**：当前源码能证明行为，但历史事件归因仍可能缺运行版本/请求正文。
++3. **候选关联**：归一化后相同、相邻操作、模型自述或历史文本出现，只用于定位调查方向。
++4. **未解释**：缺证据时保留，不为了80%目标强行归类。
++
++数据库中的 input/output 不必然等于当次网络请求逐字内容：存在输入真值回写、compaction、截断、插件投影和冷存储。模型推理中的“已经读过”“路径损坏”“工具二次解码”均为待核实陈述。
++
++已有 fork 会复制历史。按 Session/Part 计数不等于独立执行数；至少两个抽样 Session 复制了同一 `r6_probe_caps.py` 事件。初步以 callID、执行开始时间、input 去重得到445条失败对应426个键，**这不是已验证的最终去重算法**。
++
++## 3. 固定窗口统计
++
++统一截止北京时间 **2026-09-08 04:00:00**，epoch ms `1788811200000`。窗口起点分别为8月25日、8月18日、8月9日04:00。排除 pending，终态率为 `error / (completed + error)`。
++
++| 窗口 | apply_patch completed / error | 失败率 | edit completed / error | 失败率 |
++| --- | --- | --- | --- | --- |
++| 14天 | 1082 / 370 | 25.48% | 1972 / 500 | 20.23% |
++| 21天 | 2495 / 823 | 24.80% | 2847 / 556 | 16.34% |
++| 30天 | 3308 / 950 | 22.31% | 3538 / 640 | 15.32% |
++
++30天合计8436条编辑记录、72个 Session；14天3924条、41个 Session；21天6721条、59个 Session。一次全量解压批次校验204个冷存储 payload 的长度及带 kind 前缀的 SHA-256。
++
++### 3.1 已撤销或不能使用的统计
++
++- 早期全库观察为 apply_patch 16553 completed / 2152 error，edit 14771 / 1093；属于活动数据库快照，不能与固定窗口直接混用。
++- 直接搜索主表 error/output 正文曾得到4.04% / 3.51%，**已作废**：冷存储 skeleton 的正文为空，被错误当成成功。
++- 早期查询没有统一上界，活动 Session 导致1085/371等数字波动；本文使用固定上界结果。
++- output 包含 `Failed to update` 的候选：apply_patch 14/21/30天为93/106/128，edit为5/6/6。edit 的输出可能是被编辑代码中的字符串，不能据此认定 partial success；apply_patch 也应按输出结构复核后再计入正式部分失败率。
++- 早期正则把包含 `permission` 的文件路径误归权限错误，例如 `FileSystem.writeFile(...permission/precheck.test.ts)`。后续已单列文件写入异常。
++
++### 3.2 最近两周模型/Provider 分布
++
++| 模型 / Provider | 工具 | error / 总调用 | 比例 |
++| --- | --- | --- | --- |
++| GLM-5.3 / smark | edit | 215 / 1364 | 15.76% |
++| GLM-5.3-flash / smark | edit | 230 / 779 | 29.53% |
++| DeepSeek-v4-flash-0731 / smark | edit | 55 / 329 | 16.72% |
++| GPT-5.6-sol / DaXiao Codex | apply_patch | 245 / 855 | 28.65% |
++| GPT-5.6-sol / smark-codex | apply_patch | 84 / 350 | 24.00% |
++| GPT-5.6-sol / openai | apply_patch | 13 / 158 | 8.23% |
++| GPT-6-astra / smark-codex | apply_patch | 28 / 89 | 31.46% |
++
++这不是公平模型比较。工具、项目、任务、上下文长度、运行版本和 fork 不同。**Flash 的230条失败全部集中于 `ses_041cd5549ffeSiDWyPpcy8Xrsl` 这个补丁迁移 Session。**
++
++### 3.3 GLM 全量失败分解
++
++| 直接失败阶段 | GLM-5.3 | GLM-5.3-flash |
++| --- | --- | --- |
++| oldString 不匹配 | 94 | 140 |
++| 流未完成或取消 | 87 | 1 |
++| 未读门禁 | 13 | 69 |
++| 文件写入异常 | 8 | 0 |
++| 歧义 | 4 | 5 |
++| 重叠 | 2 | 0 |
++| 无变化 | 2 | 12 |
++| 参数/schema | 2 | 1 |
++| 文件不存在 | 0 | 2 |
++| 其他待细分 | 3 | 0 |
++| 总计 | 215 | 230 |
++
++以上是阶段分类，不是根因覆盖率。234条不匹配才是需要逐条追 oldString 的主要集合。
++
++## 4. Harness 已确认问题与高可信事件
++
++### H01. 已执行副作用后的流重试复用旧上下文
++
++Session `ses_f9a9dfba4ffegVZ576cr3ZzMGz`；message `msg_07d5fb7f3001iGrdwnR7BCT2ei`；GPT-6-astra。
++
++- read `prt_07d5fb18f001fZ85Y7Ksd7SpxM` 显示 `Diff.regression.test.ts` 第247/248行为8。
++- 成功 patch `prt_07d6016e3001Ctqb11dwpbETsd` 将两处8改9。
++- 日志03:37:29记录工具 completed；03:38:28 requestID=963 SSE idle timeout。
++- 03:38:30 requestID=969重新发起请求，bodyBytes同为2206127。相同大小单独不证明请求正文相同，但与实现复用输入相互印证。
++- `prt_07d617bfd001Eo9ClpBFxstAjk` 再次提交相同8→9补丁，实际已经是9，所以失败。
++- `src/session/processor.ts:1149–1200` 的 retry 再调用 `llm.stream(streamInput)`，没有在该重试入口重建成功副作用的上下文。
++
++日志位置：`C:\Users\Lenovo\.local\share\opencode\log\2026-09-07T105132.log`，67874、68088、68092附近。日志时间使用UTC，本文时序转换为北京时间。
++
++30天内成功后相同 input 再失败的候选共7条：GPT-5.6-sol同message 2条/不同message 2条，Astra同message 1条，GLM-5.2不同message 1条，Flash不同message 1条。**只有上述Astra链路已核对超时日志，不能把7条全归流重试。**
++
++### H02. apply_patch 最终落盘内容反馈不完整
++
++实现证据：`src/tool/apply_patch.ts:281–290,348–359,392–462`；`src/session/message-v2.ts:1233–1268`。
++
++- patch diff/files metadata 在 formatter 前生成。
++- 写盘后执行 formatter，却不回读重算最终 diff。
++- 成功 output 主要是文件列表、部分失败和LSP说明，没有附最终 diff。
++- 模型投影消费 `state.output` 和 `state.input`，不会自动把 `state.metadata.diff` 作为正文注入。
++- 因此UI/metadata有diff不等于模型收到最终diff；模型提交的patch也不等于格式化后的文本。
++
++对照：edit 在 `src/tool/edit.ts:365–424` 重算post-formatter diff并附 `Changed:`，不能把两种工具混为一谈。
++
++历史关联：EchoPaper `prt_07d74676a001wtSFiVuMu3IQXe` 请求 `recordingWaveform = next.length > 36`，诊断实际为换行后的 `recordingWaveform =` / `next.length > 36`。符合格式化反馈缺失机制，但单凭此处尚不能排除其他写入者。
++
++### H03. Bash 压缩会删除普通CRLF源码中的空白行
++
++这是已闭合的“模型复制了工具输出，但工具输出不忠实”案例。
++
++- Session `ses_041cd5549ffeSiDWyPpcy8Xrsl`，Flash。
++- Bash `prt_0570f8758001KjAN6Ct5uQNagv`：先materialize state 8，再 `Get-Content ...subagent-footer.tsx | Select-Object -Skip 32 -First 28`；命令未过滤空行。
++- output 中 `const status = ...` 与 `type UsageInfo = ...` 紧邻。
++- edit `prt_057129aad001R5QFfqF080RPC6` 的oldString逐字存在于上述output。
++- 失败诊断和后续成功edit `prt_057133213001a8f7uFX6jNXzrK` 证明文件中两行之间有空行。
++- Bash metadata：compressed=true，originalBytes=2551，compressedBytes=2484，savedBytes=67，carriageReturnGroups=1，其余压缩组为0。
++- `src/tool/bash-compress.ts:531–532` 的 `getStableOutput()` 用 `filter(line => line.trim().length > 0)` 删除所有空白行；普通CRLF也可进入虚拟终端路径。
++- `compressVisibleOutput` 主路径在1380–1460行。
++
++只在内存调用真实 `compressVisibleOutput()` 的验证：270字节普通CRLF源码包含一处空行，输出264字节、空行消失，stats.applied=true、carriageReturnGroups=1，无空行删除提示。没有创建fixture或修改源码。
++
++影响：Bash读取、日志和脚本输出不能作为逐字编辑依据，即使没有明显截断标记。当前只对上述事件闭合了因果，不能把所有空行不匹配都算作本缺陷。
++
++### H04. edit未读门禁的相对路径身份不一致
++
++实现：`src/tool/edit.ts:120–123` 对目标以instance.directory解析；140–153行的历史比较直接 `path.resolve(p)`，相对路径使用进程cwd，而非该Session项目目录。
++
++同一Flash Session：
++
++- read `prt_04ff9e8a5001gz6LigX3T6qCDO` 成功读取 `.temp\patches\records\0337-e21353edbf23.md`。
++- read `prt_04ffa15b2001VeBo0thd8jf0hE` 同相对路径返回stub，明确1–40仍可见；metadata.canonicalPath正确指向thirdparty/opencode-11720下文件。
++- edit `prt_04ffae4e1001tBYF9I5jWgTVkj` 同相对路径却报未读；随后还有重复拒绝。
++
++82条门禁失败中，完整历史检索20条存在同规范路径成功read/write/edit；52条只在Bash命令中找到basename提及；10条未找到。这只是候选划分：basename提及不证明Bash确实读到目标，旧历史也可能已compaction。不能把20或52全计为缺陷。
++
++### H05. 失败后恢复读取与去重stub发生冲突
++
++`src/tool/read.ts:205–249` 根据历史metadata、未compacted状态和版本键判断可见性。版本键是size+mtime+head-sample指纹，不是完整文件摘要。
++
++- EchoPaper home失败后，read `prt_07d6336ff001PW4IvGlJQIbr6j` 请求135–179，却返回覆盖90–259的stub。
++- `write.ts`失败链 `prt_04f4cccce001s7v43AS3f2K2Je` 前的read `prt_04f4c9ab3001j6Kt3SW3nL89PF` 也被stub抑制。
++- matcher要求“read and retry”，read却要求“do NOT re-read”，造成恢复指令冲突。
++
++已确认恢复没有收到新源码；**未证明这些stub对应错误版本或Provider实际漏掉旧read**。应继续检查活跃消息集合、投影截断与metadata可见性是否一致。
++
++### H06. 匹配错误的定位与可操作性不足
++
++- home仅差一个前导空格却返回 `No reliable nearby candidate`；该提示是诊断器未能选可靠候选，不等于文件无目标。
++- `src/patch/match.ts` 的closest诊断有4秒和64MiB预算；预算/可靠性不足均可能不给候选。
++- apply_patch失败只报文件，未报告具体chunk索引；大量chunk中模型不易知道应该修正哪个old block。
++- closest诊断有时只给请求/实际列区间，文本自身又省略，不能假定它足够恢复精确oldString。
++
++### H07. 部分文件成功但整体completed的协议认知风险
++
++`src/tool/apply_patch.ts:262–279,405–408`：全部文件失败才error；有文件成功则执行成功文件，并在output附失败文件。按文件原子，不是整次调用全有或全无。
++
++进一步核对发现 `src/tool/apply_patch.txt:30–36` 没有解释部分成功，也没有明确描述全部chunk对原始快照定位和overlap契约。这里是**实现与工具说明的契约缺口**；尚未独立证明多少重试误操作由此造成。
++
++## 5. 模型/Provider行为：必须与Harness分开记录
++
++### M01. home_view.dart展示分隔空格被当成源码缩进
++
++Session `ses_fa174e32dffeTCMApGdW6PJvHv`；Astra。
++
++- grep `prt_07d67c9a2001lJxBn3qk2zXAT3` 的 `Line 146: ` 分隔符后为22个空格。
++- edit patch `prt_07d681a49001NltLYeqKrY8tMu` 删除行去掉 `-` 后为23个空格。
++- 两者字符计数实测，不是猜测。另两次失败仍使用相同错误缩进。
++- 来源展示前缀混淆是合理机制；单凭结果不能证明模型究竟从read还是grep复制那一个空格。
++
++### M02. Flash把字面反斜杠n当成换行
++
++Session `ses_041cd5549ffeSiDWyPpcy8Xrsl`；失败Parts：
++
++- `prt_04fe417190012YIbadaIh7U0lD`
++- `prt_04fe4ae7c0012MmrbrLM0mHHA4`
++- `prt_04fe52bef001fxS6Z7n07TQf1H`
++
++DB JSON解码后oldString含实际两个字符 `\n`，不是换行；转换字面转义后与后续成功edit `prt_04fe864db001HYWLbX9QA9klAw` 的旧文本对应。read `prt_04fd7ad98001EOTWldbOjUouDa` 也有真实换行文本。
++
++推理 `prt_04fe4dcb1001H2iGJ0TzFJTT3Z` 反复怀疑缩进、隐藏字符、JSON层数和工具二次解码；模型确实有解释，只是它的管道解释没有被事实支持。没有原始网络参数对照，不能断言最初由模型还是Provider序列化造成。
++
++### M03. GLM-5.3一次异常输出被放大成80条失败
++
++Session `ses_fb40f26b4ffeY3VjfG4svSLFqh`，80条edit `Tool execution did not complete before stream ended` 全在同一assistant message。
++
++- 示例 `prt_051a6a43d001U1SV48aHeMdqZe`、`prt_051a6fb16001Nbn9QueGa4w1lu`、`prt_051a701fe001SFSk6MlkOMiNBc`。
++- input={}，但state.raw并非空：含长文档编辑以及非法JSON、异常tab/换行、`newString1`、`F:\tmp`等重复异常参数。
++- 该message报告input=94827、output=1920、finish=tool-calls。不能仅凭token数反推网络真实工具调用数。
++- 80条占GLM215条失败的37.21%；不能解读成80次正常编辑或匹配失败。
++- 其余GLM流类失败7条、Flash1条也都是input={}。
++
++仍需确定异常首先发生于模型生成、Provider适配/代理、SDK解析还是processor生命周期；当前仅闭合“统计集中于单次异常message”和raw非法。
++
++### M04. 旧版本、批次语义与补丁文件多层前缀
++
++- Flash旧文本有时来自先前成功edit的oldString，不是最新newString。
++- 部分操作是在逆向重建state-14/state-20/state-21，模型推理 `prt_05807d5250016AUJgHwVhlW9z9` 明确据多个patch推导pre-image；并非单纯抄read。
++- 对 `.patch` 文件编辑需要同时处理文件内diff前缀与工具返回diff前缀，多一个/少一个空格或加号即可改变内容。
++- 各edit条目和apply_patch chunk对immutable original定位；同一调用中用前一条产生的新文本定位后一条应失败。这是合同，不宜自动放宽成顺序修改。
++
++这些机制都有案例或实现基础，但仍需逐条证明，而不是按文件后缀批量归因。
++
++## 6. 跨Session样本台账
++
++下列20条是不同Session的定点失败抽样，并非随机样本。相邻窗口检索为失败前1小时、后10分钟；“未见先前读取”不等于整个Session从未读过。第7/8条为fork复制事件，不能算独立根因样本。
++
++| # | Session | 失败Part | 文件/观察 |
++| --- | --- | --- | --- |
++| 1 | ses_fa174e32dffeTCMApGdW6PJvHv | prt_07d74676a001wtSFiVuMu3IQXe | state.dart，单行赋值与实际格式化换行不符 |
++| 2 | ses_f9a9dfba4ffegVZ576cr3ZzMGz | prt_07d7253810011CClzMnawXqjQJ | Diff.ts，多个匹配；另有H01完整链 |
++| 3 | ses_f8b378e68ffePzMwT7iii55Nw7 | prt_07c29224e002uib94CwxKk7FYq | update.sh，dirname缺少--；read后成功 |
++| 4 | ses_041cd5549ffeSiDWyPpcy8Xrsl | prt_079837474001R75OB5TIizWE7l | 0259.patch，空格上下文行被当成+行 |
++| 5 | ses_10fb7b41cfferSWcJIpOXdJIGj | prt_07880706f001cWXk0lX5g6dyVl | dorm_audit_aug.py，前次修改后第二块不符 |
++| 6 | ses_fc166ef8effeHjRt8s7WK0azSM | prt_0774effcd001uaRsRhETju5hvc | transcribe.py，成功改写后再次大块修改失败 |
++| 7 | ses_1762e23a2ffeYBi6TXLUSjJuKP | prt_076acb096001HkGjuedifRY8Uf | r6_probe_caps.py，write后转义不符，read后成功 |
++| 8 | ses_f8925cc15ffeEPWfz0EMkdwK4O | prt_076da340d017mzt0DzTFicE6JK | 上条fork复制，不算独立事件 |
++| 9 | ses_fa4a6f985ffewzbdTRgY6NxHyM | prt_07686ab38001zPgLJlKU1uXgBL | reviewer-prompt.test.ts，门禁；完整历史其实有旧edit |
++| 10 | ses_f8aefd1efffer9qxMHqUeLpEtq | prt_0764b4671002S8nik39A898V9Y | chatgpt-core.js，第二块不符，定点read后成功 |
++| 11 | ses_f8af288a6ffemmYSZ0brd66JKQ | prt_075bd3ecf0011auEl4ua7g8Mb5 | bash-compress.ts，九块成功后又用不同旧片段 |
++| 12 | ses_00ebf47e6ffejc0zWNlqQRaO0w | prt_070b5fa8a001QT8UT4C5i6dqZT | test_generate_provider.py，门禁，旧历史有读/改 |
++| 13 | ses_f9d14159cffeNPomj2tKlu5QhH | prt_0633e18ef001wfOw4NGakC83MX | file-diff.ts，第四块不符 |
++| 14 | ses_fa1e77e60ffeBsVgoixXfzndY6 | prt_05e6192c5001td2tQ6O8Eu46J4 | settings.json，门禁，read后两块成功 |
++| 15 | ses_fa2ef8cd2ffeDlBpRloUME3nOC | prt_05d812ea2001pVR2jPN1FyvnlQ | audio.test.ts，前次edit后第二块不符，read后成功 |
++| 16 | ses_fb0592160ffekmK38a40bM58vb | prt_0580cb0b4001XR7JgWvmnK2coI | mesh-node.sh，反斜杠数量不同，修正后成功 |
++| 17 | ses_fb40f26b4ffeY3VjfG4svSLFqh | prt_051f1ec620012zVluSfNkrbk0m | scroll计划文件门禁；另有M03异常输出群 |
++| 18 | ses_fb39b7c1effeTceet1hCpuPwmW | prt_0517a2868001jtO3SP4W7hj5Iz | Markdown待核验段遗漏空行，随后成功 |
++| 19 | ses_fbdc39136ffeZ2bTXGcvoEAMNK | prt_04f4cccce001s7v43AS3f2K2Je | write.ts第六块不符，恢复read被stub |
++| 20 | ses_05d28b468ffet146EjFFXLGrhD | prt_0458410c00017zVvSoas41yNPj | control-plane-migrate.sh，刚read仍歧义，扩大上下文成功 |
++
++## 7. 来源扫描结果与80%目标差距
++
++全量扫描GLM/Flash最近14天445条失败，重点追234条oldString不匹配。
++
++- 第一轮全历史搜索64条找到完全相同文本，但包含25条最近来源为模型reasoning，不能证明工具提供过。
++- 第二轮限制同文件来源、前7天、read/Bash/write/成功edit：56条找到字面或变换后对应，178条没有；变换包括解码字面换行、删空行、去缩进、去全部空白。
++- 第三轮用前后1小时read和后续成功edit见证：53条有对应，181条无对应。**与第二轮不能相加，窗口与规则不同。**
++- 后续成功edit的oldString已可能被 `_syncInput` 真值回写，适合做实际文本见证，不适合证明模型原始提交字节。
++- oldString在其他版本或别的文件中出现，不自动证明该文本是来源；必须检查路径、时间、可见性和中间writer。
++- 归一化匹配只说明差异形式，不能当因果归类；特别不能把所有空行差异算作H03。
++
++**当前没有合法的“已解释80%”结果，也没有模型/Harness因果占比。** 已知阶段比例可统计，完整来源归因尚未完成。
++
++## 8. 本轮继续检查发现的实现风险
++
++### C01. edit的Changed截断不是连续前缀
++
++`src/tool/edit.ts:408–425` 逐行预算检查，遇到放不下的行使用continue而不是break，之后更短的行仍可被加入。末尾却提示 `more lines omitted`，容易让消费者理解为只截掉尾部。实现可产生缺中间行的diff片段；尚无历史失败链证明它导致oldString错误。应验证输出预算边界和省略位置语义。
++
++### C02. edit成功历史参数与formatter最终结果并非总一致
++
++普通edit在format后回读contentNew，diff正确；但 `_syncInput` 来自 `applied.syncEdits`，仍是formatter前的replacement。create分支则会同步最终内容。模型能同时看到调用参数newString与Changed最终diff两个不同版本。不是说Changed错误，而是必须继续检查模型是否沿用较早的newString，以及参数回写是否让取证丢失原始请求。
++
++### C03. 工具说明未完整呈现当前匹配语义
++
++当前matcher包含PI normalization、唯一性和original-snapshot语义；apply_patch说明强调exact/substring，却未完整说明同文件chunk重叠、无全局顺序依赖和部分成功。说明与实现差异不能直接算运行错误，但可能造成模型使用错误心智模型。需对照各历史版本实际发送的工具schema，而不只检查当前txt。
++
++## 9. R2补充调查：批次依赖与反证
++
++本轮保持同一14天固定窗口，重新检查445条GLM失败和全部2143条GLM编辑终态记录。新增数据库查询为只读事务；运行真实工具纯函数进行内存对照，没有执行文件编辑工具实现或写入fixture。
++
++### 9.1 五条同次调用引用新文本的证据
++
++对234条不匹配定位错误消息中的 `edits[i]`（单条错误取0），检查失败oldString是否完整包含于另一个条目的newString、且不包含于该条目的oldString。找到5条：GLM-5.3为3条，Flash为2条。
++
++| 失败Part | 失败索引 | 产生该文本的索引 | 事件 |
++| --- | --- | --- | --- |
++| prt_058093723001pHOy2wEsYYt5RF | 4 | 1 | Flash逆向重建prompt版本，后续条目引用同次替换将恢复的hasInFlightTail块 |
++| prt_05d812ea2001pVR2jPN1FyvnlQ | 1 | 0 | GLM在audio.test.ts同次添加测试后，再修改新测试中的sleep/断言段 |
++| prt_072b8abc0001lbnG6aG0xApLz6 | 3 | 0 | Flash后续条目引用同次新加的Entry/Match import |
++| prt_075c853a4001MobbgiyvRm05MP | 1 | 0 | GLM后续条目引用同次新加的bisect-mid调试行 |
++| prt_07a5401af001gqQJQO5ZPt46Jo | 5 | 4 | GLM文档条目引用同次替换后才形成的编号段落 |
++
++失败事实说明owner在修改前文件中未找到目标；参数结构证明存在新文本依赖。仍不能仅凭包含关系证明模型主观意图，或证明全部条目除此以外均正确。
++
++真实 `applyEdits` 内存验证：初始 `const a = 1`，同一批 `a→b`、`b→c`，返回 `Could not find edits[1].oldString in memory.ts`。说明实现遵循original-snapshot契约，而非逐条修改后再匹配。
++
++这5条占234条不匹配的2.14%、445条失败的1.12%；不是额外新增失败。它们与前述来源候选重叠，不得与56条或53条机械相加。
++
++**修正此前样本解释**：audio.test.ts不能仅描述为“前次编辑后又抄错”；本次失败批内明确存在先新增、后修改新文本的依赖。`prt_058093...` 和 `prt_075c853...` 在后续成功操作中出现完全相同oldString，也不再构成“matcher拒绝正确文本”的证据：后续文件可能已经经历第一步变更。
++
++### 9.2 批大小与终态相关性
++
++统计以持久化input.edits长度分桶，输入可能已做真值回写；保留fork重复，包含门禁/权限等失败，不能解释为纯匹配概率或公平性能评测。
++
++| 模型 | 条目数 | completed | error | error占比 |
++| --- | --- | --- | --- | --- |
++| GLM-5.3 | 0 | 0 | 87 | 100%（流类空解析input） |
++| GLM-5.3 | 1 | 679 | 51 | 6.99% |
++| GLM-5.3 | 2–4 | 361 | 44 | 10.86% |
++| GLM-5.3 | 5+ | 109 | 33 | 23.24% |
++| Flash | 0 | 0 | 1 | 100% |
++| Flash | 1 | 346 | 134 | 27.92% |
++| Flash | 2–4 | 179 | 74 | 29.25% |
++| Flash | 5+ | 24 | 21 | 46.67% |
++
++GLM的94条不匹配中61条来自多条目调用，Flash的140条中66条来自多条目调用。批大小与失败相关，但可能由任务复杂度、长上下文和同文件原子性共同影响，不能据此证明“批量工具本身有bug”。
++
++### 9.3 Bash空行缺失的差分对照
++
++同一组普通源码行，使用真实 `compressVisibleOutput`，结果如下：
++
++| 输入 | 输出空行 | applied | carriageReturnGroups |
++| --- | --- | --- | --- |
++| LF | 保留 | false | 0 |
++| CRLF | 删除 | true | 1 |
++| CRLF + enabled:false | 保留 | false | 0 |
++| ANSI reset + LF | 保留 | false | 0 |
++
++这个反证限制H03范围：不能笼统断言所有ANSI输出都会丢空行。内部虚拟终端可能删空行，但最终是否返回压缩文本还受applied判定约束；测试中的ANSI reset场景最终返回原文本。CRLF的缺陷在本对照中稳定可复现。
++
++### 9.4 工具说明与模型行为的责任边界
++
++新读 `src/tool/edit.txt:8` 明确写了original snapshot、不能overlap/nest；第5行明确解释read行号后的分隔空格，第11行说明转义/缩进差异仍失败。
++
++因此C03必须区分工具：**edit已经告知批内原始快照语义，不能将上述5条统一归咎于缺少说明；apply_patch的说明缺口仍需独立评估。** 历史实际发送schema是否含这些描述仍需运行版本证据。
++
++R2增加了可核验机制与反证，但仍未达到80%因果解释目标。剩余匹配失败需要恢复更精确的历史文件版本，不能把“当前扫描未找到来源”转成模型猜测的判决。
++
++## 10. 后续工作与验收
++
++- [ ] 按callID/原始执行时间/fork lineage验证去重，分别报告记录率、执行率、失败链率。
++- [ ] 为234条不匹配建立逐条证据：失败条目索引、oldString、先前来源Part、差异、同文件中间写入、恢复结果、置信度。
++- [ ] 检查Bash原始输出可恢复性、压缩开关、CRLF/ANSI/模板压缩/脱敏；区分读取命令自身变换和harness变换。
++- [ ] 对82条门禁检查真实路径、进程cwd、活跃消息和compaction；不以basename命中替代文件读取证据。
++- [ ] 对M03核对原始Provider流/SDK输入，确定80个raw异常调用在哪里首次出现。
++- [ ] 检查read的展示行前缀、2000字符长行截断、16KB分页、stub与Provider实际可见输出之间的一致性。
++- [ ] 检查格式化、外部编辑、并行工具和子代理的同文件writer时间线；无历史快照时标记不可判定。
++- [ ] 按运行版本分层，特别是8月末/9月初工具实现变更，不将当前实现反推全部历史。
++- [ ] 扩大非迁移任务、非单一长Session对照；不同模型/Provider分别统计。
++- [ ] 80%目标必须以证据闭合的独立失败事件为分子，并公开未解释项；达不到则继续调查，不降低标准。
++
++修复优先级建议仅作为调查结论：先保护已执行副作用后的重试上下文，再修Bash源码保真、路径身份、最终编辑反馈和失败恢复。不得为了降低报错率直接放宽为猜测式模糊写入。
++
++## 11. R3 补充调查：最近一周全量失败与上下文一致性
++
++本轮按用户要求覆盖 edit 与 apply_patch 全部失败，窗口为北京时间 **2026-09-05 00:00 → 2026-09-12**（与 R1/R2 的 09-08 04:00 截止窗口部分重叠，重叠段结论一致）。所有查询沿用只读事务与内存冷存储解压；新增对 pack v2 的 entry 级还原。分析粒度为「失败事件」：edit 按 edits[i] 条目、apply_patch 按文件 hunk 展开，共 681 个事件。
++
++### 11.1 总量与模型分布
++
++2835 次调用、25 个 Session；edit 2026 次（错误 304，**15.0%**），apply_patch 809 次（错误 161，**19.9%**）。对照 R2 固定窗口（edit 20.23% / apply_patch 25.48%）均有下降，但基数仍高。
++
++| 模型 | 工具 | 错误 / 总调用 | 比例 |
++| --- | --- | --- | --- |
++| glm-5.3-flash | edit | 176 / 717 | 24.5%（全部仍属补丁迁徙 Session `ses_041cd5549ffeSiDWyPpcy8Xrsl`） |
++| glm-5.3 | edit | 48 / 465 | 10.3% |
++| kimi-k3 | edit | 80 / 844 | 9.5% |
++| gpt-6-astra | apply_patch | 99 / 568 | 17.4% |
++| gpt-5.6-sol | apply_patch | 40 / 145 | 27.6% |
++| gpt-5.6-luna | apply_patch | 22 / 96 | 22.9% |
++
++排除迁徙 Session 后 edit 错误 128 / 1309 ≈ **9.8%**。这不是公平模型比较（任务/项目/上下文不同）。
++
++### 11.2 失败阶段分类（465 条错误）
++
++| 阶段 | edit | apply_patch |
++| --- | --- | --- |
++| oldString 不匹配 / Failed to find expected lines | 236 | 148 全量 hunk 失败（按文件行细分：99 找不到、53 多处匹配、2 重叠） |
++| 未读门禁 | 39 | — |
++| 多处匹配（Found N occurrences） | ~8 | （计入上行 53） |
++| 流未完成 / aborted | 3+3 | 3+6 |
++| schema/参数、无变化、写入异常、权限预检、冲突等 | ~13 | 4 |
++
++### 11.3 事件级一致性还原（681 事件）
++
++方法：对每个失败条目，在同 Session 全部先前语料（read 输出去行号前缀、bash 输出、成功 edit/write/patch 的 old/new 文本、reasoning）中检索 verbatim 与归一化变体；写入者识别修复了 R2 的盲点——**apply_patch 的文件列表必须解析 patchText 分段**，否则同 Session 的 patch 写入全部漏计。修正后桶分布发生决定性迁移：
++
++| 一致性桶 | 事件数 | 占比 | 机制 |
++| --- | --- | --- | --- |
++| not-in-visible-context | 215 | 31.6% | 见 11.4 G01/G03/G04 细分 |
++| verbatim-but-ambiguous | 199 | 29.2% | G02 最小上下文 hunk 在重复文本中多匹配 |
++| source-then-overwritten / read-then-overwritten | 132 | 19.4% | G01 自写后陈旧 |
++| hit-other-context（read/bash/patch-new/reasoning/write/edit-new） | 91 | 13.4% | G05 跨文件复制、reasoning 重建 |
++| never-read-in-session | 35 | 5.1% | G04 全部经 write/edit 触痕过门禁 |
++| verbatim-in-context-but-failed 真异常 | 9 | 1.3% | 见 11.5，无一确认为 matcher 缺陷 |
++
++中间写入者总数 299（修正前误报 168）。读取-失败间经历 compaction 的仅 2 例，compaction 不是本周失败的主要因子。最后读取为 stub 的 0 例（H05 的 stub 死循环在本周样本未出现）。
++
++### 11.4 确认的 coherence 缺口（机制级）
++
++- **G01 自写后陈旧（约 246 事件，36%）**：模型用自己的 read/patch 文本构造下一次编辑，但同 Session 后续成功写入已改写该区域；失败前未重新读取。错误文案只有「Failed to find expected lines」，不含任何时效信号。钉死案例 `prt_070892f480018Uom0glSRK8rwt`（sol）：失败 patch 7 个 hunk 中 5 个的 expected 在无中间写入者的见证 read 中逐字存在，仅 2 个真正过期——all-or-nothing 语义正确拒绝，但错误把「5/7 可匹配、2/7 陈旧」报成整文件失败，H06 的诊断粒度成本得到本周实证。
++- **G02 最小上下文 hunk 导致歧义（199 事件）**：失败 patch 的 hunk 上下文行分布为 0 行 702、1 行 825、2 行 302；在重复段落多的大文档（`opentui-tui-native-liveness-root-cause-repair.md` 49 次、`opencode-gpt-prompt-transcript.md` 19 次）必然多处匹配。错误文案「Provide more context」可操作但模型重复同一模式。
++- **G03 分页部分可见（70/101）**：读过但找不到且无中间写入者的 101 事件中，70 的读取输出带分页标记——模型只见过文件的某一页，却为从未显示的区域构造 oldString。145/215 的读取→失败间隔 <10 分钟，排除「遗忘」，是可见域与编辑目标的结构性错位。
++- **G04 write 后无复读编辑（33 事件）**：门禁接受 write 触痕，模型凭「自己写入时的意图文本」构造 oldString；formatter 改写与 `_formattedContent` 真值回写后，上下文中的 write input 已是格式化后版本，与模型记忆不一致。
++- **G05 跨文件/同名混淆（45+ 事件）**：45 事件的 oldString 逐字来自**另一个文件**的 read 输出；其中方案文档族（repair.md 与 history 归档）共享大段文本、补丁迁徙 Session 存在 `original\X.patch` 与 `current\X.patch` 同名兄弟目录（22 条门禁即读 original 改 current）。
++- **G06 bash 可见性与门禁错位（13/39 门禁）**：模型经 bash 已看到文件内容，门禁（只认 read/write/edit 触痕）拒绝 edit；从模型视角是「我读过却被说没读」。22/39 则是同名异目录的正确拦截。H04 的相对路径 cwd 解析缺陷在本周样本未单独复现，但门禁与 bash 的语义裂缝依旧。
++- **H03 仍存活**：`bash-compress.ts:531–532` `getStableOutput()` 的空白行过滤在 2026-09-07 压缩精准化提交后仍然存在；CRLF 源码经 bash 读取仍丢空行。
++
++### 11.5 否证的假设（本周新增反证）
++
++- **CRLF 行尾不一致**：verbatim 命中桶 121 事件全部 old=LF / read=LF，CRLF 假设对本周样本不成立。
++- **hunk 内裸空行**：148 个失败 patch 仅 4 个含裸空行，不是主因。
++- **同调用移动伪命中**：9 条真异常的 hit 源 patch 均无同调用移除对应文本。
++- **跨 Session 写入者**：9 条真异常与 101 条候选 B 抽样 40 条，跨 Session 写入者均为 0。
++- **matcher 吞掉现存文本**：唯一钉死案（sol session-diff-count.ts）证明错误来自模型侧部分陈旧；astra 大文档案的文本在失败后见证 read 中不存在且无库内写入者，残余解释为带外替换（用户/编辑器/git 操作，bash 仅见只读 git 命令 45 次）。
++
++### 11.6 可优化点（按证据覆盖排序，均为调查结论，非实施授权）
++
++1. **失败反馈携带时效与进度**：不匹配错误附同文件最近一次成功写入/读取时间与「此后被 N 次写入修改」；apply_patch 报告失败 chunk 索引与已定位成功数（覆盖 G01+H06，约 36%+ 事件）。
++2. **歧义诊断增强**：多处匹配时给出候选行号列表或要求的最小上下文行数（覆盖 G02，29%）。
++3. **read 分页与 edit 联动**：edit 失败且 oldString 不在任何已显示页内时给出指向性提示（覆盖 G03，需 read metadata 与 edit 联动的设计变更）。
++4. **write 结果回显最终内容**：formatter 改写后的最终文本应出现在 output 正文而非仅 input 回写（覆盖 G04）。
++5. **bash 读取与门禁语义对齐**：门禁文案区分「从未见过」与「仅经 bash 见过（压缩输出不可作为逐字依据）」；是否让忠实 bash 读取计入触痕是独立设计取舍（覆盖 G06）。
++6. **同名兄弟文件警告**：编辑目标与已读文件 basename 相同而路径不同时警告（覆盖 G05）。
++7. **H03 空行删除修复**：`getStableOutput` 空白行过滤仍待修复，属既有确认缺陷。
++
++80% 逐事件因果解释目标：本周窗口在事件级（681）完成一致性桶归类，主因六类机制合计覆盖约 98.7%，但桶级归因不等于逐事件闭合；G01/G03 内仍有个案依赖「模型记忆与回写文本差异」的推理链，未达逐事件证据闭合标准。
++
++## 12. R4 用户决策与修复设计（待实施授权）
++
++以下为用户 2026-09-12 审阅 R3 结论后逐条敲定的修复方向与取舍。记录为用户偏好与需求，仍非实施授权；后续以独立 canonical plan / GOAL workflow 推进。
++
++### 12.1 G01 自写后陈旧（约 36% 事件）：文案 + 时效反馈 + 统一 diff 回显
++
++1. **静态文案（edit.txt / apply_patch.txt）**：克制增加一条，位置相对靠前、可用大写等手段保持醒目，但不得占据主导地位。含义：构造 oldString 时以最近一次 read 为底，叠加此后自身 edit/apply_patch/write 返回的作用后结果（diff）；不得凭陈旧 read 转写。
++2. **动态时效反馈**：失败时若同文件最近一次成功写入晚于最后一次读取，附一句时效事实。**措辞不得诱导 re-read**——模型自写后已有 diff 作为真值增量，应引导其使用作用后结果，而非每次重读。示例方向：`This file was modified by your own apply_patch after your last read. Use the diffs returned by those calls as the current content.`
++3. **统一 post-formatter diff 回显**：write 与 apply_patch 补齐 edit 的 `Changed:` 段，使三个写工具的成功 output 都携带 formatter 后的最终 diff。预算中档（见 12.7）。
++
++### 12.2 G02 歧义（29% 事件）：不强制最小行数 + 最小唯一扩展
++
++1. **不强制最小上下文行数**（避免改动单行 typo 也要凑三行的摩擦）。
++2. 现有文案 `Provide more context to make it unique` 后补最短诱导，如 `(more than 3 lines of surrounding context)`。
++3. **歧义失败时返回「最小唯一扩展」**：locateExact 已枚举全部候选 span，错误路径上据此计算距唯一还差多少——返回候选行号及向上/向下扩展建议（如 `matches at lines 121, 487; including 2 more lines above or 3 more below disambiguates`）。性能要求：只在失败路径计算，复用已枚举候选，预算与 match.ts 诊断预算（4s / 64MiB）同源；实现保持简洁顺畅，不为单一调用点新增公共 helper，不引入状态机。
++
++### 12.3 G03 分页盲区（约 10% 事件）：失败时列出已显示区间
++
++edit 失败且 oldString 不在任何已展示 read 页内时，附加事实句：该文本不在你已读取的行区间内，随后列出合并排序后的区间（如 `120-260, 400-512`）。区间融合复用 `src/util/range.ts` 的 `mergeRanges`——read.ts 的 stub 覆盖判断与 compaction handoff 已共用同一 helper。仅陈述事实，不强制诱导 re-read。
++
++### 12.4 G04 write 后无复读（33 事件）：靠 formatter diff 回显，不要求重读
++
++好的 harness 应保证模型写完即可直接编辑。write 成功 output 附 post-formatter diff（同 12.1 第 3 条），`_formattedContent` 真值回写维持现状；不追加任何 re-read 要求。
++
++### 12.5 G05 跨文件/同名混淆（45+ 事件）：克制一句提醒
++
++失败时若上下文中存在同 basename、异路径的已读文件（如 `original\X.patch` vs `current\X.patch`、方案文档族），在错误中简短提示一次：`你在上下文中读过的是另一个同名文件：<path>`。保持简短，不展开。
++
++### 12.6 G06 bash/门禁错位（39 条）：不做文案分层，强化劝导
++
++用户明确：bash 输出解析不可信（压缩/变换，H03 未修复），**bash 读取永远不计入触痕**，也不做「仅经 bash 见过」的文案分层（需要完整解析 bash，不可行）。修复收敛为：在 edit.txt 门禁条目处强化劝导——避免使用 bash 输出作为编辑依据，须用 read 工具。
++
++### 12.7 预算纪律与 diff 回显经济学（2026-09-12 数据库实测）
++
++最近一周 3304 次成功写调用的 metadata.diff 实测：
++
++| 工具 | 次数 | diff p50 | p90 | p99 | max | output 被裁 |
++| --- | --- | --- | --- | --- | --- | --- |
++| edit | 1853 | 1.5KB / 22 行 | 4.4KB / 78 行 | 11KB | 19.3KB | **全周仅 1 次**（48 行省略） |
++| apply_patch | 666 | 2.4KB / 36 行 | 6.2KB / 101 行 | 20KB | 50.7KB | 0（当前 output 无 diff） |
++| write | 785 | 3.2KB / 64 行 | 10.7KB / 193 行 | 28.5KB | 45.4KB | 0（当前 output 无 diff） |
++
++write 拆分：新建 677 次（86%，diff=全文，与模型刚写入的内容完全重复）、覆写 109 次（14%）。
++
++**决策（用户确认方向）**：
++
++1. **edit**：维持现有 `Changed:` 段。预算 = `truncate.limits()`（默认 1000 行/16KB，可配置）减 2048B/10 行保留 ≈ 14KB/990 行，实测一周仅裁 1 次，预算充足不动。C01 跳行截断校正为连续前缀 + 显式省略计数。
++2. **apply_patch**：output 增加 post-formatter 完整 diff 段（同量级预算）。成本约 +3.2KB/次（全周 +2.0MB ≈ 53万 token），换来 landed 锚点，对抗 G01 链式陈旧。
++3. **write**：**不全量回显**（86% 新建 diff 是纯冗余，全量回显将多花 3.4MB/周 ≈ 87万 token）。只在 formatter 实际改变内容时回显差异段；实现时需持久化一个 `formattedChanged` 类标志（当前 `_formattedContent` 被 strip，历史上无法测量 formatter 命中率）。常态零成本。
++4. 超预算兜底：完整 diff 写入 truncation 工件文件，output 给前缀 + 路径指针（复用 Truncate 服务既有模式，与 bash 输出一致）。
++
++### 12.8 上游机制对照（thirdparty/opencode-11720）
++
++- 上游 edit/write/apply_patch 的成功 output **均不含 diff**：只有成功句 + LSP 诊断；diff 仅进 metadata（供 UI/snapshot）。「模型上下文中的落地真值」上游没有任何机制，完全依赖模型自觉重读。
++- 上游工具输出统一截断为 2000 行 / **50KB**（本 fork 收紧为 1000 行 / 16KB），超限全文落 truncation 工件文件并在 metadata 附 `outputPath`。
++- 本 fork 的 edit `Changed:` 段已是上游没有的本地增强；write/apply_patch 的 diff 回显与 G01 时效反馈均属上游不存在的进一步改进，无移植冲突，但需自行维护差异。
++
++### 12.9 与正交缺陷的关系
++
++H03（bash 空行删除）与本组修复正交，仍待独立修复；G06 的劝导文案以 H03 存在为前提。H02（apply_patch 无 post-formatter diff）由 12.1 第 3 条覆盖。
++
++## 13. 维护记录
++
++- R1 / 2026-09-08：汇总首轮跨模型调查、第二轮GLM来源追踪及统计撤销；加入Bash空行删除实证、相对路径门禁、80条单message异常、工具说明缺口和edit diff非前缀截断风险。没有实施任何生产修复。
++- R2 / 2026-09-08：全量检查234条不匹配的同批newString依赖，找到5条；补充2143条GLM编辑记录的批大小分布、真实applyEdits内存验证及LF/CRLF/关闭压缩/ANSI对照；修正audio.test.ts与后续相同文本成功的解释。仍不宣称已完成80%根因覆盖。
++- R3 / 2026-09-12：最近一周全量 edit/apply_patch 失败调查（2835 调用、465 错误、681 事件）。修复分析盲点（apply_patch 写入者解析），建立一致性桶：自写后陈旧 36%、最小上下文歧义 29%、分页部分可见、write 后无复读、跨文件复制、门禁/bash 错位。否证 CRLF/裸空行/同调用移动/跨 Session 写入者假设；未发现 matcher 吞掉现存文本的证据。确认 H03 空行删除仍存活、H06 诊断粒度成本实证。没有实施任何生产修复。
++- R4 / 2026-09-12：记录用户审阅 R3 后逐条敲定的修复设计（第 12 章）：G01 文案+时效反馈（不诱导 re-read）+三写工具统一 post-formatter diff 回显（中档预算）、G02 不强制最小行数+失败时返回最小唯一扩展、G03 失败时列出已读区间（复用 mergeRanges）、G05 同名文件提醒、G06 收敛为门禁文案劝导（bash 永不计触痕）。仍非实施授权。
+diff --git a/docs/plans/edit-write-feedback-coherence-repair.md b/docs/plans/edit-write-feedback-coherence-repair.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5161ed042daa7d92a004f168599c910c766038cb
+--- /dev/null
++++ b/docs/plans/edit-write-feedback-coherence-repair.md
+@@ -0,0 +1,472 @@
++# Canonical Implementation Plan: Edit/Write 工具上下文一致性反馈修复
++
++> Status: verified
++>
++> Revision: R4
++>
++> Approved revision: R4
++>
++> Audit mode: full-scope
++>
++> Requirement source: 用户 GOAL 原始需求（2026-09-12，verbatim 见第 1 节）；证据基础 `docs/plans/edit-harness-reliability-investigation.md` R3/R4
++>
++> Implementation allowed: yes
++>
++> Last updated: 2026-09-12
++
++本文是本任务唯一 implementation authority。调查台账 R1–R4、聊天摘要与旧审计不是实施授权。
++
++R4 修订触发：实现审计第 2 轮 BLOCK（唯一阻断为合同纪律）——第 1 轮返工把 read.ts 的导出 seam 从批准文本的 collectVisibleReads 改为 visibleReadMeta、并删除 INV-04 的 input.filePath 回退，但计划设计节未同步。审计已核实 as-built 设计健全且原 R3 的回退规则对目录/媒体 read 本身有误计缺陷；R4 只做计划侧对齐（代码不再返工）：§9/§10/§13/§14/§15 记录 as-built seam 与「仅内容可见 read 锚定最后读取」的判定规则及其 legacy/媒体边界理由。
++
++R3 修订触发：实施期间发现修改面内既有红测试 `apply_patch.test.ts:1542`（keeps the abort path sub-second for incident-scale rewrites）在本机改动前基线即失败（实测 2.7s > 1000ms）。用户原始需求含「既有红色也需要去解决」，该失败属于本任务范围，但 R2 未映射。根因实测：jsdiff `diffLines(maxEditLength=2000)` 的中止路径自身是 O(K²) 且每步分配路径对象（真实事故 fixture 纯探测 1280ms），预算门成本模型在慢机器上不成立。修复留在同一 owner（file-diff.ts）内：新增可证明的行多重集对称差下界预过滤，只在探测必然中止时跳过探测，决策语义零变化（见 §8/§10）。
++
++R2 修订触发：R1 方案审计 B-01（blocking）——apply_patch 侧歧义候选必须由判定 owner（`src/patch/match.ts` 的 `locateExact`）产出并随 `ambiguous` 结果携带至抛出点，不得在抛出点用更弱域重扫。R2 同时吸收该轮 8 条非阻断更正（见 §22 审计记录）。
++
++## 1. Verbatim Requirement
++
++> 修复 edit/apply_patch/write 的上下文一致性缺口：①edit.txt/apply_patch.txt 克制新增醒目但不主导的文案——oldString 须以最近 read 为底叠加此后自身编辑返回的 diff，不得凭陈旧 read 转写；不匹配失败时若文件最后被自身写入晚于最后读取，附时效事实并引导使用作用后 diff（不诱导 re-read）。②歧义失败返回最小唯一扩展（候选行号+向上/下扩展建议，复用已枚举候选、受既有诊断预算约束、实现简洁不新增状态机），文案补「more than 3 lines」。③edit 失败且 oldString 不在已读页内时列出融合后的已读区间（复用 mergeRanges）。④write/apply_patch 成功 output 补 post-formatter diff 段（约 14KB/990 行预算，连续前缀裁剪），edit 的 C01 跳行截断一并校正。⑤同名异路径已读文件存在时简短提醒。⑥edit.txt 门禁条目劝导勿用 bash 输出作编辑依据。最终整体文件生产代码修改数不超过12个文件，修改行数不超过1200行。整体需要保证最终全部的修改面不会出现红测试，既有红色也需要去解决。
++
++后续用户补充决策（verbatim 要点）：
++
++> 「write 仅 formatter 改动时回显 delta」（write 全量回显 86% 为新建全文冗余被否证；只在 formatter 实际改变内容时回显差异段，持久化 formattedChanged 标志）。
++>
++> 「不强制最小上下文行数」；「失败的时候确实要返回一个最大重复段……按照那个高档的实现」；「实现尽量保证检查的速度……不要增加过多的冗余的状态机」。
++>
++> 「bash 的读取无法记入触痕，它本身这个内容不是很可信」——G06 不做文案分层，收敛为门禁条目劝导。
++
++## 2. Explicit Non-Goals
++
++- 不改变任何匹配成功域：`locateExact` 的候选枚举/唯一性规则、`findMatch`/`applyEdits`/`deriveNewContentsFromChunks` 的成功语义、PI normalization 集合、overlap 拒绝、all-or-nothing 语义全部保持不变。`ambiguous` 结果新增候选载荷只增加诊断信息，不改变何时歧义。
++- 不强制最小上下文行数；不在任何失败文案中强制或诱导 re-read（用户明确）。
++- 不解析 bash 命令；bash 读取永远不计入 edit 门禁触痕；不做「仅经 bash 见过」的文案分层（用户明确）。
++- 不修复 H03（bash `getStableOutput` 空行删除）——正交缺陷，独立任务。
++- 不改变 read 工具的 stub/分页/版本指纹行为；G03 只复用其可见性协议（`visibleReadMeta`）与 `mergeRanges`，不新增 read 语义。
++- 不改变未读门禁的通过规则（write/edit 触痕仍算数）；不改 `_syncInput`/`_formattedContent` 真值回写契约。
++- 不向上游 thirdparty/opencode-11720 移植；commit 仅在 verified 后按 GOAL 合同执行一次，不 push。
++- 不新增配置项、feature flag、公共 API、迁移或 generated 文件。
++- 不改变 apply_patch 的 `title` 相对今日的行为（今日 `title: output` 是成功行+文件列表+失败/LSP 段的完整串；新增 Changed 段只进 output，title 保持今日全部既有段落）；不改变 edit 成功 output 的 warning 段预算与保留规则。
++- INV-05（已读区间）与 INV-09（同名提醒）只落 edit 失败路径；INV-04（时效事实）落 edit 与 apply_patch 失败路径。G05 证据集中在 edit 域，apply_patch 侧不扩展（R1 审计非阻断 4 的明确化）。
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` Tool / Session / Message（MessageV2 part-based） | 反馈文案作用于 Tool 的 ExecuteResult.output；历史扫描基于 Session 的 Message/Part |
++| `.opencode/policy/first-principles-engineering.md` | first-divergence 修复、禁止 fallback、双向 traceability |
++| `docs/plans/edit-harness-reliability-investigation.md` R3 §11 / R4 §12 | 全部缺口（G01–G06）、桶分布、预算实测与用户逐项决策的唯一证据来源 |
++| `packages/opencode/AGENTS.md` + `test/AGENTS.md` | package-local `bun test`/`bun typecheck`；testEffect/tmpdir fixture；不用 sleep 同步 |
++| 上游 `thirdparty/opencode-11720` edit/write/apply_patch | 上游 output 均无 diff 段（台账 §12.8）；本任务是 fork 本地增强，无移植冲突 |
++| `src/tool/edit-apply.ts` 模块头不变量速查（14 条） | 匹配域/诊断域分离：closest 与扩展提示只能出现在失败诊断，永不进入成功路径 |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| 台账 R3 §11.1–11.3（窗口 2026-09-05→09-12，2835 调用、465 错误、681 事件） | G01≈36%、G02=29%、G03≈10%、G04=33 事件、G05=45+、G06=39 条的全部量化证据 | observed |
++| 台账 R3 §11.5 | CRLF/裸空行/同调用移动/跨 Session 写入者/matcher 吞文本均被否证 | observed |
++| 台账 R4 §12.1–12.9 | 用户逐项决策与预算纪律（diff 实测：edit p50=1.5KB、apply_patch p50=2.4KB、write 86% 新建冗余） | contracted |
++| `src/tool/edit.ts:120-161`（门禁）、`266-289`（mismatch 错误增强点）、`386-425`（Changed 段与 C01 跳行循环 `:410-419`） | G01/G03/G05 增强落点与 C01 缺陷现场 | observed |
++| `src/tool/edit-apply.ts:204-261`（countOccurrences/exactLiteralCount/enumerate*，replaceAll=false 时 enumerate 只给首候选）、`401-538`（applyEdits 主路径 + EditApplyError.editIndex）、`451-462`（歧义抛出点） | edit 侧歧义计数域：usedNormalized 决定 countOccurrences（normalized split）与 exactLiteralCount（literal） | observed |
++| `src/patch/index.ts:344-435`（applyChunks）、`376-385`（ambiguous/not-found 抛错）、`456-461`（withCandidate） | patch 侧抛出点持有 originalText、chunk.old_lines、chunk.change_context | observed |
++| `src/patch/match.ts:10-13`（ExactResult）、`33-147`（locateExact 多层候选枚举与 ambiguous 三返回点）、`276-283`（诊断预算常量）、`645+`（closestWindow） | B-01 现场：ambiguous 变体无载荷，候选数组被丢弃；owner 必须产出候选 | observed |
++| `src/tool/apply_patch.ts:236-303`（逐文件 proposal + hunkErrors）、`305-364`（Mutation.commit + formatter）、`392-462`（output/metadata 组装，`title: output`） | H02 现场；G01 patch 侧落点；title 钉死决策点 | observed |
++| `src/tool/write.ts:120-204`（formatter 分支、`_formattedContent`、metadata.diff） | G04 现场 | observed |
++| `src/tool/read.ts:187-299`（isReadMetadata/collectVisibleReads/mergeRanges 复用点/isSameFileVersion）、`740-836`（read metadata 发布） | G03 数据源 | observed |
++| `src/tool/tool.ts:46-56`（Context.messages） | 历史扫描的合法数据源 | observed |
++| `test/tool/edit.test.ts:117+`（ctxWithPriorRead）、`94-108`（itTruncated）、`:1152`（既有歧义前缀断言）、`test/tool/write.test.ts:45-61`（mockFormatLayer）、`test/tool/apply_patch.test.ts:269`（既有歧义断言） | 全部 TDD seam 已存在 | observed |
++
++## 5. Current Behavior
++
++```text
++edit 失败路径:
++model edits[] -> edit.ts gate(触痕检查) -> applyEdits(baseLF, editsLF)
++  -> EditApplyError("Could not find..." / "Found N occurrences...")
++  -> edit.ts catch: 仅 mismatch 追加 closestWindow 诊断 -> 错误回模型
++edit 成功路径:
++commit(+formatter) -> renderFileDiff(contentOld, contentNew) -> output "Changed:" + diff
++  -> C01: edit.ts:410-419 预算循环用 continue 跳行，展示非连续前缀却报 "more lines omitted"
++
++apply_patch 失败路径:
++patchText -> parsePatch -> 逐文件 processHunkGroup -> deriveNewContentsFromChunks
++  -> locateExact ambiguous（候选丢弃）-> "Found multiple matches for expected lines"（无候选行号）
++  -> not-found -> withCandidate 附 closest 或 "No reliable nearby candidate"
++  -> 全部失败: "apply_patch verification failed: all hunks failed."；部分失败: output 附失败文件
++apply_patch 成功路径:
++commit(+formatter 在锁内) -> output 仅文件列表+LSP；metadata.diff = formatter 前的 proposal diff（H02）
++
++write 成功路径:
++写盘 -> format.file -> 若改变内容则 _formattedContent 回写 input（重放真值）
++  -> output 仅 "Wrote file successfully." + LSP；formatter 造成的 delta 对模型不可见（G04）
++```
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| edit/apply_patch 不匹配失败且同文件最后写入晚于最后读取 | 模型工具调用 | ctx.messages 含 completed 工具 part 及 state.time | edit.ts catch / apply_patch 错误组装 | 各 Tool | observed（G01，246 事件） |
++| 歧义失败（唯一性拒绝） | locateExact / applyEdits 计数 | 候选在 owner 内已枚举 | edit-apply.ts:455 / match.ts ambiguous 三返回点 | edit-apply / match.ts | observed（G02，199 事件） |
++| 不匹配失败且存在同文件已读 read metadata | read 工具发布 metadata.read | visibleReadMeta 可见性协议（含 compacted/stub 过滤） | edit.ts catch（消费 visibleReadMeta） | edit + read（只读复用） | observed（G03，70+ 事件） |
++| write 后 formatter 改变内容 | Format.Service.file | write.ts 已计算 formattedContent | write.ts output 组装 | write | observed（G04，33 事件） |
++| 同名异路径已读文件存在 | read 工具 input.filePath | ctx.messages | edit.ts catch | edit | observed（G05，45+ 事件） |
++| diff 超预算需裁切 | renderFileDiff | truncate.limits() | 三工具 output 组装 | file-diff（新增有界渲染 seam） | observed |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | 匹配成功域、唯一性规则、normalization 集合与 all-or-nothing 语义逐字节不变；`ambiguous` 只增诊断载荷 | 台账 §11.5 否证 matcher 缺陷 | edit.test.ts / apply_patch.test.ts 全量既有用例 |
++| INV-02 | 失败诊断只陈述事实与可操作信息，不得诱导 re-read（用户明确禁止） | 用户决策 verbatim | 新增断言不新增祈使 re-read 文案 |
++| INV-03 | 歧义失败必须给出候选行号与最小唯一扩展建议；候选由唯一性判定 owner 产出（patch 侧 locateExact 携带、edit 侧按抛出点同一计数域枚举）；扩展建议必须经同域唯一性核验后才展示 | G02；R1 审计 B-01 | 新增 |
++| INV-04 | edit/apply_patch 不匹配失败且同文件最后写入晚于最后读取时，错误附时效事实并指向作用后 diff | G01；台账 §12.1 | 新增 |
++| INV-05 | edit mismatch 且存在同文件已读区间时，错误附 mergeRanges 后的已读区间；只陈述事实 | G03；台账 §12.3 | 新增 |
++| INV-06 | write 仅当 formatter 实际改变内容时 output 附差异段（基线：模型提交内容 EOL 归一化后 → 最终落盘内容）；未改变时 output 与现状一致；metadata 持久化 formattedChanged | G04；台账 §12.7-3 | 新增（mockFormatLayer） |
++| INV-07 | apply_patch 成功 output 附 post-formatter diff 段（Changed:），metadata.diff 同步为 post-formatter 真值；部分失败报告语义与 title 不变 | H02 + G01 锚点；台账 §12.7-2 | 新增 |
++| INV-08 | 三工具 diff 段统一连续前缀裁剪 + 显式省略计数；edit 现有跳行行为消除（C01） | C01；用户「连续前缀裁剪」 | 新增（itTruncated 小预算层） |
++| INV-09 | 同名异路径已读文件存在时 edit mismatch 错误附一行提醒 | G05；台账 §12.5 | 新增 |
++| INV-10 | edit.txt/apply_patch.txt 各新增克制文案；歧义文案补 more-than-3-lines；G06 劝导并入 edit.txt 门禁条目 | 用户 verbatim | 文案断言（轻量） |
++| INV-11 | renderFileDiff 的预算决策在慢机器上亚秒完成；预过滤只在「探测必然中止」时跳过探测，标记/产物决策与现状逐字节一致 | 用户「既有红色也需要去解决」；本机基线红 | 既有红测试即回归（apply_patch.test.ts:1542） |
++
++## 8. First Divergence and Root Cause
++
++本任务主体是反馈质量增强；red 信号 = 各 TDD 切片在实现前失败（断言当前错误/output 不含新信息）。例外：INV-11 是既有红测试修复，red-capable loop 即 `bun test test/tool/apply_patch.test.ts -t "abort path sub-second"`，改动前基线实测 2.7s（失败），修复目标 <1000ms。
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| INV-04 | 失败错误只说「找不到」，第一个丢失的事实是「你自己的写入晚于你的读取」 | edit.ts catch / apply_patch.ts 错误组装 | 台账 G01（132 source-then-overwritten + 114 not-visible-with-writers） |
++| INV-03 | 歧义候选已枚举但在两处被丢弃：locateExact 的 ambiguous 无载荷（patch 侧）、edit-apply 抛出点只有计数（edit 侧） | match.ts `ExactResult` / edit-apply.ts:455 | R1 审计 B-01；G02 分布：0-行上下文 82、1 行 48 |
++| INV-05 | read 已读区间 metadata 已发布，edit 失败时从未被用于对照 | edit.ts catch | G03：70/101 带分页标记 |
++| INV-06 | write 已算出 formattedContent 并回写 input，output 组装点只写成功句 | write.ts output 组装 | G04：33 事件 |
++| INV-07 | diff 在 proposal 阶段生成，formatter 在 commit 锁内改写后无人重算 | apply_patch.ts renderFileDiff 时机（H02） | 台账 §4 H02 |
++| INV-08 | edit.ts:410-419 `continue` 使超预算行被跳过而后行仍进入 | edit.ts Changed 段循环 | C01 实现证据 |
++| INV-11 | jsdiff `maxEditLength` 探测的中止成本是 O(K²)+路径分配（K=2000 时实测 1280ms），慢机器上越过测试的 1000ms 断言 | file-diff.ts renderFileDiff 的预算探测 seam | 本机基线实测（改前即红）；node_modules/diff/dist/diff.js:124-143 同步中止循环 |
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| 时效/已读/同名的判定数据 | `Tool.Context.messages`（既有） | 工具可见历史 | 只读消费，不新增生产者 | processor 不回传分析结果给工具 |
++| 时效/已读/同名文案组装 | edit.ts catch 块 / apply_patch.ts 错误组装 | 失败错误的最终文本 owner | 错误文本在此诞生，文件身份在此已知 | edit-apply/patch 是纯函数匹配域，不持有 messages |
++| patch 侧歧义候选 | match.ts：`locateExact` 的 `ambiguous` 结果携带候选行号（去重、排序、封顶 8） | 唯一性判定 owner 产出候选（B-01） | 多层候选域（exact whole-line/normalized whole-line/literal substring/normalized substring/unsafeNormalized）只有 owner 知道 | 抛出点重扫＝第二 matcher 或更弱域，均被禁止 |
++| edit 侧歧义候选 | edit-apply.ts：在抛出点按同一计数域（usedNormalized ? countOccurrences 域 : exactLiteralCount 域）枚举全部命中偏移 | 抛出点的计数域即唯一性域 | 计数与候选同源，无域分歧 | — |
++| 最小唯一扩展计算 | edit-apply.ts 新增私有域 helper（行域公共前缀/后缀 + 同域唯一性核验回调）；patch/index.ts 复用导入并注入 locateExact 核验 | 失败诊断增强，仅歧义路径调用 | 扩展的正确性依赖唯一性域，核验回调由各 owner 注入保证同域；helper 本身只做行级公共上下文计算 | match.ts 已 import edit-apply（normalizeForMatch），反向成环 |
++| 有界 diff 段渲染（连续前缀+省略计数） | file-diff.ts 新增 `boundDiff` | diff 生产与有界展示同一 owner | 三工具共用，消除 edit 内联跳行循环（C01） | truncate.ts 是通用字节截断，不懂 diff 结构 |
++| post-formatter diff 真值 | apply_patch.ts commit 段 | commit 锁内拥有最终内容 | formatter 结果只在锁内可见 | file-diff 只负责渲染 |
++| formattedChanged 持久化 | write.ts metadata | metadata 是工具事实出口 | 与 _formattedContent 同一判定来源 | processor 只 strip/回写 |
++| 已读区间数据复用 | read.ts 导出 `visibleReadMeta`（可见性协议的唯一 part 级判定）与 `canonicalReadPath`；collectVisibleReads/isReadMetadata 保持私有 | read metadata 的消费者协议 | 版本键与 metadata 结构由 read.ts 定义；compacted/stub 过滤只能在 owner 内唯一表达 | edit.ts 重新解析 XML 或复制过滤条件会让两侧对同一历史给出不同答案（实现审计 B-01 实证） |
++| 预算探测的廉价下界预过滤 | file-diff.ts（renderFileDiff 内联） | 预算门决策的同一 owner | 只在「必然中止」时跳过探测，决策不变 | jsdiff 的 maxEditLength 中止路径自身昂贵，无法在其内部加速 |
++
++## 10. Single Approved Primary-Path Design
++
++一条主路径：**在失败文本诞生点与成功 output 组装点附加事实段**；匹配/成功域零改动。（R1 审计非阻断 1：这些增强是本次合同的 primary-path 行为本身——失败文案与成功 output 正是被修复对象——不是附属诊断；无 alternate success path。）
++
++```text
++失败增强（edit，edit.ts catch）:
++applyEdits throw -> closestWindow（既有）
++  -> [INV-04] 扫 ctx.messages（completed 工具 part；文件身份提取规则：
++       read → 仅 visibleReadMeta 通过者（metadata.read.canonicalPath）；
++       edit/write → input.filePath；apply_patch → metadata.files[].filePath）：
++       同文件最后 completed 写入 > 最后 completed read
++       -> 有先读："This file was modified by your own <tool> after your last read.
++          Use the result of that call (its returned diff or formatted-changes section)
++          as the current content."（工具感知措辞：write 未格式化时无 diff 段，
++          真值是该次 write 的提交内容本身；edit/apply_patch 有 Changed 段。
++          实际落盘文案以代码与测试钉死文本为准："Use the result returned by that call
++          (its diff or formatted-changes section) as the current content."）
++       -> 无先读（apply_patch 可达，无门禁）："This file was last modified by your own
++          <tool> in this session and has not been read since."
++  -> [INV-05] visibleReadMeta 逐 part 判定（同 canonicalPath、不按版本过滤——
++       陈旧版本的已读区间仍有导航价值，且当前 edit 侧没有可构造的当前版本 ReadMetadata）
++       -> mergeRanges -> 附 "Lines you have read in this file: 120-260, 400-512."
++       （无已读则整句省略）
++  -> [INV-09] 同 basename 异 canonicalPath 的已读文件存在
++       -> 附一行 "You previously read a different file with the same name: <path>."
++
++失败增强（apply_patch）：全失败错误与部分失败 output 的逐文件错误行，共用 INV-04 的
++同一判定与文案；INV-05/INV-09 不适用（见 Non-Goals）。
++
++歧义增强（INV-03）：
++  edit（edit-apply.ts:455 抛出点前）:
++    -> 按抛出点计数域枚举全部命中偏移 -> 行号（去重排序封顶 8）
++    -> uniqueExtensionHint：行域内计算每个候选与其余候选的向上/向下公共上下文长度，
++       得出逐候选最小去歧扩展；取全局最便宜者
++    -> 核验：扩展后模式在抛出点同一计数函数（countOccurrences 或 exactLiteralCount）
++       下唯一，才写入建议；否则只给候选行号
++  patch（patch/index.ts:377 抛出点）:
++    -> locateExact ambiguous 结果携带候选行号（owner 产出，封顶 8）
++    -> uniqueExtensionHint 注入核验回调：扩展后 expected 块以同一 cursorOffset 过
++       locateExact 唯一（owner 域，含 normalized/substring 层）
++    -> 文案（两侧一致）："Matches at lines 121, 487. Including 2 more line(s) above
++       (or 3 below) makes the match unique."
++  预算：候选 ≤8、每方向扩展 ≤10 行、行域两两比较 O(candidates²×cap)；核验为同域
++  单次计数/定位调用。这是用户「保证检查速度」决策下的固定 caps 收紧，有意不共享
++  match.ts 的 4s/64MiB 诊断预算（更严、更简单；R1 审计非阻断 8 记录为有意偏离）。
++
++成功 output 增强:
++  write（INV-06）: formattedContent 存在 ->
++    "Formatted changes:" + boundDiff(diff(normalize(提交内容) -> normalize(最终落盘)))
++    + metadata.formattedChanged=true；formatter 未改变内容时 output 逐字节同现状
++  apply_patch（INV-07）: commit 锁内已知最终内容（formatter 结果的 restore 计算点）
++    -> 逐文件以最终内容重算 diff（未 formatter 的文件沿用 proposal diff）
++    -> output 附 "Changed:" + boundDiff(汇总 diff)；metadata.diff = post-formatter 真值
++    -> title 保持文件列表摘要不变；permission 预览 diff 保持 formatter 前（审批语义）
++  edit（INV-08）: Changed: 段改经 boundDiff（C01 消除）
++  boundDiff（INV-08）: 连续前缀 + "… (N more lines omitted)"；超硬顶（truncate.limits
++    同量级）时完整 diff 经 Truncate.Service.write 落工件文件并附路径
++
++预算探测预过滤（INV-11，file-diff.ts renderFileDiff 内联、探测之前）:
++  行多重集对称差 |old\\new| + |new\\old| 是编辑距离 D 的下界（每次删除/插入各覆盖一侧，
++  任何编辑脚本都受其约束；分词差异只让下界更松，不会更紧——strip 行尾后一致性更粗
++  只会减少所需编辑数）。对称差 > K=MAX_DIFF_EDIT_LINES 时 jsdiff 探测必然中止，
++  直接走 rewriteMarker，跳过 O(K²) 探测。成本 O(N) 哈希计数。对称差 ≤ K 时路径
++  与现状完全一致（进入原探测）。证明与边界（split 分词 vs jsdiff 行分词、尾换行
++  空 token 丢弃）在代码注释中给出。
++```
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++| closestWindow 诊断 | current | diagnostic | no | 既有 | preserve（不改） |
++| 失败文案事实段（INV-03/04/05/09） | proposed | primary-contract repair（失败文本是被修复对象本身；不产生 success 等价物、不隐藏失败） | no | 变更主体之一 | 新增 |
++| boundDiff / 成功 output diff 段（INV-06/07/08） | proposed | primary-contract branch（成功 output 的既有/新增信息段；不改变成功/失败分类） | no（同一成功结果） | 变更主体之一 | 新增 |
++| match.ts ambiguous 载荷 | proposed | primary-contract 诊断数据传递（owner 产出，候选集合不变） | no | locateExact 返回类型扩展 | 新增 |
++| 对称差下界预过滤（INV-11） | proposed | primary-contract 快速路径（只在探测必然中止时跳过探测，决策等价） | no | renderFileDiff 内联分支 | 新增 |
++
++无新 alternate success path；无 fallback；无 catch-and-success。
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| edit.ts Changed 段内联跳行循环（C01） | 逐行塞预算的局部实现 | boundDiff 统一连续前缀语义 | edit.ts:408-425 循环替换为 boundDiff 调用 |
++
++无其他被取代的 workaround；`_syncInput`/`_formattedContent` 回写保留（重放真值职责不同）。
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| ①文案（陈旧转写禁令） | 工具 description | edit.txt / apply_patch.txt 各 1 条 | description 含关键短语的轻量断言 |
++| INV-04 时效事实 | edit.ts catch / apply_patch.ts 错误组装 | edit.ts、apply_patch.ts | edit.test.ts：read→edit 成功后旧 oldString 失败→含时效句；apply_patch.test.ts 同构（含无先读措辞分支） |
++| INV-03 最小唯一扩展 | owner 候选产出 + uniqueExtensionHint | edit-apply.ts、match.ts、patch/index.ts | edit.test.ts 重复块歧义→含行号+扩展建议；apply_patch.test.ts 同构（含 normalized 域候选场景） |
++| ②文案 more-than-3-lines | apply_patch.txt 第 35 行 / edit.txt 歧义条 | 两个 txt | 轻量断言 |
++| INV-05 已读区间 | edit.ts catch + visibleReadMeta/mergeRanges | edit.ts、read.ts（导出） | edit.test.ts：分页 read metadata 后失败→含区间列表；compacted read 不计入 |
++| INV-06 write 差异段 | write.ts output + metadata flag | write.ts | write.test.ts：mockFormatLayer→含 Formatted changes；默认层→无且 output 同现状 |
++| INV-07 patch diff 段 | apply_patch.ts commit 后重算 + output | apply_patch.ts | apply_patch.test.ts：Changed: 存在；formatter 改动后 diff 反映最终内容；metadata.diff 一致；title 不变 |
++| INV-08 连续前缀 | boundDiff + edit Changed 段接入 | file-diff.ts、edit.ts | edit.test.ts（itTruncated）：输出是真实 diff 前缀且省略计数正确 |
++| INV-11 预过滤 | renderFileDiff 探测前下界检查 | file-diff.ts | 既有红测试转绿（apply_patch.test.ts:1542）；既有 diff 门控套件（同文件 §1408 describe）全绿证明决策不变 |
++| INV-09 同名提醒 | edit.ts catch | edit.ts | edit.test.ts：读 original/x.patch 后改 current/x.patch 失败→含提醒 |
++| ⑥门禁劝导文案 | edit.txt 门禁条目 | edit.txt | 轻量断言 |
++| INV-01 既有行为不变 | 无改动 | — | 既有 edit/apply_patch/write/read 测试全绿 |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| match.ts ambiguous 候选载荷 | INV-03 | R1 审计 B-01：owner 外的重扫要么第二 matcher 要么域更弱 | ExactResult.ambiguous 现无载荷，候选数组被丢弃 |
++| edit 侧同域候选枚举（抛出点） | INV-03 | G02 | 现有点只有计数；enumerate* 在 replaceAll=false 时只给首候选 |
++| uniqueExtensionHint（含同域核验回调注入） | INV-03 | G02 199 事件；用户选定高档实现 | closestWindow 只找「最相似」单点，不回答「加多少上下文才唯一」 |
++| 时效判定扫描（含文件身份提取规则） | INV-04 | G01 246 事件 | 门禁只看「有无触痕」，不比较读写先后 |
++| 已读区间提示 | INV-05 | G03 70 事件 | collectVisibleReads 是 read.ts 私有且不向失败诊断开放 |
++| 同名提醒 | INV-09 | G05 45+ 事件 | 现无任何跨文件 basename 对照 |
++| boundDiff | INV-08 | C01；apply_patch p99=20KB 超预算 | truncate.ts 通用截断不懂 diff 结构；edit 内联循环有跳行缺陷 |
++| post-formatter diff 重算 | INV-07 | H02 + 台账 §12.7 实测 | proposal diff 在 formatter 前生成，commit 后无人重算 |
++| formattedChanged flag | INV-06 | G04 33 事件；台账 §12.7-3 | _formattedContent 被 strip 不持久化，历史上不可测 |
++| read.ts 导出 visibleReadMeta | INV-05 | G03 + 实现审计 B-01（compacted 过滤缺失实证） | 可见性协议的 part 级判定只能在 owner 内唯一表达；导出它而非 collectVisibleReads 让 edit 同时拿到 metadata 与 part 时间戳 |
++| 对称差下界预过滤 | INV-11 | 本机基线红（2.7s）；jsdiff 中止路径实测 1280ms | jsdiff 无法在其 API 内提供更便宜的必然中止判定；下层过滤是同一决策的加速，不改变结果 |
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++| `src/tool/edit.txt` | modify | ①陈旧转写禁令（1 条）+ ⑥门禁劝导并入 + ②歧义条目补 more-than-3-lines | +4 |
++| `src/tool/apply_patch.txt` | modify | ②第 35 行补 more-than-3-lines + ①陈旧转写禁令（1 条） | +3 |
++| `src/tool/edit-apply.ts` | modify | 抛出点同域候选枚举 + uniqueExtensionHint（行域扩展计算 + 核验回调）+ 歧义错误文本 | +110 |
++| `src/patch/match.ts` | modify | `ambiguous` 结果携带候选行号（owner 产出，去重排序封顶 8） | +30 |
++| `src/patch/index.ts` | modify | ambiguous 抛出点接入 uniqueExtensionHint（注入 locateExact 核验） | +20 |
++| `src/tool/edit.ts` | modify | catch 块三句事实增强（时效/已读区间/同名）；Changed 段接入 boundDiff | +110 |
++| `src/tool/read.ts` | modify | 导出 visibleReadMeta 与 canonicalReadPath；collectVisibleReads 改经 visibleReadMeta 表达（对 read.ts 内部无行为变化） | +12 |
++| `src/tool/file-diff.ts` | modify | 新增 boundDiff（连续前缀+省略计数+超限工件文件兜底）；renderFileDiff 探测前对称差下界预过滤（INV-11） | +75 |
++| `src/tool/apply_patch.ts` | modify | commit 内记录最终内容、commit 后重算 diff、Changed 段、失败错误时效增强 | +85 |
++| `src/tool/write.ts` | modify | formattedChanged echo（Formatted changes 段 + metadata flag） | +35 |
++| `test/tool/edit.test.ts` | modify | INV-03/04/05/08/09 + 文案断言 | +180 |
++| `test/tool/apply_patch.test.ts` | modify | INV-03/04/07 | +120 |
++| `test/tool/write.test.ts` | modify | INV-06 | +45 |
++
++生产代码 10 个文件、估计 ~450 行有效修改；测试 3 个文件 ~345 行。总量 < 12 文件 / 1200 行约束。
++
++## 16. TDD Behavior Slices
++
++统一 seam：Tool.execute 的公开 ExecuteResult.output / error（既有的 ctxWithPriorRead、itTruncated、mockFormatLayer、tmpdir fixture）。
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 | edit 歧义失败错误含候选行号与经核验的扩展建议 | 当前错误只有 "Provide more context"；既有前缀断言（edit.test.ts:1152）保持 | 同域枚举 + uniqueExtensionHint 接入抛出点 | 既有歧义用例文案前缀不变 |
++| 2 | apply_patch 歧义失败同上（含 normalized 域候选场景） | locateExact ambiguous 无载荷 | ambiguous 携带候选行号 + 核验回调 | patch 既有用例（apply_patch.test.ts:269 前缀保持） |
++| 3 | edit 失败在「自写晚于自读」时含时效句 | 当前错误无此句 | ctx.messages 扫描 + 条件附加 | 无写入历史时错误与现状一致 |
++| 4 | apply_patch 全失败错误含时效句（含无先读措辞分支） | 同上 | 同一判定逻辑复用 | 部分失败 output 语义不变 |
++| 5 | edit 失败附已读区间列表 | 当前无 | visibleReadMeta 导出 + mergeRanges | 无已读 metadata 时省略该句 |
++| 6 | edit 失败附同名异路径提醒 | 当前无 | basename 对照 | 无同名已读时省略 |
++| 7 | write formatter 改内容时 output 含 Formatted changes 段且 metadata.formattedChanged=true | 当前 output 只有成功句 | 条件段 + flag | 未改动时 output 逐字节同现状 |
++| 8 | apply_patch 成功 output 含 post-formatter Changed 段且 metadata.diff 一致、title 不变 | 当前无 Changed 段 | commit 后重算 + boundDiff | 文件列表/LSP 段/title 不变 |
++| 9 | 小预算下 edit Changed 段为真实前缀+省略计数 | 当前跳行（C01） | boundDiff 接入 edit | 预算内输出逐字节同现状 |
++| 10 | 事故规模重写的预算门亚秒完成 | jsdiff 探测 O(K²) 中止超 1000ms | 对称差下界预过滤跳过必然中止的探测 | 既有 diff 门控套件全绿（决策不变） |
++
++每片先红后绿；测试只断言公开 output/error 文本与 metadata flag，不断言私有函数。
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` | ~480（生产，含 INV-11 预过滤 ~30）+345（测试）≈ 825；文案 txt 不计复杂逻辑 | 排除 import、既有行移动 |
++| Required Chinese explanatory comments `C` | ≥ 124（ceil(825×0.15)） | 见下方点位 |
++
++注释点位（解释为什么/不得破坏什么，不复述代码）：
++
++- match.ts ambiguous 载荷：候选必须由 owner 产出（B-01 教训），封顶 8 的诊断预算理由。
++- edit 侧同域枚举：计数域与唯一性域同源要求（usedNormalized 决定），enumerate* 首候选语义不可复用。
++- uniqueExtensionHint：扩展上限的预算理由、核验回调必须同域（否则建议可能假唯一）、候选外不存在扩展命中的推理（扩展模式包含原模式）。
++- 时效判定：判定方向、只看 completed、不诱导 re-read（用户决策）、无先读措辞分支的可达性（apply_patch 无门禁）。
++- 已读区间：不按版本过滤的理由（陈旧版本仍有导航价值；当前侧无当前版本 ReadMetadata 可构造）。
++- boundDiff：连续前缀不变量（C01 教训）、省略计数必须等于真实剩余行数、工件文件兜底与 bash 输出同模式。
++- post-formatter 重算：metadata.diff 必须对齐落盘真值（H02）、permission 预览保持 formatter 前的审批语义、title 不变决定。
++- formattedChanged：常态零成本理由（86% 新建冗余实测）、flag 持久化用途。
++- 预过滤：下界证明（symDiff ≤ D）为何成立、为何只在严格大于 K 时跳过（决策等价性红线）。
++- 测试：各切片锁定的是哪条用户可观察行为。
++
++## 18. Verification
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test test/tool/edit.test.ts` | packages/opencode | 切片 1/3/5/6/9 + 既有用例全绿 |
++| `bun test test/tool/apply_patch.test.ts` | packages/opencode | 切片 2/4/8 + 既有用例全绿 |
++| `bun test test/tool/write.test.ts` | packages/opencode | 切片 7 + 既有用例全绿 |
++| `bun test test/tool/read.test.ts test/tool/truncation.test.ts` | packages/opencode | read 导出无行为变化、truncate 无回归 |
++| `bun test test/patch`（match/index 既有套件） | packages/opencode | locateExact 返回类型扩展无回归 |
++| `bun test test/tool` | packages/opencode | 修改面整体无红（含既有红色排查） |
++| `bun typecheck` | packages/opencode | 类型零错误 |
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added | 0 | 无新模块 |
++| Files modified | 13（10 生产 + 3 测试） | 第 15 节；生产 10 ≤ 用户约束 12 |
++| Files deleted | 0 | — |
++| Production lines | ~478 | 生产+测试 ~825 ≤ 1200 |
++| Test lines | ~345 | 同上 |
++| Generated lines | 0 | 不涉及 |
++
++## 20. Real Risks and Open Decisions
++
++- **时效判定的误报面**：自写后未读但本次失败其实与陈旧无关时，时效句仍真实（只陈述先后事实），不断言因果——文案措辞必须为事实句。
++- **扩展建议的域一致性**：核验回调必须与抛出点同域（edit：countOccurrences/exactLiteralCount；patch：同 cursorOffset 的 locateExact），否则建议可能假唯一。已设计为注入式核验。
++- **apply_patch metadata.diff 语义变化**：formatter 前→formatter 后。消费方为 snapshot/工具流归因与 prompt.ts（只要求真实 diff 行与计数），post-formatter 更贴近磁盘真值；permission 预览 diff 保持 formatter 前（审批语义）。
++- **ctx.messages 扫描成本**：线性扫描且只在失败路径；无额外 IO。
++- **预过滤边界正确性**：symDiff ≤ D 的证明依赖「strip 行尾后 token 一致性更粗 ⇒ 所需编辑数更少」；尾换行空 token 必须丢弃以对齐 jsdiff 行分词。错误方向只可能是下界偏松（保守），永不偏紧（否则会跳过本应成功的探测）。
++- **Open decisions**：无。全部取舍已由用户在 R4 逐项敲定。
++
++### Rejected Speculation
++
++- CRLF 行尾作为失败主因——台账 §11.5 否证。
++- hunk 裸空行解析缺陷——148 中仅 4，否证。
++- matcher 吞掉现存文本——无证据（唯一钉死案为模型侧部分陈旧）。
++- 跨 Session 写入者检测——0 命中，且超出 Session 边界，不实现。
++- bash 读取计入触痕或文案分层——用户明确拒绝。
++- write 全量 diff 回显——86% 新建冗余，否证。
++- INV-05/INV-09 扩展到 apply_patch 失败路径——G05/G03 证据集中在 edit 域，需求 ③⑤ 未指明 apply_patch；apply_patch 侧 hunk 定位已有文件级粒度，不扩展。
++
++## 21. Audit Contract
++
++The independent auditor must:
++
++- Read this exact file and the original requirement.
++- Reconstruct behavior from repository evidence.
++- Treat builder summaries as untrusted.
++- Audit the complete original scope on every round.
++- Require evidence for every blocking finding.
++- Check both under-design and over-design.
++- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
++  percent Chinese explanatory-comment plan.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | B-01：apply_patch 侧歧义候选无法按合同产出——locateExact 的 ambiguous 结果丢弃候选（match.ts:10-13,142-146），抛出点重扫构成第二 matcher 或更弱域；最小方向：候选由 owner 携带至抛出点 | 8 条：§11 诊断面分类/估计不诚实；§10 write diff 基线含糊（应为提交内容→最终落盘）；§10 与 §17 版本过滤矛盾且 isSameFileVersion 不可执行；§10 apply_patch 复用范围与 §13/§15 不一致；apply_patch title: output 未钉死；INV-04 文件身份提取规则未写明；§4 match.ts:645+ 引用漂移（预算常量在 276-283）；固定 caps vs 4s/64MiB 应注明有意偏离 | BLOCK | ses_f6b72fbc1ffew0VQ404367P9o8 |
++
++R4 边界裁定（read 侧「最后读取」的判定规则）：只认 visibleReadMeta 通过的内容可见 read。(a) legacy 历史 part（无 metadata.read 的旧记录）不锚定「最后读取」，此时文案为 "has not been read since"——跨版本 resume 的稀少边界，宁报未读也不冒称可见；(b) 目录/媒体 read（read.ts:625,673,684,704 无 metadata.read）不误计为文本读取。该规则替代 R3 文本中的 input.filePath 回退（回退会把目录/媒体 read 错计为「最后读取」，实现审计第 2 轮 B-01 证据 2 的核实结论）。
++
++R2 处置：B-01 按最小方向修订（match.ts ambiguous 携带候选行号；edit 侧同域枚举；uniqueExtensionHint 注入同域核验回调）。非阻断全部吸收：§11 重分类为 primary-contract repair；§10 钉死 write 基线/已读区间版本规则/apply_patch title/文件身份提取与无先读措辞；§2 Non-Goals 明确 INV-05/09 仅 edit；§4 引用更正；§10 注明固定 caps 为有意收紧。
++
++| 2 | R2 | yes | No blocking findings（B-01 解决已逐项源码核实：locateExact ambiguous 载荷、同域枚举、核验回调、无环导入、既有歧义测试前缀保持） | 2 条：①INV-04 引导句需工具感知；②§2 title 括注精度（R3 审计发现该轮 record correction 未实际落盘——与表头同批 edit 原子失败；已在 R3 批准时真实落入 §10/§2） | APPROVE | ses_f6b72fbc1ffew0VQ404367P9o8 |
++| 3 | R3 | yes | No blocking findings（INV-11 下界证明经审计独立验证：symdiff ≤ D 成立、尾空 token 丢弃是关键、只在严格 >K 时跳过、决策等价非第二路径；红测试与本机基线失败均经源码/实测确认） | 3 条：①§19 行数算术漂移——record correction 已落入；②§11 缺 INV-11 预过滤行——record correction 已落入；③R2 轮次的 record correction 未落盘——本轮已真实补齐 §10/§2 | APPROVE | ses_f6b72fbc1ffew0VQ404367P9o8 |
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++13 文件修改、0 新增/删除：生产 10（patch/index.ts +36、patch/match.ts +53、tool/apply_patch.ts +72、tool/apply_patch.txt +3、tool/edit-apply.ts +153、tool/edit.ts +126、tool/edit.txt +5、tool/file-diff.ts +48、tool/read.ts +8、tool/write.ts +26），测试 3（apply_patch.test.ts +153、edit.test.ts +249、write.test.ts +26）。总 +970/-50。生产 ≤12 文件约束满足；总修改 ≤1200 行满足。
++
++### Red-Green Test Evidence
++
++| 切片 | 红（实现前） | 绿（实现后） |
++| --- | --- | --- |
++| 1 edit 歧义候选行号+扩展建议 | "reports candidate lines and minimal unique extension on ambiguity" / "degrades to candidate lines…" 失败（无新信息） | 通过 |
++| 2 apply_patch 歧义（含 normalized 域） | "reports candidate lines and verified unique extension on ambiguity" 失败 | 通过 |
++| 3 edit 时效句 | "notes own-write-after-read staleness on mismatch failure" 失败 | 通过（含「读取更新则不出现」控制组） |
++| 4 apply_patch 时效句 | "notes own-write-after-read staleness on all-hunks failure" 失败 | 通过 |
++| 5 已读区间列表 | "lists previously read line ranges on mismatch failure" 失败 | 通过 |
++| 6 同名异路径提醒 | "notes a same-named read from a different path on mismatch failure" 失败 | 通过 |
++| 7 write formatter 差异段 | "echoes the formatted delta…" 失败 | 通过（含未改动零变化控制组） |
++| 8 apply_patch Changed 段 + post-formatter 真值 | "echoes the post-formatter diff…" / "reflects formatter results…" 失败 | 通过 |
++| 9 C01 连续前缀 | "truncates the Changed diff as a strict prefix…" 失败（跳行出洞复现） | 通过 |
++| 10 INV-11 预过滤 | 既有红 "keeps the abort path sub-second…" 改前基线 2.7s 失败 | 通过（同一命令） |
++| 文案 | 两个 description 断言失败 | 通过 |
++
++### Verification Commands and Results
++
++| Command | 目录 | 结果 |
++| --- | --- | --- |
++| `bun test test/tool/edit.test.ts` | packages/opencode | 94 pass / 0 fail |
++| `bun test test/tool/apply_patch.test.ts` | packages/opencode | 70 pass / 0 fail（含既有红转绿） |
++| `bun test test/tool/write.test.ts` | packages/opencode | 27 pass / 0 fail |
++| `bun test test/tool`（全目录 25 文件） | packages/opencode | 731 pass / 0 fail |
++| `bun test test/patch` | packages/opencode | 57 pass / 0 fail |
++| `bun typecheck`（tsgo --noEmit） | packages/opencode | 零错误 |
++
++### Original Feedback-Loop Result
++
++INV-11：`bun test test/tool/apply_patch.test.ts -t "abort path sub-second"` 改前 2.7s 失败 → 改后 6.5s 内通过（含全文件其他用例）。反馈增强类切片的「原始症状」来自台账 §11 的数据库实证（不匹配/歧义/陈旧失败），red 由切片断言直接覆盖。
++
++### Actual Secondary and Replacement Path Inventory
++
++与 §11 一致：无新 alternate success path；ambiguous 载荷、uniqueExtensionHint、历史事实句均为失败诊断；boundDiff/Changed 段/Formatted changes 段为成功 output 的信息段；预过滤为决策等价快速路径。无 fallback、无 catch-and-success。
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` | 747 | git diff 新增行排除空行、纯英文注释行、import 行（实现审计独立重算口径） |
++| Qualifying Chinese comment lines `C` | 127 | 纯中文注释行 + 行尾中文注释 |
++| Ratio `C / E` | 17.0% | |
++| Required minimum `C` | 113 | ceil(747×0.15) |
++
++代表性注释：edit-apply.ts（同域枚举红线、行对齐降级理由、核验失败必须丢弃建议）、match.ts（owner 产出候选载荷）、file-diff.ts（symDiff ≤ D 下界证明与尾空 token 丢弃的关键性）、edit.ts（不诱导 re-read 的用户决策、共享扫描 seam）、apply_patch.ts（审批看提案/模型看落盘的职责分离、win32 无反斜杠合同）。
++
++### Remaining Unverified Items
++
++- Linux/macOS 行为未在本机验证（测试含平台分支断言；改动无平台特定逻辑，win32 路径规则已覆盖）。
++- 全仓库全量测试套件（`bun test` 全量）未运行——超出修改面验证范围（test/tool + test/patch 全绿）。
++- 真实生产 formatter（prettier/gofmt）下的 write 差异段仅在 mock formatter 层验证（测试环境无真实 formatter 可用）。
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R3 | yes | B-01：scanFileTouchHistory 丢弃 read.ts 可见性协议（compacted 过滤缺失），且 collectVisibleReads 导出成死 import/死导出——已压缩读取会被误报为「已读」并抑制时效句；B-02：apply_patch.txt 措辞「three or more lines」偏离合同「more than 3 lines」且测试钉死偏离 | 4 条：两工具 diff 头路径形态不一致（apply_patch 相对/正斜杠，edit/write 绝对）；Changed 段预算不减已累积 output（wrapper 截断为最终边界）；§23 记录算术小出入（70→71 pass，E/C 口径）；canonicalReadPath 导出超出 §15 字面列举但属最小 seam 意图内 | BLOCK | ses_f6b72fbc1ffew0VQ404367P9o8 |
++
++| 2 | R3 | yes | B-01（合同纪律）：第 1 轮返工改变了 read.ts 公共 seam（visibleReadMeta 替代 collectVisibleReads 导出）与 INV-04 判定规则（删除 input.filePath 回退），但计划设计节未同步——计划文本与已交付代码漂移。代码本身经全量复现健全，不需要代码返工；最小修正为计划侧对齐（R4）后重批 + 同一 diff 复审 | 4 条（延续项 + §23 记录算术 + fixture 结构重复观察） | BLOCK | ses_f6b72fbc1ffew0VQ404367P9o8 |
++| 3 | R4 | yes | No blocking findings（R4 文本与已交付代码逐行一致；diff 与第 2 轮审计版本逐字节相同；E=747/C=127=17.0% 独立重算通过；验证复现：typecheck 零错误、edit/apply_patch/write/patch 251/251、test/tool 731/731） | 4 条记录级（均已在本轮记录时处理：§23 数字刷新、§24 轮次行补齐、残余 seam 名引用更正、§10 示例措辞与落盘文案对齐） | APPROVE | ses_f6b72fbc1ffew0VQ404367P9o8 |
++
++第 1 轮返工记录（R3 不变，纯实施修正）：①read.ts 新增 `visibleReadMeta` 作为可见性协议的唯一 part 级判定（completed+未 compacted+非 stub+metadata.read 合法），collectVisibleReads 改经它表达；edit.ts 的 scanFileTouchHistory 全量改用它（readRanges/lastReadEnd/同名判定全部来自可见 read），collectVisibleReads/isReadMetadata 回滚为私有，edit.ts 只导入 canonicalReadPath/visibleReadMeta；新增红绿用例「does not count compacted reads as visible history」。②apply_patch.txt 改回合同措辞「more than 3 lines」，测试断言同步。返工后 edit 96/96、apply_patch 71/71、read 82/82、typecheck 零错误。
+diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
+index c2ff8e55c4d96a1d9e78a62283dea0bf8b80ace4..0c2dd3669825a3dc81e9058c1f7161ee661a857c 100644
+--- a/packages/opencode/src/patch/index.ts
++++ b/packages/opencode/src/patch/index.ts
+@@ -4,7 +4,8 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import * as Log from "@opencode-ai/core/util/log"
+ import * as Bom from "../util/bom"
+ import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
+-import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./match"
++import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset, type AmbiguityCandidates } from "./match"
++import { formatAmbiguityHint, uniqueExtensionHint } from "../tool/edit-apply"
+ 
+ const log = Log.create({ service: "patch" })
+ 
+@@ -376,7 +377,14 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
+     const result = locateExact(originalLines, chunk.old_lines, searchFrom, chunk.is_end_of_file, terminated)
+     if (result.type === "ambiguous") {
+       throw new Error(
+-        `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
++        withAmbiguityAdvice(
++          `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
++          originalLines,
++          chunk.old_lines,
++          result.candidates,
++          searchFrom,
++          terminated,
++        ),
+       )
+     }
+     if (result.type === "not-found") {
+@@ -434,6 +442,30 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
+   return lines
+ }
+ 
++// 歧义失败合同（INV-03）：候选行号来自 locateExact 载荷（唯一性 owner 产出）；
++// 扩展建议经同域核验——同一 locateExact、同一 cursorOffset（change_context 收窄后的
++// 合格域），核验失败的建议不得展示，否则模型按错误建议重试只会再失败一次。
++function withAmbiguityAdvice(
++  message: string,
++  originalLines: string[],
++  oldLines: string[],
++  candidates: AmbiguityCandidates | undefined,
++  cursorOffset: number,
++  terminated: boolean,
++) {
++  if (!candidates || candidates.lines.length === 0) return message
++  // old block 是整行域输入，lineAligned 恒成立。
++  const hint = uniqueExtensionHint(
++    originalLines,
++    candidates.lines,
++    oldLines.length,
++    (extended) => locateExact(originalLines, extended, cursorOffset, false, terminated).type === "found",
++    true,
++  )
++  // total 以 owner 的完整枚举为准：载荷 lines 有封顶，不能只报截断后的数量。
++  return message + formatAmbiguityHint(hint && { ...hint, total: candidates.total })
++}
++
+ function formatLineReplacement(
+   newLines: string[],
+   span: { start: number; end: number },
+diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
+index efaeda50adf06bcc8e48311ec53c006f6f7dc704..aeb250162c0c19406981efb30a1eaf6b7b76574f 100644
+--- a/packages/opencode/src/patch/match.ts
++++ b/packages/opencode/src/patch/match.ts
+@@ -1,5 +1,5 @@
+ import { diffChars } from "diff"
+-import { normalizeForMatch } from "../tool/edit-apply"
++import { AMBIGUITY_MAX_CANDIDATES, normalizeForMatch } from "../tool/edit-apply"
+ 
+ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
+ 
+@@ -7,10 +7,15 @@ export type ExactLocation =
+   | { kind: "line"; startLine: number; endLine: number }
+   | { kind: "substring"; startOffset: number; endOffset: number }
+ 
++// 歧义载荷（INV-03）：候选行号（0-based）必须由唯一性判定 owner 随结果携带——
++// 抛出点拿不到多层候选域（exact/normalized whole-line、substring、unsafeNormalized），
++// 自行重扫要么构成第二 matcher，要么用更弱域给出与真实唯一性矛盾的建议。
++export type AmbiguityCandidates = { lines: number[]; total: number }
++
+ export type ExactResult =
+   | { type: "found"; location: ExactLocation }
+   | { type: "not-found" }
+-  | { type: "ambiguous" }
++  | { type: "ambiguous"; candidates?: AmbiguityCandidates }
+ 
+ // 行起点统一从当前 working lines 推导，避免前一次替换后继续使用失效的原始坐标。
+ // index 等于行数时表示逻辑文本末尾，供删除和 replacement 后的 cursor 使用。
+@@ -48,6 +53,35 @@ export function locateExact(
+     starts.push(offset)
+     offset += line.length + 1
+   }
++
++  // 偏移→行号（0-based）：starts 是全行起点升序数组，取最后一个 ≤ offset 的下标。
++  const lineOfOffset = (rawOffset: number) => {
++    let low = 0
++    let high = starts.length
++    while (low < high) {
++      const middle = (low + high) >>> 1
++      if (starts[middle] <= rawOffset) low = middle + 1
++      else high = middle
++    }
++    return low - 1
++  }
++
++  // 歧义载荷只描述唯一性判定已枚举的候选；unsafeNormalized（无 raw span 的归一化
++  // 命中）经 normalizedOwnerStart 归到行号，仍是模型需要绕开的真实重复位置。
++  const ambiguityCandidates = (
++    entries: Array<{ location: ExactLocation }>,
++    unsafeRawOffsets: number[],
++  ): AmbiguityCandidates => {
++    const found = new Set<number>()
++    for (const entry of entries) {
++      found.add(entry.location.kind === "line" ? entry.location.startLine : lineOfOffset(entry.location.startOffset))
++    }
++    for (const raw of unsafeRawOffsets) {
++      if (Number.isFinite(raw)) found.add(lineOfOffset(raw))
++    }
++    const sorted = [...found].sort((a, b) => a - b)
++    return { lines: sorted.slice(0, AMBIGUITY_MAX_CANDIDATES), total: sorted.length }
++  }
+   // cursor 落在一行内部时该行已被部分消费，whole-line 分支只能从下一个完整行起点继续。
+   const firstEligibleLine = starts.findIndex((offset) => offset >= cursorOffset)
+   const startLine = firstEligibleLine === -1 ? lines.length : firstEligibleLine
+@@ -88,7 +122,7 @@ export function locateExact(
+ 
+   // proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
+   if (exactLineByOffset.size > 0) {
+-    if (lineCandidates.length > 1) return { type: "ambiguous" }
++    if (lineCandidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(lineCandidates, []) }
+     return { type: "found", location: lineCandidates[0].location }
+   }
+ 
+@@ -111,7 +145,8 @@ export function locateExact(
+ 
+   const normalized = normalizedRawView(text)
+   const normalizedLiteral = normalizeForMatch(literal)
+-  let unsafeNormalized = 0
++  // unsafe 命中没有可写 raw span，但歧义载荷仍需其行号，故收集 ownerStart 而非只计数。
++  const unsafeNormalizedOffsets: number[] = []
+   if (normalized && normalizedLiteral.length > 0) {
+     for (
+       let start = normalized.text.indexOf(normalizedLiteral);
+@@ -125,7 +160,7 @@ export function locateExact(
+       const ownerStart = rawStart ?? normalizedOwnerStart(normalized.owners, start)
+       if (ownerStart < cursorOffset) continue
+       if (rawStart === undefined || rawEnd === undefined || hasInternalGap(normalized.gaps, start, end)) {
+-        unsafeNormalized++
++        unsafeNormalizedOffsets.push(ownerStart)
+         continue
+       }
+       // whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
+@@ -139,9 +174,11 @@ export function locateExact(
+   }
+ 
+   // unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
+-  if (candidates.length + unsafeNormalized > 1) return { type: "ambiguous" }
+-  if (unsafeNormalized > 0) return { type: "not-found" }
+-  if (candidates.length > 1) return { type: "ambiguous" }
++  if (candidates.length + unsafeNormalizedOffsets.length > 1) {
++    return { type: "ambiguous", candidates: ambiguityCandidates(candidates, unsafeNormalizedOffsets) }
++  }
++  if (unsafeNormalizedOffsets.length > 0) return { type: "not-found" }
++  if (candidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(candidates, []) }
+   if (candidates.length === 0) return { type: "not-found" }
+   return { type: "found", location: candidates[0].location }
+ }
+diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
+index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cbc9d46cee 100644
+--- a/packages/opencode/src/tool/apply_patch.ts
++++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -7,7 +7,9 @@ import { FileWatcher } from "../file/watcher"
+ import { InstanceState } from "@/effect/instance-state"
+ import { Patch } from "../patch"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+-import { renderFileDiff } from "./file-diff"
++import { boundDiff, renderFileDiff } from "./file-diff"
++import { formatStalenessNote, scanFileTouchHistory } from "./edit"
++import { Truncate } from "./truncate"
+ import { LSP } from "@/lsp/lsp"
+ // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
+ import type * as LSPClient from "@/lsp/client"
+@@ -47,6 +49,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+   instance: InstanceContext,
+   afs: AppFileSystem.Interface,
+ ) {
++  // diff 头统一用 worktree 相对路径（正斜杠）：output 在 win32 有不许含反斜杠的合同测试；
++  // 相对路径同时是 UI/SummaryCache 的既有展示形态，proposal 与 result 共用同一渲染。
++  const displayPath = path.relative(instance.worktree, group.filePath).replaceAll("\\", "/")
+   const first = group.hunks[0]
+   switch (first.type) {
+     case "add": {
+@@ -62,7 +67,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+       const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
+       const next = Bom.split(newContent)
+       // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
+-      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
++      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
+       // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
+       return {
+         filePath: group.filePath,
+@@ -107,7 +112,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
+       }
+       // 元数据 diff 走唯一有界 seam；正常路径产物与旧实现逐字节一致（INV-02）。
+-      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
++      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
+       const expected = [snapshot]
+       if (movePath) {
+         // move destination 也是 proposal 的 expected state，不能只锁 source。
+@@ -138,7 +143,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+       if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
+       const source = Bom.split(Mutation.decode(snapshot))
+       // delete 的全量语义保留：中小文件仍记录全文行 diff；只有二进制/超限中段换标记表示。
+-      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(source.text), "")
++      const rendered = renderFileDiff(displayPath, normalizeLineEndings(source.text), "")
+       // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
+       return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: rendered.patch, additions: rendered.additions, deletions: rendered.deletions, bom: source.bom, expected: [snapshot] }
+     }
+@@ -204,6 +209,7 @@ export const ApplyPatchTool = Tool.define(
+     const afs = yield* AppFileSystem.Service
+     const format = yield* Format.Service
+     const bus = yield* Bus.Service
++    const truncate = yield* Truncate.Service
+ 
+     const run = Effect.fn("ApplyPatchTool.execute")(function* (
+       params: Schema.Schema.Type<typeof Parameters>,
+@@ -263,7 +269,10 @@ export const ApplyPatchTool = Tool.define(
+         const exit = yield* Effect.exit(processHunkGroup(group, instance, afs))
+         if (Exit.isFailure(exit)) {
+           const err = Cause.squash(exit.cause)
+-          hunkErrors.push(`${group.filePath}: ${err instanceof Error ? err.message : String(err)}`)
++          // INV-04：失败文件行附时效事实（自写晚于自读）。判定与 edit 侧共享同一 seam，
++          // 同一文件在同一会话历史下两工具必须给出一致的事实句。
++          const stale = formatStalenessNote(scanFileTouchHistory(ctx.messages, group.filePath))
++          hunkErrors.push(`${group.filePath}: ${err instanceof Error ? err.message : String(err)}${stale}`)
+           continue
+         }
+         const change = exit.value
+@@ -305,6 +314,9 @@ export const ApplyPatchTool = Tool.define(
+       // Apply the changes
+       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
+       const editedFiles: string[] = []
++      // INV-07：commit 锁内逐文件记录最终落盘内容，供 commit 后重算 post-formatter diff。
++      // delete 无最终内容不记录；未 formatter 的文件沿用 proposal newContent（两者本就一致）。
++      const finalContents = new Map<string, string>()
+       const expected = fileChanges.flatMap((change) => change.expected)
+       // 所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
+ 
+@@ -345,6 +357,7 @@ export const ApplyPatchTool = Tool.define(
+             }
+ 
+             if (edited) {
++              let finalText = change.newContent
+               if (yield* format.file(edited)) {
+                 const formattedText = yield* Bom.syncFile(afs, edited, change.bom)
+                 // FileChange.ending 来自同一 proposal/source；formatter 只拥有文本变化，不接管 existing EOL。
+@@ -356,7 +369,9 @@ export const ApplyPatchTool = Tool.define(
+                 if (restoredText !== formattedText) {
+                   yield* afs.writeWithDirs(edited, Bom.join(restoredText, change.bom))
+                 }
++                finalText = restoredText
+               }
++              finalContents.set(edited, finalText)
+               editedFiles.push(edited)
+             }
+           }
+@@ -448,11 +463,52 @@ export const ApplyPatchTool = Tool.define(
+         }
+       }
+ 
++      // INV-07/H02：result 的 diff/files 必须对齐 commit 后的落盘真值（post-formatter）；
++      // permission 预览用的 proposal diff（files/totalDiff）保持 formatter 前语义不变——
++      // 审批看到提案、模型看到落盘，两处职责不合并。
++      const resultFiles = fileChanges.map((change) => {
++        const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
++        const finalText = edited ? finalContents.get(edited) : undefined
++        const unchanged = finalText === undefined || normalizeLineEndings(finalText) === normalizeLineEndings(change.newContent)
++        // proposal diff 已在 processHunkGroup 用相对路径渲染；未变化的文件直接复用，
++        // formatter 改写过的文件以同一相对路径重算（post-formatter 真值）。
++        const relativePath = path.relative(instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/")
++        const rendered = unchanged
++          ? { patch: change.diff, additions: change.additions, deletions: change.deletions }
++          : renderFileDiff(relativePath, normalizeLineEndings(change.oldContent), normalizeLineEndings(finalText))
++        return {
++          filePath: change.filePath,
++          relativePath,
++          type: change.type,
++          patch: rendered.patch,
++          additions: rendered.additions,
++          deletions: rendered.deletions,
++          movePath: change.movePath,
++        }
++      })
++      const resultDiff = resultFiles.map((file) => file.patch).join("\n")
++
++      // title 保持今日全部既有段落（成功行+文件列表+失败/LSP 段），不含新增 Changed 段。
++      const title = output
++      // Changed 段给模型「落盘真值」锚点（G01 链式陈旧的对冲）；连续前缀裁剪由 boundDiff 持有。
++      const limits = yield* truncate.limits()
++      const bounded = boundDiff(resultDiff, {
++        maxLines: Math.max(0, limits.maxLines - 10),
++        maxBytes: Math.max(0, limits.maxBytes - 2048),
++      })
++      if (bounded.text.length > 0) {
++        output += `\n\nChanged:\n${bounded.text}`
++      }
++      if (bounded.omitted > 0) {
++        const artifact = yield* truncate.write(resultDiff)
++        output += `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
++      }
++
+       return {
+-        title: output,
++        title,
+         metadata: {
+-          diff: totalDiff,
+-          files,
++          diff: resultDiff,
++          files: resultFiles,
+           // [local-smark] metadata.diagnostics 存储新错误数组 + diagnosticSummary 聚合摘要
+           diagnostics: diagMetadata,
+           // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突。
+diff --git a/packages/opencode/src/tool/apply_patch.txt b/packages/opencode/src/tool/apply_patch.txt
+index 9a927631f661a386eb486b4776bab92a0fb35370..eac1e3522dfeb562e711f99311ee5d5b81374e4b 100644
+--- a/packages/opencode/src/tool/apply_patch.txt
++++ b/packages/opencode/src/tool/apply_patch.txt
+@@ -32,5 +32,6 @@ It is important to remember:
+ - You must include a header with your intended action (Add/Delete/Update)
+ - You must prefix new lines with `+` even when creating a new file
+ - Update old lines are matched exactly as complete lines first. If that fails, the complete old block may match one exact literal substring while preserving all surrounding text.
+-- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
++- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
++- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.
+ - A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
+diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
+index 21805459f9b47f11b32c3985693780356ae69a98..8cb44ea36ddffa7c205367cfeeedbe3c0f9deeb2 100644
+--- a/packages/opencode/src/tool/edit-apply.ts
++++ b/packages/opencode/src/tool/edit-apply.ts
+@@ -169,6 +169,152 @@ export function applyReplacementsPreservingUnchangedLines(
+   return result
+ }
+ 
++// ---- 歧义失败诊断（INV-03）----
++// 以下逻辑只服务失败文本，永不进入成功替换域（模块不变量 8）。
++// 候选行号让模型不必为定位重复段再跑一次 grep；最小唯一扩展直接回答
++// 「oldString 再带多少上下文行才唯一」，避免模型盲目试探。
++
++// 诊断预算：候选与扩展都封顶，全部计算是 indexOf/行比较的线性扫描，
++// 不启动第二 matcher，也不引入超时状态机。match.ts 的歧义载荷复用同一上限。
++export const AMBIGUITY_MAX_CANDIDATES = 8
++const AMBIGUITY_MAX_EXTENSION = 10
++
++// 偏移→行号（0-based）。候选偏移天然升序，双指针一次划过不同行起点的重复扫描。
++function offsetsToLines(starts: number[], offsets: number[]) {
++  const lines: number[] = []
++  let cursor = 0
++  for (const offset of offsets) {
++    while (cursor + 1 < starts.length && starts[cursor + 1] <= offset) cursor++
++    lines.push(cursor)
++  }
++  return lines
++}
++
++/**
++ * 最小唯一扩展提示：对同一行的多个候选去重后，逐对比较候选块的向上/向下公共上下文，
++ * 取「比最长公共上下文再多一行」作为该候选该方向的去歧成本，全局取最便宜者。
++ * 扩展模式必然包含原块，其命中只能是原候选之一，因此行域两两比较在数学上完备；
++ * 但 mid-line 候选与 normalized 域可能破坏行级推理，所以最终建议必须经调用方注入的
++ * 同域唯一性核验（verifyUnique）后才允许展示——核验不过则只给候选行号。
++ */
++export function uniqueExtensionHint(
++  lines: string[],
++  candidateStartLines: number[],
++  patternLineCount: number,
++  verifyUnique: (extended: string[]) => boolean,
++  lineAligned: boolean,
++): { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined {
++  const distinct = [...new Set(candidateStartLines)].sort((a, b) => a - b)
++  if (distinct.length === 0) return undefined
++  const shown = distinct.slice(0, AMBIGUITY_MAX_CANDIDATES).map((line) => line + 1)
++
++  // 扩展建议的语义是「多带 N 个完整行」，只在块行对齐且候选确在多行上时才有意义：
++  // 同行重复（distinct=1 但多次出现）或 mid-line 块都无法用整行扩展表达，直接降级为只报行号。
++  if (!lineAligned || distinct.length < 2) return { lines: shown, total: distinct.length }
++
++  let best: { direction: "above" | "below"; count: number; start: number } | undefined
++  for (const start of distinct) {
++    const end = start + patternLineCount - 1
++    let up = 0
++    let down = 0
++    for (const other of distinct) {
++      if (other === start) continue
++      const otherEnd = other + patternLineCount - 1
++      let shared = 0
++      while (
++        shared < AMBIGUITY_MAX_EXTENSION &&
++        start - 1 - shared >= 0 &&
++        other - 1 - shared >= 0 &&
++        lines[start - 1 - shared] === lines[other - 1 - shared]
++      ) {
++        shared++
++      }
++      up = Math.max(up, shared + 1)
++      shared = 0
++      while (
++        shared < AMBIGUITY_MAX_EXTENSION &&
++        end + 1 + shared < lines.length &&
++        otherEnd + 1 + shared < lines.length &&
++        lines[end + 1 + shared] === lines[otherEnd + 1 + shared]
++      ) {
++        shared++
++      }
++      down = Math.max(down, shared + 1)
++    }
++    // 超出文件边界或预算的方向不可能去歧，不参与择优。
++    if (up <= AMBIGUITY_MAX_EXTENSION && start - up >= 0 && (!best || up < best.count)) {
++      best = { direction: "above", count: up, start }
++    }
++    if (down <= AMBIGUITY_MAX_EXTENSION && end + down < lines.length && (!best || down < best.count)) {
++      best = { direction: "below", count: down, start }
++    }
++  }
++
++  if (best) {
++    const extended =
++      best.direction === "above"
++        ? lines.slice(best.start - best.count, best.start + patternLineCount)
++        : lines.slice(best.start, best.start + patternLineCount + best.count)
++    // 核验与抛出点的唯一性判定同域；核验失败的建议会变成模型的下一次失败，必须丢弃。
++    if (!verifyUnique(extended)) best = undefined
++  }
++
++  return {
++    lines: shown,
++    total: distinct.length,
++    ...(best ? { extension: { direction: best.direction, count: best.count } } : {}),
++  }
++}
++
++// 歧义文案尾部是 edit 与 apply_patch 的共享合同（同一措辞、同一格式），
++// 禁止两处各自拼装导致漂移。hint.lines 已是 1-based 展示行号。
++export function formatAmbiguityHint(
++  hint: { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined,
++) {
++  if (!hint) return ""
++  const listing =
++    hint.total === 1
++      ? `line ${hint.lines[0]}`
++      : `lines ${hint.lines.join(", ")}${hint.total > hint.lines.length ? `, … (${hint.total} total)` : ""}`
++  const advice = hint.extension
++    ? ` Including ${hint.extension.count} more line(s) ${hint.extension.direction} makes the match unique.`
++    : ""
++  return `\n\nMatches at ${listing}.${advice}`
++}
++
++// 失败错误尾部：候选行号 + 经同域核验的最小唯一扩展。
++// 候选枚举与抛出点的唯一性计数同域（usedNormalized 决定字面/归一化），
++// 禁止用另一域的重扫结果做建议——域分歧的建议会让模型重试再失败。
++function ambiguitySuffix(base: string, oldString: string, usedNormalized: boolean) {
++  const probe = usedNormalized ? normalizeForMatch(oldString) : oldString
++  if (probe.length === 0) return ""
++  // 与 countOccurrences/exactLiteralCount 同构的非重叠步进枚举。
++  const offsets: number[] = []
++  let from = 0
++  while (true) {
++    const index = base.indexOf(probe, from)
++    if (index === -1) break
++    offsets.push(index)
++    from = index + probe.length
++  }
++  if (offsets.length === 0) return ""
++  // replacementBase 与原文行结构一致（normalizeForMatch 不改行数），行号对模型即文件行号。
++  const starts: number[] = [0]
++  for (let i = 0; i < base.length; i++) if (base[i] === "\n") starts.push(i + 1)
++  const candidateLines = offsetsToLines(starts, offsets)
++  // 行对齐校验：扩展语义按整行表达，mid-line 块（如行内单词重复）不满足前提，
++  // 必须降级为只报候选行号，否则「0 行扩展」会把整行吞进建议而说谎。
++  const lineAligned = offsets.every((offset) => {
++    const end = offset + probe.length
++    return (offset === 0 || base[offset - 1] === "\n") && (end === base.length || base[end] === "\n")
++  })
++  const hint = uniqueExtensionHint(base.split("\n"), candidateLines, probe.split("\n").length, (extended) => {
++    const text = extended.join("\n")
++    return (usedNormalized ? countOccurrences(base, text) : exactLiteralCount(base, text)) === 1
++  }, lineAligned)
++  return formatAmbiguityHint(hint)
++}
++
+ // progressive locate：先字面 exact，失败才进封闭 normalize；不使用打分/closest 成功。
+ export function findMatch(content: string, oldString: string) {
+   const exactIndex = content.indexOf(oldString)
+@@ -453,12 +599,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+       ? countOccurrences(replacementBase, edit.oldString)
+       : exactLiteralCount(replacementBase, edit.oldString)
+     if (occurrences > 1 && edit.replaceAll !== true) {
+-      throw new EditApplyError(
++      const message =
+         edits.length === 1
+           ? `Found multiple matches for oldString. Provide more surrounding context to make the match unique.`
+-          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`,
+-        i,
+-      )
++          : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`
++      throw new EditApplyError(message + ambiguitySuffix(replacementBase, edit.oldString, usedNormalized), i)
+     }
+ 
+     const ranges = usedNormalized
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index 5f9b7f0cf776dd6f749c137a1cb8429b84da7171..b6aacb1c09b5c45a225ddaa9b0372af6dafda605 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -3,7 +3,7 @@ import { createHash } from "crypto"
+ import { Effect, Schema } from "effect"
+ import * as Tool from "./tool"
+ import { LSP } from "@/lsp/lsp"
+-import { renderFileDiff } from "./file-diff"
++import { boundDiff, renderFileDiff } from "./file-diff"
+ import DESCRIPTION from "./edit.txt"
+ import { File } from "../file"
+ import { FileWatcher } from "../file/watcher"
+@@ -17,6 +17,9 @@ import * as Bom from "@/util/bom"
+ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+ import { closestWindow } from "@/patch/match"
+ import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
++import { canonicalReadPath, visibleReadMeta } from "./read"
++import { mergeRanges } from "@/util/range"
++import type { MessageV2 } from "../session/message-v2"
+ import * as Mutation from "./file-mutation-coordinator"
+ import * as Truncate from "./truncate"
+ 
+@@ -87,6 +90,97 @@ export function prepareEditArguments(input: unknown): unknown {
+   return args
+ }
+ 
++// 文件触碰历史（INV-04/05/09 的共享判定源）：edit 与 apply_patch 的失败诊断必须
++// 消费同一份扫描结果，禁止两个工具各自实现导致判定漂移。只扫描 completed 工具 part；
++// 时间戳取 state.time.end（completed 时刻），不取 start。
++export type FileTouchHistory = {
++  lastReadEnd: number
++  lastWriteEnd: number
++  lastWriteTool: string
++  readRanges: Array<{ start: number; end: number }>
++  sameNameRead?: string
++}
++
++export function scanFileTouchHistory(messages: MessageV2.WithParts[], filePath: string): FileTouchHistory {
++  // 与门禁同一身份规则（execute 内 resolveForCompare）：win32 大小写不敏感。
++  const resolveForCompare = (p: string) => {
++    const r = path.resolve(p)
++    return process.platform === "win32" ? r.toLowerCase() : r
++  }
++  const targetKey = resolveForCompare(filePath)
++  const targetName = path.basename(filePath).toLowerCase()
++  const canonical = canonicalReadPath(filePath)
++  const history: FileTouchHistory = { lastReadEnd: -1, lastWriteEnd: -1, lastWriteTool: "", readRanges: [] }
++
++  for (const msg of messages) {
++    if (msg.info.role !== "assistant") continue
++    for (const part of msg.parts) {
++      if (part.type !== "tool" || part.state.status !== "completed") continue
++      const end = part.state.time.end
++      const input = part.state.input as Record<string, unknown> | undefined
++      if (part.tool === "read") {
++        // 已读事实只认 read.ts 的可见性协议（visibleReadMeta：completed、未 compacted、
++        // 非 stub、metadata.read 合法）——已压缩的读取内容不在模型上下文中，计入会把
++        // 「不可见」说成「已读」，在本任务修复的一致性域内自相矛盾。
++        const meta = visibleReadMeta(part)
++        if (!meta) continue
++        if (meta.canonicalPath === canonical) {
++          history.readRanges.push({ start: meta.start, end: meta.end })
++          history.lastReadEnd = Math.max(history.lastReadEnd, end)
++          continue
++        }
++        // 同名异路径提醒只看 read：它是模型实际可见内容的来源；write/edit 目标即身份。
++        if (path.basename(meta.path).toLowerCase() === targetName) history.sameNameRead = meta.path
++        continue
++      }
++      if (part.tool === "edit" || part.tool === "write") {
++        if (typeof input?.filePath === "string" && resolveForCompare(input.filePath) === targetKey && end > history.lastWriteEnd) {
++          history.lastWriteEnd = end
++          history.lastWriteTool = part.tool
++        }
++        continue
++      }
++      if (part.tool === "apply_patch") {
++        // 文件身份取自 metadata.files（提交后的权威列表）；缺失元数据的旧 part 不猜 patchText。
++        const files = part.state.metadata?.files
++        if (!Array.isArray(files)) continue
++        const touched = files.some(
++          (file) =>
++            typeof (file as { filePath?: unknown }).filePath === "string" &&
++            resolveForCompare((file as { filePath: string }).filePath) === targetKey,
++        )
++        if (touched && end > history.lastWriteEnd) {
++          history.lastWriteEnd = end
++          history.lastWriteTool = part.tool
++        }
++      }
++    }
++  }
++  return history
++}
++
++// 时效事实句（INV-04）：只陈述「最后写入晚于最后读取」的先后事实并指向作用后结果，
++// 不诱导 re-read（用户决策）。apply_patch 与 edit 共用同一文案。
++export function formatStalenessNote(history: FileTouchHistory) {
++  if (history.lastWriteEnd <= 0 || history.lastWriteEnd <= history.lastReadEnd) return ""
++  return history.lastReadEnd > 0
++    ? `\n\nThis file was modified by your own ${history.lastWriteTool} after your last read. Use the result returned by that call (its diff or formatted-changes section) as the current content.`
++    : `\n\nThis file was last modified by your own ${history.lastWriteTool} in this session and has not been read since.`
++}
++
++function mismatchHistoryNotes(messages: MessageV2.WithParts[], filePath: string) {
++  const history = scanFileTouchHistory(messages, filePath)
++  let notes = formatStalenessNote(history)
++  if (history.readRanges.length > 0) {
++    const merged = mergeRanges(history.readRanges)
++    notes += `\n\nLines of this file you have read in this session: ${merged.map((range) => `${range.start}-${range.end}`).join(", ")}.`
++  }
++  if (history.sameNameRead) {
++    notes += `\n\nYou previously read a different file with the same name: ${history.sameNameRead}.`
++  }
++  return notes
++}
++
+ function isCreate(edits: EditReplacement[]) {
+   return edits.length === 1 && edits[0].oldString === ""
+ }
+@@ -282,7 +376,8 @@ export const EditTool = Tool.define(
+                   message +
+                     (closest
+                       ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+-                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
++                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
++                    mismatchHistoryNotes(ctx.messages, filePath),
+                 )
+               }
+               throw error
+@@ -405,20 +500,19 @@ export const EditTool = Tool.define(
+             output += `\n\nChanged:`
+             consumedBytes += Buffer.byteLength("\n\nChanged:", "utf-8")
+             consumedLines += 3
+-            const diffLinesArr = diff.split("\n")
+-            let omitted = 0
+-            for (const line of diffLinesArr) {
+-              const size = Buffer.byteLength(line, "utf-8") + 1
+-              if (consumedLines >= diffBudgetLines || consumedBytes + size > diffBudgetBytes) {
+-                omitted++
+-                continue
+-              }
+-              output += `\n${line}`
+-              consumedBytes += size
+-              consumedLines++
++            // INV-08/C01：连续前缀裁剪由 boundDiff 统一持有——展示段是真实 diff 的
++            // 逐字节前缀，省略计数等于真实剩余行数；不得恢复逐行跳塞（中间出洞）。
++            const bounded = boundDiff(diff, { maxLines: diffBudgetLines, maxBytes: diffBudgetBytes })
++            if (bounded.text.length > 0) {
++              output += `\n${bounded.text}`
++              consumedBytes += Buffer.byteLength(bounded.text, "utf-8") + 1
++              consumedLines += bounded.text.split("\n").length
+             }
+-            if (omitted > 0) {
+-              const marker = `\n… (${omitted} more lines omitted)`
++            if (bounded.omitted > 0) {
++              // 超预算兜底：完整 diff 落 truncation 工件文件（与 bash 输出同模式），
++              // 模型可按需 read 取回全文，裁切不再意味着丢失。
++              const artifact = yield* truncate.write(diff)
++              const marker = `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
+               output += marker
+               consumedBytes += Buffer.byteLength(marker, "utf-8")
+               consumedLines++
+diff --git a/packages/opencode/src/tool/edit.txt b/packages/opencode/src/tool/edit.txt
+index 89d945cfefb1f8c6b96c057c51cc06408406fae7..174de35da0ec76dfd45f713fa8143ba9939644a2 100644
+--- a/packages/opencode/src/tool/edit.txt
++++ b/packages/opencode/src/tool/edit.txt
+@@ -1,15 +1,16 @@
+ Performs string replacements in files. Supports one or more disjoint edits in a single call.
+ 
+ Usage:
+-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
++- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. Bash output does not count: it may be compressed or transformed, so it cannot serve as an exact editing basis.
+ - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
+ - If need, ALWAYS prefer editing existing files in the codebase. NEVER write new files unless the user explicitly requires them.
+ - Prefer one call with multiple entries in `edits[]` for disjoint regions in the same file instead of multiple edit calls.
+ - Each `edits[].oldString` is matched against the original file snapshot, not after earlier edits in the same call. Do not emit overlapping or nested edits; merge nearby changes into one edit.
+ - Keep each `oldString` as small as possible while still unique. Do not pad with large unchanged regions.
+ - Matching tries exact unique literal first, then a conservative normalized form (trailing line whitespace and common unicode quote/dash/space variants). Uniqueness and `replaceAll` both count under that same normalized-aware domain (e.g. ASCII hyphen and en-dash siblings count as multiples).
++- ALWAYS transcribe `oldString` from your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct it from an older read alone.
+ - Indent/tab differences and escape artifacts still fail; re-read and copy exact text.
+-- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context to make it unique or set `replaceAll` on that edit item.
++- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context (more than 3 lines) to make it unique or set `replaceAll` on that edit item.
+ - Use `replaceAll` on an edit item to rename a string across the file.
+ - Create/overwrite: single edit with empty `oldString` only (raw empty string). Whitespace-only oldString is not create and will fail.
+ - If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins when non-empty.
+diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
+index 9e4fbd968da8f76bf2feeb965a8c6bb938402c0b..97c4720654a94c7ad129850e875c218ba45cdb9b 100644
+--- a/packages/opencode/src/tool/file-diff.ts
++++ b/packages/opencode/src/tool/file-diff.ts
+@@ -27,6 +27,22 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
+ 
+ export type RenderedFileDiff = { patch: string; additions: number; deletions: number }
+ 
++// 连续前缀裁剪（INV-08；C01 教训）：text 永远是 patch 的逐字节前缀，omitted 等于真实
++// 剩余行数。旧 edit.ts 内联循环用 continue 跳过超放行、后续短行仍进入，展示中间出洞
++// 却把「只裁尾部」的印象留给模型——这里只许切一刀，长行处即整体截止。
++export function boundDiff(patch: string, budget: { maxLines: number; maxBytes: number }) {
++  const lines = patch.split("\n")
++  let bytes = 0
++  let kept = 0
++  while (kept < lines.length && kept < budget.maxLines) {
++    const size = Buffer.byteLength(lines[kept], "utf-8") + (kept > 0 ? 1 : 0)
++    if (bytes + size > budget.maxBytes) break
++    bytes += size
++    kept++
++  }
++  return { text: lines.slice(0, kept).join("\n"), omitted: lines.length - kept }
++}
++
+ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
+ 
+ function isBinaryText(text: string) {
+@@ -96,8 +112,40 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
+   }
+ }
+ 
++// 行多重集对称差 |old\\new| + |new\\old| 是行级编辑距离 D 的下界：只在单侧出现的每个
++// 行实例都必须被删除/插入，任何编辑脚本都受其约束。行尾差异（CRLF/尾换行空 token）
++// 会让下界偏松（strip 后一致性更粗、所需编辑更少），永不偏紧——因此对称差严格大于
++// MAX_DIFF_EDIT_LINES 时，jsdiff 探测（diff.js 同步循环按 editLength 递增穷举到 K+1）
++// 必然中止，直接走 rewriteMarker 与探测中止的决策逐字节一致。
++// 动机实测：jsdiff 中止路径自身是 O(K²) 且每步分配路径对象（事故 fixture 纯探测
++// ~1280ms），慢机器上会越过性能回归测试的 1000ms 预算；本过滤是 O(N) 哈希计数。
++function exceedsEditBudgetByLineMultiset(oldText: string, newText: string) {
++  // 分词对齐 jsdiff 行分词的 strip 形态：split("\n") 后去尾部空 token（尾换行产生），
++  // 行尾 \r 归入行内容（strip 只让一致性更粗，保持下界方向安全）。
++  const counts = new Map<string, number>()
++  let excess = 0
++  const consume = (text: string, sign: 1 | -1) => {
++    const lines = text.split("\n")
++    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
++    for (const line of lines) {
++      const next = (counts.get(line) ?? 0) + sign
++      counts.set(line, next)
++      // excess 只跟踪 |count| 的增量变化，避免最后再一次全表求和。
++      excess += Math.abs(next) - Math.abs(next - sign)
++    }
++  }
++  consume(oldText, 1)
++  consume(newText, -1)
++  return excess > MAX_DIFF_EDIT_LINES
++}
++
+ export function renderFileDiff(filePath: string, oldText: string, newText: string): RenderedFileDiff {
+   if (isBinaryText(oldText) || isBinaryText(newText)) return binaryMarker(filePath, oldText, newText)
++  // INV-11：下界严格大于预算时探测必然中止，跳过的不是「可能成功」的路径。
++  if (exceedsEditBudgetByLineMultiset(oldText, newText)) {
++    const { oldMid, newMid } = trimCommonLines(oldText, newText)
++    return rewriteMarker(filePath, oldMid, newMid, oldText, newText)
++  }
+   // 门B（R2）：带预算的真实计算取代中段体积猜测。探测即主路径计算本身（jsdiff 原生
+   // maxEditLength，预算耗尽同步返回 undefined），不是失败后备路径。
+   const probe = diffLines(oldText, newText, { maxEditLength: MAX_DIFF_EDIT_LINES })
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 1ada85ca1e71301246cd7a2501b912b729509a78..73a9740788613065d20050792eec10de740a2964 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -170,7 +170,9 @@ function resolveReadPath(input: string, directory: string) {
+   return AppFileSystem.normalizePath(path.resolve(directory, input))
+ }
+ 
+-function canonicalReadPath(filepath: string) {
++// canonicalPath 协议与可见读取收集是 read metadata 的唯一权威判定；edit 失败诊断
++// （INV-04/05/09）复用同一判定，禁止调用方另写路径规范化导致两侧漂移。
++export function canonicalReadPath(filepath: string) {
+   const normalized = AppFileSystem.normalizePath(filepath).replaceAll("\\", "/")
+   return process.platform === "win32" ? normalized.toLowerCase() : normalized
+ }
+@@ -202,21 +204,29 @@ function isReadMetadata(input: unknown): input is ReadMetadata {
+   )
+ }
+ 
++// 「内容仍在模型上下文中可见」的 part 级判定是本模块的单一协议：completed、
++// 未 compacted、非 stub、metadata.read 合法。collectVisibleReads 与 edit 失败诊断
++// （INV-04/05）都必须经此判定，复制条件会让两侧对同一历史给出不同答案。
++export function visibleReadMeta(part: MessageV2.ToolPart): ReadMetadata | undefined {
++  if (part.tool !== "read") return undefined
++  if (part.state.status !== "completed") return undefined
++  if (part.state.time.compacted) return undefined
++  // Use metadata rather than parsing XML so the visible-context decision
++  // stays stable even if the human-facing formatting changes later.
++  const meta = part.state.metadata?.read
++  if (!isReadMetadata(meta)) return undefined
++  if (meta.stub) return undefined
++  return meta
++}
++
+ function collectVisibleReads(messages: MessageV2.WithParts[], canonicalPath: string) {
+   const reads: ReadMetadata[] = []
+   for (const msg of messages) {
+     if (msg.info.role !== "assistant") continue
+     for (const part of msg.parts) {
+       if (part.type !== "tool") continue
+-      if (part.tool !== "read") continue
+-      if (part.state.status !== "completed") continue
+-      if (part.state.time.compacted) continue
+-
+-      // Use metadata rather than parsing XML so the visible-context decision
+-      // stays stable even if the human-facing formatting changes later.
+-      const meta = part.state.metadata?.read
+-      if (!isReadMetadata(meta)) continue
+-      if (meta.stub) continue
++      const meta = visibleReadMeta(part)
++      if (!meta) continue
+       if (meta.canonicalPath !== canonicalPath) continue
+       reads.push(meta)
+     }
+diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
+index 78ca08d8827a84d6fbd151384510af4f0e677a0d..a48c440b13b5c2cbedda4f4f5c89c998066833ab 100644
+--- a/packages/opencode/src/tool/write.ts
++++ b/packages/opencode/src/tool/write.ts
+@@ -8,6 +8,8 @@ import { Bus } from "../bus"
+ import { File } from "../file"
+ import { FileWatcher } from "../file/watcher"
+ import { Format } from "../format"
++import { boundDiff } from "./file-diff"
++import { Truncate } from "./truncate"
+ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { InstanceState } from "@/effect/instance-state"
+ import { renderFileDiff } from "./file-diff"
+@@ -30,6 +32,7 @@ export const WriteTool = Tool.define(
+     const fs = yield* AppFileSystem.Service
+     const bus = yield* Bus.Service
+     const format = yield* Format.Service
++    const truncate = yield* Truncate.Service
+ 
+     return {
+       description: DESCRIPTION,
+@@ -159,6 +162,26 @@ export const WriteTool = Tool.define(
+           })
+ 
+           let output = "Wrote file successfully."
++          // INV-06/G04：formatter 实际改变内容时，回显「提交内容→最终落盘」的差异段，
++          // 否则模型记忆中的写入与磁盘真值分叉（后续 edit 凭意图文本构造 oldString 必败）。
++          // 未改变时本段整体缺席（常态零成本：新建文件的 full diff 与提交内容重复，不回显）。
++          if (formattedContent !== undefined) {
++            const delta = renderFileDiff(
++              filepath,
++              normalizeLineEndings(contentNew),
++              normalizeLineEndings(formattedContent),
++            ).patch
++            const limits = yield* truncate.limits()
++            const bounded = boundDiff(delta, {
++              maxLines: Math.max(0, limits.maxLines - 10),
++              maxBytes: Math.max(0, limits.maxBytes - 2048),
++            })
++            output += `\n\nFormatted changes (auto-format adjusted the file):\n${bounded.text}`
++            if (bounded.omitted > 0) {
++              const artifact = yield* truncate.write(delta)
++              output += `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
++            }
++          }
+           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
+           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
+           const beforeDiagnostics = yield* lsp.diagnostics()
+@@ -202,6 +225,9 @@ export const WriteTool = Tool.define(
+               // _formattedContent 由 processor 的 completeToolCall 消费：
+               // 覆盖 state.input.content 后从此 metadata 中 strip，不持久化
+               ...(formattedContent !== undefined ? { _formattedContent: formattedContent } : {}),
++              // formattedChanged 持久化（_formattedContent 会被 strip，历史上无法观测
++              // formatter 命中率）；只作事实标记，不参与后续判定。
++              ...(formattedContent !== undefined ? { formattedChanged: true } : {}),
+             },
+             output,
+           }
+diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
+index 503349d09ef42dbc5c8d29d123f885f122c48349..3a1d18a0d4b15731029e44920f15864098d5fdcf 100644
+--- a/packages/opencode/test/tool/apply_patch.test.ts
++++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -16,6 +16,7 @@ import { Bus } from "../../src/bus"
+ import { Truncate } from "@/tool/truncate"
+ import { TestInstance } from "../fixture/fixture"
+ import { SessionID, MessageID } from "../../src/session/schema"
++import { canonicalReadPath } from "../../src/tool/read"
+ import { testEffect } from "../lib/effect"
+ 
+ const it = testEffect(
+@@ -276,6 +277,176 @@ describe("tool.apply_patch freeform", () => {
+     }),
+   )
+ 
++  // 歧义失败的合同（INV-03）：候选行号由唯一性判定 owner（locateExact）产出，
++  // 扩展建议必须经同域核验后才展示；文本不得泄露 old block 内容（上行既有契约）。
++  it.instance("reports candidate lines and verified unique extension on ambiguity", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "dupblocks.txt")
++      yield* writeText(target, "alpha\nshared one\nshared two\nbeta\nshared one\nshared two\ngamma\n")
++
++      const patchText =
++        "*** Begin Patch\n*** Update File: dupblocks.txt\n@@\n-shared one\n-shared two\n+changed\n*** End Patch"
++      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
++
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) {
++        const error = Cause.squash(exit.cause) as Error
++        expect(error.message).toContain("Found multiple matches")
++        expect(error.message).toContain("lines 2, 5")
++        expect(error.message).toContain("1 more line(s) above")
++        expect(error.message).not.toContain("shared one")
++      }
++
++      expect(yield* readText(target)).toBe("alpha\nshared one\nshared two\nbeta\nshared one\nshared two\ngamma\n")
++    }),
++  )
++
++  // INV-04 时效事实：自写晚于自读时，全失败错误必须点明时效并指向作用后结果。
++  // 与 edit 侧同一判定与文案（scanFileTouchHistory 共享 seam）。
++  it.instance("notes own-write-after-read staleness on all-hunks failure", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "stale.txt")
++      yield* writeText(target, "current content\n")
++
++      const messageID = MessageID.make("msg_history")
++      const history = {
++        ...ctx,
++        messages: [
++          {
++            info: {
++              id: messageID,
++              role: "assistant",
++              sessionID: ctx.sessionID,
++              parentID: ctx.messageID,
++              agent: "build",
++              mode: "build",
++              path: { cwd: ".", root: "." },
++              cost: 0,
++              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++              modelID: "test",
++              providerID: "test",
++              time: { created: 0 },
++            },
++            parts: [
++              {
++                id: "prt_h0",
++                messageID,
++                sessionID: ctx.sessionID,
++                type: "tool",
++                tool: "read",
++                callID: "call_h0",
++                state: {
++                  status: "completed",
++                  input: { filePath: target },
++                  output: "old",
++                  title: "Read",
++                  // 生产上 completed read 必带 metadata.read（可见性协议只认它，
++                  // 不认裸 input.filePath），fixture 缺省补全单行区间。
++                  metadata: {
++                    read: {
++                      type: "file",
++                      path: target,
++                      canonicalPath: canonicalReadPath(target),
++                      size: 1,
++                      modified: "",
++                      modifiedMs: 1,
++                      fp: "fp",
++                      start: 1,
++                      end: 1,
++                      total: 1,
++                      returned: 1,
++                      stub: false,
++                    },
++                  },
++                  time: { start: 0, end: 1 },
++                },
++              },
++              {
++                id: "prt_h1",
++                messageID,
++                sessionID: ctx.sessionID,
++                type: "tool",
++                tool: "write",
++                callID: "call_h1",
++                state: {
++                  status: "completed",
++                  input: { filePath: target, content: "current content\n" },
++                  output: "ok",
++                  title: "Write",
++                  metadata: {},
++                  time: { start: 2, end: 3 },
++                },
++              },
++            ],
++          },
++        ],
++      }
++
++      const patchText = "*** Begin Patch\n*** Update File: stale.txt\n@@\n-missing line\n+changed\n*** End Patch"
++      // messages 在 ToolCtx 上是 never[]（baseCtx 字面量推导），fixture 先经 unknown 过渡。
++      const exit = yield* execute({ patchText }, history as unknown as typeof ctx).pipe(Effect.exit)
++
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) {
++        const error = Cause.squash(exit.cause) as Error
++        expect(error.message).toContain("modified by your own write after your last read")
++        expect(error.message).toContain("Use the result returned by that call")
++      }
++    }),
++  )
++
++  // INV-07/H02：成功 output 必须携带 post-formatter 的 Changed 段，metadata.diff 与其一致；
++  // 模型需要一个「落盘真值」错点对凑陈旧（G01），formatter 前 diff 会在 formatter 改动后说谎。
++  it.instance("echoes the post-formatter diff in output and metadata", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx, calls } = makeCtx()
++      const target = path.join(test.directory, "echo.txt")
++      yield* writeText(target, "alpha\nomega\n")
++
++      const patchText = "*** Begin Patch\n*** Update File: echo.txt\n@@\n-alpha\n+beta\n*** End Patch"
++      const result = yield* execute({ patchText }, ctx)
++
++      expect(result.output).toContain("\n\nChanged:")
++      expect(result.output).toContain("+beta")
++      expect(result.metadata.diff).toContain("+beta")
++      expect(result.metadata.diff).toBe(result.metadata.files[0].patch)
++      // permission 预览 diff 保持 proposal 语义（审批看到的是提案）。
++      expect(calls[0].metadata.diff).toContain("+beta")
++    }),
++  )
++
++  itLineEndingFormatted.instance("reflects formatter results in the echoed diff and metadata.diff", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "fmt.txt")
++      yield* writeText(target, "alpha\n")
++
++      const patchText = "*** Begin Patch\n*** Update File: fmt.txt\n@@\n-alpha\n+new\n*** End Patch"
++      const result = yield* execute({ patchText }, ctx)
++
++      // formatter 把 new 改写为 formatted：回显与 metadata 必须反映落盘真值。
++      expect(result.output).toContain("+formatted")
++      expect(result.metadata.diff).toContain("+formatted")
++      expect(result.metadata.diff).not.toContain("+new")
++    }),
++  )
++
++  // INV-10：description 必须携带陈旧转写禁令与 more-than-3-lines 诱导。文案即合同。
++  it.instance("description carries staleness and context-size guidance", () =>
++    Effect.gen(function* () {
++      const info = yield* ApplyPatchTool
++      const tool = yield* info.init()
++      expect(tool.description).toContain("latest read")
++      expect(tool.description).toContain("more than 3 lines")
++    }),
++  )
++
+   // current-text cursor 允许第二个 chunk 在同一存活行继续向右匹配，而不覆盖第一处结果。
+   // 这个真实 Tool 输出会在退回 line tuple 或原始 line cursor 时立即变红。
+   it.instance("composes multiple substring chunks on one line", () =>
+diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
+index fa37d6cae59071e678e5c6afa04d372b30af690f..0c987d41a0816858f91989edc9bea8c0c506a316 100644
+--- a/packages/opencode/test/tool/edit.test.ts
++++ b/packages/opencode/test/tool/edit.test.ts
+@@ -17,6 +17,8 @@ import * as Tool from "../../src/tool/tool"
+ import { testEffect } from "../lib/effect"
+ import { FileWatcher } from "../../src/file/watcher"
+ import { closestWindow } from "@/patch/match"
++import { canonicalReadPath } from "../../src/tool/read"
++import { renderFileDiff } from "@/tool/file-diff"
+ 
+ const ctx = {
+   sessionID: SessionID.make("ses_test-edit-session"),
+@@ -102,6 +104,25 @@ const itTruncated = testEffect(
+     Layer.mock(Truncate.Service, {
+       limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
+       output: (text: string) => Effect.succeed({ content: text, truncated: false }),
++      // C01 工件兜底路径：超预算 diff 会调 write，mock 必须提供而不是抛 UnimplementedError。
++      write: () => Effect.succeed("<artifact>"),
++    }),
++    Agent.defaultLayer,
++  ),
++)
++
++// [local-smark] 中档预算层：diff 预算（limits−2048B/10行 保留额）落在「部分可显示」
++// 区间，C01 前缀测试才能区分连续前缀与跳行截断；itTruncated 的 1024B 会裁到 0 行。
++const itMidBudget = testEffect(
++  Layer.mergeAll(
++    LSP.defaultLayer,
++    AppFileSystem.defaultLayer,
++    Format.defaultLayer,
++    Bus.layer,
++    Layer.mock(Truncate.Service, {
++      limits: () => Effect.succeed({ maxLines: 100, maxBytes: 4096 }),
++      output: (text: string) => Effect.succeed({ content: text, truncated: false }),
++      write: () => Effect.succeed("<artifact>"),
+     }),
+     Agent.defaultLayer,
+   ),
+@@ -170,6 +191,86 @@ type EditTestArgs =
+       replaceAll?: boolean
+     }
+ 
++// 多 part 历史 fixture（INV-04/05/09 共享）：state.time.end 是时效判定的时间源；
++// readRange 走 metadata.read 才能进入 collectVisibleReads 的可见性协议（生产同构）。
++type HistoryEntry = {
++  tool: "read" | "edit" | "write" | "apply_patch"
++  end: number
++  file?: string
++  readRange?: { start: number; end: number }
++  // compacted 会话压缩标记：可见性协议（visibleReadMeta）必须将其排除
++  compacted?: boolean
++}
++
++function ctxWithHistory(filePath: string, entries: HistoryEntry[]): Tool.Context {
++  const messageID = MessageID.make("msg_history")
++  const parts = entries.map((entry, index) => {
++    const file = entry.file ?? filePath
++    const input =
++      entry.tool === "apply_patch" ? { patchText: `*** Update File: ${file}` } : { filePath: file }
++    // 生产上每个 completed read 都携带 metadata.read；fixture 缺省补一个单行区间，
++    // 只有携带 metadata 的 read 才能进入可见性协议（无 metadata 的历史形态不算可见读取）。
++    const readRange = entry.readRange ?? { start: 1, end: 1 }
++    const metadata =
++      entry.tool === "read"
++        ? {
++            read: {
++              type: "file",
++              path: file,
++              canonicalPath: canonicalReadPath(file),
++              size: 1,
++              modified: "",
++              modifiedMs: 1,
++              fp: "fp",
++              start: readRange.start,
++              end: readRange.end,
++              total: readRange.end,
++              returned: readRange.end - readRange.start + 1,
++              stub: false,
++            },
++          }
++        : {}
++    return {
++      id: PartID.make(`prt_history_${index}`),
++      messageID,
++      sessionID: ctx.sessionID,
++      type: "tool" as const,
++      tool: entry.tool,
++      callID: `call_history_${index}`,
++      state: {
++        status: "completed" as const,
++        input,
++        output: "ok",
++        title: entry.tool,
++        metadata,
++        time: { start: entry.end - 1, end: entry.end, ...(entry.compacted ? { compacted: entry.end } : {}) },
++      },
++    } satisfies MessageV2.ToolPart
++  })
++  return {
++    ...ctx,
++    messages: [
++      {
++        info: {
++          id: messageID,
++          role: "assistant",
++          sessionID: ctx.sessionID,
++          parentID: ctx.messageID,
++          agent: "build",
++          mode: "build",
++          path: { cwd: ".", root: "." },
++          cost: 0,
++          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          modelID: ModelID.make("test"),
++          providerID: ProviderID.make("test"),
++          time: { created: 0 },
++        } satisfies MessageV2.Assistant,
++        parts,
++      } satisfies MessageV2.WithParts,
++    ],
++  }
++}
++
+ function isCreateArgs(args: EditTestArgs) {
+   if ("edits" in args && Array.isArray(args.edits) && args.edits.length > 0) {
+     return args.edits.length === 1 && args.edits[0]?.oldString === ""
+@@ -177,6 +278,15 @@ function isCreateArgs(args: EditTestArgs) {
+   return "oldString" in args && args.oldString === ""
+ }
+ 
++const failWith = Effect.fn("EditToolTest.failWith")(function* (args: EditTestArgs, context: Tool.Context) {
++  const exit = yield* run(args, context).pipe(Effect.exit)
++  if (Exit.isFailure(exit)) {
++    const err = Cause.squash(exit.cause)
++    return err instanceof Error ? err : new Error(String(err))
++  }
++  throw new Error("expected edit to fail")
++})
++
+ const run = Effect.fn("EditToolTest.run")(function* (args: EditTestArgs, next?: Tool.Context) {
+   const tool = yield* init()
+   // [local-smark] 非 create 时注入 prior read；兼容 edits[] 与 legacy 顶层 oldString。
+@@ -1154,6 +1264,169 @@ describe("tool.edit", () => {
+       }),
+     )
+ 
++    // 歧义诊断的用户可观察合同：候选行号 + 最小唯一扩展建议（INV-03）。
++    // 该断言锁死失败文本的信息量，不断言内部枚举实现。
++    it.instance("reports candidate lines and minimal unique extension on ambiguity", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "ambiguous.txt")
++        yield* put(filepath, "alpha\nshared A\nshared B\nbeta\nshared A\nshared B\ngamma")
++
++        const error = yield* fail({ filePath: filepath, oldString: "shared A\nshared B", newString: "changed" })
++
++        expect(error.message).toContain("Found multiple matches")
++        expect(error.message).toContain("lines 2, 5")
++        expect(error.message).toContain("1 more line(s) above")
++        expect(yield* load(filepath)).toBe("alpha\nshared A\nshared B\nbeta\nshared A\nshared B\ngamma")
++      }),
++    )
++
++    // 同一行内重复无法通过行扩展去歧：此时只给候选行号，不得给出会再次失败的扩展建议。
++    it.instance("degrades to candidate lines when line extension cannot disambiguate", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "sameline.txt")
++        yield* put(filepath, "foo bar foo")
++
++        const error = yield* fail({ filePath: filepath, oldString: "foo", newString: "qux" })
++
++        expect(error.message).toContain("Found multiple matches")
++        expect(error.message).toContain("line 1")
++        expect(error.message).not.toContain("makes the match unique")
++      }),
++    )
++
++    // INV-04 时效事实：自写晚于自读时，失败错误必须点明时效并指向作用后结果；
++    // 文案不得诱导 re-read（用户决策）。控制组证明无陈旧时句子不出现。
++    it.instance("notes own-write-after-read staleness on mismatch failure", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "stale.txt")
++        yield* put(filepath, "changed by earlier edit")
++        const context = ctxWithHistory(filepath, [
++          { tool: "read", end: 1 },
++          { tool: "edit", end: 3 },
++        ])
++
++        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
++
++        expect(error.message).toContain("modified by your own edit after your last read")
++        // 新增事实句自身不得携带 re-read 祈使（INV-02）；既有 closest 回退文案不属于本合同。
++        expect(error.message).toContain("Use the result returned by that call")
++        expect(error.message).not.toContain("re-read")
++      }),
++    )
++
++    it.instance("omits staleness note when the last read is newer than the last write", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "fresh.txt")
++        yield* put(filepath, "current content")
++        const context = ctxWithHistory(filepath, [
++          { tool: "edit", end: 3 },
++          { tool: "read", end: 5 },
++        ])
++
++        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
++
++        expect(error.message).not.toContain("modified by your own")
++      }),
++    )
++
++    // INV-05 已读区间：融合同 canonicalPath 的全部可见 read metadata，只陈述事实。
++    it.instance("lists previously read line ranges on mismatch failure", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "paged.txt")
++        yield* put(filepath, "line\n".repeat(600))
++        const context = ctxWithHistory(filepath, [
++          { tool: "read", end: 1, readRange: { start: 120, end: 260 } },
++          { tool: "read", end: 2, readRange: { start: 250, end: 400 } },
++        ])
++
++        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
++
++        expect(error.message).toContain("120-400")
++      }),
++    )
++
++    // 已压缩读取的内容不在模型上下文中（可见性协议）：不得计入已读区间与时效判定。
++    it.instance("does not count compacted reads as visible history", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "compacted.txt")
++        yield* put(filepath, "changed by earlier edit")
++        const context = ctxWithHistory(filepath, [
++          { tool: "read", end: 1, compacted: true, readRange: { start: 5, end: 40 } },
++          { tool: "edit", end: 3 },
++        ])
++
++        const error = yield* failWith({ filePath: filepath, oldString: "missing text", newString: "x" }, context)
++
++        expect(error.message).toContain("has not been read since")
++        expect(error.message).not.toContain("5-40")
++      }),
++    )
++
++    // INV-09 同名异路径提醒：存在同 basename 异路径已读文件时提示一次。
++    it.instance("notes a same-named read from a different path on mismatch failure", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const original = path.join(test.directory, "original", "x.patch")
++        const current = path.join(test.directory, "current", "x.patch")
++        yield* put(current, "actual current content")
++        const context = ctxWithHistory(current, [
++          { tool: "read", file: original, end: 1 },
++          { tool: "read", end: 2 },
++        ])
++
++        const error = yield* failWith({ filePath: current, oldString: "missing text", newString: "x" }, context)
++
++        expect(error.message).toContain("different file with the same name")
++        expect(error.message).toContain(original)
++      }),
++    )
++
++    // INV-08/C01：Changed 段截断必须是真实 diff 的连续前缀 + 显式省略计数；
++    // 旧实现逐行跳塞（continue）会让展示中间出现不可见的洞，却报「只裁尾部」。
++    itMidBudget.instance("truncates the Changed diff as a strict prefix with an omission count", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "budget.txt")
++        // 夹具刻意在 del 段中部放一条 1300B 长行：旧跳行实现跳过它后继续收后面的
++        // 短行（展示中间出洞仍报「只裁尾部」），连续前缀实现必须在长行处一次性截止。
++        const before = Array.from({ length: 60 }, (_, i) =>
++          i === 20 ? `line ${i} ${"x".repeat(1300)}` : `line ${i} ${"x".repeat(24)}`,
++        ).join("\n")
++        const after = Array.from({ length: 60 }, (_, i) => `line ${i} ${"y".repeat(12)}`).join("\n")
++        yield* put(filepath, before)
++
++        const context = ctxWithHistory(filepath, [{ tool: "read", end: 1 }])
++        const result = yield* run(
++          { filePath: filepath, edits: [{ oldString: before, newString: after }] },
++          context,
++        )
++
++        const full = renderFileDiff(filepath, before, after).patch
++        const shown = result.output.split("\n\nChanged:\n")[1]?.split("\n… (")[0] ?? ""
++        // 前缀性质：展示段必须是完整 diff 的逐字节前缀（旧跳行实现必然违反）。
++        expect(full.startsWith(shown)).toBe(true)
++        expect(result.output).toMatch(/… \(\d+ more lines omitted/)
++        expect(shown.length).toBeGreaterThan(0)
++      }),
++    )
++
++    // INV-10：工具 description 必须携带三条用户可观察合同——陈旧转写禁令、
++    // 门禁不认可 bash 输出、歧义条目的 more-than-3-lines 诱导。文案即合同。
++    it.instance("description carries staleness, bash-gate, and context-size guidance", () =>
++      Effect.gen(function* () {
++        const tool = yield* init()
++        expect(tool.description).toContain("latest read")
++        expect(tool.description).toContain("Bash output")
++        expect(tool.description).toContain("more than 3 lines")
++      }),
++    )
++
+     it.instance("emits change event for existing files", () =>
+       Effect.gen(function* () {
+         const test = yield* TestInstance
+diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
+index a8781fac5e3373de3b102f13f972645644e3847e..e3ed2e5f0b0c333edfbed4b9be90b3240f4a82bb 100644
+--- a/packages/opencode/test/tool/write.test.ts
++++ b/packages/opencode/test/tool/write.test.ts
+@@ -109,6 +109,32 @@ const run = Effect.fn("WriteToolTest.run")(function* (
+ })
+ 
+ describe("tool.write", () => {
++  // INV-06/G04：formatter 实际改变内容时，output 必须回显「提交内容→最终落盘」的
++  // 差异段并置 formattedChanged；未改变时 output 与 metadata 逐字节保持现状（常态零成本）。
++  describe("formatter feedback", () => {
++    itFormatted.instance("echoes the formatted delta when auto-format changes the content", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "fmt.txt")
++        const result = yield* run({ filePath: filepath, content: "hello" })
++
++        expect(result.output).toContain("Formatted changes")
++        expect((result.metadata as Record<string, unknown>).formattedChanged).toBe(true)
++      }),
++    )
++
++    it.instance("keeps output and metadata unchanged when no formatter adjustment happens", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "plain.txt")
++        const result = yield* run({ filePath: filepath, content: "hello" })
++
++        expect(result.output).not.toContain("Formatted changes")
++        expect((result.metadata as Record<string, unknown>).formattedChanged).toBeUndefined()
++      }),
++    )
++  })
++
+   describe("new file creation", () => {
+     it.instance("writes content to new file", () =>
+       Effect.gen(function* () {

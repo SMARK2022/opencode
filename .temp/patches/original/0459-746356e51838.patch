@@ -1,0 +1,94 @@
+From 746356e51838941df14d7e50ce1823846f71d680 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 21 May 2026 04:25:35 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E9=87=8D=E6=9E=84=20BlockTool=20?=
+ =?UTF-8?q?=E7=BB=84=E4=BB=B6=E4=BB=A5=E4=BD=BF=E7=94=A8=20collapsible=20?=
+ =?UTF-8?q?=E4=BB=A3=E6=9B=BF=20canCollapse=EF=BC=8C=E4=BC=98=E5=8C=96?=
+ =?UTF-8?q?=E6=8A=98=E5=8F=A0=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 2ff78724fb9c9c6ec81d88b76a78ff2ca0d32cc2..66e5e02c15c90870259598afb5411bb2768e10a8 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2031,18 +2031,19 @@ function BlockTool(props: {
+   const previewLines = createMemo(() => props.maxLines ?? 10)
+   const threshold = createMemo(() => props.threshold ?? 20)
+   const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
+-  const [canCollapse, setCanCollapse] = createSignal(false)
+-  createEffect(() => {
+-    if (canCollapse()) return
+-    if (previewLines() <= 0) return
++  const collapsible = createMemo(() => {
++    if (previewLines() <= 0) return false
+     // OpenTUI wraps very long single lines at terminal width, so newline counts
+     // alone miss commands such as `bun --eval "...large inline script..."` that
+     // occupy many visual rows.  Keep the historic line threshold, but also
+     // collapse blocks whose command/output text exceeds the preview char budget.
+-    if ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()) setCanCollapse(true)
++    // This must be synchronous for the first render. Using an effect here lets
++    // large edit/write diffs mount once before the preview replaces them, which
++    // still pays the full DiffRenderable/tree-sitter cost on the hot path.
++    return (props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()
+   })
+   const [expanded, setExpanded] = createSignal(false)
+-  const collapsed = createMemo(() => canCollapse() && !expanded())
++  const collapsed = createMemo(() => collapsible() && !expanded())
+   // BlockTool spacing is intentionally owned by the section wrappers below.
+   // The body, expand affordance, and error rows each use marginTop={1}; adding
+   // a root gap would stack with those margins and render two blank rows around
+@@ -2058,7 +2059,7 @@ function BlockTool(props: {
+       backgroundColor={background()}
+       customBorderChars={SplitBorder.customBorderChars}
+       borderColor={props.contextView ? theme.info : theme.background}
+-      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
++      onMouseOver={() => (props.onClick || props.onRightClick || collapsible()) && setHover(true)}
+       onMouseOut={() => setHover(false)}
+       onMouseUp={(evt?: TuiMouseEvent) => {
+         if (renderer.getSelection()?.getSelectedText()) return
+@@ -2069,7 +2070,7 @@ function BlockTool(props: {
+           props.onRightClick()
+           return
+         }
+-        if (canCollapse()) setExpanded((prev) => !prev)
++        if (collapsible()) setExpanded((prev) => !prev)
+         props.onClick?.()
+       }}
+     >
+@@ -2093,7 +2094,7 @@ function BlockTool(props: {
+           {props.children}
+         </Show>
+       </box>
+-      <Show when={canCollapse()}>
++      <Show when={collapsible()}>
+         <box marginTop={1}>
+           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+         </box>
+diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+index 211fd2ecea3aca06dfccfd9b3267bc4354b29bf7..e2f6cdc06ad664c64ae06d852d2ff62e7b612857 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+@@ -112,7 +112,7 @@ describe("Session route integration points", () => {
+       expect(sessionSource).toContain("threshold")
+       expect(sessionSource).toContain("totalLines")
+       expect(sessionSource).toContain("preview")
+-      expect(sessionSource).toContain("canCollapse")
++      expect(sessionSource).toContain("collapsible")
+     })
+ 
+     test("BlockTool uses one vertical spacing strategy", () => {
+@@ -128,6 +128,11 @@ describe("Session route integration points", () => {
+       expect(blockToolSource).toContain("(props.totalChars ?? 0) > charThreshold()")
+     })
+ 
++    test("BlockTool decides collapse eligibility before mounting previews", () => {
++      expect(blockToolSource).toContain("const collapsible = createMemo")
++      expect(blockToolSource).not.toContain("setCanCollapse")
++    })
++
+     test("Shell counts command and output characters for collapse", () => {
+       expect(shellSource).toContain("shellPreviewText")
+       expect(shellSource).toContain("totalChars={shellPreviewText().length}")

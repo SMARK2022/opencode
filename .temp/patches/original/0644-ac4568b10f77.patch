@@ -1,0 +1,567 @@
+From ac4568b10f773a6167b5f0e68d6e310e9cf6a228 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 23 Sep 2026 01:13:03 +0800
+Subject: [PATCH] =?UTF-8?q?fix(reasoning):=20=E4=BF=AE=E5=A4=8D=E8=B7=A8?=
+ =?UTF-8?q?=E6=A8=A1=E5=9E=8B=E6=8E=A8=E7=90=86=E7=8A=B6=E6=80=81=E5=9B=9E?=
+ =?UTF-8?q?=E6=94=BE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+保留 OpenAI-compatible 模型之间的 reasoning_content 结构化回放，避免 GLM 与 Kimi 等模型切换时将推理摘要降级为普通 assistant 文本。
+
+支持 GPT 前缀模型之间跨 provider 回放 OpenAI Responses 的 reasoning item，保留 summary 与 encrypted_content，并移除源 response 的服务端 item ID。
+
+对 Anthropic、Bedrock、Gemini 仅在目标协议签名有效时保留原生 reasoning；无签名外部推理统一降级为普通文本，避免跨 provider 伪造签名。
+
+补充 provider lowering 与 MessageV2 回放回归覆盖；LLM 与 opencode 类型检查通过，消息回放测试 60 项通过。
+
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+index e27af18426ef5ff3058fd30606a1eb212c7c81d8..27a022134edfcb4650988e64ad88ac48a019d74d 100644
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -298,10 +298,16 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
+           continue
+         }
+         if (part.type === "reasoning") {
++          // 外部无签名块不具备 Anthropic 签名，不能作为 `thinking` 发送；保留其语义文本。
++          const signature = part.encrypted ?? signatureFromMetadata(part.providerMetadata)
++          if (!signature) {
++            content.push({ type: "text", text: part.text })
++            continue
++          }
+           content.push({
+             type: "thinking",
+             thinking: part.text,
+-            signature: part.encrypted ?? signatureFromMetadata(part.providerMetadata),
++            signature,
+           })
+           continue
+         }
+diff --git a/packages/llm/src/protocols/bedrock-converse.ts b/packages/llm/src/protocols/bedrock-converse.ts
+index 7f5647c4a7bee0b195af387de65a185a83fe7316..76c12cc92855368de64db57f3658746d584250be 100644
+--- a/packages/llm/src/protocols/bedrock-converse.ts
++++ b/packages/llm/src/protocols/bedrock-converse.ts
+@@ -311,6 +311,11 @@ const lowerMessages = Effect.fn("BedrockConverse.lowerMessages")(function* (
+           continue
+         }
+         if (part.type === "reasoning") {
++          // Bedrock 会用目标账号校验签名，因此只有带签名的 reasoning 才能使用原生块。
++          if (!part.encrypted) {
++            content.push({ text: part.text })
++            continue
++          }
+           content.push({
+             reasoningContent: {
+               reasoningText: { text: part.text, signature: part.encrypted },
+diff --git a/packages/llm/src/protocols/gemini.ts b/packages/llm/src/protocols/gemini.ts
+index 6e0b82abba9ae6b19b03ee38d85abddc14085e15..cb0dd1f89e05862d15e852172f8502b9df4644d3 100644
+--- a/packages/llm/src/protocols/gemini.ts
++++ b/packages/llm/src/protocols/gemini.ts
+@@ -210,7 +210,13 @@ const lowerMessages = Effect.fn("Gemini.lowerMessages")(function* (request: LLMR
+           continue
+         }
+         if (part.type === "reasoning") {
+-          parts.push({ text: part.text, thought: true })
++          // Gemini thought 签名由 provider 所有；外部无签名摘要安全地保留为普通模型文本。
++          const signature = part.providerMetadata?.google?.thoughtSignature
++          parts.push(
++            typeof signature === "string"
++              ? { text: part.text, thought: true, thoughtSignature: signature }
++              : { text: part.text },
++          )
+           continue
+         }
+         if (part.type === "tool-call") {
+diff --git a/packages/llm/src/protocols/openai-responses.ts b/packages/llm/src/protocols/openai-responses.ts
+index 7cf734f0278594a9b6b65350002f04bd6a593649..a29d38bacb7237edbef81eda3583b05aaab09b3e 100644
+--- a/packages/llm/src/protocols/openai-responses.ts
++++ b/packages/llm/src/protocols/openai-responses.ts
+@@ -11,6 +11,7 @@ import {
+   type FinishReason,
+   type LLMRequest,
+   type ProviderMetadata,
++  type ReasoningPart,
+   type TextPart,
+   type ToolCallPart,
+   type ToolDefinition,
+@@ -37,10 +38,28 @@ const OpenAIResponsesOutputText = Schema.Struct({
+   text: Schema.String,
+ })
+ 
++const OpenAIResponsesReasoningSummary = Schema.Struct({
++  type: Schema.tag("summary_text"),
++  text: Schema.String,
++})
++
++// 摘要文本是 reasoning 的可见投影；它与 encrypted_content 共同组成回放输入。
++
++// Response item ID 属于源 response 链。跨模型回放保留加密状态，但省略服务端所有的 ID。
++// encrypted_content 是续接状态，必须保留为 reasoning item，不能压平成普通 assistant 文本。
++const OpenAIResponsesReasoningItem = Schema.Struct({
++  type: Schema.tag("reasoning"),
++  id: Schema.optional(Schema.String),
++  summary: Schema.Array(OpenAIResponsesReasoningSummary),
++  encrypted_content: Schema.optional(Schema.NullOr(Schema.String)),
++})
++type OpenAIResponsesReasoningItem = Schema.Schema.Type<typeof OpenAIResponsesReasoningItem>
++
+ const OpenAIResponsesInputItem = Schema.Union([
+   Schema.Struct({ role: Schema.tag("system"), content: Schema.String }),
+   Schema.Struct({ role: Schema.tag("user"), content: Schema.Array(OpenAIResponsesInputText) }),
+   Schema.Struct({ role: Schema.tag("assistant"), content: Schema.Array(OpenAIResponsesOutputText) }),
++  OpenAIResponsesReasoningItem,
+   Schema.Struct({
+     type: Schema.tag("function_call"),
+     call_id: Schema.String,
+@@ -125,6 +144,9 @@ type OpenAIResponsesUsage = Schema.Schema.Type<typeof OpenAIResponsesUsage>
+ const OpenAIResponsesStreamItem = Schema.Struct({
+   type: Schema.String,
+   id: Schema.optional(Schema.String),
++  // provider 可能在不同终止事件中附带 reasoning 字段；可选字段允许解析器安全合并这些形态。
++  summary: Schema.optional(Schema.Array(OpenAIResponsesReasoningSummary)),
++  encrypted_content: Schema.optional(Schema.NullOr(Schema.String)),
+   call_id: Schema.optional(Schema.String),
+   name: Schema.optional(Schema.String),
+   arguments: Schema.optional(Schema.String),
+@@ -196,7 +218,23 @@ const lowerToolCall = (part: ToolCallPart): OpenAIResponsesInputItem => ({
+   arguments: ProviderShared.encodeJson(part.input),
+ })
+ 
++const lowerReasoning = (part: ReasoningPart): OpenAIResponsesReasoningItem | undefined => {
++  const openai = part.providerMetadata?.openai
++  if (!ProviderShared.isRecord(openai)) return undefined
++  // Responses 的加密状态是回放契约；只有摘要时可以降为可见文本，但无法重建 reasoning item。
++  if (typeof openai.reasoningEncryptedContent !== "string") return undefined
++  // 只有明确的字符串状态才进入 item 路径，避免把 null 当作可续接凭据。
++  // 摘要仍需让目标模型可读；加密 blob 才能让 item 具备续接资格，而不只是展示内容。
++  return {
++    type: "reasoning",
++    summary: part.text.length > 0 ? [{ type: "summary_text", text: part.text }] : [],
++    encrypted_content: openai.reasoningEncryptedContent,
++  }
++}
++
+ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (request: LLMRequest) {
++  // 该函数负责把统一 LLM 消息投影为 Responses input item。
++  // 跨模型安全性在这里落实，而不是交给 provider SDK 猜测。
+   const system: OpenAIResponsesInputItem[] =
+     request.system.length === 0 ? [] : [{ role: "system", content: ProviderShared.joinText(request.system) }]
+   const input: OpenAIResponsesInputItem[] = [...system]
+@@ -216,12 +254,30 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
+     if (message.role === "assistant") {
+       const content: TextPart[] = []
+       for (const part of message.content) {
+-        if (!ProviderShared.supportsContent(part, ["text", "tool-call"]))
+-          return yield* ProviderShared.unsupportedContent("OpenAI Responses", "assistant", ["text", "tool-call"])
++        if (!ProviderShared.supportsContent(part, ["text", "reasoning", "tool-call"]))
++          return yield* ProviderShared.unsupportedContent("OpenAI Responses", "assistant", ["text", "reasoning", "tool-call"])
+         if (part.type === "text") {
+           content.push(part)
+           continue
+         }
++        if (part.type === "reasoning") {
++          // 有加密状态时保留协议级 reasoning item；否则使用普通文本降级。
++          // 这样非 GPT Responses 部署不会收到无法验证的伪 reasoning 块。
++          const reasoning = lowerReasoning(part)
++          if (!reasoning) {
++            // 没有加密续接状态时，摘要无法重建为有效的 Responses reasoning item。
++            content.push({ type: "text", text: part.text })
++            continue
++          }
++          if (content.length > 0) {
++            // Responses wire 会分离 assistant 文本和 reasoning item，因此追加 item 前先刷新前置文本。
++            input.push({ role: "assistant", content: content.map((item) => ({ type: "output_text", text: item.text })) })
++            content.splice(0, content.length)
++          }
++          // 省略外部 item ID，避免无状态目标解析源 response/model 所拥有的标识符。
++          input.push(reasoning)
++          continue
++        }
+         if (part.type === "tool-call") {
+           input.push(lowerToolCall(part))
+           continue
+@@ -394,8 +450,38 @@ const onOutputTextDelta = (state: ParserState, event: OpenAIResponsesEvent): Ste
+   ]
+ }
+ 
++const onReasoningDelta = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
++  if (!event.delta || !event.item_id) return [state, NO_EVENTS]
++  const events: LLMEvent[] = []
++  // 当摘要 delta 早于 provider 的终止 output item 到达时，lifecycle helper 会先开启 reasoning 块。
++  // 这避免流式摘要在终止事件前丢失。
++  return [
++    { ...state, lifecycle: Lifecycle.reasoningDelta(state.lifecycle, events, event.item_id, event.delta) },
++    events,
++  ]
++}
++
+ const onOutputItemAdded = (state: ParserState, event: OpenAIResponsesEvent): StepResult => {
++  // output_item.added 是恢复 reasoning 元数据的最早稳定边界。
++  // 后续 delta 只补充摘要文本，不改变 item 的身份。
+   const item = event.item
++  if (item?.type === "reasoning" && item.id) {
++    const events: LLMEvent[] = []
++    // 首个 item 事件暴露下一轮所需的不透明续接状态。
++    const providerMetadata = openaiMetadata({
++      itemId: item.id,
++      reasoningEncryptedContent: item.encrypted_content ?? null,
++    })
++    const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
++    events.push(LLMEvent.reasoningStart({ id: item.id, providerMetadata }))
++    return [
++      {
++        ...state,
++        lifecycle: { ...lifecycle, reasoning: new Set([...lifecycle.reasoning, item.id]) },
++      },
++      events,
++    ]
++  }
+   if (item?.type !== "function_call" || !item.id) return [state, NO_EVENTS]
+   const providerMetadata = openaiMetadata({ itemId: item.id })
+   const events: LLMEvent[] = []
+@@ -439,6 +525,7 @@ const onOutputItemDone = Effect.fn("OpenAIResponses.onOutputItemDone")(function*
+   state: ParserState,
+   event: OpenAIResponsesEvent,
+ ) {
++  // 终止事件负责关闭生命周期，确保持久化的 reasoning Part 获得完整 metadata。
+   const item = event.item
+   if (!item) return [state, NO_EVENTS] satisfies StepResult
+ 
+@@ -473,6 +560,23 @@ const onOutputItemDone = Effect.fn("OpenAIResponses.onOutputItemDone")(function*
+     return [{ ...state, lifecycle }, events] satisfies StepResult
+   }
+ 
++  if (item.type === "reasoning" && item.id) {
++    const events: LLMEvent[] = []
++    // 终止事件可能是唯一携带最终加密 blob 的事件，因此关闭 reasoning 块时再次写入 metadata。
++    return [
++      {
++        ...state,
++        lifecycle: Lifecycle.reasoningEnd(
++          state.lifecycle,
++          events,
++          item.id,
++          openaiMetadata({ itemId: item.id, reasoningEncryptedContent: item.encrypted_content ?? null }),
++        ),
++      },
++      events,
++    ] satisfies StepResult
++  }
++
+   return [state, NO_EVENTS] satisfies StepResult
+ })
+ 
+@@ -504,6 +608,8 @@ const onError = (state: ParserState, event: OpenAIResponsesEvent): StepResult =>
+ 
+ const step = (state: ParserState, event: OpenAIResponsesEvent) => {
+   if (event.type === "response.output_text.delta") return Effect.succeed(onOutputTextDelta(state, event))
++  if (event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta")
++    return Effect.succeed(onReasoningDelta(state, event))
+   if (event.type === "response.output_item.added") return Effect.succeed(onOutputItemAdded(state, event))
+   if (event.type === "response.function_call_arguments.delta") return onFunctionCallArgumentsDelta(state, event)
+   if (event.type === "response.output_item.done") return onOutputItemDone(state, event)
+diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
+index 71204bcd6399f11b61ddb46cc83932a65a42b98e..d6a6809aafa7419bd62b386840136e4242eaef3e 100644
+--- a/packages/llm/test/provider/anthropic-messages.test.ts
++++ b/packages/llm/test/provider/anthropic-messages.test.ts
+@@ -90,6 +90,21 @@ describe("Anthropic Messages route", () => {
+     }),
+   )
+ 
++  it.effect("lowers unsigned foreign reasoning to assistant text", () =>
++    Effect.gen(function* () {
++      // 无签名块无法满足 Anthropic 的 thinking signature 字段。
++      // 该断言防止跨 provider 回放生成伪造签名。
++      const prepared = yield* LLMClient.prepare(
++        LLM.request({ model, messages: [Message.assistant({ type: "reasoning", text: "foreign thought" })] }),
++      )
++
++      expect(prepared.body).toMatchObject({
++        // 目标协议只接受可见文本，不伪造源 provider 的签名。
++        messages: [{ role: "assistant", content: [{ type: "text", text: "foreign thought" }] }],
++      })
++    }),
++  )
++
+   it.effect("parses text, reasoning, and usage stream fixtures", () =>
+     Effect.gen(function* () {
+       const body = sseEvents(
+diff --git a/packages/llm/test/provider/bedrock-converse.test.ts b/packages/llm/test/provider/bedrock-converse.test.ts
+index ffdd6e800824dba036782a41c41642f55c07a1e4..938ece8879e72c48c89fce43af582bfd51b3455c 100644
+--- a/packages/llm/test/provider/bedrock-converse.test.ts
++++ b/packages/llm/test/provider/bedrock-converse.test.ts
+@@ -328,6 +328,25 @@ describe("Bedrock Converse route", () => {
+     }),
+   )
+ 
++  it.effect("lowers unsigned foreign reasoning to assistant text", () =>
++    Effect.gen(function* () {
++      // 目标签名不存在时，Bedrock 将摘要作为普通文本接收。
++      // 这样目标账号不会验证源账号的 opaque state。
++      const prepared = yield* LLMClient.prepare<BedrockConverse.BedrockConverseBody>(
++        LLM.request({
++          model,
++          messages: [Message.assistant({ type: "reasoning", text: "foreign thought" })],
++          cache: "none",
++        }),
++      )
++
++      expect(prepared.body.messages).toEqual([
++        // 无签名时使用 Bedrock 普通文本块。
++        { role: "assistant", content: [{ text: "foreign thought" }] },
++      ])
++    }),
++  )
++
+   it.effect("lowers image media into Bedrock image blocks", () =>
+     Effect.gen(function* () {
+       const prepared = yield* LLMClient.prepare(
+diff --git a/packages/llm/test/provider/gemini.test.ts b/packages/llm/test/provider/gemini.test.ts
+index 7e6bbc8466dbc5466a8469e84dd592104d8e8a0b..b8c8da743c981239b30fdd7450b5788923835dd8 100644
+--- a/packages/llm/test/provider/gemini.test.ts
++++ b/packages/llm/test/provider/gemini.test.ts
+@@ -390,4 +390,19 @@ describe("Gemini route", () => {
+       )
+     }),
+   )
++
++  it.effect("lowers unsigned foreign reasoning to assistant text", () =>
++    Effect.gen(function* () {
++      // 缺少签名的 Gemini thought 块不能作为 thought metadata 回放。
++      // 普通文本仍保留模型可见的摘要语义。
++      const prepared = yield* LLMClient.prepare<Gemini.GeminiBody>(
++        LLM.request({ model, messages: [Message.assistant({ type: "reasoning", text: "foreign thought" })] }),
++      )
++
++      expect(prepared.body.contents).toEqual([
++        // 没有 thoughtSignature 时不发送 thought=true。
++        { role: "model", parts: [{ text: "foreign thought" }] },
++      ])
++    }),
++  )
+ })
+diff --git a/packages/llm/test/provider/openai-responses.test.ts b/packages/llm/test/provider/openai-responses.test.ts
+index 63452f61b0a65f16ed788b223cfbd064ebeb06f9..be7a624bd8de335c4981a1fb3761b11f6ddbcdbf 100644
+--- a/packages/llm/test/provider/openai-responses.test.ts
++++ b/packages/llm/test/provider/openai-responses.test.ts
+@@ -546,6 +546,66 @@ describe("OpenAI Responses route", () => {
+     }),
+   )
+ 
++  it.effect("lowers foreign reasoning to assistant text", () =>
++    Effect.gen(function* () {
++      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
++        LLM.request({
++          model,
++          messages: [
++            Message.assistant([
++              { type: "text", text: "before" },
++              { type: "reasoning", text: "foreign thought" },
++              { type: "text", text: "after" },
++            ]),
++          ],
++        }),
++      )
++
++      expect(prepared.body.input).toEqual([
++        {
++          role: "assistant",
++          content: [
++            { type: "output_text", text: "before" },
++            { type: "output_text", text: "foreign thought" },
++            { type: "output_text", text: "after" },
++          ],
++        },
++      ])
++    }),
++  )
++
++  it.effect("replays encrypted reasoning items without foreign item ids", () =>
++    // 该测试锁定摘要、加密状态和源 ID 脱敏三个回放契约。
++    Effect.gen(function* () {
++      // 这里模拟 GPT 到 GPT 的切换，此时源 item ID 不再复用。
++      const prepared = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
++        LLM.request({
++          model,
++          messages: [
++            Message.assistant({
++              type: "reasoning",
++              text: "foreign summary",
++              providerMetadata: {
++                openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" },
++              },
++            }),
++          ],
++        }),
++      )
++
++      // 无状态回放保留加密状态，但不会把源 response 的 ID 交给目标。
++      // 目标接收完整 item，不查询源 response 链；无状态回放保留状态但丢弃源 ID。
++      expect(prepared.body.input).toEqual([
++        {
++          // item 本身承载摘要与加密续接状态。
++          type: "reasoning",
++          summary: [{ type: "summary_text", text: "foreign summary" }],
++          encrypted_content: "encrypted-state",
++        },
++      ])
++    }),
++  )
++
+   it.effect("emits provider-error events for mid-stream provider errors", () =>
+     Effect.gen(function* () {
+       const response = yield* LLMClient.generate(request).pipe(
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 74151110085a4651e2c97cd9179339c211505479..196d458c4f36efd58df6b3a7099355559160869e 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -1191,6 +1191,15 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+ 
+     if (msg.info.role === "assistant") {
+       const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
++      const replaysForeignReasoning =
++        model.api.npm === "@ai-sdk/openai-compatible" &&
++        typeof model.capabilities.interleaved === "object" &&
++        model.capabilities.interleaved.field === "reasoning_content"
++      const replaysForeignOpenAIReasoning =
++        // 按用户指定的 GPT 家族边界回放，不把自定义 provider 名称当作兼容性依据。
++        model.id.toLowerCase().startsWith("gpt") && msg.info.modelID.toLowerCase().startsWith("gpt")
++      // 两端都检查，避免非 GPT 模型的签名因目标为 GPT 而被放行。
++      // 此处保留语义信息；最终 wire 字段由目标协议适配器编码。
+       const media: Array<{ mime: string; url: string; filename?: string }> = []
+ 
+       if (
+@@ -1343,7 +1352,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+           }
+         }
+         if (part.type === "reasoning") {
+-          if (differentModel) {
++          if (differentModel && !replaysForeignReasoning && !replaysForeignOpenAIReasoning) {
+             if (part.text.trim().length > 0)
+               assistantMessage.parts.push({
+                 type: "text",
+@@ -1352,10 +1361,21 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+             continue
+           }
+           const providerMetadata = providerMeta(part.metadata)
++          // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
++          const replayMetadata =
++            differentModel
++              ? replaysForeignOpenAIReasoning && providerMetadata?.openai
++                ? { openai: providerMetadata.openai }
++                : undefined
++              : providerMetadata
+           assistantMessage.parts.push({
+             type: "reasoning",
+             text: part.text,
+-            ...(providerMetadata ? { providerMetadata } : {}),
++            ...(differentModel && !replaysForeignOpenAIReasoning
++              ? {}
++              : replayMetadata
++                ? { providerMetadata: replayMetadata }
++                : {}),
+           })
+         }
+       }
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+index c0c737d3c0061f40f063dc6f0fba3875ecda6a5f..7287a5c4a85e80f8c2e95d02e2252a7635e55001 100644
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -758,6 +758,96 @@ describe("session.message-v2.toModelMessage", () => {
+     ])
+   })
+ 
++  test("preserves foreign reasoning for OpenAI-compatible reasoning fields", async () => {
++    const assistantID = "m-assistant"
++    // reasoning_content 是可移植文本字段，因此兼容模型保留其结构化形态。
++    const compatible: Provider.Model = {
++      ...model,
++      api: { ...model.api, npm: "@ai-sdk/openai-compatible" },
++      capabilities: { ...model.capabilities, reasoning: true, interleaved: { field: "reasoning_content" } },
++    }
++    const input: MessageV2.WithParts[] = [
++      {
++        info: assistantInfo(assistantID, "m-user", undefined, { providerID: "other", modelID: "other" }),
++        parts: [
++          {
++            ...basePart(assistantID, "a1"),
++            type: "reasoning",
++            text: "thinking",
++            metadata: { anthropic: { signature: "foreign" } },
++            time: { start: 0 },
++          },
++          {
++            ...basePart(assistantID, "a2"),
++            type: "text",
++            text: "answer",
++          },
++        ] as MessageV2.Part[],
++      },
++    ]
++
++    expect(
++      ProviderTransform.message(await MessageV2.toModelMessages(input, compatible), compatible, {}),
++    ).toStrictEqual([
++      {
++        role: "assistant",
++        content: [{ type: "text", text: "answer" }],
++        providerOptions: { openaiCompatible: { reasoning_content: "thinking" } },
++      },
++    ])
++  })
++
++  test.each(["openai", "smark-codex"])("preserves encrypted GPT reasoning for %s", async (targetProvider) => {
++    // 该测试覆盖 Session projection 与 provider transform 的完整边界。
++    const assistantID = "m-assistant"
++    // 目标模型满足 OpenAI Responses 与 gpt 前缀两个边界条件。
++    const gpt: Provider.Model = {
++      ...model,
++      id: ModelID.make("gpt-5.5"),
++      providerID: ProviderID.make(targetProvider),
++      api: { ...model.api, id: "gpt-5.5", npm: "@ai-sdk/openai" },
++      capabilities: { ...model.capabilities, reasoning: true },
++    }
++    const input: MessageV2.WithParts[] = [
++      {
++        info: assistantInfo(assistantID, "m-user", undefined, { providerID: "smark-codex", modelID: "gpt-6-astra" }),
++        parts: [
++          {
++            ...basePart(assistantID, "a1"),
++            type: "reasoning",
++            text: "foreign summary",
++            // 持久化 metadata 会在 adapter 边界投影为 providerOptions。
++            metadata: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
++            time: { start: 0 },
++          },
++          {
++            ...basePart(assistantID, "a2"),
++            type: "text",
++            text: "answer",
++          },
++        ] as MessageV2.Part[],
++      },
++    ]
++
++    // adapter 边界接收 providerOptions，Session 持久化的 MessageV2 Part 仍保留原 metadata 形态。
++    // GPT Responses 在模型切换时保留不透明的续接状态。
++    // 只有目标 GPT 协议接收这类 provider metadata。
++    expect(ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, {})).toStrictEqual([
++      {
++        role: "assistant",
++        ...(targetProvider === "openai" ? {} : { providerOptions: undefined }),
++        content: [
++          {
++            type: "reasoning",
++            text: "foreign summary",
++            providerOptions: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
++          },
++          { type: "text", text: "answer", ...(targetProvider === "openai" ? {} : { providerOptions: undefined }) },
++        ],
++      },
++    ])
++  })
++
+   test("replaces compacted tool output with placeholder", async () => {
+     const userID = "m-user"
+     const assistantID = "m-assistant"

@@ -1,0 +1,903 @@
+From 1c53af980ffa43da912c26f167e1e9cb0ab579c2 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 21 Jul 2026 03:26:43 +0800
+Subject: [PATCH] =?UTF-8?q?fix(task):=20=E9=9D=9E=E6=B3=95=20task=5Fid=20?=
+ =?UTF-8?q?=E5=AE=89=E5=85=A8=E8=A7=A3=E6=9E=90=E5=B9=B6=E6=8F=90=E7=A4=BA?=
+ =?UTF-8?q?=E6=96=B0=E5=BB=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+模型常因后训练强制传假 task_id：对非 ses* 串直接 SessionID.make 会炸工具，
+对 ses* 未命中则静默新建。改为 brand 安全候选（exact / 26-body+ses_），
+能用则 resume，不能用则创建新 session，并用 opencode_notice 标明独立上下文。
+
+避免把 raw task_id 出现性当成 resume，从而错误关掉 inspected_files summary。
+
+diff --git a/docs/plans/task-id-illegal-resolution.md b/docs/plans/task-id-illegal-resolution.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9ca3d4004e2391537bb8d0a08a3aae33ed997f1
+--- /dev/null
++++ b/docs/plans/task-id-illegal-resolution.md
+@@ -0,0 +1,442 @@
++# Canonical Implementation Plan: Task ID Illegal Resolution
++
++> Status: verified
++>
++> Revision: R2
++>
++> Approved revision: R2
++>
++> Audit mode: full-scope
++>
++> Requirement source: Current Session GOAL user requirement quoted in section 1
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-07-21
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 0. Revision History
++
++| Rev | Why |
++| --- | --- |
++| R1 | 初稿：26-body 补 `ses_`、miss→create+notice、inspected 跟 resolve |
++| R2 | 修复 plan audit **B-01**：`SessionID.make` 对非 `ses*` 字符串同步抛 brand 错误，不能作为候选求值入口；修正现状描述与 TDD 覆盖 |
++
++Resolved audit findings incorporated in R2:
++
++- **B-01**（blocking）：候选求值不得对 raw 直接 `SessionID.make`；只有通过域检查或显式构造的 `ses_`+26 body 才 brand+get；brand/域不合格 = 候选未命中。
++
++## 1. Verbatim Requirement
++
++> 当前的整体task ID传递是有一点小麻烦的,因为有一些模型它可能在预训练的过程中,它会在相应的post-train的过程中刻意地强调模型必须传递task ID,所以导致模型即便不想传递task ID,它也可能进行一个非法的task ID传递,这就导致模型多次调用,它都以为自己没传递,但实际上传递了,会导致最终出现问题。因此,你看看能不能适当优化,解决一下,看看这个方案能不能改进一下。也就是我们理论上来说,如果模型传递了一个非法的task ID,那么我们可以首先看看它是不是一个26字符,同时这个前面如果加上SES这个下划线,看看能不能组装成一个准确的已有的task ID。如果存在的话,那么我们就调用那个。如果它不存在的话,也就是譬如说这不是一个26字符,或者它根本就不存在的话,那么我们就直接创建一个新的task。同时在task返回的时候,我们可以加一个相应的open code的一个notice或者什么东西来提示它,这是一个全新的task,由于传递了一个非法的task ID。请你看看这样的完整的方案应该去怎么去构建,同时保证相应的修改鲁棒且没有相应的静态或者潜在其他问题,进行完整检查检查。
++
++目标终态：`verified-implementation-and-commit`。
++
++## 2. Explicit Non-Goals
++
++- 不修改 `task_status` 的参数 schema 或 not-found 语义（`Task not found: …` 保持现状）。
++- 不改变 Agent/工具描述文案去“禁止模型传 task_id”；根因在 harness 对非法 ID 的处理，不在 prompt 说教。
++- 不引入模糊匹配、Levenshtein、跨 parent 扫描、按 title 猜测 session 等第二套恢复策略。
++- 不强制 parent/child 归属校验（当前 resume 已可恢复任意存在的 session；本次不扩展也不收紧）。
++- 不修改 Session ID 生成算法、`SessionID` brand schema 的 `startsWith("ses")` 校验规则。
++- 不改 CLI/TUI 对 `<task_result>` 的用户展示剥离逻辑（notice 面向模型上下文，留在 tool output 骨架内即可）。
++- 不处理空白 trim、大小写折叠、`SES_`/`Ses_` 变体等未证实可达的 wire 变形（见 Rejected Speculation）。
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` | 词汇：Session、Tool、Agent、subagent；task 工具创建/恢复的是 Session。 |
++| `packages/opencode/AGENTS.md` | 测试与 typecheck 在 package 目录运行；Effect module 形状。 |
++| `AGENTS.md` (repo root) | 默认分支 `dev`；并行工具；不随意 commit。 |
++| `.opencode/policy/first-principles-engineering.md` | 修 first divergence；禁止 fallback 堆叠；forward/reverse 映射。 |
++| `packages/core/src/session.ts` + `packages/opencode/src/id/id.ts` | Brand 边界：`startsWith("ses")`；生成器写 `ses_` + 26 字符 body。 |
++| `packages/opencode/src/util/output-notice.ts` | 已有模型可见 `<opencode_notice … />` 格式与 attribute escape。 |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `packages/opencode/src/tool/task.ts` | task_id 解析、create/resume、output/backgroundOutput 骨架 | observed |
++| `packages/opencode/src/tool/task_status.ts` | 对比：not-found 显式 error；参数为 SessionID brand | observed |
++| `packages/opencode/src/tool/tool.ts` | 参数 decode 失败文案；task 的 task_id 为 optional string | observed |
++| `packages/core/src/session.ts` | `SessionID` = `Schema.String.check(Schema.isStartsWith("ses"))` + brand；`make` 执行 brand 检查 | observed |
++| `packages/opencode/src/id/id.ts` / `packages/core/src/util/identifier.ts` | body 长度 26；完整 ID `ses_` + body（总长 30） | observed |
++| `packages/opencode/src/session/session.ts` | `get` → `Session not found`；`createNext` 分配 `SessionID.descending()` | observed |
++| `packages/opencode/test/tool/task.test.ts` | 存在 ID resume；`ses_missing` 时新建且不用传入 ID | observed |
++| `packages/opencode/src/util/output-notice.ts` | notice 序列化契约（type/source attrs + escape） | observed |
++| 本地 `SessionID.make` 复现 | `make("abcdefghijklmnopqrstuvwxyz")` / `make("not-a-session")` 抛 `Expected a string starting with "ses"`；`make("ses_missing")` 成功 | observed |
++| `packages/opencode/src/cli/cmd/run/tool.ts` `taskResult` | 用户侧只抽 `<task_result>` | observed |
++| `packages/opencode/src/session/prompt.ts` `handleSubtask` | Path B 不传 task_id | observed |
++| `packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap` | wire：`task_id` 为普通 string | observed |
++
++## 5. Current Behavior
++
++```text
++model/tool-call args.task_id (optional string)
++  -> Tool.wrap Schema.decode (accepts any string — NOT SessionID brand)
++  -> TaskTool.execute
++       taskID = params.task_id
++       if taskID:
++         // SessionID.make 同步 brand 检查 startsWith("ses")
++         // 非 "ses*" 字符串：make 抛错，在 yield*/catchCause 之前炸裂整次 execute
++         // 已是 "ses*"：make 成功 → sessions.get → NotFound 时 catch → undefined
++         session = sessions.get(SessionID.make(taskID)).catch -> undefined
++       else:
++         session = undefined
++       nextSession = session ? reuse : sessions.create(...)
++       inspected_files default = params.task_id ? "none" : "summary"
++  -> output: task_id: <nextSession.id> … <task_result>…  （无 illegal notice）
++```
++
++要点（R2 纠正后的现状）：
++
++1. **`ses*` 且 DB 不存在**（如 `ses_missing`）：get miss → **静默新建**，无 notice。
++2. **非 `ses*` 字符串**（如 `not-a-session`、裸 26-body）：`SessionID.make` **同步抛 brand 错误** → 整次 task 工具失败，**不是** catch→create。
++3. **不做** `ses_` 前缀补全；裸 26-body 即使对应已有 session 也会在 make 处失败（或若绕过 make 也会 miss）。
++4. **truthy `task_id` 参数** 即令 `inspected_files` 默认 `"none"`，即使最终 create 或工具失败。
++5. 合法且存在的完整 `ses*` ID 能 resume（测试覆盖）。
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path (current) | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| 省略 `task_id` | 模型或 `handleSubtask` | schema optional | create，无 notice | TaskTool | observed |
++| 完整存在的 `ses…` ID | 模型复制先前 output | 无格式强制（string） | make ok → get hit → resume | TaskTool | observed |
++| `ses*` 但不存在（如 `ses_missing`） | 幻觉/过期 ID | 无 | make ok → get miss → create，无 notice | TaskTool | observed |
++| 恰好 26 字符 body（无 `ses` 前缀） | post-train 强制传 ID 但漏前缀 | 无 | **make 抛错 → 工具失败**；需求要求 `ses_`+body 探测 resume | TaskTool | contracted + observed |
++| 其他非 `ses*` 乱串 | 同上 | 无 | **make 抛错 → 工具失败**；需求要求 create+notice | TaskTool | contracted + observed |
++| 空字符串 `""` | 模型 | JS falsy | 与省略等价 | TaskTool | observed |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | 省略 `task_id` 时创建新子 Session，输出含新 `task_id:`，**无** illegal-task_id notice | create 分支；“新任务”语义 | 间接 create 测试 |
++| INV-02 | 提供**存在**的完整 SessionID（`ses*` 且 get hit）时 resume，输出该 ID，**无** illegal notice | task.ts + resume 测试 | `task.test.ts` resume |
++| INV-03 | 提供无法解析为已存在 Session 的非空 task_id（含：非 `ses*` 乱串、`ses*` 但不存在、26-body 补前缀后仍不存在）时：**不**因 brand 炸工具；创建**新**子 Session；output 含 opencode notice（invalid_provided） | 用户需求；R2 对 brand 边界的修正 | 部分：`ses_missing` create（无 notice、未覆盖非 ses*） |
++| INV-04 | 提供长度恰好 26 且**不**以 `ses` 开头的字符串，且 `ses_`+该串为已存在 Session 时：resume 该 Session，**无** illegal notice | 用户 26+ses_ 规则；body 长度 26 | 无（red） |
++| INV-05 | 26 字符 body 补 `ses_` 后仍不存在 → 同 INV-03 | 用户需求 | 无（red） |
++| INV-06 | `inspected_files` 默认：真实 resume → `"none"`；真实新建（含 invalid_provided）→ `"summary"` | task 注释意图 | 无 execute 级（red） |
++| INV-07 | notice 使用 `<opencode_notice … />` + attribute escape；字段足以说明非法 provided 与 created_new | output-notice 契约 | shell 旁证 |
++| INV-08 | 合法 resume / omit 新建骨架兼容：`task_id:` + `<task_result>`；notice 仅 invalid_provided | CLI taskResult | 旁证 |
++| INV-09 | resolve 路径上，任何候选的 brand/域失败只导致该候选未命中，**不得**使整个 `TaskTool.execute` 以 brand Error 失败 | B-01；`SessionID.make` 复现 | 无（red：非 ses* 乱串须成功 create） |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| INV-04/09 | `TaskTool.execute` 对 raw `task_id` 无条件 `SessionID.make`；裸 26-body 在 get 之前同步 brand 失败 | `TaskTool` / `task.ts:235-238` | `SessionID.make("abcdefghijklmnopqrstuvwxyz")` 抛错；core session schema startsWith `"ses"` |
++| INV-03/07（ses* miss） | make 成功后 get miss 静默 create，无 notice | 同上 | test `ses_missing`；output 无 notice |
++| INV-03/09（非 ses*） | 同上 make 同步失败，工具错误而非 create+notice | 同上 | make 复现 |
++| INV-06 | `inspectedFilesMode` 用 raw `params.task_id` 真值 | task.ts:312 | 源码 |
++
++根因：**Task 工具入口的 task_id resolve 合同不完整**——把任意 string 直接 brand 成 SessionID，既拦死了用户要求的 26-body 恢复，又把“假 ID”变成工具崩溃；同时在 ses* miss 路径缺少 notice，并误用参数出现性驱动 inspected 默认。
++
++反馈信号：
++
++1. Red：`task_id = child.id.slice(4)`（26 body）期望 resume `child.id`；现状 brand 失败或新建。
++2. Red：`task_id = "not-a-session"` 期望成功 create + notice；现状 brand 失败。
++3. Red：`task_id = "ses_missing"` 期望 create + notice；现状 create 无 notice。
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| 模型传入 task_id 的 resolve（域检查、候选、miss→create） | `TaskTool.execute` | optional string → resume 或新建子 Session | 唯一消费该参数并决定 create/resume | Session.get 只接受已品牌化 ID |
++| SessionID brand 校验 | `SessionID` schema | 仅 `startsWith("ses")` 的字符串可品牌化 | 域边界 | Task 不得假定 make 对任意 string 安全 |
++| 存在性查询 | `Session.Service.get` | Info 或 NotFound | 已有 | — |
++| 新建子 Session | `Session.Service.create` | 分配新 `ses_` ID | 已有 | — |
++| notice 序列化 | `output-notice` 导出 | 统一 escape | 惯例 | 避免 task 手写 XML |
++
++## 10. Single Approved Primary-Path Design
++
++**Brand 安全规则（B-01 硬约束）**：永远不要对未通过域检查的 raw 调用 `SessionID.make`。`make` 同步抛错不得成为 resolve 控制流。
++
++```text
++function lookupSession(id: string): Effect<Session | undefined>
++  // 仅当 id 已满足 SessionID 域（startsWith "ses"）时：
++  //   make(id) + get；NotFound/其他 → undefined
++  // 否则：立即 undefined（不调用 make）
++
++params.task_id 缺失或 "" ->
++  resolve = { mode: "create", reason: "omitted" }
++
++params.task_id = raw (非空) ->
++  candidates: string[] = []
++
++  // 候选 1：raw 本身已是 SessionID 域成员
++  if raw.startsWith("ses"):
++    candidates.push(raw)
++
++  // 候选 2：用户指定的 26-body 补全（生成器前缀字面量 ses_）
++  // 仅当 raw 长度 === 26 且尚未是 ses* 域成员时构造
++  if raw.length === 26 && !raw.startsWith("ses"):
++    candidates.push("ses_" + raw)
++
++  for each candidate in candidates:
++    session = lookupSession(candidate)   // brand 仅发生在已是 ses* 的 candidate 上
++    if session:
++      resolve = { mode: "resume", session, canonicalId: session.id }
++      break
++
++  if no hit:
++    resolve = { mode: "create", reason: "invalid_provided", provided: raw }
++
++// 执行
++if resolve.mode === "resume":
++  nextSession = session + 既有 permission overlay
++  inspected default = "none"
++  run → output(task_id=canonical)  // 无 illegal notice
++
++if resolve.mode === "create":
++  nextSession = sessions.create(...)  // 系统分配新 ID，绝不使用 raw 作主键
++  inspected default = "summary"
++  run → output(task_id=newId)
++  if reason === "invalid_provided":
++    在元信息块与 <task_result> 之间插入
++    <opencode_notice type="task_id" source="task" severity="warning"
++      reason="invalid_provided" provided="<escaped raw>" action="created_new" />
++```
++
++说明：
++
++1. **单一 resolve 合同**的有序域分支：omit；exact ses* hit；26-body→`ses_`+body hit；provided miss→create+notice。不是 A 失败后换算法 B。
++2. **`startsWith("ses")` vs `ses_`**：brand 边界是 `ses`；生成与补全字面量是 `ses_`。`lookup` 用 brand 边界；构造用 `ses_`。
++3. **为何 `!raw.startsWith("ses")` 才补前缀**：已是 `ses*` 的字符串走候选 1；对完整 ID 再套 `ses_` 无意义且错误。
++4. **notice**：`formatTaskIdNotice({ provided })` 复用 `formatNotice`/escape；foreground 与 background output 同源。
++5. **公共可观察面**：`output` notice + `metadata.sessionId`。可选 metadata 镜像仅当与 resolve 同值且有测试；默认可不加，避免第二语义。
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++| omit → create | preserve | primary-contract | yes | ~20% | preserve |
++| ses* exact hit → resume | preserve | primary-contract | yes | ~20% | preserve |
++| 26-body → ses_+body hit → resume | proposed | primary-contract | yes | ~20% | add |
++| provided miss → create + notice | proposed | primary-contract | yes | ~25% | add |
++| brand 失败当工具 Error | current（非 ses*） | defect | no | — | remove via safe lookup |
++| 模糊匹配 / 扫 children | not proposed | forbidden fallback | yes | — | reject |
++| task_status 同步 normalize | not proposed | out of scope | — | — | reject |
++
++Diagnostic share：notice 附着 create，不构成第二成功算法。Alternate success budget：0。
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| 无条件 `SessionID.make(raw)` + catchCause(get) | 假设任意 string 可 brand | brand 安全 lookup + 显式候选 | task.ts:235-238 |
++| `inspected_files` 用 raw `params.task_id` | 假设有参数=resume | `resolve.mode === "resume"` | task.ts inspectedFilesMode |
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| INV-01 omit 无 notice | resolve omitted | task.ts | output 无 `type="task_id"` notice |
++| INV-02 完整 ID resume | lookup(raw) hit | task.ts | 既有 resume + 无 notice |
++| INV-03 ses* miss + notice | miss → create + notice | task.ts + output-notice | `ses_missing`：新 ID；含 notice |
++| INV-03 非 ses* 乱串 + notice | 无 candidate / miss → create + notice | 同上 | `task_id: "not-a-session"`：**成功** execute；新建；notice；**无** brand Error |
++| INV-04 26-body resume | candidate ses_+body | task.ts | `child.id.slice(4)` → sessionId === child.id；无 notice |
++| INV-05 26-body miss | candidate miss → create+notice | task.ts | 26 乱串；新建；notice |
++| INV-06 inspected 默认 | resolve.mode | task.ts | 非法新建 + 父 read → parent_context；真 resume → 无 |
++| INV-07 notice 格式 | formatTaskIdNotice | output-notice.ts | provided 含 `"` 时 escape |
++| INV-08 骨架 | output helpers | task.ts | omit/resume 仍有 task_id 与 task_result |
++| INV-09 brand 不炸 | lookup 门闸 | task.ts | 与 INV-03 非 ses* 同测 |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| brand-safe `lookupSession` / 候选 resolve | INV-02/03/04/09 | make 抛错复现；B-01 | 现逻辑对 raw 直接 make |
++| `SESSION_ID_BODY_LENGTH = 26` + `ses_` 构造 | INV-04 | identifier LENGTH；用户规则 | 无候选 |
++| `formatTaskIdNotice` | INV-03/07 | 用户 notice；output-notice | 无类型 |
++| resolve.mode 驱动 inspected 默认 | INV-06 | task.ts:312 | raw 参数伪装 resume |
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++| `packages/opencode/src/tool/task.ts` | modify | brand-safe resolve；create/resume；inspected；output notice | +50–90 |
++| `packages/opencode/src/util/output-notice.ts` | modify | `formatTaskIdNotice` | +10–20 |
++| `packages/opencode/test/tool/task.test.ts` | modify | 切片 1–7 | +100–180 |
++
++## 16. TDD Behavior Slices
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 | 26-char body of existing child resumes same sessionId | make(body) 抛 brand 或 create | ses_+body lookup hit | 完整 ID resume |
++| 2 | `task_id: "not-a-session"` **成功** create + notice | make 抛 → execute 失败 | brand-safe miss → create+notice | — |
++| 3 | `task_id: "ses_missing"` create + notice | 无 notice | create+notice | 新 ID ≠ provided |
++| 4 | 26-char 不存在 body → create + notice | brand 失败或无 notice | 同 create+notice | — |
++| 5 | 省略 task_id → create **无** task_id notice | 应保持 | 不插 notice | — |
++| 6 | 完整合法 resume → **无** notice | 应保持 | 不插 | 既有 resume |
++| 7 | 非法 task_id 新建 + 父 read → parent_context | inspected 因 raw task_id 用 none | create → summary | 真 resume 仍 none |
++
++Seam：`TaskTool.execute` 的 `output` / `metadata.sessionId`；不断言 private helper 源码。
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` | ~60–100 | 排除 import/格式 |
++| Required Chinese explanatory comments `C` | `max(1, ceil(E*0.15))` → **9–15** | 邻近非显然点 |
++
++须中文解释：
++
++1. 为何禁止对 raw 直接 `SessionID.make`（brand 同步抛错会短路整次 resolve）。
++2. brand 边界 `ses` 与补全字面量 `ses_` 的分工。
++3. 26-body 候选是单一合同域分支，不是二次 fallback。
++4. `invalid_provided` vs `omitted` 的 notice 差异。
++5. inspected_files 跟 `resolve.mode`。
++
++## 18. Verification
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test test/tool/task.test.ts` | `packages/opencode` | 切片 1–7 |
++| `bun typecheck` | `packages/opencode` | 类型 |
++| 同文件既有 resume/cancel/background 用例 | `packages/opencode` | 回归 |
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added | 0 | — |
++| Files modified | 3 | task.ts、output-notice.ts、task.test.ts |
++| Files deleted | 0 | — |
++| Production lines | ~70–120 | resolve + notice |
++| Test lines | ~120–200 | 含非 ses* 与 26-body |
++| Generated lines | 0 | — |
++
++## 20. Real Risks and Open Decisions
++
++| Risk | Mitigation |
++| --- | --- |
++| 26-char 碰撞 | 仅 get hit 才 resume |
++| 模型误读 notice | warning + action=created_new + 合法 task_id |
++| brand 边界 `ses` 与生成 `ses_` 混淆 | 注释与 lookup 门闸写清；补全固定 `ses_` |
++| 旧行为：非 ses* 曾是工具失败，现改为 create+notice | **用户明确要求**；测试锁定新合同 |
++
++### Open Decisions Requiring the User
++
++无。
++
++### Rejected Speculation
++
++- trim/大小写/`SES_`：无生产者证据。
++- parent/child 强制：改变既有 resume 语义。
++- task_status normalize：用户范围是 task 创建/恢复。
++- 模糊匹配：forbidden。
++
++## 21. Audit Contract
++
++The independent auditor must:
++
++- Read this exact file and the original requirement.
++- Reconstruct behavior from repository evidence.
++- Treat builder summaries as untrusted.
++- Audit the complete original scope on every round.
++- Require evidence for every blocking finding.
++- Check both under-design and over-design.
++- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
++  percent Chinese explanatory-comment plan.
++- Re-verify B-01 is fully addressed in the resolve design (no raw `SessionID.make` on non-`ses*` strings).
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | B-01 | 3 non-blocking | BLOCK | task `ses_07f761842ffetmIYDDE31bAJFN` |
++| 2 | R2 | yes | No blocking findings | 3 non-blocking (candidates shape; background notice; escape slice) | APPROVE | task `ses_07f6f8758ffeVacVvPvG7GfBLM` |
++
++Independent plan audit verdict (R2, copied without paraphrase):
++
++```text
++No blocking findings.
++APPROVE
++```
++
++- Audited revision: R2
++- Full scope: yes
++- B-01 addressed: no raw `SessionID.make` on non-`ses*` strings; brand/domain failure = candidate miss only
++- Implementation allowed for exact R2 only
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++| File | Change |
++| --- | --- |
++| `packages/opencode/src/tool/task.ts` | brand-safe resolve；invalid notice；inspected 跟 resolve.mode；foreground/background output 挂 notice |
++| `packages/opencode/src/util/output-notice.ts` | `formatTaskIdNotice` |
++| `packages/opencode/test/tool/task.test.ts` | INV-01–09 行为切片（26-body resume、非 ses* create、ses_missing notice、omit/full resume、unknown body、inspected summary） |
++| `docs/plans/task-id-illegal-resolution.md` | plan + approval + evidence（非 production） |
++
++`git diff --stat`（implementation paths）: task.ts +56/-10 region; output-notice +13; task.test.ts +256.
++
++### Red-Green Test Evidence
++
++- Seam: `TaskTool.execute` → `output` / `metadata.sessionId`.
++- Prior red conditions (from plan): non-`ses*` brand failure; 26-body miss-as-create; `ses_missing` silent create; inspected raw task_id.
++- Green: `bun test test/tool/task.test.ts` → **30 pass, 0 fail** (packages/opencode).
++
++### Verification Commands and Results
++
++| Command | Working directory | Result |
++| --- | --- | --- |
++| `bun test test/tool/task.test.ts` | `packages/opencode` | 30 pass, 0 fail |
++| `bun typecheck` | `packages/opencode` | pass (`tsgo --noEmit`) |
++
++### Original Feedback-Loop Result
++
++Feature/behavior contract (not a separate external repro loop): illegal/missing task_id no longer crashes on non-`ses*`; usable IDs resume (full or 26-body); unusable IDs create new session + `opencode_notice` with `invalid_provided` / `created_new`.
++
++### Actual Secondary and Replacement Path Inventory
++
++| Path | Classification | Disposition |
++| --- | --- | --- |
++| omit → create | primary-contract | implemented |
++| ses* exact hit → resume | primary-contract | implemented |
++| 26-body → ses_+body hit → resume | primary-contract | implemented |
++| provided miss → create + notice | primary-contract | implemented |
++| brand-safe lookup (no make on non-ses*) | primary-contract guard | implemented |
++| fuzzy match / scan children | forbidden | not added |
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` | 273 | `git diff` 新增非空非 import 行（task.ts + output-notice.ts + task.test.ts） |
++| Qualifying Chinese comment lines `C` | 41 | brand 门闸、ses vs ses_、候选域、notice 条件、inspected 跟 mode、INV 测试意图、escape、background 同源 |
++| Ratio `C / E` | 0.150 | `41/273` |
++| Required minimum `C` | 41 | `max(1, ceil(273 * 0.15)) = 41` |
++
++### Remaining Unverified Items
++
++- background 路径 notice 未单独 `background=true` 测试（与 foreground 共用 `backgroundOutput(..., notice)` 参数；plan non-blocking 已记）。
++- 未跑全量 package 测试套（仅 task.test.ts + typecheck）。
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R2 | yes | No blocking findings | 4 non-blocking (background notice test; INV-06 resume half; comment margin; notice attrs) | APPROVE | task `ses_07f6240e0ffehMK12aLj8l7bip` |
++
++Independent implementation audit verdict (copied without paraphrase):
++
++```text
++No blocking findings.
++APPROVE
++```
++
++- Audited plan revision: R2
++- Full original scope: yes
++- E=273, C=41, required=41, ratio≈0.150
++- Clean verdict applies only to this exact implementation diff against approved R2
++
++The task may be marked `verified` only after an independent full-scope result of
++`No blocking findings` for the current implementation and approved plan
++revision.
+diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
+index beca15905e47119e0f7cb521236453d7212e95d4..e990bd0efad4d4b489392a5ca9bb40aca9fe6704 100644
+--- a/packages/opencode/src/tool/task.ts
++++ b/packages/opencode/src/tool/task.ts
+@@ -19,6 +19,10 @@ import { Permission } from "@/permission"
+ import path from "path"
+ import { InstanceState } from "@/effect/instance-state"
+ import { mergeRanges } from "@/util/range"
++import { formatTaskIdNotice } from "@/util/output-notice"
++
++// SessionID 生成 body 固定 26（见 packages/core Identifier LENGTH / id.ts）；完整 ID = "ses_" + body。
++const SESSION_ID_BODY_LENGTH = 26
+ 
+ // [local-smark] 从父 session 的 messages 提取已读文件列表，
+ // 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
+@@ -137,9 +141,11 @@ export const Parameters = Schema.Struct({
+   }),
+ })
+ 
+-function output(sessionID: SessionID, text: string) {
++// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析
++function output(sessionID: SessionID, text: string, notice?: string) {
+   return [
+     `task_id: ${sessionID} (for resuming to continue this task if needed)`,
++    ...(notice ? [notice] : []),
+     "",
+     "<task_result>",
+     text,
+@@ -147,10 +153,12 @@ function output(sessionID: SessionID, text: string) {
+   ].join("\n")
+ }
+ 
+-function backgroundOutput(sessionID: SessionID) {
++// background 与 foreground 共用同一 invalid notice 插入点，避免只修 output() 漏 background
++function backgroundOutput(sessionID: SessionID, notice?: string) {
+   return [
+     `task_id: ${sessionID} (for polling this task with task_status)`,
+     "state: running",
++    ...(notice ? [notice] : []),
+     "",
+     "<task_result>",
+     "Background task started. Continue your current work and call task_status when you need the result.",
+@@ -232,10 +240,40 @@ export const TaskTool = Tool.define(
+         })
+       }
+ 
+-      const taskID = params.task_id
+-      const session = taskID
+-        ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+-        : undefined
++      // task_id 是 optional string，不是 SessionID brand。对非 "ses*" raw 直接
++      // SessionID.make 会同步抛 brand 错误并中断整次 execute；只能对已过域门闸的候选 make+get。
++      const lookupSession = (id: string) =>
++        id.startsWith("ses")
++          ? sessions.get(SessionID.make(id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
++          : Effect.succeed(undefined)
++
++      const rawTaskID = params.task_id
++      const resolved = yield* Effect.gen(function* () {
++        if (!rawTaskID) return { mode: "create" as const, reason: "omitted" as const }
++
++        // 候选 1：raw 已是 SessionID 域成员（startsWith "ses"）
++        const exact = yield* lookupSession(rawTaskID)
++        if (exact) return { mode: "resume" as const, session: exact }
++
++        // 候选 2：用户指定的 26-body 补全（生成器字面量 ses_）；与 brand 边界 "ses" 分工
++        if (rawTaskID.length === SESSION_ID_BODY_LENGTH && !rawTaskID.startsWith("ses")) {
++          const prefixed = yield* lookupSession("ses_" + rawTaskID)
++          if (prefixed) return { mode: "resume" as const, session: prefixed }
++        }
++
++        // 能用就用；不能用就当错误走创建，不因非法 ID 硬失败
++        return { mode: "create" as const, reason: "invalid_provided" as const, provided: rawTaskID }
++      })
++
++      // resume 取已命中 session；create 时 session 保持 undefined 以走 sessions.create
++      const session = resolved.mode === "resume" ? resolved.session : undefined
++      // 仅在“传了但无法命中已有 Session”时提示；省略 task_id 的正常新建不插 notice
++      // notice 与 create 绑定：不伪装 resume 成功，只声明独立新上下文
++      const invalidTaskIdNotice =
++        resolved.mode === "create" && resolved.reason === "invalid_provided"
++          ? formatTaskIdNotice({ provided: resolved.provided })
++          : undefined
++
+       const parent = yield* sessions.get(ctx.sessionID)
+       // The current tool context is the actual delegation source. Persisted
+       // session.agent can be absent or stale on resumed sessions, so it is only a
+@@ -304,12 +342,14 @@ export const TaskTool = Tool.define(
+         const parts = yield* ops.resolvePromptParts(params.prompt)
+ 
+         // [local-smark] 根据 inspected_files 参数传递父 session 的已读文件列表。
+-        // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
++        // 默认必须跟真实 resolve.mode：resume→none，新建（含非法 task_id 导致的新建）→summary。
++        // 不能用 raw params.task_id 真值——假 ID 会伪装成 resume 并丢掉父 inspected 摘要。
+         // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
+         // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
+         // worktree 用于计算相对路径，通过 InstanceState.context 获取（与 read.ts 同款用法）。
+         const instance = yield* InstanceState.context
+-        const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
++        const inspectedFilesMode =
++          params.inspected_files ?? (resolved.mode === "resume" ? "none" : "summary")
+         const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
+           ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
+           : undefined
+@@ -449,7 +489,8 @@ export const TaskTool = Tool.define(
+             ...metadata,
+             jobId: info.id,
+           },
+-          output: backgroundOutput(nextSession.id),
++          // background 启动回执同样挂 invalid notice（若有），与前台 output 合同一致
++          output: backgroundOutput(nextSession.id, invalidTaskIdNotice),
+         }
+       }
+ 
+@@ -469,7 +510,7 @@ export const TaskTool = Tool.define(
+             return {
+               title: params.description,
+               metadata,
+-              output: output(nextSession.id, text),
++              output: output(nextSession.id, text, invalidTaskIdNotice),
+             }
+           }),
+         (_, exit) =>
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+index 18e0428ba9e95c1c15e0da3c06f0296ebbcde6df..355345d47d1158f90933c49b6b2e8bb57e92ca82 100644
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -118,6 +118,21 @@ export function formatCompactionClearedNotice() {
+   return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
+ }
+ 
++// task 工具：模型传了无法解析为已有 Session 的 task_id 时，仍新建任务但用 notice 标明独立上下文。
++// provided 走 attribute escape，避免引号/尖括号破坏 <opencode_notice> 骨架。
++export function formatTaskIdNotice(input: { provided: string }) {
++  // severity=warning：任务已成功创建，但模型应改用返回的合法 task_id 继续
++  return formatNotice({
++    type: "task_id",
++    source: "task",
++    severity: "warning",
++    reason: "invalid_provided",
++    provided: input.provided,
++    // action 固定 created_new，避免与 resume 语义混淆
++    action: "created_new",
++  })
++}
++
+ function formatNotice(input: Notice) {
+   return `<opencode_notice ${Object.entries(input)
+     .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))
+diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
+index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb237202646868c 100644
+--- a/packages/opencode/test/tool/task.test.ts
++++ b/packages/opencode/test/tool/task.test.ts
+@@ -452,10 +452,285 @@ describe("tool.task", () => {
+       expect(kids[0]?.id).toBe(result.metadata.sessionId)
+       expect(result.metadata.sessionId).not.toBe("ses_missing")
+       expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
++      // ses* 但 DB 不存在：新建独立上下文，并 notice 标明非法 provided
++      // notice 字段固定：type/reason/provided/action，供模型识别「非法 ID → 独立新上下文」
++      expect(result.output).toContain('type="task_id"')
++      expect(result.output).toContain('reason="invalid_provided"')
++      expect(result.output).toContain('provided="ses_missing"')
++      expect(result.output).toContain('action="created_new"')
++      // 系统分配的 sessionId 绝不能回写成调用方提供的非法串
+       expect(seen?.sessionID).toBe(result.metadata.sessionId)
+     }),
+   )
+ 
++  // INV-04：裸 26-body 补 ses_ 后若 session 存在则 resume，不得 brand 失败也不得新建
++  it.instance("execute resumes when task_id is the 26-char body of an existing session", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const { chat, assistant } = yield* seed()
++      const child = yield* sessions.create({ parentID: chat.id, title: "Body resume child" })
++      // 生成器 ID = "ses_" + 26 body；模型漏前缀时应命中同一 session
++      const body = child.id.slice("ses_".length)
++      expect(body.length).toBe(26)
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      let seen: SessionPrompt.PromptInput | undefined
++      const promptOps = stubOps({ text: "resumed-body", onPrompt: (input) => (seen = input) })
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "continue prior subagent work",
++          subagent_type: "general",
++          task_id: body,
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "build",
++          abort: new AbortController().signal,
++          extra: { promptOps },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      // resume 成功：metadata 与 prompt 的 session 必须是原 child，不是新建 ID
++      expect(result.metadata.sessionId).toBe(child.id)
++      expect(result.output).toContain(`task_id: ${child.id}`)
++      // 合法恢复路径禁止 illegal notice，避免模型误判为新上下文
++      expect(result.output).not.toContain('reason="invalid_provided"')
++      expect(seen?.sessionID).toBe(child.id)
++    }),
++  )
++
++  // INV-03/09：非 ses* 乱串不得让 SessionID.make 炸掉工具；应 create + invalid notice
++  it.instance("execute creates a child for non-ses task_id without brand failure", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const { chat, assistant } = yield* seed()
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      let seen: SessionPrompt.PromptInput | undefined
++      const promptOps = stubOps({ text: "fresh", onPrompt: (input) => (seen = input) })
++      // 含引号以锁定 notice attribute escape（INV-07）
++      const provided = 'not-a-session"with-quote'
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "start work without a real task id",
++          subagent_type: "general",
++          task_id: provided,
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "build",
++          abort: new AbortController().signal,
++          extra: { promptOps },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      // 非 ses* 输入：execute 必须成功完成（无 brand Die），并只创建一个 child
++      const kids = yield* sessions.children(chat.id)
++      expect(kids).toHaveLength(1)
++      expect(result.metadata.sessionId).toBe(kids[0]?.id)
++      // 主键永远是系统 ses_ ID，从不把非法 provided 当 session 主键
++      expect(result.metadata.sessionId).not.toBe(provided)
++      expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
++      expect(result.output).toContain('reason="invalid_provided"')
++      expect(result.output).toContain('action="created_new"')
++      // provided 中的引号须 attribute-escape，不能原样打断 notice
++      expect(result.output).toContain('provided="not-a-session&quot;with-quote"')
++      expect(seen?.sessionID).toBe(result.metadata.sessionId)
++    }),
++  )
++
++  // INV-01：省略 task_id 是正常新建，不得出现 invalid_provided notice
++  it.instance("execute creates without invalid notice when task_id is omitted", () =>
++    Effect.gen(function* () {
++      const { chat, assistant } = yield* seed()
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      const promptOps = stubOps({ text: "omit-ok" })
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "fresh subagent",
++          subagent_type: "general",
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "build",
++          abort: new AbortController().signal,
++          extra: { promptOps },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      // 省略参数时只有 task_id 行与 task_result，没有 task_id 类型 notice
++      expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
++      expect(result.output).not.toContain('reason="invalid_provided"')
++      expect(result.output).not.toContain('type="task_id"')
++    }),
++  )
++
++  // INV-02/08：完整合法 resume 骨架保持兼容，且无 illegal notice
++  it.instance("execute resumes full task_id without invalid notice", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const { chat, assistant } = yield* seed()
++      const child = yield* sessions.create({ parentID: chat.id, title: "Full id child" })
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      const promptOps = stubOps({ text: "full-resume" })
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "resume with full id",
++          subagent_type: "general",
++          task_id: child.id,
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "build",
++          abort: new AbortController().signal,
++          extra: { promptOps },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      // 完整 ID 命中：sessionId 不变，且无 invalid notice
++      expect(result.metadata.sessionId).toBe(child.id)
++      expect(result.output).not.toContain('reason="invalid_provided"')
++    }),
++  )
++
++  // INV-05：26-body 补前缀后仍不存在 → 与其他 invalid 相同，create + notice
++  it.instance("execute creates for unknown 26-char body with invalid notice", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const { chat, assistant } = yield* seed()
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      const promptOps = stubOps({ text: "unknown-body" })
++      // 12 hex + 14 base62 形态的占位 body，保证长度门闸触发 ses_ 候选
++      const body = "0".repeat(12) + "a".repeat(14)
++      expect(body.length).toBe(26)
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "no matching body",
++          subagent_type: "general",
++          task_id: body,
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "build",
++          abort: new AbortController().signal,
++          extra: { promptOps },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      // 26 乱串：触发 body 候选但 get miss，仍 create 且 notice 回显 provided body
++      const kids = yield* sessions.children(chat.id)
++      expect(kids).toHaveLength(1)
++      expect(result.metadata.sessionId).toBe(kids[0]?.id)
++      expect(result.output).toContain('reason="invalid_provided"')
++      expect(result.output).toContain(`provided="${body}"`)
++    }),
++  )
++
++  // INV-06：非法 task_id 导致的新建必须走 summary 默认，不能因 raw task_id 真值伪装 resume
++  it.instance("execute uses summary inspected_files default when invalid task_id creates", () =>
++    Effect.gen(function* () {
++      const { chat, assistant } = yield* seed()
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      let seen: SessionPrompt.PromptInput | undefined
++      const promptOps = stubOps({ text: "with-context", onPrompt: (input) => (seen = input) })
++      // 最小已完成 read part：非法 task_id 新建应默认 summary 并注入 parent_context
++      const readPart: MessageV2.ToolPart = {
++        id: PartID.ascending(),
++        type: "tool",
++        tool: "read",
++        callID: "call-read-1",
++        sessionID: chat.id,
++        messageID: assistant.id,
++        state: {
++          status: "completed",
++          input: { filePath: "/tmp/repo/src/a.ts" },
++          output: "ok",
++          title: "Read",
++          metadata: {
++            read: {
++              path: "/tmp/repo/src/a.ts",
++              canonicalPath: "/tmp/repo/src/a.ts",
++              start: 1,
++              end: 20,
++              total: 20,
++              size: 100,
++              modified: "2026-01-01 00:00:00",
++              modifiedMs: 1,
++            },
++          },
++          time: { start: Date.now(), end: Date.now() },
++        },
++      }
++      const messages: MessageV2.WithParts[] = [
++        {
++          info: assistant,
++          parts: [readPart],
++        },
++      ]
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "use parent context",
++          subagent_type: "general",
++          task_id: "not-a-real-id",
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "build",
++          abort: new AbortController().signal,
++          extra: { promptOps },
++          messages,
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      // 非法 ID 新建仍应带 invalid notice
++      expect(result.output).toContain('reason="invalid_provided"')
++      // prompt parts 中必须出现 parent_context，证明 inspected 默认是 summary 而非 none
++      const parentCtx = seen?.parts.find(
++        (part) => part.type === "text" && "text" in part && String(part.text).includes("<parent_context>"),
++      )
++      expect(parentCtx).toBeDefined()
++    }),
++  )
++
+   it.instance("execute records the subagent and tightens permissions from the executing parent agent", () =>
+     Effect.gen(function* () {
+       const sessions = yield* Session.Service

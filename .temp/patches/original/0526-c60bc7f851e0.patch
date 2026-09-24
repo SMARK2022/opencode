@@ -1,0 +1,107 @@
+From c60bc7f851e06da5c5156ceae2dfae664e84460d Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 22 Jul 2026 16:08:57 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E6=81=A2=E5=A4=8D=20question/perm?=
+ =?UTF-8?q?ission=20=E9=9C=80=E8=A6=81=E8=BE=93=E5=85=A5=E6=97=B6=E7=9A=84?=
+ =?UTF-8?q?=E6=8F=90=E7=A4=BA=E9=9F=B3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+此前 need-input 为避免打扰被静音，只剩视觉通知；现重新接入内置语义音效槽位。
+question 播 question、permission 播 permission，when 仍为 always；abort 静音与完成/错误音效边界不变。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
+index 53b0cefb6bfd38b0d7945eb4dc8d388fbf438eeb..6dce2f303530da7ff9820f040801f22dfa463547 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
+@@ -6,7 +6,7 @@ const id = "internal:notifications"
+ 
+ type SessionError = Extract<Event, { type: "session.error" }>["properties"]["error"]
+ 
+-// sound 参数支持 false：question/permission 只保留视觉通知不播放音效
++// sound 参数支持 false：单次调用静音（如 abort）；其余传入语义音效名
+ function notify(api: TuiPluginApi, sessionID: string | undefined, message: string, sound: TuiAttentionSoundName | false) {
+   const session = sessionID ? api.state.session.get(sessionID) : undefined
+   const isSubagent = session?.parentID !== undefined
+@@ -14,7 +14,7 @@ function notify(api: TuiPluginApi, sessionID: string | undefined, message: strin
+     title: session?.title,
+     message,
+     notification: isSubagent ? false : { when: "blurred" },
+-    // false 表示静音；attention.ts 的 soundVolume 在 input.sound === false 时返回 undefined
++    // false → soundVolume 返回 undefined，不播放；具名音效 when: always（失焦/聚焦都播）
+     sound: sound === false ? false : { name: sound, when: "always" },
+   })
+ }
+@@ -47,11 +47,11 @@ const tui: TuiPlugin = async (api) => {
+   const questions = new Set<string>()
+   const permissions = new Set<string>()
+ 
+-  // question/permission 静音：只保留视觉通知，避免频繁触发时太吵
++  // question/permission 需要用户输入：视觉通知 + 对应语义音效
+   api.event.on("question.asked", (event) => {
+     if (questions.has(event.properties.id)) return
+     questions.add(event.properties.id)
+-    notify(api, event.properties.sessionID, "Question needs input", false)
++    notify(api, event.properties.sessionID, "Question needs input", "question")
+   })
+ 
+   api.event.on("question.replied", (event) => {
+@@ -65,7 +65,7 @@ const tui: TuiPlugin = async (api) => {
+   api.event.on("permission.asked", (event) => {
+     if (permissions.has(event.properties.id)) return
+     permissions.add(event.properties.id)
+-    notify(api, event.properties.sessionID, "Permission needs input", false)
++    notify(api, event.properties.sessionID, "Permission needs input", "permission")
+   })
+ 
+   api.event.on("permission.replied", (event) => {
+diff --git a/packages/opencode/test/cli/cmd/tui/notifications.test.ts b/packages/opencode/test/cli/cmd/tui/notifications.test.ts
+index 20fb5a4c33830349ff7b396cc7fcee4cfc7360b8..e711f04628a752a501f5043b2e0f5f76656070dc 100644
+--- a/packages/opencode/test/cli/cmd/tui/notifications.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/notifications.test.ts
+@@ -117,25 +117,25 @@ function permission(id: string, sessionID = "session"): PermissionRequest {
+ }
+ 
+ describe("internal notifications TUI plugin", () => {
+-  test("question and permission are visual-only without sound", async () => {
++  test("question and permission play their semantic sounds", async () => {
+     const harness = await setup()
+ 
+     harness.emit({ id: "event-1", type: "question.asked", properties: question("question-1") })
+     harness.emit({ id: "event-2", type: "permission.asked", properties: permission("permission-1") })
+ 
+-    // question/permission 保留视觉通知但静音，避免频繁触发时太吵
++    // question/permission 需要用户输入：视觉通知 + 语义音效
+     expect(harness.notifications).toEqual([
+       {
+         title: "Demo session",
+         message: "Question needs input",
+         notification: { when: "blurred" },
+-        sound: false,
++        sound: { name: "question", when: "always" },
+       },
+       {
+         title: "Demo session",
+         message: "Permission needs input",
+         notification: { when: "blurred" },
+-        sound: false,
++        sound: { name: "permission", when: "always" },
+       },
+     ])
+   })
+@@ -162,8 +162,12 @@ describe("internal notifications TUI plugin", () => {
+     harness.emit({ id: "event-8", type: "permission.asked", properties: permission("permission-1") })
+ 
+     expect(harness.notifications).toHaveLength(4)
+-    // 所有 question/permission 通知都应该是 sound: false
+-    expect(harness.notifications.every((n) => n.sound === false)).toBe(true)
++    expect(harness.notifications.map((n) => n.sound)).toEqual([
++      { name: "question", when: "always" },
++      { name: "question", when: "always" },
++      { name: "permission", when: "always" },
++      { name: "permission", when: "always" },
++    ])
+   })
+ 
+   test("notifies done when an active session completes with a finished assistant", async () => {

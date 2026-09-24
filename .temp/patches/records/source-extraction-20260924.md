@@ -1,5 +1,13 @@
 # SMARK original extraction 2026-09-24
 
+## Active numbering update 2026-09-25
+
+Maintenance verification: `bun test D:/Temp/opencode/materializer-maintenance.test.ts --timeout 20000` passed 7 cases and 23 assertions. The tests load the actual script functions with isolated filesystem fixtures and injected read-only Git responses; the SQLite maintenance lock is exercised by two naturally exiting Bun processes. Cases cover dirty/deletion-blocked states, malformed metadata, untracked pollution, prefix reuse after tail extension, invalidation after early edits, incomplete publication recovery, rollback, bounded retry cleanup, canonical paths and lock release. The official script also passed a real `--materialize 0 --rebuild`, subsequent healthy state reuse, and complete 644-item `--verify-source`. Temporary workspace construction remains inside the official states namespace, and installation now preserves the full frozen dependency graph.
+
+Verification: the official materializer completed `--verify-source` for all 644 commits and `--materialize 0` at release `545f51d26cc39a907d2867492d498d9607ea5fa4`. The target migration branch was linearly rebased: its first custom commit directly follows that release, with 21 preserved custom commits and zero merge commits before the final numbering/configuration update. The source repository's history was unchanged. Renumbering preserved patch bytes. After rebase, all 904 files in the existing adapted 1-452 pairs match the archived Git contents; 456 checkout files have Git-normalized line endings relative to the pre-switch filesystem inventory. Their names and patch content remain unchanged. All 192 added current files match their original counterparts byte for byte.
+
+The active JSON/TSV manifest now contains 644 consecutive entries. Entries 1-452 retain their exact identities and archived patch contents. The 36 historical additions occupy 453-488; the former 453-608 entries occupy 489-644. All originals and currents use `NNNN-<sha12>.patch` directly in their respective root directories. The two historical-side-branches directories were removed after byte-verified relocation. Current patch contents were preserved, including all previously adapted entries. The extraction-day tables below retain their historical numbering; the active manifest is authoritative for present paths and order. The materializer independently validates the preserved prefix and the topologically ordered remaining SMARK commits through `ac4568b10f773a6167b5f0e68d6e310e9cf6a228`.
+
 - Source repository: `F:\ML\PythonAIProject\Claude-Code\opencode`
 - Source ref: `dev-smark`
 - Pinned source tip: `ac4568b10f773a6167b5f0e68d6e310e9cf6a228`

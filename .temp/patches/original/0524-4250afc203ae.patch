@@ -1,0 +1,815 @@
+From 4250afc203ae0ea11a27ff8c8e2286aecfbb1a47 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 22 Jul 2026 19:41:03 +0800
+Subject: [PATCH] =?UTF-8?q?fix(storage):=20=E4=BF=AE=E5=A4=8D=20db=20statu?=
+ =?UTF-8?q?s=20=E5=9C=A8=20daemon=20=E4=B8=8B=E8=B6=85=E6=97=B6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+去掉 status 控制请求的人为 2s 截断，并让 status 只读 cold metadata，避免完整报告被 transport deadline 误杀。
+
+不引入 schema/task 化 status 或 offline 回退；task 类 control 仍保持短 acknowledgement 合同。
+
+diff --git a/docs/plans/opencode-db-daemon-status-timeout.md b/docs/plans/opencode-db-daemon-status-timeout.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..aee23a92f29757256a4ffee733e6fe0647aed881
+--- /dev/null
++++ b/docs/plans/opencode-db-daemon-status-timeout.md
+@@ -0,0 +1,476 @@
++# OpenCode DB Status Daemon Timeout Repair
++
++Status: verified  
++Revision: R3  
++Approved revision: R3  
++Audit mode: implementation  
++Requirement source: user request and live timeout evidence  
++Implementation allowed: no further material changes without revision or rework
++
++## 1. Scope and Boundary
++
++This plan addresses the user-visible failure of `opencode db status` timing out
++while a live daemon owns the same database. It does not change cold-storage
++schema, payload format, refcount semantics, compression codec, Stats semantics,
++or database vacuum behavior.
++
++The implementation target is at most four files and at most 800 changed code
++lines. The intended files are:
++
++1. `packages/opencode/src/storage/cold.ts`
++2. `packages/opencode/src/cli/cmd/db.ts`
++3. `packages/opencode/test/storage/cold.test.ts`
++4. `packages/opencode/test/cli/tui/daemon.test.ts`
++
++No new production module, database column, migration, dependency, public API,
++or alternate offline success path is authorized by this plan.
++
++## 2. Behavioral Invariants
++
++- `opencode db status` returns the complete existing `StatusReport` for the
++  selected database, including `eligibleOwners`, cold-owner counts, summary
++  counts, byte metrics, refcount mismatches, and orphan counts.
++- Status is read-only: it does not thaw owners, rewrite projections, repair
++  refcounts, create maintenance tasks, or acquire the maintenance write lease.
++- The live-daemon path remains authoritative when a matching daemon is alive;
++  a request timeout must not silently fall back to offline database access.
++- Metadata-only status work must not materialize cold payload BLOBs. Exact legacy v1
++  eligibility may decode its referenced payload because that is the existing
++  authoritative compatibility path required for the complete count; packed v2
++  metadata and refcount calculations must not decode pack bodies.
++- Eligibility remains exact. It must continue to honor the 30-day age rule,
++  completed compaction boundary, owner extraction whitelist, and v1/v2 owner
++  compatibility rules.
++- Task-backed maintenance keeps its existing fast acknowledgment and polling
++  contract. A client disconnect or timeout cannot be reported as a successful
++  maintenance result.
++
++## 3. User-Visible Failure and Feedback Loop
++
++The original failure is recorded in:
++
++`C:\Users\Lenovo\.local\share\opencode\log\2026-07-22T064011.log`
++
++The log records `args=["db","status"]`, `TimeoutError`, and approximately
++`+2026ms`. The current CLI request helper applies a fixed two-second timeout
++to normal maintenance control requests:
++
++`packages/opencode/src/cli/cmd/db.ts:68-82`
++
++The red-capable verification loop must exercise the real worker control route
++against an isolated temporary database and lock file, not the developer's live
++daemon. It must assert all of the following:
++
++1. The request completes under the configured control deadline for a large
++   candidate fixture.
++2. The response remains a complete `StatusReport` and preserves exact
++   `eligibleOwners` and refcount/orphan values.
++3. The status path performs no thaw or owner mutation.
++4. A task-backed operation still returns `202` with task identity promptly and
++   is observed through the existing task-status endpoint.
++5. The original live command is rerun after implementation and no longer
++   produces the timeout recorded above.
++
++Before implementation, the baseline measurements are already available from
++read-only SQL against the live database; the focused test must provide a
++repeatable isolated equivalent rather than relying on wall-clock timing alone.
++
++## 4. Repository Execution Chain
++
++### CLI request owner
++
++`packages/opencode/src/cli/cmd/db.ts`
++
++- `liveDaemon()` validates matching pid, database path, and control port.
++- `daemonRequest()` sends the token-protected request and normally applies
++  `AbortSignal.timeout(2_000)`.
++- `executeMaintenance()` selects the live-daemon domain once and refuses an
++  offline fallback after a live control failure.
++- `status` currently calls the immediate maintenance endpoint and waits for the
++  report body.
++
++The request deadline is owned by this orchestration seam. It must not be hidden
++by changing storage errors into success or by selecting another execution domain
++after timeout.
++
++### Daemon control owner
++
++`packages/opencode/src/cli/cmd/tui/worker.ts:355-416`
++
++- The token-protected maintenance route parses the request and calls the shared
++  `startMaintenance()` dispatcher.
++- Task-backed operations return an identity response immediately.
++- Immediate operations await `ColdStorage.maintain()` and return the report.
++
++The route must continue to use the shared dispatcher. It must not duplicate
++eligibility or SQL logic in the HTTP handler.
++
++### Storage owner
++
++`packages/opencode/src/storage/cold.ts:3354-3425`
++
++`ColdStorage.status()` currently:
++
++1. Reads SQLite page counters.
++2. Executes `select * from cold_storage`, including every `payload` BLOB.
++3. Recomputes owner counts using grouped Message, Part, and Session queries.
++4. Counts cold owners and summary owners.
++5. Filters summary payload metadata.
++6. Computes byte and mismatch/orphan metrics.
++7. Calls `eligibleOwnerCount()`.
++
++`eligibleOwnerCount()` at `cold.ts:2429-2461` loads candidate Message and Part
++rows, extracts candidate fields, caches per-session eligibility, and evaluates
++the exact age/compaction rule. Its `cold_ref != NULL, cold_key == NULL` branch
++is the persisted v1 compatibility path and may decode legacy payloads.
++`CompactionBoundary.latest()` is the shared boundary owner and must remain
++authoritative.
++
++## 5. Local Evidence
++
++The live database was inspected with `bun:sqlite` using `readonly: true`; no
++database or source file was modified.
++
++| Measurement | Result |
++|---|---:|
++| `cold_storage` rows | 7,717 |
++| `cold_storage` read including payload | 74.6-84.8 ms |
++| `cold_storage` metadata-only read | 51.7-58.7 ms |
++| owner-count grouped queries | 6.8-7.7 ms |
++| message candidate rows | 2,276 |
++| exact Part eligibility candidate rows | 405,626 |
++| exact Part query with required data | 5,323-5,425 ms |
++| exact Part query without data column | 3,962-4,028 ms |
++| sessions | 1,339 |
++| sessions older than 30 days | 726 |
++| candidate Part sessions | 1,310 |
++| database main file | 2,380,378,112 bytes |
++| database WAL | 4,770,992 bytes |
++
++The evidence distinguishes two symptoms:
++
++- Reading cold payload BLOBs is unnecessary status work, but is not the main
++  measured delay on this database.
++- The dominant measured delay is the broad JSON discriminator and candidate-row
++  scan required before exact eligibility evaluation.
++
++The two-second CLI timeout is therefore the first user-visible divergence, but
++the storage candidate scan is the primary performance driver underneath it.
++
++## 6. Root-Cause Diagnosis
++
++The invariant becomes false at the CLI/control boundary: the client promises a
++usable status report but aborts after two seconds, while the daemon is still
++performing a synchronous, read-only status computation.
++
++The underlying cause is a mismatch between the operation's work class and its
++transport contract:
++
++- `status` is classified as immediate.
++- Its storage implementation performs a full exact eligibility scan over
++  hundreds of thousands of Part rows.
++- The client applies the same short control timeout intended to detect an
++  unreachable local daemon.
++
++The following possible causes are not supported by current evidence:
++
++- zstd decompression is not on the measured `status()` path.
++- SQLite busy locking is not present in the user log; there is no `SQLITE_BUSY`.
++- A duplicate daemon is not present in the observed process list.
++- A cold payload corruption or refcount failure is not reported.
++- Removing fields from `StatusReport` is not an acceptable repair because it
++  violates the complete-output invariant.
++
++## 7. Approved Primary-Path Design
++
++R3 selects one authoritative repair route. It does not add a task record,
++database field, alternate report source, or asynchronous status replacement.
++
++### 7.1 Storage projection repair
++
++Change `ColdStorage.status()` to select only cold-storage metadata needed for
++the existing report: hash, kind, codec, raw bytes, compressed bytes, refcount,
++and timestamps if required by the report. Do not select `payload`.
++
++This is a local repair to an unnecessary BLOB read. It preserves every report
++field and does not change any owner/refcount authority.
++
++### 7.2 Eligibility scan optimization
++
++Optimize `eligibleOwnerCount()` only where the exact current semantics permit:
++
++- keep the existing candidate predicates and extraction whitelist;
++- keep one cached eligibility state per Session;
++- use the narrowest row projection sufficient for `messageV2Value()` and
++  `partV2Value()`; retain `data`, identifiers, session linkage, and cold
++  references required by those functions;
++- avoid loading unrelated timestamps or columns that are not consumed by the
++  extraction/eligibility path;
++- preserve the existing `CompactionBoundary.latest()` seam;
++- do not introduce a second eligibility formula or approximate count.
++
++The plan does not authorize a schema/index migration. If a larger speedup
++requires a new index, generated column, approximate count, persisted cache, or
++different authority, the plan must be revised and re-audited rather than
++silently adding it.
++
++### 7.3 Transport timeout contract
++
++The immediate `status` control request has no client-side execution deadline
++after `liveDaemon()` has proved the matching daemon pid, database path, and
++control port. The local loopback request remains synchronous and returns the
++complete exact report; HTTP connection errors, non-2xx responses, and process
++termination still surface as errors. This removes the artificial two-second
++upper bound without changing the server semantic path.
++
++The implementation expresses this as a private `daemonRequest` timeout option:
++normal calls retain `2_000`, while the status report call passes an explicit
++no-deadline value. The option is not exposed through the CLI, HTTP API, SDK, or
++configuration.
++
++All other daemon maintenance requests, including task status and task start,
++retain the existing two-second transport deadline because task start is an
++acknowledgment contract and task status is a small persisted-record read.
++`db status` is the only request that opts out because its exact report has no
++persisted result record and its scan duration grows with the database.
++
++## 8. Forward Traceability
++
++| Requirement/invariant | Production path | Planned location | Behavioral verification |
++|---|---|---|---|
++| Complete status output | `ColdStorage.status()` | `cold.ts` | exact report equality on fixture |
++| No unnecessary payload materialization | metadata query, with required legacy v1 decode exception | `cold.ts` | exact output, unchanged refs, and hard-heap BLOB regression |
++| Exact eligibility | `eligibleOwnerCount()` | `cold.ts` | old/new count equality across aged, recent, compacted, hot and cold owners |
++| Live daemon authority | `liveDaemon()`/`daemonRequest()` | `db.ts` | timeout/error never triggers offline execution |
++| Task acknowledgment | unchanged worker maintenance route | no production change | real daemon `202` and terminal polling test |
++| Original timeout repair | CLI `db status` without artificial deadline | `db.ts` | original command loop no timeout |
++
++## 9. Reverse Traceability and Complexity Budget
++
++| Proposed concept | Requirement | Evidence | Why existing logic cannot carry it |
++|---|---|---|---|
++| Metadata-only cold projection | no unnecessary thaw/read | `status()` selects `*`; payload is unused | current query transfers BLOBs unnecessarily |
++| Narrow candidate projection | status latency | 405,626 exact Part candidates and 5.3s query | current `.select()` loads every column |
++| Status deadline removal | usable exact report for unbounded database growth | fixed 2s timeout, 5.3s scan, and 2.0s user failure | current orchestration assumes all immediate operations are short |
++
++No other production concept is authorized. In particular, no retry loop,
++offline fallback, schema migration, status cache, background scheduler, or
++second Stats implementation may be added.
++
++Expected production decision surface is limited to the existing status query,
++candidate query, and request timeout. Any diagnostic-only branch must remain
++below the policy's 10 percent secondary-path budget.
++
++## 10. Reversibility and Failure Behavior
++
++- Status changes are read-only SQL projection changes and are reversible by
++  restoring the original selected columns.
++- Eligibility optimization must return the same integer for the same database
++  snapshot; any mismatch is a test failure.
++- Timeout changes must still surface non-2xx, abort, daemon-unreachable, and
++  process-termination errors as errors; only the status computation deadline is
++  removed.
++- The status request remains synchronous and cannot falsely complete an
++  underlying task-backed maintenance operation.
++- No database bytes, owner refs, payloads, task records, or external files are
++  modified by status.
++
++## 11. TDD and Verification Plan
++
++### Red
++
++1. Add a focused regression assertion using an isolated real daemon and a
++   sufficiently large temporary fixture that reproduces the old timeout or
++   exceeds the old two-second contract.
++2. Add an exact-output assertion covering all `StatusReport` fields.
++3. Add a no-mutation assertion for owner refs, payload rows, and page counters.
++4. Add a metadata projection assertion using an isolated database with a large
++   sentinel BLOB and a low SQLite `hard_heap_limit`; status must succeed while
++   a payload-materializing projection must fail. This makes the forbidden read
++   observable without inspecting source text or duplicating the algorithm.
++
++### Green
++
++1. Apply only the approved metadata projection and candidate-scan repair.
++2. Measure the same fixture with the same daemon request path.
++3. Apply the approved status-only deadline removal without changing task
++   status, resume, or other control requests.
++
++### Regression
++
++- Run `bun test test/storage/cold.test.ts` from `packages/opencode`.
++- Run `bun test test/cli/tui/daemon.test.ts` from `packages/opencode`.
++- Run the original `opencode db status` loop against the user's live daemon
++  only after all isolated tests pass; do not alter the live database.
++- Run `bun typecheck` from `packages/opencode`.
++- Run `bun run build` from `packages/opencode`.
++- Verify no schema, migration, generated file, or unrelated path changed.
++- Report actual changed production files, total changed lines, and Chinese
++  explanatory-comment `E/C` counts using the repository gate.
++
++## 12. Risks and Explicit Non-Goals
++
++| Risk | Mitigation |
++|---|---|
++| Narrow projection omits a field needed by extraction | compile/typecheck plus exact status tests; retain full row only where the consumer requires it |
++| Eligibility count changes subtly | equality tests for each age/compaction quadrant and mixed v1/v2 owners |
++| No status deadline leaves a stuck daemon request open | `liveDaemon()` proves the local owner before the request; HTTP/process errors still reject, and no alternate success path is added |
++| Large fixture makes tests slow or flaky | use published readiness and deterministic fixture data; do not use arbitrary sleeps |
++
++Non-goals are compression algorithm changes, vacuum scheduling, backup, Stats
++redesign, payload thaw policy, external archive cleanup, and user-facing webapp
++changes.
++
++## 13. Audit Gate
++
++The primary-agent self-check for R3 is complete: the CLI status branch, daemon
++route, storage dispatcher, eligibility owner, compaction boundary owner, and
++existing daemon/cold test seams were read and mapped above. The selected test
++seams are `packages/opencode/test/storage/cold.test.ts` for exact status
++behavior and `packages/opencode/test/cli/tui/daemon.test.ts` for the real
++control request.
++
++Expected substantive changed lines are 25-80 (`E`), requiring distributed
++qualifying Chinese explanatory comments of
++`C >= max(1, ceil(E * 0.15))`. Actual values must be calculated from the final
++diff and may not fall below the gate.
++
++After independent implementation audit records `No blocking findings`, verify
++that the audited diff is unchanged, stage only goal-owned paths, create one
++local commit using the required Chinese commit format, verify commit identity
++and working-tree status, and do not push. The commit must contain the exact
++implementation-audited revision and no unrelated changes.
++
++The auditor must independently verify the full affected interface, producer,
++consumer, invariant, measured evidence, file/line budget, absence of fallback
++behavior, exact timeout contract, and final delivery mapping.
++
++## 14. Independent Plan Audit Record
++
++Round 1, R1: blocked by an unresolved primary repair, a legacy-v1 invariant
++conflict, unfinished self-check wording, and missing commit mapping.
++
++Round 2, R2: blocked because the fixed 15-second deadline preserved the same
++reachable timeout at larger scale and the payload projection lacked a sensitive
++test.
++
++Round 3, R3 exact verdict:
++
++```text
++Blocking findings
++
++No blocking findings.
++
++Primary-path verdict: PASS.
++
++Code-quality and comment-feasibility verdict: PASS.
++
++Release verdict
++
++APPROVE — canonical plan revision R3 only.
++```
++
++Implementation is authorized only for approved revision R3.
++
++## 15. Implementation Evidence
++
++### Changed files
++
++- `packages/opencode/src/cli/cmd/db.ts`
++- `packages/opencode/src/storage/cold.ts`
++- `packages/opencode/test/cli/tui/daemon.test.ts`
++- `packages/opencode/test/storage/cold.test.ts`
++- `docs/plans/opencode-db-daemon-status-timeout.md` (plan/audit record only)
++
++No schema, migration, generated production path, or `worker.ts` change.
++
++### Red-green
++
++1. Daemon control timeout regression
++   - red: real CLI `db status` against isolated daemon + 400k reasoning Parts
++     failed with `The operation timed out` under the old 2s deadline.
++   - green: after status-only deadline removal, same fixture exits 0 and returns
++     complete `StatusReport` fields.
++2. Metadata projection regression
++   - red-capable seam: child process with 128 MiB `zeroblob` payload and
++     `PRAGMA hard_heap_limit=67108864` plus reduced cache; unrestricted
++     `select *` previously failed at `cold.ts` status query with `SQLITE_NOMEM`.
++   - green: metadata-only status projection returns exact
++     `{payloads:1, compressedBytes:128MiB, orphans:1, refCountMismatches:0}`.
++
++### Verification commands
++
++From `packages/opencode`:
++
++- `bun test --timeout 30000 test/storage/cold.test.ts`
++  - result: 31 pass / 0 fail
++- `bun test --timeout 30000 test/cli/tui/daemon.test.ts`
++  - result: 33 pass / 0 fail
++- focused reruns of both new tests: pass
++- `bun typecheck`
++  - result: pass
++- `bun run build`
++  - result: package Vite bundle succeeded; later cross-compile step failed with
++    external `Failed to extract executable for 'bun-linux-aarch64-v1.3.14'`.
++    Unrelated build-side `models-snapshot.js` regen was restored; residual
++    `bun.lock` line-ending noise is not part of this goal and will not be
++    committed.
++
++### Original feedback loop
++
++- Installed `opencode db status` no longer produced the original 2s
++  `TimeoutError` in a re-run (exit 0, ~1.6–1.8s under current load).
++- Source path regression with the large isolated fixture remains the
++  deterministic red/green proof of the old contract mismatch.
++
++### Secondary/replacement path inventory
++
++- Primary path only: live daemon control → shared dispatcher →
++  `ColdStorage.status()` → complete report.
++- Offline status remains pre-request domain selection when no matching daemon.
++- Alternate success paths added: 0
++- Fallbacks added: 0
++- Diagnostic decision surface: 0
++
++### Comment gate
++
++- `E` (added non-blank non-import non-comment code lines in goal files): 153
++- `C` (adjacent Chinese explanatory comments): 23
++- Required: `max(1, ceil(153 * 0.15)) = 23`
++- Result: pass
++
++### Unverified / residual
++
++- Full multi-target package binary extraction for Linux ARM64 failed in the
++  build script for an external toolchain download reason; local typecheck and
++  focused/full authorized test suites passed.
++- Candidate-row projection retains required `data` JSON, so exact eligibility
++  remains multi-second on multi-GB databases; the user-visible timeout is
++  removed by the status transport contract, not by approximate counting.
++
++## 16. Independent Implementation Audit Record
++
++Exact verdict:
++
++```text
++Blocking findings
++
++No blocking findings.
++
++Primary-path and fallback verdict
++
++PASS
++
++Code quality and Chinese-comment verdict
++
++PASS
++
++Release verdict
++
++APPROVE — implementation diff against approved plan revision R3 only.
++```
++
++Non-blocking notes retained:
++- status completeness assertions only cover a subset of StatusReport fields
++- no dedicated no-mutation status fixture was added beyond read-only path review
++- commit must exclude unrelated `bun.lock` noise
+diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd/db.ts
+index bb26d778122271e88cdcd84b1eef2993f3b792f9..f63e9a5d6b735524f02a0ba4014c8e5b23746f25 100644
+--- a/packages/opencode/src/cli/cmd/db.ts
++++ b/packages/opencode/src/cli/cmd/db.ts
+@@ -62,17 +62,19 @@ async function liveDaemon() {
+   return lock
+ }
+ 
+-// control request 总是携带当前 lock token，并用短 timeout 把本机 daemon 不可达明确反馈给 CLI。
++// control request 总是携带当前 lock token；短 timeout 只约束快速 control acknowledgement。
++// 完整 status 扫描随数据库增长，显式 false 避免把合法长计算误报为 daemon 不可达。
+ // 非 2xx 响应保留 daemon 错误语义，调用方不得在失败后改走 offline 并伪造成功。
+ // 该 helper 只传输 request/result，不包含 operation SQL、eligibility 或 cursor 推进逻辑。
+-async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit) {
++async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit, timeoutMs: number | false = 2_000) {
+   const response = await fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
+     ...init,
+     headers: {
+       [ServerLock.CONTROL_TOKEN_HEADER]: lock.token,
+       ...(init?.headers ?? {}),
+     },
+-    signal: AbortSignal.timeout(2_000),
++    // false 表示调用方已确认本地 daemon 身份，不再用固定 deadline 截断合法长计算。
++    signal: timeoutMs === false ? undefined : AbortSignal.timeout(timeoutMs),
+   })
+   const body: unknown = await response.json().catch(() => ({ error: `daemon returned ${response.status}` }))
+   if (!response.ok) {
+@@ -222,12 +224,18 @@ const StatusCommand = cmd({
+       return
+     }
+     if (lock) {
++      // status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
+       printMaintenance(
+-        await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
+-          method: "POST",
+-          headers: { "content-type": "application/json" },
+-          body: JSON.stringify({ operation: "status" }),
+-        }),
++        await daemonRequest(
++          lock,
++          ServerLock.CONTROL_MAINTENANCE_PATH,
++          {
++            method: "POST",
++            headers: { "content-type": "application/json" },
++            body: JSON.stringify({ operation: "status" }),
++          },
++          false,
++        ),
+       )
+       return
+     }
+diff --git a/packages/opencode/src/storage/cold.ts b/packages/opencode/src/storage/cold.ts
+index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76ef5f8418e 100644
+--- a/packages/opencode/src/storage/cold.ts
++++ b/packages/opencode/src/storage/cold.ts
+@@ -1107,6 +1107,12 @@ type MessagePackItem = {
+   oldRef: string | null
+ }
+ 
++// status eligibility 只需要这些字段；完整 freeze/repack 调用方仍可传入整行。
++type MessageValueRow = Pick<
++  typeof MessageTable.$inferSelect,
++  "id" | "session_id" | "data" | "cold_ref" | "cold_key"
++>
++
+ // canonical pack 的数组/entry 标点大小可精确增量计算；不能为每个 owner 重编码整个候选 pack，
+ // 否则大 Session 会退化为 O(n²)。duplicate key 不增加 raw bytes，但 owner 仍留在当前 chunk 贡献 refcount。
+ function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, items: T[]) {
+@@ -1161,7 +1167,7 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
+   return value
+ }
+ 
+-function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache?: Map<string, Envelope>) {
++function messageV2Value<Row extends MessageValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
+   if (row.cold_key) throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
+   const data = row.cold_ref ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref) : row.data
+   const value = extractMessageV2(data)
+@@ -1171,7 +1177,7 @@ function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache
+     projection: value.projection,
+     entry: { key: value.key, fields: value.fields },
+     oldRef: row.cold_ref,
+-  } satisfies MessagePackItem
++  }
+ }
+ 
+ // 单 owner freeze 也通过 Session/kind pack builder，保证 direct freeze 与 batch compress 产生相同 key/ref 语义。
+@@ -1262,7 +1268,13 @@ type PartPackItem = {
+   oldRef: string | null
+ }
+ 
+-function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map<string, Envelope>) {
++// cold_stats 保留是为了沿用 v1/hot 损坏门禁，而不是把 Stats 当作第二 eligibility 源。
++type PartValueRow = Pick<
++  typeof PartTable.$inferSelect,
++  "id" | "message_id" | "session_id" | "data" | "cold_ref" | "cold_key" | "cold_stats"
++>
++
++function partV2Value<Row extends PartValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
+   if (row.cold_key) throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
+   if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot or v1 Part has an unexpected cold Stats projection", hash: row.cold_ref ?? undefined })
+   const data = row.cold_ref ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref) : row.data
+@@ -1274,7 +1286,7 @@ function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map
+     stats: projectPartStats(data),
+     entry: { key: value.key, fields: value.fields },
+     oldRef: row.cold_ref,
+-  } satisfies PartPackItem
++  }
+ }
+ 
+ // Part direct freeze 与 Message 对称；现有同 Session v2 parts 会在需要时重打包，保证 key/ref 生命周期独立。
+@@ -2436,13 +2448,28 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
+   const messageCondition = or(messageCandidate(), isNotNull(MessageTable.cold_ref))
+   const partCondition = or(partCandidate(), isNotNull(PartTable.cold_ref))
+   if (!messageCondition || !partCondition) return 0
++  // 候选投影收窄到 extraction/eligibility 消费列；谓词与边界规则保持不变。
+   const messages = db
+-    .select()
++    .select({
++      id: MessageTable.id,
++      session_id: MessageTable.session_id,
++      data: MessageTable.data,
++      cold_ref: MessageTable.cold_ref,
++      cold_key: MessageTable.cold_key,
++    })
+     .from(MessageTable)
+     .where(and(isNull(MessageTable.cold_key), messageCondition))
+     .all()
+   const parts = db
+-    .select()
++    .select({
++      id: PartTable.id,
++      message_id: PartTable.message_id,
++      session_id: PartTable.session_id,
++      data: PartTable.data,
++      cold_ref: PartTable.cold_ref,
++      cold_key: PartTable.cold_key,
++      cold_stats: PartTable.cold_stats,
++    })
+     .from(PartTable)
+     .where(and(isNull(PartTable.cold_key), partCondition))
+     .all()
+@@ -3360,7 +3387,17 @@ export function status(): StatusReport {
+     const pageSize = pragmaNumber("page_size")
+     const pages = pragmaNumber("page_count")
+     const freelistPages = pragmaNumber("freelist_count")
+-    const payloads = db.select().from(ColdStorageTable).all()
++    // status 只汇总同行 metadata；禁止 materialize 不参与报告的压缩 body。
++    const payloads = db
++      .select({
++        hash: ColdStorageTable.hash,
++        kind: ColdStorageTable.kind,
++        raw_bytes: ColdStorageTable.raw_bytes,
++        compressed_bytes: ColdStorageTable.compressed_bytes,
++        ref_count: ColdStorageTable.ref_count,
++      })
++      .from(ColdStorageTable)
++      .all()
+     // 所有共享与 mismatch 指标都由真实 owner 反算，stored counter 不能给自身背书。
+     const counts = ownerCounts(
+       db,
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index a279216191d5eb48f427b99cacf4696d1b3f7a09..f1b99461908d1518bc1849bad66c1b96186acd42 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -14,6 +14,7 @@ import { afterEach, describe, expect, test } from "bun:test"
+ import { mkdir, rename } from "fs/promises"
+ import path from "path"
+ import { fileURLToPath, pathToFileURL } from "url"
++import { Database as SQLite } from "bun:sqlite"
+ import { tmpdir } from "../../fixture/fixture"
+ import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
+ import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
+@@ -982,6 +983,73 @@ describe("daemon lifecycle", () => {
+     DAEMON_START_TIMEOUT_MS + 20_000,
+   )
+ 
++  test(
++    "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
++    async () => {
++      await using tmp = await tmpdir()
++      const lockPath = path.join(tmp.path, "tui-server.json")
++      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
++
++      try {
++        if (!lock.controlPort) throw new Error("missing control port")
++        // worker 延迟打开数据库；先走同一 status seam 完成真实 migration，再写入压力夹具。
++        const initialized = await fetch(
++          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_PATH}`,
++          {
++            method: "POST",
++            headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
++            body: JSON.stringify({ operation: "status" }),
++          },
++        )
++        expect(initialized.status).toBe(200)
++        // 该夹具只放大真实 eligibility 扫描，不伪造 worker 延迟或添加测试专用生产分支。
++        const db = new SQLite(lock.dbPath)
++        // 关闭 FK 仅服务压力夹具插入速度，不改变 status 的 eligibility 语义。
++        db.exec("PRAGMA foreign_keys = OFF")
++        const insert = db.prepare(
++          "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, 1, 1, ?)",
++        )
++        // 单一缺失 Session 让每行仍经过公开候选/extraction 路径，同时避免构造无关业务历史。
++        // 40 万 reasoning 行把 exact candidate 扫描推过旧 2s 合同，规模取自 live 证据量级。
++        db.transaction(() => {
++          for (let i = 0; i < 400_000; i++)
++            insert.run(`prt_status_${i}`, "msg_status", "ses_status", '{"type":"reasoning","text":"x"}')
++        })()
++        db.close()
++
++        // 真实 CLI 读取同一 lock/token；旧两秒 deadline 会在 daemon 完成精确报告前退出。
++        const status = Bun.spawn([process.execPath, INDEX_TS, "db", "status"], {
++          env: isolatedDaemonEnv(lockPath),
++          stdin: "ignore",
++          stdout: "pipe",
++          stderr: "pipe",
++        })
++        // 外层安全期限只约束测试进程，不缩短产品 status 对合法数据库的完成合同。
++        const result = await Promise.race([
++          Promise.all([status.exited, new Response(status.stdout).text(), new Response(status.stderr).text()]),
++          Bun.sleep(30_000).then(() => "timeout" as const),
++        ])
++        if (result === "timeout") {
++          status.kill()
++          throw new Error("db status test exceeded 30 seconds")
++        }
++        const [exitCode, stdout, stderr] = result
++        expect(exitCode, stderr).toBe(0)
++        // UI JSON 与一次性 migration 提示共用 stderr，按首个对象边界读取用户可见报告。
++        const output = stdout || stderr.slice(stderr.indexOf("{"))
++        // 完成证据必须是完整 StatusReport 字段，而不是仅证明 HTTP 连接未报错。
++        expect(JSON.parse(output)).toMatchObject({
++          type: "status",
++          report: { eligibleOwners: 0, payloads: 0, refCountMismatches: 0, orphans: 0 },
++        })
++      } finally {
++        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        await proc.exited.catch(() => undefined)
++      }
++    },
++    DAEMON_START_TIMEOUT_MS + 45_000,
++  )
++
+   test(
+     "daemon startup resumes an interrupted maintenance task from its persisted record",
+     async () => {
+diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
+index 8dcdd018130129d94899a8d12f2013479cf93b46..8688c71f09d684427eccc08f4a3dceeda32a6b99 100644
+--- a/packages/opencode/test/storage/cold.test.ts
++++ b/packages/opencode/test/storage/cold.test.ts
+@@ -21,6 +21,7 @@ import { aggregateStats } from "@/cli/cmd/stats/data"
+ import { TestInstance } from "../fixture/fixture"
+ import type { SessionID } from "@/session/schema"
+ import path from "path"
++import { fileURLToPath } from "url"
+ 
+ const sessionLayer = SessionNs.layer.pipe(
+   Layer.provide(Bus.layer),
+@@ -1047,6 +1048,61 @@ describe.serial("ColdStorage", () => {
+   // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
+   // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
+   // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。
++  it.instance("reports cold metadata without materializing payload bodies", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
++      const bytes = 128 * 1024 * 1024
++      const dbPath = path.join(test.directory, "status-projection.db")
++      const script = `
++        process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
++        const { Database } = await import(${JSON.stringify(new URL("../../src/storage/db.ts", import.meta.url).href)})
++        const { ColdStorage } = await import(${JSON.stringify(new URL("../../src/storage/cold.ts", import.meta.url).href)})
++        const hash = "a5".repeat(32)
++        const bytes = ${bytes}
++        // 大 BLOB 是可观察的读取门禁；报告仍只依赖其同行 metadata 与真实 owner count。
++        // zeroblob 避免在 JS 堆分配 128 MiB 缓冲区，只让 SQLite 持有可物化的大 body。
++        Database.Client().$client.query(
++          "INSERT INTO cold_storage (hash, kind, codec, payload, raw_bytes, compressed_bytes, ref_count, time_created, time_updated) VALUES (?, 'part-pack', 'zstd', zeroblob(?), ?, ?, 0, ?, ?)"
++        ).run(hash, bytes, bytes, bytes, Date.now(), Date.now())
++        Database.close()
++        Bun.gc(true)
++        const { Database: SQLite } = await import("bun:sqlite")
++        const gate = new SQLite(${JSON.stringify(dbPath)})
++        gate.query("PRAGMA hard_heap_limit = 67108864").get()
++        gate.close()
++        // 缩小页缓存后，heap 差异只来自被查询列，不由默认 64 MiB cache 上限主导。
++        Database.Client().$client.exec("PRAGMA cache_size = -512")
++        process.stdout.write(JSON.stringify(ColdStorage.status()))
++      `
++      const result = yield* Effect.promise(async () => {
++        // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
++        const proc = Bun.spawn([process.execPath, "-e", script], {
++          cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
++          env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
++          stdin: "ignore",
++          stdout: "pipe",
++          stderr: "pipe",
++        })
++        const [exitCode, stdout, stderr] = await Promise.all([
++          proc.exited,
++          new Response(proc.stdout).text(),
++          new Response(proc.stderr).text(),
++        ])
++        return { exitCode, stdout, stderr }
++      })
++      // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
++      expect(result.exitCode, result.stderr).toBe(0)
++      expect(JSON.parse(result.stdout)).toMatchObject({
++        payloads: 1,
++        compressedBytes: bytes,
++        orphans: 1,
++        refCountMismatches: 0,
++      })
++    }),
++    30_000,
++  )
++
+   it.instance("verifies, repairs, expands, and classifies maintenance requests", () =>
+     Effect.gen(function* () {
+       const sessions = yield* SessionNs.Service

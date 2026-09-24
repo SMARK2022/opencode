@@ -1,0 +1,200 @@
+From 6bfd3120622288cc30c34c2aa6670886007441e9 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 21 May 2026 02:45:40 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=20BlockTool=20?=
+ =?UTF-8?q?=E5=92=8C=20Shell=20=E7=BB=84=E4=BB=B6=E7=9A=84=E9=A2=84?=
+ =?UTF-8?q?=E8=A7=88=E9=80=BB=E8=BE=91=EF=BC=8C=E6=B7=BB=E5=8A=A0=E5=AD=97?=
+ =?UTF-8?q?=E7=AC=A6=E8=AE=A1=E6=95=B0=E4=BB=A5=E6=94=AF=E6=8C=81=E5=86=85?=
+ =?UTF-8?q?=E5=AE=B9=E6=8A=98=E5=8F=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 1b7f67a1ef782ca394906ffb5bcf053692fd1fe2..3cd852e606f6eea23212a230a1e5859a426b1843 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1859,10 +1859,16 @@ type ToolProps<T> = {
+   part: ToolPart
+ }
+ 
+-function previewText(input: string, maxLines: number) {
++const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
++
++function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
+   const lines = input.split("\n")
+-  if (lines.length <= maxLines) return input
+-  return [...lines.slice(0, maxLines), "…"].join("\n")
++  const lineLimited = lines.length > maxLines
++  const text = lineLimited ? lines.slice(0, maxLines).join("\n") : input
++  const charLimited = text.length > maxChars
++  if (!lineLimited && !charLimited) return input
++  const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
++  return preview ? [preview, "…"].join("\n") : "…"
+ }
+ function GenericTool(props: ToolProps<any>) {
+   const { theme } = useTheme()
+@@ -1884,6 +1890,7 @@ function GenericTool(props: ToolProps<any>) {
+           maxLines={10}
+           threshold={20}
+           totalLines={output().split("\n").length}
++          totalChars={output().length}
+           preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+         >
+         <text fg={theme.text}>{output()}</text>
+@@ -1997,6 +2004,8 @@ function BlockTool(props: {
+   maxLines?: number
+   threshold?: number
+   totalLines?: number
++  totalChars?: number
++  charThreshold?: number
+   preview?: JSX.Element
+ }) {
+   const { theme } = useTheme()
+@@ -2010,13 +2019,24 @@ function BlockTool(props: {
+   })
+   const previewLines = createMemo(() => props.maxLines ?? 10)
+   const threshold = createMemo(() => props.threshold ?? 20)
++  const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
+   const [canCollapse, setCanCollapse] = createSignal(false)
+   createEffect(() => {
+     if (canCollapse()) return
+-    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) setCanCollapse(true)
++    if (previewLines() <= 0) return
++    // OpenTUI wraps very long single lines at terminal width, so newline counts
++    // alone miss commands such as `bun --eval "...large inline script..."` that
++    // occupy many visual rows.  Keep the historic line threshold, but also
++    // collapse blocks whose command/output text exceeds the preview char budget.
++    if ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()) setCanCollapse(true)
+   })
+   const [expanded, setExpanded] = createSignal(false)
+   const collapsed = createMemo(() => canCollapse() && !expanded())
++  // BlockTool spacing is intentionally owned by the section wrappers below.
++  // The body, expand affordance, and error rows each use marginTop={1}; adding
++  // a root gap would stack with those margins and render two blank rows around
++  // shell/edit/patch/write content. Keep this matching the pre-preview layout
++  // while preserving the body wrapper needed for collapsed maxHeight clipping.
+   return (
+     <box
+       border={["left"]}
+@@ -2024,7 +2044,6 @@ function BlockTool(props: {
+       paddingBottom={1}
+       paddingLeft={2}
+       marginTop={1}
+-      gap={1}
+       backgroundColor={background()}
+       customBorderChars={SplitBorder.customBorderChars}
+       borderColor={props.contextView ? theme.info : theme.background}
+@@ -2087,6 +2106,10 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+     const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
+     return stripAnsi(text?.trim() ?? "")
+   })
++  const shellPreviewText = createMemo(() => {
++    if (!output()) return `$ ${props.input.command ?? ""}`
++    return [`$ ${props.input.command ?? ""}`, "", output()].join("\n")
++  })
+ 
+   const workdirDisplay = createMemo(() => {
+     const workdir = props.input.workdir
+@@ -2116,18 +2139,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+           spinner={isRunning()}
+           maxLines={isRunning() || showContextOutput() ? 0 : 10}
+           threshold={20}
+-          totalLines={1 + output().split("\n").length}
++          totalLines={shellPreviewText().split("\n").length}
++          totalChars={shellPreviewText().length}
+           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
+           contextView={showContextOutput()}
+           contextLabel="returned to model"
+-          preview={
+-            <box gap={1}>
+-              <text fg={theme.text}>$ {props.input.command}</text>
+-              <Show when={output()}>
+-                <text fg={theme.text}>{previewText(output(), 10)}</text>
+-              </Show>
+-            </box>
+-          }
++          preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
+         >
+           <box gap={1}>
+             <text fg={theme.text}>$ {props.input.command}</text>
+@@ -2217,6 +2234,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
+           maxLines={10}
+           threshold={20}
+           totalLines={diffStats().total}
++          totalChars={diff()!.length}
+           preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
+         >
+           <box gap={1} flexDirection="column">
+@@ -2232,6 +2250,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
+           maxLines={10}
+           threshold={20}
+           totalLines={code().split("\n").length}
++          totalChars={code().length}
+           preview={
+             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+               <code
+@@ -2447,6 +2466,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
+           maxLines={10}
+           threshold={20}
+           totalLines={stats().total}
++          totalChars={diffContent().length}
+           preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
+         >
+           <box gap={1} flexDirection="column">
+@@ -2502,6 +2522,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+                 maxLines={10}
+                 threshold={20}
+                 totalLines={(file.patch ?? "").split("\n").length}
++                totalChars={(file.patch ?? "").length}
+                 preview={
+                   <Show
+                     when={file.type !== "delete"}
+diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+index ed66112e155f63478c3cb9aa639b1f995d0488f2..9011025c5163a977093765022fce45db9348eb6a 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+@@ -21,6 +21,16 @@ const promptSource = readFileSync(
+   "utf-8",
+ )
+ 
++const blockToolSource = sessionSource.slice(
++  sessionSource.indexOf("function BlockTool("),
++  sessionSource.indexOf("function Shell("),
++)
++
++const shellSource = sessionSource.slice(
++  sessionSource.indexOf("function Shell("),
++  sessionSource.indexOf("function DiffView("),
++)
++
+ describe("Session route integration points", () => {
+   describe("scrollbar", () => {
+     test("imports drawSmoothScrollbar", () => {
+@@ -102,6 +112,25 @@ describe("Session route integration points", () => {
+       expect(sessionSource).toContain("canCollapse")
+     })
+ 
++    test("BlockTool uses one vertical spacing strategy", () => {
++      expect(blockToolSource).toContain("marginTop={1}")
++      expect(blockToolSource).not.toContain("gap={1}")
++    })
++
++    test("BlockTool can collapse long wrapped single-line content", () => {
++      expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
++      expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
++      expect(blockToolSource).toContain("totalChars?: number")
++      expect(blockToolSource).toContain("charThreshold")
++      expect(blockToolSource).toContain("(props.totalChars ?? 0) > charThreshold()")
++    })
++
++    test("Shell counts command and output characters for collapse", () => {
++      expect(shellSource).toContain("shellPreviewText")
++      expect(shellSource).toContain("totalChars={shellPreviewText().length}")
++      expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
++    })
++
+     test("Edit tool shows diff stats in title", () => {
+       expect(sessionSource).toContain("← Edit")
+       expect(sessionSource).toContain("stats().added")

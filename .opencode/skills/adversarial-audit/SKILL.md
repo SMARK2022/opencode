@@ -367,7 +367,7 @@ For each current commit, independently perform all of the following checks:
    before the first current edit and updated after every edit, materialization,
    test, and audit result; missing, delayed, merged, empty, or incomplete
    records are `BLOCK`.
-3. Reconstruct the v1.17.18 owner through the actual producer, consumer, callers,
+3. Reconstruct the v1.17.20 owner through the actual producer, consumer, callers,
    error paths, concurrency, exit, cleanup, permission, and persistence chains.
 4. Compare the SMARK behavior with the upstream behavior one responsibility at a
    time. State which implementation is stronger for each behavior, preserve the

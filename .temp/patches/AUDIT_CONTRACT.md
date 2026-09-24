@@ -21,7 +21,7 @@ Build your own understanding from:
 - Source, upstream and target tests read directly.
 - Repository instructions and accepted ADRs.
 - Reproduced commands, traces, fixtures and explicit contracts.
-- Direct comparison of the SMARK and v1.17.18 implementations.
+- Direct comparison of the SMARK and v1.17.20 implementations; the directory name remains `opencode-v1.17.18-smark`.
 
 Every material claim must be independently verified. A file list, grep result, builder explanation, stale report or prior summary is an investigation lead, never proof.
 
