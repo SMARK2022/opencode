@@ -1,10 +1,11 @@
 import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src/util/output-notice"
 import { describe, expect, test } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Sink, Stream } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
 import * as fs from "node:fs/promises"
+import { markConfigDependenciesInstalled } from "../fixture/plugin-deps"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
 import { Shell } from "../../src/shell/shell"
@@ -25,6 +26,8 @@ import { PermissionReviewer } from "@/permission/reviewer/service"
 import { Permission as PermissionService } from "@/permission"
 import { ToolProgress } from "@/tool/progress"
 import { PermissionPrecheck } from "../../src/permission/precheck"
+import { ChildProcessSpawner, ExitCode, ProcessId, makeHandle } from "effect/unstable/process/ChildProcessSpawner"
+import * as PlatformError from "effect/PlatformError"
 
 const shellLayer = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
@@ -209,6 +212,85 @@ const mustTruncate = (result: {
 }
 
 describe("tool.shell", () => {
+  // 复用真实 shell 矩阵，同时覆盖 PowerShell 编码入口及其余原生脚本入口。
+  for (const plugin of [false, true]) {
+    each(`process identity ${plugin ? "explicit plugin precedence" : "ordinary child"}`, () =>
+      Effect.gen(function* () {
+        // 子进程直接调用真实身份初始化，不启动 worker 服务，也不依赖 CLI 输出标记。
+        const dir = yield* tmpdirScoped()
+        const inherited = {
+          OPENCODE_PROCESS_ROLE: "worker",
+          OPENCODE_RUN_ID: "parent-run",
+          // 无关变量也使用 OPENCODE_ 前缀，防止修复误删整个命名空间。
+          OPENCODE_SHELL_TEST_VALUE: "parent-value",
+          PYTHONIOENCODING: "parent-encoding",
+          PYTHONUTF8: "parent-utf8",
+        }
+        // 与已有 shell 矩阵一样恢复全局环境，失败的断言也不能污染后续用例。
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const previous = Object.fromEntries(Object.keys(inherited).map((key) => [key, process.env[key]]))
+            Object.assign(process.env, inherited)
+            return previous
+          }),
+          (previous) =>
+            Effect.sync(() => {
+              for (const [key, value] of Object.entries(previous)) {
+                if (value === undefined) delete process.env[key]
+                else process.env[key] = value
+              }
+            }),
+        )
+        // 文件入口避免各 shell 的内联 JavaScript 引号规则掩盖环境继承行为。
+        yield* Effect.promise(() =>
+          Bun.write(
+            path.join(dir, "identity.mjs"),
+            `
+          import { ensureProcessMetadata } from ${JSON.stringify(import.meta.resolve("@opencode-ai/core/util/opencode-process"))};
+          console.log(JSON.stringify({ ...ensureProcessMetadata("main"),
+            value: process.env.OPENCODE_SHELL_TEST_VALUE,
+            encoding: process.env.PYTHONIOENCODING, utf8: process.env.PYTHONUTF8 }));
+        `,
+          ),
+        )
+        if (plugin) {
+          // 真实本地插件走配置发现及 shell.env；不能用服务替身绕开覆盖顺序。
+          yield* Effect.promise(() =>
+            Bun.write(
+              path.join(dir, ".opencode/plugin/identity.ts"),
+              `
+            export default async () => ({ "shell.env": (_input, output) => Object.assign(output.env, {
+              OPENCODE_PROCESS_ROLE: "worker", OPENCODE_RUN_ID: "plugin-run",
+              OPENCODE_SHELL_TEST_VALUE: "plugin-value", PYTHONIOENCODING: "plugin-encoding", PYTHONUTF8: "plugin-utf8"
+            }) });
+          `,
+            ),
+          )
+          // 本地文件无需网络安装，沿用配置依赖 fixture 的已满足标记。
+          yield* Effect.promise(() => markConfigDependenciesInstalled(path.join(dir, ".opencode")))
+        }
+        const result = yield* runIn(
+          dir,
+          run({ command: "bun identity.mjs", workdir: dir, description: "Read child identity" }),
+        )
+        // 成功必须来自真实有限进程正常返回，不能用中止后的部分输出代替。
+        expect(result.metadata.exit).toBe(0)
+        const identity: unknown = JSON.parse(result.output)
+        // 普通子进程获得自己的身份；显式插件身份仍属于调用者承诺的覆盖契约。
+        expect(identity).toEqual({
+          processRole: plugin ? "worker" : "main",
+          runID: plugin ? "plugin-run" : expect.stringMatching(/.+/),
+          value: plugin ? "plugin-value" : "parent-value",
+          // Windows 默认 UTF-8 胜过父环境，但不得胜过插件的显式设置。
+          encoding: plugin ? "plugin-encoding" : process.platform === "win32" ? "utf-8" : "parent-encoding",
+          utf8: plugin ? "plugin-utf8" : process.platform === "win32" ? "1" : "parent-utf8",
+        })
+        // 仅断言 main 不足以防止父运行标识继续串入子进程。
+        if (!plugin) expect(identity).not.toMatchObject({ runID: "parent-run" })
+      }),
+    )
+  }
+
   each("basic", () =>
     runIn(
       projectRoot,
@@ -2149,6 +2231,246 @@ describe("tool.shell display output", () => {
         }),
       ),
     15_000,
+  )
+})
+
+describe("tool.shell post-root lifetime", () => {
+  for (const mode of ["abort", "timeout", "normal"] as const) {
+    it.live(`keeps ${mode} active after the root exits with output still open`, () =>
+      Effect.gen(function* () {
+        const dir = yield* tmpdirScoped()
+        const root = yield* Deferred.make<void>()
+        // 两个独立信号区分“root确已退出”与“consumer已有可交付文本”，不靠启动延迟推断顺序。
+        const ready = yield* Deferred.make<void>()
+        const controller = new AbortController()
+        const spawner = yield* ChildProcessSpawner
+        // 有限后代持有真实管道；最终业务输出与 root exit 均先于取消，避免测成前台 kill。
+        // release 是正常退出信号，六秒上限仅保护失败的测试，不能参与成功断言。
+        // 后代吸收取消后的broken pipe只是为了自然清理fixture，工具结果仍须报告取消。
+        yield* Effect.promise(() =>
+          Bun.write(
+            path.join(dir, "holder.mjs"),
+            `
+        import fs from 'node:fs';
+        process.stdout.on('error', () => {});
+        process.stderr.on('error', () => {});
+        console.log('HOLDER_READY');
+        const end = Date.now() + 6000;
+        while (!fs.existsSync('release') && Date.now() < end) await Bun.sleep(20);
+        console.log('LATE_STDOUT');
+        console.error('LATE_STDERR');
+        fs.writeFileSync('done', '');
+      `,
+          ),
+        )
+        // 故意保留NoNewWindow造成的共享写端，覆盖原故障而非换成独立启动规避它。
+        const command =
+          process.platform === "win32"
+            ? `Start-Process -FilePath '${process.execPath.replaceAll("'", "''")}' -ArgumentList 'holder.mjs' -NoNewWindow; Write-Output ROOT_FINAL`
+            : `${bin} holder.mjs & printf 'ROOT_FINAL\\n'`
+        const selected = process.platform === "win32" ? ps.find((item) => item.label === "pwsh") : undefined
+        if (process.platform === "win32" && !selected) throw new Error("pwsh is required for the post-root fixture")
+        // withShell在作用域结束时恢复环境；该平台fixture不改变其他测试选用的shell。
+        const execute = runIn(
+          dir,
+          run(
+            // 手动取消预算长于fixture寿命；deadline用独立预算，避免二者争胜掩盖取消回归。
+            { command, timeout: mode === "timeout" ? 3000 : 15000, description: "Complete post-root output lifetime" },
+            {
+              ...ctx,
+              abort: controller.signal,
+              metadata: (input) =>
+                typeof input.metadata?.output === "string" && input.metadata.output.includes("HOLDER_READY")
+                  ? Deferred.succeed(ready, undefined).pipe(Effect.asVoid)
+                  : Effect.void,
+            },
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner, {
+              ...spawner,
+              // 只观察公开 exitCode，实际 spawn、输出与资源释放始终来自生产 adapter。
+              spawn: (cmd) =>
+                spawner
+                  .spawn(cmd)
+                  .pipe(
+                    Effect.tap((handle) =>
+                      Effect.forkScoped(handle.exitCode.pipe(Effect.andThen(Deferred.succeed(root, undefined)))),
+                    ),
+                  ),
+            }),
+          ),
+        )
+        const running = yield* Effect.forkScoped(selected ? withShell(selected, execute) : execute)
+        yield* Deferred.await(root)
+        yield* Deferred.await(ready)
+        // 正常路径显式放行晚到输出；取消与deadline路径必须在后代尚未放行时交付部分结果。
+        if (mode === "normal") yield* Effect.promise(() => Bun.write(path.join(dir, "release"), ""))
+        if (mode === "abort") controller.abort()
+        const result = yield* Fiber.join(running).pipe(
+          Effect.ensuring(Effect.promise(() => Bun.write(path.join(dir, "release"), ""))),
+        )
+        // 子进程用真实broken-pipe语义收尾；完成标记用于fixture清理，绝不参与工具的完成条件。
+        // POSIX取消会终止整个进程组，后代不会再写done；Windows已退root后的后代则自然收尾。
+        if (mode === "normal" || process.platform === "win32") {
+          yield* Effect.gen(function* () {
+            while (!(yield* Effect.promise(() => Bun.file(path.join(dir, "done")).exists()))) yield* Effect.sleep(20)
+          }).pipe(Effect.timeout("5 seconds"))
+        }
+        expect(result.output).toContain("ROOT_FINAL")
+        if (mode === "normal") {
+          // root之后两个流仍有真实字节，不能用退出事件代替EOF，也不能在正常路径截断读取。
+          expect(result.output).toContain("LATE_STDOUT")
+          expect(result.output).toContain("LATE_STDERR")
+          expect(result.metadata.exit).toBe(0)
+          return
+        }
+        // 取消交付已经捕获的结果，不等待未来 late 字节，也不把 root 的0误报成成功。
+        expect(result.output).toContain(`reason="${mode === "abort" ? "user_abort" : "timeout"}"`)
+        expect(result.output).not.toContain("LATE_STDOUT")
+        expect(result.metadata.exit).toBeNull()
+      }),
+    )
+  }
+
+  for (const mode of ["exit", "output", "defect", "early-eof"] as const) {
+    it.live(`observes ${mode} while coordinating process and output`, () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const failed = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          const spawner = yield* ChildProcessSpawner
+          const error = PlatformError.systemError({
+            _tag: "Unknown",
+            module: "ChildProcess",
+            method: mode,
+            cause: new Error("lifetime probe failure"),
+          })
+          // OS错误通过公开spawner seam注入，避免依赖平台随机产生信号退出或管道读错误。
+          // 另一完成条件保持未决，直接检验错误监督，而不是最终超时以后仍能看到同一错误。
+          const failure = Deferred.succeed(failed, undefined).pipe(Effect.andThen(Effect.fail(error)))
+          const all =
+            mode === "output"
+              ? Stream.fromEffect(failure)
+              : mode === "defect"
+                ? Stream.fromEffect(Deferred.succeed(failed, undefined).pipe(Effect.andThen(Effect.die(error))))
+                : Stream.empty.pipe(Stream.ensuring(Deferred.succeed(failed, undefined)))
+          // 合成handle仅注入合法adapter结果，PID不连接OS；虚拟kill不会触碰真实进程。
+          const handle = makeHandle({
+            pid: ProcessId(1),
+            stdin: Sink.drain,
+            stdout: all,
+            stderr: Stream.empty,
+            all,
+            exitCode: mode === "exit" ? failure : Deferred.await(release).pipe(Effect.as(ExitCode(17))),
+            isRunning: Effect.succeed(false),
+            kill: () => Effect.void,
+            // Shell只消费all；其他描述符按公开空流/空sink合同提供，不另造消费算法。
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+            unref: Effect.succeed(Effect.void),
+          })
+          const call = yield* run({
+            command: "echo probe",
+            timeout: 5000,
+            description: "Observe complete process outcome",
+          }).pipe(
+            Effect.provideService(ChildProcessSpawner, { ...spawner, spawn: () => Effect.succeed(handle) }),
+            Effect.exit,
+            Effect.forkScoped,
+          )
+          if (mode === "early-eof") {
+            // EOF不能让仍在运行的程序提前成功；释放root后仍应交付原生数值非零退出码。
+            yield* Deferred.await(failed)
+            // 窗口从真实EOF起算；输出结束时尚有异步收尾，单次即时poll会漏掉提前成功。
+            expect(
+              yield* Effect.raceAllFirst([
+                Fiber.join(call).pipe(Effect.as("completed")),
+                Effect.sleep(50).pipe(Effect.as("waiting for root")),
+              ]),
+            ).toBe("waiting for root")
+            yield* Deferred.succeed(release, undefined)
+            const result = yield* Fiber.join(call)
+            if (Exit.isFailure(result)) return yield* result
+            expect(result.value.metadata.exit).toBe(17)
+            return
+          }
+          yield* Deferred.await(failed)
+          // 一秒仅是错误已产生后的外层测试保护；不用于控制生产timer或猜测fixture就绪。
+          const result = yield* Fiber.join(call).pipe(
+            Effect.timeout("1 second"),
+            // 测试失败也解开合成root的闸门，防止一个红测把整个测试进程挂住。
+            Effect.ensuring(Deferred.succeed(release, undefined)),
+          )
+          expect(Exit.isFailure(result) && Cause.pretty(result.cause)).toContain("lifetime probe failure")
+        }),
+      ),
+    )
+  }
+
+  it.live("cleans up a live process when its output consumer fails", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner
+        let running: Effect.Effect<boolean, PlatformError.PlatformError> = Effect.succeed(true)
+        const error = PlatformError.systemError({
+          _tag: "Unknown",
+          module: "ChildProcess",
+          method: "read",
+          cause: new Error("ready stream failed"),
+        })
+        // POSIX写出ready之前就忽略TERM，保证错误触发的scope释放真实经过强杀升级。
+        // Windows沿现有tree kill；两者都验证失败返回前已释放存活root，而非只取消一个Promise。
+        const command =
+          process.platform === "win32"
+            ? `& ${bin} -e 'console.log("READY"); setInterval(() => {}, 1000)'`
+            : `trap '' TERM; printf 'READY\\n'; while :; do sleep 1; done`
+        const selected = process.platform === "win32" ? ps.find((item) => item.label === "pwsh") : undefined
+        if (process.platform === "win32" && !selected) throw new Error("pwsh is required for the live failure fixture")
+        const execute = fail({ command, timeout: 5000, description: "Fail an active output consumer" }).pipe(
+          Effect.provideService(ChildProcessSpawner, {
+            ...spawner,
+            spawn: (cmd) =>
+              spawner.spawn(cmd).pipe(
+                Effect.map((handle) => {
+                  // 保存公开存活查询，在Tool返回之后检查实际root，而不是清理函数是否被调用。
+                  running = handle.isRunning
+                  // 使用真实字节作为故障触发点；继承原handle的kill、scope和exit观察。
+                  const all = handle.all.pipe(
+                    Stream.flatMap((bytes) =>
+                      Buffer.from(bytes).includes("READY") ? Stream.fail(error) : Stream.make(bytes),
+                    ),
+                  )
+                  return makeHandle({ ...handle, all })
+                }),
+              ),
+          }),
+        )
+        const result = yield* selected ? withShell(selected, execute) : execute
+        // 错误对象原样交付，同时root已终止；共同排除“快速丢弃异常但遗留进程”。
+        expect(result).toBe(error)
+        expect(yield* running).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("starts its execution budget after the existing permission wait", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        // 延迟本身是本例的审批行为，不是fixture readiness；超过命令预算后仍应正常执行。
+        // 复用Context.ask边界，权限分类和真实reviewer模型均保持既有实现与既有测试。
+        const result = yield* run(
+          { command: "echo approved", timeout: 3000, description: "Run after approval" },
+          {
+            ...ctx,
+            ask: () => Effect.sleep(3200),
+          },
+        )
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output.trim()).toBe("approved")
+      }),
+    ),
   )
 })
 

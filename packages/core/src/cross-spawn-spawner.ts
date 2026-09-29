@@ -237,26 +237,45 @@ export const make = Effect.gen(function* () {
       return Effect.succeed(sink)
     })
 
-  const setupOutput = (
+  const setupOutput = Effect.fnUntraced(function* (
     command: ChildProcess.StandardCommand,
     proc: NodeChildProcess.ChildProcess,
     out: ChildProcess.StdoutConfig,
     err: ChildProcess.StderrConfig,
-  ) => {
+  ) {
     // 急切缓冲（写入与订阅时序解耦）：spawn 建柄后立即把主 stdout/stderr pipe 进
     // PassThrough（与下方 extra-fd 输出同款模式）。惰性 fromReadable 下快退子进程
     // 在订阅前写入并退出会丢管道数据（macOS CI shell basic 红 + Windows 10/10
     // 探针复现）；立即 pipe 让读取端自 spawn 时刻持有数据，订阅延迟只推迟消费
     // 时刻、不再影响输出保真。
-    const tapOutput = (node: NodeChildProcess.ChildProcess["stdout"]) => {
-      if (!node) return
-      const tap = new PassThrough()
-      node.on("error", (cause) => tap.destroy(toError(cause)))
-      node.pipe(tap)
-      return tap
-    }
-    const tapOut = tapOutput(proc.stdout)
-    const tapErr = tapOutput(proc.stderr)
+    // acquireRelease 原子建立两对 capture 并注册释放，避免取消落在所有权空窗。
+    const taps = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        [proc.stdout, proc.stderr].map((source) => {
+          if (!source) return
+          const tap = new PassThrough()
+          const relay = (cause: Error) => tap.destroy(toError(cause))
+          source.on("error", relay)
+          // close 发生在异步 error 之后；保留 relay 到实际关闭，避免清理中出现未处理错误。
+          source.once("close", () => source.off("error", relay))
+          source.pipe(tap)
+          return { source, tap }
+        }),
+      ),
+      (taps) =>
+        Effect.sync(() => {
+          // NodeStream 只销毁 tap；原始读端必须由创建它的 spawn scope 一并释放。
+          // 不绑定 root exit：scope 内的晚订阅与后代真实输出仍需保留。
+          for (const pair of taps) {
+            if (!pair) continue
+            pair.source.unpipe(pair.tap)
+            pair.source.destroy()
+            pair.tap.destroy()
+          }
+        }),
+    )
+    const tapOut = taps[0]?.tap
+    const tapErr = taps[1]?.tap
     let stdout = tapOut
       ? NodeStream.fromReadable({
           evaluate: () => tapOut,
@@ -274,7 +293,7 @@ export const make = Effect.gen(function* () {
     if (Sink.isSink(err.stream)) stderr = Stream.transduce(stderr, err.stream)
 
     return { stdout, stderr, all: Stream.merge(stdout, stderr) }
-  }
+  })
 
   const spawn = (command: ChildProcess.StandardCommand, opts: NodeChildProcess.SpawnOptions) =>
     Effect.callback<readonly [NodeChildProcess.ChildProcess, ExitSignal], PlatformError.PlatformError>((resume) => {
@@ -423,7 +442,7 @@ export const make = Effect.gen(function* () {
           )
 
           const fd = yield* setupFds(command, proc, extra)
-          const out = setupOutput(command, proc, sout, serr)
+          const out = yield* setupOutput(command, proc, sout, serr)
           let ref = true
           return makeHandle({
             pid: ProcessId(proc.pid!),

@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Effect, Exit, Stream } from "effect"
+import { Deferred, Effect, Exit, Fiber, Stream } from "effect"
 import type * as PlatformError from "effect/PlatformError"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -266,6 +266,95 @@ describe("cross-spawn spawner", () => {
         expect(chunks.join("")).toContain("x")
       }),
       20_000,
+    )
+  })
+
+  describe("capture scope ownership", () => {
+    for (const mode of ["unsubscribed", "interrupted"]) {
+      fx.live(
+        `releases captured readers when an ${mode} scope ends`,
+        Effect.gen(function* () {
+          const tmp = yield* Effect.acquireRelease(
+            Effect.promise(() => tmpdir()),
+            (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+          )
+          const release = path.join(tmp.path, "release")
+          const result = path.join(tmp.path, "result")
+          const file = path.join(tmp.path, "holder.cjs")
+          // 后代只在测试放行后写入，避免把进程启动快慢误当作读端释放。
+          // 微小同步写入直接验证实际管道行为，不观察私有 tap 或监听器数量。
+          const child = [
+            "const fs = require('node:fs')",
+            "const timer = setInterval(() => {",
+            `  if (!fs.existsSync(${JSON.stringify(release)})) return`,
+            "  clearInterval(timer)",
+            "  clearTimeout(limit)",
+            "  const results = [1, 2].map(fd => {",
+            "    try { fs.writeSync(fd, 'late'); return 'open' } catch { return 'closed' }",
+            "  })",
+            // 原子发布完整结果，避免文件刚创建尚未写完时被轮询读到。
+            `  fs.writeFileSync(${JSON.stringify(result + ".tmp")}, results.join('|'))`,
+            `  fs.renameSync(${JSON.stringify(result + ".tmp")}, ${JSON.stringify(result)})`,
+            "}, 20)",
+            // 有限寿命只负责失败后的自然清理，不用于判定 scope 应何时完成。
+            "const limit = setTimeout(() => clearInterval(timer), 5000)",
+            "fs.writeSync(1, 'ready')",
+            "process.send('ready')",
+          ].join("\n")
+          yield* Effect.promise(() => fs.writeFile(file, child))
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              // Windows 后代需独立存活，否则 root 的退出本身就结束 fixture，掩盖泄漏。
+              // IPC ready 保证后代已建立管道；放行文件才允许它尝试晚到写入。
+              const handle = yield* js(
+                `const child = require('node:child_process').spawn(process.execPath, [${JSON.stringify(file)}], { detached: true, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] }); child.once('message', () => { child.disconnect(); child.unref() })`,
+              )
+              if (mode === "interrupted") {
+                // 先消费真实 ready 字节再中断，保证覆盖已订阅 consumer 的释放路径。
+                // 只停止 tap 不会关闭原读端；随后同一晚到写入必须仍能揭示这个缺口。
+                const ready = yield* Deferred.make<void>()
+                const reader = yield* Stream.runForEach(handle.all, () => Deferred.succeed(ready, undefined)).pipe(
+                  Effect.forkScoped,
+                )
+                yield* Deferred.await(ready)
+                yield* Fiber.interrupt(reader)
+              }
+              // root 已退出，但后代仍持有写端；scope 才是 capture 的所有权边界。
+              expect(yield* handle.exitCode).toBe(ChildProcessSpawner.ExitCode(0))
+            }),
+          )
+          // 无订阅也必须释放 eager capture；放行后再检查两条真实管道的写入结果。
+          yield* Effect.promise(() => fs.writeFile(release, "go"))
+          yield* Effect.gen(function* () {
+            while (!(yield* Effect.promise(() => Bun.file(result).exists()))) yield* Effect.sleep(20)
+          }).pipe(Effect.timeout("5 seconds"))
+          expect(yield* Effect.promise(() => fs.readFile(result, "utf8"))).toBe("closed|closed")
+        }),
+        15_000,
+      )
+    }
+
+    fx.live(
+      "keeps another scope's stdout and stderr open",
+      Effect.gen(function* () {
+        const release = yield* Deferred.make<Uint8Array>()
+        // stdin 是另一个 scope 的因果闸门；关闭第一个 scope 后才允许第二个写出结果。
+        // 同一 spawner service 的释放必须只作用于自己的 capture，不能误关并行调用。
+        const other = yield* js(
+          "process.stdin.once('data', data => { process.stdout.write('out:' + data); process.stderr.write('err:' + data); process.stdin.destroy() })",
+          { stdin: Stream.fromEffect(Deferred.await(release)) },
+        )
+        yield* Effect.scoped(
+          js("process.stdout.write('first')")
+            .asEffect()
+            .pipe(Effect.flatMap((handle) => handle.exitCode)),
+        )
+        yield* Deferred.succeed(release, Buffer.from("still open"))
+        const output = yield* decodeByteStream(other.all)
+        expect(output).toContain("out:still open")
+        expect(output).toContain("err:still open")
+      }),
+      15_000,
     )
   })
 

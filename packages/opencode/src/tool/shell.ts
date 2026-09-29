@@ -6,6 +6,7 @@ import * as Tool from "./tool"
 import { ToolProgress } from "./progress"
 import path from "path"
 import * as Log from "@opencode-ai/core/util/log"
+import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import type { Node } from "web-tree-sitter"
@@ -38,6 +39,8 @@ import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } 
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
+// 终止阶段沿用既有500ms宽限，失败时的scope释放也必须能升级；不改变执行预算。
+const TERMINATION_GRACE_MS = 500
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -439,6 +442,7 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
         env,
         stdin: "ignore",
         detached: false,
+        forceKillAfter: TERMINATION_GRACE_MS,
       },
     )
   }
@@ -457,6 +461,7 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     env,
     stdin: "ignore",
     detached: process.platform !== "win32",
+    forceKillAfter: TERMINATION_GRACE_MS,
   })
 }
 
@@ -779,7 +784,8 @@ export const ShellTool = Tool.define(
       )
       const utf8Env = process.platform === "win32" ? { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } : {}
       return {
-        ...process.env,
+        // 普通命令不能继承宿主 worker 身份；插件的显式环境覆盖仍保留最后优先级。
+        ...sanitizedProcessEnv(),
         ...utf8Env,
         ...extra.env,
       }
@@ -921,8 +927,12 @@ export const ShellTool = Tool.define(
 
           const timeout = Effect.sleep(`${input.timeout + 100} millis`)
 
-          const exit = yield* Effect.raceAll([
-            handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
+          // root退出与输出EOF是两个完成条件；共同竞争才能让排空期间的取消与原deadline继续有效。
+          // 首完成保留真实错误，避免exit/consumer失败后被首成功竞争改写为timeout。
+          const exit = yield* Effect.raceAllFirst([
+            Effect.all([handle.exitCode, Fiber.join(output)], { concurrency: "unbounded" }).pipe(
+              Effect.map(([code]) => ({ kind: "exit" as const, code })),
+            ),
             abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
           ])
@@ -930,25 +940,33 @@ export const ShellTool = Tool.define(
           if (exit.kind !== "exit") {
             aborted = exit.kind === "abort"
             expired = exit.kind === "timeout"
-            // kill 等到的是主进程 exit，后代仍可能持有 stdout/stderr。
-            // 将输出排空纳入同一 500ms 宽限期，避免主进程先退出后跳过强杀升级。
-            // 此处只等待 output fiber；宽限期到期不打断它，保留后续缓冲输出消费。
-            yield* handle.kill().pipe(
-              Effect.andThen(Fiber.join(output)),
-              Effect.timeoutOrElse({
-                duration: "500 millis",
-                // 主进程退出后仍向原进程组发送 SIGKILL，清理持有管道的后代。
-                // 保留原有忽略错误语义：升级时进程组可能已经消失。
-                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
-              }),
-              Effect.orDie,
-            )
+            const kill = (killSignal?: NodeJS.Signals) =>
+              handle.kill({ killSignal }).pipe(
+                // isRunning检查与kill之间允许真实退出；仅已退出时承认终止完成，存活进程保留错误。
+                Effect.catch((error) =>
+                  Effect.flatMap(handle.isRunning, (running) => (running ? Effect.fail(error) : Effect.void)),
+                ),
+              )
+            yield *
+              Effect.gen(function* () {
+                // Windows死root的PID不再拥有后代；结束本地读取无需再等taskkill寻找已退出进程。
+                // POSIX仍保留进程组终止，覆盖root已退但后代忽略TERM的既有合同。
+                if (process.platform === "win32" && !(yield* handle.isRunning)) return
+                yield* kill().pipe(
+                  Effect.andThen(Fiber.join(output)),
+                  Effect.timeoutOrElse({
+                    duration: TERMINATION_GRACE_MS,
+                    // 沿用强杀升级；进程组在升级前消失是既有可接受结果。
+                    orElse: () => kill("SIGKILL").pipe(Effect.ignore),
+                  }),
+                )
+              }).pipe(
+                // 取消结束剩余读取，同时等待decoder.end与已捕获文本提交；不再等未来writer的EOF。
+                // kill失败也释放consumer，真实异常仍通过外层scope传播。
+                Effect.ensuring(Fiber.interrupt(output)),
+                Effect.orDie,
+              )
           }
-
-          // 进程退出不代表 Effect stream 已处理完缓冲 chunk 及其 metadata 更新。
-          // 正常退出或强杀后都完成消费，再组装最终输出、截断和诊断摘要。
-          // 宽限期内已排空时，此次 join 立即返回；否则继续消费剩余输出。
-          yield* Fiber.join(output)
 
           return exit.kind === "exit" ? exit.code : null
         }),
