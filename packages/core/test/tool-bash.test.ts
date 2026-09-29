@@ -206,6 +206,18 @@ describe("BashTool", () => {
         reset()
         return withTool(tmp.path, (registry) =>
           Effect.gen(function* () {
+            // 真实leaf必须剥离内部身份，但不能误删同前缀的普通用户变量。
+            const inherited = { OPENCODE_PROCESS_ROLE: "worker", OPENCODE_RUN_ID: "parent-run", OPENCODE_SHELL_TEST_VALUE: "leaf-value" }
+            const previous = Object.fromEntries(Object.keys(inherited).map((key) => [key, process.env[key]]))
+            yield* Effect.acquireRelease(
+              Effect.sync(() => Object.assign(process.env, inherited)),
+              () => Effect.sync(() => {
+                for (const [key, value] of Object.entries(previous)) {
+                  if (value === undefined) delete process.env[key]
+                  else process.env[key] = value
+                }
+              }),
+            )
             const definitions = yield* toolDefinitions(registry)
             expect(definitions.map((tool) => tool.name)).toEqual(["bash"])
             expect(definitions[0]?.inputSchema).not.toHaveProperty("properties.background")
@@ -256,12 +268,16 @@ describe("BashTool", () => {
               maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
             })
             expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
-            // extendEnv 保留用户显式 Java/Ruby 值，leaf 的两项覆盖不能重写它们。
-            expect(runs[0]?.extendEnv).toBe(true)
-            expect(runs[0]?.env).toEqual(process.platform === "win32" ? {
-              PYTHONIOENCODING: "utf-8",
-              PYTHONUTF8: "1",
-            } : {})
+            // 逐字段断言，既尊重Windows的Path拼写，也避免失败时展开完整宿主环境。
+            const env = runs[0]?.env
+            expect(runs[0]?.extendEnv).toBe(false)
+            expect(env?.PYTHONIOENCODING).toBe(process.platform === "win32" ? "utf-8" : process.env.PYTHONIOENCODING)
+            expect(env?.PYTHONUTF8).toBe(process.platform === "win32" ? "1" : process.env.PYTHONUTF8)
+            expect(env?.OPENCODE_PROCESS_ROLE).toBeUndefined()
+            expect(env?.OPENCODE_RUN_ID).toBeUndefined()
+            expect(env?.OPENCODE_SHELL_TEST_VALUE).toBe("leaf-value")
+            const pathKey = Object.keys(env ?? {}).find((key) => process.platform === "win32" ? key.toLowerCase() === "path" : key === "PATH")
+            expect(pathKey ? env?.[pathKey] : undefined).toBe(process.env.PATH)
             expect(runs).toHaveLength(1)
             // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
             const contexts = yield* SystemContextRegistry.Service

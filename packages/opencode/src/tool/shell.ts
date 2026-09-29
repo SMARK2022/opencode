@@ -4,6 +4,7 @@ import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
 import { ToolProgress } from "./progress"
 import path from "path"
+import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import type { Node } from "web-tree-sitter"
@@ -77,6 +78,8 @@ function riskyGit(tokens: string[]) {
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
+// 终止阶段沿用既有500ms升级，不改变工具执行预算。
+const TERMINATION_GRACE_MS = 500
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -349,8 +352,10 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     shell: invocation.shell,
     cwd,
     env,
+    extendEnv: false,
     stdin: "ignore",
     detached: process.platform !== "win32",
+    forceKillAfter: TERMINATION_GRACE_MS,
   })
 }
 
@@ -497,7 +502,8 @@ export const ShellTool = Tool.define(
         { env: {} },
       )
       return {
-        ...process.env,
+        // 普通命令不继承宿主worker身份；插件显式覆盖仍最后生效。
+        ...sanitizedProcessEnv(),
         // 保留源顺序：宿主环境、Windows UTF-8、插件 extras；插件显式覆盖仍最后生效。
         ...Shell.utf8Environment(),
         ...extra.env,
@@ -651,8 +657,12 @@ export const ShellTool = Tool.define(
 
           const timeout = Effect.sleep(`${input.timeout + 100} millis`)
 
-          const exit = yield* Effect.raceAll([
-            handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
+          // 正常完成同时等待root退出与输出EOF，取消和原deadline覆盖整个消费阶段。
+          // 首完成竞争保留真实失败，不能等到另一分支成功才交付错误。
+          const exit = yield* Effect.raceAllFirst([
+            Effect.all([handle.exitCode, Fiber.join(output)], { concurrency: "unbounded" }).pipe(
+              Effect.map(([code]) => ({ kind: "exit" as const, code })),
+            ),
             abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
           ])
@@ -660,12 +670,16 @@ export const ShellTool = Tool.define(
           if (exit.kind !== "exit") {
             aborted = exit.kind === "abort"
             expired = exit.kind === "timeout"
-            // Core的强杀等待覆盖持管道的后代；这里不叠第二套计时或提前打断output。
-            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
+            yield* Effect.gen(function* () {
+              // Windows死root不能再代表其后代；POSIX仍沿Core进程组与强杀升级收口。
+              if (process.platform === "win32" && !(yield* handle.isRunning)) return
+              yield* handle.kill({ forceKillAfter: TERMINATION_GRACE_MS })
+            }).pipe(
+              // 归还consumer时结清decoder及已捕获文本，不再等待未来writer的EOF。
+              Effect.ensuring(Fiber.interrupt(output)),
+              Effect.orDie,
+            )
           }
-
-          // 正常退出或强杀后仍需消费完缓冲chunk及metadata，再组装最终输出和诊断。
-          yield* Fiber.join(output)
 
           return exit.kind === "exit" ? exit.code : null
         }),

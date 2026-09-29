@@ -21,6 +21,7 @@ import { ShellPermission } from "../shell-permission"
 import { ShellRemote } from "../shell-remote"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
+import { sanitizedProcessEnv } from "../util/opencode-process"
 import { createAutoTextDecoder } from "../text-decoding"
 import { formatShellExecutionNotice } from "../util/output-notice"
 
@@ -339,10 +340,10 @@ const layer = Layer.effectDiscard(
               const command = ChildProcess.make(invocation.command, invocation.args, {
                 cwd: target.canonical,
                 shell: invocation.shell,
-                // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
-                extendEnv: true,
-                // V2 尚无插件 shell.env owner；这里只叠加源编码设置，不能恢复 legacy hook。
-                env: Shell.utf8Environment(),
+                // 完整过滤后关闭二次继承，避免spawner把worker身份重新补回。
+                extendEnv: false,
+                // 原生路径仍无插件hook；编码覆盖与其余宿主环境保持原有优先级。
+                env: { ...sanitizedProcessEnv(), ...Shell.utf8Environment() },
                 stdin: "ignore",
                 detached: process.platform !== "win32",
                 // 原生Bash scope退出同样按500ms升级，清理仍归现有AppProcess/spawner。
