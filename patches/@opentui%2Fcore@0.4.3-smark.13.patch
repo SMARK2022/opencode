@@ -72,3 +72,16 @@ diff --git a/renderables/ScrollBox.d.ts b/renderables/ScrollBox.d.ts
      set stickyScroll(value: boolean);
      get stickyStart(): "bottom" | "top" | "left" | "right" | undefined;
      set stickyStart(value: "bottom" | "top" | "left" | "right" | undefined);
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -3422,7 +3422,8 @@
+   async runStreamingLoop() {
+     this._streamingActive = true;
+     try {
+-      while (this._streamingPending !== undefined) {
++      // 已销毁的 owner 不得开启下一轮，否则旧 client 会在清理后重新创建 worker。
++      while (!this.isDestroyed && this._streamingPending !== undefined) {
+         const content = this._streamingPending;
+         this._streamingPending = undefined;
+         const snapshot = this._highlightSnapshotId;
