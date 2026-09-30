@@ -10,7 +10,7 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Auth } from "../auth"
 import { Env } from "../env"
-import { applyEdits, modify } from "jsonc-parser"
+import { applyEdits, findNodeAtLocation, modify, parseTree } from "jsonc-parser"
 import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { existsSync } from "fs"
 import { Account } from "@/account/account"
@@ -350,7 +350,9 @@ function globalConfigFile() {
 }
 
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
-  if (!isRecord(patch)) {
+  const root = parseTree(input)
+  // 只有双方都是对象才逐字段合并；布尔开关切换为配置对象或原节点缺席时，必须整体替换该节点。
+  if (!isRecord(patch) || (root && findNodeAtLocation(root, path)?.type) !== "object") {
     const edits = modify(input, path, patch, {
       formattingOptions: {
         insertSpaces: true,
@@ -810,21 +812,12 @@ export const layer = Layer.effect(
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)
 
-      let next: Info
-      let changed: boolean
-      if (!file.endsWith(".jsonc")) {
-        const existing = ConfigParse.schema(Info, ConfigParse.jsonc(before, file), file)
-        const merged = mergeDeep(writable(existing), patch)
-        const serialized = JSON.stringify(merged, null, 2)
-        changed = serialized !== before
-        if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
-        next = merged
-      } else {
-        const updated = patchJsonc(before, patch)
-        next = ConfigParse.schema(Info, ConfigParse.jsonc(updated, file), file)
-        changed = updated !== before
-        if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
-      }
+      // 公共 schema 不包含语音认证快照；它可验证配置，但不能替代原文作为整份文件的写回来源。
+      // JSON 与 JSONC 都只修改请求字段，磁盘私有认证保留，公开返回值仍由原 schema 限定。
+      const updated = patchJsonc(before, patch)
+      const next = ConfigParse.schema(Info, ConfigParse.jsonc(updated, file), file)
+      const changed = updated !== before
+      if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
 
       if (changed) yield* invalidate()
       return { info: next, changed }

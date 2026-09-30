@@ -185,7 +185,8 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
 
 describe("backend Cookie attempts", () => {
   // Cookie-only 429属于匿名额度，成功浏览器返回的实际Bearer必须在下一轮直接复用。
-  test("reuses the browser account snapshot after anonymous dictation is rejected", async () => {
+  // 429直接进入浏览器；401/403先读取profile，Cookie-only额度拒绝后仍须提交同一份账户快照。
+  test.each([429, 401, 403])("reuses the browser account snapshot after HTTP %i recovery", async (status) => {
     await using tmp = await tmpdir()
     const seen: (string | undefined)[] = []
     await using fixture = await backendFixture(tmp.path, async (request) => {
@@ -195,13 +196,14 @@ describe("backend Cookie attempts", () => {
       // 只认独立已知的账户值，避免Cookie单独成功掩盖授权字段在持久化中丢失。
       // 标准 Headers 读取保持与线上请求相同的大小写无关语义。
       const account = authorization === "Bearer browser-token" && cookie === "oai-did=browser"
-      return new Response(JSON.stringify({ text: "authenticated transcript" }), { status: account ? 200 : 429 })
-    }, "console.log(JSON.stringify({text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))")
+      return new Response(JSON.stringify({ text: "authenticated transcript" }), { status: account ? 200 : cookie === "oai-did=profile" ? 429 : status })
+    }, "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))")
     expect(await fixture.run()).toBe("browser transcript")
     // 第二轮从文件读取，经真实HTTP发送；仅检查转换helper不足以覆盖完整消费链。
     expect(await fixture.run()).toBe("authenticated transcript")
-    expect(seen).toEqual([undefined, "Bearer browser-token"])
-    expect(await fixture.commands()).toBe("transcribe-file\n")
+    // 两种入口都只在恢复轮执行CLI；下一轮从磁盘取得Bearer后必须直接得到HTTP文字。
+    expect(seen).toEqual(status === 429 ? [undefined, "Bearer browser-token"] : [undefined, undefined, "Bearer browser-token"])
+    expect(await fixture.commands()).toBe(status === 429 ? "transcribe-file\n" : "auth-export\ntranscribe-file\n")
     expect(await readVoiceAuth(fixture.config, "chatgpt")).toMatchObject({ access_token: "browser-token" })
   })
 

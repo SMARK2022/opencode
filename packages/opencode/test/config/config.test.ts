@@ -331,6 +331,106 @@ test("updates global config and omits empty shell key in jsonc", async () => {
   }
 })
 
+test.each(["json", "jsonc"])("updates global %s without losing or exposing private auth", async (extension) => {
+  // 使用真实快照的字典形状，但凭据完全合成，回归不依赖用户账户或浏览器。
+  const auth = {
+    cookies: { "oai-did": { value: "synthetic-cookie", expires: 0 } },
+    fetched_at: "2026-09-06T00:00:00Z",
+  }
+  await using tmp = await tmpdir()
+  const prev = Global.Path.config
+  // 公共服务仍走真实文件系统；只切换到 fixture，避免触碰用户全局配置。
+  Object.assign(Global.Path, { config: tmp.path })
+  try {
+    // Cookie-only 和带 Bearer 都是已持久化的合法快照，不能只保护其中一种。
+    for (const snapshot of [auth, { ...auth, access_token: "synthetic-token" }]) {
+      const chatgpt = { type: "local", command: ["synthetic-mcp"], enabled: false, auth: snapshot }
+      await writeConfig(tmp.path, { model: "test/before", mcp: { chatgpt } }, `opencode.${extension}`)
+      // 无关 model 更新复现原先的整份 schema 写回丢失，不直接调用内部 patch 函数。
+      const result = await saveGlobal({ model: "test/after" })
+      const written = await Filesystem.readJson<{ model: string; mcp: { chatgpt: typeof chatgpt } }>(
+        path.join(tmp.path, `opencode.${extension}`),
+      )
+      expect(written.model).toBe("test/after")
+      // 同时约束 command/enabled 与认证内容，防止只保留秘密却破坏 MCP 配置。
+      expect(written.mcp.chatgpt).toEqual(chatgpt)
+      // 磁盘保留不等于公开授权；返回值必须继续剥离 auth。
+      expect(result.mcp?.chatgpt).toEqual({ type: "local", command: ["synthetic-mcp"], enabled: false })
+    }
+  } finally {
+    // 即使断言失败也恢复全局路径，避免污染同文件后续配置用例。
+    Object.assign(Global.Path, { config: prev })
+    await clear(true)
+  }
+})
+
+test.each(["json", "jsonc"])("updates global %s formatter types and object patches", async (extension) => {
+  await using tmp = await tmpdir()
+  const prev = Global.Path.config
+  Object.assign(Global.Path, { config: tmp.path })
+  try {
+    // 固定期望来自公开配置合同，不通过另一份合并算法计算答案。
+    for (const [before, patch, after] of [
+      // 布尔开关可切换为配置字典，不能向布尔父节点添加属性。
+      [
+        { formatter: false },
+        { formatter: { prettier: { disabled: true } } },
+        { formatter: { prettier: { disabled: true } } },
+      ],
+      [{ formatter: { prettier: { disabled: true } } }, { formatter: true }, { formatter: true }],
+      // 缺席对象必须建立；空补丁对已有对象则保留原字段。
+      [{}, { formatter: {} }, { formatter: {} }],
+      [{}, { formatter: { prettier: {} } }, { formatter: { prettier: {} } }],
+      [
+        { formatter: { prettier: { disabled: true } } },
+        { formatter: {} },
+        { formatter: { prettier: { disabled: true } } },
+      ],
+      // 嵌套对象继续合并，但数组是完整替换，不能残留旧命令参数。
+      [
+        { formatter: { prettier: { command: ["old", "arg"], disabled: true } } },
+        { formatter: { prettier: { command: ["new"] } } },
+        { formatter: { prettier: { command: ["new"], disabled: true } } },
+      ],
+    ] satisfies [Config.Info, Config.Info, Config.Info][]) {
+      await writeConfig(tmp.path, before, `opencode.${extension}`)
+      expect(await saveGlobal(patch)).toEqual(after)
+      // 返回正确还不够，后继进程读取的持久化结果也必须遵守同一合同。
+      expect(await Filesystem.readJson<Config.Info>(path.join(tmp.path, `opencode.${extension}`))).toEqual(after)
+    }
+  } finally {
+    Object.assign(Global.Path, { config: prev })
+    await clear(true)
+  }
+})
+
+test.each(["json", "jsonc"])("validates global %s updates before writing and reports unchanged patches", async (extension) => {
+  await using tmp = await tmpdir()
+  const file = path.join(tmp.path, `opencode.${extension}`)
+  const prev = Global.Path.config
+  Object.assign(Global.Path, { config: tmp.path })
+  try {
+    await writeConfig(tmp.path, { model: "test/before" }, `opencode.${extension}`)
+    // 派生的插件来源只服务运行时，不能随公开更新持久化。
+    await saveGlobal({ model: "test/after", plugin_origins: [] })
+    expect(await Filesystem.readJson<Config.Info>(file)).toEqual({ model: "test/after" })
+    // 同值更新必须报告未变更，不能因序列化格式变化触发无意义失效。
+    const result = await Effect.runPromise(
+      Config.Service.use((svc) => svc.updateGlobal({ model: "test/after" })).pipe(Effect.scoped, Effect.provide(layer)),
+    )
+    expect(result).toEqual({ info: { model: "test/after" }, changed: false })
+    // 磁盘内容是独立不可信输入，格式合法但字段无效时也必须先验证再写盘。
+    await writeConfig(tmp.path, { formatter: "invalid" }, `opencode.${extension}`)
+    const before = await Filesystem.readText(file)
+    await expect(saveGlobal({ model: "test/rejected" })).rejects.toThrow()
+    // 失败不能只表现为异常：原文必须完整保留，避免发生部分提交。
+    expect(await Filesystem.readText(file)).toBe(before)
+  } finally {
+    Object.assign(Global.Path, { config: prev })
+    await clear(true)
+  }
+})
+
 test("loads formatter boolean config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
