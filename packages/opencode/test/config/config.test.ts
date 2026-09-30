@@ -399,6 +399,71 @@ it.effect("updates global config and omits empty shell key in jsonc", () =>
   ),
 )
 
+for (const extension of ["json", "jsonc"]) {
+  it.live(`updates global ${extension} without losing or exposing private auth`, () =>
+    withGlobalConfig({}, ({ dir }) => Effect.gen(function* () {
+      // 合成两种真实快照形状，不读取账户或启动浏览器。
+      const auth = { cookies: { "oai-did": { value: "synthetic-cookie", expires: 0 } }, fetched_at: "2026-09-06T00:00:00Z" }
+      for (const snapshot of [auth, { ...auth, access_token: "synthetic-token" }]) {
+        const chatgpt = { type: "local", command: ["synthetic-mcp"], enabled: false, auth: snapshot }
+        yield* writeConfigEffect(dir, { model: "test/before", mcp: { chatgpt } }, `opencode.${extension}`)
+        const result = yield* Config.use.updateGlobal({ model: "test/after" })
+        // 磁盘保留认证和兄弟字段，公开结果仍受Schema约束。
+        expect(yield* FSUtil.use.readJson(path.join(dir, `opencode.${extension}`))).toEqual({ model: "test/after", mcp: { chatgpt } })
+        expect(result.info.mcp?.chatgpt).toEqual({ type: "local", command: ["synthetic-mcp"], enabled: false })
+      }
+    })),
+  )
+
+  it.live(`updates global ${extension} formatter types and object patches`, () =>
+    withGlobalConfig({}, ({ dir }) => Effect.gen(function* () {
+      // 固定oracle覆盖类型切换，不能用第二份合并算法计算期望。
+      for (const [before, patch, after] of [
+        [
+          { formatter: false },
+          { formatter: { prettier: { disabled: true } } },
+          { formatter: { prettier: { disabled: true } } },
+        ],
+        [{ formatter: { prettier: { disabled: true } } }, { formatter: true }, { formatter: true }],
+        // 缺席对象必须建立，已有对象的空补丁不能清掉旧字段。
+        [{}, { formatter: {} }, { formatter: {} }],
+        [{}, { formatter: { prettier: {} } }, { formatter: { prettier: {} } }],
+        [
+          { formatter: { prettier: { disabled: true } } },
+          { formatter: {} },
+          { formatter: { prettier: { disabled: true } } },
+        ],
+        // 数组整体替换，嵌套对象仍保留未请求修改的设置。
+        [
+          { formatter: { prettier: { command: ["old", "arg"], disabled: true } } },
+          { formatter: { prettier: { command: ["new"] } } },
+          { formatter: { prettier: { command: ["new"], disabled: true } } },
+        ],
+      ] satisfies [ConfigV1.Info, ConfigV1.Info, ConfigV1.Info][]) {
+        yield* writeConfigEffect(dir, before, `opencode.${extension}`)
+        expect((yield* Config.use.updateGlobal(patch)).info).toEqual(after)
+        expect(yield* FSUtil.use.readJson(path.join(dir, `opencode.${extension}`))).toEqual(after)
+      }
+    })),
+  )
+
+  it.live(`validates global ${extension} updates before writing and reports unchanged patches`, () =>
+    withGlobalConfig({}, ({ dir }) => Effect.gen(function* () {
+      const file = path.join(dir, `opencode.${extension}`)
+      yield* writeConfigEffect(dir, { model: "test/before" }, `opencode.${extension}`)
+      // 派生插件来源不持久化，同值更新也不因重排格式造成失效。
+      yield* Config.use.updateGlobal({ model: "test/after", plugin_origins: [] })
+      expect(yield* FSUtil.use.readJson(file)).toEqual({ model: "test/after" })
+      expect(yield* Config.use.updateGlobal({ model: "test/after" })).toEqual({ info: { model: "test/after" }, changed: false })
+      yield* writeConfigEffect(dir, { formatter: "invalid" }, `opencode.${extension}`)
+      const before = yield* FSUtil.use.readFileString(file)
+      // 失败必须保持原文；捕获真实Exit而非删除会失败的断言。
+      expect(Exit.isFailure(yield* Effect.exit(Config.use.updateGlobal({ model: "test/rejected" })))).toBe(true)
+      expect(yield* FSUtil.use.readFileString(file)).toBe(before)
+    })),
+  )
+}
+
 it.effect("logs global update diagnostics once without exposing values", () =>
   withGlobalConfig(
     {
