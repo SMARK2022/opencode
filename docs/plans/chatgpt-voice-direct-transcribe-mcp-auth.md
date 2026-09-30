@@ -1,15 +1,15 @@
 # Canonical Plan：共享后端语音转录、Profile Cookie 与完整取消
 
 > Status: verified
-> Revision: R19
-> Approved revision: R19
+> Revision: R27
+> Approved revision: R27
 > Implementation allowed: no further material changes without revision or rework
 > Audit mode: full-scope
 > Requirement source: 本会话用户原文，见 §1
-> Target: verified-implementation-and-commit
-> Last updated: 2026-09-19
+> Target: verified-implementation
+> Last updated: 2026-09-30
 
-本文件是唯一实施规格。当前R19保持R18全部修复与行为范围，仅按用户最新原文采用等价平台检查替代远端macOS CI放行方式，见§43。Bun保持1.3.14，800行按增加侧计量，注释保持完整解释深度。R19方案及实现均获独立full-scope批准，最终验证与边界见§45-46；按最新授权仅本地提交，不push。
+本文件是唯一实施规格。R27沿用§47-53全部修复，§54替换实际附件卡片解析。上限5生产文件/600行，仍为5文件，Bun1.3.14不变；不手填凭据、不调用question、不提交或推送。新增语义须当前修订完整批准后实施。
 
 ## 1. 用户原始要求
 
@@ -1217,3 +1217,997 @@ No blocking findings.
 前次待核验事项已关闭。批准仅适用于本次核验的 R19 和实际差异，保留 Darwin 未直接验证及账户 E2E 未执行的明确边界。
 
 记录方据此设置verified。方案审计R18、R19各一轮（R18补齐执行授权后同会话批准），实现审计R18一轮保留旧平台门禁、R19一轮按新用户验收完成。R19没有增加生产行为；全量Linux CI等价、Windows原始崩溃反馈、源码回归、typecheck、完整artifact与独立计量均已获得证据。提交仅包含canonical、prompt-voice-input.ts及两个测试文件，保留无关工作树与hooks，不创建CI分支、不push。
+
+## 47. R20：当前页面输入框合同替换与 HTTP 恢复闭环
+
+### 47.1 原文、范围与约定
+
+> 你应当准确全面完整检查并给出针对性的修复方式和修复方案。那本质上而言，相应的修改的生产代码行数不得超过200行，相应的修改文件数不得超过4个生产文件。那请你给出相应的修改方案以及具体的修改内容，甚至说给出相应的 diff。同时必须确保现行的流程不再会出现类似问题。同时你要保持你的流程逻辑简洁，不要过度的防御型。那本身而言，呃我认为整体的流程应当是比如说旧的逻辑啊或者旧的参数有问题，那本身你使用新的参数组装去进行替换即可。你不要在上面去加啊加啊加啊改啊改啊改。这样你会导致你的主逻辑非常的冗余，函数非常的多。那而且与此同时，当前我进行相应的 ALT 加V进行相应的转录。那理论上而言，Open Code的侧不会受到 DOM 的影响。那本质上而言，它只是进行 HTTP 请求。那如果这个都有问题，那说明从根源处就是都会有很大问题，因为当前我进行了一次请求，它最终 fallback 到浏览器都没有正常成功，所以我认为这是有问题的。
+
+> 当前我试过了，直接alt+v的opencode内置路径仍然不行，还有log在
+
+此前本轮用户明确要求“不修改工作区”；最新消息要求方案及 diff，故只授权本 canonical 文档修改，拟议 diff 不应用。不得把历史 commit/push 指令用于本轮。保持既有认证、取消、期限、原生录音正文修复及解释注释，不扩展状态机、备用 selector、认证刷新或重试。外部网页任意未来改版无法作永久保证；本轮承诺的是当前已观察输入域的完整行为回归与端到端验收，不用测试 fixture 的通过冒充线上已恢复。
+
+约定来源：根 AGENTS.md、packages/opencode/AGENTS.md、packages/opencode/test/AGENTS.md、httpapi/AGENTS.md、CONTEXT.md、first-principles-engineering policy 和 canonical 模板。本轮未找到 thirdparty 内额外 AGENTS 或相关 voice/browser ADR。既有 canonical 全文及 R19 审计由只读研究 invocation ses_f139533f3ffea9KqE11PuKuyGr 核对；新批准只覆盖 R20 原始完整范围。
+
+### 47.2 当前调用链与证据边界
+
+```text
+三个 TUI 输入 -> submitVoice(独立 WAV 字节) -> SDK POST /tui/voice/transcribe
+ -> resolveVoiceTarget(用户级 MCP 配置) -> 配置文件锁内 readVoiceAuth
+ -> cached Cookie + 可选 Bearer 的 NetworkProxy HTTP POST
+ -> 无缓存/401/403 时 offline auth-export + Cookie-only HTTP POST
+ -> 仍未成功时 CLI transcribe-file -> daemon bootstrap -> voice page stability
+ -> page fetch /backend-api/transcribe -> 同次 text/Cookie/Bearer -> 原子写回
+下一次录音从已写回的缓存重新 HTTP 直连。
+```
+
+缓存直连与 profile HTTP 不调用 DOM。浏览器启动和 voice lease 都消费 DOM 的 sessionPageFact，因而末级恢复会受 DOM 影响。浏览器恢复失败时没有新快照提交；后继 Alt+V 仍使用此前快照。此为可达因果链，不证明用户那次第一步的具体状态码。
+
+| 证据/源文件 | 观察与用途 | 分类 |
+|---|---|---|
+| chatgpt-dom.js:856-906、15 处旧输入框引用 | 要求旧 ID 才判 authenticated；还影响 Project 状态、等待、fill/send、附件及 image 表单范围 | observed |
+| chatgpt-core.js:1700-1735、2382-2514 | startup/voice 共用上述事实；不收敛会刷新/退出；不能只修 TUI | reachable |
+| chatgpt.js:898-955 | Node24、DPAPI/v10、只读 SQLite 离线导出 Cookie，不产出 Bearer | observed |
+| tui-control.ts 全部 voice 路径 | HTTP 现有 Cookie/Bearer、multipart、代理、分支与原子写回；前两步异常未保留给最终调用者 | observed |
+| prompt-voice-input.ts、handlers/tui.ts:134-166 | 真实 TUI 到后端路径、WAV/活动租约清理、末级错误交付 | reachable |
+| packages/core/src/network-proxy.ts；src/util/process.ts | provider fetch 保留 headers/body/signal；Process.run timeout=1000 是 abort 后 kill grace，不是一秒执行期限 | observed |
+| test-mcp.js:2798、voice lifecycle/export 测试 | 旧 fixture 自带 prompt-textarea，无法发现当前真实网页移除 ID | observed |
+| voice-auth.test.ts:188-205、209-240、取消/期限测试 | 已有 HTTP 持久化与恢复分支的行为 seam，不能拿假 browser text 代替本轮真实页面验收 | observed |
+| 用户手动网页听写 | 用户报告当前网页输入与听写正常 | contracted |
+
+日志位置为用户目录 C:/Users/Lenovo/AppData/Local/opencode/chatgpt-browser-agent/state/daemon.log；不复制凭据。14256 行记录 08:22:50Z `...after one reload: inconsistent`。最新 14274-14277 行记录 09:13:23Z 启动、09:13:27Z `Navigating frame was detached`。本轮探针与用户操作曾时间重叠，frame/Target closed 不能直接归因于新的生产竞态；不据此新增生命周期机制。C:/Users/Lenovo/.local/share/opencode/log/2026-09-29T082132.log 仍只有启动记录，dev.log 为空，未找到该次直连上游状态。
+
+**必须保留的不确定性：** 未读取当前生效用户配置的认证缓存；此前敏感配置读取预检拒绝，未绕过。无法从现有日志还原用户那次 cached POST 是 401、429、网络失败还是缺快照。严禁把“缓存过期”“Cookie 变格式”写成已证实事实。需要获准的、仅输出状态/认证字段存在性而不输出值的实际调用证据，或者修复后的用户原路径闭环，才能进一步判定。此项限制不授权修改 HTTP 参数。
+
+### 47.3 已执行反馈与最小复现
+
+全部使用当前代码，未给 production 打补丁。命令工作目录分别为 thirdparty/chatgpt-browser-agent（Node）和 packages/opencode（Bun）。临时浏览器只用于诊断，未发送聊天消息；HTTP 测试音频是内存中生成的一秒 16kHz PCM 静音 WAV，结果空 text 属合法 200，不等于真实语音准确率验收。浏览器 profile 自身缓存更新位于用户目录。
+
+1. **原探针 RED/单变量对照：** Node `CHATGPT_TEST_HOOKS=1` 导入 core.testing，使用 launchBrowser、prepareBootstrapPage、dom.sessionPageFact。页面 HTTP 200、ready complete、authStatus logged_in、token 存在、无登录按钮；唯一可见输入框为表单内 div.ProseMirror、role=textbox、contenteditable=true，无旧 ID。原探针连续返回 inconsistent。仅临时赋旧 ID，原函数返回 authenticated；还原 ID，原函数再次返回 inconsistent。未改变 Cookie、网络、token 或原函数。
+2. **HTTP 原路径：** Bun 导入原 buildDirectTranscribeRequest、NetworkProxy.fetch，对当前浏览器 Cookie + Bearer 发 POST，HTTP 200、hasText=true、textLength=0、无 cf-mitigated。不是重新实现一个 fetch 成功来替代原路径。
+3. **profile 单变量实验：** 原 exportProfileAuth 真实离线成功，29 cookies、session cookie 存在、无 Bearer。固定这份 Cookie、同一 WAV、同一原 HTTP 构造：不带 Bearer 为 429；只补当前 Bearer 为 200/hasText=true/textLength=0。证明本机当前 Cookie 解密与传输并非必然失败，但不证明用户缓存内容。
+4. **页面 fetch 对照：** 当前 bootstrap Bearer、credentials=include、file multipart，返回 200/hasText=true/textLength=0。初次诊断脚本误将 Web Response.status 当函数，捕获 TypeError；已纠正诊断脚本后重测，不将其作为 production 失败证据。
+5. **反证修正：** 早先确实见到 HTTP403/cf-mitigated=challenge，但随后的多次 HTTP200 仍稳定重现旧 selector 故障。challenge 脚本存在本身不能证明页面被挑战阻挡，因此撤回其为共同根因的判断。
+
+最小 RED 可复现程序主体（不含账户凭据）：
+
+```js
+const before = await dom.sessionPageFact(page, { waitForTerminal: false })
+// 页面由 MCP 原启动方式取得；只在实验新页面临时改变一个属性并恢复。
+const saved = await page.evaluate(() => {
+  const el = document.querySelector('form [contenteditable="true"][role="textbox"]')
+  const id = el.getAttribute('id')
+  el.id = 'prompt-textarea'
+  return id
+})
+try {
+  const during = await dom.sessionPageFact(page, { waitForTerminal: false })
+  console.log(before.kind, during.kind) // 实测 inconsistent authenticated
+} finally {
+  await page.evaluate(id => {
+    const el = document.querySelector('#prompt-textarea')
+    if (id === null) el.removeAttribute('id')
+    else el.setAttribute('id', id)
+  }, saved)
+}
+console.log((await dom.sessionPageFact(page, { waitForTerminal: false })).kind)
+// 实测恢复后 inconsistent；本属性补写仅为诊断，禁止带入生产方案。
+```
+
+### 47.4 不变量、首个分歧与责任
+
+| ID | 不变量/支持输入域 | 首个分歧与 owner | 修复/验证 |
+|---|---|---|---|
+| V20-1 | 正常已登录的当前网页可完成启动与 voice page 准备 | DOM adapter 把旧 ID 等同 composer 存在 | 替换定位合同；原 sessionPageFact 在无 ID 当前 DOM 上返回 authenticated |
+| V20-2 | 同一 composer 的 Project、文字、附件和发送消费者一致 | 15 个 literal 仍绑定旧 ID | 全部一次替换，保持表单归属和原操作顺序；submit/附件/Project seam 回归 |
+| V20-3 | 有效缓存 HTTP 成功时不进入 browser；恢复成功写回供下一轮直连 | HTTP 实验可成功，用户该次首步原因未观测 | 保持 HTTP 代码；cache401/403→profile429→browser成功→下一轮cache200 闭环验收 |
+| V20-4 | 正常调用使用修复版 daemon | CLI 同版本会复用已加载旧 adapter 的进程 | 沿既有版本淘汰合同同时 bump CLI/core；不新增重启机制 |
+| V20-5 | 取消、固定期限、无秘密日志、无重复提交保持 | 尚无本轮违反证据 | 重跑既有行为回归，禁止为了通过而弱化认证或增时 |
+| V20-6 | ≤4生产文件、≤200生产修改行；无过度防御 | 用户约束 | 计划3文件；同时报告新增侧及增删总量，删除不抵扣；不新增 helper/state/fallback |
+
+支持范围：当前 ChatGPT 首页、Project/对话内实际 composer；非表单的其它 editable 不属于 composer。定位不依赖中文 aria-label、CSS 构建哈希、ProseMirror-focused 或旧 ID。没有证据要求 selector 候选数组、按失败逐个尝试、token 解析器或代理切换。现有 frame 导航恢复不扩展。
+
+### 47.5 单一路径与替换清单
+
+将 chatgpt-dom.js 内全部 15 处 `#prompt-textarea` 替换为同一个 CSS 合同：`form [contenteditable="true"][role="textbox"]`。保留原 querySelector、waitForSelector、waitForFunction 的使用位置、可见性/期限和 closest('form') 操作；直接替换参数，不引入新的函数。认证判断仍要求原 bootstrap、token、无登录入口，不通过删除 composer 检查绕过故障。
+
+旧 ID 查询全部退出生产；不保留 `old || new`、selector 列表、运行时补 ID、通用“任意 editable”或中文 label 后备。为保持现有重复调用结构，本轮只替换 literal，不增加 page.evaluate 参数层或新的 resolver 框架。统一替换由完整调用点清单和行为测试约束，不用源码 grep 充当功能测试。
+
+CLI/core DAEMON_VERSION 从26同步改27，仅触发既有正常调用的版本选主。其意义是代码版本失配，非 IPC schema 修改。部署时子模块已提交引用随主仓库正常分发；当前方案阶段不操作 Git 或现用 daemon。
+
+现有附加路径清单：cache/profile/browser 属用户明确合同，保留；浏览器启动的既有 reload/cold recovery 保留，本次没有新增；模式/附件既有行为保持。新 alternate success path=0，新诊断生产分支=0，变更诊断决策面=0%。不为不可还原的旧 HTTP 错误添加新日志状态或“缓存修复”算法。
+
+### 47.6 文件清单与预算
+
+| 文件 | 拟议变更 | 生产新增侧/增删总量预算 |
+|---|---|---|
+| thirdparty/chatgpt-browser-agent/chatgpt-dom.js | 替换15处输入框 literal；邻近补充3条解释，保留原注释 | 18 / 33 |
+| thirdparty/chatgpt-browser-agent/chatgpt.js | DAEMON_VERSION 26→27，补1条版本原因注释，保留凭据合同注释 | 2 / 3 |
+| thirdparty/chatgpt-browser-agent/chatgpt-core.js | 同步 DAEMON_VERSION，补1条版本原因注释 | 2 / 3 |
+| thirdparty/chatgpt-browser-agent/test-mcp.js | 修正现有网页 fixtures，覆盖无旧ID真实DOM、submit/Project/附件及认证反例；版本复用回归 | 非生产，预计80–180行实质修改 |
+| thirdparty/chatgpt-browser-agent/test-voice-robustness.js | 更新现有独立页面断言的旧ID fixture/定位，使实测不再绑定退休属性 | 非生产，预计5–15行 |
+| packages/opencode/test/cli/tui/voice-auth.test.ts | 新增完整401/403→profile429→browser快照→第二次cache200一项行为切片，沿用fixture | 非生产，预计25–45行 |
+| 本 canonical | R20 方案、拟议diff、审计 | 非生产 |
+
+生产新增侧预计22行、增删总量39行，保守上限60行；3生产文件，新增文件0，依赖/config/generated修改0。不能以净增代替计量。若证据证明另有生产缺陷，先修订本 canonical 并重审，仍受4文件/200行约束，不能占第四文件猜修。
+
+### 47.7 拟议 diff（尚未应用）
+
+以下省略 unchanged context，15处替换逐项列出；函数名是定位锚点，实施以当时文件为准。
+
+```diff
+--- a/thirdparty/chatgpt-browser-agent/chatgpt-dom.js
++++ b/thirdparty/chatgpt-browser-agent/chatgpt-dom.js
+@@ readProjectHomeState
+-        composer: !!document.querySelector('#prompt-textarea'),
++        composer: !!document.querySelector('form [contenteditable="true"][role="textbox"]'),
+@@ selectComposerMode
+-      const input = document.querySelector('#prompt-textarea');
++      const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ selectImageAspectRatio
+-      const input = document.querySelector('#prompt-textarea');
++      const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ uploadFiles
+-        await page.waitForSelector('#prompt-textarea', { timeout: 15_000 });
++        await page.waitForSelector('form [contenteditable="true"][role="textbox"]', { timeout: 15_000 });
+@@ clearComposerAttachments
+-      const input = document.querySelector('#prompt-textarea');
++      const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ waitForComposer
+-    await page.waitForSelector('#prompt-textarea', { visible: true, timeout: 45_000 });
++    // 当前网页移除了输入框 ID；以表单内可编辑 textbox 定位，避免语言或构建样式改变影响等待。
++    await page.waitForSelector('form [contenteditable="true"][role="textbox"]', { visible: true, timeout: 45_000 });
+@@ readSessionPageFact
+-        const composer = !!document.querySelector('#prompt-textarea');
++        // 会话就绪与实际提交使用同一输入框合同，不能把已退休 ID 的缺席当成未登录页面。
++        const composer = !!document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ waitForUploadReady
+-        const input = document.querySelector('#prompt-textarea');
++        const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ attachmentState
+-        const input = document.querySelector('#prompt-textarea');
++        const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ fillPrompt
+-    await page.waitForSelector('#prompt-textarea', { visible: true, timeout: 45_000 });
++    await page.waitForSelector('form [contenteditable="true"][role="textbox"]', { visible: true, timeout: 45_000 });
+@@ fillPrompt / waitForFunction
+-      const input = document.querySelector('#prompt-textarea');
++      const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ replaceComposerText
+-      const el = document.querySelector('#prompt-textarea');
++      const el = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ clickSend / waitForFunction
+-      const input = document.querySelector('#prompt-textarea');
++      const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ clickSend / before
+-      const input = document.querySelector('#prompt-textarea');
++      const input = document.querySelector('form [contenteditable="true"][role="textbox"]');
+@@ clickSend / evaluateHandle
+-    const handle = await page.evaluateHandle(() => document.querySelector('#prompt-textarea')?.closest('form')?.querySelector('button[data-testid="send-button"]'));
++    // 输入框改为语义定位，发送按钮仍归属其表单，不能扩大为页面全局按钮。
++    const handle = await page.evaluateHandle(() => document.querySelector('form [contenteditable="true"][role="textbox"]')?.closest('form')?.querySelector('button[data-testid="send-button"]'));
+--- a/thirdparty/chatgpt-browser-agent/chatgpt.js
++++ b/thirdparty/chatgpt-browser-agent/chatgpt.js
+@@ DAEMON_VERSION
+-const DAEMON_VERSION = 26;
++// 页面适配已替换旧输入框合同；正常调用必须淘汰仍持有旧 adapter 的 daemon。
++const DAEMON_VERSION = 27;
+--- a/thirdparty/chatgpt-browser-agent/chatgpt-core.js
++++ b/thirdparty/chatgpt-browser-agent/chatgpt-core.js
+@@ DAEMON_VERSION
+-const DAEMON_VERSION   = 26;
++// 与 CLI 同步代码版本，避免新客户端复用旧的页面就绪判定。
++const DAEMON_VERSION   = 27;
+```
+
+### 47.8 正反映射、TDD 与验收
+
+正向：V20-1→sessionPageFact/bootstrap/voice→DOM literal→无ID页面RED/GREEN；V20-2→全部15消费者→同文件替换→Project/submit/附件实际行为；V20-3→transcribeVoiceFile/read-write auth→仅测试→跨两次请求的真实HTTP/原子快照；V20-4→ensureDaemon/version→CLI/core常量→旧daemon被正常调用退役、新版本被复用；V20-5→既有取消/lease/截止时间→无生产变更→原回归；V20-6→diff文件清单→审计实际增加侧/总修改。
+
+反向：新 selector→V20-1/2，旧ID真实消失、直接参数替换足够；版本常量更新→V20-4，原同版本进程会保留旧函数，复用既有淘汰机制即可。新增helper/state/config/parser/retry=0。不新建 Cloudflare 分类分支，不移除身份检查，不把profile凭空变成Bearer producer。
+
+预定公共测试 seam：createChatGPTDom 的 sessionPageFact/projectHomeState/submit、CLI 正常调用与本地daemon协议、后端 transcribeVoiceFile 及真实 `/tui/voice/transcribe`。实施依次 red→最小替换→green，不在方案阶段改测试。
+
+1. 真实浏览器 fixture 使用手写 `<form><div role="textbox" contenteditable="true"></div></form>`，故意无ID且不从生产导入selector；原 sessionPageFact 必须RED。保留logged_out、缺token、登录入口冲突、loading/Mutation收敛及返回不含秘密；增加表单外 editable 不满足合同的反例。
+2. 原 submit 公共入口在无ID fixture 完成文字输入、可信send、用户turn确认；Project状态、附件归属/清理与既有 image 表单选择测试采用同一实际页面形态。不能只在probe补ID让旧消费者继续运行。
+3. 用既有 backendFixture 让旧cache401/403、profile429、browser返回同次有效Bearer与Cookie；第一轮成功并写回，第二轮仅cache HTTP200。断言真实headers、文字、配置快照与无后继CLI，而非只断言stub返回成功。保留预取消/读后取消、配置锁、错误写回、固定40/120秒的原测试。
+4. 使用既有版本fixture证明旧版daemon在新CLI正常调用时被淘汰；新版本不被重复淘汰。不是在发布脚本中无条件stop或kill。
+5. **最终用户原路径验收不可省略：** 用户实际安装的OpenCode、有效MCP目标、一次已授权真实短录音，经本地HTTP/浏览器恢复取得文字并按正常事务写回；紧接着第二次录音从缓存直连成功。记录上游状态、字段存在性和daemon是否被调用，不记录值。没有这组证据时不能宣称“内置Alt+V已恢复”。实测必须与其它profile实验串行，探针只关闭自身新建页，禁止把MCP-owned误当experiment-owned关闭用户窗口。
+6. 发布前在真实首页及Project/对话页验证composer、send和附件控件可用。当前初始页面未找到 `#upload-files`，但尚未执行附件控件展开或上传，不能据此断言其移除，也不能宣称附件已验收；若公共upload行为失败，必须查明实际控件生命周期后修订此方案，禁止直接换通用file input猜修。不得在完整验收中静默skip此项。
+
+定向命令（实施后）：thirdparty/chatgpt-browser-agent 下 `node test-mcp.js testSessionPageFactUsesBootstrapAuth`，以及新增/受影响既有公共行为测试的实际名称；随后 `npm run test:syntax`、`npm run test:mcp`。packages/opencode 下先 `bun test test/cli/tui/voice-auth.test.ts -t "reuses the browser account snapshot"` 与新增三步切片，再四文件voice/真实HTTP相关回归及 `bun typecheck`。最终一次相关完整CI编排，沿R19平台边界记录真实平台，不反复全量或冒称macOS已实跑。
+
+注释预算：production E≈17，C=5，dom E15/C3，两个版本文件各E1/C1；全部保留既有详细注释。测试 E 约80–160，邻近约束/fixture来源/敏感输出/两次请求意图中文注释 C≥ceil(E×0.15)，实施按实际diff核算，不以既有注释充数。最终新增侧、删除侧、生产文件数、每文件E/C均由独立审计复算。
+
+### 47.9 风险、开放证据与审计合同
+
+当前首步cached请求的现场状态未取到；profile Cookie-only429和同Cookie加Bearer200已独立实测，但不替代该现场事实。不需要用户决定新业务分支，原三步合同继续有效。若后续获准读取配置，只在受控进程中使用，输出限定字段存在性/HTTP状态；先前拒绝不得绕过。新selector适配当前DOM，外部未来任意改版无法保证；通过真实DOM形态回归、各消费者一致替换和发布前真实闭环降低同类遗漏。
+
+本轮恢复仍未实施。独立审计须重建全部三个生产文件拟议diff及直接消费者、HTTP两轮闭环、所有新增测试计划和边界；不能把“网页可手动用”或新鲜凭据200作为内置路径通过。Reject：Bun升级、API参数猜换、从Cookie推导Bearer、新增验证码绕过、加超时、更多重试、selector回退链、frame错误驱动新状态机。
+
+R20 implementation evidence/audit：不适用，本轮只有方案，不得标verified或提交实现。
+
+### 47.10 R20 独立全范围方案审计
+
+Invocation：ses_f13888865ffedRjWmzIFP9C6LN；Audit mode：plan；Revision：R20；full-scope；第1轮。以下保留审计分类与裁决原文；本次批准不是运行恢复证明。
+
+#### Blocking findings
+
+No blocking findings.
+
+#### Non-blocking findings
+
+- **N-01：现场 HTTP 首次失败原因仍未确认。** `transcribeVoiceFile` 的前两阶段会继续进入后续步骤，最终错误不足以还原缓存请求的状态，见 `packages/opencode/src/server/shared/tui-control.ts:105`。R20 明确保留这一不确定性，并要求两次真实录音闭环，因此不阻止方案批准；实施后不能仅凭新鲜凭据 HTTP 200 宣称 Alt+V 已恢复。
+- **N-02：本次独立核验限于源码、测试及现有日志。** 日志确有 `after one reload: inconsistent`，见 `C:/Users/Lenovo/AppData/Local/opencode/chatgpt-browser-agent/state/daemon.log:14256`。本次未重新执行浏览器单变量实验、联网转录或测试命令；§47.3 的实验结果没有被当作本审计独立复现的结果。
+
+#### Rejected speculation
+
+- 不把 `Navigating frame was detached`、`Target closed` 直接归因为新的生产竞态；现有材料不足以排除实验与用户操作重叠。
+- 不要求新增 selector 后备链、认证刷新、代理切换、重试或延长期限。
+- 不凭初始页面缺少 `#upload-files` 判定上传合同已经失效；R20 已把真实上传行为列为不可静默跳过的验收项。
+- 不把未来任意网页改版、多输入框假设或未证实的 Cookie 格式变化作为新增防御逻辑的依据。
+
+#### Requirement and traceability coverage
+
+审计对象为 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` **R20，§47 全部有效增量**。
+
+| 要求／不变量 | 独立核验与覆盖结论 |
+|---|---|
+| Alt+V 的 HTTP 与浏览器职责边界 | 三个 TUI 入口共用 `submitVoice`；后端缓存和 profile 请求不读取 DOM。浏览器末级通过 CLI、daemon、页面稳定检查后才执行转录。 |
+| V20-1：修复错误的页面就绪判定 | `chatgpt-dom.js:868` 确实将旧 ID 存在性作为认证条件；`chatgpt-core.js:1714` 和 `chatgpt-core.js:2382` 消费该事实。修改位于 DOM adapter，未绕过 token 或登录态检查。 |
+| V20-2：所有 composer 消费者一致 | 独立检索确认生产文件中恰有 15 处旧 selector，拟议 diff 全部覆盖；包括 Project、等待、输入、发送、附件及 image 表单定位。计划包含公共行为测试。 |
+| V20-3：恢复后下一轮 HTTP 复用 | `tui-control.ts:125` 接收浏览器文字及认证快照，成功后写回；下一轮在锁内重新读取。计划新增三阶段失败／恢复及第二轮直连测试，并另设真实 Alt+V 验收。 |
+| V20-4：正常调用取得新代码 | `chatgpt.js:546` 已按版本决定复用或淘汰 daemon；CLI/core 同步升级常量有直接消费者，不需要新生命周期机制。 |
+| V20-5：取消、期限和错误语义 | 拟议生产修改不改变这些机制；计划保留并重跑相关回归，不以增加期限或重复提交掩盖故障。 |
+| V20-6：修改规模和简洁性 | 3 个生产文件；15 处参数替换、2 处版本替换及邻近说明。按拟议 diff 为新增侧 22 行、删除侧 17 行，总量 39 行，低于两项用户限制。 |
+
+测试敏感性成立：无旧 ID、具有表单内可编辑 textbox 的 fixture，会使当前 `sessionPageFact` 返回 `inconsistent`；替换后才能满足预期的 `authenticated`。提交测试继续验证可信点击和新增 user turn，未降低成功标准。
+
+反向映射完整：新增生产概念仅为统一 selector 合同及同步代码版本；没有新增 helper、状态、配置、解析器或依赖。
+
+#### Primary-path and fallback verdict
+
+通过。
+
+- 缓存 HTTP → profile HTTP → 浏览器转录属于已有、用户明确要求的编排；R20 不增加第四条成功路径。
+- DOM adapter 统一替换旧定位参数，不保留 `old || new`、候选列表或运行时补 ID。
+- 浏览器同次成功结果提供文字、Cookie 和实际使用的 Bearer，后端原子提交后供下一轮使用，见 `thirdparty/chatgpt-browser-agent/chatgpt-core.js:1960`。
+- 既有启动恢复和 image 行为保持原状；本次新增 alternate success path 为 **0**，新增诊断决策面为 **0%**。
+
+#### Code quality and Chinese-comment verdict
+
+方案阶段通过；实际 implementation diff 尚不存在。
+
+拟议生产代码 **E=17、C=5，C/E≈29.4%**；其中 DOM 为 15/3，两个版本文件各为 1/1。注释解释定位合同、表单归属及版本淘汰原因，具备有效性。测试修改明确承诺按实际 E 补足至少 15% 的邻近中文解释注释。
+
+拟议修改没有无关重构、接口扩大或新增防御层。最终生产与测试的实际 E/C、文件数及增删行数仍须在实施审计中重新计算。
+
+#### Release verdict
+
+**APPROVE — 仅批准 R20 方案。**
+
+该结论覆盖三个生产文件的全部拟议修改、直接消费者、测试计划及真实两轮 HTTP／浏览器恢复闭环，不代表当前 Alt+V 已恢复，也不构成实现发布批准。
+
+本次未修改任何文件，未启动或停止 daemon。实施完成仍须通过 §47.8 的真实录音、第二轮缓存直连、页面消费者验收，以及完整独立实施审计。
+
+## 48. R21：实际缓存拒绝已复现，补齐认证持久化 owner 修复
+
+### 48.1 新授权与需求原文
+
+> 那我的opencode的内置的转录为什么不行？我试了好多次我说过了，必须找到问题，我现在内置转录直接越过或者很快失败就进入下一个浏览器环节
+>
+> 我进行过不下十次，且最近一个小时
+>
+> 全部完整进行，我授权你读取全部完整等任何凭据
+>
+> 所有的读取都授权
+>
+> 理论上所有的auth都是从gpt的mcp或者浏览器读取的，理论上应该有，没有说明有问题，而且之前都行，必须找到根源问题以及解决方式，不得采用手动填补的方式
+>
+> 理论上直接浏览器读取应当包含的
+>
+> 那按照我的实测呢，之前的时候我们明明都是可以去进行的。也就是说之前的时候，它都是可以去进行相应的这个AUTH的一个保存啊等等的一些机制，而且它相应的这个Cookie呀，相应的这个认证内容都是包含的，之前都是正常
+
+读取授权发生于明确说明 Cookie/Bearer 风险、仅内存使用和脱敏输出之后。它不授权手填认证、改写真实配置或把方案当实施；§47 的 4 文件/200 行、简洁替换与只写方案限制继续有效。
+
+### 48.2 现场事实与历史来源的区别
+
+**Observed：实际缓存直连已复现。** 运行 package-local Bun，导入原 resolveVoiceTarget、readVoiceAuth、buildDirectTranscribeRequest 和 NetworkProxy.fetch。真实解析来源为用户级 `opencode.json` 的 `mcp.chatgpt`，解释器 D:/Program Files/nodejs/node.exe，脚本指向本工作树 chatgpt.js。原缓存有26项Cookie、均可发送、session Cookie存在，access_token和accessToken均不存在；fetched_at为2026-09-29T08:07:52.122Z。仅输出结构及非敏感元数据。
+
+固定内存静音WAV，原缓存请求连续返回HTTP429，耗时602、572、537、521ms；最后经脱敏读取的上游原文为：
+
+```text
+You've hit the limit for dictation without an account. Log in or sign up to continue dictating, or try again later.
+```
+
+这明确是本次Cookie-only请求被按无账户听写额度拒绝，不是40秒期限提前触发。tui-control.ts:110只在401/403时开启profile步骤，因此本次429约0.6秒后直接进入浏览器，符合用户重复观察；前两步错误未保留解释了最终只见浏览器错误。§47.3 已实测固定profile Cookie只补当前Bearer即429→200；不得把该补值诊断转为生产手填或常驻凭据。
+
+**Observed：磁盘形状不是字段别名漏读。** 只读核验 invocation ses_f1331ae11ffeNaaDvu3n8Q8tr9 确认真实auth只有cookies/fetched_at，无environment覆盖。浏览器成功路径 dom.transcribeAudioFile→core.runVoiceTranscribe→CLI JSON→authFromHarvest→writeVoiceAuth 确实保留同次accessToken，当前代码没有该路径中已证实的单字段剥离。离线exportProfileAuth则按合同只产出Cookie，不能将两种producer等同。
+
+**仍不可反推：** 当前文件无写入审计历史，无法证明08:07:52快照由哪一次操作写入。以下持久化缺陷是用原公共入口独立复现的真实缺陷，但没有证据把它断言为这次快照缺Bearer的唯一历史来源。可能出现“整个auth被删→profile成功补回Cookie-only”这一现有可达链；目前不宣称其在用户当天实际发生。此前正常保存/使用与后续写入丢失并不冲突。
+
+### 48.3 新的 RED：无关全局配置更新删除认证
+
+只用合成凭据、隔离 HOME/XDG/TEMP，调用原 `Config.Service.updateGlobal({model:'synthetic/after'})`，不是复制写回算法。真实fs和Config.layer，账号/安装依赖沿用test/config/config.test.ts的既有测试层，禁止真实MCP执行。运行记录 invocation ses_f132dcdf8ffe7T1SqWZIfQhhCq，临时根 D:/Temp/opencode/config-auth-probe-a0dcd2c7bba24c51bb0427e34f636afa，Global.Path全部位于该根。
+
+| 原入口观察 | Cookie-only 合成字段 | Cookie+access_token 合成字段 |
+|---|---|---|
+| 更新前auth存在且内容相同 | true | true |
+| 无关model更新成功 | true | true |
+| 更新后磁盘auth存在 | false | false |
+| 返回配置auth存在 | false | false |
+| command/enabled保留 | true | true |
+
+独立primary纯内存原ConfigParse.schema(Config.Info,...)重现：beforeAuthPresent=true，afterAuthPresent=false，remainingMcpKeys=[type,command]。服务实验使用opaque合成payload来证明整个字段丢失；正式回归另用真实VoiceAuth字典形状和fetched_at，避免无效fixture掩盖生产兼容。
+
+**首个分歧：** config/config.ts:815-820的`.json`分支把schema解码后的公共配置对象当成原始持久化文档整体序列化。config/mcp.ts没有私有auth字段，所以schema在嵌套解码时剥离整个auth，随后无关更新将其永久写掉。`.jsonc`已有patchJsonc原文定点修改路径，不存在这次整体序列化分歧。
+
+**owner：** 全局配置持久化，不是HTTP请求构造、Cookie解密、TUI或浏览器提取。Config.update项目级写入不是本次用户级voice配置来源，不扩展修改。
+
+### 48.4 修复选择与第四个文件
+
+保留R20三个生产文件全部替换；增加且只增加 `packages/opencode/src/config/config.ts` 的 updateGlobal 修复：`.json`与`.jsonc`统一走已有patchJsonc，对原文只修改用户请求的字段，schema只验证更新后的有效配置并生成原有公开返回值。删除`.json`专属的schema→merge→整体JSON.stringify分支。没有新helper、auth备份、迁移、fallback、配置项或token填补。
+
+**不采用在MCP schema加auth字段的简化。** 已用内存schema实测它会把auth同时带入decode/encode；global GET/PATCH和instance config GET均用Config.Info返回，且未设置server password时现有服务可不鉴权。将私有凭据纳入公共返回形状会扩大泄露面。复用原文patch既保留磁盘快照，又保持公开schema剥离auth的现有边界；无需新增redaction代码。
+
+```diff
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@ updateGlobal
+-      let next: Info
+-      let changed: boolean
+-      if (!file.endsWith(".jsonc")) {
+-        const existing = ConfigParse.schema(Info, ConfigParse.jsonc(before, file), file)
+-        const merged = mergeDeep(writable(existing), patch)
+-        const serialized = JSON.stringify(merged, null, 2)
+-        changed = serialized !== before
+-        if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
+-        next = merged
+-      } else {
+-        const updated = patchJsonc(before, patch)
+-        next = ConfigParse.schema(Info, ConfigParse.jsonc(updated, file), file)
+-        changed = updated !== before
+-        if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
+-      }
++      // 公共 schema 不包含语音认证快照；它可验证配置，但不能替代原文作为整份文件的写回来源。
++      // JSON 与 JSONC 都只修改请求字段，磁盘私有认证保留，公开返回值仍由原 schema 限定。
++      const updated = patchJsonc(before, patch)
++      const next = ConfigParse.schema(Info, ConfigParse.jsonc(updated, file), file)
++      const changed = updated !== before
++      if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
+```
+
+保留验证成功后才写盘、writableGlobal过滤plugin_origins与空shell语义、changed/invalidate、现有文件选择优先级。复用既有`.jsonc`的叶子patch规则，数组仍整体替换；空对象patch的无操作语义需加入JSON/JSONC一致性测试。明确由用户更换整个MCP条目或mcp add的行为不在本次自动保留承诺中，不加入额外合并护栏。
+
+### 48.5 不变量、映射与预算更新
+
+新增V21-1：更新无关全局设置不能删除既有私有认证；producer=writeVoiceAuth，consumer=updateGlobal/.json持久化，首个分歧=decoded对象整份写回，owner=config/config.ts。新增V21-2：保留磁盘认证不能扩大公开Config.Info返回；由原schema和原返回链保障。其余V20-1至V20-6仍完整适用。
+
+正向：V21-1→updateGlobal→复用patchJsonc→真实公共服务更新前后auth精确保留；V21-2→schema/返回→无schema修改→result.info/GET编码无auth。反向：移除`.json`独立序列化分支→V21-1/2→原公共服务RED与公开编码证据；没有新增概念、helper或分支。新增alternate success path=0、诊断分支=0%。
+
+总生产文件4个。R20拟议diff为+22/-17；本文件拟议+6/-15，合计+28/-32=60行增删，保守≤80，远低于200；不以删除抵扣增加侧。新增文件0，依赖/generated/schema修改0。production E≈21、C7，每文件仍满足中文解释比例。本修订增加测试文件packages/opencode/test/config/config.test.ts（非生产），预计50–100行，保持测试E/C≥15%。
+
+### 48.6 新增TDD与完整恢复验收
+
+在已有config测试层加一条垂直切片：原`.json`含有效形状Cookie/Bearer快照→只更新model→磁盘auth保持完全相同且新model生效，原实现RED；最小替换后GREEN。参数化`.jsonc`保持原行为。返回result.info必须不含auth，不把秘密打印到断言错误。再覆盖Cookie-only、重复同值patch的changed=false、空shell删除、数组替换、嵌套设置/空对象patch、非法配置不落盘、plugin_origins不持久化；使用已有测试避免重复实现。
+
+两阶段原场景门禁扩展为：浏览器正常转录自动产出Bearer和Cookie→原writeVoiceAuth提交→无关全局设置变更→后继原readVoiceAuth仍取得同一完整快照→下一次Alt+V原HTTP直连成功。不能手填token来获得GREEN，不能只验证直接请求构造函数。实际失败现场缓存429已证实，集成用例另覆盖cached Cookie-only429→直接browser恢复，准确对应本次分支，而非仅401/403→profile429。
+
+定向运行package-local `bun test test/config/config.test.ts -t "global"`，新增保留认证测试使用明确名称并执行；随后完整config文件、voice-auth、原四文件voice/HTTP回归与bun typecheck。子仓库保持§47所有DOM、版本与真实页面消费者验证。全量只在定向全部通过后执行一次，最后全范围独立实现审计，仍不能把本方案批准当运行恢复。
+
+### 48.7 证据边界与审计
+
+R20 N-01的“当前缓存首步原因未确认”由实际cache请求及上游错误关闭；“历史上哪次写入造成缺Bearer”仍未知，不能混为一项。新发现持久化错误独立复现，与当前快照历史来源无关也违反已持久化凭据不应被无关设置清除的不变量。此前正常的用户报告保留为事实，不暗示用户手动损坏配置。
+
+本轮只诊断并修订方案；真实配置和认证未改写，生产和测试未修改。R21批准必须重新覆盖原需求、R20全部DOM/HTTP恢复内容和本节持久化修复；不得只审第四文件。旧R20批准不适用于此修订。独立审计待执行。
+
+## 49. R22：统一写回保持原支持的类型替换
+
+### 49.1 R21 全范围审计记录
+
+Invocation ses_f13257ca8ffeB900SVoDvlYXBs；full-scope plan audit；R21；第2轮。分类与裁决原文：
+
+#### Blocking findings
+
+### B-01 全量改用叶子 patch 会破坏 `.json` 配置的合法类型切换
+
+- **Violated invariant:** 修复认证持久化时，必须保留全局配置接口已经支持的有效更新；不能使原本成功的配置更新失败。
+- **Evidence class:** reachable。
+- **Producer and execution path:** 已有 `opencode.json` 包含 `"formatter": false`；客户端通过全局配置 PATCH 提交 `{"formatter":{"prettier":{"disabled":true}}}`。两种形状均通过现有 schema。请求进入 `Config.updateGlobal` 后，R21 将其改送 `patchJsonc`；该函数递归至 `["formatter","prettier","disabled"]`，最终尝试向已有布尔节点添加属性，触发异常。
+- **Source evidence:** `packages/opencode/src/config/formatter.ts:12` 明确接受 Boolean 或配置字典；`packages/opencode/src/server/routes/instance/httpapi/groups/global.ts:74` 使用 `Config.Info` 校验 PATCH；`packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts:158` 直接调用更新服务；`packages/opencode/src/config/config.ts:352` 的 patch 递归没有处理已有非对象节点；`node_modules/jsonc-parser/lib/umd/impl/edit.js:159` 对此抛出 `Can not add index to parent of type boolean`。原 `.json` 分支在 `packages/opencode/src/config/config.ts:817` 使用 `mergeDeep`，其对象覆盖语义见 `node_modules/remeda/dist/chunk-PDQFB3TV.js:1`，允许该更新。
+- **Canonical-plan evidence:** §48.4 拟议 diff；§48.6 的回归清单未覆盖布尔值到对象的有效切换。
+- **Responsibility owner:** `Config.updateGlobal` 及其原文更新逻辑。
+- **Concrete production, test, or contract consequence:** 使用 `.json` 的用户无法通过现有接口将 formatter 从布尔设置切换为对象配置；请求在写盘前失败。问题在旧 `.jsonc` 路径中已经存在，但本方案把它新引入原本支持此操作的 `.json` 路径，因此属于本次变更的回归。
+- **Why this is not speculative:** 输入是公开 schema 明确接受的两种配置形状，上游没有禁止二者切换；从 HTTP handler 到依赖库异常分支的路径完整可达，无需假设损坏配置或未来输入。
+- **Minimal correction direction:** 在配置持久化 owner 内保留原有合法类型替换语义，同时保留未被请求修改的私有认证。补充经 `Config.Service.updateGlobal` 执行的类型切换回归；不要引入失败后换另一种写入算法的 fallback。
+
+#### Non-blocking findings
+
+- **N-01：历史来源仍不能确定。** 源码支持“无关 `.json` 更新会删除私有 auth”的结论，但无法据此认定它就是当天 Cookie-only 快照的唯一来源。§48.2、§48.7 已保留这一边界，应继续保留。
+- **N-02：本次为静态方案审计。** 独立读取了当前源码、依赖实现、相关测试和拟议 diff；未执行 shell、联网转录或浏览器实验。方案记录的现场 HTTP 结果没有被当作本审计独立复现的结果。
+
+#### Rejected speculation
+
+- 不以未来网页改版、假想多个 composer 或未证实的 Cookie 格式变化要求增加 selector 后备链。
+- 不将 frame detached、Target closed 直接认定为新的生产竞态。
+- 不要求从离线 Cookie 推导 Bearer、手填 token、新增认证刷新或延长期限。
+- 不因初始页面缺少上传控件就断言附件流程失效；真实公共上传验收仍须执行。
+- 不把其他未修改的既有恢复逻辑单独作为本轮 blocker。
+
+#### Release verdict
+
+**BLOCK — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R21。**
+
+B-01 未解决，当前修订不得批准实施。需要修订配置持久化路径及其类型切换测试，再进行完整范围复审。DOM 修复方向和认证丢失的 owner 判断成立，但不能据此越过新增配置回归。
+
+### 49.2 判级核对与最小修订
+
+B-01 确实属于本轮把 `.json` 路径改为原文 patch 新引入的行为回归，owner 仍为同一个 config/config.ts；不扩大文件范围。保留 §48.4 的单一路径，修正既有 patchJsonc 在对象合并与节点替换之间的判断：只有目标已有对象且补丁也是对象时递归；其余情况原位整体替换这个节点。删除“无论原节点类型都递归”的错误假设，不采用 catch 后第二写入算法。
+
+新增V22-1：公开配置schema接受的布尔值/对象切换、对象缺席时建立、数组替换及空对象语义保持既有`.json` mergeDeep的结果。owner=原patchJsonc，证据=formatter公开输入合同和依赖modify的错误分支。改变的是同一算法的支持输入分支，新增诊断/备用成功路径为0。
+
+附加拟议diff（仍未应用；与§47、§48的拟议diff共同构成完整R22）：
+
+```diff
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@
+-import { applyEdits, modify } from "jsonc-parser"
++import { applyEdits, findNodeAtLocation, modify, parseTree } from "jsonc-parser"
+@@ function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
+-  if (!isRecord(patch)) {
++  const root = parseTree(input)
++  // 只有双方都是对象才逐字段合并；布尔开关切换为配置对象或原节点缺席时，必须整体替换该节点。
++  if (!isRecord(patch) || (root && findNodeAtLocation(root, path)?.type) !== "object") {
+```
+
+使用已安装jsonc-parser的实际AST API；不新增依赖、helper或缓存，不用类型断言/non-null断言。根文档与子节点由同一递归规则处理，数组/标量沿原modify直接替换；最后仍由原Config.Info验证后才写盘及返回。
+
+### 49.3 设计实验、TDD与预算
+
+已在packages/opencode通过Bun内存实验运行上述拟议递归规则及实际jsonc-parser/remeda依赖，七组输出 `matchesExistingJsonMerge=true`：boolean-to-object、object-to-boolean、missing-object、empty-missing-object、empty-existing-object、array-replacement、preserve-auth。该实验是方案算法对照，不冒充已修改的生产服务GREEN。
+
+在§48.6公共Config.Service.updateGlobal测试中加入上述合法类型切换，JSON与JSONC分别执行；测试独立写出固定期望对象，不在正式测试中复制patch算法或仅比较实现细节。缺席空对象应建立对象，已有对象收到空对象补丁保持原内容；此处覆盖并更正§48.4先前笼统“空对象无操作”的描述。所有认证保留、公开结果不含auth、invalid更新不落盘和voice端到端验收保持。
+
+四个生产文件不变。附加import+1/-1、函数+3/-1，完整预计新增侧32、删除侧34，增删总量66，保守≤90（限额200）。有效production E≈23、C8；本文件E6/C3；原DOM E15/C3及两个version文件各E1/C1保持。新增函数0、配置项0、依赖0、公开schema修改0。
+
+R22全范围审计待执行，须同时覆盖§47全部DOM消费者、§48实际HTTP证据/认证保存修复和本节类型切换，不能只复查B-01。尚未实施，当前真实Alt+V仍不可宣称恢复。
+
+### 49.4 R22 全范围独立批准
+
+Invocation ses_f131e47afffeXLYNLobu9Mpq6A；full-scope plan audit；R22；第3轮。以下保留分类和裁决原文，旧R21 B-01已由本轮全范围审计复核。
+
+#### Blocking findings
+
+No blocking findings.
+
+#### Non-blocking findings
+
+- **N-01：当天 Cookie-only 快照的历史来源仍未确定。** 当前源码可以证明，无关 `.json` 配置更新会丢弃私有 `auth`；但不能据此认定它就是当天缺少 Bearer 的唯一原因。R22 §48.2、§48.7 保留了这一证据边界，没有把可达链冒充历史事实。
+- **N-02：本轮为只读方案审计。** 独立核验了源码、相关测试、`jsonc-parser` 实现及日志。日志仍有页面不收敛记录，包括 `C:/Users/Lenovo/AppData/Local/opencode/chatgpt-browser-agent/state/daemon.log:14286`。未运行测试、联网转录或浏览器实验；方案中的 HTTP 实测数据没有被当作本审计独立复现的结果。
+
+#### Rejected speculation
+
+- 不从 `frame detached`、`Target closed` 推导新的生命周期缺陷，也不要求新增状态机或重试。
+- 不要求离线 Cookie 导出凭空提供 Bearer；实际 producer 在 `thirdparty/chatgpt-browser-agent/chatgpt.js:951` 仅返回 Cookie。
+- 不根据初始页面缺少上传控件就认定附件流程失效。真实上传验收仍是方案明确保留的发布门禁。
+- 不以未来 DOM 改版、假想多个输入框或未知 Cookie 格式要求 selector 后备链。
+- 未修改的既有恢复逻辑，不因同处一个文件就自动成为本次 blocker。
+
+#### Requirement and traceability coverage
+
+审计对象：`docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，**Revision R22，§47、§48、§49 的全部有效拟议变更**。
+
+| 要求／不变量 | 独立核验结论 |
+|---|---|
+| 内置 HTTP 与浏览器职责分离 | 三个 TUI 入口调用同一 `submitVoice`。缓存和 profile 转录经 `NetworkProxy.fetch`，不读取 DOM；浏览器末级才经过页面稳定检查。见 `packages/opencode/src/server/shared/tui-control.ts:99`。 |
+| V20-1：修复页面就绪误判 | `thirdparty/chatgpt-browser-agent/chatgpt-dom.js:868` 将旧 ID 存在性作为认证条件；startup 和 voice 均消费该事实。替换定位参数落在正确 owner，保留 bootstrap、Bearer 和登录入口检查。 |
+| V20-2：全部 composer 消费者一致 | 独立检索并阅读确认 15 处旧 selector，拟议 diff 全覆盖 Project、模式、附件、等待、输入及发送。表单归属、可信点击和新增 user turn 成功标准保持。 |
+| V20-3：浏览器恢复后复用 HTTP | 页面请求返回实际使用的 Bearer，core 与 CLI 保留它，后端转换并写回。见 `thirdparty/chatgpt-browser-agent/chatgpt-core.js:1978`、`packages/opencode/src/server/shared/tui-control.ts:185`。计划覆盖恢复后第二轮缓存直连，并在中间加入无关配置更新。 |
+| V20-4：正常调用取得新代码 | CLI/core 同步升级版本，复用现有版本淘汰机制。见 `thirdparty/chatgpt-browser-agent/chatgpt.js:548`。没有新增重启机制。 |
+| V21-1／V21-2：保留私有认证且不扩大公开返回 | 当前 `.json` 分支先 schema 解码再整份序列化，确实会删除 MCP schema 未定义的 `auth`。R22 改为原文定点更新，公开结果仍由原 schema 生成。见 `packages/opencode/src/config/config.ts:815`、`packages/opencode/src/config/mcp.ts:4`。 |
+| V22-1：合法类型切换保持 | R22 在目标与补丁均为对象时递归，其余整体替换节点。布尔值转对象不再深入布尔父节点，因而避开依赖明确抛错的路径。见 `node_modules/jsonc-parser/lib/umd/impl/edit.js:159`。R21 B-01 的具体回归已在方案中消除。 |
+| 简洁性、修改规模与验证 | 四个生产文件；没有新增 helper、状态、配置项或依赖。拟议增删约 66 行，低于 200 行。取消、期限、错误提交语义保持，并有回归及真实两轮录音验收。 |
+
+**测试敏感性成立：**
+
+- 无旧 ID、具有表单内可编辑 textbox 的 fixture，会使当前认证探针失败。
+- 含私有认证的 `.json` 经原 `Config.Service.updateGlobal` 更新无关设置，会丢失认证。
+- 类型切换测试约束统一写回后的行为；固定期望值不依赖复制生产算法。
+- 真实录音恢复、自动写回、无关配置更新和第二轮 HTTP 成功，被保留为完整恢复门禁，不能由合成浏览器响应替代。
+
+反向映射完整：selector 修复对应 DOM 合同；版本更新对应旧 daemon 的实际复用；原文写回对应认证丢失；AST 节点判断对应公开 schema 支持的类型替换。
+
+#### Primary-path and fallback verdict
+
+**通过。**
+
+- 保留缓存 HTTP、profile HTTP、浏览器末级的既有编排，本修订新增备用成功路径为 **0**。
+- DOM 定位直接替换旧合同，不保留候选列表、失败后换 selector 或运行时补 ID。
+- 配置写回统一为一条原文更新路径；对象合并和节点替换属于同一算法的输入分支，没有 catch 后换算法。
+- 新增诊断决策面为 **0%**；认证快照仍由正常浏览器成功路径产生，不依赖手填。
+
+#### Code quality and Chinese-comment verdict
+
+**方案阶段通过。**
+
+按拟议代码计，生产 **E=23、合格 C=8，C/E≈34.8%**；排除 import-only、文档及未修改上下文。注释分别解释 DOM 定位合同、版本淘汰、私有认证边界及类型替换原因。
+
+测试修改承诺实际 E/C 至少 15%。当前没有 implementation diff，最终生产及测试的实际计量、类型检查和测试结果仍须在实施审计中核验。
+
+#### Release verdict
+
+**APPROVE — 仅批准 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` 的 R22 方案。**
+
+本结论覆盖全部四个生产文件的拟议修改及直接影响路径，不代表当前 Alt+V 已恢复，也不构成实现发布批准。实施完成仍须通过计划中的真实录音闭环、页面消费者验收、相关回归和独立全范围实现审计。
+
+本轮未修改文件、真实配置、浏览器或 daemon，未输出凭据。
+
+## 50. R23 实施授权与验证约束
+
+> 保持修改逻辑准确自然同时请注意测试断言要符合逻辑自然，避免过多增大不必要的或者为了断言而进行的不必要断言；同时整体生产代码修改数在5个文件以内，在600行生产代码修改以内，期间不要使用question因为用户不在这里
+>
+> 目标终态：verified-implementation
+
+R23不更改R22修复路径或增添生产概念。沿用§47-49四文件拟议diff；新增测试只验证公开行为及实际回归，不添加内部调用计数、源码形状、重复实现算法或为了行数配额而增加的断言。测试复用已有fixtures与断言，保留原始断言深度、取消/期限及敏感字段边界。
+
+重新核对的工作树中，子仓库干净，目标config/config.ts未被修改；主仓库另有shell、cross-spawn、OpenTUI、VSCode与其它计划文件的并行修改及暂存内容，全部保留，不加入本次diff。现有生产代码仍是已复现RED的版本。新预算不授权扩展范围；若真实页面消费者验证暴露新的确定缺陷，按同一canonical递增revision并全范围审计，最多5生产文件、600行。
+
+实施先完成定向RED/GREEN再扩展回归，真实浏览器/转录使用已有授权的MCP账户，秘密仅在本地进程中传递；不手填token。正常成功路径写回是用户请求的功能验证，与人工编辑认证区别明确。测试如需更改配置，先用隔离配置和合成值验证；用户实际配置只允许正常语音成功事务写回，不用无关设置更改真实配置充当测试。真实录音闭环的无关设置更新在与真实成功快照相同内容的隔离配置中通过原公共服务执行，并由下一次原HTTP读取验证。
+
+不得关闭并发用户browser/daemon。实验只清理自己创建的页面/进程；正常CLI版本选主行为由既有实现所有。最终目标只到验证与独立实现批准，不进行git add/commit/push。R23方案全范围审计待执行。
+
+### 50.1 R23 独立方案批准
+
+Invocation ses_f1291f811ffexZ7X6A9Fgfk88L；full-scope plan audit；R23；第4轮。以下分类及裁决原文：
+
+#### Blocking findings
+No blocking findings.
+
+#### Non-blocking findings
+- **N-01：缺少 Bearer 的历史来源仍不能确定。** 当前源码证明，无关 `.json` 全局配置更新会通过 schema 解码后整体写回，丢弃私有 `auth`，见 `packages/opencode/src/config/config.ts:815`。这足以支持持久化修复，但不能证明它就是当天 Cookie-only 快照的唯一来源。R23 保留了这一证据边界。
+- **N-02：本轮是静态方案审计。** 已独立读取源码、相关测试、依赖实现及全部有效拟议修改；未执行测试、联网转录或浏览器实验。方案中的现场 HTTP 结果未被当作本审计独立复现的结果。
+
+#### Rejected speculation
+- 不要求增加 selector 候选链、认证刷新、额外重试、代理切换或更长超时。
+- 不从 `frame detached`、`Target closed` 推导新的生命周期缺陷。
+- 不要求离线 profile Cookie 导出提供 Bearer；该 producer 当前只返回 Cookie，见 `thirdparty/chatgpt-browser-agent/chatgpt.js:951`。
+- 不凭初始页面缺少上传控件判定附件合同失效；方案已保留真实上传验收门禁。
+- 不将未被本次修改引入或加重的既有恢复逻辑、并发写入问题扩大为本轮阻断项。
+
+#### Release verdict
+**APPROVE — 仅批准 R23 方案。**
+
+该批准允许实施 §47–50 的准确范围，不代表 Alt+V 已恢复或达到 `verified-implementation`。完成仍须取得定向 RED/GREEN、相关回归与 typecheck、真实转录后下一轮缓存直连、隔离配置中的认证保留验证、真实页面消费者验收，以及全范围独立实施批准。
+
+本轮未修改文件、未输出凭据、未操作现用浏览器或 daemon。
+
+## 51. R24：真实提交与上传控件合同一并替换
+
+### 51.1 已完成实施与新事实
+
+R23配置和DOM修改已实施，production四文件+32/-34；原配置公开服务RED/GREEN、无ID页面原探针RED/GREEN均取得。完整config文件90pass/2既有skip，voice相关四文件109pass/3既有账户skip，子仓库73项完整离线测试全通过，包级typecheck通过。详细执行记录由后续实施证据统一归档。
+
+真实链路脚本D:/Temp/opencode/r23-voice-verify.ts第二次执行（第一次网络连接中断）已经通过：原submitVoice→真实Server.listen→cached429(625ms)→原browserCLI成功(14589ms)→正常自动写回Bearer/Cookie。私有快照与browser producer逐值一致。隔离副本经原/global/config PATCH成功保留快照且公开响应无auth；第二次原transcribeVoiceFile HTTP200(800ms)，CLI执行0，hello-world识别正确。用户配置仅正常语音事务写回，未手填凭据。daemon保持运行version27，active/queued/locks均0。
+
+随后执行真实MCP公共验证 `node test-mcp.js testE2EAskBasic testE2EAskWithFileUpload`（cwd子仓库），daemon检测通过，basic因等待发送按钮10秒失败。纯CDP只读检查当前Project页面：有1个正常可编辑表单textbox，文本已填充，1个启用的`button type=submit aria-label=发送`，但所有按钮均无旧data-testid。未发生user turn，故没有重复发送风险；不把填字成功当提交成功。
+
+同一页面及首页均有3个表单file input，全部multiple、动态React id；accept依次image/*,video/*、image/*、属性缺席。`form input[type="file"][multiple]:not([accept])`恰好匹配1个通用文件输入。当前添加内容按钮没有composer-plus-btn ID，具有`data-composer-navigation-target="add-context"`；模型菜单则为reasoning，scope可明确区分。上述属性为真实DOM读取，不根据未来可能的页面猜测。
+
+### 51.2 Owner、替换与完整diff增量
+
+新V24-1：已填好的当前composer能够按原可信click提交，并等待新增user turn；首个分歧为同表单发送按钮旧testid查询。新V24-2：原附件上传选择通用文件input、原模式选择打开添加内容菜单；首个分歧是已退休ID。owner均为同一个chatgpt-dom.js，不新增文件或抽象，不扩大到DOM结果提取或其它浏览器状态。
+
+替换现有参数，不提供旧新候选：四处`button[data-testid="send-button"]`改为`button[type="submit"]`，均保留当前composer.closest('form')范围、disabled判断、文字比较、trusted click与新增user turn确认。uploadFiles使用唯一通用file input；显式change事件沿原持有ElementHandle派发，避免再次按已退休ID查找。image原入口改同表单add-context按钮，保留原菜单语言选项与image确认合同。
+
+```diff
+--- a/thirdparty/chatgpt-browser-agent/chatgpt-dom.js
++++ b/thirdparty/chatgpt-browser-agent/chatgpt-dom.js
+@@ selectComposerMode
+-    const plus = await page.waitForSelector('#composer-plus-btn', { timeout: 10_000 });
++    const plus = await page.waitForSelector('form button[data-composer-navigation-target="add-context"]', { timeout: 10_000 });
+@@ uploadFiles
+-          const input = await page.waitForSelector('#upload-files', { timeout: 15_000 });
++          // 当前表单含图片/视频专用输入；无 accept 限制的 multiple 输入才是通用文件上传入口。
++          const input = await page.waitForSelector('form input[type="file"][multiple]:not([accept])', { timeout: 15_000 });
+@@ uploadFiles
+-          await page.evaluate(() => document.getElementById('upload-files')?.dispatchEvent(new Event('change', { bubbles: true })));
++          await input.evaluate(element => element.dispatchEvent(new Event('change', { bubbles: true })));
+@@ waitForUploadReady
+-        const button = input?.closest('form')?.querySelector('button[data-testid="send-button"]');
++        const button = input?.closest('form')?.querySelector('button[type="submit"]');
+@@ clickSend / waitForFunction
+-      const button = form?.querySelector('button[data-testid="send-button"]');
++      const button = form?.querySelector('button[type="submit"]');
+@@ clickSend / before
+-      const button = form?.querySelector('button[data-testid="send-button"]');
++      const button = form?.querySelector('button[type="submit"]');
+@@ clickSend / evaluateHandle
+-    const handle = await page.evaluateHandle(() => document.querySelector('form [contenteditable="true"][role="textbox"]')?.closest('form')?.querySelector('button[data-testid="send-button"]'));
++    // 网页移除了发送 testid；submit 类型保留表单提交语义，不依赖本地化按钮标签。
++    const handle = await page.evaluateHandle(() => document.querySelector('form [contenteditable="true"][role="textbox"]')?.closest('form')?.querySelector('button[type="submit"]'));
+```
+
+版本仍27：尚未发布，本轮新进程已拥有R23适配但新增修复需正常重载才能实测。验证以自行创建的新daemon进程/隔离state配合已有授权profile或正常CLI版本淘汰进行，不强行关闭用户现用进程；若需再次bump来使已启动27加载最终代码，可在这同一CLI/core版本合同中同步改28并记录实际值，不引入新恢复机制。
+
+### 51.3 TDD、映射与预算
+
+在原testSubmitUsesTrustedClick fixture移除发送testid、按钮设type=submit；模拟网页正常preventDefault而非让浏览器导航掉fixture。原可信点击/user turn/route-only失败断言保持，先RED再替换production参数GREEN。上传fixture移除input固定ID，并同时布置带accept的image/video输入；既有文件内容及chip断言识别是否选错入口，不加内部查询次数。image fixture改为add-context属性，原选图模式/比例/发送行为继续验证；测试脚本的定位同时对应新fixture，不用源码grep充当行为测试。
+
+正向V24-1→submit公共seam→四处按钮参数→原trusted-submit与真实MCP数学题。V24-2→uploadFiles/selectComposerMode→三个定位/事件表达式→既有文件上传/image tests及真实附件标记读取。反向每一处替换都来自本轮真实失败或相同页面的直接消费者；无新增helper/候选链/重试/guard。保留原shape与协议，生产diagnostic决策0%、alternate success0。
+
+完整production仍4文件，新增增删约16行，预计总量82，保守≤120（限额600）；E预计30/C10，每文件均满足15%。测试继续复用现有case，只有必要fixture变化和说明。新failure没有扩展成功判定：必须新增user turn、文件内容真正被模型读到；超时不放宽。用户真实voice闭环已通过也不能据此跳过本节MCP消费者。
+
+完整验收保持§47-50全部要求，并在本节修复后重跑受影响offline tests、真实basic ask和file upload；如新一轮出现不同故障，保留原始输出再定位，禁止增加备用算法凑通过。R24方案全范围重审待执行。
+
+### 51.4 R24 独立方案批准
+
+Invocation ses_f1276544affeuJL2uiFF5geeDT；full-scope plan audit；R24；第5轮。分类及裁决原文：
+
+#### Blocking findings
+No blocking findings.
+
+#### Non-blocking findings
+- **N-01：现有验证脚本未覆盖真实快捷键和录音器。** `D:/Temp/opencode/r23-voice-verify.ts:100` 将已有 WAV 交给源码版 `submitVoice`，第二轮在 `D:/Temp/opencode/r23-voice-verify.ts:139` 直接调用 `transcribeVoiceFile`。它可以验证后端恢复、持久化和缓存复用，但不能独立证明实际安装版本的 Alt+V 录音入口恢复。R24 保留了 §47.8 的原场景验收，因此不阻止方案批准；实现验收仍须区分这两类证据。
+- **N-02：最终验收必须确认运行进程已加载 R24。** `thirdparty/chatgpt-browser-agent/chatgpt.js:549` 会直接复用健康的同版本 daemon。§51.2 已允许同步升级至28或使用自行创建的新进程；仅修改磁盘代码、继续调用旧27进程不能验证新增修复。
+- **N-03：本轮为静态、只读方案审计。** 独立检查了源码、测试、依赖实现及现有差异，没有执行测试或联网实验。方案记载的真实 DOM、HTTP 状态和通过数量未被当作本审计独立复现的结果。
+
+#### Rejected speculation
+- 不以未来网页改版、假想多个 composer、未知 Cookie 格式要求增加候选 selector、重试或状态机。
+- 不从 `frame detached`、`Target closed` 推导未经证明的新生命周期缺陷。
+- 不要求离线 profile 导出产生 Bearer；现有 producer 明确只返回 Cookie。
+- 不将当前 Cookie-only 快照的历史来源认定为已查明；配置写回缺陷的可达性不等于当天事件的唯一因果证明。
+- 不将未修改的既有浏览器恢复和 image 行为自动纳入本轮缺陷修复范围。
+
+#### Release verdict
+**APPROVE — 仅批准 R24 方案。**
+
+该批准覆盖四个生产文件的完整修复计划及直接影响行为，不代表当前实现已达到 `verified-implementation`。完成仍须通过 R24 新增切片、真实 MCP ask／附件验收、原 Alt+V 场景验证及全范围独立实现审计。
+
+本轮未修改文件、真实配置、浏览器或 daemon，未输出凭据。
+
+## 52. R25：消息接收和读取沿用当前角色合同
+
+### 52.1 原始场景与新RED
+
+安装版F:/include/CLI/opencode.exe（1.15.14-smark）已通过Windows ConPTY两轮真正Alt+V开始/停止PvRecorder；源码真实Server.listen后端两轮HTTP200，16kHz单声道PCM WAV分别98348/97324字节，客户端与上传hash一致，无CLI调用，前后端WAV正常清理，TUI与自有服务exit0。原始事件D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl。录音为静音，空text不冒充有声识别；有声hello-world由§51.1已知语音真实转录补充。
+
+R24参数替换已实施，离线完整73项通过。真实`node test-mcp.js testE2EAskBasic testE2EAskWithFileUpload`正常选主到version28后，在20秒“新增user turn”确认失败。只读CDP证明已经进入conversation路由、编辑器清空、页面有回答95，但旧user/assistant role查询均0。完整DOM事实：当前用户消息单元是`data-chatgpt-search-unit-key="fallback-turn-0:0:user"`，回答单元是同属性`fallback-turn-0:2:assistant`，共同turn容器是`data-content-search-turn-key="fallback-turn-0"`；各role单元包含各自正文，旧data-message-author-role、旧conversation-turn testid和article均不存在。不是未点击成功，必须修复接收事实owner，不能把路由变化当提交成功。
+
+全量`bun run test:ci`默认core合并运行在30分钟外层期限结束，无最终pass/fail摘要；child PID38788已确认退出。没有将此运行算通过。相关109项、配置90项和子仓库73项已有完整通过记录。后续按实际Windows shard验证并保留全量限制，不通过增加timeout或改测试掩盖失败。
+
+### 52.2 单一替换与受影响消费者
+
+新V25-1：可信发送之后只能以新增用户消息单元证明接受；新V25-2：回答状态、正文、产物与滚动读取同一当前角色/turn语义。owner均chatgpt-dom.js。直接替换已退休属性，保留原数量增长、正文稳定、stop/placeholder、引用/表格转换、产物归属和pending规则，不加HTTP会话读取或备用解析器。
+
+完整替换表（不是候选列表）：
+
+| 原定位/字段 | 新定位/字段 | 消费者 |
+|---|---|---|
+| `[data-message-author-role="user"]` | `[data-chatgpt-search-unit-key$=":user"]` | clickSend前后计数、assistantState、空turn归属 |
+| `[data-message-author-role="assistant"]` | `[data-chatgpt-search-unit-key$=":assistant"]` | state、dump、extractAssistant、sandbox发现/点击、空turn归属 |
+| `[data-testid^="conversation-turn"]` | `[data-content-search-turn-key]` | assistantState turn计数、scrollToEnd |
+| dump的`[data-message-author-role]`与角色读取 | 两种上述role单元的集合，角色值取key最后的冒号字段 | 仅非敏感诊断结构，不输出完整key或正文 |
+
+CSS `$=`匹配的是已有角色后缀，不绑定临时turn编号或message ID。dump union表示两个支持的角色，不是失败后回退。所有查询在原位置替换，不新增函数。旧没有role的空回答case继续按最新turn与既有固定标签判定，不引入新的空成功规则。四处生产文件保持，CLI/core版本同步29，以原正常调用使已启动28加载最终代码。
+
+代表性diff；表中列出的所有消费者均须同次替换：
+
+```diff
+-      const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+-      const userCount = document.querySelectorAll('[data-message-author-role="user"]').length;
++      // 当前消息单元以搜索key的角色后缀标识；状态和正文读取不能再依赖已退休的author属性。
++      const msgs = document.querySelectorAll('[data-chatgpt-search-unit-key$=":assistant"]');
++      const userCount = document.querySelectorAll('[data-chatgpt-search-unit-key$=":user"]').length;
+-      const turns = [...document.querySelectorAll('[data-testid^="conversation-turn"]')];
++      const turns = [...document.querySelectorAll('[data-content-search-turn-key]')];
+```
+
+注释分别放在可信接受计数、状态/正文一致性、非敏感dump角色提取和最新turn滚动，解释为什么仍需本轮user增长及最新回答归属，保留旧原理说明。新增生产代码约18–25行，含替换删除的总量预计≤180，低于600；E≈47/C≥12，最终按实际diff独立计量。无新helper/state/config/retry。
+
+### 52.3 测试与验证
+
+在原trusted-submit fixture以当前role属性生成新user单元，先RED20秒未确认，再替换计数GREEN；无user只有route变化的反例继续失败。所有使用角色/turn的既有state/emptyAssistant/foreground/table-citation/sandbox fixtures改为独立手写当前属性，保留原行为断言与顺序，不能通过导入生产selector来生成fixture。增加或复用一条公开state/extractAssistant用例含历史user/assistant和最新回答，预期只取最新正文，不把早前回答或按钮文本当本轮文字；不复制生产转换算法。
+
+真实basic ask必须返回95且归属MCP Project，再沿同session执行真实文件上传，模型读出文件独有标记。出现已提交但确认超时的session只读检查/恢复，不重发同一prompt，不删除历史用户对话。已尝试在daemon外创建未登记临时页验证上传，该页被关闭导致detached；此诊断不等于正式upload失败，后续只使用daemon正常登记页面做上传E2E，不改变生命周期机制。
+
+保留全部R23/R24语音及配置验收，最终在新version29执行语音账户返回/后继HTTP验证以确认新进程没有回归。本轮第6次方案全范围审计必须覆盖§47-52全部当前修复，不能仅审消息selector；如仍有阻断按既定审计上限处理，不能自审放行。
+
+### 52.4 R25 全范围方案批准
+
+Invocation ses_f123bb4faffefdTkSyB1hZJIGw；full-scope plan audit；R25；第6轮。分类与裁决原文：
+
+#### Blocking findings
+No blocking findings.
+
+#### Non-blocking findings
+- **N-01：完整验证尚未结束。** §52明确保留 version29 下真实 MCP ask、同会话附件读取、语音恢复与后继缓存 HTTP 验证。已有测试记录不能替代这些最终验收；全量 CI 超时也不能计为通过。
+- **N-02：Alt+V 证据应保持准确边界。** 已直接读取 `D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl:10`：安装版 TUI attach 到源码服务，两轮真实录音上传均返回 HTTP200，并完成 WAV 清理；两轮 `textLength` 均为0。这支持快捷键、录音、上传和缓存直连链路，不单独证明有声识别、文字插入或浏览器恢复。
+- **N-03：当天缺失 Bearer 的历史来源仍未确定。** 原配置写回确实存在删除私有 auth 的路径，但不能据此认定它是当天快照的唯一来源。方案保留了这一区分。
+- **N-04：本轮是只读方案审计。** 未执行测试或操作真实 browser、daemon、配置；方案记载的现场 DOM 和联网实验未被冒充为本审计独立复现。
+
+#### Rejected speculation
+- 不根据未来 DOM 改版、假想重复 composer 或未知角色格式要求增加 selector 候选链。
+- 不从 `detached`、`Target closed` 推导新的生命周期缺陷或要求新增重试、状态机。
+- 不要求离线 profile 导出产生 Bearer；其实际返回合同只有 Cookie 与时间，见 `thirdparty/chatgpt-browser-agent/chatgpt.js:952`。
+- 不把同文件内未修改、且本次未加重的既有兼容行为自动列为阻断项。
+
+#### Release verdict
+**APPROVE — 仅批准 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` 的 R25 方案。**
+
+批准覆盖§47–52全部有效范围，不构成当前实现发布批准。达到 `verified-implementation` 仍须完成 R25 RED/GREEN、version29 真实页面及语音闭环、规定回归与类型检查，并取得全范围独立实现批准。
+
+## 53. R26：临时会话 URL 不能进入正式 registry
+
+### 53.1 原需求与审计轮次说明
+
+最新用户原文：“继续，避免不必要的全量疯狂测试”。因此不再重跑全量，仅执行当前变更的必要定向回归及真实用户链路；先前全量超时与OpenTUI失败保留原始记录，不冒充通过。当前verified-implementation目标从R23启动，本次为该目标第4次方案审计；R20–R22属于已结束的方案目标，历史连续编号保留。§52所称第6次是canonical历史累计，不以它抹去本次实施目标的独立审计要求；本目标仍最多6次方案审计、3次实现审计。
+
+### 53.2 已观察RED与首个分歧
+
+R25消息定位替换后，真实CLI已发送并读取到回答，但finishAsk拒绝返回：`Session #a040291b4c left its recorded ChatGPT conversation before response collection`。调用原readSessionEntry与只读CDP对照得到：registry URL为目标Project下`/c/local-chatgpt%3A354552e7-2f90-4a63-9e9a-bc4f5fc2e3f9`；实际同一页面最终URL为同Project下`/c/6abc0224-6a64-83ee-a1b9-1b5a22ad1cc8`，user/assistant均1、generating=false。此处记录的是本轮合成验证会话，不含凭据。
+
+首个分歧是chatgpt-project.js:71的conversationRef将浏览器临时local-chatgpt ID误认为持久远端conversation；rememberCurrentSessionUrl已有20秒轮询在首次误判时写入临时ID并结束，后续正确永久ID被当成外来会话。owner为现有无副作用URL身份策略，而非等待器、registry迁移或响应提取。V26-1：本地临时创建地址和既有`/c/new`同样不是可恢复身份；V26-2：真正不同的已建立会话仍立即拒绝，绝不能取消原sameConversation保护。
+
+### 53.3 最小精确替换与预算
+
+新增第五生产文件thirdparty/chatgpt-browser-agent/chatgpt-project.js，只在现有两个已解析的conversation ID判定中排除local-chatgpt前缀（冒号原文或URL编码%3A，编码大小写均合法）。不解码或改变其它ID，不增加helper或轮询、重试、放宽身份。
+
+```diff
+@@ conversationRef / scoped
+-    return project && scoped[2] !== 'new' ? { id: scoped[2], projectID: project.id } : null;
++    // 新网页先暴露客户端临时 ID；它与 /c/new 一样不能成为 registry 的远端身份。
++    return project && scoped[2] !== 'new' && !/^local-chatgpt(?::|%3a)/i.test(scoped[2]) ? { id: scoped[2], projectID: project.id } : null;
+@@ conversationRef / plain
+-  return plain && plain[1] !== 'new' ? { id: plain[1], projectID: null } : null;
++  // 历史 plain 路由也沿用同一 ID 语义；只保留已经建立的会话，不扩大兼容范围。
++  return plain && plain[1] !== 'new' && !/^local-chatgpt(?::|%3a)/i.test(plain[1]) ? { id: plain[1], projectID: null } : null;
+```
+
+CLI/core同步version30以沿原选主机制加载新策略；其它生产路径保持R25。正向V26-1→conversationRef→两处ID判定→纯策略与原rememberCurrentSessionUrl临时到永久用例；V26-2→sameConversation→无改变→旧跨会话拒绝回归。反向新增前缀排除由真实registry错误证明，属于原身份域校正，不是备用成功路径或额外防御。
+
+预计总生产增删≤190行（仍小于600），5文件。新增策略E2/C2，其它文件原注释预算维持，全部生产与测试按实际E/C至少15%复算。新增函数/状态/配置/依赖0，不修改历史session，不手动改registry来取得通过。
+
+### 53.4 验证门禁
+
+在既有testProjectIdentityPolicy加入Project/plain两种临时ID的固定预期null，以及永久会话仍接受；在既有testCoreProjectStateMachine使用原rememberCurrentSessionUrl、页面URL由临时自然变永久的fixture，期望只返回/保存永久URL。先RED（原策略立即把临时URL返回），再GREEN；不以调用次数断言代替身份结果。异项目与同项目另一个永久ID的拒绝断言保持。
+
+定向跑策略、core状态、trusted submit和回答提取相关测试；真实新会话basic ask及附件读取必须成功。对已发送失败的测试会话只读检查、不重发同一请求；新的测试使用新session。同时保留所有voice/配置验证，不扩大fullsuite。当前最新验证门禁包括原安装TUI+源码后端、正常自动认证写回与二次直连；最终报告明确部署边界。
+
+R26需针对§47–53全部有效需求和五文件完整重审；不得只审新策略。未经批准不实施此增量。
+
+### 53.5 R26 全范围方案批准
+
+Invocation ses_f119498b8ffeuW20cY6gTusP2z；full-scope plan audit；R26；本次实施目标第4轮。以下分类和裁决原文：
+
+#### Blocking findings
+No blocking findings.
+
+#### Non-blocking findings
+- **N-01：最终运行验证仍未完成。** R26 的临时 URL 修复尚未实施；version30 下的新会话 ask、同会话附件读取、语音自动认证写回及后继 HTTP 复用仍是实现验收门禁。方案批准不能替代这些结果。
+- **N-02：已有 Alt+V 证据有明确边界。** 独立读取 `D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl:10`，确认安装版 TUI attach 到源码后端，两轮录音上传返回 HTTP200、完成 WAV 清理；两轮文字长度均为0。它证明快捷键、录音、上传和缓存直连链路，不单独证明有声识别、文字插入或最终部署版本已经恢复。
+- **N-03：缺失 Bearer 的历史来源仍不能确定。** 原全局配置写回存在删除私有认证的路径，但不能据此认定它就是当天 Cookie-only 快照的唯一来源。方案正确保留了这一证据边界。
+- **N-04：本轮为静态、只读方案审计。** 核验了源码、现有差异、测试及上述事件记录；未执行测试、联网转录或操作真实 browser、daemon、配置。canonical 中其他现场实验没有被当作本审计独立复现的结果。
+
+#### Rejected speculation
+- 不因未来 DOM 改版、假想重复 composer 或未知角色格式要求增加 selector 候选链。
+- 不从 `detached`、`Target closed` 推导新的生命周期缺陷。
+- 不要求离线 profile 导出提供 Bearer；其返回合同明确只有 Cookie 与时间，见 `thirdparty/chatgpt-browser-agent/chatgpt.js:952`。
+- 不要求迁移或猜修已经登记的临时会话；R26 保留失败会话的防重发边界，验证使用新 session。
+- 不把同文件内未改变、且本轮未加重的既有兼容或恢复行为自动列为阻断项。
+
+#### Release verdict
+**APPROVE — 仅批准 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` 的 R26 方案，full-scope。**
+
+批准覆盖§47–53全部有效范围，不构成实现发布批准。达到 `verified-implementation` 仍须完成R26定向RED/GREEN、version30真实MCP与语音闭环、必要回归和类型检查，并取得完整独立实现批准。
+
+## 54. R27：附件卡片解析替换退休属性
+
+### 54.1 真实验收与RED
+
+R26原identity/core公共测试取得RED/GREEN，源码version30。真实MCP `testE2EAskBasic`通过（32109ms），证明创建Project永久conversation、发送并返回95已闭环。随后同会话`testE2EAskWithFileUpload`报`Attachment chips made no progress after upload`。不把basic成功替代附件验收。
+
+在本轮测试自己的已登记conversation中通过真实通用input上传无敏感`chip-probe.txt`，只读DOM确认：form中role=group数量0；文件名SPAN的祖先是`.composer-attachment-surface`（静态语义类），其父为单张卡片容器；移除按钮标注“移除 chip-probe.txt”，发送按钮type=submit启用。现有attachmentTexts只扫描role=group然后扫描attachment/file testid，故两个旧解析都返回空。这是实际上传完成后的卡片表示漂移，不是上传HTTP失败。
+
+### 54.2 Owner与唯一算法
+
+V27-1：每个已挂载附件卡片计一次且可验证文件名，不能把输入控件当卡片。owner为现有attachmentState/attachmentTexts；保留外层namesPresent和normalize、上传/取消流程、计数阈值与期限。直接用当前`.composer-attachment-surface`卡片文本替换旧role/testid双路径，删除不再有调用的isUploadControl。清理移除按钮的现有逻辑在当前页面仍匹配，保持不变；不新增选择器后备或另一套计数算法。
+
+```diff
+@@ attachmentTexts
+-        const texts = new Set();
+-        // 当前文件 tile 优先暴露 role=group + 文件名 aria-label；data-testid 只作后备。
+-        // 先读 tile 容器可以避免把“移除文件”按钮和同一个文件名重复计数成两份附件。
+-        for (const el of root.querySelectorAll('[role="group"][aria-label]')) {
+-          const text = normalize(`${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`);
+-          if (text) texts.add(text);
+-        }
+-        if (texts.size > 0) return [...texts];
+-        for (const el of root.querySelectorAll('[data-testid*="attachment"], [data-testid*="file"]')) {
+-          if (isUploadControl(el)) continue;
+-          const text = normalize(`${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`);
+-          if (text && !/^(send|stop|attach files?|upload files?|发送|停止|上传文件|添加文件等)$/.test(text)) texts.add(text);
+-        }
+-        return [...texts];
++        // 当前每份附件有独立语义卡片；读取卡片本身，避免把移除按钮或上传输入重复计数。
++        // 文件名仍由外层独立核对；未挂到表单的历史文件不能满足本轮上传条件。
++        return [...root.querySelectorAll('.composer-attachment-surface')]
++          .map(el => normalize(el.textContent || ''))
++          .filter(Boolean);
+@@
+-      function isUploadControl(el) {
+-        return /^(input|textarea)$/i.test(el.tagName) || /^(upload-files|upload-photos|upload-camera)$/.test(el.id || '') || /upload-photos-input|composer-plus-btn/.test(el.getAttribute('data-testid') || '');
+-      }
+```
+
+删除的旧中文注释描述已经退役的role/testid两算法，用两条准确的新合同解释替代，不降低当前机制解释深度；其它注释原样保留。CLI/core同步31使正常调用加载最终adapter。生产文件保持5、预计总增删≤210（限额600），无新增函数，删除1个失效helper；新计数无额外条件分支。该替换新增E3/C2，仍逐文件满足15%，实际完整diff另计。
+
+### 54.3 TDD、验证与审计
+
+修改既有testFileUploadUsesStableLocalCopy及其它附件fixture，让卡片含`.composer-attachment-surface`和真实文件名、移除按钮为其兄弟；不带旧role/testid。先运行原公共submit得到附件计数RED，再替换production后GREEN。保持原附件内容、重复残留清理、可信发送与新user单元断言；不增加为断言而造的production接口。既有文件输入/图片输入decoy继续存在，确保不会混算控件。
+
+正向V27-1→attachmentState→当前卡片文本→公共上传submit与真实文件独有marker读取；反向新class唯一依据真实卡片，不将新旧解析并存。无备用成功路径，旧后备解析被删除而非再加一层。
+
+仅重跑本次附件/submit/image相关定向测试、真实basic+附件+voice；不重跑全量。voice与配置既有完整证据保留，最终当前进程验证仍必须取得。R27是当前实施目标从R23开始的第5轮方案审计，要求§47–54全部有效范围全审，不仅附件段。
+
+### 54.4 R27 全范围方案批准
+
+Invocation ses_f117a055dffeeaez56DLYZMSSt；full-scope plan audit；R27；本次实施目标第5轮。分类和裁决原文：
+
+#### Blocking findings
+No blocking findings.
+
+#### Non-blocking findings
+- **N-01：最终运行验收仍待完成。** R27 的附件解析替换和 version31 尚未形成最终验证证据。真实附件标记读取、当前进程的语音自动认证写回及后继 HTTP 复用，仍须按方案完成。
+- **N-02：Alt+V 证据有明确边界。** 独立读取 `D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl:10`：安装版 TUI 连接源码后端，两轮真实录音上传返回 HTTP200、完成 WAV 清理，但文字长度均为0。它证明快捷键、录音、上传和缓存直连链路，不单独证明有声识别、文字插入或最终部署版本恢复。
+- **N-03：缺失 Bearer 的历史来源仍不能确定。** 原配置整体写回存在丢弃私有 auth 的路径；这支持持久化修复，但不足以认定其为当天 Cookie-only 快照的唯一来源。
+- **N-04：本轮为静态、只读方案审计。** 已核验源码、差异、测试和上述事件记录；未执行测试、联网转录或操作现用 browser、daemon、真实配置。方案记载的其他现场实验未被视为本审计独立复现。
+
+#### Rejected speculation
+- 不依据未来 DOM 改版、假想嵌套卡片或重复 composer，要求增加 selector 后备链。
+- 不从 `detached`、`Target closed` 推导未经证明的生命周期缺陷。
+- 不要求离线 profile Cookie 导出凭空提供 Bearer，也不要求手填凭据或新增刷新机制。
+- 不把同文件内未改变、且本轮未加重的既有兼容、重试和恢复行为列为阻断项。
+
+#### Release verdict
+**APPROVE — 仅批准 R27 方案，full-scope。**
+
+批准覆盖§47–54全部有效范围，不构成 `verified-implementation` 批准。完成仍须取得 R27 定向 RED/GREEN、version31 真实附件与语音闭环、必要回归及类型检查，并通过完整独立实现审计。
+
+本轮未修改文件、真实配置或运行进程，未输出凭据。
+
+## 55. R27 实施证据与最终验证边界
+
+当前实际生产修改严格覆盖§47–54批准路线；没有额外认证刷新、手填token、生产helper、状态机、依赖或fallback。配置整体序列化分支与旧附件双解析/isUploadControl已删除；取消/40秒/120秒和跨会话隔离保持。CLI/core最终version31。以下是builder核验记录，独立实现审计仍需自行重建。
+
+### 55.1 当前差异与计量
+
+| 文件 | 新增/删除 | E | C |
+|---|---|---|---|
+| packages/opencode/src/config/config.ts | 10/17 | 6 | 3 |
+| thirdparty/chatgpt-browser-agent/chatgpt-dom.js | 49/53 | 38 | 11 |
+| thirdparty/chatgpt-browser-agent/chatgpt-project.js | 4/2 | 2 | 2 |
+| thirdparty/chatgpt-browser-agent/chatgpt.js | 2/1 | 1 | 1 |
+| thirdparty/chatgpt-browser-agent/chatgpt-core.js | 2/1 | 1 | 1 |
+| packages/opencode/test/config/config.test.ts | 100/0 | 81 | 16 |
+| packages/opencode/test/cli/tui/voice-auth.test.ts | 7/5 | 5 | 2 |
+| thirdparty/chatgpt-browser-agent/test-mcp.js | 127/70 | 99 | 24 |
+| thirdparty/chatgpt-browser-agent/test-voice-robustness.js | 2/1 | 1 | 1 |
+
+生产5文件，新增侧67、删除74、总修改141（不以删除抵扣）；全部E234/C61≈26.1%，生产E48/C18=37.5%。E排除注释、空行、import-only，C按邻近解释单列，实际独立计量以审计结果为准。没有新增仓库文件。主仓库其它计划/VSCode暂存及thirdparty/opencode-11720保留，未git add/commit/push；过程中其它agent提交的shell/OpenTUI内容不纳入本次diff。
+
+### 55.2 定向RED/GREEN与回归
+
+配置执行在packages/opencode，浏览器执行在thirdparty/chatgpt-browser-agent，Bun1.3.14不变：
+
+- `bun test test/config/config.test.ts -t "without losing or exposing private auth"`：生产修改前JSON丢auth为RED（1pass/1fail）；原文patch后2pass。
+- `bun test test/config/config.test.ts -t "formatter types and object patches"`：AST修复前2fail，`Can not add index to parent of type boolean`；修复后`-t "updates global"`6pass。
+- `bun test test/config/config.test.ts -t "global"`：15pass；完整config文件90pass/2既有skip/0fail，198断言。
+- `node test-mcp.js testSessionPageFactUsesBootstrapAuth`：无旧ID fixture原实现inconsistent RED，替换后GREEN。
+- `node test-mcp.js testSubmitUsesTrustedClick`：当前role fixture在原20秒期限下RED，角色参数替换后GREEN。
+- `node test-mcp.js testProjectIdentityPolicy`：原策略接受local-chatgpt而预期null RED；`testCoreProjectStateMachine`原记录返回临时URL而预期永久URL RED；修复后两项PASS（8243ms）。
+- `node test-mcp.js testFileUploadUsesStableLocalCopy`：无旧role/testid卡片导致`Attachment chips made no progress after upload` RED；新解析后与trusted-submit/image合并3PASS（33753ms）。
+- `bun test test/cli/tui/voice-auth.test.ts -t "reuses the browser account snapshot"`：429/401/403三种恢复及后继直连均PASS。第一次新增fixture错误把auth-export包成browser response，导致漏过profile POST；仅修正测试协议后通过，未据此改生产。
+- `bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/server/tui-provider-endpoint-status.test.ts`：109pass/3既有账户E2E skip/0fail，420断言，210.10秒。
+- R23/R24各取得73项完整离线PASS；R25完整离线运行在27项PASS后工具中断，没有最终summary，不计完整通过。按用户最新要求，此后不重跑全量。
+- 最终必要定向 `node test-mcp.js testSessionPageFactUsesBootstrapAuth testProjectIdentityPolicy testCoreProjectStateMachine testTableCitationExtraction testEmptyAssistantTurnCompletes testDirectVoiceUsesBootstrapAuth`：6PASS/36977ms；与R27附件/提交/image三项共同覆盖最终变更。
+- `npm run test:syntax`、`node --check chatgpt-project.js`、`node --check test-voice-robustness.js`通过；package-local `bun typecheck`最终通过；两个仓库定向`git diff --check`通过，仅既有LF/CRLF提示。
+
+### 55.3 真实语音与页面验收
+
+1. 初始真实用户缓存实测无Bearer、429约0.6秒；原transcribeVoiceFile观测到cached429→transcribe-file直接推进，未执行profile。修复后的原submitVoice→真实Server.listen在R23成功恢复并正常写回，下一轮HTTP200，已在§51记录；这是正常事务，不是人工填值。
+2. 最终version31以全新ACL私有隔离MCP配置（无auth）执行同一原入口。原profile导出因正在运行的浏览器占用数据库退出1/2210ms，原编排自然进入browser；原CLI成功911ms，首轮API200/4363ms，实际hello-world文字12字符，Bearer/Cookie与自动写回快照完全一致。原/global/config PATCH更新隔离model后快照逐值保持、公开响应无auth；第二轮同一原submitVoice/API HTTP200/913ms，上游757ms，全部CLI调用0。真实用户配置逐字节不变，shared daemon31保持connected/idle。原始脱敏证据：D:/Temp/opencode/r27-no-auth-1790709679193.jsonl，primary已直接读取31行确认。
+3. 原安装程序F:/include/CLI/opencode.exe 1.15.14-smark，通过ConPTY真正Alt+V两轮录音上传，客户端/HTTP WAV哈希一致、均16kHz单声道PCM，HTTP200，上游1196/553ms，CLI0，前后端WAV删除，owned TUI/server exit0。事件D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl已读取；安装TUI接源码后端，未声称已安装daemon完成代码升级；静音text0只证明录音/上传，不冒充有声识别。已知有声音频的原入口实测补足有声转录证据。
+4. 最终version31真实 `node test-mcp.js testE2EAskBasic testE2EAskWithFileUpload testE2EVoiceTranscribe`：检测现用daemon，3PASS（20874/31298/1196ms，总53718ms）。basic返回95且永久Project conversation成立；附件返回文件中唯一随机标记；voice识别hello。前一轮附件请求因浏览器窗口hidden导致IntersectionObserver未触发而55秒客户端超时；仅将现有测试窗口移到可见位置后原请求继续、userCount由1到2，未重发。随后原CLI恢复同session返回ZEBRA-1OMAY、Status completed、Prompt sent:no。上述最终3PASS是在窗口可见后自然通过，未修改生产超时或加替代点击算法。
+
+### 55.4 广域CI与部署限制
+
+全量检查不能报告全绿：`bun run test:ci`默认core合并运行在本地30分钟外层期限被终止，没有最终summary；随后干净环境Windows三片监督运行runtime/integration各13分钟预算耗尽，不能冒称达到CI实际45分钟限制。TUI完成769pass/14skip/5fail。证据D:/Temp/opencode/windows-ci-20260929-1528/results.json及各日志，primary已读results。
+
+五个TUI失败独立运行原opentui-streaming-runtime.test.ts仍1pass/5fail。只读归属核验发现已提交45d9daa2ed的OpenTUI lifecycle补丁与当前node_modules不一致：patch中while带!isDestroyed，实际安装包仍无该条件。证据D:/Temp/opencode/opentui-streaming-independent-20260930.xml；与本次五个生产文件无共同修改，未擅自重装/更改依赖或修无关代码。runtime/integration只有局部预算结论，未证明失败归属，不隐藏未完成。
+
+用户最新明确避免不必要全量，故此后只做直接相关回归与真实场景。上述广域环境限制交独立审计判定，不通过缩水用例、跳过失败或延长期限得到假绿。本任务目标verified-implementation，不包含构建安装替换已运行OpenCode服务、commit或push。最终报告须明确源码后端已验证、用户已安装后端尚未部署本次配置修复；MCP源码由正常CLI加载version31。
+
+### 55.5 实现审计交接
+
+R27当前全部实际diff进入独立full-scope implementation audit；目前状态implementation-audit-required。不再材料性修改直到审计返工或新revision批准。测试/实现子任务的“不能自行委派审计”不构成主流程审计不可用，主流程正常调用独立auditor。
+
+## 56. R27 全范围独立实现批准
+
+Invocation ses_f115f539fffevtq3tG7VrfJGR0；full-scope implementation audit；Revision R27；实现审计第1轮，同会话补齐独立执行。初次因等待定向执行确认而暂缓，没有代码blocking finding；明确既有本地验证授权后独立执行并作最终裁决。以下分类、结论及执行结果为原文：
+
+### Blocking findings
+No blocking findings.
+
+### Non-blocking findings
+- **N-01：部署边界保持。** 本次批准源码实现；安装版 TUI 已连接源码后端验证，用户已安装后端尚未部署配置修复。不能将实现批准表述为所有现用进程均已升级。
+- **N-02：历史归因保持不确定性。** 原配置写回存在删除私有认证的确定路径，但不能据此断言它是当天 Cookie-only 快照的唯一来源。
+- **N-03：不宣称全量 CI 全绿。** 既有广域运行存在超时和 TUI 失败。本轮没有重复全量，也没有发现这些结果与本次修改之间的证据链；当前变更的必要定向验证已独立通过。
+
+### Rejected speculation
+- 不要求新增 selector 后备链、认证刷新、额外重试、状态机或延长生产期限。
+- 不以假想重复 composer、嵌套卡片、未来网页改版作为阻断依据。
+- 不要求离线 profile 导出凭空提供 Bearer。
+- 不将同文件内未修改、且未被本次变更加重的既有行为扩大为阻断项。
+
+### Requirement and traceability coverage
+
+本轮延续原完整范围，审计 **R27 §47–54、全部指定实际 diff、直接影响的生产者与消费者，以及相关测试**，未缩减为最后一处附件修复。
+
+| 要求 | 核验结论 |
+|---|---|
+| 页面认证与输入框一致 | 表单 textbox 合同覆盖认证、Project、模式、输入、附件与发送；认证条件保持。 |
+| 提交与回答归属 | 新角色/turn 属性贯穿计数、状态、正文、产物与滚动；新增用户消息仍是接受事实。 |
+| 附件完整提交 | 当前卡片解析替换退休属性；文件名、数量、残留清理、可信发送保持。 |
+| 持久会话身份 | 临时 ID 在 URL 策略 owner 被排除；原轮询等待永久地址，跨会话保护保持。 |
+| 私有认证持久化 | 原文 patch 保存未修改的认证；公开返回继续由 schema 限定，合法类型切换保持。 |
+| 新实现加载 | CLI/core 同步31，使用原版本淘汰机制。 |
+| 语音恢复与复用 | 缓存/profile/browser 既有编排保持；成功快照自动写回，后继 HTTP 消费同一快照。 |
+| 取消与期限 | 独立回归确认取消、固定期限、资源释放及后继请求可用。 |
+
+关键路径已直接核验：`packages/opencode/src/config/config.ts:352`、`packages/opencode/src/config/config.ts:810`、`packages/opencode/src/server/shared/tui-control.ts:99`、`thirdparty/chatgpt-browser-agent/chatgpt-project.js:71`、`thirdparty/chatgpt-browser-agent/chatgpt-core.js:1400`。
+
+**本轮独立执行结果：**
+- global 配置：**15 pass，0 fail**。
+- `voice-auth.test.ts`：**53 pass，0 fail，198断言**；包含先前单独通过的3项账户快照复用测试。
+- DOM、身份、Project、上传、image、回答与产物读取：**13 pass**。
+- 隔离取消及旧 daemon 消费路径：**3 pass**。
+- 包级 `bun typecheck`：**通过**。
+- 两仓库定向 `git diff --check`：**通过**，仅既有行尾提示。
+
+测试固定期望独立于生产算法；无旧属性的 fixtures、认证原文保留和临时 URL 用例均对原错误行为敏感。本轮未重新制造历史 RED，也未将 builder 的 RED 汇总冒充独立执行结果。
+
+真实恢复证据已直接读取：`D:/Temp/opencode/r27-no-auth-1790709679193.jsonl:9` 记录浏览器恢复、自动写回、隔离配置更新后认证保持，以及第二轮 HTTP200、CLI调用0。Alt+V 记录证明录音上传与清理，其静音结果边界继续保留。
+
+### Primary-path and fallback verdict
+
+**通过。**
+
+新增备用成功路径为0。配置更新统一为原文 patch；对象合并与类型替换属于同一算法。附件旧双解析及失效 helper 已删除。缓存/profile/browser 沿既有明确合同执行，没有手填凭据或绕过主路径的新增机制。
+
+新增诊断决策路径为0；现有 dump 的属性替换不产生成功替代路径。
+
+### Code quality and Chinese-comment verdict
+
+实际 diff 独立计量：
+
+| 范围 | E | 合格 C | C/E |
+|---|---:|---:|---:|
+| 五个生产文件 | 48 | 18 | 37.50% |
+| 四个测试文件 | 186 | 43 | 23.12% |
+| 合计 | **234** | **61** | **26.07%** |
+
+排除空行、import-only 和文档；没有生成代码或纯移动扣减。合格注释邻近解释认证保存、DOM合同、身份边界及测试意图，达到15%目标。
+
+生产修改为 **5文件，新增67行、删除74行，增删共141行**，满足5文件/600行限制。未新增依赖、配置项、状态机或生产 helper；未发现无依据的生产概念或接口扩张。
+
+### Release verdict
+
+**APPROVE — `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，Revision R27，当前实际 diff 的全范围独立实现审计。**
+
+前轮暂缓所需的定向验证与 typecheck 已由本轮独立执行关闭。本结论允许记录该精确修订和 diff 达到 `verified-implementation`；不代表全量 CI 全绿，也不代表已安装 OpenCode 后端已经部署。
+
+本轮未修改实现或用户配置，未操作账户浏览器或现用 daemon，未提交、暂存或推送。
+
+记录方据此设为verified。当前实施目标方案审计R23/R24/R25/R26/R27共5轮，全部按原范围；实现审计1轮同会话闭合。R20-R22属前一方案目标的历史审计，保留不作当前代码放行依据。当前目标不包含发布，改动留在工作树，不提交、不推送；无关暂存内容保留。

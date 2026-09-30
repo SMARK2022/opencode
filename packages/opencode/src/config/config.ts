@@ -11,7 +11,7 @@ import fsNode from "fs/promises"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Auth } from "../auth"
 import { Env } from "../env"
-import { applyEdits, modify } from "jsonc-parser"
+import { applyEdits, findNodeAtLocation, modify, parseTree } from "jsonc-parser"
 import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { existsSync } from "fs"
 import { Account } from "@/account/account"
@@ -149,7 +149,9 @@ function globalConfigFile() {
 }
 
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
-  if (!isRecord(patch)) {
+  const root = parseTree(input)
+  // 只有双方都是对象才逐字段合并；布尔开关切换为配置对象或原节点缺席时，必须整体替换该节点。
+  if (!isRecord(patch) || (root && findNodeAtLocation(root, path)?.type) !== "object") {
     const edits = modify(input, path, patch, {
       formattingOptions: {
         insertSpaces: true,
@@ -671,22 +673,12 @@ const layer = Layer.effect(
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)
 
-      let next: Info
-      let changed: boolean
-      if (!file.endsWith(".jsonc")) {
-        const existing = ConfigParse.jsonc(before, file)
-        ConfigParse.schema(ConfigV1.Info, ConfigV2Compat.lower(normalizeLoadedConfig(existing), file).value, file)
-        const merged = mergeDeep(isRecord(existing) ? existing : {}, patch)
-        const serialized = JSON.stringify(merged, null, 2)
-        next = yield* decodeConfig(merged, file)
-        changed = serialized !== before
-        if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
-      } else {
-        const updated = patchJsonc(before, patch)
-        next = yield* decodeConfig(ConfigParse.jsonc(updated, file), file)
-        changed = updated !== before
-        if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
-      }
+      // 原文是持久化来源，公共Schema不能代替私有认证节点或未知字段写回。
+      // 两种格式同样定点更新，仍经目标V2兼容解码后才允许提交文件。
+      const updated = patchJsonc(before, patch)
+      const next = yield* decodeConfig(ConfigParse.jsonc(updated, file), file)
+      const changed = updated !== before
+      if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
 
       if (changed) yield* invalidate()
       return { info: next, changed }
