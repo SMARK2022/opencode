@@ -5,6 +5,7 @@ import * as Tool from "./tool"
 import { ToolProgress } from "./progress"
 import path from "path"
 import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
+import { WindowsShellOutput } from "@opencode-ai/core/windows-shell-output"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import type { Node } from "web-tree-sitter"
@@ -348,7 +349,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   // 编码仅发生在授权后的 spawn 边界；AST 与权限 metadata 继续使用原始输入。
   const invocation = Shell.cmd(shell, command)
-  return ChildProcess.make(invocation.command, invocation.args, {
+  const result = ChildProcess.make(invocation.command, invocation.args, {
     shell: invocation.shell,
     cwd,
     env,
@@ -357,6 +358,8 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     detached: process.platform !== "win32",
     forceKillAfter: TERMINATION_GRACE_MS,
   })
+  // 捕获寿命只在WinPS叶子选择；共享参数、环境和权限顺序保持原样。
+  return process.platform === "win32" && Shell.ps(shell) ? WindowsShellOutput.mark(result) : result
 }
 
 // 只检查解析出的命令头，不能把 echo 参数或路径里的 grep 当成执行工具。
