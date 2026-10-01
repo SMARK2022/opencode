@@ -19,6 +19,10 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 const SUBAGENT_IDLE_MS = 24 * 60 * 60 * 1000
 // 1 MiB 是普通 pack 的目标而非硬上限；单个超大 entry 必须独立保留完整信息而不能截断。
 const PACK_TARGET_BYTES = 1024 * 1024
+// 重写批次以解压工作量限流，单个超大 entry 仍沿用完整保存合同。
+const REPACK_BATCH_BYTES = 8 * PACK_TARGET_BYTES
+// 两个运行时共享编码策略，解码协议不依赖这个压缩级别。
+const COMPRESSION_LEVEL = 12
 export const DEFAULT_BATCH_SIZE = 2000
 const MAX_BATCH_SIZE = 5000
 const isDiffsSchema = Schema.is(Schema.Array(Snapshot.FileDiff))
@@ -41,7 +45,8 @@ function isSummarySeed(value: unknown): value is { cursor: string; diffs: Summar
 }
 
 type Owner = { type: "message"; id: MessageID } | { type: "part"; id: PartID }
-// hot owner 以 NULL ref/key 表示，v1 owner 只有 ref，v2 owner 同时持有 ref 与 32-byte key。
+// hot owner 没有引用；v1 只有 ref，v2 使用完整 key，v3 使用包内 slot。
+// 存量版本由持久 envelope 决定，不能因一次解码失败而改猜另一种版本。
 type OwnerKind = Owner["type"]
 type PackKind = "message-pack" | "part-pack"
 // 三种持久状态唯一选择 decoder，读取失败后绝不尝试另一格式制造备用成功路径。
@@ -50,7 +55,7 @@ type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
 // payload hash 覆盖 canonical raw bytes 而非 zstd frame，跨平台压缩差异不会改变内容身份。
 type Envelope = { version: 1; owner: OwnerKind; fields: Record<string, Json> }
 type PackEntry = { key: Buffer; fields: Record<string, Json> }
-type PackEnvelope = { version: 2; owner: OwnerKind; entries: PackEntry[] }
+type PackEnvelope = { version: 2 | 3; owner: OwnerKind; entries: PackEntry[] }
 type MessageData<T extends MessageV2.Info = MessageV2.Info> = T extends unknown ? Omit<T, "id" | "sessionID"> : never
 type PartData<T extends MessageV2.Part = MessageV2.Part> = T extends unknown
   ? Omit<T, "id" | "sessionID" | "messageID">
@@ -272,6 +277,15 @@ function packKind(owner: OwnerKind): PackKind {
   return owner === "message" ? "message-pack" : "part-pack"
 }
 
+function slotKey(index: number): Buffer {
+  // 四字节是包内序号，完整内容身份仍由包和 entry 的 SHA-256 校验。
+  // 固定小端编码避免宿主机器字节序进入持久协议。
+  // slot 只在所属不可变包内有意义，重打包后必须重新分配。
+  const key = Buffer.alloc(4)
+  key.writeUInt32LE(index)
+  return key
+}
+
 // entry key 只覆盖 owner kind 与冷字段，pack hash 则覆盖整个排序后的 entries；两层地址分别服务去重和批量读取。
 // binary key 固定 32 bytes，避免 SQLite text 编码/大小写差异改变同一 entry 的身份。
 function entryKey(owner: OwnerKind, fields: Record<string, Json>) {
@@ -283,6 +297,8 @@ function entryKey(owner: OwnerKind, fields: Record<string, Json>) {
 // pack 内同 key 只保存一份 fields；多个 owner 仍各自持有 cold_ref/ref_count，展开时按 owner 数递减。
 // entries 按 binary key 排序而非插入顺序，跨批次、Windows/Linux 和 fork 都能得到同一 pack hash。
 function packEnvelope(owner: OwnerKind, entries: PackEntry[]) {
+  // 去重对象是完整字段集合，工具的内部 schema 和字段关系保持原样。
+  // 不把相同字段拆成跨包引用树，避免读取一个 owner 时递归追踪多个包。
   const unique = new Map<string, PackEntry>()
   for (const entry of entries) {
     const key = entry.key.toString("hex")
@@ -293,26 +309,47 @@ function packEnvelope(owner: OwnerKind, entries: PackEntry[]) {
     unique.set(key, { key: Buffer.from(entry.key), fields: entry.fields })
   }
   const values = [...unique.values()].sort((a, b) => Buffer.compare(a.key, b.key))
+  // 排序按完整内容摘要固定，调用方传入顺序不会改变 slot 的含义。
+  // 行 ID 和时间不参与正文身份，因此 fork 可以继续共享不可变内容。
   const value = {
-    version: 2 as const,
+    version: 3 as const,
     owner,
-    entries: values.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
+    entries: values.map((entry) => entry.fields),
   }
   const raw = Buffer.from(canonical(value))
-  return { value, raw, hash: digest(packKind(owner), raw), entries: values }
+  // base64url 保留全部 256 bit，缩短每个 owner 的引用而不截断摘要。
+  return {
+    value,
+    raw,
+    hash: Buffer.from(digest(packKind(owner), raw), "hex").toString("base64url"),
+    entries: values,
+    keys: new Map(values.map((entry, index) => [entry.key.toString("hex"), slotKey(index)])),
+  }
 }
 
 function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): PackEnvelope {
+  // 新格式省去可重算的 entry 摘要，包级完整摘要仍覆盖全部原始字节。
+  // 保留 canonical 校验，禁止只改 JSON 排版就绕过唯一内容身份。
   let value: unknown
   try {
     value = JSON.parse(Buffer.from(raw).toString("utf8"))
   } catch (cause) {
     throw new CorruptionError({ message: `Cold pack is not JSON: ${String(cause)}`, hash })
   }
-  if (!isRecord(value) || value.version !== 2 || value.owner !== owner || !Array.isArray(value.entries)) {
+  if (
+    !isRecord(value) ||
+    (value.version !== 2 && value.version !== 3) ||
+    value.owner !== owner ||
+    !Array.isArray(value.entries)
+  ) {
     throw new CorruptionError({ message: "Cold pack envelope does not match its owner", hash })
   }
   const entries = value.entries.map((item) => {
+    // v3 的字段本身就是 entry 身份来源；旧包的显式 key 继续逐项验证。
+    if (value.version === 3) {
+      const fields = jsonObject(item)
+      return { key: entryKey(owner, fields), fields }
+    }
     if (!isRecord(item) || typeof item.key !== "string" || !/^[0-9a-f]{64}$/.test(item.key) || !isRecord(item.fields)) {
       throw new CorruptionError({ message: "Cold pack entry is invalid", hash })
     }
@@ -330,11 +367,14 @@ function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Pac
       throw new CorruptionError({ message: "Cold pack entries are not uniquely key-sorted", hash })
     }
   }
-  const parsed: PackEnvelope = { version: 2, owner, entries }
+  const parsed: PackEnvelope = { version: value.version, owner, entries }
   const canonicalValue = {
-    version: 2 as const,
+    version: value.version,
     owner,
-    entries: entries.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
+    entries:
+      value.version === 3
+        ? entries.map((entry) => entry.fields)
+        : entries.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
   }
   if (!Buffer.from(canonical(canonicalValue)).equals(Buffer.from(raw))) {
     throw new CorruptionError({ message: "Cold pack is not canonical JSON", hash })
@@ -343,16 +383,16 @@ function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Pac
 }
 
 // 压缩适配器固定产生标准 zstd frame，数据库不保存 Bun/Node 平台标记，保证跨平台可展开。
-// level 3 是实测甜点：740 MB canonical payload 单进程约 16.7 秒，继续提高级别会让 CPU 反客为主。
+// level 12 的实际增量收益用于满足物理容量门槛；编码时间由显式维护承担。
 // codec 不可用是环境错误，不能回退为 gzip；静默混用格式会让 codec 列失去完整性约束。
 // 同步 API 只在维护批次或单 owner freeze 内调用，前端请求不会在每次上下文构建时重新压缩。
 function compress(raw: Uint8Array) {
   try {
     // Bun 与 Node 使用同一 zstd frame 格式；codec 字段描述格式，而不是运行时实现。
-    // 固定 level 3 保证相同 canonical bytes 的性能策略一致，hash 本身仍只依赖未压缩内容。
-    if (typeof Bun !== "undefined") return Buffer.from(Bun.zstdCompressSync(raw, { level: 3 }))
+    // 显式维护使用 level 12；普通热读取不调用压缩器，内容身份独立于级别。
+    if (typeof Bun !== "undefined") return Buffer.from(Bun.zstdCompressSync(raw, { level: COMPRESSION_LEVEL }))
     return nodeZstdCompressSync(raw, {
-      params: { [zlibConstants.ZSTD_c_compressionLevel]: 3 },
+      params: { [zlibConstants.ZSTD_c_compressionLevel]: COMPRESSION_LEVEL },
     })
   } catch (cause) {
     throw new CodecUnavailableError({ message: `zstd compression unavailable: ${String(cause)}` })
@@ -395,7 +435,8 @@ function parseEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Envelop
 // Session summary 使用独立 version/owner，防止 aggregate FileDiff 被当成 Message 的 summary.diffs 字段恢复。
 // 一个 Session ref 直接选择完整 aggregate，不需要 entry key；仍复用相同 canonical/hash/zstd integrity gate。
 function summaryEnvelope(payload: SummaryPayload) {
-  if (!isSummaryPayload(payload)) throw new CorruptionError({ message: "Session summary payload fails schema validation" })
+  if (!isSummaryPayload(payload))
+    throw new CorruptionError({ message: "Session summary payload fails schema validation" })
   const fields = payload.seed
     ? { seed: { cursor: payload.seed.cursor, diffs: payload.seed.diffs }, delta: payload.delta }
     : { delta: payload.delta }
@@ -436,7 +477,23 @@ function parseSummaryEnvelope(raw: Uint8Array, hash: string): SummaryPayload {
 }
 
 function extractMessage(data: (typeof MessageTable.$inferSelect)["data"]) {
-  // ordinary Text 始终保持 hot 以支持精确搜索；Message 只允许归档 summary.diffs。
+  // 抽取只作用于经过资格判定的维护写入；流式生产者继续写完整业务对象。
+  // 原始 token/cost 数字留在同行，统计读取无需恢复诊断明细。
+  if (data.role === "assistant") {
+    // 生命周期和 provider token 保热；完整读取统一恢复历史诊断字段。
+    const projection = structuredClone(data)
+    const fields: Record<string, unknown> = {}
+    for (const key of ["path", "inputChars", "inputTokens", "inputBreakdown"] as const) {
+      const value = data[key]
+      if (value !== undefined) fields[key] = value
+    }
+    delete projection.path
+    delete projection.inputChars
+    delete projection.inputTokens
+    delete projection.inputBreakdown
+    return Object.keys(fields).length ? { projection, fields: jsonObject(fields) } : undefined
+  }
+  // user summary 的 title/body 继续支撑列表定位，只把大 diff 内容外移。
   const summary = data.role === "user" ? data.summary : undefined
   if (!summary) return
   if (!isDiffs(summary.diffs)) throw new CorruptionError({ message: "Stored message diffs fail schema validation" })
@@ -451,8 +508,8 @@ function extractMessage(data: (typeof MessageTable.$inferSelect)["data"]) {
   return { projection, fields }
 }
 
-// v2 Message extraction 复用已验证的 projection/字段白名单，但取消 owner-level 4 KiB 门槛。
-// entry key 只由 summary.diffs 生成；同一 diff 可在不同 Session 的 pack 中安全复用 entry 身份。
+// Message extraction 复用统一字段白名单，不以单 owner 大小排除批量压缩收益。
+// entry 身份只取抽取字段，热的生命周期变更不会改变共享正文。
 function extractMessageV2(data: (typeof MessageTable.$inferSelect)["data"]) {
   const value = extractMessage(data)
   if (!value) return
@@ -500,6 +557,14 @@ const emptyPartComponents = (): Extract<PartColdStats, { type: "step-finish" }>[
   attachments: 0,
 })
 
+// tuple 是已发布的持久编码：版本号、判别标签和字段位置发布后都不可变更。
+// 写入与解析共用同一份组件键序，任何一侧单独漂移都会被对侧按损坏数据拒绝。
+const STATS_TUPLE_VERSION = 2
+const STATS_TAG_TOOL = 0
+const STATS_TAG_STEP_FINISH = 1
+const TOOL_STATS_TUPLE_LENGTH = 4
+const STEP_COMPONENT_KEYS = Object.keys(emptyPartComponents()) as (keyof ReturnType<typeof emptyPartComponents>)[]
+
 const finiteStat = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0)
 
 // Step projection 复用 Stats 已发布的字符到 token 分摊公式；只有这个 owner 可以解释持久 inputBreakdown。
@@ -513,7 +578,8 @@ function stepComponents(data: Extract<(typeof PartTable.$inferSelect)["data"], {
   const breakdown = isRecord(data.inputBreakdown) ? data.inputBreakdown : {}
   const messages = isRecord(breakdown.messages) ? breakdown.messages : undefined
   const media = isRecord(breakdown.media) ? breakdown.media : undefined
-  const inputTokens = finiteStat(data.tokens.input) + finiteStat(data.tokens.cache.read) + finiteStat(data.tokens.cache.write)
+  const inputTokens =
+    finiteStat(data.tokens.input) + finiteStat(data.tokens.cache.read) + finiteStat(data.tokens.cache.write)
   const attachmentTokens = typeof media?.tokens === "number" && Number.isFinite(media.tokens) ? media.tokens : undefined
   const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
   const textChars = media
@@ -540,19 +606,21 @@ export function projectPartStats(data: (typeof PartTable.$inferSelect)["data"]):
   if (data.type === "tool") {
     // 字符数必须在完整 Tool 字段被抽走前计算，不能从 skeleton 反推原始长度。
     // inputChars 沿用公开 JSON.stringify 口径；字符数不是 UTF-8 bytes 或 provider token。
-    const inputChars = data.state.status === "pending"
-      ? data.state.raw.length
-      : JSON.stringify(storedRecord(data.state.input, "Stored tool input is invalid")).length
+    const inputChars =
+      data.state.status === "pending"
+        ? data.state.raw.length
+        : JSON.stringify(storedRecord(data.state.input, "Stored tool input is invalid")).length
     // completed output 包含 attachment URL；error 只计 error，未完成状态不猜测稳定输出。
-    const outputChars = data.state.status === "completed"
-      ? storedString(data.state.output, "Stored tool output is invalid").length +
-        (data.state.attachments ?? []).reduce(
-          (sum, item) => sum + storedString(item.url, "Stored tool attachment URL is invalid").length,
-          0,
-        )
-      : data.state.status === "error"
-        ? storedString(data.state.error, "Stored tool error is invalid").length
-        : 0
+    const outputChars =
+      data.state.status === "completed"
+        ? storedString(data.state.output, "Stored tool output is invalid").length +
+          (data.state.attachments ?? []).reduce(
+            (sum, item) => sum + storedString(item.url, "Stored tool attachment URL is invalid").length,
+            0,
+          )
+        : data.state.status === "error"
+          ? storedString(data.state.error, "Stored tool error is invalid").length
+          : 0
     // Tool name/status/time 保持在主表，投影禁止复制这些 hot 字段形成双权威。
     // 固定字段顺序使投影 JSON 和跨平台 state hash 可复现。
     return { version: 1, type: "tool", inputChars, outputChars }
@@ -578,6 +646,24 @@ function statInteger(value: unknown, message: string, hash?: string) {
 // v2 Stats 在投影损坏后不得解码 pack 兜底，必须独立验证 exact version/type/keys。
 // 此 parser 同时服务 Stats 和 verify，维护命令不会采用更宽松的投影规则。
 function parsePartStats(value: unknown, hash?: string): PartColdStats {
+  // 固定长度同时拒绝缺项和多余项，不能把版本标签当作业务计数。
+  // 兼容旧对象是为了读取已发布数据；新 tuple 出错仍按损坏上报。
+  // tuple 只压缩字段名；还原后继续通过原有整数和 exact-shape 校验。
+  if (Array.isArray(value) && value[0] === STATS_TUPLE_VERSION) {
+    if (value[1] === STATS_TAG_TOOL && value.length === TOOL_STATS_TUPLE_LENGTH)
+      return parsePartStats({ version: 1, type: "tool", inputChars: value[2], outputChars: value[3] }, hash)
+    // step 长度由键序派生而非硬编码，组件增减时两侧同步失效而不是静默错位。
+    if (value[1] === STATS_TAG_STEP_FINISH && value.length === STEP_COMPONENT_KEYS.length + 2)
+      return parsePartStats(
+        {
+          version: 1,
+          type: "step-finish",
+          components: Object.fromEntries(STEP_COMPONENT_KEYS.map((key, index) => [key, value[index + 2]])),
+        },
+        hash,
+      )
+    throw new CorruptionError({ message: "Cold Stats tuple has an invalid shape", hash })
+  }
   // version 是格式演进边界，未知版本不能按相似字段结构猜测解释。
   if (!isRecord(value) || value.version !== 1 || typeof value.type !== "string") {
     throw new CorruptionError({ message: "Part cold Stats projection is invalid", hash })
@@ -639,15 +725,33 @@ function requirePartStats(
   expected: PartColdStats | null,
 ) {
   if (expected === null) {
-    if (row.cold_stats !== null) throw new CorruptionError({ message: "Non-Stats Part has a cold Stats projection", hash: row.cold_ref ?? undefined })
+    if (row.cold_stats !== null)
+      throw new CorruptionError({
+        message: "Non-Stats Part has a cold Stats projection",
+        hash: row.cold_ref ?? undefined,
+      })
     return null
   }
-  if (row.cold_stats === null) throw new CorruptionError({ message: "Stats Part is missing its cold projection", hash: row.cold_ref ?? undefined })
+  if (row.cold_stats === null)
+    throw new CorruptionError({ message: "Stats Part is missing its cold projection", hash: row.cold_ref ?? undefined })
   const stored = parsePartStats(row.cold_stats, row.cold_ref ?? undefined)
   if (canonical(stored) !== canonical(expected)) {
-    throw new CorruptionError({ message: "Part cold Stats projection does not match its payload", hash: row.cold_ref ?? undefined })
+    throw new CorruptionError({
+      message: "Part cold Stats projection does not match its payload",
+      hash: row.cold_ref ?? undefined,
+    })
   }
   return stored
+}
+
+function compactPartStats(value: PartColdStats | null) {
+  // 输入来自同一统计 projector 或已重建的 parser 对象，字段顺序具有单一来源。
+  // 精确数值直接搬运，不通过压缩后的空字符串重新估算字符或 token。
+  if (!value) return null
+  // 两种投影使用独立标签；写入同样按 STEP_COMPONENT_KEYS 取值，与解析共用唯一键序来源。
+  return value.type === "tool"
+    ? [STATS_TUPLE_VERSION, STATS_TAG_TOOL, value.inputChars, value.outputChars]
+    : [STATS_TUPLE_VERSION, STATS_TAG_STEP_FINISH, ...STEP_COMPONENT_KEYS.map((key) => value.components[key])]
 }
 
 // extraction 先检查冷字段，再对真正候选 clone，避免扫描大型 Tool JSON 时无效深拷贝。
@@ -675,7 +779,8 @@ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
   if (data.type === "tool" && data.state.status === "error") {
     fields["state.input"] = storedJson(data.state.input, "Stored error tool input is invalid")
     fields["state.error"] = storedString(data.state.error, "Stored error tool error is not a string")
-    if (data.state.metadata !== undefined) fields["state.metadata"] = storedJson(data.state.metadata, "Stored error tool metadata is invalid")
+    if (data.state.metadata !== undefined)
+      fields["state.metadata"] = storedJson(data.state.metadata, "Stored error tool metadata is invalid")
     if (data.metadata !== undefined) fields.metadata = storedJson(data.metadata, "Stored tool part metadata is invalid")
   }
   // reasoning 只抽 text；其余结构和可见身份仍留在主表。
@@ -695,15 +800,22 @@ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
   }
   // Step snapshot/breakdown 是存档字段；tokens/cost/reason 保持 hot 服务 usage 与 Stats。
   if (data.type === "step-start") {
-    if (data.snapshot !== undefined) fields.snapshot = storedJson(data.snapshot, "Stored step-start snapshot is invalid")
-    if (data.inputChars !== undefined) fields.inputChars = storedJson(data.inputChars, "Stored step-start inputChars is invalid")
-    if (data.inputTokens !== undefined) fields.inputTokens = storedJson(data.inputTokens, "Stored step-start inputTokens is invalid")
-    if (data.inputBreakdown !== undefined) fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-start breakdown is invalid")
+    if (data.snapshot !== undefined)
+      fields.snapshot = storedJson(data.snapshot, "Stored step-start snapshot is invalid")
+    if (data.inputChars !== undefined)
+      fields.inputChars = storedJson(data.inputChars, "Stored step-start inputChars is invalid")
+    if (data.inputTokens !== undefined)
+      fields.inputTokens = storedJson(data.inputTokens, "Stored step-start inputTokens is invalid")
+    if (data.inputBreakdown !== undefined)
+      fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-start breakdown is invalid")
   }
   if (data.type === "step-finish") {
-    if (data.snapshot !== undefined) fields.snapshot = storedJson(data.snapshot, "Stored step-finish snapshot is invalid")
-    if (data.inputChars !== undefined) fields.inputChars = storedJson(data.inputChars, "Stored step-finish inputChars is invalid")
-    if (data.inputBreakdown !== undefined) fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-finish breakdown is invalid")
+    if (data.snapshot !== undefined)
+      fields.snapshot = storedJson(data.snapshot, "Stored step-finish snapshot is invalid")
+    if (data.inputChars !== undefined)
+      fields.inputChars = storedJson(data.inputChars, "Stored step-finish inputChars is invalid")
+    if (data.inputBreakdown !== undefined)
+      fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-finish breakdown is invalid")
   }
   if (Object.keys(fields).length === 0) return
   // hot row 的空字符串/对象仍是合法业务值，只有 cold_ref 才赋予 skeleton 语义。
@@ -754,17 +866,55 @@ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
 
 // v2 Part extraction 先保持 R9 已上线字段白名单，后续 expanded-field slice 会只扩展此处和 restorePart 对称协议。
 // 没有获准字段的结构 Part 仍保持 hot，避免把 marker/patch/usage 变成无意义 pack owner。
-function extractPartV2(data: (typeof PartTable.$inferSelect)["data"]) {
+function extractPartV2(data: (typeof PartTable.$inferSelect)["data"], sessionID?: SessionID) {
+  // parent_id 区分子任务与 fork；标题和 agent 显示名称不承担此分类。
+  // Text metadata 保热，reviewID 和可见性查询无需打开正文包。
+  // 根正文继续服务直接 SQL 搜索；只有子 Session 的完整正文进入冷包。
+  if (data.type === "text" && sessionID) {
+    const child = Database.use((db) =>
+      db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get(),
+    )
+    if (!child?.parent) return
+    const fields = jsonObject({ text: data.text })
+    return { projection: { ...data, text: "" }, key: entryKey("part", fields), fields }
+  }
   const value = extractPart(data)
   if (!value) return
   return { projection: value.projection, key: entryKey("part", value.fields), fields: value.fields }
 }
 
-// Message restore 只接受唯一 summary.diffs 路径，防止 part 字段或未来未知字段被错误合并进 user info。
-// projection 必须仍是 user 且保留 summary；否则 cold_ref 与 owner skeleton 已失配，应中止整个读取事务。
+// Message restore 按角色接受明确白名单，不能把 Part 字段或未知路径合入业务对象。
+// user 的 summary 容器和 assistant 的生命周期继续由热行承担权威。
 // FileDiff 通过 Effect Schema 重新验证，外部 SQL 写入的任意 JSON 不能借 thaw 冒充完整业务类型。
 // 返回对象是完整替换输入；后续修改非冷字段时 diffs 会自然随对象保留，不需要 touched-field 猜测。
 function restoreMessage(data: (typeof MessageTable.$inferSelect)["data"], value: Envelope, hash: string) {
+  // 回填完整字段而非摘要，provider 重放与 TUI 明细获得同一份原始值。
+  // 恢复只修改 clone；事务回滚时不会向其他消费者暴露半恢复对象。
+  if (data.role === "assistant") {
+    const restored = structuredClone(data)
+    for (const [field, item] of Object.entries(value.fields)) {
+      if (field === "path" && isRecord(item) && typeof item.cwd === "string" && typeof item.root === "string") {
+        restored.path = { ...item, cwd: item.cwd, root: item.root }
+        continue
+      }
+      if (
+        (field === "inputChars" || field === "inputTokens") &&
+        typeof item === "number" &&
+        Number.isSafeInteger(item) &&
+        item >= 0
+      ) {
+        restored[field] = item
+        continue
+      }
+      if (field === "inputBreakdown" && isRecord(item)) {
+        // 与 Step 的历史读取合同一致，保留已存 breakdown 的全部键和值。
+        Object.assign(restored, { inputBreakdown: item })
+        continue
+      }
+      throw new CorruptionError({ message: `Assistant cold field is invalid: ${field}`, hash })
+    }
+    return restored
+  }
   const summary = data.role === "user" ? data.summary : undefined
   if (!summary) {
     throw new CorruptionError({ message: "Message projection cannot accept summary.diffs", hash })
@@ -812,7 +962,11 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
       restored.state.error = fieldValue
       continue
     }
-    if (field === "state.metadata" && restored.type === "tool" && (restored.state.status === "completed" || restored.state.status === "error")) {
+    if (
+      field === "state.metadata" &&
+      restored.type === "tool" &&
+      (restored.state.status === "completed" || restored.state.status === "error")
+    ) {
       restored.state.metadata = storedRecord(fieldValue, "Tool metadata is not an object")
       continue
     }
@@ -820,7 +974,7 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
       restored.metadata = storedRecord(fieldValue, "Part metadata is not an object")
       continue
     }
-    if (field === "text" && restored.type === "reasoning") {
+    if (field === "text" && (restored.type === "reasoning" || restored.type === "text")) {
       if (typeof fieldValue !== "string") throw new CorruptionError({ message: "Reasoning text is not a string", hash })
       restored.text = fieldValue
       continue
@@ -851,10 +1005,7 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
       restored.snapshot = fieldValue
       continue
     }
-    if (
-      (field === "inputChars" || field === "inputTokens") &&
-      restored.type === "step-start"
-    ) {
+    if ((field === "inputChars" || field === "inputTokens") && restored.type === "step-start") {
       if (typeof fieldValue !== "number" || !Number.isSafeInteger(fieldValue) || fieldValue < 0) {
         throw new CorruptionError({ message: "Step input estimate is invalid", hash })
       }
@@ -869,11 +1020,11 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
       restored.inputChars = fieldValue
       continue
     }
-    if (
-      field === "inputBreakdown" &&
-      (restored.type === "step-start" || restored.type === "step-finish")
-    ) {
-      restored.inputBreakdown = storedRecord(fieldValue, "Step input breakdown is not an object") as typeof restored.inputBreakdown
+    if (field === "inputBreakdown" && (restored.type === "step-start" || restored.type === "step-finish")) {
+      restored.inputBreakdown = storedRecord(
+        fieldValue,
+        "Step input breakdown is not an object",
+      ) as typeof restored.inputBreakdown
       continue
     }
     const match = /^state\.attachments\.(\d+)\.url$/.exec(field)
@@ -891,7 +1042,11 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
 }
 
 // v2 entry fields 使用与 v1 envelope 相同的字段恢复协议；只替换 envelope version，避免复制另一套字段校验。
-function restorePackedMessage(data: (typeof MessageTable.$inferSelect)["data"], fields: Record<string, Json>, hash: string) {
+function restorePackedMessage(
+  data: (typeof MessageTable.$inferSelect)["data"],
+  fields: Record<string, Json>,
+  hash: string,
+) {
   return restoreMessage(data, { version: 1, owner: "message", fields }, hash)
 }
 
@@ -912,6 +1067,66 @@ function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
       .where(eq(MessageTable.session_id, sessionID))
       .get()?.value ?? null
   )
+}
+
+function completedReviewMessages(db: TxOrDb, sessionID: SessionID) {
+  // reviewer 复用 Session，但重试创建新 request；已完成 attempt 可以独立冷冻。
+  // 这里仅读取持久事实；业务 reviewer 不获得任何冷冻接口或新状态标记。
+  // 同一 Session 中其他 request 仍可运行，资格只约束关联的这一组消息。
+  const messages = db
+    .select({ id: MessageTable.id, data: MessageTable.data })
+    .from(MessageTable)
+    .where(eq(MessageTable.session_id, sessionID))
+    .all()
+  const requests = new Set(
+    messages.flatMap((row) => (row.data.role === "user" && row.data.agent === "permission-reviewer" ? [row.id] : [])),
+  )
+  const open = new Set(
+    db
+      .select({ id: PartTable.message_id })
+      .from(PartTable)
+      .where(
+        and(
+          eq(PartTable.session_id, sessionID),
+          sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+          sql`json_extract(${PartTable.data}, '$.state.status') in ('pending', 'running')`,
+        ),
+      )
+      .all()
+      .map((row) => row.id),
+  )
+  const replies = new Map<string, typeof messages>()
+  // 用户请求没有已完成回复时不入选，避免把尚待审计的请求正文提前冻结。
+  // 多个回复共享 parent 时统一检查，单个完成回复不能掩盖仍在运行的回复。
+  for (const row of messages) {
+    if (row.data.role !== "assistant" || !requests.has(row.data.parentID)) continue
+    const group = replies.get(row.data.parentID)
+    if (group) {
+      group.push(row)
+      continue
+    }
+    replies.set(row.data.parentID, [row])
+  }
+  const result = new Set<string>()
+  // 后续协议隐藏走完整对象 replacement，能保留这里移入包的正文。
+  // 手动命令的 immediate transaction 将资格检查和引用切换放在同一写边界。
+  for (const [request, group] of replies) {
+    // completed 时间先于部分异常 Tool 收尾落库，因此同时核实 Tool 已经终态。
+    if (
+      open.has(MessageID.make(request)) ||
+      group.some(
+        (row) =>
+          row.data.role !== "assistant" ||
+          row.data.agent !== "permission-reviewer" ||
+          !row.data.time.completed ||
+          open.has(row.id),
+      )
+    )
+      continue
+    result.add(request)
+    for (const row of group) result.add(row.id)
+  }
+  return result
 }
 
 function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderThanMs = SEVEN_DAYS_MS) {
@@ -950,6 +1165,7 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
     : session.updated <= now - rootOlderThanMs
   return {
     aged,
+    completed: session.parentID ? completedReviewMessages(db, sessionID) : new Set<string>(),
     boundary: boundaryRow ? { id: boundaryRow.id, time: boundaryRow.time } : undefined,
     markerID: boundary?.markerID,
     summaryID: boundary?.summaryID,
@@ -962,13 +1178,17 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
 // marker、summary 与 tail 即使通过 age/boundary，仍必须通过 extraction 白名单才能真正冻结。
 function eligible(state: ReturnType<typeof eligibility>, messageID: string, markerPart = false) {
   if (!state) return false
-  if (!state.aged && ((markerPart && messageID === state.markerID) || (!markerPart && messageID === state.summaryID))) return false
+  if (state.completed.has(messageID)) return true
+  if (!state.aged && ((markerPart && messageID === state.markerID) || (!markerPart && messageID === state.summaryID)))
+    return false
   if (state.aged) return true
   const ownerTime = state.messageTimes.get(messageID)
   if (ownerTime === undefined || state.boundary === undefined) return false
   // 同时间 ID 必须按 SQLite BINARY 的 UTF-8 bytes 比较，不能把 caller ID 字典序当作 chronology。
-  return ownerTime < state.boundary.time ||
+  return (
+    ownerTime < state.boundary.time ||
     (ownerTime === state.boundary.time && Buffer.compare(Buffer.from(messageID), Buffer.from(state.boundary.id)) < 0)
+  )
 }
 
 // 空 cursor 是无 closed Message 的 sentinel：任何真实变更都晚于它，无需查行。
@@ -1086,7 +1306,7 @@ function packKeyStats(db: TxOrDb, hashes: string[]) {
   return result
 }
 
-function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: "part-pack" | "session-summary") {
+function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: PackKind | "session-summary") {
   // unique hash 去重只减少 SQL 工作量，不改变每个真实 owner 对 ref_count 的贡献。
   const unique = [...new Set(hashes)]
   if (unique.length === 0) return
@@ -1209,10 +1429,7 @@ type MessagePackItem = {
 }
 
 // status eligibility 只需要这些字段；完整 freeze/repack 调用方仍可传入整行。
-type MessageValueRow = Pick<
-  typeof MessageTable.$inferSelect,
-  "id" | "session_id" | "data" | "cold_ref" | "cold_key"
->
+type MessageValueRow = Pick<typeof MessageTable.$inferSelect, "id" | "session_id" | "data" | "cold_ref" | "cold_key">
 
 // canonical pack 的数组/entry 标点大小可精确增量计算；不能为每个 owner 重编码整个候选 pack，
 // 否则大 Session 会退化为 O(n²)。duplicate key 不增加 raw bytes，但 owner 仍留在当前 chunk 贡献 refcount。
@@ -1235,7 +1452,7 @@ function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, items: T[]
     if (previous !== undefined && previous !== fields) {
       throw new CorruptionError({ message: "Pack entry key collides with different fields", hash: key })
     }
-    const entryBytes = Buffer.byteLength(`{"fields":${fields},"key":${JSON.stringify(key)}}`)
+    const entryBytes = Buffer.byteLength(fields)
     // target 变化虽不改业务值，却会改变 hash/ref 布局，仍需 plan revision 与物理实测。
     const delta = previous === undefined ? entryBytes + (unique.size ? 1 : 0) : 0
     // 首个超大 entry 仍独立成包，完整信息优先于目标大小与平均吞吐。
@@ -1269,8 +1486,11 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
 }
 
 function messageV2Value<Row extends MessageValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
-  if (row.cold_key) throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
-  const data = row.cold_ref ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref) : row.data
+  if (row.cold_key)
+    throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
+  const data = row.cold_ref
+    ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref)
+    : row.data
   const value = extractMessageV2(data)
   if (!value) return
   return {
@@ -1283,11 +1503,7 @@ function messageV2Value<Row extends MessageValueRow>(db: TxOrDb, row: Row, cache
 
 // 单 owner freeze 也通过 Session/kind pack builder，保证 direct freeze 与 batch compress 产生相同 key/ref 语义。
 // 已有同 Session v2 owners 会被纳入重打包；新 pack 先取得 refs，owner row 全部切换后再批量递减旧 pack。
-function freezeMessagePacked(
-  db: TxOrDb,
-  row: typeof MessageTable.$inferSelect,
-  now: number,
-): FreezeResult {
+function freezeMessagePacked(db: TxOrDb, row: typeof MessageTable.$inferSelect, now: number): FreezeResult {
   const target = messageV2Value(db, row)
   if (!target) return { type: "skipped", reason: "no-fields" }
   const existing = db
@@ -1304,14 +1520,16 @@ function freezeMessagePacked(
     .all()
     .filter((item) => item.id !== row.id)
     .map((item) => {
-      if (!item.cold_ref || !item.cold_key) throw new CorruptionError({ message: "Message v2 owner state is incomplete" })
+      if (!item.cold_ref || !item.cold_key)
+        throw new CorruptionError({ message: "Message v2 owner state is incomplete" })
       const entries = decodePack(db, item.cold_ref, "message")
       const fields = entries.get(item.cold_key.toString("hex"))
-      if (!fields) throw new CorruptionError({ message: "Message v2 owner key is missing from pack", hash: item.cold_ref })
+      if (!fields)
+        throw new CorruptionError({ message: "Message v2 owner key is missing from pack", hash: item.cold_ref })
       return {
         row: item,
         projection: item.data,
-        entry: { key: Buffer.from(item.cold_key), fields },
+        entry: { key: entryKey("message", fields), fields },
         oldRef: item.cold_ref,
       } satisfies MessagePackItem
     })
@@ -1327,15 +1545,22 @@ function freezeMessagePacked(
     )
     const added = chunk.filter((item) => item.oldRef !== packed.hash).length
     if (added > 0) retainPackedReference(db, packed.hash, "message", now, added)
-    for (const item of chunk) assignments.set(item.row.id, { hash: packed.hash, key: Buffer.from(item.entry.key) })
+    for (const item of chunk)
+      assignments.set(item.row.id, { hash: packed.hash, key: requiredPackKey(packed, item.entry.key) })
   }
 
   for (const item of items) {
     const assignment = assignments.get(item.row.id)
-    if (!assignment) throw new CorruptionError({ message: "Message pack assignment is incomplete", hash: item.oldRef ?? undefined })
+    if (!assignment)
+      throw new CorruptionError({ message: "Message pack assignment is incomplete", hash: item.oldRef ?? undefined })
     const updated = db
       .update(MessageTable)
-      .set({ data: item.projection, cold_ref: assignment.hash, cold_key: assignment.key, time_updated: item.row.time_updated })
+      .set({
+        data: item.projection,
+        cold_ref: assignment.hash,
+        cold_key: assignment.key,
+        time_updated: item.row.time_updated,
+      })
       .where(eq(MessageTable.id, item.row.id))
       .returning({ id: MessageTable.id })
       .get()
@@ -1350,8 +1575,15 @@ function freezeMessagePacked(
   if (!assigned) throw new CorruptionError({ message: `Message pack target missing: ${row.id}` })
   const packed = chunks.find((chunk) => chunk.some((item) => item.row.id === row.id))
   if (!packed) throw new CorruptionError({ message: `Message pack target chunk missing: ${row.id}` })
-  const envelopeValue = packEnvelope("message", packed.map((item) => item.entry))
-  const payload = db.select({ compressed_bytes: ColdStorageTable.compressed_bytes }).from(ColdStorageTable).where(eq(ColdStorageTable.hash, assigned.hash)).get()
+  const envelopeValue = packEnvelope(
+    "message",
+    packed.map((item) => item.entry),
+  )
+  const payload = db
+    .select({ compressed_bytes: ColdStorageTable.compressed_bytes })
+    .from(ColdStorageTable)
+    .where(eq(ColdStorageTable.hash, assigned.hash))
+    .get()
   if (!payload) throw new CorruptionError({ message: "Message pack disappeared after assignment", hash: assigned.hash })
   return {
     type: "frozen",
@@ -1376,10 +1608,17 @@ type PartValueRow = Pick<
 >
 
 function partV2Value<Row extends PartValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
-  if (row.cold_key) throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
-  if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot or v1 Part has an unexpected cold Stats projection", hash: row.cold_ref ?? undefined })
-  const data = row.cold_ref ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref) : row.data
-  const value = extractPartV2(data)
+  if (row.cold_key)
+    throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
+  if (row.cold_stats !== null)
+    throw new CorruptionError({
+      message: "Hot or v1 Part has an unexpected cold Stats projection",
+      hash: row.cold_ref ?? undefined,
+    })
+  const data = row.cold_ref
+    ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref)
+    : row.data
+  const value = extractPartV2(data, row.session_id)
   if (!value) return
   return {
     row,
@@ -1397,13 +1636,7 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
   const existing = db
     .select()
     .from(PartTable)
-    .where(
-      and(
-        eq(PartTable.session_id, row.session_id),
-        isNotNull(PartTable.cold_ref),
-        isNotNull(PartTable.cold_key),
-      ),
-    )
+    .where(and(eq(PartTable.session_id, row.session_id), isNotNull(PartTable.cold_ref), isNotNull(PartTable.cold_key)))
     .orderBy(PartTable.id)
     .all()
     .filter((item) => item.id !== row.id)
@@ -1417,7 +1650,7 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
         row: item,
         projection: item.data,
         stats: requirePartStats(item, projectPartStats(data)),
-        entry: { key: Buffer.from(item.cold_key), fields },
+        entry: { key: entryKey("part", fields), fields },
         oldRef: item.cold_ref,
       } satisfies PartPackItem
     })
@@ -1425,21 +1658,28 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
   const chunks = splitPacks("part", items)
   const assignments = new Map<PartID, { hash: string; key: Buffer }>()
   for (const chunk of chunks) {
-    const packed = retainPackPayload(db, "part", chunk.map((item) => item.entry), now)
+    const packed = retainPackPayload(
+      db,
+      "part",
+      chunk.map((item) => item.entry),
+      now,
+    )
     const added = chunk.filter((item) => item.oldRef !== packed.hash).length
     if (added > 0) retainPackedReference(db, packed.hash, "part", now, added)
-    for (const item of chunk) assignments.set(item.row.id, { hash: packed.hash, key: Buffer.from(item.entry.key) })
+    for (const item of chunk)
+      assignments.set(item.row.id, { hash: packed.hash, key: requiredPackKey(packed, item.entry.key) })
   }
   for (const item of items) {
     const assignment = assignments.get(item.row.id)
-    if (!assignment) throw new CorruptionError({ message: "Part pack assignment is incomplete", hash: item.oldRef ?? undefined })
+    if (!assignment)
+      throw new CorruptionError({ message: "Part pack assignment is incomplete", hash: item.oldRef ?? undefined })
     const updated = db
       .update(PartTable)
       .set({
         data: item.projection,
         cold_ref: assignment.hash,
         cold_key: assignment.key,
-        cold_stats: item.stats,
+        cold_stats: compactPartStats(item.stats),
         time_updated: item.row.time_updated,
       })
       .where(eq(PartTable.id, item.row.id))
@@ -1459,7 +1699,11 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
   if (!assigned) throw new CorruptionError({ message: `Part pack target missing: ${row.id}` })
   const packed = chunks.find((chunk) => chunk.some((item) => item.row.id === row.id))
   if (!packed) throw new CorruptionError({ message: `Part pack target chunk missing: ${row.id}` })
-  const payload = db.select({ raw_bytes: ColdStorageTable.raw_bytes, compressed_bytes: ColdStorageTable.compressed_bytes }).from(ColdStorageTable).where(eq(ColdStorageTable.hash, assigned.hash)).get()
+  const payload = db
+    .select({ raw_bytes: ColdStorageTable.raw_bytes, compressed_bytes: ColdStorageTable.compressed_bytes })
+    .from(ColdStorageTable)
+    .where(eq(ColdStorageTable.hash, assigned.hash))
+    .get()
   if (!payload) throw new CorruptionError({ message: "Part pack disappeared after assignment", hash: assigned.hash })
   return {
     type: "frozen",
@@ -1471,7 +1715,11 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
 
 // packed Message thaw 按 hash 分组，每个 pack 只解压一次；entry key 缺失或真实 ref_count 漂移会阻止整批回填。
 // owner row 清除 ref/key 后再统一 decrement，父子 fork 共享 pack 时不会把仍在使用的 payload 提前删除。
-function thawPackedMessageRows(db: TxOrDb, rows: Array<typeof MessageTable.$inferSelect & { cold_ref: string; cold_key: Buffer }>, now: number) {
+function thawPackedMessageRows(
+  db: TxOrDb,
+  rows: Array<typeof MessageTable.$inferSelect & { cold_ref: string; cold_key: Buffer }>,
+  now: number,
+) {
   const hashes = [...new Set(rows.map((row) => row.cold_ref))]
   const payloads = db.select().from(ColdStorageTable).where(inArray(ColdStorageTable.hash, hashes)).all()
   if (payloads.length !== hashes.length) throw new CorruptionError({ message: "Message thaw contains a missing pack" })
@@ -1493,17 +1741,18 @@ function thawPackedMessageRows(db: TxOrDb, rows: Array<typeof MessageTable.$infe
       .run()
     return { ...row, data, cold_ref: null, cold_key: null }
   })
-  decrementReferences(db, rows.map((row) => row.cold_ref), now)
+  decrementReferences(
+    db,
+    rows.map((row) => row.cold_ref),
+    now,
+  )
   return restored
 }
 
 // 一个 pack chunk 内的 owner projection 使用单条 SQLite upsert，而不是每行一次 UPDATE。
 // maintenance 已持有 immediate transaction；同一批不会被其他 writer 插入竞争，RETURNING 仍验证每个 owner 都被写回。
-function assignMessagePack(
-  db: TxOrDb,
-  items: MessagePackItem[],
-  hash: string,
-) {
+function assignMessagePack(db: TxOrDb, items: MessagePackItem[], packed: ReturnType<typeof retainPackPayload>) {
+  const hash = packed.hash
   for (let offset = 0; offset < items.length; offset += DEFAULT_BATCH_SIZE) {
     const values = items.slice(offset, offset + DEFAULT_BATCH_SIZE).map((item) => ({
       id: item.row.id,
@@ -1512,7 +1761,7 @@ function assignMessagePack(
       time_updated: item.row.time_updated,
       data: item.projection,
       cold_ref: hash,
-      cold_key: Buffer.from(item.entry.key),
+      cold_key: requiredPackKey(packed, item.entry.key),
     }))
     const updated = db
       .insert(MessageTable)
@@ -1528,15 +1777,13 @@ function assignMessagePack(
       })
       .returning({ id: MessageTable.id })
       .all()
-    if (updated.length !== values.length) throw new CorruptionError({ message: "Message pack assignment is incomplete", hash })
+    if (updated.length !== values.length)
+      throw new CorruptionError({ message: "Message pack assignment is incomplete", hash })
   }
 }
 
-function assignPartPack(
-  db: TxOrDb,
-  items: PartPackItem[],
-  hash: string,
-) {
+function assignPartPack(db: TxOrDb, items: PartPackItem[], packed: ReturnType<typeof retainPackPayload>) {
+  const hash = packed.hash
   // 一个 chunk 使用批量 upsert，避免每个 Part 各执行 UPDATE 导致 SQLite writer 往返成为瓶颈。
   // 2000 行与公共 batch 上限一致，既降低 statement 次数也不超过当前 SQLite variable 限制。
   for (let offset = 0; offset < items.length; offset += DEFAULT_BATCH_SIZE) {
@@ -1550,9 +1797,9 @@ function assignPartPack(
       data: item.projection,
       cold_ref: hash,
       // 每个 owner 保留自己的 key；entry 去重不能丢失一对一恢复定位。
-      cold_key: Buffer.from(item.entry.key),
+      cold_key: requiredPackKey(packed, item.entry.key),
       // 非 Tool/Step 的 stats 必须是 NULL，不能沿用上一轮对象中的派生值。
-      cold_stats: item.stats,
+      cold_stats: compactPartStats(item.stats),
     }))
     // data、ref、key、stats 在同一 statement 切换，任何半状态都属于 corruption。
     // excluded 值只来自已经验证的 extraction projection，不接受任意 storage skeleton。
@@ -1573,7 +1820,8 @@ function assignPartPack(
       .all()
     // payload ref 已由 caller 预先 retain，只有完整 assignment 后才能递减旧引用。
     // returning 缺一行会回滚 immediate transaction，不能留下已 retain 却未归属的 payload。
-    if (updated.length !== values.length) throw new CorruptionError({ message: "Part pack assignment is incomplete", hash })
+    if (updated.length !== values.length)
+      throw new CorruptionError({ message: "Part pack assignment is incomplete", hash })
   }
 }
 
@@ -1603,11 +1851,16 @@ function freezeMessageBatch(
   let compressedBytes = 0
   for (const items of groups.values()) {
     for (const chunk of splitPacks("message", items)) {
-      const packed = retainPackPayload(db, "message", chunk.map((item) => item.entry), input.now)
+      const packed = retainPackPayload(
+        db,
+        "message",
+        chunk.map((item) => item.entry),
+        input.now,
+      )
       retainPackedReference(db, packed.hash, "message", input.now, chunk.length)
       rawBytes += packed.rawBytes
       compressedBytes += packed.compressedBytes
-      assignMessagePack(db, chunk, packed.hash)
+      assignMessagePack(db, chunk, packed)
       decrementReferences(
         db,
         chunk.flatMap((item) => (item.oldRef && item.oldRef !== packed.hash ? [item.oldRef] : [])),
@@ -1653,12 +1906,17 @@ function freezePartBatch(
   for (const items of groups.values()) {
     for (const chunk of splitPacks("part", items)) {
       // 每个 chunk 先 retain immutable pack，再切 owner，最后递减真实移动的旧 refs。
-      const packed = retainPackPayload(db, "part", chunk.map((item) => item.entry), input.now)
+      const packed = retainPackPayload(
+        db,
+        "part",
+        chunk.map((item) => item.entry),
+        input.now,
+      )
       retainPackedReference(db, packed.hash, "part", input.now, chunk.length)
       // counters 只累加 frame 逻辑 bytes，不把共享 owner 数量当作物理文件大小。
       rawBytes += packed.rawBytes
       compressedBytes += packed.compressedBytes
-      assignPartPack(db, chunk, packed.hash)
+      assignPartPack(db, chunk, packed)
       // 新旧 hash 相同表示内容未变，不能 retain/decrement 后删除仍被复用的 payload。
       decrementReferences(
         db,
@@ -1730,11 +1988,28 @@ function decodePack(db: TxOrDb, hash: string, owner: OwnerKind) {
     throw new CorruptionError({ message: "Cold pack compressed size does not match", hash })
   }
   const raw = decompress(payload.payload)
-  if (raw.byteLength !== payload.raw_bytes || digest(packKind(owner), raw) !== hash) {
+  const identity = digest(packKind(owner), raw)
+  if (
+    raw.byteLength !== payload.raw_bytes ||
+    (identity !== hash && Buffer.from(identity, "hex").toString("base64url") !== hash)
+  ) {
     throw new CorruptionError({ message: "Cold pack size or hash does not match", hash })
   }
   const parsed = parsePackEnvelope(owner, raw, hash)
-  return new Map(parsed.entries.map((entry) => [entry.key.toString("hex"), entry.fields]))
+  return new Map(
+    parsed.entries.map((entry, index) => [
+      (parsed.version === 3 ? slotKey(index) : entry.key).toString("hex"),
+      entry.fields,
+    ]),
+  )
+}
+
+function requiredPackKey(packed: { hash: string; keys: Map<string, Buffer> }, key: Buffer) {
+  // assignment 查的是完整内容身份，返回的短 slot 只负责定位。
+  // 缺失映射应回滚本批，不能写入一个指向其他 entry 的默认序号。
+  const value = packed.keys.get(key.toString("hex"))
+  if (!value) throw new CorruptionError({ message: "Pack assignment entry is missing", hash: packed.hash })
+  return value
 }
 
 // retainPackPayload 与 v1 retain 对称，但 hash 身份覆盖完整 pack；existing row 必须先用真实 owner ref_count 和 canonical bytes 复验。
@@ -1756,13 +2031,14 @@ function retainPackPayload(db: TxOrDb, owner: OwnerKind, entries: PackEntry[], n
     const restored = decodePack(db, value.hash, owner)
     const restoredValue = packEnvelope(
       owner,
-      [...restored].map(([key, fields]) => ({ key: Buffer.from(key, "hex"), fields })),
+      [...restored.values()].map((fields) => ({ key: entryKey(owner, fields), fields })),
     )
     if (!restoredValue.raw.equals(value.raw)) {
       throw new CorruptionError({ message: "Cold pack hash collides with different canonical bytes", hash: value.hash })
     }
     return {
       hash: value.hash,
+      keys: value.keys,
       rawBytes: value.raw.byteLength,
       compressedBytes: existing.compressed_bytes,
     }
@@ -1782,7 +2058,7 @@ function retainPackPayload(db: TxOrDb, owner: OwnerKind, entries: PackEntry[], n
       time_updated: now,
     })
     .run()
-  return { hash: value.hash, rawBytes: value.raw.byteLength, compressedBytes: payload.byteLength }
+  return { hash: value.hash, keys: value.keys, rawBytes: value.raw.byteLength, compressedBytes: payload.byteLength }
 }
 
 // Pack ref_count 按 owner 增量而不是按 unique key 增量；相同 entry 被两个 Message 使用时仍需两个生命周期引用。
@@ -1802,7 +2078,7 @@ function retainPackedReference(db: TxOrDb, hash: string, owner: OwnerKind, now: 
 }
 
 // SummaryCache 的 inspect 只解码 aggregate，不修改 Session ref/cursor 或任何 payload ref_count。
-// 该路径只给内部 cache rebuild 使用；业务 Message/Part 读取必须继续走 thaw，不能借此形成第二套缓存。
+// 该路径只恢复 Session aggregate；Message/Part 仍由对应 owner decoder 恢复。
 function decodeSummary(db: TxOrDb, hash: string) {
   const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
   if (!payload) throw new CorruptionError({ message: "Session summary reference points to a missing payload", hash })
@@ -1836,7 +2112,10 @@ export function retainSummaryPayload(db: TxOrDb, diffs: SummaryPayload, now: num
     }
     const restored = decodeSummary(db, value.hash)
     if (!Buffer.from(canonical(summaryEnvelope(restored).value)).equals(value.raw)) {
-      throw new CorruptionError({ message: "Session summary hash collides with different canonical bytes", hash: value.hash })
+      throw new CorruptionError({
+        message: "Session summary hash collides with different canonical bytes",
+        hash: value.hash,
+      })
     }
     return { hash: value.hash, compressedBytes: existing.compressed_bytes }
   }
@@ -1934,7 +2213,9 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
   if (relation === undefined || relation > 0) return
   const payload = decodeSummary(db, session.summaryRef)
   // seed 内部 cursor 与外层 cursor 各自独立解析：保留晚于变更行的 seed，丢弃已被覆盖的 seed。
-  const seedRelation = payload.seed ? compareStoredMessageCursor(db, sessionID, messageID, payload.seed.cursor) : undefined
+  const seedRelation = payload.seed
+    ? compareStoredMessageCursor(db, sessionID, messageID, payload.seed.cursor)
+    : undefined
   const seed = payload.seed && (seedRelation === undefined || seedRelation > 0) ? payload.seed : undefined
   const updated = db
     .update(SessionTable)
@@ -2048,7 +2329,10 @@ export function replacePart(
   const previous = db.select({ cold_ref: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, row.id)).get()
   db.insert(PartTable)
     .values({ ...row, cold_ref: null, cold_key: null, cold_stats: null })
-    .onConflictDoUpdate({ target: PartTable.id, set: { data: row.data, cold_ref: null, cold_key: null, cold_stats: null } })
+    .onConflictDoUpdate({
+      target: PartTable.id,
+      set: { data: row.data, cold_ref: null, cold_key: null, cold_stats: null },
+    })
     .run()
   if (previous?.cold_ref) releaseReference(db, PartTable, row.id, previous.cold_ref)
 }
@@ -2111,10 +2395,7 @@ export function releaseSession(db: TxOrDb, sessionID: SessionID) {
     .get()
   if (summary?.summary_ref) {
     // Session FK 是 RESTRICT；summary owner 必须先清除并 release，才能删除 Session 行而不绕过计数。
-    db.update(SessionTable)
-      .set({ summary_ref: null, summary_cursor: null })
-      .where(eq(SessionTable.id, sessionID))
-      .run()
+    db.update(SessionTable).set({ summary_ref: null, summary_cursor: null }).where(eq(SessionTable.id, sessionID)).run()
     releaseSummaryReference(db, summary.summary_ref)
   }
 }
@@ -2250,11 +2531,23 @@ export function clonePrefix(
       .run()
   }
 
+  const targetRoot = !db
+    .select({ parent: SessionTable.parent_id })
+    .from(SessionTable)
+    .where(eq(SessionTable.id, input.sessionID))
+    .get()?.parent
+  // 冷子正文复制到根 Session 时仅恢复目标行，源引用保持不变。
+  const copiedText = new Map(
+    inspectPartRows(
+      db,
+      sourceParts.filter((row) => targetRoot && row.data.type === "text" && row.cold_ref),
+    ).map((row) => [row.id, row.data]),
+  )
   const parts = sourceParts.map((row) => {
     const targetID = partMap.get(row.id)
     const targetMessageID = messageMap.get(row.message_id)
     if (!targetID || !targetMessageID) throw new ValidationError({ message: `Fork part map misses ${row.id}` })
-    const data = structuredClone(row.data)
+    const data = structuredClone(copiedText.get(row.id) ?? row.data)
     if (data.type === "compaction" && data.tail_start_id) {
       const tailStartID = messageMap.get(data.tail_start_id)
       if (tailStartID) data.tail_start_id = tailStartID
@@ -2267,8 +2560,8 @@ export function clonePrefix(
       time_created: row.time_created,
       time_updated: row.time_updated,
       data,
-      cold_ref: row.cold_ref,
-      cold_key: row.cold_key ? Buffer.from(row.cold_key) : null,
+      cold_ref: copiedText.has(row.id) ? null : row.cold_ref,
+      cold_key: copiedText.has(row.id) ? null : row.cold_key ? Buffer.from(row.cold_key) : null,
       // fork 复制同一 immutable payload 的 owner 投影；重新计算会要求无意义地解码整个共享 pack。
       cold_stats: row.cold_stats,
     }
@@ -2281,7 +2574,7 @@ export function clonePrefix(
 
   incrementReferences(
     db,
-    [...sourceMessages, ...sourceParts].flatMap((row) => (row.cold_ref ? [{ hash: row.cold_ref }] : [])),
+    [...messages, ...parts].flatMap((row) => (row.cold_ref ? [{ hash: row.cold_ref }] : [])),
     Date.now(),
   )
   // projector 仍拥有 Session usage totals；返回 raw Part data 让它复用既有 step-finish 聚合而不再次查询或 thaw。
@@ -2319,7 +2612,7 @@ function freeze(
   if (!row) return { type: "skipped", reason: "missing" }
   if (row.cold_key) return { type: "skipped", reason: "already-cold" }
   const source = row.cold_ref ? restorePart(row.data, decode(db, row.cold_ref, "part"), row.cold_ref) : row.data
-  const value = extractPartV2(source)
+  const value = extractPartV2(source, row.session_id)
   if (!value) return { type: "skipped", reason: "no-fields" }
   const state =
     typeof input.eligibilityState === "function"
@@ -2345,22 +2638,32 @@ export function freezeOwner(input: Owner & { now?: number; olderThanMs?: number 
 // corruption 会使整个范围 rollback，模型不会收到部分完整、部分占位的混合上下文。
 export function thawMessageRows(rows: (typeof MessageTable.$inferSelect)[]) {
   if (!rows.some((row) => row.cold_ref)) {
-    if (rows.some((row) => row.cold_key)) throw new CorruptionError({ message: "Message owner has a key without a ref" })
+    if (rows.some((row) => row.cold_key))
+      throw new CorruptionError({ message: "Message owner has a key without a ref" })
     return rows
   }
   return Database.transaction(
     (db) => {
       const current = rows.map((input) => {
-        if (input.cold_key && !input.cold_ref) throw new CorruptionError({ message: "Message owner has a key without a ref" })
+        if (input.cold_key && !input.cold_ref)
+          throw new CorruptionError({ message: "Message owner has a key without a ref" })
         const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
         if (!row) throw new CorruptionError({ message: `Message disappeared during thaw: ${input.id}` })
         return row
       })
-      const legacy = current.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
-      const packed = current.filter((row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key)
-      const restored = new Map<MessageID, typeof current[number]>()
+      const legacy = current.filter(
+        (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
+      )
+      const packed = current.filter(
+        (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
+      )
+      const restored = new Map<MessageID, (typeof current)[number]>()
       if (legacy.length > 0) {
-        const values = decodedBatch(db, legacy.map((row) => row.cold_ref), "message")
+        const values = decodedBatch(
+          db,
+          legacy.map((row) => row.cold_ref),
+          "message",
+        )
         for (const row of legacy) {
           const data = restoreMessage(row.data, requiredEnvelope(values, row.cold_ref), row.cold_ref)
           db.update(MessageTable)
@@ -2369,7 +2672,11 @@ export function thawMessageRows(rows: (typeof MessageTable.$inferSelect)[]) {
             .run()
           restored.set(row.id, { ...row, data, cold_ref: null, cold_key: null })
         }
-        decrementReferences(db, legacy.map((row) => row.cold_ref), Date.now())
+        decrementReferences(
+          db,
+          legacy.map((row) => row.cold_ref),
+          Date.now(),
+        )
       }
       if (packed.length > 0) {
         for (const row of thawPackedMessageRows(db, packed, Date.now())) restored.set(row.id, row)
@@ -2387,25 +2694,35 @@ export function thawPartRows(rows: (typeof PartTable.$inferSelect)[]) {
   // fast path 只接受严格 hot `(NULL,NULL,NULL)`；key-only 或 stats-only 状态不能冒充无需处理。
   if (!rows.some((row) => row.cold_ref)) {
     if (rows.some((row) => row.cold_key)) throw new CorruptionError({ message: "Part owner has a key without a ref" })
-    if (rows.some((row) => row.cold_stats !== null)) throw new CorruptionError({ message: "Hot Part has a cold Stats projection" })
+    if (rows.some((row) => row.cold_stats !== null))
+      throw new CorruptionError({ message: "Hot Part has a cold Stats projection" })
     return rows
   }
   return Database.transaction(
     (db) => {
       // 输入可能来自过期查询；事务内按 ID 重读才是选择当前 decoder 的事实。
       const current = rows.map((input) => {
-        if (input.cold_key && !input.cold_ref) throw new CorruptionError({ message: "Part owner has a key without a ref" })
+        if (input.cold_key && !input.cold_ref)
+          throw new CorruptionError({ message: "Part owner has a key without a ref" })
         const row = db.select().from(PartTable).where(eq(PartTable.id, input.id)).get()
         if (!row) throw new CorruptionError({ message: `Part disappeared during thaw: ${input.id}` })
         return row
       })
-      const legacy = current.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
-      const packed = current.filter((row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key)
+      const legacy = current.filter(
+        (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
+      )
+      const packed = current.filter(
+        (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
+      )
       // Map 按 ID 汇合恢复值，最终仍依输入顺序返回，hash grouping 不改变 Part chronology。
-      const restored = new Map<PartID, typeof current[number]>()
+      const restored = new Map<PartID, (typeof current)[number]>()
       if (legacy.length > 0) {
         // v1 refs 按 hash 批量 decode，共享 fork owner 不重复解压同一 payload。
-        const values = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
+        const values = decodedBatch(
+          db,
+          legacy.map((row) => row.cold_ref),
+          "part",
+        )
         for (const row of legacy) {
           const data = restorePart(row.data, requiredEnvelope(values, row.cold_ref), row.cold_ref)
           // data 与 NULL ref/key/stats 一次写回并保留 timestamp，持久预热不改变 chronology。
@@ -2416,12 +2733,17 @@ export function thawPartRows(rows: (typeof PartTable.$inferSelect)[]) {
           restored.set(row.id, { ...row, data, cold_ref: null, cold_key: null, cold_stats: null })
         }
         // legacy owners 全部写热后再递减，共享 payload 不会因首个 fork thaw 被提前删除。
-        decrementReferences(db, legacy.map((row) => row.cold_ref), Date.now())
+        decrementReferences(
+          db,
+          legacy.map((row) => row.cold_ref),
+          Date.now(),
+        )
       }
       if (packed.length > 0) {
         const hashes = [...new Set(packed.map((row) => row.cold_ref))]
         const payloads = db.select().from(ColdStorageTable).where(inArray(ColdStorageTable.hash, hashes)).all()
-        if (payloads.length !== hashes.length) throw new CorruptionError({ message: "Part thaw contains a missing pack" })
+        if (payloads.length !== hashes.length)
+          throw new CorruptionError({ message: "Part thaw contains a missing pack" })
         // v2 先反算真实 owner count，再验证 kind/refcount；损坏时不写回任何 Part。
         const counts = ownerCounts(db, hashes)
         const entries = new Map<string, Map<string, Record<string, Json>>>()
@@ -2445,7 +2767,11 @@ export function thawPartRows(rows: (typeof PartTable.$inferSelect)[]) {
           restored.set(row.id, { ...row, data, cold_ref: null, cold_key: null, cold_stats: null })
         }
         // owner 全部写回后才递减，最后一个共享 ref 才能删除 immutable payload。
-        decrementReferences(db, packed.map((row) => row.cold_ref), Date.now())
+        decrementReferences(
+          db,
+          packed.map((row) => row.cold_ref),
+          Date.now(),
+        )
       }
       // 返回值均已是热态业务数据，前端不感知本次是否执行 zstd 与持久写回。
       return current.map((row) => restored.get(row.id) ?? row)
@@ -2454,18 +2780,49 @@ export function thawPartRows(rows: (typeof PartTable.$inferSelect)[]) {
   )
 }
 
-// inspect 只在 SummaryCache rebuild 中恢复内存投影，保留 owner cold_ref 和 payload ref_count 不动。
-// 它与 thaw 共用 decode/restore corruption gate，但绝不写 PartTable，避免 derived cache 重建反向破坏归档状态。
+// inspect 为普通读取恢复内存对象，保留 owner cold_ref 和 payload ref_count 不动。
+// 它与 thaw 共用完整性门禁，只有持久预热才写回 owner 并释放引用。
+export function inspectMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
+  // 一次读取按包分组，完整 Message 返回值不改变持久引用或时间戳。
+  // 普通查看不调用 release，多个 fork 的共享生命周期保持独立。
+  // v1 的单 owner envelope 与 packed owner 各走明确版本路径。
+  const hashes = [...new Set(rows.flatMap((row) => (row.cold_ref && row.cold_key ? [row.cold_ref] : [])))]
+  requireReferenceMetadata(db, hashes, "message-pack")
+  const packs = new Map(hashes.map((hash) => [hash, decodePack(db, hash, "message")]))
+  const legacy = decodedBatch(
+    db,
+    rows.flatMap((row) => (row.cold_ref && !row.cold_key ? [row.cold_ref] : [])),
+    "message",
+  )
+  return rows.map((row) => {
+    if (!row.cold_ref) {
+      if (row.cold_key) throw new CorruptionError({ message: "Message key has no pack" })
+      return row
+    }
+    if (!row.cold_key)
+      return { ...row, data: restoreMessage(row.data, requiredEnvelope(legacy, row.cold_ref), row.cold_ref) }
+    const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
+    if (!fields) throw new CorruptionError({ message: "Message inspect entry is missing", hash: row.cold_ref })
+    return { ...row, data: restorePackedMessage(row.data, fields, row.cold_ref) }
+  })
+}
+
 export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
-  const legacy = rows.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
-  const packed = rows.filter((row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key)
-  const legacyValues = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
+  const legacy = rows.filter(
+    (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
+  )
+  const packed = rows.filter(
+    (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
+  )
+  const legacyValues = decodedBatch(
+    db,
+    legacy.map((row) => row.cold_ref),
+    "part",
+  )
   // 非持久 inspect 与 thaw/Stats 共用真实 owner gate，不能仅因 pack bytes 可解码就忽略 refcount drift。
   const packedHashes = [...new Set(packed.map((row) => row.cold_ref))]
   requireReferenceMetadata(db, packedHashes, "part-pack")
-  const packs = new Map(
-    packedHashes.map((hash) => [hash, decodePack(db, hash, "part")] as const),
-  )
+  const packs = new Map(packedHashes.map((hash) => [hash, decodePack(db, hash, "part")] as const))
   return rows.map((row) => {
     if (!row.cold_ref) {
       if (row.cold_key) throw new CorruptionError({ message: "Part owner has a key without a ref" })
@@ -2486,12 +2843,67 @@ export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect
 // Stats inspect 与业务 inspect 的差异是持久格式合同：v2 只能读取 owner 同行投影，绝不打开 pack。
 // v1 没有该列，必须按 hash 批量解码并在内存恢复；该 shipped compatibility branch 不写 owner/refcount。
 // hot row 现场计算同一 projector，因而 hot/v1/v2 不会维护三套统计公式。
+export function matchColdText(tokens: string[], scope?: SQL) {
+  // 只返回命中身份，把最终排序、分页和 title/hot 条件仍交给现有 SQL。
+  // 每个 token 独立记录命中，允许关键词分别出现在标题、热正文和冷正文中。
+  return Database.use((db) => {
+    // 范围和可见性先在 SQL 缩小；一次只解码一个包，结果仅保留 Session ID。
+    const rows = db
+      .select({ session: PartTable.session_id, ref: PartTable.cold_ref, key: PartTable.cold_key })
+      .from(PartTable)
+      .innerJoin(
+        MessageTable,
+        and(eq(MessageTable.id, PartTable.message_id), eq(MessageTable.session_id, PartTable.session_id)),
+      )
+      .innerJoin(SessionTable, eq(SessionTable.id, PartTable.session_id))
+      .where(
+        and(
+          scope,
+          isNotNull(PartTable.cold_ref),
+          sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
+          sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+          sql`coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0`,
+          sql`coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0`,
+        ),
+      )
+      .orderBy(PartTable.cold_ref)
+      .all()
+    const result = tokens.map(() => new Set<SessionID>())
+    // locator 已按 hash 排序，单包缓存即可避免同包 owner 重复解压。
+    // 查询结束即释放正文，没有跨请求缓存生命周期或额外持久索引。
+    let hash: string | undefined
+    let entries = new Map<string, Record<string, Json>>()
+    for (const row of rows) {
+      if (!row.ref || !row.key) throw new CorruptionError({ message: "Cold Text locator is incomplete" })
+      if (hash !== row.ref) {
+        entries = decodePack(db, row.ref, "part")
+        hash = row.ref
+      }
+      const text = entries.get(row.key.toString("hex"))?.text
+      if (typeof text !== "string") throw new CorruptionError({ message: "Cold Text body is missing", hash })
+      // SQLite lower 只折叠 ASCII；Unicode 大小写不能改用 JS 全量折叠。
+      const folded = text.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      tokens.forEach((token, index) => {
+        if (folded.includes(token)) result[index].add(row.session)
+      })
+    }
+    return result.map((ids) => [...ids])
+  })
+}
+
 export function inspectPartStats(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
   // hot row 出现 cold_stats 表示 writer 未清理派生状态，继续统计会形成两个矛盾数据源。
   // 此 seam 只返回标量且不执行 owner mutation，Stats 前后 storage-state hash 必须相同。
-  const legacy = rows.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
+  const legacy = rows.filter(
+    (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
+  )
   // v1 只能批量 decode 旧 payload，但共用正式 integrity gate，不建立宽松 Stats parser。
-  const legacyValues = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
+  const legacyValues = decodedBatch(
+    db,
+    legacy.map((row) => row.cold_ref),
+    "part",
+  )
   // v2 只验证 metadata/refcount，不读取 pack body；完整 archive 扫描属于显式 verify。
   requireReferenceMetadata(
     db,
@@ -2508,7 +2920,10 @@ export function inspectPartStats(db: TxOrDb, rows: (typeof PartTable.$inferSelec
     if (!row.cold_key) {
       // v1 row 只允许 NULL stats；当前 writer 在下次压缩时将其升级为 v2。
       if (row.cold_stats !== null) {
-        throw new CorruptionError({ message: "Legacy Part has an unexpected cold Stats projection", hash: row.cold_ref })
+        throw new CorruptionError({
+          message: "Legacy Part has an unexpected cold Stats projection",
+          hash: row.cold_ref,
+        })
       }
       return projectPartStats(restorePart(row.data, requiredEnvelope(legacyValues, row.cold_ref), row.cold_ref))
     }
@@ -2601,8 +3016,9 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
 // Message SQL candidate 只做必要条件预筛，最终字段白名单与 eligibility 仍由 extraction 路径决定。
 function messageCandidate() {
   // v2 不再按 owner 大小筛选；SQL 只识别有 summary.diffs 的 hot user，v1 projection 由 cold_ref 分支纳入。
-  return sql`json_extract(${MessageTable.data}, '$.role') = 'user'
-    and json_array_length(json_extract(${MessageTable.data}, '$.summary.diffs')) > 0`
+  return sql`(json_extract(${MessageTable.data}, '$.role') = 'assistant' or
+    (json_extract(${MessageTable.data}, '$.role') = 'user'
+    and json_array_length(json_extract(${MessageTable.data}, '$.summary.diffs')) > 0))`
 }
 
 // Part candidate 只做 discriminator 前置筛选，最终字段白名单/eligibility 在 JS extraction 再验证。
@@ -2615,7 +3031,7 @@ function partCandidate() {
         and json_extract(${PartTable.data}, '$.state.status') in ('completed', 'error')
       )
       or (
-        json_extract(${PartTable.data}, '$.type') = 'reasoning'
+        json_extract(${PartTable.data}, '$.type') in ('reasoning', 'text')
       )
       or (
         json_extract(${PartTable.data}, '$.type') = 'file'
@@ -2687,7 +3103,8 @@ function repairToolInputShape(db: TxOrDb) {
   let fixed = 0
   for (const row of rows) {
     // SQL 谓词已保证 tool + completed/error；此分支只收窄 union 类型，不复制第二套判定。
-    if (row.data.type !== "tool" || (row.data.state.status !== "completed" && row.data.state.status !== "error")) continue
+    if (row.data.type !== "tool" || (row.data.state.status !== "completed" && row.data.state.status !== "error"))
+      continue
     const normalized = typeof row.data.state.input === "string" ? parseToolInputObject(row.data.state.input) : {}
     db.update(PartTable)
       .set({ data: { ...row.data, state: { ...row.data.state, input: normalized } }, time_updated: row.time_updated })
@@ -2801,8 +3218,8 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
       if (payload.kind !== owner) corruptOwners++
       return
     }
-    // packed key 固定 32 bytes，并须存在于成功解析的唯一排序 entry 集合。
-    if (key.byteLength !== 32 || payload.kind !== packKind(owner)) {
+    // 已发布 hex 包使用完整 key，新 base64url 包使用 slot；长度与包格式共同约束 owner。
+    if (key.byteLength !== (ref.length === 43 ? 4 : 32) || payload.kind !== packKind(owner)) {
       corruptOwners++
       return
     }
@@ -2816,7 +3233,11 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
     try {
       if (!owner.ref || !owner.key) {
         // hot 与 v1 rows 从未由 v2 writer 生成同行投影；非空值只能来自不完整迁移或外部破坏。
-        if (owner.stats !== null) throw new CorruptionError({ message: "Non-v2 Part has a cold Stats projection", hash: owner.ref ?? undefined })
+        if (owner.stats !== null)
+          throw new CorruptionError({
+            message: "Non-v2 Part has a cold Stats projection",
+            hash: owner.ref ?? undefined,
+          })
         continue
       }
       const entries = packEntries.get(owner.ref)
@@ -3092,10 +3513,12 @@ function taskCounter(input: Record<string, unknown>, field: string) {
 }
 
 function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): MaintenanceCursor {
+  // compress 在 owner 扫描后进入既有包阶段；expand 仍只接受 owner cursor。
+  // 同一个持久任务保留明确阶段，恢复时不能把包 hash 当作 Message ID。
   // cursor 是已提交批次的恢复锚点，缺失时不能默认从头运行并重复 refcount 写入。
   // operation 决定唯一 cursor family，验证后 maintain 无需再解释任意 JSON shape。
   if (!isRecord(input)) throw new ValidationError({ message: "Maintenance task cursor is missing" })
-  if (operation === "compress" || operation === "expand") {
+  if ((operation === "compress" && input.stage !== "payload") || operation === "expand") {
     if (
       (input.owner !== "message" && input.owner !== "part" && input.owner !== "session-summary") ||
       typeof input.lastID !== "string"
@@ -3115,7 +3538,7 @@ function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): Ma
   if (input.stage !== "payload" || typeof input.lastHash !== "string") {
     throw new ValidationError({ message: "Maintenance task payload cursor is invalid" })
   }
-  if (input.lastHash && !/^[0-9a-f]{64}$/.test(input.lastHash)) {
+  if (input.lastHash && !/^(?:[0-9a-f]{64}|[A-Za-z0-9_-]{43})$/.test(input.lastHash)) {
     throw new ValidationError({ message: "Maintenance task payload cursor hash is invalid" })
   }
   return { stage: "payload", lastHash: input.lastHash }
@@ -3218,6 +3641,230 @@ function taskRequest(prepared: PreparedMaintenance, runtime: MaintenanceRuntime)
 // nextMessageRows 使用稳定 ID cursor 和 cold_ref 状态实现幂等恢复；已提交 owner 不会在 resume 中重复处理。
 // compress 追加 SQL candidate 必要条件，expand 则只扫描 cold_ref 非空的真实 owner。
 // session scope 进入同一 SQL，不能先全库读取后在 JS 过滤导致无意义数据搬运。
+type EntryLocation = { hash: string; key: Buffer }
+
+// Map 只保存可由数据库重建的地址；正文仍由 cold_storage 的完整校验拥有。
+// cache 命中不代表引用仍存活，实际复用前需要确认目标包尚在数据库中。
+
+// 重打包收集结果；写计划与写执行分离后，批内目的/源依赖才完整可见。
+type RepackBatch = {
+  messages: MessagePackItem[]
+  parts: PartPackItem[]
+  rawBytes: number
+  compressedBytes: number
+}
+
+// 收集阶段只读源包并解码，不写任何 owner 行；summary 只重编码 frame，不进入 pack 搬运。
+function collectRepackRows(
+  db: TxOrDb,
+  hashes: string[],
+  request: { sessionID?: SessionID },
+  admission: ReturnType<typeof batchEligibility>,
+): RepackBatch {
+  const batch: RepackBatch = { messages: [], parts: [], rawBytes: 0, compressedBytes: 0 }
+  for (const hash of hashes) {
+    const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
+    // 批次之间允许用户删除最后一个 owner；已释放的输入包不再需要搬运。
+    if (!payload) continue
+    if (payload.kind === "session-summary") {
+      // summary 没有 entry slot，只更换 zstd frame，保留其原始内容地址和聚合状态。
+      // 编码级别变化不修改 raw_bytes，也不触发 derived summary 重建。
+      decodeSummary(db, hash)
+      const encoded = compress(decompress(payload.payload))
+      db.update(ColdStorageTable)
+        .set({ payload: encoded, compressed_bytes: encoded.length })
+        .where(eq(ColdStorageTable.hash, hash))
+        .run()
+      batch.rawBytes += payload.raw_bytes
+      batch.compressedBytes += encoded.length
+      continue
+    }
+    if (payload.kind !== "message-pack" && payload.kind !== "part-pack") continue
+    const owner = payload.kind === "message-pack" ? "message" : "part"
+    const entries = decodePack(db, hash, owner)
+    // 先核实真实 owner 数，外部损坏不能借重打包被悄悄修正。
+    // 非本次 Session scope 的 owner 保持旧引用，最后一个引用释放前保留旧包。
+    if (payload.ref_count !== ownerCount(db, hash))
+      throw new CorruptionError({ message: "Repack reference count mismatch", hash })
+    batch.rawBytes += payload.raw_bytes
+    if (owner === "message") {
+      const rows = db
+        .select()
+        .from(MessageTable)
+        .where(
+          and(
+            eq(MessageTable.cold_ref, hash),
+            request.sessionID ? eq(MessageTable.session_id, request.sessionID) : undefined,
+          ),
+        )
+        .all()
+      for (const row of rows) {
+        const fields = row.cold_key && entries.get(row.cold_key.toString("hex"))
+        if (!fields) throw new CorruptionError({ message: "Repack Message entry missing", hash })
+        const full = restorePackedMessage(row.data, fields, hash)
+        // 已完整抽取的 owner 仅换编码，避免反复扫描长 Session 的资格历史。
+        const additional = full.role === "assistant" && !Object.hasOwn(fields, "path")
+        const value = additional && eligible(admission(row.session_id), row.id) ? extractMessageV2(full) : undefined
+        batch.messages.push({
+          row,
+          projection: value?.projection ?? row.data,
+          entry: { key: value?.key ?? entryKey(owner, fields), fields: value?.fields ?? fields },
+          oldRef: hash,
+        })
+      }
+      continue
+    }
+    const rows = db
+      .select()
+      .from(PartTable)
+      .where(
+        and(eq(PartTable.cold_ref, hash), request.sessionID ? eq(PartTable.session_id, request.sessionID) : undefined),
+      )
+      .all()
+    for (const row of rows) {
+      const fields = row.cold_key && entries.get(row.cold_key.toString("hex"))
+      if (!fields) throw new CorruptionError({ message: "Repack Part entry missing", hash })
+      const full = restorePackedPart(row.data, fields, hash)
+      const stats = requirePartStats(row, projectPartStats(full))
+      // 重编码同时核实原统计投影，再保存新表示；两个表示承载相同精确数值。
+      // 统计检查失败会回滚整个批次，避免正文正确但报表数值漂移。
+      const additional = full.type === "text" && !Object.hasOwn(fields, "text")
+      const value =
+        additional && eligible(admission(row.session_id), row.message_id)
+          ? extractPartV2(full, row.session_id)
+          : undefined
+      batch.parts.push({
+        row,
+        projection: value?.projection ?? row.data,
+        stats,
+        entry: { key: value?.key ?? entryKey(owner, fields), fields: value?.fields ?? fields },
+        oldRef: hash,
+      })
+    }
+  }
+  return batch
+}
+
+// 一批 owner 的写入计划：目的引用、行切换回调与旧包释放清单，执行前不改动任何行。
+type RepackPlan = {
+  targets: Map<string, { owner: OwnerKind; count: number }>
+  assignments: Array<() => void>
+  released: string[]
+}
+
+// 计划一批 owner 的搬运：新正文打成新包，可复用正文按既有包地址分组，统一登记到 plan。
+function planPackWrites<T extends MessagePackItem | PartPackItem>(
+  db: TxOrDb,
+  owner: OwnerKind,
+  items: T[],
+  assign: (rows: T[], packed: ReturnType<typeof retainPackPayload>) => void,
+  known: Map<string, EntryLocation>,
+  now: number,
+  plan: RepackPlan,
+) {
+  let compressedBytes = 0
+  const schedule = (rows: T[], packed: ReturnType<typeof retainPackPayload>) => {
+    // 同一 hash 的入站引用合并后只 retain 一次，保持其真实 owner 计数校验。
+    // 计划阶段不切行，后续目的包的校验仍看到一致的批次起点。
+    const moved = rows.filter((item) => item.oldRef !== packed.hash)
+    const count = (plan.targets.get(packed.hash)?.count ?? 0) + moved.length
+    plan.targets.set(packed.hash, { owner, count })
+    plan.assignments.push(() => assign(rows, packed))
+    // 一个小 entry 可以有大量共享 owner，逐项收集避免 spread 的调用参数上限。
+    for (const item of moved) {
+      if (item.oldRef) plan.released.push(item.oldRef)
+    }
+  }
+  for (const chunk of splitPacks(owner, items)) {
+    // 新正文和可复用正文共用同一 assignment/release 顺序，只有目的地址不同。
+    // Map 的去重范围可以跨 Session，但每个 owner 仍贡献一次真实引用。
+    const reused = new Map<string, { rows: T[]; keys: Map<string, Buffer> }>()
+    const fresh: T[] = []
+    for (const item of chunk) {
+      const identity = `${owner}:${item.entry.key.toString("hex")}`
+      const location = known.get(identity)
+      // identity map 是性能索引；真实引用生命期始终由数据库负责。
+      if (
+        !location ||
+        !db
+          .select({ hash: ColdStorageTable.hash })
+          .from(ColdStorageTable)
+          .where(eq(ColdStorageTable.hash, location.hash))
+          .get()
+      ) {
+        fresh.push(item)
+        continue
+      }
+      const group = reused.get(location.hash) ?? { rows: [], keys: new Map<string, Buffer>() }
+      group.rows.push(item)
+      group.keys.set(item.entry.key.toString("hex"), location.key)
+      reused.set(location.hash, group)
+    }
+    if (fresh.length) {
+      // 先取得目标包并增加真实移动的引用，随后才切换 owner 的整组存储字段。
+      // source==target 时保持计数，防止幂等维护把仍在使用的包删除。
+      const packed = retainPackPayload(
+        db,
+        owner,
+        fresh.map((item) => item.entry),
+        now,
+      )
+      compressedBytes += packed.compressedBytes
+      schedule(fresh, packed)
+      for (const item of fresh)
+        known.set(`${owner}:${item.entry.key.toString("hex")}`, {
+          hash: packed.hash,
+          key: requiredPackKey(packed, item.entry.key),
+        })
+    }
+    for (const [hash, group] of reused) {
+      // 同一目标包的 owner 一起写入，旧包按实际移动次数统一递减。
+      // 这里只重用完整 entry，部分字段相同不构成可共享业务对象。
+      schedule(group.rows, { hash, keys: group.keys, rawBytes: 0, compressedBytes: 0 })
+    }
+  }
+  return compressedBytes
+}
+
+function repackColdBatch(
+  db: TxOrDb,
+  hashes: string[],
+  request: { sessionID?: SessionID; olderThanMs: number },
+  known: Map<string, EntryLocation>,
+) {
+  const now = Date.now()
+  const admission = batchEligibility(db, now, request.olderThanMs)
+  // 普通批次限制的是 raw payload，而非 owner 数；共享 owner 多也不会重复解码包。
+  // 一个超大历史 entry 仍完整保留，容量目标不能通过截断内容满足。
+  const batch = collectRepackRows(db, hashes, request, admission)
+  const plan: RepackPlan = { targets: new Map(), assignments: [], released: [] }
+  // 回调只在当前 immediate transaction 内同步执行，不延迟到提交之后。
+  // 先收集计划才能看见跨组的目的/源依赖，单组正确并不能保证整批正确。
+  // Message/Part 共用搬运算法，业务字段和统计仍由各自 extractor 拥有。
+  const compressedBytes =
+    batch.compressedBytes +
+    planPackWrites(
+      db,
+      "message",
+      batch.messages,
+      (items, packed) => assignMessagePack(db, items, packed),
+      known,
+      now,
+      plan,
+    ) +
+    planPackWrites(db, "part", batch.parts, (items, packed) => assignPartPack(db, items, packed), known, now, plan)
+  // 目的包也可能是同批其他 owner 的源包；全部目的引用先保留，不能逐组释放。
+  // 分阶段提交同时维持 retain 的真实计数检查，避免已移动 owner 造成中间计数漂移。
+  for (const [hash, target] of plan.targets) {
+    if (target.count) retainPackedReference(db, hash, target.owner, now, target.count)
+  }
+  for (const assign of plan.assignments) assign()
+  // 此时所有入站引用都已落到 owner 表，旧包即使同时是目的包也会保留正确余量。
+  // 引用环按计数结算，不依赖 hash、插入顺序或恢复索引的遍历顺序。
+  decrementReferences(db, plan.released, now)
+  return { processed: batch.messages.length + batch.parts.length, rawBytes: batch.rawBytes, compressedBytes }
+}
+
 function nextMessageRows(
   db: TxOrDb,
   request: { sessionID?: SessionID },
@@ -3367,6 +4014,8 @@ export async function maintain(
     }
 
     let done = false
+    let packs: Array<{ hash: string; bytes: number }> | undefined
+    const known = new Map<string, EntryLocation>()
     while (!done) {
       runtime.lease.assertOwned()
       if (runtime.signal?.aborted) {
@@ -3375,7 +4024,75 @@ export async function maintain(
         return { type: "task", task }
       }
 
-      if (request.operation === "compress" || request.operation === "expand") {
+      if (request.operation === "compress" && task.cursor && "stage" in task.cursor) {
+        const cursor = task.cursor
+        if (!packs && cursor.lastHash)
+          Database.use((db) => {
+            // checkpoint 只保存进度；重启从已提交的不可变包重建去重索引。
+            // 索引不持有正文，也不参与引用计数，不能成为第二份持久权威。
+            const committed = db
+              .select({ hash: ColdStorageTable.hash, kind: ColdStorageTable.kind })
+              .from(ColdStorageTable)
+              .where(
+                and(
+                  sql`length(${ColdStorageTable.hash}) = 43`,
+                  inArray(ColdStorageTable.kind, ["message-pack", "part-pack"]),
+                ),
+              )
+              .all()
+            for (const payload of committed) {
+              const owner = payload.kind === "message-pack" ? "message" : "part"
+              for (const [key, fields] of decodePack(db, payload.hash, owner)) {
+                known.set(`${owner}:${entryKey(owner, fields).toString("hex")}`, {
+                  hash: payload.hash,
+                  key: Buffer.from(key, "hex"),
+                })
+              }
+            }
+          })
+        if (!packs)
+          packs = Database.use((db) =>
+            db
+              .select({ hash: ColdStorageTable.hash, bytes: ColdStorageTable.raw_bytes })
+              .from(ColdStorageTable)
+              .where(
+                and(
+                  gt(ColdStorageTable.hash, cursor.lastHash),
+                  request.sessionID
+                    ? sql`(
+              exists (select 1 from ${MessageTable} where ${MessageTable.cold_ref} = ${ColdStorageTable.hash} and ${MessageTable.session_id} = ${request.sessionID}) or
+              exists (select 1 from ${PartTable} where ${PartTable.cold_ref} = ${ColdStorageTable.hash} and ${PartTable.session_id} = ${request.sessionID}) or
+              exists (select 1 from ${SessionTable} where ${SessionTable.summary_ref} = ${ColdStorageTable.hash} and ${SessionTable.id} = ${request.sessionID})
+            )`
+                    : undefined,
+                ),
+              )
+              .orderBy(ColdStorageTable.hash)
+              .all(),
+          )
+        // 固定输入集合避免新 hash 再进入本轮；8 MiB 控制普通批次的解码工作量。
+        // SQLite 事务只覆盖一个批次，取消在提交后的 checkpoint 边界生效。
+        // 固定集合只包含地址和大小，维护内存不随全库正文总量增长。
+        const batch: string[] = []
+        let bytes = 0
+        while (packs.length && (batch.length === 0 || bytes + packs[0].bytes <= REPACK_BATCH_BYTES)) {
+          const row = packs.shift()
+          if (!row) break
+          batch.push(row.hash)
+          bytes += row.bytes
+        }
+        if (!batch.length) {
+          done = true
+          continue
+        }
+        const outcome = Database.transaction((db) => repackColdBatch(db, batch, request, known), {
+          behavior: "immediate",
+        })
+        task.cursor = { stage: "payload", lastHash: batch[batch.length - 1] }
+        task.processed += outcome.processed
+        task.rawBytes += outcome.rawBytes
+        task.compressedBytes += outcome.compressedBytes
+      } else if (request.operation === "compress" || request.operation === "expand") {
         const cold = request.operation === "expand"
         const olderThanMs = request.operation === "compress" ? request.olderThanMs : 0
         const cursor = task.cursor
@@ -3454,8 +4171,9 @@ export async function maintain(
             await checkpoint()
             continue
           }
-          if (outcome.empty) done = true
-          else {
+          if (outcome.empty) {
+            task.cursor = { stage: "payload", lastHash: "" }
+          } else {
             task.cursor = outcome.cursor
             task.processed += outcome.processed
             task.skipped += outcome.skipped

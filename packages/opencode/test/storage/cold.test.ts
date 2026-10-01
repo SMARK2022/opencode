@@ -298,13 +298,13 @@ describe.serial("ColdStorage", () => {
       expect(coldOwnerCount([session.id])).toBe(1)
 
       // 断言走真实业务读取 seam，而不是直接查询 projection/cold blob。
-      // 首次读取应同步 thaw 并持久回填；第二次读取因此不再依赖 cold payload。
+      // 两次完整读取均透明恢复正文，并保持用户显式维护建立的冷态。
       const first = yield* MessageV2.get({ sessionID: session.id, messageID })
       const firstTool = first.parts.find((part) => part.id === partID)
       expect(
         firstTool?.type === "tool" && firstTool.state.status === "completed" ? firstTool.state.output : undefined,
       ).toBe(output)
-      expect(coldOwnerCount([session.id])).toBe(0)
+      expect(coldOwnerCount([session.id])).toBe(1)
 
       const second = yield* MessageV2.get({ sessionID: session.id, messageID })
       const secondTool = second.parts.find((part) => part.id === partID)
@@ -516,7 +516,7 @@ describe.serial("ColdStorage", () => {
           ? restoredTool.state.attachments?.[0]?.url
           : undefined,
       ).toBe(attachmentURL)
-      expect(coldOwnerCount([session.id])).toBe(0)
+      expect(coldOwnerCount([session.id])).toBe(4)
       yield* sessions.remove(session.id)
     }),
   )
@@ -1073,6 +1073,9 @@ describe.serial("ColdStorage", () => {
       expect(
         childTool?.type === "tool" && childTool.state.status === "completed" ? childTool.state.output : undefined,
       ).toBe(output)
+      // 显式 thaw 只释放当前 fork owner，普通完整读取保持共享引用。
+      if (!childPart) throw new Error("Fork Part missing")
+      expect(ColdStorage.thawOwner({ type: "part", id: childPart.id })).toBe(true)
       expect(coldOwnerCount([source.id, child.id])).toBe(1)
 
       const thawedSource = yield* MessageV2.get({ sessionID: source.id, messageID })
@@ -1080,6 +1083,7 @@ describe.serial("ColdStorage", () => {
       expect(
         sourceTool?.type === "tool" && sourceTool.state.status === "completed" ? sourceTool.state.output : undefined,
       ).toBe(output)
+      expect(ColdStorage.thawOwner({ type: "part", id: partID })).toBe(true)
       expect(coldOwnerCount([source.id, child.id])).toBe(0)
       yield* sessions.remove(child.id)
       yield* sessions.remove(source.id)
@@ -1530,7 +1534,8 @@ describe.serial("ColdStorage", () => {
       )
       expect(compressed.type).toBe("task")
       expect(compressed.type === "task" ? compressed.task.status : undefined).toBe("completed")
-      expect(coldOwnerCount([session.id])).toBe(1)
+      // assistant path 与 Tool payload 分别由各自 owner 冷冻。
+      expect(coldOwnerCount([session.id])).toBe(2)
       expect(checkpoints.some((task) => task.status === "running")).toBe(true)
 
       const expanded = yield* Effect.promise(() =>
@@ -1696,7 +1701,7 @@ describe.serial("ColdStorage", () => {
         ),
       )
       expect(resumed.type === "task" ? resumed.task.status : undefined).toBe("completed")
-      expect(coldOwnerCount([session.id])).toBe(1)
+      expect(coldOwnerCount([session.id])).toBe(2)
       yield* sessions.remove(session.id)
     }),
   )
@@ -1739,6 +1744,7 @@ describe.serial("Packed ColdStorage V2", () => {
         ColdStorage.maintain(
           ColdStorage.prepareMaintenance({
             operation: "compress",
+            sessionID: session.id,
             olderThanMs: 0,
             batchSize: ColdStorage.DEFAULT_BATCH_SIZE,
           }),
@@ -1795,6 +1801,8 @@ describe.serial("Packed ColdStorage V2", () => {
       const test = yield* TestInstance
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({ title: "status raw F4 pack" })
+      // 普通查看现在保留旧测试的冷 owner；此统计夹具显式建立独立冷集合。
+      ColdStorage.expand({ all: true })
       // 两个不同 patch 强制不同 entry key，排除「碰巧同 key 共享」把 pure pack 变成 entry_shared。
       yield* addCompletedSummaryEdit(sessions, {
         sessionID: session.id,
@@ -1804,7 +1812,7 @@ describe.serial("Packed ColdStorage V2", () => {
       })
       yield* addCompletedSummaryEdit(sessions, {
         sessionID: session.id,
-        directory: test.directory,
+        directory: path.join(test.directory, "second"),
         file: "src/status-b.ts",
         patch: "+status-b\n",
       })
@@ -1812,6 +1820,7 @@ describe.serial("Packed ColdStorage V2", () => {
         ColdStorage.maintain(
           ColdStorage.prepareMaintenance({
             operation: "compress",
+            sessionID: session.id,
             olderThanMs: 0,
             batchSize: ColdStorage.DEFAULT_BATCH_SIZE,
           }),
@@ -2617,12 +2626,11 @@ describe.serial("Packed ColdStorage V2", () => {
       expect(page.items).toHaveLength(1)
       // page limit=1 同时断言 more=true，证明第二条仅作为范围探针而非被 hydrate 的 item。
       expect(page.more).toBe(true)
-      // cold owner 数从 3 到 2 是持久预热范围的数据库证据，不断言内部 SQL 次数。
-      expect(coldOwnerCount([session.id])).toBe(2)
-      // explicit no-limit consumer 随后降到 0，保护 export/Revert 类完整历史合同。
+      // 页面与完整历史读取都恢复业务值，均不改变持久冷态。
+      expect(coldOwnerCount([session.id])).toBe(3)
       expect(yield* sessions.messages({ sessionID: session.id })).toHaveLength(3)
       // 原始文本可由完整 suite 的 Message round-trip覆盖，本例只锁定选择范围和 owner 生命周期。
-      expect(coldOwnerCount([session.id])).toBe(0)
+      expect(coldOwnerCount([session.id])).toBe(3)
     }),
   )
 

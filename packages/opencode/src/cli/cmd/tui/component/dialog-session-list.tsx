@@ -101,6 +101,8 @@ export function DialogSessionList() {
       directoryQuery(titleUrl)
       titleUrl.searchParams.set("search", query)
       titleUrl.searchParams.set("searchMode", "title")
+      // UI 只展示主 Session，过滤提前到 SQL 才能保留正确分页与热搜索成本。
+      titleUrl.searchParams.set("roots", "true")
       titleUrl.searchParams.set("start", String(scope.start))
       titleUrl.searchParams.set("limit", String(SESSION_LIST_SEARCH_LIMIT))
       if (scope.scope) titleUrl.searchParams.set("scope", scope.scope)
@@ -143,6 +145,8 @@ export function DialogSessionList() {
         directoryQuery(scanUrl)
         const body = {
           search: query,
+          // title 与正文扫描使用同一个候选宇宙，避免首屏和最终结果错位。
+          roots: true,
           cursor: cursor ?? undefined,
           batch: SESSION_LIST_CONTENT_BATCH,
           start: scope.start,

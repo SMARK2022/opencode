@@ -1019,7 +1019,11 @@ function* listByProject(
   // scope/start 与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
   const conditions = listUniverseConditions(input)
   if (input.search) {
-    const condition = searchCondition(input.search, { mode: input.searchMode ?? "all" })
+    const condition = searchCondition(input.search, {
+      mode: input.searchMode ?? "all",
+      roots: input.roots,
+      scope: and(...conditions),
+    })
     if (condition) conditions.push(condition)
   }
 
@@ -1096,8 +1100,9 @@ function searchScanByProject(
 
   // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
   // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
-  const full = searchCondition(input.search, { mode: "all" })
   const ids = page.map((row) => row.id)
+  // 冷匹配仅检查当前候选页，保持 progressive scan 每次固定推进的工作量。
+  const full = searchCondition(input.search, { mode: "all", roots: input.roots, scope: inArray(SessionTable.id, ids) })
   const matchedIds = full
     ? new Set(
         Database.use((db) =>
@@ -1219,12 +1224,13 @@ export function* listGlobal(input?: {
   if (input?.cursor) {
     conditions.push(lt(SessionTable.time_updated, input.cursor))
   }
-  if (input?.search) {
-    const condition = searchCondition(input.search)
-    if (condition) conditions.push(condition)
-  }
   if (!input?.archived) {
     conditions.push(isNull(SessionTable.time_archived))
+  }
+  // archived/cursor 先进入范围，再恢复冷正文，避免扫描最终查询不会返回的记录。
+  if (input?.search) {
+    const condition = searchCondition(input.search, { roots: input.roots, scope: and(...conditions) })
+    if (condition) conditions.push(condition)
   }
 
   const limit = input?.limit ?? 100

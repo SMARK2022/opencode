@@ -784,7 +784,8 @@ describe("Session.findMessage", () => {
           matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
         ).toBe(output)
         expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
-        expect(sessionColdOwners(sessionID)).toBe(0)
+        // 命中返回完整值，持久冷态由显式展开或执行窗口预热改变。
+        expect(sessionColdOwners(sessionID)).toBe(1)
       }),
     ),
   )

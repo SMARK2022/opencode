@@ -189,10 +189,6 @@ export const layer = Layer.effect(
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
         if (input.roots) conditions.push(isNull(SessionTable.parent_id))
         if (input.start) conditions.push(gte(SessionTable.time_created, input.start))
-        if (input.search) {
-          const condition = searchCondition(input.search)
-          if (condition) conditions.push(condition)
-        }
         if (input.cursor) {
           conditions.push(
             order === "asc"
@@ -205,6 +201,11 @@ export const layer = Layer.effect(
                   and(eq(SessionTable.time_created, input.cursor.time), lt(SessionTable.id, input.cursor.id)),
                 )!,
           )
+        }
+        if (input.search) {
+          // v2 与生产 Session 共用搜索语义，冷内容同样受本次 cursor 和范围约束。
+          const condition = searchCondition(input.search, { roots: input.roots, scope: and(...conditions) })
+          if (condition) conditions.push(condition)
         }
         const query = Database.Client()
           .select()

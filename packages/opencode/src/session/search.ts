@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm"
 import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./session.sql"
+import { ColdStorage } from "../storage/cold"
 
 /**
  * Build a SQL condition that searches sessions by title or message content.
@@ -23,7 +24,10 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./se
 // complete 路径与 searchScan 必须使用 all，禁止用 title 定义最终召回
 export type SearchMode = "title" | "all"
 
-export function searchCondition(search: string, options?: { mode?: SearchMode }): SQL | undefined {
+export function searchCondition(
+  search: string,
+  options?: { mode?: SearchMode; roots?: boolean; scope?: SQL },
+): SQL | undefined {
   const tokens = search
     .trim()
     .toLowerCase()
@@ -34,7 +38,13 @@ export function searchCondition(search: string, options?: { mode?: SearchMode })
   // title 模式故意不扫 part，才能把首屏压到毫秒级；complete 仍走 all/scan
   const mode = options?.mode ?? "all"
   // 单 token 与历史语义一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
-  const parts = tokens.map((needle) => (mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle)))
+  // 根搜索保持纯 SQL；子正文匹配由存储层按当前候选范围一次恢复。
+  const cold =
+    // 调用方的 roots/title 合同决定零解压路径，不能在取到冷结果后再做根过滤。
+    mode === "title" || options?.roots ? tokens.map(() => []) : ColdStorage.matchColdText(tokens, options?.scope)
+  const parts = tokens.map((needle, index) =>
+    mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle, cold[index]),
+  )
   if (parts.length === 1) return parts[0]
   return sql`(${sql.join(parts, sql` and `)})`
 }
@@ -44,9 +54,12 @@ function titleTokenCondition(needle: string) {
   return textMatches(sql`${SessionTable.title}`, needle)
 }
 
-function tokenCondition(needle: string) {
+function tokenCondition(needle: string, cold: string[]) {
+  // JSON 参数承载任意数量的 ID，避免命中集合增长触及 SQLite 变量上限。
+  // ID 仍是绑定值，正文或 Session 名称不会成为拼接 SQL 的一部分。
   return sql`(
     ${textMatches(sql`${SessionTable.title}`, needle)}
+    or ${SessionTable.id} in (select value from json_each(${JSON.stringify(cold)}))
     or exists (
       select 1
       from ${PartTable}

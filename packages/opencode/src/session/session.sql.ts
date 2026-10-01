@@ -18,7 +18,9 @@ type StoredInfoData<T extends MessageV2.Info = MessageV2.Info> = T extends Messa
   ? Omit<InfoData<T>, "summary"> & {
       summary?: Omit<NonNullable<InfoData<T>["summary"]>, "diffs"> & { diffs: unknown[] }
     }
-  : InfoData<T>
+  : T extends MessageV2.Assistant
+    ? Omit<InfoData<T>, "path"> & { path?: MessageV2.Assistant["path"] }
+    : InfoData<T>
 type StoredToolState =
   | (Omit<MessageV2.ToolStatePending, "input"> & { input: unknown })
   | (Omit<MessageV2.ToolStateRunning, "input" | "title" | "metadata"> & {
@@ -210,7 +212,8 @@ export const PartTable = sqliteTable(
     // cold_stats 是同一 Part owner 的精确只读投影；它只在 v2 Tool/StepFinish 冷态存在。
     // Stats 可据此完成全量聚合而不解码 pack，thaw/update 必须与 ref/key 一起清空。
     // hot row 始终为 NULL，完整 replacement/thaw 不允许保留过期派生统计。
-    cold_stats: text({ mode: "json" }).$type<PartColdStats>(),
+    // tuple 是内部编码；ColdStorage 对消费端仍返回原有具名统计字段。
+    cold_stats: text({ mode: "json" }).$type<PartColdStats | number[]>(),
   },
   // cold_stats 故意不建索引；Stats 已按 Session/Part type 扫描同行小 JSON。
   (table) => [

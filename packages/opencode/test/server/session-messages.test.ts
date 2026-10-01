@@ -189,7 +189,7 @@ describe("session messages endpoint", () => {
         expect(projectedBody[0]?.parts).toMatchObject([{ type: "text", text: "visible message" }])
         expect(coldRef()).toBe(frozen)
 
-        // 默认 bounded API 是 Web App/SDK 的完整合同；它必须返回并 thaw 同一份 summary。
+        // 默认 API 保留完整 summary 返回值，同时查看操作继续保持持久冷态。
         const complete = yield* request(`/session/${session.id}/message?limit=1`)
         expect(complete.status).toBe(200)
         const completeBody = yield* json<MessageV2.WithParts[]>(complete)
@@ -198,7 +198,7 @@ describe("session messages endpoint", () => {
           body: "summary body",
           diffs: [{ file: "large.txt", patch, additions: 512, deletions: 0, status: "modified" }],
         })
-        expect(coldRef()).toBeNull()
+        expect(coldRef()).toBe(frozen)
       }),
     ),
     { git: true },
