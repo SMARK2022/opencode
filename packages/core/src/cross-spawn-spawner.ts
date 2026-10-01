@@ -24,6 +24,7 @@ import {
 import * as NodeChildProcess from "node:child_process"
 import { PassThrough } from "node:stream"
 import launch from "cross-spawn"
+import { WindowsShellOutput } from "./windows-shell-output"
 import { makeGlobalNode } from "./effect/app-node"
 import { filesystem, path } from "./effect/app-node-platform"
 
@@ -244,13 +245,14 @@ export const make = Effect.gen(function* () {
     proc: NodeChildProcess.ChildProcess,
     out: ChildProcess.StdoutConfig,
     err: ChildProcess.StderrConfig,
+    capture?: Awaited<ReturnType<typeof WindowsShellOutput.make>>,
   ) {
     // 与 extra-fd 相同，建柄时立即接入 PassThrough，保留快退写手在订阅前的输出字节。
     // tap 仍受背压约束；不承诺 chunk 划分、跨 fd 全序或大输出未消费仍能等待退出。
     // acquireRelease 原子建立两对 capture 并注册释放，避免取消落在所有权空窗。
     const taps = yield* Effect.acquireRelease(
       Effect.sync(() =>
-        [proc.stdout, proc.stderr].map((source) => {
+        (capture?.streams ?? [proc.stdout, proc.stderr]).map((source) => {
           if (!source) return
           const tap = new PassThrough()
           const relay = (cause: Error) => tap.destroy(toError(cause))
@@ -294,10 +296,16 @@ export const make = Effect.gen(function* () {
     return { stdout, stderr, all: Stream.merge(stdout, stderr) }
   })
 
-  const spawn = (command: ChildProcess.StandardCommand, opts: NodeChildProcess.SpawnOptions) =>
+  const spawn = (
+    command: ChildProcess.StandardCommand,
+    opts: NodeChildProcess.SpawnOptions,
+    capture?: Awaited<ReturnType<typeof WindowsShellOutput.make>>,
+  ) =>
     Effect.callback<readonly [NodeChildProcess.ChildProcess, ExitSignal], PlatformError.PlatformError>((resume) => {
       const signal = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
       const proc = launch(command.command, command.args, opts)
+      // 子进程已取得自己的写端；父进程不得用这些fd阻止管道完成。
+      capture?.releaseWriters()
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
       // 生命周期按进程死亡完成，不能等待背压下未排干的stdio；kill/exitCode/finalizer共用此信号。
@@ -313,6 +321,11 @@ export const make = Effect.gen(function* () {
       proc.on("exit", (...args) => {
         exit = args
         completeSignal(args)
+        // exitCode继续只表示进程结果；排空失败走原输出流错误链，不伪造退出码。
+        // fd启动时proc.close可早于owned排空，Tool仍通过原output fiber等待缓冲消费。
+        void capture?.finish().catch((cause) => {
+          for (const source of capture.streams) source.destroy(toError(cause))
+        })
       })
       proc.on("close", (...args) => {
         completeSignal(exit ?? args)
@@ -429,17 +442,33 @@ export const make = Effect.gen(function* () {
           const extra = fds(command.options)
           const dir = yield* cwd(command.options)
 
+          // capture先取得、后释放：原process finalizer仍负责取消存活进程。
+          // marker来自ShellTool构造点，通用core、MCP和管道组合保持原EOF路径。
+          const capture = WindowsShellOutput.has(command)
+            ? yield* Effect.acquireRelease(
+                Effect.tryPromise({
+                  try: WindowsShellOutput.make,
+                  catch: (cause) => toPlatformError("capture", toError(cause), command),
+                }),
+                (output) => Effect.promise(output.close),
+              )
+            : undefined
+
           const [proc, signal] = yield* Effect.acquireRelease(
-            spawn(command, {
-              cwd: dir,
-              env: env(command.options),
-              stdio: stdios(sin, sout, serr, extra),
-              detached: command.options.detached ?? process.platform !== "win32",
-              shell: command.options.shell,
-              // cmd自行解析/c脚本；Node的反斜杠转义会破坏其中路径和嵌套引号。
-              windowsVerbatimArguments: process.platform === "win32" && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(command.command),
-              windowsHide: process.platform === "win32",
-            }),
+            spawn(
+              command,
+              {
+                cwd: dir,
+                env: env(command.options),
+                stdio: capture ? ["ignore", ...capture.descriptors] : stdios(sin, sout, serr, extra),
+                detached: command.options.detached ?? process.platform !== "win32",
+                shell: command.options.shell,
+                // cmd自行解析/c脚本；Node的反斜杠转义会破坏其中路径和嵌套引号。
+                windowsVerbatimArguments: process.platform === "win32" && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(command.command),
+                windowsHide: process.platform === "win32",
+              },
+              capture,
+            ),
             Effect.fnUntraced(function* ([proc, signal]) {
               const done = yield* Deferred.isDone(signal)
               const kill = timeout(proc, command, command.options)
@@ -469,7 +498,7 @@ export const make = Effect.gen(function* () {
           )
 
           const fd = yield* setupFds(command, proc, extra)
-          const out = yield* setupOutput(command, proc, sout, serr)
+          const out = yield* setupOutput(command, proc, sout, serr, capture)
           let ref = true
           return makeHandle({
             pid: ProcessId(proc.pid!),
@@ -508,11 +537,13 @@ export const make = Effect.gen(function* () {
             unref: Effect.sync(() => {
               if (ref) {
                 proc.unref()
+                capture?.ref(false)
                 ref = false
               }
               return Effect.sync(() => {
                 if (!ref) {
                   proc.ref()
+                  capture?.ref(true)
                   ref = true
                 }
               })

@@ -22,6 +22,7 @@ import { ShellRemote } from "../shell-remote"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
 import { sanitizedProcessEnv } from "../util/opencode-process"
+import { WindowsShellOutput } from "../windows-shell-output"
 import { createAutoTextDecoder } from "../text-decoding"
 import { formatShellExecutionNotice } from "../util/output-notice"
 
@@ -349,6 +350,8 @@ const layer = Layer.effectDiscard(
                 // 原生Bash scope退出同样按500ms升级，清理仍归现有AppProcess/spawner。
                 forceKillAfter: Duration.millis(500),
               })
+              // 标记最终交给AppProcess的对象，普通命令与非Windows继续原EOF合同。
+              if (process.platform === "win32" && Shell.ps(shell)) WindowsShellOutput.mark(command)
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
               let ended = false
               const finish = Effect.fnUntraced(function* (result?: AppProcess.RunResult, interrupted = false) {

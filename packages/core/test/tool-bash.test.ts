@@ -22,6 +22,7 @@ import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ConfigToolOutput } from "@opencode-ai/core/config/tool-output"
 import { BashDiagnosticCollector, compressVisibleOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 import { Global } from "@opencode-ai/core/global"
+import { WindowsShellOutput } from "@opencode-ai/core/windows-shell-output"
 import { SystemContext } from "@opencode-ai/core/system-context"
 import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
 import { location } from "./fixture/location"
@@ -82,6 +83,8 @@ const appProcess = Layer.succeed(
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
         // 非Windows独立进程组是取消/超时隔离契约，不能为规避stdout竞态改成仅Linux。
         expect(command.options.detached).toBe(process.platform !== "win32")
+        // 只观察最终对象上的marker，不执行make或触发FFI。
+        expect(WindowsShellOutput.has(command)).toBe(process.platform === "win32" && Shell.ps(command.command))
         // 仅在测试观察边界解码传输包装；完整argv仍保留，真实编码由另一个实进程用例验证。
         const argument = command.args.at(-1)
         // 只观察外层脚本块中的原始命令；偏好行数和末尾流重定向不属于用户输入。
