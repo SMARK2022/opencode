@@ -78,7 +78,9 @@ type StoredInfoData<T extends SessionV1.Info = SessionV1.Info> = T extends Sessi
   ? Omit<T, "id" | "sessionID" | "summary"> & {
       summary?: Omit<NonNullable<T["summary"]>, "diffs"> & { diffs: unknown[] }
     }
-  : Omit<T, "id" | "sessionID">
+  : T extends SessionV1.Assistant
+    ? Omit<T, "id" | "sessionID" | "path"> & { path?: T["path"] }
+    : Omit<T, "id" | "sessionID">
 
 // #0500：v2 放宽面扩大——pending 之后的 tool state、metadata/title 与 step/compaction 冷字段都可外移。
 type StoredToolState =
@@ -229,7 +231,8 @@ export const PartTable = sqliteTable(
     // #0500：cold_stats 是同一 Part owner 的精确只读投影；它只在 v2 Tool/StepFinish 冷态存在。
     // Stats 可据此完成全量聚合而不解码 pack，thaw/update 必须与 ref/key 一起清空。
     // hot row 始终为 NULL，完整 replacement/thaw 不允许保留过期派生统计。
-    cold_stats: text({ mode: "json" }).$type<PartColdStats>(),
+    // tuple 是内部编码；ColdStorage 对消费端仍返回原有具名统计字段。
+    cold_stats: text({ mode: "json" }).$type<PartColdStats | number[]>(),
   },
   // #0500：cold_stats 故意不建索引；Stats 已按 Session/Part type 扫描同行小 JSON。
   (table) => [

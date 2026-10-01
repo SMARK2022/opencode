@@ -1651,6 +1651,10 @@ const layer = Layer.effect(
             : yield* MessageV2.filterCompactedEffect(sessionID).pipe(
                 Effect.provideService(Database.Service, database),
               )
+          // 缓存suffix命中也经最终窗口owner，不只在全量cache miss时预热。
+          if (cached) yield* MessageV2.warmExecutionWindow(canonical).pipe(
+            Effect.provideService(Database.Service, database),
+          )
           let msgs = canonical
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)

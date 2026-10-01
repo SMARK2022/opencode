@@ -85,10 +85,36 @@ describe("SessionProjector", () => {
       expect(yield* search("alpha absent")).toEqual([])
       expect(yield* search(" \t ")).toEqual(ids.toSorted())
       // 首屏仅标题是刻意子集；真实Native正文继续由同一all谓词完整召回，不构建第二搜索器。
-      const title = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha", { mode: "title" })).all().pipe(Effect.orDie)
+      const title = yield* Database.withSync({ db, sync: db.sync }, sync => sync.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition(sync, "alpha", { mode: "title" })).all())
       expect(title.map(row => row.id).toSorted()).toEqual(ids.slice(0, 2).toSorted())
-      const cross = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha beta", { mode: "title" })).all().pipe(Effect.orDie)
+      const cross = yield* Database.withSync({ db, sync: db.sync }, sync => sync.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition(sync, "alpha beta", { mode: "title" })).all())
       expect(cross).toEqual([])
+      // 同一真实用户投影改为闲置子会话，冷正文仍参与原跨字段交集。
+      yield* db.update(SessionTable).set({ parent_id: ids[3] }).where(inArray(SessionTable.id, [ids[0], ids[2]])).run().pipe(Effect.orDie)
+      const coldIDs = [0, 2].map(index => SessionMessage.ID.make(`msg_search_${index}`))
+      yield* db.update(SessionMessageTable).set({ time_created: 0 }).where(inArray(SessionMessageTable.id, coldIDs)).run().pipe(Effect.orDie)
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        for (const id of coldIDs) {
+          expect(ColdStorage.freezeOwner(sync, { type: "session_message", id, now: Date.now() }).type).toBe("frozen")
+          const row = sync.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, id)).get()
+          expect(row?.cold_key?.byteLength).toBe(4)
+          expect(row?.data).toMatchObject({ text: "" })
+        }
+      })
+      const cold = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, coldIDs)).all().pipe(Effect.orDie)
+      expect(cold).toHaveLength(2)
+      expect(yield* search("alpha beta")).toEqual([ids[0], ids[2]].toSorted())
+      expect(yield* sessions.message({ sessionID: ids[0], messageID: coldIDs[0] })).toMatchObject({ text: "contains beta token" })
+      // 搜索及公开读取不消费引用，完整字段只恢复到本次返回值。
+      expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, coldIDs)).all().pipe(Effect.orDie)).toEqual(cold)
+      const cache = SessionHistory.makeCache()
+      const window = yield* SessionHistory.entriesForRunner(db, ids[0], -1, cache)
+      expect(window.map(entry => entry.message.id)).toEqual([coldIDs[0]])
+      expect(window[0]?.message).toMatchObject({ text: "contains beta token" })
+      // 只有选中的执行窗口变热，另一个子会话和已验证的搜索结果保持不变。
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, coldIDs[0])).get().pipe(Effect.orDie))?.cold_ref).toBeNull()
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, coldIDs[1])).get().pipe(Effect.orDie))?.cold_ref).toBeTruthy()
+      expect(yield* search("alpha beta")).toEqual([ids[0], ids[2]].toSorted())
     }),
   )
   previewIt.effect("checks Native root and child idle clocks at exact boundaries", () =>
@@ -123,6 +149,29 @@ describe("SessionProjector", () => {
         }
         expect(ColdStorage.parseMaintenanceRequest({ operation: "compress" })).toMatchObject({ olderThanMs: 7 * day })
       })
+      // 同一活跃reviewer子会话中，真实请求身份仅允许完成且无open工具的尝试提前归档。
+      const reviewer = SessionV2.ID.make("ses_native_review_completed")
+      yield* db.insert(SessionTable).values({ id: reviewer, parent_id: parent, project_id: Project.ID.global, slug: reviewer, directory: "/project", title: "reviewer", version: "test", time_updated: now }).run().pipe(Effect.orDie)
+      const timestamp = DateTime.makeUnsafe(now)
+      for (const [index, complete] of [true, false].entries()) {
+        const request = SessionMessage.ID.make(`msg_native_review_request_${index}`)
+        const reply = SessionMessage.ID.make(`msg_native_review_reply_${index}`)
+        const messages = [
+          SessionMessage.Synthetic.make({ id: request, sessionID: reviewer, type: "synthetic", text: "review request", metadata: { permissionReviewerRequest: true }, time: { created: timestamp } }),
+          SessionMessage.Assistant.make({ id: reply, type: "assistant", agent: "permission-reviewer", model, metadata: { permissionReviewerRequestID: request }, content: [{ type: "text", id: "answer", text: "review answer" }], time: { created: timestamp, ...(complete ? { completed: timestamp } : {}) } }),
+        ]
+        yield* db.insert(SessionMessageTable).values(messages.map((message, offset) => {
+          const { id, type, ...data } = encodeMessage(message)
+          return { id: SessionMessage.ID.make(id), type, data, session_id: reviewer, seq: index * 2 + offset + 1, time_created: now }
+        })).run().pipe(Effect.orDie)
+        yield* Database.withSync({ db, sync: db.sync }, sync => {
+          for (const id of [request, reply]) {
+            const input = { type: "session_message" as const, id, now }
+            expect(ColdStorage.isEligibleOwner(sync, input)).toBe(complete)
+            if (complete) expect(ColdStorage.freezeOwner(sync, input).type).toBe("frozen")
+          }
+        })
+      }
     }),
   )
 
@@ -155,11 +204,12 @@ describe("SessionProjector", () => {
       const compressed = yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
         operation: "compress", sessionID, olderThanMs: 30 * 24 * 60 * 60 * 1000, batchSize: 1,
       }), runtime))
-      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 3, skipped: 2,
-        cursor: { owner: "session_message" } } })
+      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 4, skipped: 2,
+        cursor: { stage: "payload" } } })
       if (compressed.type !== "task") return yield* Effect.die("Missing maintenance task")
       expect(ColdStorage.parseMaintenanceTask(compressed.task)).toEqual(compressed.task)
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_ref).toBeTruthy()
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_key?.byteLength).toBe(4)
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, tailID)).get())?.cold_ref).toBeNull()
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, otherID)).get())?.cold_ref).toBeNull()
       // 强制老化只用于此精确owner；隐藏消息即使已冷也不能因普通history读取被预热。
@@ -456,17 +506,20 @@ describe("SessionProjector", () => {
       expect(view[1]).toMatchObject({ type: "user", text: "attachment body", files })
       expect(view[1]).not.toHaveProperty("summary")
       expect(view[2] && encodeMessage(view[2])).toMatchObject({ type: "assistant", content })
-      // 只读省略不能持久删除summary；附件和Tool则必须已真实恢复，而非返回骨架。
+      // 查看只恢复返回值；完整附件和Tool断言仍在上方，不能通过解冻存储行冒充只读。
       const after = yield* db.select().from(SessionMessageTable).orderBy(asc(SessionMessageTable.seq)).all()
-      expect(after.map(row => row.cold_ref)).toEqual([before[0]?.cold_ref, null, null])
-      expect(after[0]?.cold_key).toEqual(before[0]?.cold_key)
-      expect(after[1]?.data).toMatchObject({ summary })
-      expect((yield* db.select().from(ColdStorageTable).all()).map(row => row.ref_count)).toEqual([1])
-      // 默认API仍返回完整摘要并释放最后引用；不能让viewer污染SDK/模型历史的后续读取。
+      expect(after.map(row => row.cold_ref)).toEqual(before.map(row => row.cold_ref))
+      expect(after.map(row => row.cold_key)).toEqual(before.map(row => row.cold_key))
+      expect(after.map(row => row.data)).toEqual(before.map(row => row.data))
+      expect((yield* db.select().from(ColdStorageTable).all()).map(row => row.ref_count)).toEqual([3])
+      // 默认API同样返回完整摘要，普通读取不消费冷引用。
       const complete = yield* sessions.messages({ sessionID, order: "asc" })
       expect(complete[0]).toMatchObject({ summary })
       expect(complete[1]).toMatchObject({ files, summary })
       expect(complete[2] && encodeMessage(complete[2])).toMatchObject({ content })
+      expect((yield* db.select().from(SessionMessageTable).all()).map(row => row.cold_ref)).toEqual(before.map(row => row.cold_ref))
+      // 只有真实执行选集预热才释放存储引用，保留原解冻与完整性检查。
+      yield* SessionHistory.loadForRunner(db, sessionID, 0)
       expect((yield* db.select().from(SessionMessageTable).all()).every(row => row.cold_ref === null)).toBe(true)
       expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
     }),
@@ -528,6 +581,11 @@ describe("SessionProjector", () => {
         expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(1)
         const history = yield* (runner ? SessionHistory.loadForRunner(db, sessionID, 0) : SessionHistory.load(db, sessionID))
         expect(history.find(message => message.id === assistantMessageID)).toEqual(expected)
+        if (!runner) {
+          // 普通history保冷；显式执行后继续核对原热行和引用释放，下一轮独立冻结仍成立。
+          expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeTruthy()
+          yield* SessionHistory.loadForRunner(db, sessionID, 0)
+        }
         const restored = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
         expect(restored?.cold_ref).toBeNull()
         expect(restored?.data).toEqual(before?.data)
@@ -544,6 +602,10 @@ describe("SessionProjector", () => {
         expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
       })
       expect(yield* SessionHistory.goalTurnMessages(db, sessionID)).toEqual([expected])
+      // Goal进度读取同样只恢复返回值，显式执行后仍验证真实解冻与引用释放。
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeTruthy()
+      expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(1)
+      yield* SessionHistory.loadForRunner(db, sessionID, 0)
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeNull()
       expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
       const later = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_later"), sessionID,

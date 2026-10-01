@@ -3,7 +3,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { selection } from "@opencode-ai/core/session/info"
+import { selection, withRequests } from "@opencode-ai/core/session/info"
 import { RequestUsage } from "@opencode-ai/schema/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
@@ -515,14 +515,14 @@ const layer: Layer.Layer<
     })
 
     const get = Effect.fn("Session.get")(function* (id: SessionID) {
-      const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+      const row = yield* db.select(selection(id)).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
     })
 
     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
       const ctx = yield* InstanceState.context
-      return yield* listByProject(db, {
+      return yield* listByProject(database, {
         projectID: ctx.project.id,
         experimentalWorkspaces: flags.experimentalWorkspaces,
         // #143：worktree 供 directoryMatchesPath
@@ -535,7 +535,7 @@ const layer: Layer.Layer<
     // ctx.worktree 参与 directoryMatchesPath 判定——scan 候选宇宙与 list 逐字一致。
     const searchScan = Effect.fn("Session.searchScan")(function* (input: SearchScanInput) {
       const ctx = yield* InstanceState.context
-      return yield* searchScanByProject(db, {
+      return yield* searchScanByProject(database, {
         projectID: ctx.project.id,
         experimentalWorkspaces: flags.experimentalWorkspaces,
         worktree: ctx.worktree,
@@ -549,27 +549,32 @@ const layer: Layer.Layer<
       if (input?.roots) conditions.push(isNull(SessionTable.parent_id))
       if (input?.start) conditions.push(gte(SessionTable.time_updated, input.start))
       if (input?.cursor) conditions.push(lt(SessionTable.time_updated, input.cursor))
+      if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
+      const search = input?.search
       // #121：全局列表——标题或消息内容
-      if (input?.search) {
-        const condition = searchCondition(input.search)
+      if (search) {
+        // archived与cursor先限定本次宇宙，冷正文也预约同一连接。
+        const condition = yield* Database.withSync(database, (sync) =>
+          searchCondition(sync, search, { roots: input?.roots, scope: and(...conditions) }),
+        )
         if (condition) conditions.push(condition)
       }
-      if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
 
       const query =
         conditions.length > 0
           ? db
               // 条件列表也使用共享投影，不能只有无筛选列表带请求数据。
-              .select(selection)
+              .select()
               .from(SessionTable)
               .where(and(...conditions))
-          // 不另扫描 parts；当前请求计算已经封装在 Core 的同一 SELECT 内。
-          : db.select(selection).from(SessionTable)
-      const rows = yield* query
+          // 先固定页面，再绑定每条身份读取完整请求，避免相关CTE反复展开。
+          : db.select().from(SessionTable)
+      const rows = yield* db.transaction(() => query
         .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
         .limit(input?.limit ?? 100)
         .all()
-        .pipe(Effect.orDie)
+        .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
+      ).pipe(Effect.orDie)
       const ids = [...new Set(rows.map((row) => row.project_id))]
       const projects = new Map<string, ProjectInfo>()
       if (ids.length > 0) {
@@ -591,13 +596,14 @@ const layer: Layer.Layer<
     })
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
-      const rows = yield* db
+      const rows = yield* db.transaction(() => db
         // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
-        .select(selection)
+        .select()
         .from(SessionTable)
         .where(and(eq(SessionTable.parent_id, parentID)))
         .all()
-        .pipe(Effect.orDie)
+        .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
+      ).pipe(Effect.orDie)
       return rows.map(fromRow)
     })
 
@@ -945,8 +951,8 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
   )
 })
 
-function listByProject(
-  db: Database.Interface["db"],
+function* listByProject(
+  database: Database.Interface,
   input: ListInput & {
     projectID: ProjectV2.ID
     experimentalWorkspaces: boolean
@@ -956,17 +962,22 @@ function listByProject(
   // #544：scope/start 谓词与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
   // searchMode 只作用于 list——缺省 all 与历史行为逐字一致，旧客户端零感知。
   const conditions = listUniverseConditions(input)
+  const search = input.search
   // #121：项目列表——空白 search 不注入条件
-  if (input.search) {
-    const condition = searchCondition(input.search, { mode: input.searchMode ?? "all" })
+  if (search) {
+    // roots/title保持零解压，完整搜索只恢复当前候选范围的子正文。
+    const condition = yield* Database.withSync(database, (sync) =>
+      searchCondition(sync, search, { mode: input.searchMode ?? "all", roots: input.roots, scope: and(...conditions) }),
+    )
     if (condition) conditions.push(condition)
   }
 
   const limit = input.limit ?? 100
 
-  return db
+  // 页面与请求保持同一读快照，后台更新不能在两段读取间拼出混合版本。
+  return yield* database.db.transaction(() => database.db
     // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
-    .select(selection)
+    .select()
     .from(SessionTable)
     // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
     .where(conditions.length > 0 ? and(...conditions) : undefined)
@@ -975,9 +986,10 @@ function listByProject(
     .limit(limit)
     .all()
     .pipe(
-      Effect.orDie,
+      Effect.flatMap((rows) => withRequests(database.db, rows)),
       Effect.map((rows) => rows.map(fromRow)),
-    )
+    ),
+  ).pipe(Effect.orDie)
 }
 
 /**
@@ -988,7 +1000,7 @@ function listByProject(
  * - done=true 当候选页不足 batch，表示宇宙耗尽
  */
 function* searchScanByProject(
-  db: Database.Interface["db"],
+  database: Database.Interface,
   input: SearchScanInput & {
     projectID: ProjectV2.ID
     experimentalWorkspaces: boolean
@@ -1025,7 +1037,7 @@ function* searchScanByProject(
     )
   }
 
-  const page = yield* db
+  const page = yield* database.db
     .select()
     .from(SessionTable)
     .where(universe.length > 0 ? and(...universe) : undefined)
@@ -1039,15 +1051,19 @@ function* searchScanByProject(
   // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
   // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
   // 固定 all：complete 召回不得被首屏 title 子集口径污染（INV-09 的服务端锚点）。
-  const full = searchCondition(input.search, { mode: "all" })
   const ids = page.map((row) => row.id)
+  // 冷匹配只检查固定候选页，未命中的满页仍按既有cursor推进。
+  const full = yield* Database.withSync(database, (sync) =>
+    searchCondition(sync, input.search, { mode: "all", roots: input.roots, scope: inArray(SessionTable.id, ids) }),
+  )
   // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
-  const matched = yield* db
-    .select(selection)
+  const matched = yield* database.db.transaction(() => database.db
+    .select()
     .from(SessionTable)
     .where(and(inArray(SessionTable.id, ids), full))
     .all()
-    .pipe(Effect.orDie)
+    .pipe(Effect.flatMap((rows) => withRequests(database.db, rows))),
+  ).pipe(Effect.orDie)
   // 命中行保留同一请求投影，输出仍按候选页排序而非第二次SQL的返回顺序。
   const byID = new Map(matched.map((row) => [row.id, row]))
   const sessions = page.flatMap((row) => {

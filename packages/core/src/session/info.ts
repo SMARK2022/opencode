@@ -1,5 +1,5 @@
-import { DateTime, Schema } from "effect"
-import { getTableColumns, sql } from "drizzle-orm"
+import { DateTime, Effect, Schema } from "effect"
+import { eq, getTableColumns, sql } from "drizzle-orm"
 import { Session } from "@opencode-ai/schema/session"
 import { AgentV2 } from "../agent"
 import { Location } from "../location"
@@ -12,43 +12,44 @@ import { SessionSchema } from "./schema"
 import { SessionTable } from "./sql"
 import { SessionMessage } from "./message"
 import { Snapshot } from "../snapshot"
+import type { Database } from "../database/database"
 
 // HTTP、列表和事件共用现有 Session SELECT 的请求投影，避免各视图重复扫描历史或另建账本。
-export const selection = {
+export const selection = (sessionID: SessionSchema.ID) => ({
   ...getTableColumns(SessionTable),
   request: sql<string | null>`(
     -- 修订、移除和 revert 直接反映存储行，无需额外 replay 去重标记。
-    -- 单表 SELECT 会剥离 Column 限定名；关联外层必须固定使用 "session"."id"。
+    -- 绑定身份让CTE在一次请求投影内复用，避免按每个标量字段反复展开相关历史查询。
     WITH v1_request AS (
       -- 优先最新助手的父用户，跳过无回复输入；首次输入仍有独立零值投影。
       -- 按父ID点查后再取最新用户，避免为每个用户排序重查同一助手；保留缺失父行时的原投影。
       SELECT m.id, m.time_created, NULL AS promoted_seq, 'v1' AS kind
-      FROM message m WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'user'
+      FROM message m WHERE m.session_id = ${sessionID} AND json_extract(m.data, '$.role') = 'user'
       AND m.id = coalesce((
         SELECT u.id FROM message u
-        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
+        WHERE u.session_id = ${sessionID} AND json_extract(u.data, '$.role') = 'user'
           AND u.id = (
             SELECT json_extract(a.data, '$.parentID') FROM message a
-            WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
+            WHERE a.session_id = ${sessionID} AND json_extract(a.data, '$.role') = 'assistant'
             ORDER BY a.time_created DESC, a.id DESC LIMIT 1
           )
       ), (
         SELECT u.id FROM message u
-        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
+        WHERE u.session_id = ${sessionID} AND json_extract(u.data, '$.role') = 'user'
         ORDER BY u.time_created DESC, u.id DESC LIMIT 1
       ))
     ), native_request AS (
       -- native 身份取持久化 admission，不依赖显示窗口。
       -- 两种序号同属 Session durable 序列；旧 queue 后提升要覆盖较新 steer 的 admission。
       SELECT id, time_created, promoted_seq, 'native' AS kind, coalesce(promoted_seq, admitted_seq) AS position
-      FROM session_input WHERE session_id = "session"."id"
+      FROM session_input WHERE session_id = ${sessionID}
       -- 未提升的queue/steer不能接管当前轮；没有提升记录时仍显示首次admission。
       ORDER BY (promoted_seq IS NOT NULL) DESC, coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
     ), active_compaction AS (
       -- 复用压缩独立身份，仅在其真实生命周期内显示prepared估算，不冒用用户admission。
       SELECT json_extract(e.data, '$.messageID') AS id, json_extract(e.data, '$.timestamp') AS time_created,
         NULL AS promoted_seq, 'compaction' AS kind, e.seq AS position
-      FROM event e WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.compaction.started.1'
+      FROM event e WHERE e.aggregate_id = ${sessionID} AND e.type = 'session.next.compaction.started.1'
         AND NOT EXISTS (
           SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
             AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = json_extract(e.data, '$.messageID')
@@ -60,14 +61,14 @@ export const selection = {
       SELECT * FROM (
         SELECT v.*, coalesce(min(e.seq), -1) AS position
         FROM v1_request v LEFT JOIN event e
-          ON e.aggregate_id = "session"."id" AND e.type = 'message.updated.1'
+          ON e.aggregate_id = ${sessionID} AND e.type = 'message.updated.1'
           AND json_extract(e.data, '$.info.id') = v.id AND json_extract(e.data, '$.info.role') = 'user'
         GROUP BY v.id
         UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction) candidates
       -- 混合入口同样优先已开始的请求；无回复V1输入不能压过正在执行的native轮次。
       -- 活跃压缩拥有真实独立估算，继续以其durable位置参与最新执行请求选择。
       ORDER BY CASE WHEN kind = 'compaction' THEN 1 WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
-        SELECT 1 FROM message a WHERE a.session_id = "session"."id"
+        SELECT 1 FROM message a WHERE a.session_id = ${sessionID}
           AND json_extract(a.data, '$.role') = 'assistant'
           AND json_extract(a.data, '$.parentID') = candidates.id
       ) END DESC, position DESC, time_created DESC, id DESC LIMIT 1
@@ -75,13 +76,13 @@ export const selection = {
       -- V1 明确 parentID 归属，不能只按最后助手或时间范围猜测请求。
       SELECT m.id, m.data, m.time_created AS position, 'v1' AS kind
       FROM message m JOIN current_request r ON r.kind = 'v1'
-      WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'assistant'
+      WHERE m.session_id = ${sessionID} AND json_extract(m.data, '$.role') = 'assistant'
         AND json_extract(m.data, '$.parentID') = r.id
       UNION ALL
       SELECT m.id, m.data, m.seq AS position, 'native' AS kind
       FROM session_message m JOIN current_request r ON r.kind = 'native'
       -- native 用 promoted 序列划分每个请求区间，不伪造旧协议 parentID。
-      WHERE m.session_id = "session"."id" AND m.type = 'assistant'
+      WHERE m.session_id = ${sessionID} AND m.type = 'assistant'
         AND r.promoted_seq IS NOT NULL AND m.seq > r.promoted_seq
         AND NOT EXISTS (
           SELECT 1 FROM session_input i WHERE i.session_id = m.session_id
@@ -90,7 +91,7 @@ export const selection = {
     ), settled AS (
       -- V1 所有 step-finish 与 native 每步助手结算互斥，避免重复累计。
       SELECT p.id, p.data, a.position, a.id AS assistant_id FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
-      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
+      WHERE p.session_id = ${sessionID} AND json_extract(p.data, '$.type') = 'step-finish'
       UNION ALL
       SELECT id, data, position, id FROM assistants
       WHERE kind = 'native' AND json_extract(data, '$.tokens') IS NOT NULL
@@ -104,7 +105,7 @@ export const selection = {
     ), native_estimate AS (
       -- 复用 durable event 保存首包前估算；请求身份仍属于原 current_request。
       SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind IN ('native', 'compaction')
-      WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.request.estimated.1'
+      WHERE e.aggregate_id = ${sessionID} AND e.type = 'session.next.request.estimated.1'
         AND json_extract(e.data, '$.messageID') = r.id
         AND NOT EXISTS (SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
           AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = r.id
@@ -113,7 +114,7 @@ export const selection = {
     ), last_step AS (
       -- V1 parts 按 ID 排序，最后 step-finish 不等于最后一个任意 part。
       SELECT p.id, p.data FROM part p JOIN last_assistant a ON a.kind = 'v1' AND a.id = p.message_id
-      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
+      WHERE p.session_id = ${sessionID} AND json_extract(p.data, '$.type') = 'step-finish'
       ORDER BY p.id DESC LIMIT 1
     ), step AS (
       -- native 每个助手就是一轮；V1 未完成且还有尾部时不能沿用旧 step 确认值。
@@ -124,7 +125,7 @@ export const selection = {
           (json_extract(a.data, '$.inputEstimate.confirmed') = 0
             AND coalesce((SELECT id FROM last_step), '') <= coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), ''))
           OR EXISTS (
-          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = "session"."id"
+          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = ${sessionID}
             AND p.id > coalesce((SELECT id FROM last_step), '')
         )) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
       FROM last_assistant a
@@ -202,6 +203,16 @@ export const selection = {
       model: fields.model ? { ...fields.model, contextLimit: fields.model.contextLimit ?? undefined } : undefined,
     })
   }),
+})
+
+// 调用者在同一读事务内先固定页面，再复用同一参数化投影，不丢请求字段或解冻历史。
+export function withRequests(db: Database.Interface["db"], rows: (typeof SessionTable.$inferSelect)[]) {
+  return Effect.forEach(rows, (row) =>
+    db.select({ request: selection(row.id).request }).from(SessionTable).where(eq(SessionTable.id, row.id)).get().pipe(
+      Effect.orDie,
+      Effect.map((projection) => ({ ...row, request: projection?.request })),
+    ),
+  )
 }
 
 export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): SessionSchema.Info {
