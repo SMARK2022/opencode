@@ -25,7 +25,7 @@ import { InstallationVersion } from "./installation/version"
 import { Slug } from "./util/slug"
 import { ProjectTable } from "./project/sql"
 import path from "path"
-import { fromRow, selection } from "./session/info"
+import { fromRow, withRequests } from "./session/info"
 import { SessionRunner } from "./session/runner/index"
 import { SessionStore } from "./session/store"
 import { SessionExecution } from "./session/execution"
@@ -342,11 +342,6 @@ const layer = Layer.effect(
             if (condition) conditions.push(condition)
           }
         }
-        // #121：V2 list 与 opencode 共用 searchCondition
-        if (input.search) {
-          const condition = searchCondition(input.search)
-          if (condition) conditions.push(condition)
-        }
         if (input.anchor) {
           conditions.push(
             order === "asc"
@@ -360,19 +355,27 @@ const layer = Layer.effect(
                 )!,
           )
         }
+        const search = input.search
+        if (search) {
+          // 原生V2先保留实际placement与anchor合同，再限定legacy冷正文匹配范围。
+          const condition = yield* Database.withSync(database, (sync) =>
+            searchCondition(sync, search, { scope: and(...conditions) }),
+          )
+          if (condition) conditions.push(condition)
+        }
         const query = db
           // 列表和 get 返回同一请求口径，列表刷新不能擦掉已加载的请求身份。
           // 继续使用既有分页与 placement 条件，投影不改变成员或排序。
-          .select(selection)
+          .select()
           .from(SessionTable)
           .where(conditions.length > 0 ? and(...conditions) : undefined)
           .orderBy(
             order === "asc" ? asc(sortColumn) : desc(sortColumn),
             order === "asc" ? asc(SessionTable.id) : desc(SessionTable.id),
           )
-        const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
-          Effect.orDie,
-        )
+        const rows = yield* db.transaction(() =>
+          (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(Effect.flatMap((rows) => withRequests(db, rows))),
+        ).pipe(Effect.orDie)
         return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
       }),
       messages: Effect.fn("V2Session.messages")(function* (input) {

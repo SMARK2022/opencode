@@ -77,7 +77,7 @@ const layer = Layer.effect(
           const data = Schema.decodeUnknownSync(Schema.Struct({ sessionID: SessionV1.SessionInfo.fields.id }))(event.data)
           // 发布与 HTTP 相同的持久化读投影，仍然只发非 durable 的兼容快照。
           // SQL 失败沿用 listener 错误路径，不从消息窗口构造替代累计。
-          const row = yield* database.db.select(selection).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
+          const row = yield* database.db.select(selection(data.sessionID)).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
           // 会话删除后不制造幽灵快照；原始 part/message 事件仍照常转发。
           if (row) {
             // 只依赖 Core 的纯兼容映射；导入 Session service 会让 Layer 推断形成反向闭环。

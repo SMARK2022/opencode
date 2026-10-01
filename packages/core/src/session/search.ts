@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm"
 import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
+import { ColdStorage } from "../storage/cold-storage"
 
 // #265：搜索是 session 列表/TUI quick switch 的“可定位内容”投影，不是持久化 JSON 的全文搜索。
 // 只索引用户能用来识别会话的字段：标题、可见文本、文件/引用/子任务定位和 shell command 等。
@@ -13,7 +14,11 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sq
 // complete 路径与 searchScan 必须使用 all，禁止用 title 定义最终召回
 export type SearchMode = "title" | "all"
 
-export function searchCondition(search: string, options?: { mode?: SearchMode }): SQL | undefined {
+export function searchCondition(
+  db: ColdStorage.TxOrDb,
+  search: string,
+  options?: { mode?: SearchMode; roots?: boolean; scope?: SQL },
+): SQL | undefined {
   const tokens = search
     .trim()
     .toLowerCase()
@@ -26,7 +31,11 @@ export function searchCondition(search: string, options?: { mode?: SearchMode })
   const mode = options?.mode ?? "all"
   // #529：单 token 与历史语义逐字一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
   // #529：每个 token 的三路 union 自带括号，AND 拼接不会漏进 union 内部的 or 链
-  const parts = tokens.map((needle) => (mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle)))
+  // 根搜索保持纯 SQL；子正文匹配由存储层按当前候选范围一次恢复。
+  const cold = mode === "title" || options?.roots ? tokens.map(() => []) : ColdStorage.matchColdText(db, tokens, options?.scope)
+  const parts = tokens.map((needle, index) =>
+    mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle, cold[index]),
+  )
   if (parts.length === 1) return parts[0]
   return sql`(${sql.join(parts, sql` and `)})`
 }
@@ -37,11 +46,14 @@ function titleTokenCondition(needle: string) {
   return textMatches(sql`${SessionTable.title}`, needle)
 }
 
-function tokenCondition(needle: string) {
+function tokenCondition(needle: string, cold: string[]) {
   // #265：三路 union——标题、v1 part 白名单、v2 session_message 白名单；hidden 门仅存在于 v1 part 侧 exists，
   // #265：v2 侧由 sessionMessageMatches 的类型等值判定承担同等排除（等值不命中即不可搜索）
+  // JSON 参数承载任意数量的 ID，避免命中集合增长触及 SQLite 变量上限。
+  // ID 仍是绑定值，正文或 Session 名称不会成为拼接 SQL 的一部分。
   return sql`(
     ${textMatches(sql`${SessionTable.title}`, needle)}
+    or ${SessionTable.id} in (select value from json_each(${JSON.stringify(cold)}))
     or exists (
       select 1
       from ${PartTable}

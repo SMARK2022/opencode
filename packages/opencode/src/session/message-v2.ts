@@ -125,18 +125,20 @@ export const cursor = {
   },
 }
 
-// #493：Message storage type 只放宽 summary.diffs；Array 检查足以跨越该静态差异，cold payload 项已在 restore 中逐项解码。
+// user diff 与 assistant path 必须先恢复，再跨越 storage 到完整 Info 的类型边界。
 // 这里不能重跑完整 Info Schema：既有数据库允许 fractional time，新增冷存储不得收紧无关历史读取合同。
 type StoredInfo = (typeof MessageTable.$inferSelect)["data"] & Pick<Info, "id" | "sessionID">
 
 function isInfo(value: StoredInfo): value is Info {
-  return value.role === "assistant" || value.summary === undefined || Array.isArray(value.summary.diffs)
+  return value.role === "assistant"
+    ? value.path !== undefined
+    : value.summary === undefined || Array.isArray(value.summary.diffs)
 }
 
-// #493：HotInfo 只用于 predicate 定位：assistant info 全热，user summary 明确排除唯一冷字段 diffs。
+// HotInfo 只用于定位，类型中排除 assistant 诊断字段及 user diff 正文。
 // 返回完整 Message 的 consumer 仍必须在匹配后经过 hydrate，不能把该类型扩展成业务读取捷径。
 export type HotInfo =
-  | Assistant
+  | Omit<Assistant, "path">
   | (Omit<User, "summary"> & { summary?: Omit<NonNullable<User["summary"]>, "diffs"> })
 
 // #0500：Goal chronology 只依赖 hot 定位字段——Tool output、Reasoning、附件与 summary.diffs 不进入 JS。
@@ -168,8 +170,8 @@ function isPart(value: StoredPart): value is Part {
 }
 
 const info = (db: ColdStorage.TxOrDb, row: typeof MessageTable.$inferSelect) => {
-  // #493：thaw 在同步事务内完成；任何 corruption 都终止读取而不是返回 storage skeleton。
-  const restored = ColdStorage.thawMessageRows(db, [row])[0]
+  // 单条读取与分页采用相同 inspect 合同，避免详情入口偷偷改变冷态。
+  const restored = ColdStorage.inspectMessageRows(db, [row])[0]
   if (!restored) throw new Error(`Message row disappeared during thaw: ${row.id}`)
   const value = {
     ...restored.data,
@@ -192,7 +194,8 @@ const infoFromRestored = (row: typeof MessageTable.$inferSelect) => {
 
 // #493：单 Part decoder 是所有 direct read 的共同 cold-aware seam；调用方不能直接 spread raw projection row。
 const part = (db: ColdStorage.TxOrDb, row: typeof PartTable.$inferSelect) => {
-  const restored = ColdStorage.thawPartRows(db, [row])[0]
+  // 普通业务读取只恢复返回值；执行窗口和显式 expand 才负责持久预热。
+  const restored = ColdStorage.inspectPartRows(db, [row])[0]
   if (!restored) throw new Error(`Part row disappeared during thaw: ${row.id}`)
   const value = {
     ...restored.data,
@@ -220,7 +223,7 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
   // cold_ref/key 不暴露给 consumer，前端和 session logic 不判断 owner storage version。
   // #493：user summary 只保留热字段（title/body），diffs 不进入定位扫描类型面。
   if (row.data.role === "assistant") {
-    // #0500：Assistant projection 无冷业务字段，spread 保留同毫秒 chronology 所需的全部 hot fields。
+    // 生命周期字段保热，谓词查找无需为 path 或输入明细展开整页内容。
     return { ...row.data, id: row.id, sessionID: row.session_id }
   }
   const summary = row.data.summary
@@ -239,9 +242,8 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
 
 function viewerInfo(row: typeof MessageTable.$inferSelect): Info {
   const value = hotInfo(row)
-  // HotInfo 的 user summary 只含 title/body；viewer 直接省略整个字段而非二次收窄。
-  // Assistant 没有被归档的 summary.diffs，直接保留 lifecycle/model/error 字段，避免 viewer 另造 assistant shape。
-  if (value.role === "assistant") return value
+  // assistant 已由 hydrate 按包恢复，viewer 不另造一个缺字段的公开对象。
+  if (value.role === "assistant") return infoFromRestored(row)
   // TUI 没有 user summary 消费者；省略整个 optional 字段才能保持合法 Info，
   // 同时阻止 cold diffs 在普通查看路径被解压、持久预热并进入 wire。
   const { summary: _, ...info } = value
@@ -368,16 +370,21 @@ function hydrate(
   messageProjection?: "viewer",
 ) {
   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
-  // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
-  // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
+  // 内存恢复由ColdStorage校验，此层不拥有引用生命周期。
+  // Message与Parts按选中范围批量inspect，查看不写热历史。
   // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
   return Effect.gen(function* () {
-    // 可见性先决定owner集合，隐藏父消息及其子Part都不能被业务读取预热。
+    // 可见性先决定owner集合，隐藏父消息及其子Part都不能被业务读取恢复。
     const admitted = includeHidden ? rows : rows.filter((row) => !row.data.hidden)
-    // viewer在任何冷Message解压前选热投影；默认完整读取仍预约Effect驱动的同一连接。
-    const infos = messageProjection === "viewer"
-      ? admitted.map(viewerInfo)
-      : (yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, admitted))).map(infoFromRestored)
+    // viewer只省略user summary，assistant同包批量恢复而不逐条解压。
+    const selected = messageProjection === "viewer" ? admitted.filter((row) => row.data.role === "assistant") : admitted
+    const restored = new Map(
+      (yield* Database.withSync({ db, sync }, () => ColdStorage.inspectMessageRows(sync, selected))).map((row) => [row.id, row]),
+    )
+    const infos = admitted.map((row) => {
+      const complete = restored.get(row.id) ?? row
+      return messageProjection === "viewer" ? viewerInfo(complete) : infoFromRestored(complete)
+    })
     const ids = admitted.map((row) => row.id)
     const partByMessage = new Map<string, Part[]>()
     if (ids.length > 0) {
@@ -386,8 +393,8 @@ function hydrate(
         const partRows = tx.select().from(PartTable).where(inArray(PartTable.message_id, ids))
           .orderBy(PartTable.message_id, PartTable.id).all()
         const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
-        // viewer仅inspect，不持久预热；完整SDK仍走原thaw与refcount owner。
-        return messageProjection === "viewer" ? ColdStorage.inspectPartRows(tx, visible) : ColdStorage.thawPartRows(tx, visible)
+        // 普通SDK与viewer共享只读恢复，保留同连接查询快照和完整性检查。
+        return ColdStorage.inspectPartRows(tx, visible)
       }, { behavior: "deferred" }))
       for (const row of restoredParts) {
         const next = partFromRestored(row)
@@ -399,7 +406,7 @@ function hydrate(
       }
     }
 
-    // 持久 thaw 在返回前完成并保留 page/child 顺序，不对范围外历史产生预热副作用。
+    // 只读恢复保留page与child顺序，不改变冷态或访问范围外历史。
     return infos.map((info) => ({
       info,
       parts: partByMessage.get(info.id) ?? [],
@@ -1027,8 +1034,8 @@ export function parts(messageID: MessageID, options?: { includeHidden?: boolean 
       .orderBy(PartTable.id)
       .all()
       .pipe(Effect.orDie)
-    // #493：直接读也走 cold-aware decoder——thaw 后按业务 Schema 复核差异字段。
-    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored))
+    // 直接读保持冷态，恢复后仍按业务Schema复核差异字段。
+    return yield* Database.withSync({ db, sync }, () => ColdStorage.inspectPartRows(sync, rows).map(partFromRestored))
   })
 }
 
@@ -1257,7 +1264,31 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
   const database = yield* Database.Service
   const boundary = yield* Database.withSync(database, (sync) => CompactionBoundary.latest(sync, sessionID))
   const cutoff = boundary?.tailStartID ?? boundary?.markerID
-  return filterCompacted(yield* stream(sessionID, { includeHidden: true, fromMessageID: cutoff }))
+  const messages = filterCompacted(yield* stream(sessionID, { includeHidden: true, fromMessageID: cutoff }))
+  // 可见性和压缩排序完成后才预热，不扩大模型实际保留的上下文。
+  yield* warmExecutionWindow(messages)
+  return messages
+})
+
+export const warmExecutionWindow = Effect.fn("MessageV2.warmExecutionWindow")(function* (messages: WithParts[]) {
+  if (!messages.length) return
+  const database = yield* Database.Service
+  yield* Database.withSync(database, (sync) => {
+    const ids = messages.map((message) => message.info.id)
+    // 已热owner不重复搬运正文，仍由ColdStorage管理实际引用和清理。
+    ColdStorage.thawMessageRows(
+      sync,
+      sync.select().from(MessageTable)
+        .where(and(inArray(MessageTable.id, ids), sql`${MessageTable.cold_ref} is not null`)).all(),
+    )
+    const parts = messages.flatMap((message) => message.parts.map((part) => part.id))
+    // 最终窗口未选择的隐藏Part不随父Message预热。
+    if (parts.length) ColdStorage.thawPartRows(
+      sync,
+      sync.select().from(PartTable)
+        .where(and(inArray(PartTable.id, parts), sql`${PartTable.cold_ref} is not null`)).all(),
+    )
+  })
 })
 
 // #557：Prompt window 结构 proof——只读 SQLite 原始文本与 cold locator，不 thaw/hydrate；
@@ -1302,16 +1333,17 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
   // time_updated 覆盖同一 Message ID 的原位更新；time_created 决定 common-prefix 的 persisted 顺序。
   const partRows = yield* db
     .select({
-      messageID: PartTable.message_id,
-      id: PartTable.id,
-      timeCreated: PartTable.time_created,
-      timeUpdated: PartTable.time_updated,
+      messageID: sql<MessageID>`${PartTable.message_id}`,
+      id: sql<PartID>`${PartTable.id}`,
+      timeCreated: sql<number>`${PartTable.time_created}`,
+      timeUpdated: sql<number>`${PartTable.time_updated}`,
       data: sql<string>`cast(${PartTable.data} as text)`,
-      coldRef: PartTable.cold_ref,
+      coldRef: sql<string | null>`${PartTable.cold_ref}`,
       coldKey: sql<string>`hex(${PartTable.cold_key})`,
       coldStats: sql<string>`cast(${PartTable.cold_stats} as text)`,
     })
-    .from(PartTable)
+    // 无统计信息时 SQLite 会误选 session 索引，逐次扫描整段历史；沿已有消息索引只读窗口 Part。
+    .from(sql`${PartTable} indexed by part_message_id_id_idx`)
     .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
     // 同一 join 同时承载完整历史与 cutoff 窗口，避免两个 proof 查询形状漂移。
     .where(

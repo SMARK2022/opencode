@@ -44,7 +44,7 @@ const layer = Layer.effect(
       get: Effect.fn("SessionStore.get")(function* (sessionID) {
         // 与会话行同一次读取，首次挂载不能由 TUI 的有限消息页重建请求用量。
         // SessionStore 仍按 Session ID 读取，没有新建请求执行服务或生命周期。
-        const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+        const row = yield* db.select(selection(sessionID)).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
         return row ? fromRow(row) : undefined
       }),
       context: Effect.fn("SessionStore.context")(function* (sessionID) {

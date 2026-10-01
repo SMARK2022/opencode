@@ -117,7 +117,7 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   const mismatch = cache?.boundary === boundary
     ? proof.findIndex((key, index) => key !== cache.proof[index]) : 0
   const matched = cache?.boundary === boundary ? mismatch < 0 ? rows.length : mismatch : 0
-  const suffix = yield* ColdStorage.readSessionMessageRows(db, rows.slice(matched))
+  const suffix = yield* ColdStorage.readSessionMessageRows(db, rows.slice(matched), "execution")
   const decoded = yield* Effect.forEach(suffix, (row) =>
     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
   )

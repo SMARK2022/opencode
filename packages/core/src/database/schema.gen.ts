@@ -370,6 +370,12 @@ export default {
       yield* tx.run(
         `CREATE INDEX \`message_session_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`);`,
       )
+      yield* tx.run(
+        `CREATE INDEX \`message_session_parent_time_created_id_idx\` ON \`message\` (\`session_id\`,json_extract("data", '$.parentID'),\`time_created\`,\`id\`);`,
+      )
+      yield* tx.run(
+        `CREATE INDEX \`message_session_compaction_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`) WHERE json_extract("data", '$.role') = 'assistant' AND json_extract("data", '$.summary') = 1 AND coalesce(json_extract("data", '$.finish'), '') != '' AND coalesce(json_type("data", '$.error'), 'null') = 'null';`,
+      )
       yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
       yield* tx.run(`CREATE INDEX \`part_message_id_id_idx\` ON \`part\` (\`message_id\`,\`id\`);`)
       yield* tx.run(`CREATE INDEX \`part_session_idx\` ON \`part\` (\`session_id\`);`)

@@ -1,4 +1,5 @@
 import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex, blob } from "drizzle-orm/sqlite-core"
+import { sql } from "drizzle-orm"
 import * as DatabasePath from "../database/path"
 import { ProjectTable } from "../project/sql"
 import type { SessionMessage } from "./message"
@@ -78,7 +79,9 @@ type StoredInfoData<T extends SessionV1.Info = SessionV1.Info> = T extends Sessi
   ? Omit<T, "id" | "sessionID" | "summary"> & {
       summary?: Omit<NonNullable<T["summary"]>, "diffs"> & { diffs: unknown[] }
     }
-  : Omit<T, "id" | "sessionID">
+  : T extends SessionV1.Assistant
+    ? Omit<T, "id" | "sessionID" | "path"> & { path?: T["path"] }
+    : Omit<T, "id" | "sessionID">
 
 // #0500：v2 放宽面扩大——pending 之后的 tool state、metadata/title 与 step/compaction 冷字段都可外移。
 type StoredToolState =
@@ -206,6 +209,12 @@ export const MessageTable = sqliteTable(
   },
   (table) => [
     index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id),
+    // 按真实 parentID 定位请求，避免每次状态投影都重扫长会话的全部消息。
+    index("message_session_parent_time_created_id_idx").on(table.session_id, sql`json_extract(${table.data}, '$.parentID')`, table.time_created, table.id),
+    // 合法压缩候选使用原查询谓词建稀疏索引，配对和 hidden 裁决仍归原读取器。
+    index("message_session_compaction_time_created_id_idx")
+      .on(table.session_id, table.time_created, table.id)
+      .where(sql`json_extract("data", '$.role') = 'assistant' AND json_extract("data", '$.summary') = 1 AND coalesce(json_extract("data", '$.finish'), '') != '' AND coalesce(json_type("data", '$.error'), 'null') = 'null'`),
     index("message_cold_ref_idx").on(table.cold_ref),
   ],
 )
@@ -229,7 +238,8 @@ export const PartTable = sqliteTable(
     // #0500：cold_stats 是同一 Part owner 的精确只读投影；它只在 v2 Tool/StepFinish 冷态存在。
     // Stats 可据此完成全量聚合而不解码 pack，thaw/update 必须与 ref/key 一起清空。
     // hot row 始终为 NULL，完整 replacement/thaw 不允许保留过期派生统计。
-    cold_stats: text({ mode: "json" }).$type<PartColdStats>(),
+    // tuple 是内部编码；ColdStorage 对消费端仍返回原有具名统计字段。
+    cold_stats: text({ mode: "json" }).$type<PartColdStats | number[]>(),
   },
   // #0500：cold_stats 故意不建索引；Stats 已按 Session/Part type 扫描同行小 JSON。
   (table) => [
