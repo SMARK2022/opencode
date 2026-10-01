@@ -7,6 +7,7 @@ import { ToolProgress } from "./progress"
 import path from "path"
 import * as Log from "@opencode-ai/core/util/log"
 import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
+import { WindowsShellOutput } from "@opencode-ai/core/windows-shell-output"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import type { Node } from "web-tree-sitter"
@@ -426,24 +427,19 @@ const ask = Effect.fn("ShellTool.ask")(function* (
 
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32" && Shell.ps(shell)) {
-    return ChildProcess.make(
-      shell,
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-OutputFormat",
-        "Text",
-        "-EncodedCommand",
-        psEncoded(command),
-      ],
-      {
-        cwd,
-        env,
-        stdin: "ignore",
-        detached: false,
-        forceKillAfter: TERMINATION_GRACE_MS,
-      },
+    // 本次前台调用的输出寿命由core拥有；命令、参数及审批入口保持原样。
+    return WindowsShellOutput.mark(
+      ChildProcess.make(
+        shell,
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", psEncoded(command)],
+        {
+          cwd,
+          env,
+          stdin: "ignore",
+          detached: false,
+          forceKillAfter: TERMINATION_GRACE_MS,
+        },
+      ),
     )
   }
 

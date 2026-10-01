@@ -2234,8 +2234,68 @@ describe("tool.shell display output", () => {
   )
 })
 
+describe("tool.shell background launch completion", () => {
+  for (const selected of ps) {
+    it.live(
+      `returns after ${selected.label} launches a redirected background process`,
+      () =>
+        Effect.gen(function* () {
+          const dir = yield* tmpdirScoped()
+          const release = path.join(dir, "release")
+          const done = path.join(dir, "done")
+          const script = path.join(dir, "child.ps1")
+          const out = path.join(dir, "out.txt")
+          const err = path.join(dir, "err.txt")
+          const literal = (value: string) => `'${value.replaceAll("'", "''")}'`
+          // release只由Tool返回后的测试清理放行；八秒上限让旧实现也能完成并给出明确red。
+          // 后台任务始终使用自己的日志，避免把启动返回测试变成共享输出的寿命测试。
+          yield* Effect.promise(() =>
+            Bun.write(
+              script,
+              `
+          $end = [DateTime]::UtcNow.AddSeconds(8)
+          while (!(Test-Path ${literal(release)}) -and [DateTime]::UtcNow -lt $end) { Start-Sleep -Milliseconds 20 }
+          [Console]::Out.WriteLine('background complete')
+          [Console]::Error.WriteLine('background error stream')
+          [IO.File]::WriteAllText(${literal(done)}, 'done')
+        `,
+            ),
+          )
+          yield* Effect.gen(function* () {
+            const result = yield* withShell(
+              selected,
+              runIn(
+                dir,
+                run({
+                  command: `$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-File',${literal(script)} -RedirectStandardOutput ${literal(out)} -RedirectStandardError ${literal(err)} -WindowStyle Hidden -PassThru; Write-Output "started PID=$($p.Id)"`,
+                  timeout: 15000,
+                  description: "Launch background process",
+                }),
+              ),
+            )
+            expect(result.metadata.exit).toBe(0)
+            expect(result.output).toMatch(/^started PID=\d+\n$/)
+            // 正常返回必须先于后台工作完成；不用最后一行文本或固定耗时猜测进程结束。
+            expect(yield* Effect.promise(() => Bun.file(done).exists())).toBe(false)
+          }).pipe(
+            Effect.ensuring(
+              Effect.gen(function* () {
+                yield* Effect.promise(() => Bun.write(release, ""))
+                while (!(yield* Effect.promise(() => Bun.file(done).exists()))) yield* Effect.sleep(20)
+              }).pipe(Effect.timeout("10 seconds"), Effect.orDie),
+            ),
+          )
+          expect(yield* Effect.promise(() => Bun.file(out).text())).toBe("background complete\r\n")
+          expect(yield* Effect.promise(() => Bun.file(err).text())).toBe("background error stream\r\n")
+        }),
+      30000,
+    )
+  }
+})
+
 describe("tool.shell post-root lifetime", () => {
-  for (const mode of ["abort", "timeout", "normal"] as const) {
+  // POSIX继续保留原EOF合同；Windows PowerShell由上面的启动返回用例约束前台寿命。
+  for (const mode of process.platform === "win32" ? [] : (["abort", "timeout", "normal"] as const)) {
     it.live(`keeps ${mode} active after the root exits with output still open`, () =>
       Effect.gen(function* () {
         const dir = yield* tmpdirScoped()
@@ -2263,14 +2323,7 @@ describe("tool.shell post-root lifetime", () => {
       `,
           ),
         )
-        // 故意保留NoNewWindow造成的共享写端，覆盖原故障而非换成独立启动规避它。
-        const command =
-          process.platform === "win32"
-            ? `Start-Process -FilePath '${process.execPath.replaceAll("'", "''")}' -ArgumentList 'holder.mjs' -NoNewWindow; Write-Output ROOT_FINAL`
-            : `${bin} holder.mjs & printf 'ROOT_FINAL\\n'`
-        const selected = process.platform === "win32" ? ps.find((item) => item.label === "pwsh") : undefined
-        if (process.platform === "win32" && !selected) throw new Error("pwsh is required for the post-root fixture")
-        // withShell在作用域结束时恢复环境；该平台fixture不改变其他测试选用的shell。
+        const command = `${bin} holder.mjs & printf 'ROOT_FINAL\\n'`
         const execute = runIn(
           dir,
           run(
@@ -2299,7 +2352,7 @@ describe("tool.shell post-root lifetime", () => {
             }),
           ),
         )
-        const running = yield* Effect.forkScoped(selected ? withShell(selected, execute) : execute)
+        const running = yield* Effect.forkScoped(execute)
         yield* Deferred.await(root)
         yield* Deferred.await(ready)
         // 正常路径显式放行晚到输出；取消与deadline路径必须在后代尚未放行时交付部分结果。
@@ -2309,8 +2362,8 @@ describe("tool.shell post-root lifetime", () => {
           Effect.ensuring(Effect.promise(() => Bun.write(path.join(dir, "release"), ""))),
         )
         // 子进程用真实broken-pipe语义收尾；完成标记用于fixture清理，绝不参与工具的完成条件。
-        // POSIX取消会终止整个进程组，后代不会再写done；Windows已退root后的后代则自然收尾。
-        if (mode === "normal" || process.platform === "win32") {
+        // POSIX取消会终止整个进程组，后代不会再写done。
+        if (mode === "normal") {
           yield* Effect.gen(function* () {
             while (!(yield* Effect.promise(() => Bun.file(path.join(dir, "done")).exists()))) yield* Effect.sleep(20)
           }).pipe(Effect.timeout("5 seconds"))

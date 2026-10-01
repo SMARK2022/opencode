@@ -6,6 +6,7 @@ import { Deferred, Effect, Exit, Fiber, Stream } from "effect"
 import type * as PlatformError from "effect/PlatformError"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { WindowsShellOutput } from "@opencode-ai/core/windows-shell-output"
 import { testEffect } from "../lib/effect"
 
 const live = CrossSpawnSpawner.defaultLayer
@@ -59,6 +60,92 @@ async function gone(pid: number, timeout = 5_000) {
 }
 
 describe("cross-spawn spawner", () => {
+  if (process.platform === "win32") {
+    for (const delayed of [false, true]) {
+      fx.live(`drains owned output with ${delayed ? "late subscription" : "slow consumption"}`, () =>
+        Effect.gen(function* () {
+          const size = delayed ? 16384 : 2097152
+          const command = WindowsShellOutput.mark(
+            ChildProcess.make(
+              process.execPath,
+              [
+                "-e",
+                `process.stdout.write(Buffer.alloc(${size},65)); process.stderr.write(Buffer.alloc(${size},66)); process.exitCode=${delayed ? 17 : 0}`,
+              ],
+              { stdin: "ignore" },
+            ),
+          )
+          const handle = yield* command
+          // 小输出先让root退出，再订阅，验证冻结额度保留尚在内核中的字节。
+          // 大输出用真实背压跨越多轮读取，避免仅验证最后一个可见buffer。
+          if (delayed) yield* handle.exitCode
+          const output = yield* Effect.all(
+            [handle.stdout, handle.stderr].map((stream) =>
+              Stream.runCollect(stream.pipe(Stream.tap(() => (delayed ? Effect.void : Effect.sleep(2))))).pipe(
+                Effect.map((chunks) => Buffer.concat(chunks)),
+              ),
+            ),
+            { concurrency: "unbounded" },
+          )
+          expect(output[0]).toEqual(Buffer.alloc(size, 65))
+          expect(output[1]).toEqual(Buffer.alloc(size, 66))
+          expect(yield* handle.exitCode).toBe(ChildProcessSpawner.ExitCode(delayed ? 17 : 0))
+        }),
+      )
+    }
+    fx.live("releases owned pending reads when a consumer stops early", () =>
+      Effect.gen(function* () {
+        const pid = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const handle = yield* WindowsShellOutput.mark(
+              ChildProcess.make(process.execPath, ["-e", 'console.log("ready"); setInterval(() => {}, 1000)'], {
+                stdin: "ignore",
+              }),
+            )
+            // 取得真实输出后结束scope；stderr此时仍有pending read，不能提前释放OVERLAPPED。
+            yield* Stream.runCollect(handle.stdout.pipe(Stream.take(1)))
+            return handle.pid
+          }),
+        )
+        expect(alive(pid)).toBe(false)
+      }),
+    )
+    fx.live("releases owned capture after a real spawn failure", () =>
+      Effect.gen(function* () {
+        const dir = yield* Effect.acquireRelease(Effect.promise(tmpdir), (value) =>
+          Effect.promise(() => value[Symbol.asyncDispose]()),
+        )
+        const executable = path.join(dir.path, "broken.exe")
+        yield* Effect.promise(() => fs.writeFile(executable, "not an executable"))
+        // 现存exe交给OS启动后失败；避开cross-spawn对找不到命令时启动cmd的既有行为。
+        // 管道已取得，创建失败仍须沿原错误链返回并释放本次资源。
+        const result = yield* Effect.exit(
+          Effect.scoped(WindowsShellOutput.mark(ChildProcess.make(executable, [], { stdin: "ignore" })).asEffect()),
+        )
+        expect(Exit.isFailure(result)).toBe(true)
+      }),
+    )
+    fx.live("keeps concurrent owned capture scopes independent", () =>
+      Effect.gen(function* () {
+        // 两次同时创建的pipe和额度彼此独立，不能复用可写的native buffer或关闭另一次调用。
+        const values = yield* Effect.all(
+          ["first", "second"].map((value) =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const handle = yield* WindowsShellOutput.mark(
+                  ChildProcess.make(process.execPath, ["-e", `process.stdout.write('${value}')`], { stdin: "ignore" }),
+                )
+                return yield* decodeByteStream(handle.stdout)
+              }),
+            ),
+          ),
+          { concurrency: "unbounded" },
+        )
+        expect(values).toEqual(["first", "second"])
+      }),
+    )
+  }
+
   describe("basic spawning", () => {
     fx.effect(
       "captures stdout",
