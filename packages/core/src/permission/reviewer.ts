@@ -1,9 +1,12 @@
 export * as PermissionReviewer from "./reviewer"
 
 import path from "path"
+import { Question } from "@opencode-ai/schema/question"
 import { LLM, LLMClient, LLMEvent, Tool, ToolChoice } from "@opencode-ai/llm"
 import { Cause, Context, DateTime, Effect, FileSystem, Layer, Option, Schema, Semaphore, Stream } from "effect"
-import { and, eq } from "drizzle-orm"
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm"
+import { Catalog } from "../catalog"
+import { ColdStorage } from "../storage/cold-storage"
 import { Config } from "../config"
 import { ConfigAutoReview } from "../config/auto-review"
 import { Database } from "../database/database"
@@ -11,7 +14,7 @@ import { EventV2 } from "../event"
 import { ProviderV2 } from "../provider"
 import { SessionEvent } from "../session/event"
 import { SessionProjector } from "../session/projector"
-import { SessionTable } from "../session/sql"
+import { SessionMessageTable, SessionTable } from "../session/sql"
 import { createLLMEventPublisher } from "../session/runner/publish-llm-event"
 import { Slug } from "../util/slug"
 import { Token } from "../util/token"
@@ -35,12 +38,14 @@ export class Service extends Context.Service<Service, PermissionAuto.Reviewer>()
 
 const layer = Layer.effect(Service, Effect.gen(function* () {
   const config = yield* Config.Service
+  const catalog = yield* Catalog.Service
   const sessions = yield* SessionStore.Service
   const models = yield* SessionRunnerModel.Service
   const client = yield* LLMClient.Service
   const fs = yield* FileSystem.FileSystem
   const location = yield* Location.Service
-  const db = (yield* Database.Service).db
+  const database = yield* Database.Service
+  const db = database.db
   const events = yield* EventV2.Service
   const reviewerLocks = new Map<SessionSchema.ID, Semaphore.Semaphore>()
   // 与V1相同的provider层内记忆；协商不另建请求身份或持久化能力探测结果。
@@ -59,15 +64,26 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const session = yield* sessions.get(SessionSchema.ID.make(sessionID))
       if (!session) return yield* new Failed({ reason: "Review session was not found" })
       const target = options.model ? ModelV2.parse(options.model) : undefined
-      // 独立审查复用真实 Catalog/认证解析，不运行 Session 或任何工具。
-      // 未显式指定 reviewer 模型时保留父会话选择，避免漂移到其他默认提供者。
-      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : session.model }).pipe(
+      // 两条既有解析分支共用选档；只把实际广告的档名交给原lowering，不改模型或认证owner。
+      const resolve = (ref: SessionSchema.Info["model"]) => Effect.gen(function* () {
+        const configured = ref ? yield* catalog.model.get(ref.providerID, ref.id) : yield* catalog.model.default()
+        const model = ref || (configured && SessionRunnerModel.supported(configured))
+          ? configured : (yield* catalog.model.available()).find(SessionRunnerModel.supported)
+        const variant = [options.effort, "low", "minimal", "none"]
+          .map(name => model?.variants.find(variant => variant.id === name)).find(variant => variant !== undefined)
+        const result = yield* models.resolve({ ...session, model: model && variant
+          ? { id: model.id, providerID: model.providerID, variant: variant.id } : ref })
+        return { ...result, effortVariant: variant?.id }
+      })
+      const ref = target ? { id: target.modelID, providerID: target.providerID } : session.model
+      const selected = yield* resolve(ref).pipe(
         // 仅source规定的失效隐式候选回退一次；显式配置及认证、取消等其它失败继续报错。
         Effect.catchTag("SessionRunnerModel.ModelUnavailableError", (error) => target
           ? Effect.fail(error)
-          : models.resolve({ ...session, model: undefined })),
+          : resolve(undefined)),
       )
       const history = yield* sessions.context(session.id)
+      const snapshot = yield* reviewerSnapshot(database, session.id)
       const policy = options.policy_path ? yield* fs.readFileString(path.resolve(location.directory, options.policy_path)) : ""
       const tenant = [PermissionReviewerPrompt.DEFAULT_TENANT_POLICY, policy, options.policy].filter(Boolean).join("\n\n")
       const request = new PermissionReviewerSchema.ReviewerRequest({
@@ -76,24 +92,19 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const rendered = history.slice(-120).map((message) => {
         const text = render(message)
         const role: PermissionReviewerPrompt.TranscriptEntry["role"] = message.type === "user" ? "user" : message.type === "shell" ? "tool" : "assistant"
-        // 真实用户末尾可能包含授权；仅用户条目增大预算并保尾，不扩大工具证据。
-        const limit = role === "user" ? 2000 : 1000
-        return { role, text: truncate(text, limit, role === "user"), truncated: text.length > limit }
+        // 全文授权已在独立快照，滚动窗口各角色统一1000字符头截断。
+        return { role, text: truncate(text, 1000), truncated: text.length > 1000 }
       })
       const visible = rendered.filter((entry) => entry.text.trim())
-      const keep = new Set<number>()
-      const first = visible.findIndex((entry) => entry.role === "user")
-      const last = visible.findLastIndex((entry) => entry.role === "user")
-      // 真实用户锚点优先，模型推理或合成上下文不能冒充用户授权。
-      if (first >= 0) keep.add(first)
-      if (last >= 0) keep.add(last)
-      for (let index = visible.length - 1; index >= 0 && keep.size < 40; index--) keep.add(index)
-      const retained = visible.filter((_, index) => keep.has(index))
+      const retained = visible.slice(-40)
       const items = PermissionReviewerPrompt.buildUserPromptItems({
+        snapshot,
+        window: {
         entries: retained.map(({ role, text }) => ({ role, text })),
         truncated: history.length > 120 || visible.length > retained.length,
         entryTruncated: retained.some((entry) => entry.truncated),
         emptyEntries: rendered.length > visible.length,
+        },
       }, request, input.precheck.reason)
       const system = PermissionReviewerPrompt.buildSystemPrompt(tenant)
       const prompt = items.map((item) => item.text).join("\n\n")
@@ -108,7 +119,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         yield* events.publish(SessionEvent.Synthetic, {
           sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
           text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${attemptPrompt}`,
-        }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
+        // 审计名称与实际选档共用一次结果，保持原reviewID/请求身份及事件清理合同。
+        }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID, ...(selected.effortVariant ? { effortVariant: selected.effortVariant } : {}) } })
         // 审查使用自己的确认样本；父对话和并行审查的未结算估计不能参与校准。
         const samples = Token.inputHistory(yield* sessions.context(reviewerSession), selected.model)
         let inputEstimate: SessionMessage.InputEstimate | undefined
@@ -339,17 +351,128 @@ function render(message: SessionMessage.Message) {
 }
 
 // 单段和整条截短都留下显式证据标记，而不是静默丢弃剩余内容。
-function truncate(text: string, limit = 4000, preserveTail = false) {
+function truncate(text: string, limit = 4000) {
   if (text.length <= limit) return text
-  if (preserveTail) {
-    // 与V1同样保留头部60%和尾部40%，省略标记仍反映真实缺失量。
-    const head = Math.floor(limit * 0.6)
-    const tail = limit - head
-    return text.slice(0, head) + `\n<truncated chars="${text.length - limit}" />\n` + text.slice(text.length - tail)
-  }
   return text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
 }
 
+// 原生授权取自未被compaction裁剪的投影表；不读取待提升inbox或已撤回的事件尾部。
+function reviewerSnapshot(database: Database.Interface, sessionID: SessionSchema.ID) {
+  return Database.withSync(database, db => {
+    const visible = sql`not coalesce((json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
+      and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
+      and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0), 0)`
+    const decode = Schema.decodeUnknownSync(SessionMessage.Message)
+    // 用户、QA和决定共用原只读恢复边界；定位后的cold正文不写热行或消费引用。
+    const read = (rows: (typeof SessionMessageTable.$inferSelect)[]) => ColdStorage.inspectSessionMessageRows(db, rows)
+      .map(row => ({ id: row.id, seq: row.seq, message: decode({ ...row.data, id: row.id, type: row.type }) }))
+    const locations = db.all<{ id: SessionMessage.ID; seq: number; position: number }>(sql`
+      select ${SessionMessageTable.id} as id, ${SessionMessageTable.seq} as seq, cast(p.key as integer) as position
+      from ${SessionMessageTable}, json_each(${SessionMessageTable.data}, '$.content') p
+      where ${SessionMessageTable.session_id} = ${sessionID} and ${SessionMessageTable.type} = 'assistant' and ${visible}
+        and json_extract(p.value, '$.type') = 'tool' and json_extract(p.value, '$.name') = 'question'
+        and json_extract(p.value, '$.state.status') = 'completed'
+      order by ${SessionMessageTable.seq}, cast(p.key as integer) limit 101
+    `)
+    const qaMessages = new Map(read(db.select().from(SessionMessageTable)
+      .where(inArray(SessionMessageTable.id, locations.map(row => row.id))).all()).map(row => [row.id, row.message]))
+    const qa = locations.map(row => {
+      const message = qaMessages.get(row.id)
+      const part = message?.type === "assistant" ? message.content[row.position] : undefined
+      return { seq: row.seq, questions: part?.type === "tool" && part.state.status === "completed" ? part.state.input.questions : undefined,
+        answers: part?.type === "tool" && part.state.status === "completed" ? part.state.structured.answers : undefined }
+    })
+    const pairs = qa.slice(0, 100).flatMap(row => {
+      const questions = Schema.decodeUnknownOption(Schema.Array(Question.Prompt))(row.questions)
+      const answers = Schema.decodeUnknownOption(Schema.Array(Schema.Array(Schema.String)))(row.answers)
+      if (Option.isNone(questions) || Option.isNone(answers)) return []
+      // 问题只作300字符锚点，用户的每个答案全文保留。
+      return questions.value.flatMap((question, index) => {
+        const answer = answers.value[index]?.join(", ")
+        return answer ? [{ seq: row.seq, entry: { kind: "qa", question: question.question.length > 300
+          ? question.question.slice(0, 300) + "…" : question.question, answer } satisfies PermissionReviewerPrompt.ReviewerSnapshotEntry }] : []
+      })
+    })
+    // 完成的审查决定可能先于工具完成落盘；不能把running裁决或冷structured当成不存在。
+    const decisions: { seq: number; entry: PermissionReviewerPrompt.ReviewerSnapshotEntryDecision }[] = []
+    let decisionBefore: number | undefined
+    while (decisions.length <= 60) {
+      const rows = db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, sessionID),
+        eq(SessionMessageTable.type, "assistant"), visible, decisionBefore === undefined ? undefined : lt(SessionMessageTable.seq, decisionBefore),
+        sql`exists (select 1 from json_each(${SessionMessageTable.data}, '$.content') p where json_extract(p.value, '$.type') = 'tool'
+          and json_extract(p.value, '$.name') <> 'question' and (${SessionMessageTable.cold_ref} is not null
+            or json_extract(p.value, '$.state.structured.autoReview.status') in ('allowed', 'denied', 'fallback_user')
+            or json_extract(p.value, '$.state.error.message') like 'The user rejected permission%'))`,
+      )).orderBy(desc(SessionMessageTable.seq)).limit(64).all()
+      if (!rows.length) break
+      for (const row of read(rows)) {
+        if (row.message.type !== "assistant") continue
+        for (const part of row.message.content.toReversed()) {
+          if (part.type !== "tool" || part.name === "question" || part.state.status === "pending") continue
+          const review: unknown = part.state.structured.autoReview
+          const status = review && typeof review === "object" && "status" in review ? review.status : undefined
+          const result = review && typeof review === "object" && "result" in review ? review.result : undefined
+          const reason = result && typeof result === "object" && "rationale" in result && typeof result.rationale === "string" ? result.rationale : undefined
+          const label = part.state.status === "error" && part.state.error.message.startsWith("The user rejected permission") ? `[PERMISSION: USER-REJECTED] ${part.name}`
+            : part.state.status === "completed" && status === "fallback_user" ? `[PERMISSION: USER-ALLOWED-AFTER-ASK] ${part.name}`
+            : status === "denied" ? `[AUTO-REVIEW: DENIED] ${part.name}${reason ? ` — ${reason}` : ""}`
+            : status === "allowed" ? `[AUTO-REVIEW: ALLOWED] ${part.name}` : undefined
+          if (label) decisions.push({ seq: row.seq, entry: { kind: "decision", label } })
+          if (decisions.length > 60) break
+        }
+        if (decisions.length > 60) break
+      }
+      decisionBefore = rows.at(-1)?.seq
+      if (rows.length < 64) break
+    }
+    let budget = Math.max(0, 24000 - qa.slice(0, 100).reduce((sum, row) => sum + (JSON.stringify(row.questions)?.length ?? 0) + (JSON.stringify(row.answers)?.length ?? 0), 0))
+    const users: { seq: number; text: string }[] = []
+    const seen = new Set<string>()
+    let before: number | undefined
+    let userOmitted = qa.length > 100
+    walk: while (users.length < 400) {
+      const rows = db.select()
+        .from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "user"),
+          visible, before === undefined ? undefined : lt(SessionMessageTable.seq, before)))
+        .orderBy(desc(SessionMessageTable.seq)).limit(32).all()
+      if (!rows.length) break
+      for (const row of read(rows).flatMap(row => row.message.type === "user" ? [{ seq: row.seq, text: row.message.text }] : [])) {
+        if (!row.text?.trim()) continue
+        const cost = seen.has(row.text) ? 50 : row.text.length
+        seen.add(row.text)
+        if (cost > budget || users.length >= 400) { userOmitted = true; break walk }
+        budget -= cost
+        users.push(row)
+      }
+      if (users.length >= 400) { userOmitted = true; break }
+      before = rows.at(-1)?.seq
+      if (rows.length < 32) break
+    }
+    // 原始首条授权与source一致豁免逐出，不能被大量后续消息替代。
+    if (userOmitted) {
+      const row = db.select()
+        .from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "user"), visible))
+        .orderBy(SessionMessageTable.seq).limit(1).get()
+      const restored = row ? read([row])[0] : undefined
+      const first = restored?.message.type === "user" ? { seq: restored.seq, text: restored.message.text } : undefined
+      if (first?.text?.trim() && !users.some(row => row.seq === first.seq)) users.push(first)
+    }
+    const merged = [...users.map(row => ({ seq: row.seq, entry: { kind: "user", text: row.text } satisfies PermissionReviewerPrompt.ReviewerSnapshotEntry })), ...pairs, ...decisions.slice(0, 60).reverse()]
+      .sort((left, right) => left.seq - right.seq)
+    const entries: PermissionReviewerPrompt.ReviewerSnapshotEntry[] = []
+    const anchors = new Map<string, number>()
+    for (const { entry } of merged) {
+      if (entry.kind !== "user") { entries.push(entry); continue }
+      const anchor = anchors.get(entry.text)
+      if (anchor !== undefined) { entries.push({ kind: "userDup", ofIndex: anchor, chars: entry.text.length }); continue }
+      entries.push(entry)
+      anchors.set(entry.text, entries.length)
+    }
+    // 仅真实裁决进入快照，基础设施失败和普通工具完成都不是用户批准。
+    return { entries, userOmitted, decisionsOmitted: decisions.length > 60, emptyUserEvidence: entries.length === 0 }
+  })
+}
+
 export const node = makeLocationNode({ service: Service, layer,
-  deps: [Config.node, SessionStore.node, SessionRunnerModel.node, LayerNodePlatform.llmClient, LayerNodePlatform.filesystem, Location.node, Database.node, EventV2.node, SessionProjector.node],
+  deps: [Config.node, Catalog.node, SessionStore.node, SessionRunnerModel.node, LayerNodePlatform.llmClient, LayerNodePlatform.filesystem, Location.node, Database.node, EventV2.node, SessionProjector.node],
 })

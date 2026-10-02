@@ -12,6 +12,8 @@ export class Info extends Schema.Class<Info>("Config.AutoReview")({
   policy_path: Schema.String.pipe(Schema.optional),
   policy: Schema.String.pipe(Schema.optional),
   fallback: Schema.Literals(["deny", "user"]).pipe(Schema.optional),
+  // 只选择模型广告的档位，不把评审预算变成权限或provider参数的新权威。
+  effort: Schema.String.pipe(Schema.optional),
   strict: Schema.Boolean.pipe(Schema.optional),
   max_consecutive_denials: Schema.Number.pipe(Schema.optional),
   max_recent_denials: Schema.Number.pipe(Schema.optional),

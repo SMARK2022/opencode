@@ -28,6 +28,10 @@ export const AutoReview = Schema.Struct({
   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
     description: "On reviewer failure after retry, either fail closed or fall back to user approval. Defaults to user.",
   }),
+  effort: Schema.optional(Schema.String).annotate({
+    description:
+      "Reasoning effort variant name of the resolved reviewer model (e.g. \"low\"). Defaults to the minimal tier the reviewer model advertises (low, then minimal, then none); models without a low tier keep their configured options unchanged.",
+  }),
   // #196：strict 为 true 时即使 precheck 判定 allow 也强制经过 reviewer。
   strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
   // #196：熔断器阈值，连续或滑动窗口内拒绝次数超限后中断 reviewer。
