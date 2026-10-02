@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
 import { createOpenAI } from "@ai-sdk/openai"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -11,7 +11,18 @@ import { Config } from "../../src/config/config"
 import { PermissionReviewer } from "../../src/permission/reviewer/service"
 import { Plugin } from "../../src/plugin"
 import { Provider } from "../../src/provider/provider"
-import { SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { PartTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
+import { EventV2Bridge } from "../../src/event-v2-bridge"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { InstanceStore } from "../../src/project/instance-store"
+import { InstanceBootstrap } from "../../src/project/bootstrap-service"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Session } from "../../src/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -44,6 +55,7 @@ type ReviewerRequestBody = {
   max_output_tokens?: unknown
   // 596：捕获 tool_choice——验证强制决策工具与兼容重发去参
   tool_choice?: unknown
+  reasoning?: unknown
   input: Array<{ role?: unknown; content?: unknown }>
 }
 
@@ -67,8 +79,10 @@ const emptyReviewerDb = (() => {
     orderBy: () => ({ limit: () => ({ all: () => Effect.succeed([]) }) }),
     get: () => Effect.succeed({ id: SessionID.make("session_parent") }),
   }
-  // #493：Interface 增加 sync（同一原生连接的同步 client）——空链 mock 同步补齐，测试不触真实库。
-  return { db: { select: () => ({ from: () => ({ where: () => chain }) }) } as never, sync: undefined as never }
+  // 生命周期fixture维持空历史合同，补齐650证据查询需要的预约和同步空链；真实SQLite由独立用例覆盖。
+  const rows = { orderBy: () => ({ limit: () => ({ all: () => [] }) }) }
+  const sync = { select: () => ({ from: () => ({ where: () => rows, innerJoin: () => ({ where: () => rows }) }) }) }
+  return { db: { $client: { reserve: Effect.void }, select: () => ({ from: () => ({ where: () => chain }) }) } as never, sync: sync as never }
 })()
 
 // #497：closure 用例的 fixture 注册表——it 实例与 body 共享同一 fixture（单一实例，committed barrier 才可观测）。
@@ -1108,12 +1122,15 @@ function reviewerFixture(
     plugin?: Layer.Layer<Plugin.Service>
     // #280：注入自定义 permission 块（如无 approvals_reviewer 的隐式 auto 场景）
     permission?: ConfigV1.Info["permission"]
+    // 模型广告的 reasoning 变体表：生产来自 transform.variants 与 config variants 合并。
+    modelVariants?: Record<string, Record<string, unknown>>
   } = { requireInstructions: false },
 ) {
   const bodies: ReviewerRequestBody[] = []
   // #261：捕获完整请求以验证 headers
   const requests: CapturedReviewerRequest[] = []
   const model = reviewerModel(options.providerID ?? OPENAI_PROVIDER_ID)
+  if (options.modelVariants) model.variants = options.modelVariants
   // Bun 的 fetch 类型带 preconnect；测试只需要拦截真实请求体，因此用空实现满足
   // provider SDK 类型契约，不改变请求/响应行为，也不引入额外网络能力。
   const fetch = Object.assign(
@@ -1677,3 +1694,343 @@ function openAIReviewPendingStream() {
     .map((event) => `data: ${JSON.stringify(event)}\n\n`)
     .join("")
 }
+
+// effort仅从广告表选择low/minimal/none；显式档名优先，未知名沿相同启发式，无低档保持原options。
+describe("permission reviewer effort", () => {
+  test("resolveReviewerVariant prefers the minimal advertised tier", () => {
+    const base = reviewerModel(OPENAI_PROVIDER_ID)
+    const resolve = PermissionReviewer.resolveReviewerVariant
+    expect(
+      resolve({
+        ...base,
+        variants: { high: { reasoningEffort: "high" }, low: { reasoningEffort: "low" }, none: { reasoningEffort: "none" } },
+      }),
+    ).toEqual({ name: "low", options: { reasoningEffort: "low" } })
+    expect(
+      resolve({ ...base, variants: { minimal: { reasoningEffort: "minimal" }, none: { reasoningEffort: "none" } } }),
+    ).toEqual({ name: "minimal", options: { reasoningEffort: "minimal" } })
+    expect(resolve({ ...base, variants: { none: { reasoningEffort: "none" }, max: { reasoningEffort: "max" } } })).toEqual({
+      name: "none",
+      options: { reasoningEffort: "none" },
+    })
+    expect(resolve({ ...base, variants: { max: { reasoningEffort: "max" } } })).toBeUndefined()
+    expect(resolve(base)).toBeUndefined()
+  })
+
+  test("configured effort overrides the heuristic and unknown names fall back to it", () => {
+    const model = {
+      ...reviewerModel(OPENAI_PROVIDER_ID),
+      variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
+    }
+    expect(PermissionReviewer.resolveReviewerVariant(model, "high")).toEqual({ name: "high", options: { reasoningEffort: "high" } })
+    expect(PermissionReviewer.resolveReviewerVariant(model, "missing")).toEqual({ name: "low", options: { reasoningEffort: "low" } })
+  })
+
+  const effortHeuristicFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    { requireInstructions: false, modelVariants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } } },
+  )
+  const effortHeuristic = testEffect(effortHeuristicFixture.layer)
+
+  effortHeuristic.effect("sends the minimal advertised reasoning tier on reviewer requests", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* reviewer.review(reviewInput("review_effort_heuristic"))
+      expect(effortHeuristicFixture.bodies[0].reasoning).toMatchObject({ effort: "low" })
+    }),
+  )
+
+  const effortConfiguredFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    {
+      requireInstructions: false,
+      modelVariants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
+      permission: {
+        approvals_reviewer: "auto_review",
+        auto_review: {
+          model: `${OPENAI_PROVIDER_ID}/gpt-5`,
+          effort: "high",
+          policy: "Reviewer service test policy: allow only the bounded fixture command.",
+        },
+      },
+    },
+  )
+  const effortConfigured = testEffect(effortConfiguredFixture.layer)
+
+  effortConfigured.effect("configured effort variant overrides the heuristic", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* reviewer.review(reviewInput("review_effort_configured"))
+      expect(effortConfiguredFixture.bodies[0].reasoning).toMatchObject({ effort: "high" })
+    }),
+  )
+})
+
+
+// [local-smark] reviewerEvidence 定位查询的行为测试：真实 Session + SQLite 种子，
+// 与生产读取同路径；不用 mock store，避免定位语义被内存回显掩盖。
+describe("permission reviewer evidence", () => {
+  const evidence = testEffect(AppNodeBuilder.build(
+    LayerNode.group([Session.node, EventV2Bridge.node, SessionProjector.node, Database.node, CrossSpawnSpawner.node, InstanceStore.node]),
+    [
+      [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
+      // 真实Session与projector写SQLite，仅阻断实例bootstrap的产品启动副作用。
+      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))],
+    ],
+  ))
+
+  const addUser = (sessions: Session.Interface, sessionID: SessionID, created: number, text: string) =>
+    Effect.gen(function* () {
+      const messageID = MessageID.ascending()
+      yield* sessions.updateMessage({
+        id: messageID,
+        sessionID,
+        role: "user",
+        time: { created },
+        agent: "auto",
+        model: { providerID: OPENAI_PROVIDER_ID, modelID: ModelV2.ID.make("gpt-5") },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID,
+        messageID,
+        type: "text",
+        text,
+      })
+      return messageID
+    })
+
+  evidence.instance("returns full-history user texts beyond the page window with hidden excluded", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "evidence-user-texts" })
+      // 首条用户消息携带原始授权，且会被 120 条 page 窗口挤出：3 条 user + 130 条
+      // assistant 填充共 133 条消息，page(120) 只能看到尾部，定位查询必须全史可达。
+      const first = "授权目标：删除 build 目录并重新构建"
+      const middle = "追加约束：" + "保留现有测试不断言私有助手。".repeat(200)
+      const latest = "确认：可以执行"
+      yield* addUser(sessions, chat.id, 1000, first)
+      for (let i = 0; i < 130; i++) {
+        const messageID = MessageID.ascending()
+        yield* sessions.updateMessage({
+          id: messageID,
+          sessionID: chat.id,
+          role: "assistant",
+          parentID: MessageID.ascending(),
+          mode: "build",
+          agent: "build",
+          path: { cwd: chat.directory, root: chat.directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelV2.ID.make("gpt-5"),
+          providerID: OPENAI_PROVIDER_ID,
+          time: { created: 2000 + i },
+        })
+      }
+      yield* addUser(sessions, chat.id, 3000, middle)
+      yield* addUser(sessions, chat.id, 4000, latest)
+      const hiddenMessageID = yield* addUser(sessions, chat.id, 5000, "这条隐藏消息不得出现在证据里")
+      const hidden = yield* MessageV2.get({ sessionID: chat.id, messageID: hiddenMessageID })
+      yield* sessions.updateMessage({ ...hidden.info, hidden: { time: Date.now(), reason: "undo" } })
+
+      const result = yield* MessageV2.reviewerEvidence(chat.id)
+      expect(result.user.map((row) => row.text)).toEqual([first, middle, latest])
+      // >2000 字符的中段消息必须完整返回：旧投影的条内截断在快照段不存在。
+      expect(result.user[1].text.length).toBe(middle.length)
+    }),
+  )
+
+  evidence.instance("locates question answers and permission decision tool rows", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "evidence-decisions" })
+      const addAssistantWithTool = (created: number, part: Omit<SessionV1.ToolPart, "id" | "sessionID" | "messageID" | "type">) =>
+        Effect.gen(function* () {
+          const messageID = MessageID.ascending()
+          yield* sessions.updateMessage({
+            id: messageID,
+            sessionID: chat.id,
+            role: "assistant",
+            parentID: MessageID.ascending(),
+            mode: "build",
+            agent: "build",
+            path: { cwd: chat.directory, root: chat.directory },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ModelV2.ID.make("gpt-5"),
+            providerID: OPENAI_PROVIDER_ID,
+            time: { created },
+          })
+          const partID = PartID.ascending()
+          yield* sessions.updatePart({ ...part, id: partID, sessionID: chat.id, messageID, type: "tool" })
+          return partID
+        })
+      const completedState = (tool: string, input: Record<string, unknown>, metadata: Record<string, unknown> = {}) => ({
+        status: "completed" as const,
+        input,
+        output: "ok",
+        title: "t",
+        metadata,
+        time: { start: 0, end: 1 },
+      })
+      const time = { start: 0, end: 1 }
+
+      yield* addAssistantWithTool(1, {
+        tool: "question",
+        callID: "call_q",
+        state: completedState(
+          "question",
+          { questions: [{ question: "选哪个？" }] },
+          { answers: [["方案B"]] },
+        ),
+      })
+      yield* addAssistantWithTool(2, {
+        tool: "bash",
+        callID: "call_allowed",
+        state: { status: "running", input: { command: "ls" }, metadata: { autoReview: { status: "allowed" } }, time: { start: 0 } },
+      })
+      yield* addAssistantWithTool(3, {
+        tool: "bash",
+        callID: "call_rejected",
+        state: { status: "error", input: { command: "rm -rf x" }, error: "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.", time },
+      })
+      yield* addAssistantWithTool(4, {
+        tool: "bash",
+        callID: "call_denied",
+        state: completedState("bash", { command: "rm -rf y" }, {
+          autoReview: { status: "denied", result: { risk_level: "high", user_authorization: "low", rationale: "目标过宽" } },
+        }),
+      })
+      yield* addAssistantWithTool(5, {
+        tool: "bash",
+        callID: "call_after_ask",
+        state: completedState("bash", { command: "deploy" }, { autoReview: { status: "fallback_user" } }),
+      })
+      // 基础设施失败不是策略决定：查询层即排除，不占决定行配额（N-03）。
+      yield* addAssistantWithTool(6, {
+        tool: "bash",
+        callID: "call_timed_out",
+        state: { status: "error", input: { command: "x" }, error: "auto reviewer timed out", metadata: { autoReview: { status: "timed_out" } }, time },
+      })
+      // 普通 error（非权限拒绝）不得进入决定证据。
+      yield* addAssistantWithTool(7, {
+        tool: "bash",
+        callID: "call_ordinary_error",
+        state: { status: "error", input: { command: "x" }, error: "exit code 1", time },
+      })
+      const hiddenPartID = PartID.ascending()
+      const hiddenMessageID = MessageID.ascending()
+      yield* sessions.updateMessage({
+        id: hiddenMessageID,
+        sessionID: chat.id,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        mode: "build",
+        agent: "build",
+        path: { cwd: chat.directory, root: chat.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelV2.ID.make("gpt-5"),
+        providerID: OPENAI_PROVIDER_ID,
+        time: { created: 8 },
+      })
+      yield* sessions.updatePart({
+        id: hiddenPartID,
+        sessionID: chat.id,
+        messageID: hiddenMessageID,
+        type: "tool",
+        tool: "bash",
+        callID: "call_hidden",
+        state: { status: "error", input: {}, error: "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.", time },
+        hidden: { time: Date.now(), reason: "undo" },
+      })
+
+      const result = yield* MessageV2.reviewerEvidence(chat.id)
+      expect(result.tools.map((row) => ({ tool: row.tool, autoReviewStatus: row.autoReviewStatus, error: row.error }))).toEqual([
+        { tool: "question", autoReviewStatus: undefined, error: undefined },
+        { tool: "bash", autoReviewStatus: "allowed", error: undefined },
+        { tool: "bash", autoReviewStatus: undefined, error: "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once." },
+        { tool: "bash", autoReviewStatus: "denied", error: undefined },
+        { tool: "bash", autoReviewStatus: "fallback_user", error: undefined },
+      ])
+      expect(result.tools[0].input).toContain("选哪个？")
+      expect(result.tools[0].answers).toContain("方案B")
+      expect(result.tools[3].autoReviewRationale).toBe("目标过宽")
+      // 同一证据集冷藏后仍逐字相同，inspect不能顺带清除持久cold_ref。
+      const database = yield* Database.Service
+      const refs = yield* Database.withSync(database, db => {
+        const rows = db.select().from(PartTable).where(eq(PartTable.session_id, chat.id)).all()
+        const results = rows.map(row => ColdStorage.freezeOwner(db, { type: "part", id: row.id, olderThanMs: 0 }))
+        expect(results.some(result => result.type === "frozen")).toBe(true)
+        return db.select({ id: PartTable.id, ref: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.session_id, chat.id)).all()
+      })
+      expect(yield* MessageV2.reviewerEvidence(chat.id)).toEqual(result)
+      expect(yield* Database.withSync(database, db => db.select({ id: PartTable.id, ref: PartTable.cold_ref })
+        .from(PartTable).where(eq(PartTable.session_id, chat.id)).all())).toEqual(refs)
+    }),
+  )
+
+  // 尾锚预算：最近的 24k 字符恒显示，超顶逐出最旧中部并显式标记；
+  // 首条 user（原始授权）豁免逐出。决定行独立 60 条配额，与快照字符预算互不占额。
+  evidence.instance("evicts oldest-middle user texts beyond the tail-anchored budget and caps decision rows", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "evidence-budget" })
+      yield* addUser(sessions, chat.id, 0, "第一条授权消息")
+      const texts: string[] = []
+      for (let i = 1; i <= 29; i++) {
+        const text = `消息${i}：` + "x".repeat(990)
+        texts.push(text)
+        yield* addUser(sessions, chat.id, i * 10, text)
+      }
+      for (let i = 0; i < 65; i++) {
+        const messageID = MessageID.ascending()
+        yield* sessions.updateMessage({
+          id: messageID,
+          sessionID: chat.id,
+          role: "assistant",
+          parentID: MessageID.ascending(),
+          mode: "build",
+          agent: "build",
+          path: { cwd: chat.directory, root: chat.directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelV2.ID.make("gpt-5"),
+          providerID: OPENAI_PROVIDER_ID,
+          time: { created: 1000 + i },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: chat.id,
+          messageID,
+          type: "tool",
+          tool: "bash",
+          callID: `call_${i}`,
+          state: {
+            status: "completed",
+            input: { command: `cmd${i}` },
+            output: "ok",
+            title: "t",
+            metadata: { autoReview: { status: "allowed" } },
+            time: { start: 0, end: 1 },
+          },
+        })
+      }
+
+      const result = yield* MessageV2.reviewerEvidence(chat.id)
+      // 首条豁免逐出且位于最前；最新 24k（消息 29 往回的 24 条约 1000 字符）恒显示。
+      expect(result.user[0].text).toBe("第一条授权消息")
+      expect(result.user.some((row) => row.text === texts[28])).toBe(true)
+      // 最旧中部（消息 1 附近）被逐出；尾部锚定保证最近内容完整。
+      expect(result.user.some((row) => row.text === texts[0])).toBe(false)
+      expect(result.userOmitted).toBe(true)
+      const totalChars = result.user.reduce((sum, row) => sum + row.text.length, 0)
+      expect(totalChars).toBeLessThanOrEqual(24000 + "第一条授权消息".length)
+      // 决定行独立 60 条：65 条种子保最新 60（cmd5..cmd64），最旧 5 条逐出并标记。
+      expect(result.tools.length).toBe(60)
+      expect(result.decisionsOmitted).toBe(true)
+      expect(result.tools.some((row) => row.input && /"cmd[0-4]"/.test(row.input))).toBe(false)
+      expect(result.tools.some((row) => row.input?.includes("cmd64"))).toBe(true)
+    }),
+  )
+})

@@ -245,6 +245,15 @@ describe("session.system", () => {
     expect(SystemContextBuiltIns.OUTPUT_GUIDANCE.includes("recovery attempts are exhausted")).toBe(false)
   })
 
+  test("ASTRA template carries permission semantics woven into existing sections", () => {
+    // 权限语义仅织入ASTRA既有Autonomy段，避免污染其他模型；收尾是残余报告而非停摆请示门禁。
+    expect(PROMPT_ASTRA).toContain("User authorization persists across turns")
+    expect(PROMPT_ASTRA).toContain("do not stop the turn just because one action was rejected")
+    expect(PROMPT_ASTRA).toContain("at the end of your response")
+    expect(PROMPT_ASTRA).not.toContain("then ask once")
+    expect([SystemContextBuiltIns.ACTION_GUIDANCE, SystemContextBuiltIns.OUTPUT_GUIDANCE].some((section) => section.includes("auto-review"))).toBe(false)
+  })
+
   // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
   test.each([
     ["gpt-6-astra", PROMPT_ASTRA],

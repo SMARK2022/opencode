@@ -6,7 +6,8 @@ import { ID } from "@opencode-ai/schema/permission-v1"
 
 export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("PermissionRejectedError", {}) {
   override get message() {
-    return "The user rejected permission to use this specific tool call."
+    // 用户拒绝禁止原样重试或立即重问，但不阻止安全替代与其他已授权工作。
+    return "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once."
   }
 }
 
@@ -44,7 +45,8 @@ export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()(
     // 虚假逃生口，会诱发换形态重试循环）；默认文案保留可授权重试路径
     const tail = this.terminal
       ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
-      : " Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation."
+      // 非终局拒绝给出安全替代、改变事实的取证和继续其他工作，原终局门禁保持不变。
+      : " You may: switch to a materially safer approach; gather read-only evidence that changes this assessment and retry; or complete unaffected work without asking for confirmation. If the task stays blocked, report in one short paragraph what was rejected and why, and ask the user for approval once."
     return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${tail}`
   }
 }

@@ -4,6 +4,9 @@ import { TestClock } from "effect/testing"
 import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Database } from "@opencode-ai/core/database/database"
+import { Catalog } from "@opencode-ai/core/catalog"
+import { makeLocationNode } from "@opencode-ai/core/effect/app-node"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -98,18 +101,21 @@ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
     }))))
   })),
 }))
-const reviewModel = Layer.succeed(SessionRunnerModel.Service, SessionRunnerModel.Service.of({ resolve: (session) => {
-  reviewModels.push(session.model)
-  // 真实reviewer仍执行，只在模型目录边界模拟已删除条目；默认解析及合法显式模型保持成功。
-  if (session.model?.id === "removed-model") return Effect.fail(new SessionRunnerModel.ModelUnavailableError({
-    providerID: session.model.providerID, modelID: session.model.id,
-  }))
-  return Effect.succeed({
-    model: Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
-    pricing: [{ input: 1, output: 2, cache: { read: 0.5, write: 1 } }],
-    openaiOAuth: reviewOAuth,
-  })
-} }))
+const reviewModel = makeLocationNode({ service: SessionRunnerModel.Service, deps: [Catalog.node], layer: Layer.effect(SessionRunnerModel.Service, Effect.gen(function* () {
+  const catalog = yield* Catalog.Service
+  return SessionRunnerModel.Service.of({ resolve: session => Effect.gen(function* () {
+    reviewModels.push(session.model)
+    // 原有失效模型、费用和OAuth断言继续经过同一真实reviewer链。
+    if (session.model?.id === "removed-model") return yield* new SessionRunnerModel.ModelUnavailableError({
+      providerID: session.model.providerID, modelID: session.model.id,
+    })
+    const model = session.model ? yield* catalog.model.get(session.model.providerID, session.model.id) : undefined
+    // 有广告时沿真实lowering观察wire默认值，未播种模型保持原fixture返回。
+    return { model: model && !reviewOAuth ? yield* SessionRunnerModel.resolve(session, model)
+      : Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
+      pricing: model?.cost ?? [{ input: 1, output: 2, cache: { read: 0.5, write: 1 } }], openaiOAuth: reviewOAuth }
+  }) })
+})) })
 const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
 
 // 只在提交边界注入一次故障；所有成功发布仍经过同一真实DB和投影，顺序记录在提交之后。
@@ -138,6 +144,7 @@ const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
       Database.node,
+      Catalog.node,
       EventV2.node,
       SessionStore.node,
       PermissionSaved.node,
@@ -533,6 +540,11 @@ describe("PermissionV2", () => {
     yield* Effect.addFinalizer(() => unsubscribe)
     const evidence = yield* Database.Service
     // 验证的是实际 reviewer 到 resolver 的输入，不能用固定返回模型掩盖来源漂移。
+    const catalog = yield* Catalog.Service
+    yield* catalog.transform(editor => editor.model.update(ProviderV2.ID.make("parent-provider"), ModelV2.ID.make("parent-model"), model => {
+      model.api = { type: "aisdk", id: ModelV2.ID.make("parent-model"), package: "@ai-sdk/openai", url: "https://review.test" }
+      model.variants = ["high", "low"].map(id => ({ id: ModelV2.VariantID.make(id), headers: {}, body: { reasoning_effort: id } }))
+    }))
     yield* evidence.db.update(SessionTable).set({ model: {
       id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider"),
     } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
@@ -541,14 +553,28 @@ describe("PermissionV2", () => {
         id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
         data: { time: { created: index + 1 }, text: index === 0 ? "FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION" : index === 44 ? "m".repeat(1500) + "Follow-up 44" : `Follow-up ${index}` },
       })),
+      // 旧授权在compaction之前，原生快照仍须完整读取，窗口则遵循上游裁剪。
+      { id: SessionMessage.ID.make("msg_evidence_compaction"), session_id: SessionV2.ID.make("ses_test"), type: "compaction" as const, seq: 46,
+        data: { time: { created: 46 }, reason: "manual" as const, summary: "compacted context", recent: "recent context" } },
       {
-        id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 46,
-        data: { time: { created: 46 }, agent: "test", model: { id: "review", providerID: "test" },
-          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) + "ASSISTANT_TAIL" }] },
+        id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 47,
+        data: { time: { created: 47 }, agent: "test", model: { id: "review", providerID: "test" },
+          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) + "ASSISTANT_TAIL" },
+            { type: "tool", id: "question", name: "question", time: { created: 47 }, state: { status: "completed", content: [],
+              input: { questions: [{ question: "q".repeat(500), header: "choice", options: [{ label: "yes", description: "authorize" }] }] },
+              structured: { answers: [["USER_ANSWER_FULL_" + "a".repeat(2500)]] } } },
+            { type: "tool", id: "early-denial", name: "bash", time: { created: 47 }, state: { status: "running", input: {}, content: [], structured: { autoReview: { status: "denied", result: { rationale: "prior bounded denial" } } } } },
+            { type: "tool", id: "cold-allow", name: "read", time: { created: 47 }, state: { status: "completed", input: {}, content: [], structured: { autoReview: { status: "allowed" } } } }] },
       },
-      { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 47, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 47 }, text: "SYNTHETIC AUTHORIZATION" } },
+      { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 48, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 48 }, text: "SYNTHETIC AUTHORIZATION" } },
     ]
     yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
+    // 真正冷藏完成QA和允许决定，running拒绝仍热；取证后两种事实都须进入同一快照。
+    const evidenceID = SessionMessage.ID.make("msg_evidence_assistant")
+    yield* Database.withSync(evidence, db => {
+      expect(ColdStorage.freezeOwner(db, { type: "session_message", id: evidenceID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+    })
+    const coldEvidence = yield* evidence.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, evidenceID)).get().pipe(Effect.orDie)
     const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
     // auto准入进入同一隔离审查，显式user与已知只读快速路径仍分别保留。
     const agents = yield* AgentV2.Service
@@ -584,7 +610,14 @@ describe("PermissionV2", () => {
     // 观察真实发往模型的文本；原生路径也要保留用户尾授权而非只测V1辅助函数。
     const reviewBody = reviewRequests[0]?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")
     expect(reviewBody).toContain("FIRST_CONTEXT_")
-    expect(reviewBody).toContain('<truncated chars="533" />')
+    expect(reviewBody).toContain("[u1] [USER] FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION")
+    expect(reviewBody).toContain("[USER-ANSWER] Q: " + "q".repeat(300) + "… A: USER_ANSWER_FULL_" + "a".repeat(2500))
+    expect(reviewBody).toContain("[AUTO-REVIEW: DENIED] bash — prior bounded denial")
+    expect(reviewBody).toContain("[AUTO-REVIEW: ALLOWED] read")
+    expect(reviewBody).not.toContain("Host notice: some earlier permission decisions are unavailable")
+    expect(reviewModels[0]).toMatchObject({ variant: "low" })
+    expect(reviewRequests[0]?.model.route.defaults.http?.body).toMatchObject({ reasoning_effort: "low" })
+    expect(yield* evidence.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, evidenceID)).get().pipe(Effect.orDie)).toEqual(coldEvidence)
     expect(reviewBody).toContain("m".repeat(1500) + "Follow-up 44")
     expect(reviewBody).not.toContain("ASSISTANT_TAIL")
     // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
@@ -599,7 +632,8 @@ describe("PermissionV2", () => {
     const staleRequest = { ...automatic, action: "external_directory", resources: ["/stale"], metadata: { action_kind: "shell", command: "git add ." } }
     expect(yield* service.ask(staleRequest)).toMatchObject({ effect: "allow" })
     expect(reviewModels.at(-2)).toEqual({ ...stale, variant: "default" })
-    expect(reviewModels.at(-1)).toBeUndefined()
+    // 失效隐式模型仍回到目录默认；新增effort必须观察实际默认模型的广告档位。
+    expect(reviewModels.at(-1)).toEqual({ id: "parent-model", providerID: "parent-provider", variant: "low" })
     // 同样的不存在模型若来自显式配置就必须失败，不能悄悄改用默认提供者。
     reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "parent-provider/removed-model", fallback: "deny" }) })
     expect(yield* service.ask({ ...staleRequest, resources: ["/explicit-stale"] })).toMatchObject({ effect: "deny" })
@@ -718,6 +752,26 @@ describe("PermissionV2", () => {
     expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
     expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
     expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
+    // 每个档位经真实review入口和同一lowerer验证，不用helper返回值替代实际请求。
+    for (const item of [
+      { variants: ["none", "minimal", "low"], effort: undefined, expected: "low" },
+      { variants: ["none", "minimal"], effort: undefined, expected: "minimal" },
+      { variants: ["none"], effort: undefined, expected: "none" },
+      { variants: ["low", "high"], effort: "high", expected: "high" },
+      { variants: ["low"], effort: "missing", expected: "low" },
+      { variants: ["high"], effort: undefined, expected: undefined },
+      { variants: [], effort: undefined, expected: undefined },
+    ]) {
+      yield* catalog.transform(editor => editor.model.update(ProviderV2.ID.make("openai"), ModelV2.ID.make("reviewer"), model => {
+        model.api = { type: "aisdk", id: ModelV2.ID.make("reviewer"), package: "@ai-sdk/openai", url: "https://review.test" }
+        model.request.body = { reasoning_effort: "baseline" }
+        model.variants = item.variants.map(id => ({ id: ModelV2.VariantID.make(id), headers: {}, body: { reasoning_effort: id } }))
+      }))
+      reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer", effort: item.effort }) })
+      expect(yield* service.ask({ ...automatic, action: "external_directory", resources: [`/effort-${item.variants.join("-")}-${item.effort ?? "default"}`], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+      expect(reviewModels.at(-1)).toEqual({ id: "reviewer", providerID: "openai", ...(item.expected ? { variant: item.expected } : {}) })
+      expect(reviewRequests.at(-1)?.model.route.defaults.http?.body).toMatchObject({ reasoning_effort: item.expected ?? "baseline" })
+    }
     yield* Effect.addFinalizer(() => Effect.sync(() => { rejectedToolChoiceBody = undefined }))
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-choice/reviewer" }) })
     rejectedToolChoiceBody = "Unsupported parameter: tool_choice"

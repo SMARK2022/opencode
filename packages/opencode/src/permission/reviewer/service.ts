@@ -111,6 +111,21 @@ const PROTOCOL_RETRY_USER_ITEM = {
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
 
+// 只选模型广告的评审档位；未知配置按source顺序选low/minimal/none，无档位保持原options。
+const REVIEWER_EFFORT_PREFERENCE = ["low", "minimal", "none"]
+export function resolveReviewerVariant(model: Provider.Model, configuredEffort?: string) {
+  const variants = model.variants ?? {}
+  if (configuredEffort) {
+    const configured = variants[configuredEffort]
+    if (configured) return { name: configuredEffort, options: configured }
+  }
+  for (const name of REVIEWER_EFFORT_PREFERENCE) {
+    const options = variants[name]
+    if (options) return { name, options }
+  }
+  return undefined
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -155,26 +170,29 @@ export const layer = Layer.effect(
             : yield* resolveImplicitReviewerModel(input.sessionID ? SessionID.make(input.sessionID) : undefined)
           // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
           const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
+          // 请求options与持久化审计名称使用同一次档位选择。
+          const effortVariant = resolveReviewerVariant(model, autoReview?.effort)
           // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
           yield* markToolReviewing(input, reviewerSession?.id)
           const tenantPolicy = yield* loadTenantPolicy(autoReview)
-          // #206：transcript 收集双重有界——先拉 120 条宽窗口再由 transcript 选择保留用户锚点和截短条目
-          // #206：page.more 表示获取窗口外还有更早消息（含 hidden 行的原始窗口探测）——hidden 挤占
-          // #206：窗口时可见条目可能 ≤ENTRY_LIMIT，必须与 selectEntries 截短合并披露，否则 reviewer
-          // #206：会把部分历史当作完整对话评估 user_authorization（page.more 语义合并）
-          const transcript = input.sessionID
-            ? yield* MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
-                // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
+          // 快照定位与120条近期窗口独立取证，保留既有best-effort合同。
+          // 调用点提供捕获的Database，不把数据依赖泄漏到review公开接口。
+          const transcript: PermissionReviewerPrompt.ReviewerTranscript = input.sessionID
+            ? yield* Effect.all([
+                MessageV2.reviewerEvidence(SessionID.make(input.sessionID)),
+                MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }),
+              ]).pipe(
                 Effect.provideService(Database.Service, database),
-                Effect.map((page) => {
-                  const transcript = PermissionReviewerTranscript.fromMessages(page.items)
-                  // #206：窗口溢出与条目截短任一存在都置 truncated——省略标记是 reviewer 的缺失证据
-                  return { ...transcript, truncated: transcript.truncated || page.more }
+                Effect.map(([snapshot, page]) => {
+                  const transcript = PermissionReviewerTranscript.fromEvidence({ snapshot, window: page.items })
+                  return { ...transcript, window: { ...transcript.window, truncated: transcript.window.truncated || page.more } }
                 }),
-                // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
-                Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
+                Effect.catch(() => Effect.succeed({
+                  snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true },
+                  window: { entries: [], truncated: false, entryTruncated: false },
+                } satisfies PermissionReviewerPrompt.ReviewerTranscript)),
               )
-            : { entries: [], truncated: false, entryTruncated: false }
+            : { snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true }, window: { entries: [], truncated: false, entryTruncated: false } }
           // #209：在子会话中记录 reviewer 请求——metadata 标记防止被误认为人类授权，但保留可检查性
           const system = PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy, "tool")
           const userItems = PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason)
@@ -190,6 +208,7 @@ export const layer = Layer.effect(
                     model,
                     reviewID: input.reviewID,
                     text: renderReviewerPrompt(messages),
+                    effortVariant: effortVariant?.name,
                   })
                 : undefined
               return yield* runReviewerAgent({
@@ -202,6 +221,7 @@ export const layer = Layer.effect(
             // #214：reviewID 透传到 reviewer agent——最终决策 part 需 mirror 此 ID
                 parentID: reviewerUser?.id,
                 messages,
+                effortVariant,
               }).pipe(
                 Effect.tapError((error) => {
 // #227：协议失败才隐藏——provider/schema 等其他错误保持可见，避免掩盖真实失败
@@ -399,7 +419,13 @@ export const layer = Layer.effect(
 
     // #209：记录 reviewer 请求为可见用户消息——metadata 标记防止被误认为人类授权
     // #214：reviewID 写入 metadata——审计/导出代码可按逻辑审查导航，无需解析安全敏感的合成 prompt
-    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; reviewID: string; text: string }) {
+    function recordReviewerRequest(input: {
+      session: Session.Info
+      model: Provider.Model
+      reviewID: string
+      text: string
+      effortVariant?: string
+    }) {
       return Effect.gen(function* () {
         const message = yield* session.updateMessage({
           id: MessageID.ascending(),
@@ -416,7 +442,12 @@ export const layer = Layer.effect(
           type: "text",
           // #209：metadata 标记替代 synthetic——reviewer 子会话请求 cell 可见但不可作为授权证据，transcript 投影据此排除
           // #214：reviewID 是从父工具 autoReview metadata 到此可见协议 prompt 的稳定 join key
-          metadata: { permissionReviewerRequest: true, reviewID: input.reviewID },
+          metadata: {
+            permissionReviewerRequest: true,
+            reviewID: input.reviewID,
+            // 实际档位写入已有审计metadata，不新增另一份持久状态。
+            ...(input.effortVariant ? { effortVariant: input.effortVariant } : {}),
+          },
           text: input.text,
         } satisfies TextPart)
         return message
@@ -431,11 +462,12 @@ export const layer = Layer.effect(
       reviewID: string
       parentID: MessageID | undefined
       messages: readonly ModelMessage[]
+      effortVariant?: ReturnType<typeof resolveReviewerVariant>
     }) {
       const sessionInfo = input.session
       const parentID = input.parentID
       // #209：无子会话或无 parentID 时走纯流式提取——不持久化中间 part，仅从 tool-call 事件取出 assessment
-      if (!sessionInfo || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model)
+      if (!sessionInfo || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model, undefined, input.effortVariant)
       return Effect.gen(function* () {
         // #209：先创建 assistant 消息壳——流式 part 挂载到该消息，错误时也能回填 error 字段
         const message: Assistant = {
@@ -474,7 +506,7 @@ export const layer = Layer.effect(
           reviewID: input.reviewID,
           // [local-smark] 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
           message,
-        }).pipe(
+        }, input.effortVariant).pipe(
           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
           // #546：先闭 tool 再写 message——顺序颠倒会重现「error message + pending tool」僵尸（INV-02）。
           Effect.tapError((error) =>
@@ -516,6 +548,7 @@ export const layer = Layer.effect(
       model: Provider.Model,
       persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: Assistant },
       forcedToolChoice?: boolean,
+      effortVariant?: ReturnType<typeof resolveReviewerVariant>,
     ) {
       return Effect.acquireUseRelease(
         // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
@@ -536,9 +569,13 @@ export const layer = Layer.effect(
             // #209：无 persist 时用固定标识——ProviderTransform.options 需要一个 sessionID 做 provider 适配键，无子会话时用常量避免空值
             const sessionID = persist?.sessionID ?? "permission-reviewer"
             // #209：合并 provider options 与 model.options——与 SessionPrompt 保持一致的 provider 适配，避免 reviewer 流缺少必要选项
+            // 评审档最后合并，避免继承的主会话高档覆盖本次低effort选择。
             const baseOptions = mergeOptions(
-              ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
-              model.options,
+              mergeOptions(
+                ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
+                model.options,
+              ),
+              effortVariant?.options,
             )
             const isOpenaiOauth =
               isOpenaiOauthProvider(providerInfo.id, buildBaseProviderMap(cfg.provider ?? {})) && authInfo?.type === "oauth"
@@ -988,12 +1025,13 @@ export const layer = Layer.effect(
       messages: readonly ModelMessage[],
       model: Provider.Model,
       persist?: Parameters<typeof runReviewerStream>[2],
+      effortVariant?: ReturnType<typeof resolveReviewerVariant>,
     ) {
       const forced = !toolChoiceRejectedProviders.has(model.providerID)
-      return runReviewerStream(messages, model, persist, forced).pipe(
+      return runReviewerStream(messages, model, persist, forced, effortVariant).pipe(
         Effect.catchIf((error) => forced && isToolChoiceRejection(error), () => {
           toolChoiceRejectedProviders.add(model.providerID)
-          return runReviewerStream(messages, model, persist, false)
+          return runReviewerStream(messages, model, persist, false, effortVariant)
         }),
       )
     }
