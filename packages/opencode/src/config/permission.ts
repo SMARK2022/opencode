@@ -25,6 +25,10 @@ export const AutoReview = Schema.Struct({
   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
     description: "On reviewer failure after retry, either fail closed or fall back to user approval. Defaults to user.",
   }),
+  effort: Schema.optional(Schema.String).annotate({
+    description:
+      "Reasoning effort variant name of the resolved reviewer model (e.g. \"low\"). Defaults to the minimal tier the reviewer model advertises (low, then minimal, then none); models without a low tier keep their configured options unchanged.",
+  }),
   strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
   max_consecutive_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker consecutive denial threshold." }),
   max_recent_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent denial threshold." }),

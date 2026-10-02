@@ -335,6 +335,17 @@ describe("session.system", () => {
     expect(SystemPrompt.outputEfficiencySection.includes("recovery attempts are exhausted")).toBe(false)
   })
 
+  test("ASTRA template carries permission semantics woven into existing sections", () => {
+    // [local-smark] INV-05 R2：权限语义织入 ASTRA 模板本体的既有 Autonomy 段
+    //（Codex instructions_template 对齐），而非共享 staticSections——通用段会波及
+    // 不受影响的模型并可能诱导绕过；收尾是回复末尾一段报告，而非 ask-once 停摆门禁。
+    expect(PROMPT_ASTRA).toContain("User authorization persists across turns")
+    expect(PROMPT_ASTRA).toContain("do not stop the turn just because one action was rejected")
+    expect(PROMPT_ASTRA).toContain("at the end of your response")
+    expect(PROMPT_ASTRA).not.toContain("then ask once")
+    expect(SystemPrompt.staticSections().some((section) => section.includes("auto-review"))).toBe(false)
+  })
+
   // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
   test.each([
     ["gpt-6-astra", PROMPT_ASTRA],

@@ -836,8 +836,9 @@ it.instance(
 
 // [local-smark] R3 终审文案分级：forbidden（不可逆灾难）终审拒绝时授权无意义，
 // 不得再提示 "ask the user for explicit confirmation"（该路径不存在，会诱发
-// agent 换形态重试循环）；非终审拒绝保留原文案字节不变（reviewer 拒绝后用户
-// 显式授权重试是有效路径）。
+// agent 换形态重试循环）；非终审拒绝改为行动菜单（Codex rejection_instructions
+// 对齐）：给路标而非墙——安全替代/只读取证重试/完成不受影响工作为自助路径，
+// 仍受阻时一次性报告并请用户授权一次，避免逐卡循环请示（INV-05）。
 test("AutoDeniedError message drops the authorization path for terminal forbidden denials", () => {
   const terminal = new Permission.AutoDeniedError({
     reason: "recursive delete of filesystem root — forbidden (cannot be authorized)",
@@ -851,8 +852,21 @@ test("AutoDeniedError message drops the authorization path for terminal forbidde
   expect(terminal.message.match(/materially safer approach/g)).toHaveLength(1)
 
   const normal = new Permission.AutoDeniedError({ reason: "some reviewer denial" })
-  expect(normal.message).toContain("or ask the user for explicit confirmation before attempting a risky operation")
+  expect(normal.message).toContain("You may: switch to a materially safer approach")
+  expect(normal.message).toContain("gather read-only evidence that changes this assessment and retry")
+  expect(normal.message).toContain("complete unaffected work without asking for confirmation")
+  expect(normal.message).toContain("ask the user for approval once")
   expect(normal.message).not.toContain("terminally forbidden")
+})
+
+// [local-smark] 用户拒绝文案同为路标而非墙（INV-05）：禁止重试/反复请示的同时
+// 给出可行动下一步；一次性报告受阻是最终出口，不是每步请示。
+test("RejectedError message gives an action menu instead of a bare stop", () => {
+  const err = new Permission.RejectedError()
+  expect(err.message).toContain("The user rejected permission for this specific tool call")
+  expect(err.message).toContain("Do not retry the same call or re-ask immediately")
+  expect(err.message).toContain("continue other authorized work")
+  expect(err.message).toContain("ask the user once")
 })
 
 it.instance(

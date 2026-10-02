@@ -114,7 +114,10 @@ export const Event = {
 
 export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("PermissionRejectedError", {}) {
   override get message() {
-    return "The user rejected permission to use this specific tool call."
+    // [local-smark] 用户拒绝反馈给路标而非墙（INV-05，Codex rejection_instructions
+    // 对齐）：用户拒绝是权威的、不允许重试或立即重问，但主模型应继续其他已授权
+    // 工作；仍受阻时一次性说明并请用户定夺，而不是逐卡循环请示。
+    return "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once."
   }
 }
 
@@ -148,7 +151,10 @@ export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()(
     // detours, or alternate tools for the same rejected outcome.
     const tail = this.terminal
       ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
-      : " Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation."
+      // [local-smark] 非终局拒绝给行动菜单（INV-05）：auto-review 拒绝不等于任务
+      // 受阻——安全替代、只读取证后重试、完成不受影响工作都是自助路径；仅当真正
+      // 受阻时才一次性报告并请用户授权一次。
+      : " You may: switch to a materially safer approach; gather read-only evidence that changes this assessment and retry; or complete unaffected work without asking for confirmation. If the task stays blocked, report in one short paragraph what was rejected and why, and ask the user for approval once."
     return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${tail}`
   }
 }

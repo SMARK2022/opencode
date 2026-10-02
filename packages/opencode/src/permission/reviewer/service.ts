@@ -103,6 +103,26 @@ const PROTOCOL_RETRY_USER_ITEM = {
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
 
+// [local-smark] reviewer effort 分层（Codex select_review_model 首选 Low 对齐）：
+// 评审是有界判断而非开放创作。只消费模型广告的 variants（transform/config 合并
+// 产物），按 low→minimal→none 取首个；无低档返回 undefined 保持现状——不臆造
+// provider 参数（兼容性不可预测）。配置名不存在回落启发式而不是失败：配置错误
+// 不应让 reviewer 不可用。
+const REVIEWER_EFFORT_PREFERENCE = ["low", "minimal", "none"]
+export function resolveReviewerVariant(model: Provider.Model, configuredEffort?: string) {
+  const variants = model.variants ?? {}
+  if (configuredEffort) {
+    const configured = variants[configuredEffort]
+    if (configured) return { name: configuredEffort, options: configured }
+    log.info("configured reviewer effort variant not found, falling back to heuristic", { effort: configuredEffort, model: model.id })
+  }
+  for (const name of REVIEWER_EFFORT_PREFERENCE) {
+    const options = variants[name]
+    if (options) return { name, options }
+  }
+  return undefined
+}
+
 // The reviewer layer is provider-backed but intentionally receives only a bounded
 // transcript projection plus the planned action JSON. It never reuses the main
 // agent's model messages, tools, or scratchpad as reviewer context.
@@ -146,22 +166,41 @@ export const layer = Layer.effect(
               )
             : yield* resolveImplicitReviewerModel(input.sessionID)
           const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+          // 评审专用 effort 档在模型解析后、提示组装前确定：一次解析同时供请求
+          // options 合并与审计 metadata 记录，两消费者共享同一决定。
+          const effortVariant = resolveReviewerVariant(model, autoReview?.effort)
           yield* markToolReviewing(input, reviewerSession?.id)
           const tenantPolicy = yield* loadTenantPolicy(autoReview)
           // Transcript collection is best-effort and bounded twice: fetch a wider
           // recent window than the final reviewer prompt, then let transcript
-          // selection preserve user anchors and cap entries/chars. This avoids
-          // walking very old sessions on the permission path while still keeping
-          // substantially more authorization context than the final prompt size.
-          const transcript = input.sessionID
+          // selection cap entries/chars. This avoids walking very old sessions on
+          // the permission path while still keeping substantially more recent
+          // context than the final prompt size.
+          // [local-smark] 双源拉取（Codex guardian 同构）：reviewerEvidence 是
+          // 定位查询（SQL 角色/类型过滤，不 hydrate 整史），产出快照段（全史用户
+          // 消息/QA/权限决定）；page(120) 产出近期滚动窗口段。两源共享同一
+          // best-effort 合同：任一失败退化为空证据继续评审，证据通道故障不得
+          // 阻断权限路径。
+          const transcript: PermissionReviewerTranscript.ReviewerTranscript = input.sessionID
             ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
                 Effect.map((page) => {
-                  const transcript = PermissionReviewerTranscript.fromMessages(page.items)
-                  return { ...transcript, truncated: transcript.truncated || page.more }
+                  const transcript = PermissionReviewerTranscript.fromEvidence({
+                    snapshot: MessageV2.reviewerEvidence(input.sessionID!),
+                    window: page.items,
+                  })
+                  return { ...transcript, window: { ...transcript.window, truncated: transcript.window.truncated || page.more } }
                 }),
-                Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
+                Effect.catch(() =>
+                  Effect.succeed({
+                    snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true },
+                    window: { entries: [], truncated: false, entryTruncated: false },
+                  } satisfies PermissionReviewerTranscript.ReviewerTranscript),
+                ),
               )
-            : { entries: [], truncated: false, entryTruncated: false }
+            : {
+                snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true },
+                window: { entries: [], truncated: false, entryTruncated: false },
+              }
           const system = PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy)
           const userItems = PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason)
           const messages = buildMessages({ system, userItems })
@@ -173,6 +212,7 @@ export const layer = Layer.effect(
                     model,
                     reviewID: input.reviewID,
                     text: renderReviewerPrompt(messages),
+                    effortVariant: effortVariant?.name,
                   })
                 : undefined
               return yield* runReviewerAgent({
@@ -181,6 +221,7 @@ export const layer = Layer.effect(
                 reviewID: input.reviewID,
                 parentID: reviewerUser?.id,
                 messages,
+                effortVariant,
               }).pipe(
                 Effect.tapError((error) => {
                   if (!hideProtocolFailure || !reviewerSession || !reviewerUser || !isReviewerDecisionProtocolError(error)) {
@@ -397,7 +438,13 @@ export const layer = Layer.effect(
       return next
     }
 
-    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; reviewID: string; text: string }) {
+    function recordReviewerRequest(input: {
+      session: Session.Info
+      model: Provider.Model
+      reviewID: string
+      text: string
+      effortVariant?: string
+    }) {
       return Effect.gen(function* () {
         const message = yield* sessions.updateMessage({
           id: MessageID.ascending(),
@@ -422,7 +469,13 @@ export const layer = Layer.effect(
           // metadata to this visible protocol prompt. Keep it in metadata rather
           // than prompt text so audit/export code can navigate without parsing a
           // security-sensitive synthetic prompt body.
-          metadata: { permissionReviewerRequest: true, reviewID: input.reviewID },
+          metadata: {
+            permissionReviewerRequest: true,
+            reviewID: input.reviewID,
+            // 实际应用的 effort 档名落 metadata：评审请求的推理档位是审计可见
+            // 行为（影响成本与时延），不能只留在进程内日志。
+            ...(input.effortVariant ? { effortVariant: input.effortVariant } : {}),
+          },
           text: input.text,
         } satisfies MessageV2.TextPart)
         return message
@@ -435,10 +488,11 @@ export const layer = Layer.effect(
       reviewID: string
       parentID: MessageID | undefined
       messages: readonly ModelMessage[]
+      effortVariant?: { name: string; options: Record<string, any> }
     }) {
       const session = input.session
       const parentID = input.parentID
-      if (!session || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model)
+      if (!session || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model, undefined, input.effortVariant)
       return Effect.gen(function* () {
         const message: MessageV2.Assistant = {
           id: MessageID.ascending(),
@@ -484,13 +538,18 @@ export const layer = Layer.effect(
               ),
             ),
           )
-        const assessment = yield* runReviewerStreamWithToolChoice(input.messages, input.model, {
-          sessionID: session.id,
-          messageID: message.id,
-          reviewID: input.reviewID,
-          // 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
-          message,
-        }).pipe(
+        const assessment = yield* runReviewerStreamWithToolChoice(
+          input.messages,
+          input.model,
+          {
+            sessionID: session.id,
+            messageID: message.id,
+            reviewID: input.reviewID,
+            // 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
+            message,
+          },
+          input.effortVariant,
+        ).pipe(
           Effect.tapError((error) =>
             Effect.gen(function* () {
               yield* closeMessageTools(TOOL_INCOMPLETE_ERROR, false)
@@ -526,6 +585,7 @@ export const layer = Layer.effect(
       model: Provider.Model,
       persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: MessageV2.Assistant },
       forcedToolChoice?: boolean,
+      effortVariant?: { name: string; options: Record<string, any> },
     ) {
       return Effect.acquireUseRelease(
         Effect.sync(() => new AbortController()),
@@ -541,9 +601,15 @@ export const layer = Layer.effect(
               { concurrency: "unbounded" },
             )
             const sessionID = persist?.sessionID ?? "permission-reviewer"
+            // variant options 最后合并：评审专用档位必须覆盖 model.options 继承的
+            // 主会话档（如实测 reasoningEffort:max），与正常会话应用 variant 同一
+            // mergeDeep 语义。
             const baseOptions = mergeOptions(
-              ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
-              model.options,
+              mergeOptions(
+                ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
+                model.options,
+              ),
+              effortVariant?.options,
             )
             const isOpenaiOauth =
               isOpenaiOauthProvider(providerInfo.id, buildBaseProviderMap(cfg.provider ?? {})) && authInfo?.type === "oauth"
@@ -995,12 +1061,13 @@ export const layer = Layer.effect(
       messages: readonly ModelMessage[],
       model: Provider.Model,
       persist?: Parameters<typeof runReviewerStream>[2],
+      effortVariant?: { name: string; options: Record<string, any> },
     ) {
       const forced = !toolChoiceRejectedProviders.has(model.providerID)
-      return runReviewerStream(messages, model, persist, forced).pipe(
+      return runReviewerStream(messages, model, persist, forced, effortVariant).pipe(
         Effect.catchIf(isToolChoiceRejection, () => {
           toolChoiceRejectedProviders.add(model.providerID)
-          return runReviewerStream(messages, model, persist, false)
+          return runReviewerStream(messages, model, persist, false, effortVariant)
         }),
       )
     }

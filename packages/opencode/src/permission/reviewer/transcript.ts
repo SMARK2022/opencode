@@ -4,27 +4,18 @@ import type { PermissionReviewerPrompt } from "./prompt"
 const ENTRY_LIMIT = 40
 const PART_CHAR_LIMIT = 4000
 const ENTRY_CHAR_LIMIT = 1000
-// 用户消息是授权证据的主要来源；长指令 + 末尾授权（如 "## 创建 commit"）
-// 可能超过 1000 字符。给用户消息更大预算，减少末尾授权被截断的概率。
-// worst case 40 × 2000 = 80k 字符，是旧 40 × 1000 = 40k 的 2 倍，
-// 对任何 ≥128k context 的 reviewer 模型是安全的。
-const ENTRY_CHAR_LIMIT_USER = 2000
+// QA 对中问题文本的限额：问题是 assistant 创作，300 字符足以锚定语义；
+// 答案是用户创作走另一条永不截断的通道，不受此限。
+const QA_QUESTION_LIMIT = 300
 type RenderedEntry = PermissionReviewerPrompt.TranscriptEntry & { truncated: boolean }
 
 export function fromMessages(messages: readonly MessageV2.WithParts[]): PermissionReviewerPrompt.TranscriptDelta {
-  // Codex-style review context keeps user intent anchors plus recent tool
-  // evidence instead of blindly sending the last N messages. The first user turn
-  // often contains the original authorization, while the latest turns explain
-  // retries and current scope; preserving both keeps context useful without
-  // expanding reviewer input cost.
+  // 窗口段只承担近期会话连贯性：授权证据完整性已由快照段承担，user 消息在
+  // 窗口内与非用户消息同享条目级限额；首末锚点逻辑已删除（快照段保证可达）。
   const visibleMessages = messages.filter((message) => !message.info.hidden)
   const rendered = visibleMessages.map((message) => {
       const text = message.parts.map(renderPart).filter((part): part is string => Boolean(part?.trim())).join("\n")
-      // 用户消息使用更大预算并保留尾部：授权指令常出现在长消息末尾，
-      // 只保留头部会丢失尾部授权证据导致 reviewer fail-closed 误拒。
-      // 非用户消息保持原有 1000 字符头部截断，避免作用域蔓延到 tool 输出。
-      const isUser = message.info.role === "user"
-      const entry = truncateWithFlag(text, isUser ? ENTRY_CHAR_LIMIT_USER : ENTRY_CHAR_LIMIT, isUser)
+      const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
       return {
         role: message.info.role,
         text: entry.text,
@@ -43,11 +34,8 @@ export function fromMessages(messages: readonly MessageV2.WithParts[]): Permissi
 
 function selectEntries(entries: readonly RenderedEntry[]) {
   if (entries.length <= ENTRY_LIMIT) return { items: entries, truncated: false }
+  // 纯尾锚填充：窗口内不再保首末 user 锚点，该职责已由快照段完整承担。
   const keep = new Set<number>()
-  const userIndexes = entries.flatMap((entry, index) => (entry.role === "user" ? [index] : []))
-  if (userIndexes[0] !== undefined) keep.add(userIndexes[0])
-  const latestUserIndex = userIndexes.at(-1)
-  if (latestUserIndex !== undefined) keep.add(latestUserIndex)
   for (let index = entries.length - 1; index >= 0 && keep.size < ENTRY_LIMIT; index--) {
     keep.add(index)
   }
@@ -98,24 +86,138 @@ function renderTool(part: MessageV2.ToolPart) {
 function truncate(text: string, limit = PART_CHAR_LIMIT) {
   // truncate 用于 part/tool 输出截断，不保留尾部：tool 输出的尾部截断
   // 不是授权证据丢失问题，保持原有行为避免作用域蔓延
-  return truncateWithFlag(text, limit, false).text
+  return truncateWithFlag(text, limit).text
 }
 
-function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT, preserveTail = false) {
+function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT) {
   // The marker records exactly how much was omitted so policy can treat missing
   // evidence conservatively instead of assuming the hidden tail was benign.
   if (text.length <= limit) return { text, truncated: false }
-  if (preserveTail) {
-    // 头尾保留：头部 60% 提供上下文，尾部 40% 保留末尾授权证据。
-    // 截断标记位于中间，chars 仍精确等于被省略的字符数。
-    const head = Math.floor(limit * 0.6)
-    const tail = limit - head
-    return {
-      text: text.slice(0, head) + `\n<truncated chars="${text.length - limit}" />\n` + text.slice(text.length - tail),
-      truncated: true,
-    }
-  }
   return { text: text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`, truncated: true }
+}
+
+// [local-smark] 快照段（Codex guardian sender_user_messages 同构）：用户授权证据
+// 的完整通道，与 window 滚动段独立。user 全文不条内截断；QA 对答案永不截断；
+// 权限决定单行事实化。超顶逐出由定位查询标记，投影负责渲染与去重。
+export interface ReviewerSnapshotEntryUser {
+  kind: "user"
+  text: string
+}
+export interface ReviewerSnapshotEntryUserDup {
+  kind: "userDup"
+  ofIndex: number
+  chars: number
+}
+export interface ReviewerSnapshotEntryQA {
+  kind: "qa"
+  question: string
+  answer: string
+}
+export interface ReviewerSnapshotEntryDecision {
+  kind: "decision"
+  label: string
+}
+export type ReviewerSnapshotEntry =
+  | ReviewerSnapshotEntryUser
+  | ReviewerSnapshotEntryUserDup
+  | ReviewerSnapshotEntryQA
+  | ReviewerSnapshotEntryDecision
+
+export interface ReviewerSnapshot {
+  entries: ReviewerSnapshotEntry[]
+  userOmitted: boolean
+  decisionsOmitted: boolean
+  emptyUserEvidence: boolean
+}
+
+export interface ReviewerTranscript {
+  snapshot: ReviewerSnapshot
+  window: PermissionReviewerPrompt.TranscriptDelta
+}
+
+export function fromEvidence(input: {
+  snapshot: MessageV2.ReviewerEvidence
+  window: readonly MessageV2.WithParts[]
+}): ReviewerTranscript {
+  const merged = [
+    ...input.snapshot.user.map((row) => ({ time: row.time, entry: { kind: "user", text: row.text } as ReviewerSnapshotEntry })),
+    ...input.snapshot.tools.flatMap(qaEntries),
+    ...input.snapshot.tools.flatMap(decisionEntries),
+  ].sort((left, right) => left.time - right.time)
+  // 精确文本去重：首个（时间最旧）出现为全文锚点，后续折叠为标记。
+  // 生产 DB 实测长用户文本 21.9% 字符为精确重复（GOAL 块最多 24x）；锚点取最旧
+  // 出现使快照前缀在 GOAL 重发周期内逐字节稳定，同时回收预算。
+  const anchorByText = new Map<string, number>()
+  const entries: ReviewerSnapshotEntry[] = []
+  for (const { entry } of merged) {
+    if (entry.kind !== "user") {
+      entries.push(entry)
+      continue
+    }
+    const anchor = anchorByText.get(entry.text)
+    if (anchor !== undefined) {
+      entries.push({ kind: "userDup", ofIndex: anchor, chars: entry.text.length })
+      continue
+    }
+    entries.push(entry)
+    // ofIndex 是锚点在最终 entries 中的 1-based 位置，渲染标记据此指向 uK。
+    anchorByText.set(entry.text, entries.length)
+  }
+  return {
+    snapshot: {
+      entries,
+      userOmitted: input.snapshot.userOmitted,
+      decisionsOmitted: input.snapshot.decisionsOmitted,
+      emptyUserEvidence: input.snapshot.user.length === 0 && input.snapshot.tools.length === 0,
+    },
+    window: fromMessages(input.window),
+  }
+}
+
+// QA 对提取：答案来自 state.metadata.answers（用户创作，永不截断）；问题来自
+// state.input.questions（assistant 创作，限 300 字符）。JSON 解析失败按无 QA 处理，
+// 与 transcript 拉取的 best-effort 合同一致，坏行不拖垮整个快照。
+function qaEntries(row: MessageV2.ReviewerEvidenceTool): { time: number; entry: ReviewerSnapshotEntry }[] {
+  if (row.tool !== "question" || row.stateStatus !== "completed") return []
+  try {
+    const questions = (JSON.parse(row.input ?? "{}") as { questions?: { question?: unknown }[] }).questions ?? []
+    const answers = (JSON.parse(row.answers ?? "[]") as unknown[][]) ?? []
+    return questions.flatMap((item, index) => {
+      if (typeof item?.question !== "string" || !item.question.trim()) return []
+      const answer = (Array.isArray(answers[index]) ? answers[index] : [])
+        .filter((option): option is string => typeof option === "string")
+        .join(", ")
+      if (!answer) return []
+      const question = item.question.length > QA_QUESTION_LIMIT ? item.question.slice(0, QA_QUESTION_LIMIT) + "…" : item.question
+      return [{ time: row.time, entry: { kind: "qa", question, answer } as ReviewerSnapshotEntry }]
+    })
+  } catch {
+    return []
+  }
+}
+
+// 用户拒绝签名与 permission/index.ts 的 RejectedError 文案前缀共享：新旧文案
+// 在历史 part 上共存（文案迭代不迁移存量数据），稳定前缀是两者的公共部分。
+const USER_REJECTED_SIGNATURE = "The user rejected permission"
+
+// 权限决定行：reviewer 策略决定与用户应答都是后续评审的先验知识。
+// N-02：追问后放行只认 completed + autoReview fallback_user，不得用 completed
+// 裸分类（否则每个 precheck 放行的工具都被误标为用户批准）。
+// N-03：timed_out/failed/aborted/reviewing 是基础设施状态，不投影为决定。
+function decisionEntries(row: MessageV2.ReviewerEvidenceTool): { time: number; entry: ReviewerSnapshotEntry }[] {
+  if (row.tool === "question") return []
+  const label = decisionLabel(row)
+  return label ? [{ time: row.time, entry: { kind: "decision", label } as ReviewerSnapshotEntry }] : []
+}
+
+function decisionLabel(row: MessageV2.ReviewerEvidenceTool) {
+  if (row.error?.startsWith(USER_REJECTED_SIGNATURE)) return `[PERMISSION: USER-REJECTED] ${row.tool}`
+  if (row.stateStatus === "completed" && row.autoReviewStatus === "fallback_user")
+    return `[PERMISSION: USER-ALLOWED-AFTER-ASK] ${row.tool}`
+  if (row.autoReviewStatus === "denied")
+    return `[AUTO-REVIEW: DENIED] ${row.tool}${row.autoReviewRationale ? ` — ${row.autoReviewRationale}` : ""}`
+  if (row.autoReviewStatus === "allowed") return `[AUTO-REVIEW: ALLOWED] ${row.tool}`
+  return undefined
 }
 
 export * as PermissionReviewerTranscript from "./transcript"

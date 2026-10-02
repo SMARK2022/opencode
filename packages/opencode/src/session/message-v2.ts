@@ -953,6 +953,215 @@ export function goalChronology(sessionID: SessionID): ChronologyMessage[] {
   })
 }
 
+// Permission reviewer 授权证据定位：全史可见 user 文本与权限决定工具行。
+// 仿 goalChronology 的 json_extract 角色过滤定位，避免 page hydrate 整史 tool 输出；
+// 快照段预算（尾锚 24000 字符/400 条）与决定行（60 条）是独立配额互不占额，
+// 超顶逐出最旧中部并显式标记（Codex guardian host notice 语义）。
+export interface ReviewerEvidenceUser {
+  id: MessageID
+  time: number
+  text: string
+}
+export interface ReviewerEvidenceTool {
+  id: PartID
+  time: number
+  tool: string
+  stateStatus: string
+  autoReviewStatus?: string
+  autoReviewRationale?: string
+  error?: string
+  input?: string
+  answers?: string
+}
+export interface ReviewerEvidence {
+  user: ReviewerEvidenceUser[]
+  userOmitted: boolean
+  tools: ReviewerEvidenceTool[]
+  decisionsOmitted: boolean
+}
+
+// 快照段独立预算（与 window 段 40 条滚动渲染互不占额）：user 文本与 QA 共享
+// 24000 字符尾锚窗口（最近的恒显示，超顶逐出最旧中部），条目上限 400；
+// 决定行独立 60 条；QA 行硬顶 100（question 工具调用频率低，硬顶防御异常会话）。
+const SNAPSHOT_CHAR_LIMIT = 24000
+const SNAPSHOT_USER_LIMIT = 400
+const SNAPSHOT_DECISION_LIMIT = 60
+const SNAPSHOT_QA_LIMIT = 100
+const SNAPSHOT_USER_PAGE = 32
+// 精确重复的文本在渲染时折叠为约 50 字符的 identical 标记，走查按标记价计费：
+// DB 实测长用户文本 21.9% 为重复（GOAL 块最多 24x），按全价计费会提前逐出有效证据。
+const SNAPSHOT_DUP_COST = 50
+
+export function reviewerEvidence(sessionID: SessionID): ReviewerEvidence {
+  return Database.use((db) => {
+    // QA 行与决定行分开取：两者配额独立，且决定行需要「最新 N 条」的尾锚语义。
+    // N-03/N-04：timed_out/failed 等基础设施状态与 hidden 行在查询层排除。
+    const qaRows = db
+      .select({
+        id: PartTable.id,
+        time: PartTable.time_created,
+        tool: sql<string>`json_extract(${PartTable.data}, '$.tool')`,
+        stateStatus: sql<string>`json_extract(${PartTable.data}, '$.state.status')`,
+        input: sql<string | null>`json_extract(${PartTable.data}, '$.state.input')`,
+        answers: sql<string | null>`json_extract(${PartTable.data}, '$.state.metadata.answers')`,
+      })
+      .from(PartTable)
+      .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
+      .where(and(
+        eq(PartTable.session_id, sessionID),
+        sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+        sql`json_extract(${PartTable.data}, '$.tool') = 'question'`,
+        sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
+        sql`json_type(${PartTable.data}, '$.hidden') is null`,
+        sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      ))
+      .orderBy(PartTable.time_created, PartTable.id)
+      .limit(SNAPSHOT_QA_LIMIT + 1)
+      .all()
+    const qaOmitted = qaRows.length > SNAPSHOT_QA_LIMIT
+    const qa = qaRows.slice(0, SNAPSHOT_QA_LIMIT)
+
+    const decisionRows = db
+      .select({
+        id: PartTable.id,
+        time: PartTable.time_created,
+        tool: sql<string>`json_extract(${PartTable.data}, '$.tool')`,
+        stateStatus: sql<string>`json_extract(${PartTable.data}, '$.state.status')`,
+        autoReviewStatus: sql<string | null>`json_extract(${PartTable.data}, '$.state.metadata.autoReview.status')`,
+        autoReviewRationale: sql<string | null>`json_extract(${PartTable.data}, '$.state.metadata.autoReview.result.rationale')`,
+        error: sql<string | null>`json_extract(${PartTable.data}, '$.state.error')`,
+        input: sql<string | null>`json_extract(${PartTable.data}, '$.state.input')`,
+      })
+      .from(PartTable)
+      .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
+      .where(and(
+        eq(PartTable.session_id, sessionID),
+        sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+        sql`json_type(${PartTable.data}, '$.hidden') is null`,
+        sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+        or(
+          sql`json_extract(${PartTable.data}, '$.state.metadata.autoReview.status') in ('allowed', 'denied', 'fallback_user')`,
+          sql`json_extract(${PartTable.data}, '$.state.error') like 'The user rejected permission%'`,
+        ),
+      ))
+      .orderBy(desc(PartTable.time_created), desc(PartTable.id))
+      .limit(SNAPSHOT_DECISION_LIMIT + 1)
+      .all()
+    const decisionsOmitted = decisionRows.length > SNAPSHOT_DECISION_LIMIT
+    const decisions = decisionRows.slice(0, SNAPSHOT_DECISION_LIMIT).reverse()
+
+    // user 文本尾锚走查：QA 的 JSON 长度从 24000 共享预算中扣除（含语法开销的
+    // 保守估计，只会提前逐出不会超支）；从最新向最旧分页累计，重复文本按标记价。
+    let budget = Math.max(0, SNAPSHOT_CHAR_LIMIT - qa.reduce((sum, row) => sum + (row.input?.length ?? 0) + (row.answers?.length ?? 0), 0))
+    const seen = new Set<string>()
+    const selected: ReviewerEvidenceUser[] = []
+    let userOmitted = false
+    let before: { id: MessageID; time: number } | undefined
+    walk: while (selected.length < SNAPSHOT_USER_LIMIT) {
+      const base = and(
+        eq(MessageTable.session_id, sessionID),
+        sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
+        sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      )
+      const messages = db
+        .select()
+        .from(MessageTable)
+        .where(before ? and(base, or(lt(MessageTable.time_created, before.time), and(eq(MessageTable.time_created, before.time), lt(MessageTable.id, before.id)))) : base)
+        .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+        .limit(SNAPSHOT_USER_PAGE)
+        .all()
+      if (!messages.length) break
+      const texts = db
+        .select({
+          messageID: PartTable.message_id,
+          text: sql<string>`json_extract(${PartTable.data}, '$.text')`,
+        })
+        .from(PartTable)
+        .where(and(
+          inArray(PartTable.message_id, messages.map((row) => row.id)),
+          sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
+          sql`json_type(${PartTable.data}, '$.hidden') is null`,
+        ))
+        .orderBy(PartTable.id)
+        .all()
+      const byMessage = new Map<MessageID, string[]>()
+      for (const row of texts) {
+        if (!row.text?.trim()) continue
+        const list = byMessage.get(row.messageID)
+        if (list) list.push(row.text)
+        else byMessage.set(row.messageID, [row.text])
+      }
+      for (const message of messages) {
+        for (const text of byMessage.get(message.id) ?? []) {
+          const cost = seen.has(text) ? SNAPSHOT_DUP_COST : text.length
+          seen.add(text)
+          if (cost > budget) {
+            userOmitted = true
+            break walk
+          }
+          budget -= cost
+          selected.push({ id: message.id, time: message.time_created, text })
+          if (selected.length >= SNAPSHOT_USER_LIMIT) {
+            userOmitted = true
+            break walk
+          }
+        }
+      }
+      const last = messages.at(-1)
+      if (!last || messages.length < SNAPSHOT_USER_PAGE) break
+      before = { id: last.id, time: last.time_created }
+    }
+    // 首条 user 豁免逐出：原始授权常在首条（Codex root conversation 同构）。
+    // 追加在走查结果之后统一反转，反转后自然位于快照开头。
+    if (userOmitted) {
+      const first = db
+        .select()
+        .from(MessageTable)
+        .where(and(
+          eq(MessageTable.session_id, sessionID),
+          sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
+          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+        ))
+        .orderBy(MessageTable.time_created, MessageTable.id)
+        .limit(1)
+        .all()[0]
+      if (first && !selected.some((row) => row.id === first.id)) {
+        const firstTexts = db
+          .select({ text: sql<string>`json_extract(${PartTable.data}, '$.text')` })
+          .from(PartTable)
+          .where(and(
+            eq(PartTable.message_id, first.id),
+            sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
+            sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          ))
+          .orderBy(PartTable.id)
+          .all()
+        for (const row of firstTexts) {
+          if (row.text?.trim()) selected.push({ id: first.id, time: first.time_created, text: row.text })
+        }
+      }
+    }
+    selected.reverse()
+
+    const tools = [...qa, ...decisions]
+      .map((row) => ({
+        id: row.id,
+        time: row.time,
+        tool: row.tool,
+        stateStatus: row.stateStatus,
+        ...("autoReviewStatus" in row && row.autoReviewStatus ? { autoReviewStatus: row.autoReviewStatus } : {}),
+        ...("autoReviewRationale" in row && row.autoReviewRationale ? { autoReviewRationale: row.autoReviewRationale } : {}),
+        ...("error" in row && row.error ? { error: row.error } : {}),
+        ...(row.input ? { input: row.input } : {}),
+        ...("answers" in row && row.answers ? { answers: row.answers } : {}),
+      }))
+      .sort((left, right) => left.time - right.time)
+    // synthetic 不排除：GOAL continuation 块是 synthetic user 文本，恰是快照要保留
+    // 的授权载体（去重规则在投影层折叠其重复）。空文本无证据价值，在组装时过滤。
+    return { user: selected, userOmitted: userOmitted || qaOmitted, tools, decisionsOmitted }
+  })
+}
+
 // cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant 定点 hydrate，
 // 因而已完成 assistant 的冷 Tool history 不会因一次取消操作被扫描并预热。
 export function cancelSnapshot(sessionID: SessionID, options?: { includeHidden?: boolean }) {
