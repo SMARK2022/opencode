@@ -22,6 +22,24 @@ const withDb = <A>(body: (db: ColdStorage.TxOrDb) => A) => Effect.gen(function* 
   return yield* Database.withSync(database, body)
 })
 
+// 同连接允许已有其他夹具；只检查本例增量，不把:memory:等同于必然跨文件共享。
+function verifyBaseline() {
+  return withDb(db => ColdStorage.verify(db, { repair: false }))
+}
+
+function expectVerifyDelta(baseline: ReturnType<typeof ColdStorage.verify>) {
+  return Effect.gen(function* () {
+    const current = yield* verifyBaseline()
+    expect(current.corruptOwners - baseline.corruptOwners).toBe(0)
+    expect(current.corruptPayloads - baseline.corruptPayloads).toBe(0)
+    expect(current.refCountMismatches - baseline.refCountMismatches).toBe(0)
+  })
+}
+
+function payloadHashes() {
+  return withDb(db => new Set(db.select({ hash: ColdStorageTable.hash }).from(ColdStorageTable).all().map(row => row.hash)))
+}
+
 it.instance("manual cold Text preserves complete reads and root Text", () =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
@@ -67,6 +85,9 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
   Effect.gen(function* () {
     const database = yield* Database.Service
     const sessions = yield* Session.Service
+    const verifyBase = yield* verifyBaseline()
+    // 用开始前的集合判断新增遗留包，不能假设测试独占空库。
+    const beforePayloads = yield* payloadHashes()
     const session = yield* sessions.create({})
     const messageID = MessageID.ascending()
     yield* sessions.updateMessage({
@@ -108,15 +129,13 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     ])
     expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
     // verify 覆盖引用数和内容完整性，短 locator 不能以降低校验强度换取空间。
-    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    yield* expectVerifyDelta(verifyBase)
     // 构造已发布 v2 字节协议，验证维护命令会升级存量数据而非只处理新行。
     const ownerRef = row.cold_ref
     if (!ownerRef) throw new Error("Tool owner lost its cold reference")
-    const packed = yield* withDb((db) => db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ownerRef)).all()[0])
+    // 沿冷引用定位本例的包，缺失时明确失败，避免误读其他夹具的数据。
+    const packed = yield* withDb((db) => db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ownerRef)).get())
+    if (!packed) throw new Error("Packed payload missing for the frozen owner")
     const fields = {
       // 直接给定旧协议字段，避免调用新 writer 生成旧格式而形成同源自证。
       "state.input": {},
@@ -176,7 +195,7 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     )
     expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
     expect(yield* withDb((db) => ColdStorage.thawOwner(db, { type: "part", id }))).toBe(true)
-    expect(yield* withDb((db) => db.select().from(ColdStorageTable).all())).toHaveLength(0)
+    expect([...(yield* payloadHashes())].filter(hash => !beforePayloads.has(hash))).toEqual([])
     // 最后一个 owner 展开后释放包，防止逻辑成功却遗留冗余冷内容。
   }),
 )
@@ -184,6 +203,7 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
 it.instance("manual freeze admits a completed reviewer attempt in an active child", () =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
+    const verifyBase = yield* verifyBaseline()
     const root = yield* sessions.create({})
     const child = yield* sessions.create({ parentID: root.id, agent: "permission-reviewer" })
     const request = MessageID.ascending()
@@ -294,11 +314,7 @@ it.instance("manual freeze admits a completed reviewer attempt in an active chil
     yield* sessions.updatePart({ ...text, text: "revised reviewer request" })
     const revised = yield* MessageV2.get({ sessionID: child.id, messageID: request, includeHidden: true })
     expect(revised.parts).toContainEqual({ ...text, text: "revised reviewer request" })
-    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    yield* expectVerifyDelta(verifyBase)
   }),
 )
 
@@ -306,6 +322,7 @@ it.instance("resumed repack retains every destination until all owners move", ()
   Effect.gen(function* () {
     const database = yield* Database.Service
     const sessions = yield* Session.Service
+    const verifyBase = yield* verifyBaseline()
     const session = yield* sessions.create({ title: "repack destination cycle" })
     const messageID = MessageID.ascending()
     yield* sessions.updateMessage({
@@ -434,11 +451,7 @@ it.instance("resumed repack retains every destination until all owners move", ()
           .run()
       }))
     }
-    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    yield* expectVerifyDelta(verifyBase)
     // 原始任务参数和实际持久 cursor 原样恢复，不伪造进度或修改 Session scope。
     const task = ColdStorage.parseMaintenanceTask(interrupted.task)
     const result = yield* Effect.promise(() =>
@@ -454,10 +467,6 @@ it.instance("resumed repack retains every destination until all owners move", ()
         part.type === "tool" && part.state.status === "completed" ? [part.state.output] : [],
       ),
     ).toEqual(["cycle-x-0", "cycle-y-0", "cycle-y-0"])
-    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    yield* expectVerifyDelta(verifyBase)
   }),
 )
