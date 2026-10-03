@@ -17,6 +17,28 @@ import { BackgroundJob } from "@/background/job"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
 
+// CI core 分片单进程跑 integration+runtime 全部文件，test/preload.ts 把 OPENCODE_DB 设为 :memory:，
+// 因此本文件与其他文件共享同一个内存库；全库绝对零断言会被他文件的遗留漂移误红（Linux/macOS CI 实测）。
+// 与 cold.test.ts 的 beforeVerify 范式一致：断言只针对本用例造成的增量。
+function verifyBaseline() {
+  return ColdStorage.verify({ repair: false })
+}
+
+function expectVerifyDelta(baseline: ReturnType<typeof ColdStorage.verify>) {
+  const current = ColdStorage.verify({ repair: false })
+  expect(current.corruptOwners - baseline.corruptOwners).toBe(0)
+  expect(current.corruptPayloads - baseline.corruptPayloads).toBe(0)
+  expect(current.refCountMismatches - baseline.refCountMismatches).toBe(0)
+}
+
+function payloadHashes() {
+  return new Set(
+    Database.use((db) => db.select({ hash: ColdStorageTable.hash }).from(ColdStorageTable).all()).map(
+      (row) => row.hash,
+    ),
+  )
+}
+
 const it = testEffect(
   // 使用真实 Session/projector/数据库层，字段恢复错误能够穿透到公开读取结果。
   // fixture 负责实例隔离，本文件不连接用户正在运行的生产数据库。
@@ -77,6 +99,9 @@ it.instance("manual cold Text preserves complete reads and root Text", () =>
 it.instance("compact packs retain full content and exact tool statistics", () =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
+    const verifyBase = verifyBaseline()
+    // 全库为空断言只在单租户库成立；共享内存库下断言本用例结束后没有新增遗留 hash。
+    const beforePayloads = payloadHashes()
     const session = yield* sessions.create({})
     const messageID = MessageID.ascending()
     yield* sessions.updateMessage({
@@ -118,13 +143,17 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     ])
     expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
     // verify 覆盖引用数和内容完整性，短 locator 不能以降低校验强度换取空间。
-    expect(ColdStorage.verify({ repair: false })).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    expectVerifyDelta(verifyBase)
     // 构造已发布 v2 字节协议，验证维护命令会升级存量数据而非只处理新行。
-    const packed = Database.use((db) => db.select().from(ColdStorageTable).all()[0])
+    // 按本用例 owner 的 cold_ref 精确定位包；共享库下 all() 含有他文件遗留的行。
+    const packed = Database.use((db) =>
+      db
+        .select()
+        .from(ColdStorageTable)
+        .where(eq(ColdStorageTable.hash, row.cold_ref ?? ""))
+        .get(),
+    )
+    if (!packed) throw new Error("Packed payload missing for the frozen owner")
     const fields = {
       // 直接给定旧协议字段，避免调用新 writer 生成旧格式而形成同源自证。
       "state.input": {},
@@ -182,7 +211,7 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     )
     expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
     expect(ColdStorage.thawOwner({ type: "part", id })).toBe(true)
-    expect(Database.use((db) => db.select().from(ColdStorageTable).all())).toHaveLength(0)
+    expect([...payloadHashes()].filter((hash) => !beforePayloads.has(hash))).toEqual([])
     // 最后一个 owner 展开后释放包，防止逻辑成功却遗留冗余冷内容。
   }),
 )
@@ -190,6 +219,7 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
 it.instance("manual freeze admits a completed reviewer attempt in an active child", () =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
+    const verifyBase = verifyBaseline()
     const root = yield* sessions.create({})
     const child = yield* sessions.create({ parentID: root.id, agent: "permission-reviewer" })
     const request = MessageID.ascending()
@@ -302,17 +332,14 @@ it.instance("manual freeze admits a completed reviewer attempt in an active chil
     yield* sessions.updatePart({ ...text, text: "revised reviewer request" })
     const revised = yield* MessageV2.get({ sessionID: child.id, messageID: request, includeHidden: true })
     expect(revised.parts).toContainEqual({ ...text, text: "revised reviewer request" })
-    expect(ColdStorage.verify({ repair: false })).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    expectVerifyDelta(verifyBase)
   }),
 )
 
 it.instance("resumed repack retains every destination until all owners move", () =>
   Effect.gen(function* () {
     const sessions = yield* Session.Service
+    const verifyBase = verifyBaseline()
     const session = yield* sessions.create({ title: "repack destination cycle" })
     const messageID = MessageID.ascending()
     yield* sessions.updateMessage({
@@ -440,11 +467,7 @@ it.instance("resumed repack retains every destination until all owners move", ()
           .run()
       })
     }
-    expect(ColdStorage.verify({ repair: false })).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    expectVerifyDelta(verifyBase)
     // 原始任务参数和实际持久 cursor 原样恢复，不伪造进度或修改 Session scope。
     const task = ColdStorage.parseMaintenanceTask(interrupted.task)
     const result = yield* Effect.promise(() =>
@@ -457,10 +480,6 @@ it.instance("resumed repack retains every destination until all owners move", ()
         part.type === "tool" && part.state.status === "completed" ? [part.state.output] : [],
       ),
     ).toEqual(["cycle-x-0", "cycle-y-0", "cycle-y-0"])
-    expect(ColdStorage.verify({ repair: false })).toMatchObject({
-      corruptOwners: 0,
-      corruptPayloads: 0,
-      refCountMismatches: 0,
-    })
+    expectVerifyDelta(verifyBase)
   }),
 )
