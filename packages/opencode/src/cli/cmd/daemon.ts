@@ -136,19 +136,23 @@ export async function stopDaemon(input: { expected?: ServerLock.ServerLock; main
     throw new Error(`opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`)
   }
 
-  // #523：先走 graceful；只有在同 owner 复核通过后才考虑 force 分支。
+  // 已接受的graceful超时或显式stop未获应答，均须先复核同一owner才可进入原force分支。
   // #535：maintenance-idle 的 409 是业务拒绝，不得降级成普通 shutdown 或 process.kill。
   const requestError = await requestStop(lock, controlPort, input.maintenanceIdle === true)
-  if (requestError) {
-    // #523：控制面不可达时不能升级 force——无法证明目标仍是请求时的 owner。
-    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError}`)
+  // 应答拒绝不授权强停，无应答仅给显式stop开放既有恢复路径。
+  if (requestError?.type === "rejected") {
+    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError.message}`)
+  }
+  // maintenanceIdle须获worker明确接受，无应答不等于空闲，不得中断可能在跑的维护。
+  if (requestError?.type === "unreachable" && input.maintenanceIdle === true) {
+    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError.message}`)
   }
 
-  input.progress?.(`Stopping opencode daemon pid=${lock.pid}...`)
-
-  if (await waitForStop(lock)) {
-    // #259：只在停止成功后清锁（finishStop 内），且仍走同 token 校验——进程若已换代则保留新 owner 的锁。
-    return finishStop(lock, false, lockPath)
+  if (!requestError) {
+    input.progress?.(`Stopping opencode daemon pid=${lock.pid}...`)
+    if (await waitForStop(lock)) {
+      return finishStop(lock, false, lockPath)
+    }
   }
 
   // #523：graceful 超时后必须重读 lock 再确认 owner；期间换代的新 daemon 不能被旧 stop 误杀。
@@ -179,7 +183,11 @@ async function finishStop(lock: ServerLock.ServerLock, forced: boolean, lockPath
   return { type: "stopped" as const, forced }
 }
 
-async function requestStop(lock: ServerLock.ServerLock, controlPort: number, maintenanceIdle: boolean) {
+async function requestStop(
+  lock: ServerLock.ServerLock,
+  controlPort: number,
+  maintenanceIdle: boolean,
+): Promise<undefined | { type: "rejected" | "unreachable"; message: string }> {
   try {
     // #535：maintenance-idle query 请求 conditional shutdown——active/pending 维护时 daemon 返回 409。
     const url = new URL(`http://127.0.0.1:${controlPort}${ServerLock.CONTROL_SHUTDOWN_PATH}`)
@@ -192,9 +200,9 @@ async function requestStop(lock: ServerLock.ServerLock, controlPort: number, mai
       signal: AbortSignal.timeout(1_000),
     })
     if (response.ok) return
-    return `control endpoint returned ${response.status}`
+    return { type: "rejected", message: `control endpoint returned ${response.status}` }
   } catch (error) {
-    return errorMessage(error)
+    return { type: "unreachable", message: errorMessage(error) }
   }
 }
 
