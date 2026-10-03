@@ -51,12 +51,77 @@ it.live("init cleanup keeps the newest timestamped logs", () =>
 
     yield* Effect.all(list.map((file) => Effect.promise(() => fs.writeFile(path.join(dir, file), file))))
 
+    // 清理合同是 count + mtime 保留窗：writeFile 造的 fixture mtime 全是当前时刻，
+    // 必须回拨超出 keep 名额的 list[0..2]，删除路径才会被真实执行（保留方向由
+    // "cleanup retains recently written logs" 测试钉住）。
+    const stale = new Date(Date.now() - 48 * 60 * 60 * 1000)
+    yield* Effect.all(
+      list.slice(0, 3).map((file) => Effect.promise(() => fs.utimes(path.join(dir, file), stale, stale))),
+    )
+
     yield* Effect.promise(() => Log.init({ print: false, dev: false }))
 
     const next = yield* files(dir)
 
     expect(next).not.toContain(list[0])
     expect(next).toContain(list.at(-1)!)
+  }),
+)
+
+it.live("cleanup retains recently written logs beyond the keep limit", () =>
+  Effect.gen(function* () {
+    const log = Global.Path.log
+    yield* Effect.addFinalizer(() => Effect.sync(() => (Global.Path.log = log)))
+
+    const dir = yield* tmpdirScoped()
+    Global.Path.log = dir
+
+    const list = Array.from({ length: 12 }, (_, i) => `2000-01-${String(i + 1).padStart(2, "0")}T000000.log`)
+    yield* Effect.all(list.map((file) => Effect.promise(() => fs.writeFile(path.join(dir, file), file))))
+
+    // writeFile 会把 mtime 写成当前时刻，必须显式回拨才能制造判别窗口：
+    // list[1] 回拨到保留窗之前（超出 keep 且过期，新旧合同都应删除，兼作 cleanup 完成的等待信号）；
+    // list[0] 保持新鲜（超出 keep 但仍在写入，旧合同误删、新合同保留——INV-08 的判别点）。
+    const stale = new Date(Date.now() - 48 * 60 * 60 * 1000)
+    yield* Effect.promise(() => fs.utimes(path.join(dir, list[1]), stale, stale))
+
+    yield* Effect.promise(() => Log.init({ print: false, dev: false }))
+
+    // cleanup 在 init 内 fire-and-forget：等 list[1] 消失即删除已真实发生，此时再断言 list[0]。
+    let gone = false
+    for (let i = 0; i < 50 && !gone; i++) {
+      gone = !(yield* Effect.promise(() => fs.readdir(dir))).includes(list[1])
+      if (!gone) yield* Effect.sleep("10 millis")
+    }
+
+    expect(gone).toBe(true)
+    expect(yield* Effect.promise(() => fs.readdir(dir))).toContain(list[0])
+  }),
+)
+
+it.live("close flushes pending writes before exit", () =>
+  Effect.gen(function* () {
+    const log = Global.Path.log
+    // close 会终结进程级日志流；finalizer 必须恢复 Global.Path.log 并 re-init，
+    // 否则同进程后续测试文件的日志写入会落在已降级到 stderr 的关闭状态上。
+    yield* Effect.addFinalizer(() =>
+      Effect.promise(async () => {
+        Global.Path.log = log
+        await Log.init({ print: false, dev: true, level: "DEBUG" })
+      }),
+    )
+
+    const dir = yield* tmpdirScoped()
+    Global.Path.log = dir
+    yield* Effect.promise(() => Log.init({ print: false, dev: true, level: "DEBUG" }))
+    Log.Default.info("close durability sentinel")
+
+    yield* Effect.promise(() => Log.close())
+
+    // close 返回即代表文件流已 finish：此处必须同步读得到 sentinel，才能证明
+    // gracefulShutdown 在 process.exit 前 await 它是有意义的（INV-07）。
+    const content = yield* Effect.promise(() => fs.readFile(path.join(dir, "dev.log"), "utf8"))
+    expect(content).toContain("close durability sentinel")
   }),
 )
 

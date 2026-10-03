@@ -48,18 +48,6 @@ if (!printLogs) win32DetachConsole()
 
 Heap.start()
 
-process.on("unhandledRejection", (e) => {
-  Log.Default.error("rejection", {
-    e: e instanceof Error ? e.message : e,
-  })
-})
-
-process.on("uncaughtException", (e) => {
-  Log.Default.error("exception", {
-    e: e instanceof Error ? e.message : e,
-  })
-})
-
 // Pre-warm external plugin imports without making daemon health depend on
 // package installation or network access.  This is purely a latency
 // optimization: the real plugin loader still owns correctness and errors.
@@ -318,6 +306,9 @@ async function gracefulShutdown(reason = "unknown", published = false) {
   // Keep the lock until after disposers and Database.close() finish. Otherwise a
   // reconnecting TUI can spawn a replacement daemon while this process still owns SQLite.
   await ServerLock.clearIfOwner(lockToken)
+  // 日志流必须在 process.exit 前落盘（生产实证：36428 号 daemon 的死亡尾部日志因未 flush 丢失）。
+  // 放在 5s 硬截止的 clearTimeout 之前：关闭等待仍受 deadline 兼容，不引入新的超时机制。
+  await Log.close()
   if (shutdownDeadlineTimer) clearTimeout(shutdownDeadlineTimer)
   shutdownDeadlineTimer = undefined
   process.exit(0)
@@ -342,10 +333,17 @@ if (process.platform !== "win32") {
   })
 }
 
-// Ensure lock is cleaned up even when the daemon crashes or receives a fatal
-// signal.  Placed after gracefulShutdown is defined so the closure is valid.
-process.prependListener("unhandledRejection", () => void gracefulShutdown("unhandledRejection"))
-process.prependListener("uncaughtException", () => void gracefulShutdown("uncaughtException"))
+// 进程级错误裁决（策略边界，非运行时保证）：本进程把 unhandledRejection 当作不致命事件
+// 只记录不自杀——生产实证单个流竞态 rejection 曾把 5 个 TUI + 9 个活跃 session 全部拖死，
+// 而隔离测试（daemon.test.ts）钉住该裁决对自杀回归敏感。uncaughtException 是同步逃逸，
+// 在飞状态不可信，保留优雅拆解以清理 daemon lock 并释放 SQLite。
+process.on("unhandledRejection", (e) => {
+  log.error("rejection", { e: e instanceof Error ? e.message : e })
+})
+process.prependListener("uncaughtException", (e) => {
+  log.error("exception", { e: e instanceof Error ? e.message : e })
+  void gracefulShutdown("uncaughtException")
+})
 
 // ── Idle timeout ───────────────────────────────────────────────────────────
 // daemon 有两段空闲退出保护：

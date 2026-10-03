@@ -95,7 +95,7 @@ const DaemonStopCommand = cmd({
 
 export async function stopDaemon(input: { expected?: ServerLockInfo; maintenanceIdle?: boolean; progress?: (message: string) => void } = {}) {
   // stop 的第一阶段仍然只发送现有 authenticated shutdown 请求。
-  // 只有该请求成功且 owner 在窗口内没有退出，才允许进入第二阶段。
+  // 请求成功且 owner 在窗口内没有退出，或显式 stop 的请求根本未获应答，才允许进入第二阶段。
   // expected 来自用户看到的 prompt；首次 control request 前就必须校验，不能只保护超时后的 force 阶段。
   const observed = await ServerLock.read()
   if (input.expected && observed && !sameOwner(input.expected, observed)) {
@@ -127,16 +127,25 @@ export async function stopDaemon(input: { expected?: ServerLockInfo; maintenance
     throw new Error(`opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`)
   }
 
-  // maintenance-idle 的 409 是业务拒绝，不得降级成普通 shutdown 或 process.kill。
   const requestError = await requestStop(lock, controlPort, input.maintenanceIdle === true)
-  if (requestError) {
-    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError}`)
+  // rejected 是控制面应答后的业务拒绝（如 maintenance-idle 409），语义上不得升级为强杀；
+  // unreachable 是请求根本未获应答（控制面卡死/超时），显式 stop 不能被挡在恢复路径之外，
+  // 与 graceful 超时汇合进入同一 owner 复核后的 force 分支。
+  if (requestError?.type === "rejected") {
+    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError.message}`)
+  }
+  // 条件式停机（maintenanceIdle，如 db compress 的 preflight）的中断授权只能来自 worker 对
+  // "无在跑维护"的明确接受；无应答不等于空闲（控制面可能正被同步事务阻塞），授权未发生时
+  // 维持抛错——只有显式 stop 保留无应答后的 force 恢复路径。
+  if (requestError?.type === "unreachable" && input.maintenanceIdle === true) {
+    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError.message}`)
   }
 
-  input.progress?.(`Stopping opencode daemon pid=${lock.pid}...`)
-
-  if (await waitForStop(lock)) {
-    return finishStop(lock, false)
+  if (!requestError) {
+    input.progress?.(`Stopping opencode daemon pid=${lock.pid}...`)
+    if (await waitForStop(lock)) {
+      return finishStop(lock, false)
+    }
   }
 
   const current = await ServerLock.read()
@@ -164,7 +173,11 @@ async function finishStop(lock: ServerLockInfo, forced: boolean) {
   return { type: "stopped" as const, forced }
 }
 
-async function requestStop(lock: ServerLockInfo, controlPort: number, maintenanceIdle: boolean) {
+async function requestStop(
+  lock: ServerLockInfo,
+  controlPort: number,
+  maintenanceIdle: boolean,
+): Promise<undefined | { type: "rejected" | "unreachable"; message: string }> {
   try {
     const url = new URL(`http://127.0.0.1:${controlPort}${ServerLock.CONTROL_SHUTDOWN_PATH}`)
     if (maintenanceIdle) url.searchParams.set("maintenance-idle", "1")
@@ -175,9 +188,9 @@ async function requestStop(lock: ServerLockInfo, controlPort: number, maintenanc
       signal: AbortSignal.timeout(1_000),
     })
     if (response.ok) return
-    return `control endpoint returned ${response.status}`
+    return { type: "rejected", message: `control endpoint returned ${response.status}` }
   } catch (error) {
-    return errorMessage(error)
+    return { type: "unreachable", message: errorMessage(error) }
   }
 }
 

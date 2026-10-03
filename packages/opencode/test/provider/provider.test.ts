@@ -2978,3 +2978,133 @@ test("invalidateAll 后 getLanguage 仍能正常重建缓存", async () => {
     },
   })
 })
+
+// 回归（生产 seam 版）：consumer 在源端 pull() 卡在 inner read 期间 cancel 流时，迟到的 EOF
+// 不得再写入已关闭的 controller。生产实证：该 write-after-close 抛出
+// "Controller is already closed" 并成为 unhandledRejection，daemon worker 曾因此把整机
+// shutdown（5 个 TUI + 9 个活跃 session 被拖死）。
+// seam 选择：plugin loader 注入 fetch（沿本文件 provider-timeout-policy 先例），响应 body
+// 经生产 fetch 包装的真实 deadline.wrap（provider.ts），不引入任何 test-only 生产导出。
+test("SSE wrap: cancel during in-flight pull does not write to a closed controller", async () => {
+  const encoder = new TextEncoder()
+  const controllersKey = Symbol.for("opencode.test.sse-race-controllers")
+  const chunk =
+    'data: {"id":"chatcmpl-race","object":"chat.completion.chunk","created":1,"model":"race","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}\n\n'
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await mkdir(path.join(dir, ".opencode", "plugin"), { recursive: true })
+      await markConfigDependenciesInstalled(path.join(dir, ".opencode"))
+      // 两个 provider 而不是一个 provider 的两个 model：SDK 实例按 provider 共享，
+      // fetch 包装闭包捕获首个加载的 model，telemetry 的 modelID 对同 provider 后续模型不可靠；
+      // providerID 随 SDK 实例区分，两组判别必须用 providerID（实测踩坑后定型）。
+      for (const id of ["race-a", "race-b"]) {
+        await Bun.write(
+          path.join(dir, ".opencode", "plugin", `sse-race-${id}.ts`),
+          [
+            "export default {",
+            `  id: "test.sse-race-${id}",`,
+            "  server: async () => ({",
+            "    auth: {",
+            `      provider: "${id}",`,
+            "      loader: async () => ({",
+            '        apiKey: "test-key",',
+            // plugin module 与测试 module 实例隔离，经 globalThis 注册每次请求的 body controller
+            // （lazy-runtime.test.ts 已有同法先例）；fetch 每次调用新建流，两组顺序消费。
+            "        fetch: async () => {",
+            "          const g = globalThis",
+            `          g[Symbol.for("opencode.test.sse-race-controllers")] ??= []`,
+            "          const body = new ReadableStream({",
+            "            start(controller) {",
+            `              g[Symbol.for("opencode.test.sse-race-controllers")].push(controller)`,
+            "            },",
+            "          })",
+            '          return new Response(body, { headers: { "content-type": "text/event-stream" } })',
+            "        },",
+            "      }),",
+            "      methods: [{ type: 'api', label: 'API key' }],",
+            "    },",
+            "  }),",
+            "}",
+          ].join("\n"),
+        )
+      }
+      const raceProvider = (id: string) => [
+        `"${id}": {`,
+        '  "npm": "@ai-sdk/openai-compatible",',
+        `  "name": "Race ${id}",`,
+        '  "models": { "race-model": { "name": "Race Model", "modalities": { "input": ["text"], "output": ["text"] } } },',
+        '  "options": { "apiKey": "test-key", "baseURL": "https://race.invalid/v1" }',
+        "}",
+      ]
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        `{ "enabled_providers": ["race-a", "race-b"], "provider": { ${[raceProvider("race-a"), raceProvider("race-b")].map((lines) => lines.join(" ")).join(", ")} } }`,
+      )
+      // baseURL 故意不可连接：fetch 必须由 plugin loader 的注入捕获，走到真实网络就是测试失败。
+    },
+  })
+  await withTestInstance({
+    directory: tmp.path,
+    fn: async (ctx) => {
+      // plugin auth loader 只在 provider 存在 auth 记录时运行（沿 provider-timeout-policy 先例）。
+      set(
+        ctx,
+        "OPENCODE_AUTH_CONTENT",
+        JSON.stringify({
+          "race-a": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
+          "race-b": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
+        }),
+      )
+      const logfile = path.join(Global.Path.log, "dev.log")
+      const baseline = await Bun.file(logfile).text().catch(() => "")
+      const g = globalThis as unknown as Record<PropertyKey, ReadableStreamDefaultController<Uint8Array>[] | undefined>
+
+      // 判别点不用 unhandledRejection spy：探针实证 Bun 在该管道拓扑下会吞掉 pull 的 rejection，
+      // spy 无法判别；done 分支执行前必然先记录 sse.end 遥测，因此"cancel 后是否出现 sse.end"
+      // 是 write-after-close 是否发生的可靠前哨；两组以唯一 providerID 区分。
+      const race = async (providerID: string, cancel: boolean) => {
+        const model = await getModel(ProviderID.make(providerID), ModelID.make("race-model"), ctx)
+        const language = await getLanguage(model, ctx)
+        const result = await language.doStream({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })
+        const body = g[controllersKey]!.at(-1)!
+        const reader = result.stream.getReader()
+        body.enqueue(encoder.encode(chunk))
+        // 就绪信号：读到 chunk 对应的 text-delta part，证明 chunk 已穿越 wrap 与 SDK 解析管道；
+        // pipeThrough 预取拓扑下 wrap 的 refill pull 此时已在飞（探针实证的生产拓扑）。
+        let traversed = false
+        for (let i = 0; i < 10 && !traversed; i++) {
+          const part = await reader.read()
+          traversed = !part.done && (part.value as { type: string }).type === "text-delta"
+        }
+        expect(traversed).toBe(true)
+        if (cancel) {
+          // cancel() 的返回值是结构性完成闩：传播链上在途 pull 的恢复先于 cancel resolve，
+          // buggy 遥测写入若存在必已在日志 FIFO 中排队（先于后面的控制组）。
+          await reader.cancel()
+          return
+        }
+        body.close()
+        await reader.read().catch(() => undefined)
+      }
+
+      // cancelled 组先行：buggy 写入若存在，必排在控制组之前进入日志 FIFO；
+      // 控制组的 sse.end 落盘即确定性关闭负断言窗口，不需要任何固定 sleep。
+      await race("race-a", true)
+      await race("race-b", false)
+      const deadline = Date.now() + 10_000
+      let delta = ""
+      while (Date.now() < deadline) {
+        delta = (await Bun.file(logfile).text()).slice(baseline.length)
+        if (delta.includes("sse.end") && delta.includes("providerID=race-b")) break
+        await Bun.sleep(25)
+      }
+      const ended = (id: string) =>
+        delta.split("\n").filter((line) => line.includes("sse.end") && line.includes(`providerID=${id}`))
+      // 控制组必须可见，证明遥测可观测、下面的空断言不是恒真。
+      expect(ended("race-b")).not.toEqual([])
+      expect(ended("race-a")).toEqual([])
+    },
+  })
+})

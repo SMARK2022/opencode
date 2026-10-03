@@ -20,6 +20,9 @@ const levelPriority: Record<Level, number> = {
   ERROR: 3,
 }
 const keep = 10
+// 证据保留窗：进程暴发（如 TUI 批量重连）会把名字旧但仍在写入的长跑进程日志挤出 keep 名额，
+// 而事故取证恰恰发生在进程死亡后的数小时内（生产实证：17MB 事故 daemon 日志被暴发删除）。
+const RETAIN_MS = 24 * 60 * 60 * 1000
 const initializedRunID = "OPENCODE_LOG_INITIALIZED_RUN_ID"
 
 let level: Level = "INFO"
@@ -161,6 +164,20 @@ export async function init(options: Options) {
   }
 }
 
+export async function close(): Promise<void> {
+  const active = stream
+  if (!active || active.destroyed || active.closed) return
+  stream = undefined
+  // 关闭后的迟到写入降级到 stderr：退出末段不能再写已销毁的流，
+  // 但同步退出路径上的写入也不能因此抛出。
+  write = writeStderr
+  await new Promise<void>((resolve) => {
+    // error 与 end 回调任一先到即放行：日志是诊断通道，关闭本身不得成为退出阻塞点。
+    active.once("error", () => resolve())
+    active.end(() => resolve())
+  })
+}
+
 async function cleanup(dir: string) {
   const files = (
     await Glob.scan("????-??-??T??????.log", {
@@ -174,7 +191,16 @@ async function cleanup(dir: string) {
   if (files.length <= keep) return
 
   const doomed = files.slice(0, -keep)
-  await Promise.all(doomed.map((file) => fs.unlink(path.join(dir, file)).catch(() => {})))
+  const now = Date.now()
+  // mtime 是最后写入时刻：名字旧不等于尸体，超出 keep 的文件只有连保留窗都出了才删除。
+  await Promise.all(
+    doomed.map(async (file) => {
+      const full = path.join(dir, file)
+      const stat = await fs.stat(full).catch(() => undefined)
+      if (stat && now - stat.mtimeMs < RETAIN_MS) return
+      await fs.unlink(full).catch(() => {})
+    }),
+  )
 }
 
 function formatError(error: Error, depth = 0): string {

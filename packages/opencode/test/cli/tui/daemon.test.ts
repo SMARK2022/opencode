@@ -19,6 +19,7 @@ import stripAnsi from "strip-ansi"
 import { spawn as spawnPty } from "#pty"
 import { tmpdir } from "../../fixture/fixture"
 import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
+import * as DaemonCmdModule from "../../../src/cli/cmd/daemon"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as Win32Module from "../../../src/cli/cmd/tui/win32"
 import type { MaintenanceTask } from "../../../src/storage/cold"
@@ -260,6 +261,57 @@ async function spawnHangingDisposerDaemon(lockPath: string) {
   })()
   expect(await readFirstLine(proc.stdout)).toBe("disposer-ready")
   return { proc, lock }
+}
+
+async function spawnProbeDaemon(lockPath: string, probe: string) {
+  // 与 spawnHangingDisposerDaemon 同理：wrapper 在隔离子进程内 import 真实 worker，
+  // 确保进程级错误策略跑在真实启动与 shutdown 生命周期上。
+  const worker = pathToFileURL(WORKER_TS).href
+  const wrapper = [
+    `await import(${JSON.stringify(worker)})`,
+    // stdin 作为测试→worker 的触发通道：写入触发行后才产生进程级事件，
+    // 避免用固定 sleep 猜测 import 与服务器的就绪时序。
+    `process.stdin.resume()`,
+    `process.stdin.on("data", () => { ${probe} })`,
+    `process.stdout.write("probe-ready\\n")`,
+  ].join("\n")
+  const proc = spawnBackground([process.execPath, "-e", wrapper], {
+    env: {
+      ...isolatedDaemonEnv(lockPath),
+      OPENCODE_PROCESS_ROLE: "worker",
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const lock = await Bun.file(lockPath)
+      .text()
+      .then((t) => JSON.parse(t) as ServerLockModule.ServerLock)
+      .catch(() => undefined)
+    if (lock && lock.pid === proc.pid && ServerLockModule.alive(lock.pid)) {
+      const ok = await ServerLockModule.ping(lock.port)
+      if (ok) {
+        expect(await readFirstLine(proc.stdout)).toBe("probe-ready")
+        return { proc, lock }
+      }
+    }
+    await Bun.sleep(POLL_INTERVAL_MS)
+  }
+  proc.kill()
+  throw new Error(`Probe daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
+}
+
+async function pollFileContains(file: string, marker: string) {
+  // 轮询可观测信号（日志行落盘）代替固定 sleep：marker 出现才证明对应 handler 真实执行过。
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const content = await Bun.file(file).text().catch(() => "")
+    if (content.includes(marker)) return true
+    await Bun.sleep(POLL_INTERVAL_MS)
+  }
+  return false
 }
 
 async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
@@ -802,6 +854,171 @@ describe("daemon lifecycle", () => {
         expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
         // lock 清理断言同时覆盖 force 后的 stale-owner recovery 边界。
         // 复核失败或 PID 仍存活时，测试必须观察到非零退出而不是这个成功文案。
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    30_000,
+  )
+
+  test(
+    "daemon keeps serving after an unhandledRejection",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnProbeDaemon(lockPath, `Promise.reject(new Error("probe-rejection"))`)
+      try {
+        proc.stdin.write("trigger\n")
+        // dev.log 出现 probe-rejection 证明 rejection handler 真实执行；
+        // 之后 ping 仍成功才证明策略是只记录而非自杀（INV-03）。
+        const devlog = path.join(tmp.path, "share", "opencode", "log", "dev.log")
+        expect(await pollFileContains(devlog, "probe-rejection")).toBe(true)
+        expect(await ServerLockModule.ping(lock.port)).toBe(true)
+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    30_000,
+  )
+
+  test(
+    "daemon exits gracefully and releases the lock on an uncaughtException",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      // EventEmitter 回调内同步抛出即 uncaughtException：策略必须记录并优雅拆解（INV-04），
+      // 断言有界退出 + lock 清理，而不是进程崩溃后由 stale-owner 机制兜底的慢路径。
+      const { proc } = await spawnProbeDaemon(lockPath, `throw new Error("probe-exception")`)
+      try {
+        proc.stdin.write("trigger\n")
+        const exit = await Promise.race([proc.exited, Bun.sleep(15_000).then(() => "timeout" as const)])
+        expect(exit).not.toBe("timeout")
+        expect(ServerLockModule.alive(proc.pid)).toBe(false)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    30_000,
+  )
+
+  test(
+    "force stops an owner whose control plane never responds",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const token = "isolated-hung-control-token"
+      const fakeOwner = `
+        const token = ${JSON.stringify(token)}
+        const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
+        const controlServer = Bun.serve({
+          port: 0,
+          hostname: "127.0.0.1",
+          fetch(request) {
+            if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
+            // /shutdown 永不答复，模拟控制面卡死：显式 stop 必须在 owner 复核后仍能到达 force 路径，
+            // 否则卡死 daemon 没有任何可执行的恢复流程。
+            return new Promise(() => {})
+          },
+        })
+        await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({
+          pid: process.pid,
+          port: publicServer.port,
+          token,
+          dbPath: "isolated",
+          channel: "local",
+          startedAt: new Date().toISOString(),
+          controlPort: controlServer.port,
+        }))
+        setInterval(() => {}, 1_000)
+      `
+      const proc = spawnBackground([process.execPath, "-e", fakeOwner], {
+        env: isolatedDaemonEnv(lockPath),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+
+      try {
+        const deadline = Date.now() + 5_000
+        while (Date.now() < deadline) {
+          const lock = await Bun.file(lockPath)
+            .text()
+            .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+            .catch(() => undefined)
+          if (lock?.pid === proc.pid) break
+          await Bun.sleep(25)
+        }
+        const result = await runDaemonStop(lockPath)
+        expect(result.exitCode).toBe(0)
+        expect(result.stderr).toContain("Force-stopped opencode daemon.")
+        expect(ServerLockModule.alive(proc.pid)).toBe(false)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    30_000,
+  )
+
+  test(
+    "conditional maintenance stop does not force-kill an unreachable owner",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const token = "isolated-hung-conditional-token"
+      const fakeOwner = `
+        const token = ${JSON.stringify(token)}
+        const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
+        const controlServer = Bun.serve({
+          port: 0,
+          hostname: "127.0.0.1",
+          fetch(request) {
+            if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
+            return new Promise(() => {})
+          },
+        })
+        await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({
+          pid: process.pid,
+          port: publicServer.port,
+          token,
+          dbPath: "isolated",
+          channel: "local",
+          startedAt: new Date().toISOString(),
+          controlPort: controlServer.port,
+        }))
+        setInterval(() => {}, 1_000)
+      `
+      const proc = spawnBackground([process.execPath, "-e", fakeOwner], {
+        env: isolatedDaemonEnv(lockPath),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+
+      try {
+        const deadline = Date.now() + 5_000
+        while (Date.now() < deadline) {
+          const lock = await Bun.file(lockPath)
+            .text()
+            .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+            .catch(() => undefined)
+          if (lock?.pid === proc.pid) break
+          await Bun.sleep(25)
+        }
+        ServerLockModule._setLockPath(lockPath)
+        // 与下方 maintenance-idle 409 合同测试互为两个方向：应答拒绝与无应答都不构成条件式停机的
+        // 中断授权——无应答不等于空闲（控制面可能正被同步事务阻塞），只有 worker 明确接受才授权。
+        await expect(DaemonCmdModule.stopDaemon({ maintenanceIdle: true })).rejects.toThrow(
+          "Failed to request opencode daemon shutdown",
+        )
+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeDefined()
       } finally {
         if (ServerLockModule.alive(proc.pid)) proc.kill()
         await proc.exited.catch(() => undefined)
