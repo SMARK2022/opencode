@@ -88,9 +88,12 @@ export const layer = Layer.effect(
       return yield* Effect.fail(new Error(`Server process ${pid} is still running`))
     })
 
-    const stopProcess = Effect.fnUntraced(function* (info: Registration) {
+    const stopProcess = Effect.fnUntraced(function* (info: Registration, explicit = false) {
       const current = yield* healthy().pipe(Effect.option)
-      if (Option.isNone(current) || !sameRegistration(current.value, info)) return
+      if (Option.isNone(current) || !sameRegistration(current.value, info)) {
+        if (explicit) return yield* Effect.fail(new Error("Registered server could not be authenticated for shutdown"))
+        return
+      }
 
       yield* signal(info.pid, "SIGTERM")
       const stopped = yield* awaitStopped(info.pid).pipe(
@@ -99,8 +102,12 @@ export const layer = Layer.effect(
       )
       if (Option.isSome(stopped)) return
 
-      const latest = yield* healthy().pipe(Effect.option)
-      if (Option.isNone(latest) || !sameRegistration(latest.value, info)) return
+      // 首次认证不省略；仅显式停机可在控制面已退出后复核同一注册并完成原强停。
+      const latest = yield* (explicit ? registration() : healthy()).pipe(Effect.option)
+      if (Option.isNone(latest) || !sameRegistration(latest.value, info)) {
+        if (explicit) return yield* Effect.fail(new Error("Registered server changed during shutdown"))
+        return
+      }
       yield* signal(info.pid, "SIGKILL")
       yield* awaitStopped(info.pid).pipe(
         Effect.retry(Schedule.spaced("50 millis").pipe(Schedule.both(Schedule.recurs(100)))),
@@ -153,12 +160,15 @@ export const layer = Layer.effect(
     })
 
     const stop = Effect.fn("cli.daemon.stop")(function* () {
-      const existing = yield* healthy().pipe(Effect.option)
-      // A stale registration may point at a PID that has since been reused by
-      // another process. Only signal the PID after authenticating the server.
-      if (Option.isNone(existing)) return yield* fs.remove(file).pipe(Effect.ignore)
-      yield* stopProcess(existing.value)
-      yield* fs.remove(file).pipe(Effect.ignore)
+      const existing = yield* registration().pipe(Effect.option)
+      if (Option.isNone(existing)) return
+      // 活PID仍须先认证，失败保留发现记录；不得把无应答或换代伪装成停止成功。
+      const stopped = yield* awaitStopped(existing.value.pid).pipe(Effect.option)
+      if (Option.isNone(stopped)) yield* stopProcess(existing.value, true)
+      yield* awaitStopped(existing.value.pid)
+      const latest = yield* registration().pipe(Effect.option)
+      if (Option.isSome(latest) && sameRegistration(latest.value, existing.value))
+        yield* fs.remove(file).pipe(Effect.ignore)
     })
 
     const register = Effect.fn("cli.daemon.register")(function* (address: HttpServer.Address) {

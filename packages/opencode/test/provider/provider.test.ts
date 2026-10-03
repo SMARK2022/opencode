@@ -5,7 +5,9 @@ import { mkdir, unlink } from "fs/promises"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import { Deferred, Effect } from "effect"
+import { Deferred, Effect, Layer, Logger } from "effect"
+import { NodeFileSystem } from "@effect/platform-node"
+import { Logging } from "@opencode-ai/core/observability/logging"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -2503,6 +2505,127 @@ it.instance(
     },
   },
 )
+
+// 由真实plugin/SDK驱动cancel与在途pull，不新增生产导出；正常EOF组钉住遥测可观测性。
+it.instance("SSE wrap: cancel during in-flight pull does not write to a closed controller", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const dir = instance.directory
+  const encoder = new TextEncoder()
+  const controllersKey = Symbol.for("opencode.test.sse-race-controllers")
+  const chunk =
+    'data: {"id":"chatcmpl-race","object":"chat.completion.chunk","created":1,"model":"race","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}\n\n'
+  yield* Effect.promise(async () => {
+      await mkdir(path.join(dir, ".opencode", "plugin"), { recursive: true })
+      await markPluginDependenciesReady(path.join(dir, ".opencode"))
+      // SDK按provider共享闭包，因此用两个provider分辨取消与正常EOF，不能仅换modelID。
+      for (const id of ["race-a", "race-b"]) {
+        await Bun.write(
+          path.join(dir, ".opencode", "plugin", `sse-race-${id}.ts`),
+          [
+            "export default {",
+            `  id: "test.sse-race-${id}",`,
+            "  server: async () => ({",
+            "    auth: {",
+            `      provider: "${id}",`,
+            "      loader: async () => ({",
+            '        apiKey: "test-key",',
+            // plugin module 与测试 module 实例隔离，经 globalThis 注册每次请求的 body controller
+            // （lazy-runtime.test.ts 已有同法先例）；fetch 每次调用新建流，两组顺序消费。
+            "        fetch: async () => {",
+            "          const g = globalThis",
+            `          g[Symbol.for("opencode.test.sse-race-controllers")] ??= []`,
+            "          const body = new ReadableStream({",
+            "            start(controller) {",
+            `              g[Symbol.for("opencode.test.sse-race-controllers")].push(controller)`,
+            "            },",
+            "          })",
+            '          return new Response(body, { headers: { "content-type": "text/event-stream" } })',
+            "        },",
+            "      }),",
+            "      methods: [{ type: 'api', label: 'API key' }],",
+            "    },",
+            "  }),",
+            "}",
+          ].join("\n"),
+        )
+      }
+      const raceProvider = (id: string) => [
+        `"${id}": {`,
+        '  "npm": "@ai-sdk/openai-compatible",',
+        `  "name": "Race ${id}",`,
+        '  "models": { "race-model": { "name": "Race Model", "modalities": { "input": ["text"], "output": ["text"] } } },',
+        '  "options": { "apiKey": "test-key", "baseURL": "https://race.invalid/v1" }',
+        "}",
+      ]
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        `{ "enabled_providers": ["race-a", "race-b"], "provider": { ${[raceProvider("race-a"), raceProvider("race-b")].map((lines) => lines.join(" ")).join(", ")} } }`,
+      )
+      // baseURL 故意不可连接：fetch 必须由 plugin loader 的注入捕获，走到真实网络就是测试失败。
+  })
+  // auth记录使真实plugin loader可达，凭据完全合成且fetch不出网。
+  yield* set("OPENCODE_AUTH_CONTENT", JSON.stringify({
+    "race-a": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
+    "race-b": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
+  }))
+  const logfile = path.join(dir, "sse-race.log")
+  yield* Effect.gen(function* () {
+      const provider = yield* Provider.Service
+      const baseline = yield* Effect.promise(() => Bun.file(logfile).text())
+      const g = globalThis as unknown as Record<PropertyKey, ReadableStreamDefaultController<Uint8Array>[] | undefined>
+
+      // 判别点不用 unhandledRejection spy：探针实证 Bun 在该管道拓扑下会吞掉 pull 的 rejection，
+      // spy 无法判别；done 分支执行前必然先记录 sse.end 遥测，因此"cancel 后是否出现 sse.end"
+      // 是 write-after-close 是否发生的可靠前哨；两组以唯一 providerID 区分。
+      const race = Effect.fn("test.sseRace")(function* (providerID: string, cancel: boolean) {
+        const model = yield* provider.getModel(ProviderV2.ID.make(providerID), ModelV2.ID.make("race-model"))
+        const language = yield* provider.getLanguage(model)
+        const result = yield* Effect.promise(() => language.doStream({
+          prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        }))
+        const body = g[controllersKey]!.at(-1)!
+        const reader = result.stream.getReader()
+        body.enqueue(encoder.encode(chunk))
+        // 就绪信号：读到 chunk 对应的 text-delta part，证明 chunk 已穿越 wrap 与 SDK 解析管道；
+        // pipeThrough 预取拓扑下 wrap 的 refill pull 此时已在飞（探针实证的生产拓扑）。
+        let traversed = false
+        for (let i = 0; i < 10 && !traversed; i++) {
+          const part = yield* Effect.promise(() => reader.read())
+          traversed = !part.done && part.value.type === "text-delta"
+        }
+        expect(traversed).toBe(true)
+        if (cancel) {
+          // cancel() 的返回值是结构性完成闩：传播链上在途 pull 的恢复先于 cancel resolve，
+          // buggy 遥测写入若存在必已在日志 FIFO 中排队（先于后面的控制组）。
+          yield* Effect.promise(() => reader.cancel())
+          return
+        }
+        body.close()
+        yield* Effect.promise(() => reader.read().catch(() => undefined))
+      })
+
+      // cancelled 组先行：buggy 写入若存在，必排在控制组之前进入日志 FIFO；
+      // 控制组的 sse.end 落盘即确定性关闭负断言窗口，不需要任何固定 sleep。
+      yield* race("race-a", true)
+      yield* race("race-b", false)
+      const deadline = Date.now() + 10_000
+      let delta = ""
+      while (Date.now() < deadline) {
+        delta = (yield* Effect.promise(() => Bun.file(logfile).text())).slice(baseline.length)
+        if (delta.includes("sse.end") && delta.includes("providerID=race-b")) break
+        yield* Effect.sleep("25 millis")
+      }
+      const ended = (id: string) =>
+        delta.split("\n").filter((line) => line.includes("sse.end") && line.includes(`providerID=${id}`))
+      // 控制组必须可见，证明遥测可观测、下面的空断言不是恒真。
+      expect(ended("race-b")).not.toEqual([])
+      expect(ended("race-a")).toEqual([])
+  }).pipe(
+    // 在getSDK捕获EffectBridge之前安装真实文件logger，不改Global.Path.log或重建全局Log。
+    Effect.provide(Logger.layer([Logging.fileLogger(logfile)]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)),
+    Effect.scoped,
+  )
+}))
 
 it.effect("opencode loader keeps paid models when auth exists", () =>
   Effect.gen(function* () {

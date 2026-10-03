@@ -6,7 +6,9 @@ import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config/config"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
-import { Effect, Layer, Scope } from "effect"
+import { Effect, Layer, Logger, ManagedRuntime, Scope } from "effect"
+import { NodeFileSystem } from "@effect/platform-node"
+import { Logging } from "@opencode-ai/core/observability/logging"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionStaleTurn } from "@/session/stale-turn"
@@ -54,11 +56,18 @@ const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
 if (isDaemon) {
   // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
   NetworkProxy.installGlobalFetch()
-  // 非print-logs启动时stdout由launcher丢弃；生命周期消息仍携带结构化原因。
+  // 日志资源仅依赖FS，错误处理不能为写日志提前初始化AppRuntime或数据库。
+  const daemonLogging = ManagedRuntime.make(Logger.layer([Logging.fileLogger()]).pipe(Layer.provide(NodeFileSystem.layer)))
   const log = {
-    info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
-    // #493：maintenance 失败走结构化 error 日志——与 info 同构，便于 launcher/测试侧统一解析。
-    error: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] [ERROR] ${message}`, fields),
+    info: (message: string, fields: Record<string, unknown> = {}) => {
+      console.log(`[daemon] ${message}`, fields)
+      return daemonLogging.runPromiseExit(Effect.logInfo(message, { service: "daemon", ...fields })).then(() => undefined)
+    },
+    error: (message: string, fields: Record<string, unknown> = {}) => {
+      console.log(`[daemon] [ERROR] ${message}`, fields)
+      // Exit吸收诊断I/O失败，不能让rejection记录再次制造孤儿Promise。
+      return daemonLogging.runPromiseExit(Effect.logError(message, { service: "daemon", ...fields })).then(() => undefined)
+    },
   }
   // Windows relay 在 Bun 启动前为两种模式都建立非 console pipe，默认双流连续排到 Null。
   // print-logs 经双通道转发到 wrapper；argv||env 只决定日志可见性及是否保留 console 关联。
@@ -264,7 +273,7 @@ if (isDaemon) {
     cancelIdleTimer("shutdown")
     cancelStartupIdleTimer("shutdown")
     cancelLauncherWatcher("shutdown")
-    log.info("daemon shutting down", { reason, hadClient, sseClients, sessionActivity: SessionActivity.count() })
+    await log.info("daemon shutting down", { reason, hadClient, sseClients, sessionActivity: SessionActivity.count() })
     if (upgradeTimer) clearTimeout(upgradeTimer)
     // 主动停机先通知全局订阅；广播失败也计入退出码，不跳过后续清理。
     const notified = await Promise.allSettled([Promise.resolve().then(() => {
@@ -291,7 +300,8 @@ if (isDaemon) {
       Promise.resolve().then(() => externalServer?.stop(true)),
       Promise.resolve().then(() => internalServer?.stop(true)),
     ])
-    const runtime = await Promise.allSettled([AppRuntime.dispose()])
+    // scoped文件logger关闭即排空缓冲；等待仍受原五秒硬截止保护。
+    const runtime = await Promise.allSettled([AppRuntime.dispose(), daemonLogging.dispose()])
     // Database Layer 的 finalizer 在 native close 前 checkpoint，监听 scope 与 runtime 均照常释放。
     // 数据库 scope 关闭后才释放锁，避免替换 owner 过早打开仍被旧进程持有的 SQLite。
     const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
@@ -305,10 +315,12 @@ if (isDaemon) {
   // daemon 致命路径替换线程空监听，启动与空闲阶段共享同一资源清理闭包。
   process.off("unhandledRejection", onUnhandledRejection)
   process.off("uncaughtException", onUncaughtException)
-  onUnhandledRejection = (_error: unknown) => {
-    void gracefulShutdown(1, "unhandledRejection")
+  // rejection按非致命策略记录，不声称所有异步错误均安全；同步逃逸仍沿原非零拆解。
+  onUnhandledRejection = (error: unknown) => {
+    void log.error("rejection", { e: error instanceof Error ? error.message : error })
   }
-  onUncaughtException = (_error: Error) => {
+  onUncaughtException = (error: Error) => {
+    void log.error("exception", { e: error.message })
     void gracefulShutdown(1, "uncaughtException")
   }
   process.prependListener("unhandledRejection", onUnhandledRejection)

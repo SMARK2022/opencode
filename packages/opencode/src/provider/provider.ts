@@ -213,6 +213,8 @@ function progressDeadline(ms: number, ctl: AbortController, timingInput: FetchTi
 
     reader = res.body.getReader()
     readerCanceled = false
+    // cancel同步关闭controller；共享标志阻止在途pull恢复后写入迟到chunk或EOF。
+    let released = false
     // SSE 复用 dispatch 时已经启动的 timer；这里不能重新给 headers 赠送一个完整窗口。
     // 返回新的 Response 只替换 body，保留状态和 headers，避免改变 Provider adapter 的协议行为。
     const body = new ReadableStream<Uint8Array>({
@@ -224,7 +226,10 @@ function progressDeadline(ms: number, ctl: AbortController, timingInput: FetchTi
           }
           throw error
         })
+        if (released) return
         if (part.done) {
+          // close 前置位使 done 分支与 cancel() 互斥：任一路径生效后另一路径不得再触碰 controller。
+          released = true
           // 正常 EOF 是 progress lifecycle 的终点，不能再让 timer 在 stream close 后触发。
           timing(timingInput, "sse.end", { chunkCount, bytes, maxGapMs })
           ctrl.close()
@@ -243,6 +248,8 @@ function progressDeadline(ms: number, ctl: AbortController, timingInput: FetchTi
         ctrl.enqueue(part.value)
       },
       async cancel(reason) {
+        // released 必须先于任何 await 置位：在途 pull() 恢复时不得再触碰已关闭的 controller。
+        released = true
         // user abort、outer timeout 和 stream consumer cancel 都必须停止同一个 deadline。
         // cancel 不创建新的错误；调用方传入的 reason 仍由既有 cancellation/error mapping 处理。
         stop()

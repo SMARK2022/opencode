@@ -30,6 +30,9 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
 
   const reader = res.body.getReader()
+  // 与 provider.ts wrap() 同一竞态：cancel 后 controller 已关闭，迟到的 chunk/EOF 再写入会抛
+  // write-after-close TypeError（生产实证：daemon 曾因同类 rejection 自杀）。released 封闭该窗口。
+  let released = false
   const body = new ReadableStream<Uint8Array>({
     async pull(ctrl) {
       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
@@ -52,7 +55,9 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
         )
       })
 
+      if (released) return
       if (part.done) {
+        released = true
         ctrl.close()
         return
       }
@@ -60,6 +65,8 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
       ctrl.enqueue(part.value)
     },
     async cancel(reason) {
+      // released 必须先于任何 await 置位：在途 pull() 恢复时不得再触碰已关闭的 controller。
+      released = true
       ctl.abort(reason)
       await reader.cancel(reason)
     },
