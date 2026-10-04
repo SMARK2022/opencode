@@ -24,7 +24,7 @@ const MIN_CHARS_PER_TOKEN = 2
 // #194：clamp 上下界与 TUI accounting 同口径，保证 daemon 与展示端估算一致
 const MAX_CHARS_PER_TOKEN = 8
 // #194：学习窗口限 100k 字符，避免超长历史拖慢估算且让最近密度主导
-const INPUT_CHARS_HISTORY_LIMIT = 100_000
+export const INPUT_CHARS_HISTORY_LIMIT = 100_000
 
 type HistoryModel = { providerID?: string; id?: string; modelID?: string }
 type HistoryMessage = { info?: { role: string; providerID?: string; modelID?: string }; role?: string; providerID?: string; modelID?: string; parts: ReadonlyArray<HistoryPart> }
@@ -87,7 +87,7 @@ function sameModel(message: HistoryMessage, model: HistoryModel | undefined) {
 }
 
 // #194：inputRatioSample 只取 step-finish 消息的输入样本，其他消息类型不参与密度学习
-function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
+export function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
   // #194：仅 step-finish 消息携带确认过的 input 字符/token，是密度学习的可信来源
   if (part.type !== "step-finish") return undefined
   const chars = part.inputChars

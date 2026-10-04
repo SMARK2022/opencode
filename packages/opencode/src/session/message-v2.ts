@@ -5,6 +5,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 // 显式 re-export 让命名空间自导出携带这两个类型（SessionV1 为唯一来源）
 export type { WithParts, Part, User, Assistant, ToolPart } from "@opencode-ai/core/v1/session"
 import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
+import { TokenEstimate } from "@/token/estimate"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import {
   APIError,
@@ -1253,6 +1254,80 @@ export function parts(messageID: MessageID, options?: { includeHidden?: boolean 
     return yield* Database.withSync({ db, sync }, () => ColdStorage.inspectPartRows(sync, rows).map(partFromRestored))
   })
 }
+
+// 输入估算只恢复参与学习的统计样本，不能经完整历史接口加载工具正文。
+export const inputEstimateHistory = Effect.fn("MessageV2.inputEstimateHistory")(function* (input: {
+  sessionID: SessionID
+  messageID: MessageID
+  model: Pick<Provider.Model, "providerID" | "id">
+}) {
+  const database = yield* Database.Service
+  // 定位、水位与样本共用只读快照，读取不修改 cold_ref、正文或时间戳。
+  return yield* Database.withSync(database, sync => sync.transaction(tx => {
+    const selected = new Map<MessageID, {
+      info: Pick<Assistant, "id" | "time" | "role" | "providerID" | "modelID" | "tokens" | "inputEstimate">
+      parts: Part[]
+    }>()
+    const collect = (modelOnly: boolean) => {
+      let chars = 0
+      let before: Cursor | undefined
+      while (chars < TokenEstimate.INPUT_CHARS_HISTORY_LIMIT) {
+        // 定位也按需读取；不能先加载全会话元数据，再在内存中挑最近样本。
+        const row = tx.select({ id: MessageTable.id, time: MessageTable.time_created, data: MessageTable.data }).from(MessageTable)
+          .where(and(eq(MessageTable.session_id, input.sessionID),
+            sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+            sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+            before ? older(before) : undefined,
+            modelOnly ? sql`json_extract(${MessageTable.data}, '$.providerID') = ${input.model.providerID} and json_extract(${MessageTable.data}, '$.modelID') = ${input.model.id}` : undefined,
+            // 旧确认 carrier 与有用的 step 都保留；零 usage、隐藏和纯正文不触发解压。
+            sql`(json_extract(${MessageTable.data}, '$.inputEstimate.confirmed') = 1 or exists (
+              select 1 from ${PartTable} where ${PartTable.message_id} = ${MessageTable.id}
+              and ${PartTable.session_id} = ${input.sessionID}
+              and json_type(${PartTable.data}, '$.hidden') is null
+              and json_extract(${PartTable.data}, '$.type') = 'step-finish'
+              and coalesce(json_extract(${PartTable.data}, '$.tokens.input'), 0)
+                + coalesce(json_extract(${PartTable.data}, '$.tokens.cache.read'), 0)
+                + coalesce(json_extract(${PartTable.data}, '$.tokens.cache.write'), 0) > 0
+              and (${PartTable.cold_ref} is not null or json_extract(${PartTable.data}, '$.inputChars') is not null)
+            ))`))
+          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(1).get()
+        if (!row) break
+        before = { id: row.id, time: row.time }
+        if (row.data.role !== "assistant") continue
+        // StepFinish 的输入明细也可能在冷层；只为实际候选恢复统计，不回填历史。
+        const message = selected.get(row.id) ?? {
+          info: { id: row.id, time: { created: row.time }, role: row.data.role, providerID: row.data.providerID, modelID: row.data.modelID,
+            tokens: row.data.tokens, inputEstimate: row.data.inputEstimate },
+          parts: ColdStorage.inspectPartRows(tx, tx.select().from(PartTable)
+            .where(and(eq(PartTable.message_id, row.id), eq(PartTable.session_id, input.sessionID),
+              sql`json_type(${PartTable.data}, '$.hidden') is null`,
+              sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
+            .orderBy(PartTable.id).all()).map(partFromRestored),
+        }
+        selected.set(row.id, message)
+        // 与学习器按完整消息累计到相同字符预算，不能任意截成最近若干条。
+        for (const part of message.parts) {
+          const sample = TokenEstimate.inputRatioSample(part)
+          if (!sample) continue
+          chars += sample.chars
+        }
+      }
+    }
+    // 同模型优先、会话样本回退沿用原算法；第二次选择复用已恢复的统计。
+    const history = () => [...selected.values()].sort((a, b) => compareChronology(a.info, b.info))
+    collect(true)
+    if (!TokenEstimate.learnInputCharsPerToken({ messages: history(), model: input.model })) collect(false)
+    // 水位仍取当前消息最后一个可见 Part，不能用最后一条统计代替。
+    const last = tx.select({ id: PartTable.id }).from(PartTable)
+      .where(and(eq(PartTable.session_id, input.sessionID), eq(PartTable.message_id, input.messageID),
+        sql`json_type(${PartTable.data}, '$.hidden') is null`))
+      .orderBy(desc(PartTable.id)).limit(1).get()
+    return {
+      history: history(),
+      afterPartID: last?.id,
+    }
+  }, { behavior: "deferred" }))
+})
 
 // #493：usage 只需要 step-finish 热字段；专用 SQL 防止统计同 message 时 thaw tool/reasoning/file payload。
 // discriminator 在 SQL 与 TS 双重确认，外部损坏 JSON 不会被静默当成 StepFinishPart。

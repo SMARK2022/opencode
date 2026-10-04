@@ -1099,7 +1099,10 @@ const layer = Layer.effect(
             ctx.hasToolCall = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
-              const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
+              const metadata = yield* MessageV2.inputEstimateHistory({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, model: ctx.model }).pipe(
+                Effect.provideService(Database.Service, database),
+              )
+              const history = metadata.history
               const samples = history.toReversed().flatMap((message) => {
                 const info = message.info
                 // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
@@ -1125,7 +1128,7 @@ const layer = Layer.effect(
                 charsPerToken,
                 contextLimit: ctx.model.limit.context,
                 // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
-                afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,
+                afterPartID: metadata.afterPartID,
               }
               // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
               // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。

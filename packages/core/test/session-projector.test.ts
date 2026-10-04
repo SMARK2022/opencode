@@ -24,6 +24,9 @@ import { SessionInput } from "@opencode-ai/core/session/input"
 import { ColdStorageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { searchCondition } from "@opencode-ai/core/session/search"
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { ColdCodec } from "@opencode-ai/core/storage/cold-codec"
+import { ColdStore } from "@opencode-ai/core/storage/cold-store"
+import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { RequestUsageTable, RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -62,6 +65,47 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  previewIt.effect("revalidates Native freeze snapshots before commit and keeps viewing read-only", () => Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const ids = ["msg_native_prepare_a", "msg_native_prepare_b"].map(id => SessionMessage.ID.make(id))
+    const body = [{ type: "reasoning" as const, id: "reason", text: "Native snapshot before encoding" }]
+    yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+    yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: sessionID, directory: "/project", title: "freeze snapshot", version: "test", time_updated: 0 }).run()
+    yield* db.insert(SessionMessageTable).values(ids.map((id, index) => ({ ...assistantRow(id, index + 1), data: { ...assistantRow(id, index + 1).data, content: body } }))).run()
+    const encode = (batch: ReturnType<typeof ColdStore.maintenance.prepareFreezeBatch>) => batch.chunks.map(chunk => {
+      const pack = ColdCodec.packEnvelope(chunk.owner, chunk.items.map(item => item.entry))
+      return { hash: pack.hash, raw: pack.raw, payload: ColdCodec.compress(pack.raw), slots: [...pack.keys].map(([key, slot]) => [key, slot.toString("hex")] as const) }
+    })
+    yield* Database.withSync({ db, sync: db.sync }, sync => {
+      const request = { sessionID, olderThanMs: 0, batchSize: 10 }
+      const cursor = { owner: "session_message" as const, lastID: "" }
+      const first = ColdStore.maintenance.prepareFreezeBatch(sync, request, cursor)
+      const packs = encode(first)
+      const row = sync.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, ids[1])).get()
+      if (!row) throw new Error("Native snapshot fixture is missing")
+      // 同毫秒更新不能只比时间戳；整块失效时不能复活旧正文或留下新孤立包。
+      const changed = { ...row.data, content: [{ type: "reasoning" as const, id: "reason", text: "Changed while encoding" }] }
+      sync.update(SessionMessageTable).set({ data: changed, time_updated: row.time_updated }).where(eq(SessionMessageTable.id, row.id)).run()
+      expect(ColdStore.maintenance.commitFreezeBatch(sync, first, packs)).toMatchObject({ processed: 2, skipped: 2 })
+      expect(sync.select().from(ColdStorageTable).all()).toEqual([])
+      expect(sync.select().from(SessionMessageTable).all().every(item => item.cold_ref === null)).toBe(true)
+      const second = ColdStore.maintenance.prepareFreezeBatch(sync, request, cursor)
+      expect(ColdStore.maintenance.commitFreezeBatch(sync, second, encode(second))).toMatchObject({ processed: 2, skipped: 0 })
+      const cold = sync.select().from(SessionMessageTable).orderBy(SessionMessageTable.seq).all()
+      expect(cold.every(item => item.cold_key?.byteLength === 4)).toBe(true)
+      const full = ColdStorage.inspectSessionMessageRows(sync, cold)
+      expect(full[0]?.data).toMatchObject({ content: body })
+      expect(full[1]?.data).toMatchObject({ content: [{ type: "reasoning", id: "reason", text: "Changed while encoding" }] })
+      // 普通查看只恢复内存；引用、slot与原seq在真实行中保持完全不变。
+      expect(sync.select().from(SessionMessageTable).orderBy(SessionMessageTable.seq).all()).toEqual(cold)
+      expect(ColdStorage.verify(sync, { repair: false })).toMatchObject({ corruptOwners: 0, corruptPayloads: 0, refCountMismatches: 0 })
+    })
+    const cold = yield* db.select().from(SessionMessageTable).orderBy(SessionMessageTable.seq).all()
+    yield* ColdStorage.readSessionMessageRows(db, cold.slice(0, 1), "execution")
+    expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, ids[0])).get())?.cold_ref).toBeNull()
+    expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, ids[1])).get())?.cold_ref).toBe(cold[1]?.cold_ref)
+    expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(1)
+  }))
   listingIt.effect("intersects Native list tokens across real titles and admitted user messages", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
@@ -147,7 +191,7 @@ describe("SessionProjector", () => {
           // 同一override只强制root年龄，不能把尚不足24h的child误冻。
           expect(ColdStorage.isEligibleOwner(sync, { ...input, olderThanMs: 0 })).toBe(entry.child ? entry.eligible : true)
         }
-        expect(ColdStorage.parseMaintenanceRequest({ operation: "compress" })).toMatchObject({ olderThanMs: 7 * day })
+        expect(ColdMaintain.parseMaintenanceRequest({ operation: "compress" })).toMatchObject({ olderThanMs: 7 * day })
       })
       // 同一活跃reviewer子会话中，真实请求身份仅允许完成且无open工具的尝试提前归档。
       const reviewer = SessionV2.ID.make("ses_native_review_completed")
@@ -199,15 +243,15 @@ describe("SessionProjector", () => {
       const { id, type, ...data } = encodeMessage(SessionMessage.Compaction.make({ id: SessionMessage.ID.make("msg_compaction"),
         type: "compaction", reason: "manual", summary: "summary", recent: "recent", time: { created } }))
       yield* db.insert(SessionMessageTable).values({ id: SessionMessage.ID.make(id), type, data, session_id: sessionID, seq: 3, time_created: 0 }).run()
-      const runtime = { lease: { assertOwned() {} }, checkpoint: async (_task: ColdStorage.MaintenanceTask) => {},
+      const runtime = { lease: { assertOwned() {} }, checkpoint: async (_task: ColdMaintain.MaintenanceTask) => {},
         run: <A>(body: () => A) => Effect.runPromise(Database.withSync({ db, sync: db.sync }, body)) }
-      const compressed = yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
+      const compressed = yield* Effect.promise(() => ColdMaintain.maintain(db.sync, ColdMaintain.prepareMaintenance({
         operation: "compress", sessionID, olderThanMs: 30 * 24 * 60 * 60 * 1000, batchSize: 1,
       }), runtime))
-      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 4, skipped: 2,
+      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 3, skipped: 2,
         cursor: { stage: "payload" } } })
       if (compressed.type !== "task") return yield* Effect.die("Missing maintenance task")
-      expect(ColdStorage.parseMaintenanceTask(compressed.task)).toEqual(compressed.task)
+      expect(ColdMaintain.parseMaintenanceTask(compressed.task)).toEqual(compressed.task)
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_ref).toBeTruthy()
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_key?.byteLength).toBe(4)
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, tailID)).get())?.cold_ref).toBeNull()
@@ -215,7 +259,7 @@ describe("SessionProjector", () => {
       // 强制老化只用于此精确owner；隐藏消息即使已冷也不能因普通history读取被预热。
       yield* Database.withSync({ db, sync: db.sync }, sync => {
         expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: hiddenID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
-        expect(ColdStorage.status(sync).coldOwners).toBe(2)
+        expect(ColdMaintain.status(sync).coldOwners).toBe(2)
         expect(ColdStorage.verify(sync, { repair: false })).toMatchObject({ checkedOwners: 2, missingPayloads: 0, corruptPayloads: 0, refCountMismatches: 0 })
       })
       const history = yield* SessionHistory.load(db, sessionID)
@@ -234,7 +278,7 @@ describe("SessionProjector", () => {
       yield* Database.withSync({ db, sync: db.sync }, sync => {
         const owners = sync.select().from(SessionMessageTable).all()
         const payloads = sync.select().from(ColdStorageTable).all()
-        const report = ColdStorage.status(sync)
+        const report = ColdMaintain.status(sync)
         expect(Object.keys(report)).toHaveLength(17)
         expect(report).toMatchObject({
           targetBytes: 1_500_000_000, eligibleOwners: 0, coldOwners: 2, payloads: 1,
@@ -246,7 +290,7 @@ describe("SessionProjector", () => {
         expect(report.pageCount).toBeGreaterThan(0)
         expect(report.freelistPages).toBeGreaterThanOrEqual(0)
         expect(report.activeBytes).toBe((report.pageCount - report.freelistPages) * report.pageSize)
-        expect(ColdStorage.status(sync)).toEqual(report)
+        expect(ColdMaintain.status(sync)).toEqual(report)
         expect(sync.select().from(SessionMessageTable).all()).toEqual(owners)
         expect(sync.select().from(ColdStorageTable).all()).toEqual(payloads)
       })
@@ -255,7 +299,7 @@ describe("SessionProjector", () => {
       expect((yield* db.select().from(SessionMessageTable).all()).filter(row => row.cold_ref !== null)).toEqual(cold)
       expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(2)
       yield* db.update(ColdStorageTable).set({ payload: payload.payload }).where(eq(ColdStorageTable.hash, payload.hash)).run()
-      const expanded = yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
+      const expanded = yield* Effect.promise(() => ColdMaintain.maintain(db.sync, ColdMaintain.prepareMaintenance({
         operation: "expand", sessionID, all: false, batchSize: 1,
       }), runtime))
       expect(expanded).toMatchObject({ type: "task", task: { status: "completed", processed: 2 } })
@@ -282,7 +326,7 @@ describe("SessionProjector", () => {
       if (!packPayload) return yield* Effect.die("Missing multi-key Native pack")
       // 两个不同entry已包含在一包中；独立期望来自真实metadata，不复制F4公式。
       yield* Database.withSync({ db, sync: db.sync }, sync => {
-        expect(ColdStorage.status(sync)).toMatchObject({ rawBytes: packPayload.raw_bytes, compressedBytes: packPayload.compressed_bytes, sharedBytes: 0 })
+        expect(ColdMaintain.status(sync)).toMatchObject({ rawBytes: packPayload.raw_bytes, compressedBytes: packPayload.compressed_bytes, sharedBytes: 0 })
       })
       // 同一内存DB同时承载Native冷pack和历史热Tool，修复只经真实显式维护入口。
       const events = yield* EventV2.Service
@@ -308,13 +352,13 @@ describe("SessionProjector", () => {
       // 只读报告不吞损坏；坏行保持原样，默认status仍明确失败。
       yield* Database.withSync({ db, sync: db.sync }, sync => {
         expect(ColdStorage.verify(sync, { repair: false }).toolInputFixed).toBe(0)
-        expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
+        expect(() => ColdMaintain.status(sync)).toThrow("Stored tool input is invalid")
         expect(sync.select().from(PartTable).where(eq(PartTable.message_id, legacyID)).orderBy(PartTable.id).all()).toEqual(hotBefore)
       })
-      const prepared = ColdStorage.prepareMaintenance(ColdStorage.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
+      const prepared = ColdMaintain.prepareMaintenance(ColdMaintain.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
       if (prepared.type !== "task") return yield* Effect.die("Missing explicit input repair task")
-      expect(ColdStorage.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
-      expect(yield* Effect.promise(() => ColdStorage.maintain(db.sync, prepared, runtime))).toMatchObject({ type: "task", task: { status: "completed" } })
+      expect(ColdMaintain.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
+      expect(yield* Effect.promise(() => ColdMaintain.maintain(db.sync, prepared, runtime))).toMatchObject({ type: "task", task: { status: "completed" } })
       const fixed = yield* db.select().from(PartTable).where(eq(PartTable.message_id, legacyID)).orderBy(PartTable.id).all()
       expect(fixed.map(row => row.data.type === "tool" ? row.data.state.input : undefined)).toEqual([{}, { command: "ls" }, {}])
       expect(fixed.map(row => row.time_updated)).toEqual([1, 1, 1])
@@ -334,7 +378,7 @@ describe("SessionProjector", () => {
       expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()).toEqual(broken)
       expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(2)
       yield* db.update(SessionMessageTable).set({ cold_key: key, time_updated: bad.time_updated }).where(eq(SessionMessageTable.id, hiddenID)).run()
-      expect(yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
+      expect(yield* Effect.promise(() => ColdMaintain.maintain(db.sync, ColdMaintain.prepareMaintenance({
         operation: "expand", sessionID, all: false, batchSize: 1,
       }), runtime))).toMatchObject({ type: "task", task: { status: "completed", processed: 2 } })
       // 全行比较同时锁定seq、时间、正文及ref/key/stats清理，不靠删断言掩盖格式差异。

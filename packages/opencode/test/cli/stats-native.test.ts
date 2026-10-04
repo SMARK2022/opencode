@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm"
 import { DateTime, Effect } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { extractSessionMessageCore } from "@opencode-ai/core/storage/cold-codec"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -69,13 +70,19 @@ it.effect("stats counts native and mixed transcripts without duplicate projectio
     // 三种持久表示须生成同一完整报表；统计不得回热owner、交换引用或补写账本。
     const stored = Effect.all([database.db.select().from(SessionMessageTable).all(), database.db.select().from(ColdStorageTable).all(),
       database.db.select().from(RequestUsageTable).all(), database.db.select().from(RequestUsageAssistantTable).all()])
-    yield* Database.withSync(database, sync => {
+    const legacyFields = yield* Database.withSync(database, sync => {
+      // 旧格式夹具复用真实writer字段，不能依赖当前v3包的tuple排布。
+      const hot = sync.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
+      if (!hot) throw new Error("Native hot fixture is missing")
+      const extracted = extractSessionMessageCore(hot, false)
       expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+      return extracted?.fields
     })
     const packed = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
     if (!packed?.cold_ref) return yield* Effect.die("Native packed fixture is missing")
     const packedRef = packed.cold_ref
-    expect(packed.cold_key).toHaveLength(32)
+    // 四字节slot归属包内寻址，摘要仍由真实codec用于去重。
+    expect(packed.cold_key).toHaveLength(4)
     expect(packed.cold_stats?.tools["0"]).toEqual({ inputChars: 2, outputChars: 4 })
     const archive = yield* database.db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, packedRef)).get()
     if (!archive) return yield* Effect.die("Native pack payload is missing")
@@ -86,12 +93,9 @@ it.effect("stats counts native and mixed transcripts without duplicate projectio
     expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
     expect(yield* stored).toEqual(packedBefore)
     yield* database.db.update(ColdStorageTable).set({ payload: archive.payload }).where(eq(ColdStorageTable.hash, packedRef)).run()
-    // 从真实writer生成的fields建立旧版envelope夹具，不在测试重写字段抽取规则。
-    const frame: unknown = JSON.parse(Buffer.from(Bun.zstdDecompressSync(archive.payload)).toString("utf8"))
-    if (!frame || typeof frame !== "object" || !("entries" in frame) || !Array.isArray(frame.entries)) return yield* Effect.die("Native pack entries are missing")
-    const entry: unknown = frame.entries[0]
-    if (!entry || typeof entry !== "object" || !("fields" in entry)) return yield* Effect.die("Native pack fields are missing")
-    const raw = Buffer.from(JSON.stringify({ fields: entry.fields, owner: "session_message", version: 1 }))
+    // 字段提取在冻结前完成，完整旧envelope仍通过正式读取和升级路径。
+    if (!legacyFields) return yield* Effect.die("Native pack fields are missing")
+    const raw = Buffer.from(JSON.stringify({ fields: legacyFields, owner: "session_message", version: 1 }))
     const payload = Buffer.from(Bun.zstdCompressSync(raw))
     const hash = createHash("sha256").update("session_message").update(Buffer.from([0])).update(raw).digest("hex")
     yield* Database.withSync(database, sync => sync.transaction(tx => {

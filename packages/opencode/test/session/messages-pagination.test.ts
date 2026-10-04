@@ -4,6 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 // #493：冷扫描不变量直测——findHot/tail 不预热、limit-0 有界空范围、hidden 跳过。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { Database } from "@opencode-ai/core/database/database"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
@@ -16,12 +17,13 @@ import { NotFoundError } from "@/storage/storage"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { TokenEstimate } from "@/token/estimate"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
 
-// #509：测试进程共享 preload SQLite；ColdStorage.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
+// #509：测试进程共享 preload SQLite；ColdMaintain.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
 // 只统计本 session 的 cold_ref owner，才能在同进程多 suite 下稳定断言 thaw 副作用。
-function sessionColdOwners(sync: Parameters<typeof ColdStorage.status>[0], sessionID: SessionID) {
+function sessionColdOwners(sync: Parameters<typeof ColdMaintain.status>[0], sessionID: SessionID) {
   return (
     sync
       .select({ cold_ref: MessageTable.cold_ref })
@@ -154,6 +156,39 @@ const addCompactionPart = Effect.fn("Test.addCompactionPart")(function* (
     auto: true,
     tail_start_id: tailStartID,
   } as any)
+})
+
+describe("MessageV2.inputEstimateHistory", () => {
+  it.instance("reads input estimate statistics separately from cold conversation bodies", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const userID = yield* addUser(sessionID)
+        const assistantID = yield* addAssistant(sessionID, userID)
+        const stepID = PartID.ascending()
+        const tokens = { input: 30000, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }
+        yield* session.updatePart({ id: stepID, sessionID, messageID: assistantID, type: "step-finish", reason: "stop", cost: 0, tokens, inputChars: 120000 })
+        yield* session.updatePart({ id: PartID.ascending(), sessionID, messageID: assistantID, type: "step-finish", reason: "stop", cost: 0, tokens, inputChars: 900000, hidden: { time: Date.now(), reason: "undo" } })
+        const latestID = PartID.ascending()
+        yield* session.updatePart({ id: latestID, sessionID, messageID: assistantID, type: "text", text: "current response" })
+        const coldID = PartID.ascending()
+        yield* session.updatePart({ id: coldID, sessionID, messageID: userID, type: "reasoning", text: "cold-body-".repeat(512), time: { start: 1, end: 2 } })
+        // 统计本身也可在冷层；按需恢复不能预热正文或改写 owner，同时保留当前 Part 水位。
+        yield* Database.withSync(database, sync => {
+          sync.update(SessionTable).set({ time_updated: Date.now() - 31 * 86400000 }).where(eq(SessionTable.id, sessionID)).run()
+          expect(ColdStorage.freezeOwner(sync, { type: "part", id: coldID, now: Date.now() }).type).toBe("frozen")
+          expect(ColdStorage.freezeOwner(sync, { type: "part", id: stepID, now: Date.now() }).type).toBe("frozen")
+        })
+        const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
+        expect(result.history.map(message => [message.info.id, message.parts.map(part => part.id)])).toEqual([[assistantID, [stepID]]])
+        expect(result.afterPartID).toBe(latestID)
+        expect(TokenEstimate.learnInputCharsPerToken({ messages: result.history, model: { providerID: "test", id: "test" } })).toEqual({ charsPerToken: 4, source: "model-history" })
+        const fallback = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("other") } })
+        expect(TokenEstimate.learnInputCharsPerToken({ messages: fallback.history, model: { providerID: "test", id: "other" } })).toEqual({ charsPerToken: 4, source: "session-history" })
+        expect(sessionColdOwners(database.sync, sessionID)).toBe(2)
+      }),
+    ),
+  )
 })
 
 describe("MessageV2.page", () => {
@@ -795,7 +830,7 @@ describe("Session.findMessage", () => {
         expect(Option.isNone(none)).toBe(true)
         // #509：无匹配扫描不得 thaw；session 级 cold 计数仍为 1。顺带调用 status() 确保 freeze 后 payload 元数据健康。
         expect(sessionColdOwners(sync, sessionID)).toBe(1)
-        expect(ColdStorage.status(sync).coldOwners).toBeGreaterThanOrEqual(1)
+        expect(ColdMaintain.status(sync).coldOwners).toBeGreaterThanOrEqual(1)
         const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
         expect(Option.isSome(match)).toBe(true)
         const matchedPart = Option.isSome(match) ? match.value.parts.find((part) => part.id === partID) : undefined

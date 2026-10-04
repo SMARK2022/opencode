@@ -11,7 +11,7 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import type { SessionV1 } from "@opencode-ai/core/v1/session"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
 import { ColdStorageTable, MessageTable, PartTable, SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
-import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { Session } from "../../src/session/session"
@@ -156,7 +156,7 @@ it.effect("stats merges mixed history after noReply without double counting ledg
       { projectFilter: projectID, sourceFilter: "command", agentFilter: "ledger-agent", statusFilter: "completed" },
       { projectFilter: projectID, agentFilter: "native-agent" }, { projectFilter: projectID, toolFilter: "native-tool" }]
     const hot = yield* Effect.forEach(filters, filter => aggregateStats(filter))
-    yield* Effect.promise(() => ColdStorage.maintain(database.db.sync, ColdStorage.prepareMaintenance({
+    yield* Effect.promise(() => ColdMaintain.maintain(database.db.sync, ColdMaintain.prepareMaintenance({
       operation: "compress", sessionID, olderThanMs: 0, batchSize: 2,
     }), { lease: { assertOwned() {} }, checkpoint: async () => {},
       run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)) }))
