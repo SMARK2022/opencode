@@ -5,6 +5,7 @@ import path from "path"
 
 import { disposeAllInstances, tmpdir, withTestInstance } from "../fixture/fixture"
 import { Global } from "@opencode-ai/core/global"
+import { Log } from "@opencode-ai/core/util/log"
 import type { InstanceContext } from "../../src/project/instance-context"
 import { Plugin } from "../../src/plugin/index"
 import { ModelsDev } from "@opencode-ai/core/models"
@@ -2985,7 +2986,7 @@ test("invalidateAll 后 getLanguage 仍能正常重建缓存", async () => {
 // shutdown（5 个 TUI + 9 个活跃 session 被拖死）。
 // seam 选择：plugin loader 注入 fetch（沿本文件 provider-timeout-policy 先例），响应 body
 // 经生产 fetch 包装的真实 deadline.wrap（provider.ts），不引入任何 test-only 生产导出。
-test("SSE wrap: cancel during in-flight pull does not write to a closed controller", async () => {
+test.each(["dev", "timestamp", "stderr"])("SSE wrap: in-flight cancel with prior %s logging", async (mode) => {
   const encoder = new TextEncoder()
   const controllersKey = Symbol.for("opencode.test.sse-race-controllers")
   const chunk =
@@ -3055,8 +3056,13 @@ test("SSE wrap: cancel during in-flight pull does not write to a closed controll
           "race-b": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
         }),
       )
-      const logfile = path.join(Global.Path.log, "dev.log")
-      const baseline = await Bun.file(logfile).text().catch(() => "")
+      // 先保留旧 dev.log 再切换真实前序状态，锁定“读错目标”而非文件缺失的 CI 回归。
+      await Log.init({ print: false, dev: true, level: "DEBUG" })
+      await Log.init({ print: mode === "stderr", dev: mode === "dev" })
+      // logger 是进程级状态；等待本用例的文件 writer 初始化，再读取实际目标和基线。
+      await Log.init({ print: false, dev: true, level: "DEBUG" })
+      const logfile = Log.file()
+      const baseline = await Bun.file(logfile).text()
       const g = globalThis as unknown as Record<PropertyKey, ReadableStreamDefaultController<Uint8Array>[] | undefined>
 
       // 判别点不用 unhandledRejection spy：探针实证 Bun 在该管道拓扑下会吞掉 pull 的 rejection，
@@ -3086,7 +3092,10 @@ test("SSE wrap: cancel during in-flight pull does not write to a closed controll
           return
         }
         body.close()
-        await reader.read().catch(() => undefined)
+        // 控制组消费到真正 EOF；中间事件不代表结束，读取错误也不能被吞掉。
+        for (;;) {
+          if ((await reader.read()).done) break
+        }
       }
 
       // cancelled 组先行：buggy 写入若存在，必排在控制组之前进入日志 FIFO；
@@ -3095,13 +3104,14 @@ test("SSE wrap: cancel during in-flight pull does not write to a closed controll
       await race("race-b", false)
       const deadline = Date.now() + 10_000
       let delta = ""
-      while (Date.now() < deadline) {
-        delta = (await Bun.file(logfile).text()).slice(baseline.length)
-        if (delta.includes("sse.end") && delta.includes("providerID=race-b")) break
-        await Bun.sleep(25)
-      }
       const ended = (id: string) =>
         delta.split("\n").filter((line) => line.includes("sse.end") && line.includes(`providerID=${id}`))
+      while (Date.now() < deadline) {
+        delta = (await Bun.file(logfile).text()).slice(baseline.length)
+        // 就绪信号必须来自同一条控制组 EOF，不能拼接取消组 EOF 与控制组的其他事件。
+        if (ended("race-b").length > 0) break
+        await Bun.sleep(25)
+      }
       // 控制组必须可见，证明遥测可观测、下面的空断言不是恒真。
       expect(ended("race-b")).not.toEqual([])
       expect(ended("race-a")).toEqual([])
