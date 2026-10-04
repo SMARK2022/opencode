@@ -20,6 +20,7 @@ import { GlobalBus } from "@/bus/global"
 import { DisposedReason, Event as ServerEvent } from "@/server/event"
 import { win32DetachConsole } from "./win32"
 import { ColdStorage } from "@/storage/cold"
+import { ColdMaintain } from "@/storage/cold-maintain"
 
 ensureProcessMetadata("worker")
 NetworkProxy.installGlobalFetch()
@@ -124,8 +125,8 @@ function maintenanceError(error: unknown) {
 // task promise 只在 terminal/interrupted checkpoint 后释放 lease 和 active 标记，daemon 不会提前退出。
 // shutdown race 通过 maintenanceShutdownRequested 立即 abort 刚创建的 controller，避免恢复窗口漏掉停止信号。
 async function runMaintenance(
-  prepared: ColdStorage.PreparedMaintenance,
-  existing?: ColdStorage.MaintenanceTask,
+  prepared: ColdMaintain.PreparedMaintenance,
+  existing?: ColdMaintain.MaintenanceTask,
   acquired?: ServerLock.MaintenanceLease,
 ) {
   if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Expected task-backed maintenance" })
@@ -134,7 +135,7 @@ async function runMaintenance(
   const controller = new AbortController()
   const promise = (async () => {
     try {
-      await ColdStorage.maintain(prepared, {
+      await ColdMaintain.maintain(prepared, {
         task,
         lease,
         signal: controller.signal,
@@ -169,8 +170,8 @@ async function startMaintenance(input: unknown) {
 }
 // body 只在 pending 已发布后运行，因此其首个 await 不会向 conditional shutdown 暴露假 idle 窗口。
 async function startMaintenanceBody(input: unknown) {
-  const request = ColdStorage.parseMaintenanceRequest(input)
-  const prepared = ColdStorage.prepareMaintenance(request)
+  const request = ColdMaintain.parseMaintenanceRequest(input)
+  const prepared = ColdMaintain.prepareMaintenance(request)
   if (prepared.type === "immediate") {
     if (request.operation === "vacuum") {
       // interrupted task 虽不持有 live lease，仍是待恢复的 nonterminal 工作；vacuum 不得绕过它重排数据库页面。
@@ -180,12 +181,12 @@ async function startMaintenanceBody(input: unknown) {
       const pseudo = { taskID: `vacuum_${crypto.randomUUID()}`, dbPath: Database.getPath() }
       const lease = await ServerLock.acquireMaintenanceLease(pseudo)
       try {
-        return await ColdStorage.maintain(prepared, { lease, checkpoint: async () => {} })
+        return await ColdMaintain.maintain(prepared, { lease, checkpoint: async () => {} })
       } finally {
         await lease.release()
       }
     }
-    return ColdStorage.maintain(prepared)
+    return ColdMaintain.maintain(prepared)
   }
   const existing = await ServerLock.findNonterminalMaintenanceTask()
   if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
@@ -216,7 +217,7 @@ async function resumeMaintenanceBody(taskID: string) {
   if (!task) return { status: 404 as const, body: { error: `Maintenance task not found: ${taskID}` } }
   if (task.status !== "interrupted") return { status: 409 as const, body: { error: `Maintenance task is ${task.status}` } }
   if (activeMaintenance) throw new ServerLock.MaintenanceBusyError()
-  const prepared = ColdStorage.prepareMaintenance(task.args)
+  const prepared = ColdMaintain.prepareMaintenance(task.args)
   if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
   await runMaintenance(prepared, task)
   return { status: 202 as const, body: { taskID: task.taskID, operation: task.operation, status: "running" } }
@@ -243,7 +244,7 @@ function maintenanceTaskID(input: unknown) {
 async function recoverInterruptedMaintenance() {
   const task = await ServerLock.findNonterminalMaintenanceTask()
   if (!task || task.status !== "interrupted") return
-  const prepared = ColdStorage.prepareMaintenance(task.args)
+  const prepared = ColdMaintain.prepareMaintenance(task.args)
   if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
   await runMaintenance(prepared, task)
 }

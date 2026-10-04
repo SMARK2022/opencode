@@ -5,7 +5,7 @@ import { randomUUID } from "crypto"
 import { Global } from "@opencode-ai/core/global"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { getPath as DatabasePath } from "@/storage/db"
-import { parseMaintenanceTask, type MaintenanceTask } from "@/storage/cold"
+import { parseMaintenanceTask, type MaintenanceTask } from "@/storage/cold-maintain"
 
 export type ServerLock = {
   pid: number

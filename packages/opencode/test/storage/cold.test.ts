@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { ColdStorage } from "@/storage/cold"
+import { ColdMaintain } from "@/storage/cold-maintain"
 import { Database } from "@/storage/db"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
@@ -35,14 +36,7 @@ const summaryLayer = SessionSummary.layer.pipe(
   Layer.provide(Storage.defaultLayer),
   Layer.provide(Bus.layer),
 )
-const it = testEffect(
-  Layer.mergeAll(
-    sessionLayer,
-    summaryLayer,
-    Storage.defaultLayer,
-    CrossSpawnSpawner.defaultLayer,
-  ),
-)
+const it = testEffect(Layer.mergeAll(sessionLayer, summaryLayer, Storage.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 class MirrorReadGate extends Context.Service<
   MirrorReadGate,
@@ -729,14 +723,14 @@ describe.serial("ColdStorage", () => {
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({ title: "tool input shape" })
       const partID = yield* seedMalformedToolPart(sessions, session, "{bad json")
-      expect(() => ColdStorage.status()).toThrow("Stored tool input is invalid")
+      expect(() => ColdMaintain.status()).toThrow("Stored tool input is invalid")
       const report = ColdStorage.verify({ repair: false, repairToolInput: true })
       expect(report.toolInputFixed).toBe(1)
       // 归一化结果是契约占位 {}：SDK 已判 invalid 的调用没有可重建参数，
       // 空对象保证 status()/compress 扫描可继续，同时不伪造任何执行参数。
       const row = Database.use((db) => db.select().from(PartTable).where(Database.eq(PartTable.id, partID)).get())
       expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({})
-      expect(() => ColdStorage.status()).not.toThrow()
+      expect(() => ColdMaintain.status()).not.toThrow()
       yield* sessions.remove(session.id)
     }),
   )
@@ -764,7 +758,7 @@ describe.serial("ColdStorage", () => {
       const partID = yield* seedMalformedToolPart(sessions, session, "{bad json")
       const report = ColdStorage.verify({ repair: false })
       expect(report.toolInputFixed).toBe(0)
-      expect(() => ColdStorage.status()).toThrow("Stored tool input is invalid")
+      expect(() => ColdMaintain.status()).toThrow("Stored tool input is invalid")
       yield* sessions.remove(session.id)
     }),
   )
@@ -961,7 +955,13 @@ describe.serial("ColdStorage", () => {
       const child = yield* sessions.fork({ sessionID: source.id, messageID: boundaryID })
       // 通过公开 messages 读取 child：验证前缀内容存在，而不是 raw row 数量。
       const messages = yield* sessions.messages({ sessionID: child.id })
-      expect(messages.some((message) => message.info.id !== boundaryID && message.parts.some((part) => part.type === "text" && part.text === "chronologically old"))).toBe(true)
+      expect(
+        messages.some(
+          (message) =>
+            message.info.id !== boundaryID &&
+            message.parts.some((part) => part.type === "text" && part.text === "chronologically old"),
+        ),
+      ).toBe(true)
       yield* sessions.remove(child.id)
       yield* sessions.remove(source.id)
     }),
@@ -1200,16 +1200,18 @@ describe.serial("ColdStorage", () => {
   // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
   // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
   // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。
-  it.instance("reports cold metadata without materializing payload bodies", () =>
-    Effect.gen(function* () {
-      const test = yield* TestInstance
-      // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
-      const bytes = 128 * 1024 * 1024
-      const dbPath = path.join(test.directory, "status-projection.db")
-      const script = `
+  it.instance(
+    "reports cold metadata without materializing payload bodies",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
+        const bytes = 128 * 1024 * 1024
+        const dbPath = path.join(test.directory, "status-projection.db")
+        const script = `
         process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
         const { Database } = await import(${JSON.stringify(new URL("../../src/storage/db.ts", import.meta.url).href)})
-        const { ColdStorage } = await import(${JSON.stringify(new URL("../../src/storage/cold.ts", import.meta.url).href)})
+        const { ColdMaintain } = await import(${JSON.stringify(new URL("../../src/storage/cold-maintain.ts", import.meta.url).href)})
         const hash = "a5".repeat(32)
         const bytes = ${bytes}
         // 大 BLOB 是可观察的读取门禁；报告仍只依赖其同行 metadata 与真实 owner count。
@@ -1225,35 +1227,35 @@ describe.serial("ColdStorage", () => {
         gate.close()
         // 缩小页缓存后，heap 差异只来自被查询列，不由默认 64 MiB cache 上限主导。
         Database.Client().$client.exec("PRAGMA cache_size = -512")
-        process.stdout.write(JSON.stringify(ColdStorage.status()))
+        process.stdout.write(JSON.stringify(ColdMaintain.status()))
       `
-      const result = yield* Effect.promise(async () => {
-        // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
-        // 隔离 heap 的子进程在 Windows 上隐藏 console，避免 status 投影验证弹窗。
-        const proc = Bun.spawn([process.execPath, "-e", script], {
-          cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
-          env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          windowsHide: process.platform === "win32",
+        const result = yield* Effect.promise(async () => {
+          // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
+          // 隔离 heap 的子进程在 Windows 上隐藏 console，避免 status 投影验证弹窗。
+          const proc = Bun.spawn([process.execPath, "-e", script], {
+            cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
+            env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            windowsHide: process.platform === "win32",
+          })
+          const [exitCode, stdout, stderr] = await Promise.all([
+            proc.exited,
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+          ])
+          return { exitCode, stdout, stderr }
         })
-        const [exitCode, stdout, stderr] = await Promise.all([
-          proc.exited,
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ])
-        return { exitCode, stdout, stderr }
-      })
-      // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
-      expect(result.exitCode, result.stderr).toBe(0)
-      expect(JSON.parse(result.stdout)).toMatchObject({
-        payloads: 1,
-        compressedBytes: bytes,
-        orphans: 1,
-        refCountMismatches: 0,
-      })
-    }),
+        // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
+        expect(result.exitCode, result.stderr).toBe(0)
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          payloads: 1,
+          compressedBytes: bytes,
+          orphans: 1,
+          refCountMismatches: 0,
+        })
+      }),
     30_000,
   )
 
@@ -1294,13 +1296,12 @@ describe.serial("ColdStorage", () => {
       )
       expect(ColdStorage.freezeOwner({ type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
       const beforeVerify = ColdStorage.verify({ repair: false }).refCountMismatches
-      const owner = Database.use(
-        (db) =>
-          db
-            .select({ hash: PartTable.cold_ref, key: PartTable.cold_key })
-            .from(PartTable)
-            .where(Database.eq(PartTable.id, partID))
-            .get(),
+      const owner = Database.use((db) =>
+        db
+          .select({ hash: PartTable.cold_ref, key: PartTable.cold_key })
+          .from(PartTable)
+          .where(Database.eq(PartTable.id, partID))
+          .get(),
       )
       if (!owner?.hash || !owner.key) throw new Error("Expected a packed cold owner for verify test")
       const hash = owner.hash
@@ -1313,12 +1314,16 @@ describe.serial("ColdStorage", () => {
 
       // 合法 frame 搭配不存在的随机 entry key，专门区分完整 owner verify 与旧 payload-only task。
       Database.use((db) =>
-        db.update(PartTable).set({ cold_key: Buffer.alloc(32, 0xa5) }).where(Database.eq(PartTable.id, partID)).run(),
+        db
+          .update(PartTable)
+          .set({ cold_key: Buffer.alloc(32, 0xa5) })
+          .where(Database.eq(PartTable.id, partID))
+          .run(),
       )
-      const verifyTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
+      const verifyTask = ColdMaintain.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
       if (verifyTask.type !== "task") throw new Error("Expected task-backed repair")
       const verified = yield* Effect.promise(() =>
-        ColdStorage.maintain(verifyTask, { lease: { assertOwned() {} }, checkpoint: async () => {} }),
+        ColdMaintain.maintain(verifyTask, { lease: { assertOwned() {} }, checkpoint: async () => {} }),
       )
       if (verified.type !== "task") throw new Error("Expected task result for repair")
       // repair 不可修 key；task 必须报告 corruption，不能因 payload hash 正常而 completed/failed=0。
@@ -1330,27 +1335,24 @@ describe.serial("ColdStorage", () => {
       const baselineOwners = ColdStorage.verify({ repair: false }).corruptOwners
       // dirty 没有 claimed cursor 是非法 Session 状态；repair 只能报告，不能猜测清 bit 或制造 cursor。
       Database.use((db) =>
-        db
-          .update(SessionTable)
-          .set({ summary_init_dirty: true })
-          .where(Database.eq(SessionTable.id, session.id))
-          .run(),
+        db.update(SessionTable).set({ summary_init_dirty: true }).where(Database.eq(SessionTable.id, session.id)).run(),
       )
-      const summaryTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
+      const summaryTask = ColdMaintain.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
       if (summaryTask.type !== "task") throw new Error("Expected task-backed summary repair")
       const summaryVerified = yield* Effect.promise(() =>
-        ColdStorage.maintain(summaryTask, { lease: { assertOwned() {} }, checkpoint: async () => {} }),
+        ColdMaintain.maintain(summaryTask, { lease: { assertOwned() {} }, checkpoint: async () => {} }),
       )
       if (summaryVerified.type !== "task") throw new Error("Expected task result for summary repair")
       expect(summaryVerified.task.failed).toBeGreaterThan(0)
       expect(ColdStorage.verify({ repair: false }).corruptOwners).toBe(baselineOwners + 1)
       expect(
-        Database.use((db) =>
-          db
-            .select({ dirty: SessionTable.summary_init_dirty })
-            .from(SessionTable)
-            .where(Database.eq(SessionTable.id, session.id))
-            .get()?.dirty,
+        Database.use(
+          (db) =>
+            db
+              .select({ dirty: SessionTable.summary_init_dirty })
+              .from(SessionTable)
+              .where(Database.eq(SessionTable.id, session.id))
+              .get()?.dirty,
         ),
       ).toBe(true)
       Database.use((db) =>
@@ -1367,8 +1369,8 @@ describe.serial("ColdStorage", () => {
       const restored = yield* sessions.getPart({ sessionID: session.id, messageID, partID })
       expect(restored?.type === "reasoning" ? restored.text : undefined).toBe("maintenance-reasoning-".repeat(512))
 
-      expect(ColdStorage.prepareMaintenance({ operation: "status" }).type).toBe("immediate")
-      const prepared = ColdStorage.prepareMaintenance({
+      expect(ColdMaintain.prepareMaintenance({ operation: "status" }).type).toBe("immediate")
+      const prepared = ColdMaintain.prepareMaintenance({
         operation: "compress",
         olderThanMs: 30 * 24 * 60 * 60 * 1000,
         batchSize: 50,
@@ -1377,16 +1379,30 @@ describe.serial("ColdStorage", () => {
       if (prepared.type !== "task") throw new Error("Expected task-backed maintenance")
       // task round-trip 证明持久 record 能通过白名单重建；字符串 counter 模拟可解析但不可信的外部文件。
       // 损坏 record 必须在 resume 前失败，不能靠 TypeScript cast 把 processed="1" 带进 cursor 累加。
-      expect(ColdStorage.parseMaintenanceTask(structuredClone(prepared.task))).toEqual(prepared.task)
-      expect(() => ColdStorage.parseMaintenanceTask({ ...prepared.task, processed: "1" })).toThrow()
-      expect(() => ColdStorage.parseMaintenanceTask({ ...prepared.task, taskID: "dbm_../../outside" })).toThrow()
+      expect(ColdMaintain.parseMaintenanceTask(structuredClone(prepared.task))).toEqual(prepared.task)
+      expect(() => ColdMaintain.parseMaintenanceTask({ ...prepared.task, processed: "1" })).toThrow()
+      expect(() => ColdMaintain.parseMaintenanceTask({ ...prepared.task, taskID: "dbm_../../outside" })).toThrow()
       expect(() =>
-        ColdStorage.parseMaintenanceTask({
+        ColdMaintain.parseMaintenanceTask({
           ...prepared.task,
           cursor: { owner: "message", lastID: "prt_wrong-kind" },
         }),
       ).toThrow()
-      expect(() => ColdStorage.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 5001 })).toThrow()
+      // progress 是面向人类的估算快照，不参与恢复语义；老记录没有该字段照常解析（上方 round-trip 已覆盖）。
+      // 非法形状必须在 resume 前失败，不能把字符串/负数计数带进 CLI 的百分比与 ETA 计算。
+      expect(
+        ColdMaintain.parseMaintenanceTask({
+          ...structuredClone(prepared.task),
+          progress: { stage: "payload", done: 3, total: 10 },
+        }).progress,
+      ).toEqual({ stage: "payload", done: 3, total: 10 })
+      expect(() =>
+        ColdMaintain.parseMaintenanceTask({ ...prepared.task, progress: { stage: "owner", done: -1, total: 10 } }),
+      ).toThrow()
+      expect(() =>
+        ColdMaintain.parseMaintenanceTask({ ...prepared.task, progress: { stage: "owner", done: "1", total: 10 } }),
+      ).toThrow()
+      expect(() => ColdMaintain.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 5001 })).toThrow()
       yield* sessions.remove(session.id)
     }),
   )
@@ -1513,17 +1529,17 @@ describe.serial("ColdStorage", () => {
           .where(Database.eq(SessionTable.id, session.id))
           .run(),
       )
-      const checkpoints: ColdStorage.MaintenanceTask[] = []
+      const checkpoints: ColdMaintain.MaintenanceTask[] = []
       const runtime = {
         lease: { assertOwned() {} },
-        checkpoint(task: ColdStorage.MaintenanceTask) {
+        checkpoint(task: ColdMaintain.MaintenanceTask) {
           checkpoints.push(structuredClone(task))
           return Promise.resolve()
         },
       }
       const compressed = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1539,8 +1555,8 @@ describe.serial("ColdStorage", () => {
       expect(checkpoints.some((task) => task.status === "running")).toBe(true)
 
       const expanded = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({ operation: "expand", sessionID: session.id, all: false, batchSize: 1 }),
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({ operation: "expand", sessionID: session.id, all: false, batchSize: 1 }),
           runtime,
         ),
       )
@@ -1588,8 +1604,8 @@ describe.serial("ColdStorage", () => {
           .run(),
       )
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1664,7 +1680,7 @@ describe.serial("ColdStorage", () => {
       const firstRuntime = {
         lease: { assertOwned() {} },
         signal: controller.signal,
-        checkpoint(task: ColdStorage.MaintenanceTask) {
+        checkpoint(task: ColdMaintain.MaintenanceTask) {
           if (task.status === "running" && task.processed > 0 && !aborted) {
             aborted = true
             controller.abort()
@@ -1673,8 +1689,8 @@ describe.serial("ColdStorage", () => {
         },
       }
       const interrupted = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1686,8 +1702,8 @@ describe.serial("ColdStorage", () => {
       expect(interrupted.type === "task" ? interrupted.task.status : undefined).toBe("interrupted")
 
       const resumed = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1741,8 +1757,8 @@ describe.serial("Packed ColdStorage V2", () => {
       )
       // maintenance 走公开 dispatcher 与真实 lease contract，不能用 direct freeze 掩盖 batch packing 差异。
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 0,
@@ -1817,8 +1833,8 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+status-b\n",
       })
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 0,
@@ -1881,7 +1897,7 @@ describe.serial("Packed ColdStorage V2", () => {
       const ownerInflatedRaw = payloads.reduce((total, row) => total + row.raw * row.refs, 0)
       expect(ownerInflatedRaw).toBeGreaterThan(uniqueRaw)
 
-      const report = ColdStorage.status()
+      const report = ColdMaintain.status()
       // F4 在 pure pack 上等于 unique raw；F0 会等于 ownerInflatedRaw。
       // sharedBytes 在 pure pack 上应为 0：真共享溢价只来自 owners>keys。
       expect(report.rawBytes).toBe(uniqueRaw)
@@ -2064,7 +2080,9 @@ describe.serial("Packed ColdStorage V2", () => {
       const before = (yield* sessions.list()).length
       // 不存在的显式边界必须 NotFound 失败，且 source admission 先于 target 创建，
       // 不能留下 orphan child session。
-      const result = yield* Effect.exit(sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }))
+      const result = yield* Effect.exit(
+        sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }),
+      )
       expect(Exit.isFailure(result)).toBe(true)
       expect((yield* sessions.list()).length).toBe(before)
       yield* sessions.remove(source.id)
@@ -2080,12 +2098,13 @@ describe.serial("Packed ColdStorage V2", () => {
       expect(yield* sessions.diff(session.id)).toEqual([])
       expect(yield* sessions.diff(session.id)).toEqual([])
       expect(
-        Database.use((db) =>
-          db
-            .select({ cursor: SessionTable.summary_cursor })
-            .from(SessionTable)
-            .where(Database.eq(SessionTable.id, session.id))
-            .get()?.cursor,
+        Database.use(
+          (db) =>
+            db
+              .select({ cursor: SessionTable.summary_cursor })
+              .from(SessionTable)
+              .where(Database.eq(SessionTable.id, session.id))
+              .get()?.cursor,
         ),
       ).toBe("")
       yield* sessions.remove(session.id)
@@ -2403,9 +2422,10 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+claim-old\n",
       })
       // stale mirror 使用不同文件和大计数，若被采用会产生一眼可见的错误结果。
-      yield* storage.write(["session_diff", session.id], [
-        { file: "src/stale.ts", patch: "+stale\n", additions: 20, deletions: 10, status: "modified" },
-      ])
+      yield* storage.write(
+        ["session_diff", session.id],
+        [{ file: "src/stale.ts", patch: "+stale\n", additions: 20, deletions: 10, status: "modified" }],
+      )
       // 测试直接构造 crash-resume 可见的 persisted claim，而不是依赖不可控 wall-clock race。
       Database.use((db) =>
         db
@@ -2747,12 +2767,10 @@ describe.serial("Packed ColdStorage V2", () => {
         ColdStorage.freezeOwner({ type: "part", id: edit.partID, now: Date.now() + 1_000, olderThanMs: 0 }).type,
       ).toBe("frozen")
       // Part ref 从真实 owner 行读取，测试不复制 content hash 或 pack identity 算法。
-      const partRef = Database.use((db) =>
-        db
-          .select({ hash: PartTable.cold_ref })
-          .from(PartTable)
-          .where(Database.eq(PartTable.id, edit.partID))
-          .get()?.hash,
+      const partRef = Database.use(
+        (db) =>
+          db.select({ hash: PartTable.cold_ref }).from(PartTable).where(Database.eq(PartTable.id, edit.partID)).get()
+            ?.hash,
       )
       if (!partRef) throw new Error("Integrity fixture did not create a cold Part owner")
 
@@ -2789,15 +2807,16 @@ describe.serial("Packed ColdStorage V2", () => {
 
       // 恢复 Part 后先建立合法 summary，再单独破坏 Session ref 以隔离第二个 gate。
       Database.use((db) =>
-        db.update(ColdStorageTable).set({ ref_count: 1 }).where(Database.eq(ColdStorageTable.hash, partRef)).run()
+        db.update(ColdStorageTable).set({ ref_count: 1 }).where(Database.eq(ColdStorageTable.hash, partRef)).run(),
       )
       expect(yield* sessions.diff(session.id)).toHaveLength(1)
-      const summaryRef = Database.use((db) =>
-        db
-          .select({ hash: SessionTable.summary_ref })
-          .from(SessionTable)
-          .where(Database.eq(SessionTable.id, session.id))
-          .get()?.hash,
+      const summaryRef = Database.use(
+        (db) =>
+          db
+            .select({ hash: SessionTable.summary_ref })
+            .from(SessionTable)
+            .where(Database.eq(SessionTable.id, session.id))
+            .get()?.hash,
       )
       if (!summaryRef) throw new Error("Integrity fixture did not create a summary owner")
       Database.use((db) =>
@@ -2828,9 +2847,10 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+race-old\n",
       })
       // stale 文件在 release 时仍存在，成功不能归因于 NotFound compatibility branch。
-      yield* storage.write(["session_diff", session.id], [
-        { file: "src/stale-race.ts", patch: "+stale\n", additions: 30, deletions: 12, status: "modified" },
-      ])
+      yield* storage.write(
+        ["session_diff", session.id],
+        [{ file: "src/stale-race.ts", patch: "+stale\n", additions: 30, deletions: 12, status: "modified" }],
+      )
 
       // Storage wrapper 最终委托真实 filesystem read，Deferred 只控制顺序而不伪造 mirror 类型或内容。
       const first = yield* sessions.diff(session.id).pipe(Effect.forkChild)
@@ -2895,10 +2915,13 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+removed\n",
       })
       // mirror 包含即将删除的文件，若 initializer 信任 pre-I/O ceiling 会把 removed.ts 永久保存。
-      yield* storage.write(["session_diff", session.id], [
-        { file: "src/remains.ts", patch: "+remains\n", additions: 1, deletions: 0, status: "added" },
-        { file: "src/removed.ts", patch: "+removed\n", additions: 1, deletions: 0, status: "added" },
-      ])
+      yield* storage.write(
+        ["session_diff", session.id],
+        [
+          { file: "src/remains.ts", patch: "+remains\n", additions: 1, deletions: 0, status: "added" },
+          { file: "src/removed.ts", patch: "+removed\n", additions: 1, deletions: 0, status: "added" },
+        ],
+      )
 
       const pending = yield* sessions.diff(session.id).pipe(Effect.forkChild)
       yield* Deferred.await(gate.ready).pipe(Effect.timeout("5 seconds"))
@@ -2937,7 +2960,7 @@ describe.serial("Packed ColdStorage V2", () => {
       // confirm=true 与 lease 同时提供，覆盖 production 对破坏性物理操作的双重授权门禁。
       // 本测试不执行自动 vacuum，只有显式 operation 才拥有 checkpoint/truncate 副作用。
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(ColdStorage.prepareMaintenance({ operation: "vacuum", confirm: true }), {
+        ColdMaintain.maintain(ColdMaintain.prepareMaintenance({ operation: "vacuum", confirm: true }), {
           lease: { assertOwned() {} },
           checkpoint: async () => {},
         }),

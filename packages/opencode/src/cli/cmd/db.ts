@@ -9,6 +9,7 @@ import { JsonMigration } from "@/storage/json-migration"
 import { EOL } from "os"
 import { errorMessage } from "../../util/error"
 import { ColdStorage } from "@/storage/cold"
+import { ColdMaintain } from "@/storage/cold-maintain"
 import { ServerLock } from "./tui/server-lock"
 import path from "path"
 import { SessionID } from "@/session/schema"
@@ -68,14 +69,23 @@ async function liveDaemon() {
 
 // 与 TUI reconnect 共用选主锁；从 expected-owner stop 到 offline 序列结束都禁止 replacement daemon 发布。
 function daemonElection() {
-  return Flock.acquire("opencode.server", { dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
+  return Flock.acquire("opencode.server", {
+    dir: path.join(Global.Path.state, "locks"),
+    timeoutMs: 75_000,
+    staleMs: 5_000,
+  })
 }
 // transport seam 不接收 offline callback，确保网络或鉴权失败不能被转换成第二条成功路径。
 // control request 总是携带当前 lock token；短 timeout 只约束快速 control acknowledgement。
 // 完整 status 扫描随数据库增长，显式 false 避免把合法长计算误报为 daemon 不可达。
 // 非 2xx 响应保留 daemon 错误语义，调用方不得在失败后改走 offline 并伪造成功。
 // 该 helper 只传输 request/result，不包含 operation SQL、eligibility 或 cursor 推进逻辑。
-async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit, timeoutMs: number | false = 2_000) {
+async function daemonRequest(
+  lock: ServerLock.ServerLock,
+  pathname: string,
+  init?: RequestInit,
+  timeoutMs: number | false = 2_000,
+) {
   const response = await fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
     ...init,
     headers: {
@@ -135,13 +145,19 @@ function freelistMetrics(report: Pick<ColdStorage.StatusReport, "freelistPages" 
 function reclaimHint(report: Pick<ColdStorage.StatusReport, "freelistPages" | "pageSize" | "pageCount">) {
   const metrics = freelistMetrics(report)
   // HINT 只服务 status Recommendation，不得单独触发写库。
-  return metrics.reusable >= RECLAIM_LARGE_BYTES || (metrics.reusable >= RECLAIM_HINT_BYTES && metrics.ratio >= RECLAIM_HINT_RATIO)
+  return (
+    metrics.reusable >= RECLAIM_LARGE_BYTES ||
+    (metrics.reusable >= RECLAIM_HINT_BYTES && metrics.ratio >= RECLAIM_HINT_RATIO)
+  )
 }
 
 function reclaimPrompt(report: Pick<ColdStorage.StatusReport, "freelistPages" | "pageSize" | "pageCount">) {
   const metrics = freelistMetrics(report)
   // PROMPT 才授权交互 reclaim；retainedDaemon 路径另有跳过逻辑。
-  return metrics.reusable >= RECLAIM_LARGE_BYTES || (metrics.reusable >= RECLAIM_PROMPT_BYTES && metrics.ratio >= RECLAIM_PROMPT_RATIO)
+  return (
+    metrics.reusable >= RECLAIM_LARGE_BYTES ||
+    (metrics.reusable >= RECLAIM_PROMPT_BYTES && metrics.ratio >= RECLAIM_PROMPT_RATIO)
+  )
 }
 
 // 固定 label 宽度只影响 scrollback 可读性，不参与字段选择或数值计算。
@@ -183,10 +199,12 @@ function renderStatus(report: ColdStorage.StatusReport) {
   if (!reclaimHint(report)) return
   UI.empty()
   UI.println(`${UI.Style.TEXT_WARNING_BOLD}Recommendation${UI.Style.TEXT_NORMAL}`)
-  UI.println(`  Run ${UI.Style.TEXT_INFO_BOLD}opencode db vacuum --yes${UI.Style.TEXT_NORMAL} to reclaim approximately ${size(reusable)}.`)
+  UI.println(
+    `  Run ${UI.Style.TEXT_INFO_BOLD}opencode db vacuum --yes${UI.Style.TEXT_NORMAL} to reclaim approximately ${size(reusable)}.`,
+  )
 }
 // task view 只投影 durable record，repair/delete 语义从 args 而非 operation 名称猜测。
-function renderTask(task: ColdStorage.MaintenanceTask) {
+function renderTask(task: ColdMaintain.MaintenanceTask) {
   // 颜色和符号只增强状态辨识，文本 status 始终保留，重定向去色后仍不丢语义。
   // 状态颜色只映射 durable terminal，不能把 queued/running 预先显示成成功结果。
   const color =
@@ -198,13 +216,7 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
           ? UI.Style.TEXT_WARNING_BOLD
           : UI.Style.TEXT_HIGHLIGHT_BOLD
   const symbol =
-    task.status === "completed"
-      ? "✓"
-      : task.status === "failed"
-        ? "×"
-        : task.status === "interrupted"
-          ? "!"
-          : "●"
+    task.status === "completed" ? "✓" : task.status === "failed" ? "×" : task.status === "interrupted" ? "!" : "●"
   const detail =
     task.args.operation === "verify" && (task.args.repair || task.args.repairToolInput === true)
       ? "verify (repair)"
@@ -212,7 +224,11 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
         ? "cleanup (delete)"
         : task.operation
 
-  UI.println(task.status === "interrupted" ? `${color}! Maintenance interrupted${UI.Style.TEXT_NORMAL}` : `${color}${symbol} OpenCode database maintenance task${UI.Style.TEXT_NORMAL}`)
+  UI.println(
+    task.status === "interrupted"
+      ? `${color}! Maintenance interrupted${UI.Style.TEXT_NORMAL}`
+      : `${color}${symbol} OpenCode database maintenance task${UI.Style.TEXT_NORMAL}`,
+  )
   renderRow("Task", task.taskID)
   renderRow("Operation", detail)
   renderRow("Status", task.status)
@@ -228,9 +244,12 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
   UI.println(`  Resume with: ${UI.Style.TEXT_INFO_BOLD}opencode db resume ${task.taskID}${UI.Style.TEXT_NORMAL}`)
 }
 // offline runner 仍由既有 lease/checkpoint owner 执行；回调仅观察提交后的 task 快照。
-async function runOffline(prepared: ColdStorage.PreparedMaintenance, onTask?: (task: ColdStorage.MaintenanceTask) => void) {
+async function runOffline(
+  prepared: ColdMaintain.PreparedMaintenance,
+  onTask?: (task: ColdMaintain.MaintenanceTask) => void,
+) {
   if (prepared.type === "immediate") {
-    if (prepared.request.operation !== "vacuum") return ColdStorage.maintain(prepared)
+    if (prepared.request.operation !== "vacuum") return ColdMaintain.maintain(prepared)
     const existing = await ServerLock.findNonterminalMaintenanceTask()
     if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
     // vacuum 没有可恢复 cursor，但仍持有同一 maintenance lease，防止与 daemon/offline task 并行写入。
@@ -240,7 +259,7 @@ async function runOffline(prepared: ColdStorage.PreparedMaintenance, onTask?: (t
       dbPath: Database.getPath(),
     })
     try {
-      return await ColdStorage.maintain(prepared, { lease, checkpoint: async () => {} })
+      return await ColdMaintain.maintain(prepared, { lease, checkpoint: async () => {} })
     } finally {
       await lease.release()
     }
@@ -250,11 +269,11 @@ async function runOffline(prepared: ColdStorage.PreparedMaintenance, onTask?: (t
   if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
   // lease owner 先于 queued record 可见，status 不会把仍在启动的 offline task 误判为 interrupted。
   // queued 仍在第一批 DB transaction 前原子落盘；其后 crash 可由 cursor/owner reconcile 恢复。
-  // checkpoint 和数据批次由同一 ColdStorage.maintain owner 推进，offline CLI 不复制状态机。
+  // checkpoint 和数据批次由同一 ColdMaintain.maintain owner 推进，offline CLI 不复制状态机。
   const lease = await ServerLock.acquireMaintenanceLease(prepared.task)
   try {
     await ServerLock.writeMaintenanceTask(prepared.task)
-    return await ColdStorage.maintain(prepared, {
+    return await ColdMaintain.maintain(prepared, {
       task: prepared.task,
       lease,
       checkpoint: async (task) => {
@@ -268,14 +287,13 @@ async function runOffline(prepared: ColdStorage.PreparedMaintenance, onTask?: (t
   }
 }
 
-// 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
-// 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
-// human compress 会轮询同一持久 task；其他命令保持原来的单次 JSON 结果，不把 disconnect 解释为 task failure。
+// 观察持久任务快照并绘制进度，展示状态不参与维护游标的推进。
 function compressionProgress(startedAt: number) {
   let visible = false
-  let latest: ColdStorage.MaintenanceTask | undefined
+  let latest: ColdMaintain.MaintenanceTask | undefined
   let rateBytes = 0
   let previous: { at: number; bytes: number } | undefined
+  let phase: { stage: string; at: number; done: number } | undefined
   // 观察器只在 human compress 创建；因此这里统一发布一次开始行，避免 online/offline 两条输出路径漂移。
   renderCompressionStart()
   const paint = () => {
@@ -283,23 +301,48 @@ function compressionProgress(startedAt: number) {
     visible = true
     const now = performance.now()
     const elapsed = Math.max(1, now - startedAt)
+    const owners = latest.processed.toLocaleString("en-US").padStart(12)
+    // 原始字节差值表示完整维护路径的吞吐，不是磁盘带宽。
+    const rateText = `${size(rateBytes)}/s`.padStart(12)
+    const elapsedText = duration(elapsed).padStart(8)
+    // 有总量估算时显示真实百分比与 ETA；老旧任务记录没有 progress 字段，回退脉冲动画。
+    const progress = latest.progress
+    if (progress && progress.total > 0) {
+      // 分母为估计值，图形限制在满格范围；旁边仍显示真实完成计数。
+      const ratio = Math.min(1, progress.done / progress.total)
+      const filled = Math.round(ratio * 20)
+      const bar = `${"█".repeat(filled)}${"·".repeat(20 - filled)}`
+      const percent = `${(ratio * 100).toFixed(1)}%`.padStart(6)
+      const counts = `${progress.done.toLocaleString("en-US")}/${progress.total.toLocaleString("en-US")}`
+      // 阶段切换和恢复有不同的计数起点，ETA 只使用本观察阶段实际完成的增量。
+      const advanced = phase ? progress.done - phase.done : 0
+      // 尚无完成增量时只显示elapsed，避免把第一帧停顿解释成零剩余时间。
+      const eta =
+        phase && advanced > 0
+          ? `  ETA ~${duration(((now - phase.at) * Math.max(0, progress.total - progress.done)) / advanced)}`
+          : ""
+      // 包阶段的分母是源包数，一个包可以共享给许多owner。
+      const unit = progress.stage === "payload" ? "packs" : "owners"
+      // 定宽字段 + EL，防止 rate/耗时变短后留下上一帧残影。
+      process.stderr.write(
+        `\r  ${UI.Style.TEXT_HIGHLIGHT}[${bar}]${UI.Style.TEXT_NORMAL} ${percent}  ${counts} ${unit}  ${rateText}  elapsed ${elapsedText}${eta}\x1b[K`,
+      )
+      return
+    }
     // 脉冲按墙钟滑动；轨道固定 20 格，不定百分比。
     const offset = Math.floor(elapsed / PROGRESS_FRAME_MS) % 15
     const pulse = `${"·".repeat(offset)}${"█".repeat(6)}${"·".repeat(14 - offset)}`
-    const owners = latest.processed.toLocaleString("en-US").padStart(12)
-    const rateText = `${size(rateBytes)}/s`.padStart(12)
-    const elapsedText = duration(elapsed).padStart(8)
-    // 定宽字段 + EL，防止 rate/耗时变短后留下上一帧残影。
     process.stderr.write(
       `\r  ${UI.Style.TEXT_HIGHLIGHT}[${pulse}]${UI.Style.TEXT_NORMAL}  ${owners} owners  ${rateText}  elapsed ${elapsedText}\x1b[K`,
     )
   }
-  // online 硬 ~10fps；offline 仅在事件循环空闲时触发（同步 batch 内无法强刷）。
-  // 不 await maintain 内部；定时器仅在 CLI 事件循环可运行时刷新（offline 同步批内会停）。
+  // 刷新与任务采样解耦；同步SQLite阶段结束后，事件循环继续绘制最新快照。
   const timer = setInterval(paint, PROGRESS_FRAME_MS)
   return {
-    update(task: ColdStorage.MaintenanceTask) {
+    update(task: ColdMaintain.MaintenanceTask) {
       const now = performance.now()
+      if (task.progress && phase?.stage !== task.progress.stage)
+        phase = { stage: task.progress.stage, at: now, done: task.progress.done }
       // rate 只在 rawBytes 变化的 durable 快照之间计算，避免每帧把吞吐刷成 0。
       if (!previous || task.rawBytes !== previous.bytes) {
         rateBytes = previous
@@ -314,23 +357,30 @@ function compressionProgress(startedAt: number) {
       clearInterval(timer)
       if (visible) process.stderr.write(EOL)
       visible = false
+      // 已排队的paint也会看见空快照，收尾后不再覆盖汇总行。
       latest = undefined
     },
   }
 }
 // 完成耗时使用人类单位；它与活动行的 elapsed 共享同一单调时钟起点。
 function duration(value: number) {
-  return value < 60_000 ? `${(value / 1_000).toFixed(1)}s` : `${Math.floor(value / 60_000)}m ${(Math.floor(value / 1_000) % 60).toString().padStart(2, "0")}s`
+  return value < 60_000
+    ? `${(value / 1_000).toFixed(1)}s`
+    : `${Math.floor(value / 60_000)}m ${(Math.floor(value / 1_000) % 60).toString().padStart(2, "0")}s`
 }
 // 相对时间避免在紧凑状态中暴露冗长 ISO 字符串，同时不改变持久 updatedAt。
 function relativeTime(timestamp: number) {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000))
   if (seconds < 60) return `${seconds}s ago`
   const minutes = Math.floor(seconds / 60)
-  return minutes < 60 ? `${minutes}m ago` : minutes < 1_440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1_440)}d ago`
+  return minutes < 60
+    ? `${minutes}m ago`
+    : minutes < 1_440
+      ? `${Math.floor(minutes / 60)}h ago`
+      : `${Math.floor(minutes / 1_440)}d ago`
 }
 // completed 汇总严格使用 task counters；packed 不能把 skipped/failed 误算为压缩成功。
-function renderCompression(task: ColdStorage.MaintenanceTask, elapsed: number) {
+function renderCompression(task: ColdMaintain.MaintenanceTask, elapsed: number) {
   const packed = Math.max(0, task.processed - task.skipped - task.failed)
   const saved = Math.max(0, task.rawBytes - task.compressedBytes)
   const ratio = task.rawBytes === 0 ? 0 : (saved / task.rawBytes) * 100
@@ -398,7 +448,7 @@ async function waitForDaemonTask(lock: ServerLock.ServerLock, taskID: string, re
 // settlement 唯一路径：worker 在 terminal+active 时 await 同一 promise 再回读，等价于 lease 已释放。
 async function ensureSettled(lock: ServerLock.ServerLock, taskID: string) {
   try {
-    return ColdStorage.parseMaintenanceTask(
+    return ColdMaintain.parseMaintenanceTask(
       await daemonRequest(
         lock,
         `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${encodeURIComponent(taskID)}`,
@@ -416,7 +466,7 @@ async function ensureSettled(lock: ServerLock.ServerLock, taskID: string) {
 }
 // options 只承载展示与已选执行域，不允许 control 失败后重新选择 offline writer。
 async function executeMaintenance(
-  request: ColdStorage.MaintenanceRequest,
+  request: ColdMaintain.MaintenanceRequest,
   options: {
     human?: boolean
     output?: boolean
@@ -482,7 +532,7 @@ async function executeMaintenance(
   }
   const started = performance.now()
   const progress = human && request.operation === "compress" ? compressionProgress(started) : undefined
-  const result = await runOffline(ColdStorage.prepareMaintenance(request), progress?.update)
+  const result = await runOffline(ColdMaintain.prepareMaintenance(request), progress?.update)
     .catch(async (error) => {
       // offline 失败必须先释放选主锁再传播原错误，否则 reconnect daemon 会被一次失败维护永久挡住。
       await election?.release()
@@ -501,7 +551,7 @@ function taskResult(value: unknown) {
   if (!isRecord(value) || value.type !== "task" || !("task" in value)) {
     throw new MaintenanceUnavailableError("Maintenance did not return a task")
   }
-  return ColdStorage.parseMaintenanceTask(value.task)
+  return ColdMaintain.parseMaintenanceTask(value.task)
 }
 // vacuum 的 page counts 保持原协议；pageSize 由紧邻执行前的 StatusReport 提供。
 function vacuumResult(value: unknown) {
@@ -523,13 +573,18 @@ function vacuumResult(value: unknown) {
 async function runVacuum(pageSize: number, human: boolean, lock: ServerLock.ServerLock | null = null) {
   const started = performance.now()
   if (human) UI.println(`${UI.Style.TEXT_HIGHLIGHT}●${UI.Style.TEXT_NORMAL} Reclaiming SQLite pages...`)
-  const execution = await executeMaintenance({ operation: "vacuum", confirm: true }, { human: false, output: false, lock })
+  const execution = await executeMaintenance(
+    { operation: "vacuum", confirm: true },
+    { human: false, output: false, lock },
+  )
   const result = vacuumResult(execution.result)
   if (human) {
     // 页面差值描述 SQLite allocation，不宣称等于 main+WAL 的即时文件系统占用。
     const before = result.pagesBefore * pageSize
     const after = result.pagesAfter * pageSize
-    UI.println(`${UI.Style.TEXT_SUCCESS_BOLD}✓ Physical reclaim completed${UI.Style.TEXT_NORMAL} in ${duration(performance.now() - started)}`)
+    UI.println(
+      `${UI.Style.TEXT_SUCCESS_BOLD}✓ Physical reclaim completed${UI.Style.TEXT_NORMAL} in ${duration(performance.now() - started)}`,
+    )
     renderRow("Page allocation", `${size(before)} → ${size(after)}`)
     renderRow("Reclaimed pages", size(Math.max(0, before - after)))
   }
@@ -538,8 +593,10 @@ async function runVacuum(pageSize: number, human: boolean, lock: ServerLock.Serv
 // sequence owner 只编排两个现有 operation，任何非 completed compression 都在 vacuum 前失败。
 // flags 由同一个 CLI request 传入，避免 machine/human 分支各自解释 --yes 的含义。
 async function executeCompression(
-  input: { request: Extract<ColdStorage.MaintenanceRequest, { operation: "compress" }> } &
-    Record<"human" | "vacuum" | "yes", boolean>,
+  input: { request: Extract<ColdMaintain.MaintenanceRequest, { operation: "compress" }> } & Record<
+    "human" | "vacuum" | "yes",
+    boolean
+  >,
 ) {
   if (input.yes && !input.vacuum) {
     throw new ColdStorage.ValidationError({ message: "compress --yes requires --vacuum" })
@@ -554,12 +611,13 @@ async function executeCompression(
     const lock = await liveDaemon()
     if (lock) {
       const stopped = await stopDaemon({ expected: lock, maintenanceIdle: true })
-      if (stopped.type !== "stopped" && stopped.type !== "stale") throw new MaintenanceUnavailableError(`Daemon pid=${lock.pid} did not stop`)
+      if (stopped.type !== "stopped" && stopped.type !== "stale")
+        throw new MaintenanceUnavailableError(`Daemon pid=${lock.pid} did not stop`)
     }
     // 显式 machine 组合只打印一个最终 JSON；两个既有 operation 仍各自拥有数据库语义。
     const compressed = await executeMaintenance(input.request, { output: false, lock: null })
     const task = taskResult(compressed.result)
-    const report = ColdStorage.status()
+    const report = ColdMaintain.status()
     // 低于噪声地板时不跑 SQL VACUUM，但保持 compress-vacuum 复合 shape（pageCount 自报）。
     // pagesBefore==pagesAfter 表示逻辑跳过而非 vacuum 失败，脚本仍可解析同一 type。
     if (freelistMetrics(report).reusable < RECLAIM_NOISE_BYTES) {
@@ -586,14 +644,19 @@ async function executeCompression(
       UI.println("  Stop the daemon and run: opencode db vacuum --yes")
       return
     }
-    const report = ColdStorage.status()
+    const report = ColdMaintain.status()
     const { reusable } = freelistMetrics(report)
     // completed task 只证明 logical compression；PROMPT 门槛过滤几 KB～小 freelist 噪声。
     if (!reclaimPrompt(report)) return
     UI.println(`${UI.Style.TEXT_WARNING_BOLD}! Logical compression is complete.${UI.Style.TEXT_NORMAL}`)
     UI.println(`  SQLite still contains ${size(reusable)} of reusable pages.`)
     // reclaim prompt 是独立物理授权，不能继承普通 compression 的默认许可。
-    if (!input.yes && !(await confirm(`${UI.Style.TEXT_WARNING_BOLD}? Reclaim ${size(reusable)} of physical database space now? [Y/n] ${UI.Style.TEXT_NORMAL}`))) {
+    if (
+      !input.yes &&
+      !(await confirm(
+        `${UI.Style.TEXT_WARNING_BOLD}? Reclaim ${size(reusable)} of physical database space now? [Y/n] ${UI.Style.TEXT_NORMAL}`,
+      ))
+    ) {
       UI.println(`${UI.Style.TEXT_DIM}  Physical reclaim skipped. Run: opencode db vacuum --yes${UI.Style.TEXT_NORMAL}`)
       return
     }
@@ -609,18 +672,28 @@ async function executeCompression(
 async function executeResume(taskID: string) {
   const lock = await liveDaemon()
   if (lock) {
-    printMaintenance(await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_RESUME_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskID }) }))
+    printMaintenance(
+      await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_RESUME_PATH, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ taskID }),
+      }),
+    )
     return
   }
   const task = await ServerLock.reconcileMaintenanceTask(taskID)
   if (!task) throw new ColdStorage.ValidationError({ message: `Maintenance task not found: ${taskID}` })
   if (task.status !== "interrupted")
     throw new ColdStorage.ValidationError({ message: `Maintenance task is ${task.status}` })
-  const prepared = ColdStorage.prepareMaintenance(task.args)
+  const prepared = ColdMaintain.prepareMaintenance(task.args)
   if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Task is not resumable" })
   const lease = await ServerLock.acquireMaintenanceLease(task)
   try {
-    const result = await ColdStorage.maintain(prepared, { task, lease, checkpoint: (next) => ServerLock.writeMaintenanceTask(next) })
+    const result = await ColdMaintain.maintain(prepared, {
+      task,
+      lease,
+      checkpoint: (next) => ServerLock.writeMaintenanceTask(next),
+    })
     printMaintenance(result.type === "task" ? result.task : result)
   } finally {
     await lease.release()
@@ -637,6 +710,7 @@ const CompressCommand = cmd({
     yargs
       .option("session", { type: "string" })
       .option("older-than", { type: "string", default: "7d" })
+      .option("recompress", { type: "boolean", default: false, describe: "also recompress existing cold frames" })
       .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE })
       .option("vacuum", { type: "boolean", default: false })
       .option("yes", { type: "boolean", default: false })
@@ -649,6 +723,7 @@ const CompressCommand = cmd({
         ...(args.session ? { sessionID: SessionID.make(args.session) } : {}),
         olderThanMs: durationMs(args.olderThan),
         batchSize: args.batchSize,
+        recompress: args.recompress,
       },
       human: interactive(args.json),
       vacuum: args.vacuum,
@@ -662,12 +737,22 @@ const CompressCommand = cmd({
 const ExpandCommand = cmd({
   command: "expand",
   describe: "thaw cold fields back into the primary tables",
-  builder: (yargs: Argv) => yargs.option("session", { type: "string" }).option("all", { type: "boolean", default: false }).option("yes", { type: "boolean", default: false }).option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
+  builder: (yargs: Argv) =>
+    yargs
+      .option("session", { type: "string" })
+      .option("all", { type: "boolean", default: false })
+      .option("yes", { type: "boolean", default: false })
+      .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
   handler: async (args: { session?: string; all: boolean; yes: boolean; batchSize: number }) => {
     if (!args.all && !args.session)
       throw new ColdStorage.ValidationError({ message: "expand requires --all or --session" })
     if (args.all && !args.yes) throw new ColdStorage.ValidationError({ message: "expand --all requires --yes" })
-    await executeMaintenance({ operation: "expand", ...(args.session ? { sessionID: SessionID.make(args.session) } : {}), all: args.all, batchSize: args.batchSize })
+    await executeMaintenance({
+      operation: "expand",
+      ...(args.session ? { sessionID: SessionID.make(args.session) } : {}),
+      all: args.all,
+      batchSize: args.batchSize,
+    })
   },
 })
 
@@ -682,8 +767,11 @@ const StatusCommand = cmd({
     const lock = await liveDaemon()
     if (args.task) {
       if (lock) {
-        const result = await daemonRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${encodeURIComponent(args.task)}`)
-        if (interactive(args.json)) renderTask(ColdStorage.parseMaintenanceTask(result))
+        const result = await daemonRequest(
+          lock,
+          `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${encodeURIComponent(args.task)}`,
+        )
+        if (interactive(args.json)) renderTask(ColdMaintain.parseMaintenanceTask(result))
         else printMaintenance(result)
         return
       }
@@ -695,12 +783,21 @@ const StatusCommand = cmd({
     }
     if (lock) {
       // status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
-      const result = await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operation: "status" }) }, false)
+      const result = await daemonRequest(
+        lock,
+        ServerLock.CONTROL_MAINTENANCE_PATH,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ operation: "status" }),
+        },
+        false,
+      )
       if (interactive(args.json)) renderStatus(parseStatus(result))
       else printMaintenance(result)
       return
     }
-    const report = ColdStorage.status()
+    const report = ColdMaintain.status()
     if (interactive(args.json)) renderStatus(report)
     else printMaintenance(report)
   },
@@ -741,7 +838,11 @@ const VerifyCommand = cmd({
 const CleanupCommand = cmd({
   command: "cleanup",
   describe: "report or remove unreferenced cold payloads",
-  builder: (yargs: Argv) => yargs.option("dry-run", { type: "boolean", default: false }).option("yes", { type: "boolean", default: false }).option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
+  builder: (yargs: Argv) =>
+    yargs
+      .option("dry-run", { type: "boolean", default: false })
+      .option("yes", { type: "boolean", default: false })
+      .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
   handler: async (args: { dryRun: boolean; yes: boolean; batchSize: number }) => {
     await executeMaintenance({ operation: "cleanup", delete: args.yes && !args.dryRun, batchSize: args.batchSize })
   },
@@ -762,8 +863,19 @@ const VacuumCommand = cmd({
     }
     const lock = await liveDaemon()
     const report = lock
-      ? parseStatus(await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operation: "status" }) }, false))
-      : ColdStorage.status()
+      ? parseStatus(
+          await daemonRequest(
+            lock,
+            ServerLock.CONTROL_MAINTENANCE_PATH,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ operation: "status" }),
+            },
+            false,
+          ),
+        )
+      : ColdMaintain.status()
     // human freelist=0 不跑 VACUUM；machine 路径仍走上方 executeMaintenance。
     if (freelistMetrics(report).reusable === 0) {
       UI.println(`${UI.Style.TEXT_DIM}○ No reusable pages to reclaim.${UI.Style.TEXT_NORMAL}`)

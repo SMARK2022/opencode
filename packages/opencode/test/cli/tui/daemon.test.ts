@@ -22,7 +22,7 @@ import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
 import * as DaemonCmdModule from "../../../src/cli/cmd/daemon"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as Win32Module from "../../../src/cli/cmd/tui/win32"
-import type { MaintenanceTask } from "../../../src/storage/cold"
+import type { MaintenanceTask } from "../../../src/storage/cold-maintain"
 import { Flock } from "@opencode-ai/core/util/flock"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", import.meta.url))

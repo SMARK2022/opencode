@@ -178,8 +178,14 @@ const targets = singleFlag
       return true
     })
   : osFilter
-  ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false && (!archFilter || item.arch === archFilter))
-  : allTargets
+    ? allTargets.filter(
+        (item) =>
+          item.os === osFilter &&
+          item.abi === undefined &&
+          item.avx2 !== false &&
+          (!archFilter || item.arch === archFilter),
+      )
+    : allTargets
 
 // PvRecorder 的 `.node` 必须按目标平台嵌入；运行时再释放到真实 cache 文件，避免 Bun compile 中 `__dirname` 指向 CI 构建路径。
 const pvRecorderNativeFilesForTarget = (item: (typeof allTargets)[number]) => {
@@ -214,9 +220,7 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
   const pvRecorderLib = path.join(path.dirname(require.resolve("@picovoice/pvrecorder-node/package.json")), "lib")
   const imports = pvRecorderNativeFilesForTarget(item).map((file, index) => {
     // require.resolve 兼容 hoisted workspace 安装；spec 再转成相对路径，交给 Bun.build 嵌入真实 native 文件。
-    const spec = path
-      .relative(dir, path.join(pvRecorderLib, ...file.split("/")))
-      .replaceAll("\\", "/")
+    const spec = path.relative(dir, path.join(pvRecorderLib, ...file.split("/"))).replaceAll("\\", "/")
     return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
   })
   // key 保持 Picovoice 包内 lib 的相对路径，运行时只需按当前 platform/arch 选同一个稳定字符串。
@@ -227,7 +231,8 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
 async function createSharpNativeFileMap(item: (typeof allTargets)[number]) {
   // Sharp用linuxmusl而Bun target用linux+abi描述；资源包和运行时loader必须采用同一个target名。
   // baseline与AVX2产物共享同一官方addon；CPU能力仍由Sharp官方loader在运行时判定。
-  const target = item.os === "linux" ? `${item.abi === "musl" ? "linuxmusl" : "linux"}-${item.arch}` : `${item.os}-${item.arch}`
+  const target =
+    item.os === "linux" ? `${item.abi === "musl" ? "linuxmusl" : "linux"}-${item.arch}` : `${item.os}-${item.arch}`
   // Windows把libvips DLL放在addon包内；Linux/macOS则依赖独立的同target libvips包。
   // 只收集当前target，避免单个可执行文件携带其他平台永远不可达的native资源。
   const packages = [`@img/sharp-${target}`, ...(item.os === "win32" ? [] : [`@img/sharp-libvips-${target}`])]
@@ -247,7 +252,9 @@ async function createSharpNativeFileMap(item: (typeof allTargets)[number]) {
   // 动态require不会告诉Bun缺了哪个transitive文件；构建时先锁住每个target恰好一个addon和必要shared library。
   // addon多于一个同样视为错误，否则运行时选择将依赖文件遍历顺序而失去确定性。
   if (addons.length !== 1 || libraries.length === 0)
-    throw new Error(`Incomplete Sharp native package for ${target}: ${addons.length} addon(s), ${libraries.length} library file(s)`)
+    throw new Error(
+      `Incomplete Sharp native package for ${target}: ${addons.length} addon(s), ${libraries.length} library file(s)`,
+    )
   const imports = files.map((file, index) => {
     // 保留@img包内相对布局，native RPATH/@loader_path才能从addon定位到对应libvips。
     const spec = path.relative(dir, file.absolute).replaceAll("\\", "/")
@@ -474,6 +481,7 @@ for (const item of targets) {
   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
   const workerPath = "./src/cli/cmd/tui/worker.ts"
   const voiceWorkerPath = "./src/cli/cmd/tui/prompt-voice-recorder-worker.ts" // keep source and compiled entrypoint ownership identical.
+  const packWorkerPath = "./src/storage/cold-codec.ts" // codec 与其 worker 共享源码和编译入口。
   const sharpFiles = (await createSharpNativeFileMap(item)).source
 
   // Use platform-specific bunfs root path based on target OS
@@ -511,6 +519,7 @@ for (const item of targets) {
       parserWorker,
       workerPath,
       voiceWorkerPath, // bundling this entrypoint prevents compiled runtime fallback to checkout files.
+      packWorkerPath,
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
       "opencode-pvrecorder.gen.ts",
@@ -522,6 +531,7 @@ for (const item of targets) {
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
       OPENCODE_VOICE_WORKER_PATH: voiceWorkerPath, // compiled 运行时只走 bunfs entrypoint，不回退 checkout 源码。
+      OPENCODE_PACK_WORKER_PATH: packWorkerPath,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
       // 运行时用该常量禁止回退到 @picovoice 的 node_modules 相对路径，防止重新暴露 CI 绝对路径 bug。
@@ -563,7 +573,8 @@ for (const item of targets) {
       }
       console.log(`Smoke test passed: ${versionOutput}`)
 
-      const voice = Bun.spawn([binaryPath], { // 通过真实 compiled binary 验证 Worker 消息协议和 clean close。
+      const voice = Bun.spawn([binaryPath], {
+        // 通过真实 compiled binary 验证 Worker 消息协议和 clean close。
         env: { ...smokeEnv, OPENCODE_PROCESS_ROLE: "voice-smoke" },
         stdout: "pipe",
         stderr: "pipe",

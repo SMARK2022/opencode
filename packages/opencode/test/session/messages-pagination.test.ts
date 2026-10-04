@@ -6,6 +6,7 @@ import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { NotFoundError } from "@/storage/storage"
 import { ColdStorage } from "@/storage/cold"
+import { ColdMaintain } from "@/storage/cold-maintain"
 import { Database } from "@/storage/db"
 import { MessageTable, PartTable, SessionTable } from "@/session/session.sql"
 import * as Log from "@opencode-ai/core/util/log"
@@ -15,7 +16,7 @@ void Log.init({ print: false })
 
 const it = testEffect(SessionNs.defaultLayer)
 
-// 测试进程共享 preload SQLite；ColdStorage.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
+// 测试进程共享 preload SQLite；ColdMaintain.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
 // 只统计本 session 的 cold_ref owner，才能在 cold.test / processor 等同进程 suite 下稳定断言 thaw 副作用。
 function sessionColdOwners(sessionID: SessionID) {
   return Database.use(
@@ -775,7 +776,7 @@ describe("Session.findMessage", () => {
         expect(Option.isNone(none)).toBe(true)
         // 无匹配扫描不得 thaw；session 级 cold 计数仍为 1。顺带调用 status() 确保 freeze 后 payload 元数据健康。
         expect(sessionColdOwners(sessionID)).toBe(1)
-        expect(ColdStorage.status().coldOwners).toBeGreaterThanOrEqual(1)
+        expect(ColdMaintain.status().coldOwners).toBeGreaterThanOrEqual(1)
 
         const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
         expect(Option.isSome(match)).toBe(true)

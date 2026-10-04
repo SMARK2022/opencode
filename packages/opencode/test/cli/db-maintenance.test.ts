@@ -7,7 +7,7 @@ import { spawn as spawnPty, type Proc } from "#pty"
 import { Database as SQLite } from "bun:sqlite"
 import { Flock } from "@opencode-ai/core/util/flock"
 import * as ServerLock from "../../src/cli/cmd/tui/server-lock"
-import type { MaintenanceTask } from "../../src/storage/cold"
+import type { MaintenanceTask } from "../../src/storage/cold-maintain"
 import { tmpdir } from "../fixture/fixture"
 // 测试只走公开 CLI/PTY seam；不导入 renderer 或调用维护私有函数，避免实现重构产生假绿。
 const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
@@ -208,7 +208,7 @@ describe("database maintenance CLI", () => {
     // 该反例锁定非 DB 命令的既有迁移提示，防止 quiet policy 泄漏到 run message。
     expect(stderr).toContain("Performing one time database migration")
   }, 30_000)
-  // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
+  // 通过真实终端观察提交进度，百分比和ETA分别验证可见的完成度与剩余时间提示。
   test("reports committed compression progress in an interactive terminal", async () => {
     await using tmp = await tmpdir({ init: seedColdParts })
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], isolatedEnv(tmp.path))
@@ -218,6 +218,9 @@ describe("database maintenance CLI", () => {
     const output = cli.output()
     // 单一顺序断言同时锁定活动行与 terminal 汇总，避免两个宽松匹配分别命中无关输出。
     expect(output).toMatch(/Compressing cold data[\s\S]*owners[\s\S]*\/s[\s\S]*elapsed[\s\S]*Compression completed in (?:\d+\.\ds|\d+m \d+s)/)
+    // 独立检查新展示字段，旧的纯脉冲动画不能满足这两个断言。
+    expect(output).toMatch(/\d+\.\d%/)
+    expect(output).toContain("ETA ~")
     expect(output).not.toContain('"operation": "compress"')
   }, 30_000)
   test("finishes visible progress before reporting a maintenance failure", async () => {
