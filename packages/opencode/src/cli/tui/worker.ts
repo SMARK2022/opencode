@@ -14,6 +14,7 @@ import { SessionStaleTurn } from "@/session/stale-turn"
 import { ServerLock } from "@/cli/tui/server-lock"
 // #493：daemon maintenance 全部 SQL 位于 core ColdStorage；worker 只装配生命周期。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { EventClients } from "@opencode-ai/server/event-clients"
 import { SessionActivity } from "@/session/activity"
 import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
@@ -100,10 +101,10 @@ if (isDaemon) {
 
   // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
   
-  async function maintain(prepared: ColdStorage.PreparedMaintenance, runtime: ColdStorage.MaintenanceRuntime = { checkpoint: async () => {} }) {
+  async function maintain(prepared: ColdMaintain.PreparedMaintenance, runtime: ColdMaintain.MaintenanceRuntime = { checkpoint: async () => {} }) {
     const database = await AppRuntime.runPromise(Database.Service)
     // 每批只预约本 runtime 的同一连接；文件 checkpoint 期间释放预约，普通会话仍可继续。
-    return ColdStorage.maintain(database.sync, prepared, {
+    return ColdMaintain.maintain(database.sync, prepared, {
       ...runtime,
       run: (body) => Effect.runPromise(Database.withSync(database, body)),
     })
@@ -114,8 +115,8 @@ if (isDaemon) {
   // task promise 只在 terminal/interrupted checkpoint 后释放 lease 和 active 标记，daemon 不会提前退出。
   // shutdown race 通过 maintenanceShutdownRequested 立即 abort 刚创建的 controller，避免恢复窗口漏掉停止信号。
   async function runMaintenance(
-    prepared: ColdStorage.PreparedMaintenance,
-    existing?: ColdStorage.MaintenanceTask,
+    prepared: ColdMaintain.PreparedMaintenance,
+    existing?: ColdMaintain.MaintenanceTask,
     acquired?: ServerLock.MaintenanceLease,
   ) {
     if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Expected task-backed maintenance" })
@@ -159,8 +160,8 @@ if (isDaemon) {
 
   // body 只在 pending 已发布后运行，因此其首个 await 不会向 conditional shutdown 暴露假 idle 窗口。
   async function startMaintenanceBody(input: unknown) {
-    const request = ColdStorage.parseMaintenanceRequest(input)
-    const prepared = ColdStorage.prepareMaintenance(request)
+    const request = ColdMaintain.parseMaintenanceRequest(input)
+    const prepared = ColdMaintain.prepareMaintenance(request)
     if (prepared.type === "immediate") {
       if (request.operation === "vacuum") {
         // interrupted task 虽不持有 live lease，仍是待恢复的 nonterminal 工作；vacuum 不得绕过它重排数据库页面。
@@ -209,7 +210,7 @@ if (isDaemon) {
       return { status: 409 as const, body: { error: `Maintenance task is ${task.status}` } }
     }
     if (activeMaintenance) throw new ServerLock.MaintenanceBusyError()
-    const prepared = ColdStorage.prepareMaintenance(task.args)
+    const prepared = ColdMaintain.prepareMaintenance(task.args)
     if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
     await runMaintenance(prepared, task)
     return { status: 202 as const, body: { taskID: task.taskID, operation: task.operation, status: "running" } }
@@ -236,7 +237,7 @@ if (isDaemon) {
   async function recoverInterruptedMaintenance() {
     const task = await ServerLock.findNonterminalMaintenanceTask()
     if (!task || task.status !== "interrupted") return
-    const prepared = ColdStorage.prepareMaintenance(task.args)
+    const prepared = ColdMaintain.prepareMaintenance(task.args)
     if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
     await runMaintenance(prepared, task)
   }

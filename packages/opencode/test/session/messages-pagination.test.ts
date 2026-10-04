@@ -4,6 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 // #493：冷扫描不变量直测——findHot/tail 不预热、limit-0 有界空范围、hidden 跳过。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { Database } from "@opencode-ai/core/database/database"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
@@ -19,9 +20,9 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
 
-// #509：测试进程共享 preload SQLite；ColdStorage.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
+// #509：测试进程共享 preload SQLite；ColdMaintain.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
 // 只统计本 session 的 cold_ref owner，才能在同进程多 suite 下稳定断言 thaw 副作用。
-function sessionColdOwners(sync: Parameters<typeof ColdStorage.status>[0], sessionID: SessionID) {
+function sessionColdOwners(sync: Parameters<typeof ColdMaintain.status>[0], sessionID: SessionID) {
   return (
     sync
       .select({ cold_ref: MessageTable.cold_ref })
@@ -795,7 +796,7 @@ describe("Session.findMessage", () => {
         expect(Option.isNone(none)).toBe(true)
         // #509：无匹配扫描不得 thaw；session 级 cold 计数仍为 1。顺带调用 status() 确保 freeze 后 payload 元数据健康。
         expect(sessionColdOwners(sync, sessionID)).toBe(1)
-        expect(ColdStorage.status(sync).coldOwners).toBeGreaterThanOrEqual(1)
+        expect(ColdMaintain.status(sync).coldOwners).toBeGreaterThanOrEqual(1)
         const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
         expect(Option.isSome(match)).toBe(true)
         const matchedPart = Option.isSome(match) ? match.value.parts.find((part) => part.id === partID) : undefined

@@ -21,7 +21,7 @@ import { tmpdir } from "../../fixture/fixture"
 import { stopDaemon } from "../../../src/cli/cmd/daemon"
 import { ServerLock } from "../../../src/cli/tui/server-lock"
 // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
-import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
+import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-maintain"
 import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
 // #535：交互 DB 命令走真实 PTY；control 断言用同 token 的公开 endpoint。
 import stripAnsi from "strip-ansi"

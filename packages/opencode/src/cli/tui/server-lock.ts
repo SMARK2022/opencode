@@ -3,7 +3,7 @@ import { mkdir, readdir, rename, rm } from "fs/promises"
 import { createHash, randomUUID } from "crypto"
 import { readFileSync } from "fs"
 // #493：maintenance task record 由 core 的 runtime parser 白名单重建，lease 与 checkpoint 共享合同。
-import { parseMaintenanceTask, type MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
+import { parseMaintenanceTask, type MaintenanceTask } from "@opencode-ai/core/storage/cold-maintain"
 import { Global } from "@opencode-ai/core/global"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { Database } from "@opencode-ai/core/database/database"

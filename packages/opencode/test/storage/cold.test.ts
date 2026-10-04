@@ -6,6 +6,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 // #493：ColdStorage 直测走 core 运行时——读路径断言经 MessageV2 业务 seam，写路径经真实 projector。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { Database } from "@opencode-ai/core/database/database"
 import { ColdStorageTable, MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { eq, inArray, isNotNull, sql } from "drizzle-orm"
@@ -694,21 +695,21 @@ describe.serial("ColdStorage", () => {
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({ title: "tool input shape" })
       const partID = yield* seedMalformedToolPart(sessions, session, "{bad json")
-      expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
+      expect(() => ColdMaintain.status(sync)).toThrow("Stored tool input is invalid")
       const report = ColdStorage.verify(sync, { repair: false, repairToolInput: true })
       expect(report.toolInputFixed).toBe(1)
       // 归一化结果是契约占位 {}：SDK 已判 invalid 的调用没有可重建参数，
       // 空对象保证 status()/compress 扫描可继续，同时不伪造任何执行参数。
       const row = useDb(sync, (db) => db.select().from(PartTable).where(eq(PartTable.id, partID)).get())
       expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({})
-      expect(() => ColdStorage.status(sync)).not.toThrow()
+      expect(() => ColdMaintain.status(sync)).not.toThrow()
       // 同一坏行经真实task-backed入口再修复，锁定参数持久化与显式写授权。
       const repairPartID = yield* seedMalformedToolPart(sessions, session, "{another bad json")
-      const prepared = ColdStorage.prepareMaintenance(ColdStorage.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
+      const prepared = ColdMaintain.prepareMaintenance(ColdMaintain.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
       if (prepared.type !== "task") throw new Error("Expected tool input repair task")
-      expect(ColdStorage.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
+      expect(ColdMaintain.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
       const database = yield* Database.Service
-      const result = yield* Effect.promise(() => ColdStorage.maintain(sync, prepared, {
+      const result = yield* Effect.promise(() => ColdMaintain.maintain(sync, prepared, {
         lease: { assertOwned() {} },
         checkpoint: async () => {},
         // 使用现有同连接预约，避免同步测试client掩盖维护事务的实际执行边界。
@@ -748,7 +749,7 @@ describe.serial("ColdStorage", () => {
       yield* seedMalformedToolPart(sessions, session, "{bad json")
       const report = ColdStorage.verify(sync, { repair: false })
       expect(report.toolInputFixed).toBe(0)
-      expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
+      expect(() => ColdMaintain.status(sync)).toThrow("Stored tool input is invalid")
       yield* sessions.remove(session.id)
     }),
   )
@@ -1451,7 +1452,7 @@ describe.serial("ColdStorage", () => {
           process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
           const { Effect, ManagedRuntime } = await import("effect")
           const { Database } = await import(${JSON.stringify(new URL("../../../core/src/database/database.ts", import.meta.url).href)})
-          const { ColdStorage } = await import(${JSON.stringify(new URL("../../../core/src/storage/cold-storage.ts", import.meta.url).href)})
+          const { ColdMaintain } = await import(${JSON.stringify(new URL("../../../core/src/storage/cold-maintain.ts", import.meta.url).href)})
           // 显式 Layer 初始化自己的连接和 migration，不注册模块级最后连接。
           const rt = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
           await rt.runPromise(Effect.void)
@@ -1477,7 +1478,7 @@ describe.serial("ColdStorage", () => {
           const database = await rt2.runPromise(Database.Service)
           const report = await rt2.runPromise(Database.withSync(database, (db) => {
             db.run("PRAGMA cache_size = -512")
-            return ColdStorage.status(db)
+            return ColdMaintain.status(db)
           }))
           process.stdout.write(JSON.stringify(report))
           await rt2.dispose()
@@ -1574,10 +1575,10 @@ describe.serial("ColdStorage", () => {
       useDb(sync, (db) =>
         db.update(PartTable).set({ cold_key: Buffer.alloc(32, 0xa5) }).where(eq(PartTable.id, partID)).run(),
       )
-      const verifyTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
+      const verifyTask = ColdMaintain.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
       if (verifyTask.type !== "task") throw new Error("Expected task-backed repair")
       const verified = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, verifyTask, runtime),
+        ColdMaintain.maintain(sync, verifyTask, runtime),
       )
       if (verified.type !== "task") throw new Error("Expected task result for repair")
       // repair 不可修 key；task 必须报告 corruption，不能因 payload hash 正常而 completed/failed=0。
@@ -1595,10 +1596,10 @@ describe.serial("ColdStorage", () => {
           .where(eq(SessionTable.id, session.id))
           .run(),
       )
-      const summaryTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
+      const summaryTask = ColdMaintain.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
       if (summaryTask.type !== "task") throw new Error("Expected task-backed summary repair")
       const summaryVerified = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, summaryTask, runtime),
+        ColdMaintain.maintain(sync, summaryTask, runtime),
       )
       if (summaryVerified.type !== "task") throw new Error("Expected task result for summary repair")
       expect(summaryVerified.task.failed).toBeGreaterThan(0)
@@ -1626,8 +1627,8 @@ describe.serial("ColdStorage", () => {
       const restored = yield* sessions.getPart({ sessionID: session.id, messageID, partID })
       expect(restored?.type === "reasoning" ? restored.text : undefined).toBe("maintenance-reasoning-".repeat(512))
 
-      expect(ColdStorage.prepareMaintenance({ operation: "status" }).type).toBe("immediate")
-      const prepared = ColdStorage.prepareMaintenance({
+      expect(ColdMaintain.prepareMaintenance({ operation: "status" }).type).toBe("immediate")
+      const prepared = ColdMaintain.prepareMaintenance({
         operation: "compress",
         olderThanMs: 30 * 24 * 60 * 60 * 1000,
         batchSize: 50,
@@ -1636,16 +1637,30 @@ describe.serial("ColdStorage", () => {
       if (prepared.type !== "task") throw new Error("Expected task-backed maintenance")
       // task round-trip 证明持久 record 能通过白名单重建；字符串 counter 模拟可解析但不可信的外部文件。
       // 损坏 record 必须在 resume 前失败，不能靠 TypeScript cast 把 processed="1" 带进 cursor 累加。
-      expect(ColdStorage.parseMaintenanceTask(structuredClone(prepared.task))).toEqual(prepared.task)
-      expect(() => ColdStorage.parseMaintenanceTask({ ...prepared.task, processed: "1" })).toThrow()
-      expect(() => ColdStorage.parseMaintenanceTask({ ...prepared.task, taskID: "dbm_../../outside" })).toThrow()
+      expect(ColdMaintain.parseMaintenanceTask(structuredClone(prepared.task))).toEqual(prepared.task)
+      expect(() => ColdMaintain.parseMaintenanceTask({ ...prepared.task, processed: "1" })).toThrow()
+      expect(() => ColdMaintain.parseMaintenanceTask({ ...prepared.task, taskID: "dbm_../../outside" })).toThrow()
       expect(() =>
-        ColdStorage.parseMaintenanceTask({
+        ColdMaintain.parseMaintenanceTask({
           ...prepared.task,
           cursor: { owner: "message", lastID: "prt_wrong-kind" },
         }),
       ).toThrow()
-      expect(() => ColdStorage.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 5001 })).toThrow()
+      // progress 是面向人类的估算快照，不参与恢复语义；老记录没有该字段照常解析（上方 round-trip 已覆盖）。
+      // 非法形状必须在 resume 前失败，不能把字符串/负数计数带进 CLI 的百分比与 ETA 计算。
+      expect(
+        ColdMaintain.parseMaintenanceTask({
+          ...structuredClone(prepared.task),
+          progress: { stage: "payload", done: 3, total: 10 },
+        }).progress,
+      ).toEqual({ stage: "payload", done: 3, total: 10 })
+      expect(() =>
+        ColdMaintain.parseMaintenanceTask({ ...prepared.task, progress: { stage: "owner", done: -1, total: 10 } }),
+      ).toThrow()
+      expect(() =>
+        ColdMaintain.parseMaintenanceTask({ ...prepared.task, progress: { stage: "owner", done: "1", total: 10 } }),
+      ).toThrow()
+      expect(() => ColdMaintain.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 5001 })).toThrow()
       yield* sessions.remove(session.id)
     }),
   )
@@ -1776,17 +1791,17 @@ describe.serial("ColdStorage", () => {
           .where(eq(SessionTable.id, session.id))
           .run(),
       )
-      const checkpoints: ColdStorage.MaintenanceTask[] = []
+      const checkpoints: ColdMaintain.MaintenanceTask[] = []
       const runtime = {
         lease: { assertOwned() {} },
-        checkpoint(task: ColdStorage.MaintenanceTask) {
+        checkpoint(task: ColdMaintain.MaintenanceTask) {
           checkpoints.push(structuredClone(task))
           return Promise.resolve()
         },
       }
       const compressed = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, 
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(sync,
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1802,8 +1817,8 @@ describe.serial("ColdStorage", () => {
       expect(checkpoints.some((task) => task.status === "running")).toBe(true)
 
       const expanded = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, 
-          ColdStorage.prepareMaintenance({ operation: "expand", sessionID: session.id, all: false, batchSize: 1 }),
+        ColdMaintain.maintain(sync,
+          ColdMaintain.prepareMaintenance({ operation: "expand", sessionID: session.id, all: false, batchSize: 1 }),
           runtime,
         ),
       )
@@ -1853,8 +1868,8 @@ describe.serial("ColdStorage", () => {
           .run(),
       )
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, 
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(sync,
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1931,7 +1946,7 @@ describe.serial("ColdStorage", () => {
       const firstRuntime = {
         lease: { assertOwned() {} },
         signal: controller.signal,
-        checkpoint(task: ColdStorage.MaintenanceTask) {
+        checkpoint(task: ColdMaintain.MaintenanceTask) {
           if (task.status === "running" && task.processed > 0 && !aborted) {
             aborted = true
             controller.abort()
@@ -1940,8 +1955,8 @@ describe.serial("ColdStorage", () => {
         },
       }
       const interrupted = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, 
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(sync,
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -1953,8 +1968,8 @@ describe.serial("ColdStorage", () => {
       expect(interrupted.type === "task" ? interrupted.task.status : undefined).toBe("interrupted")
 
       const resumed = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, 
-          ColdStorage.prepareMaintenance({
+        ColdMaintain.maintain(sync,
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 30 * 24 * 60 * 60 * 1000,
@@ -2060,9 +2075,9 @@ describe.serial("Packed ColdStorage V2", () => {
       )
       // maintenance 走公开 dispatcher 与真实 lease contract，不能用 direct freeze 掩盖 batch packing 差异。
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(
+        ColdMaintain.maintain(
         sync,
-          ColdStorage.prepareMaintenance({
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 0,
@@ -2140,9 +2155,9 @@ describe.serial("Packed ColdStorage V2", () => {
       })
       // 目标 maintain 为 db-first 三参形态（#493）；lease/checkpoint 合同与 pack 用例一致。
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(
+        ColdMaintain.maintain(
           sync,
-          ColdStorage.prepareMaintenance({
+          ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
             olderThanMs: 0,
@@ -2207,7 +2222,7 @@ describe.serial("Packed ColdStorage V2", () => {
       expect(ownerInflatedRaw).toBeGreaterThan(uniqueRaw)
 
       // status 为 db-first（#493）：同一 sync 句柄保证期望与被测读到同一份持久状态。
-      const report = ColdStorage.status(sync)
+      const report = ColdMaintain.status(sync)
       // F4 在 pure pack 上等于 unique raw；F0 会等于 ownerInflatedRaw。
       // sharedBytes 在 pure pack 上应为 0：真共享溢价只来自 owners>keys。
       expect(report.rawBytes).toBe(uniqueRaw)
@@ -3062,7 +3077,7 @@ describe.serial("Packed ColdStorage V2", () => {
       // confirm=true 与 lease 同时提供，覆盖 production 对破坏性物理操作的双重授权门禁。
       // 本测试不执行自动 vacuum，只有显式 operation 才拥有 checkpoint/truncate 副作用。
       const result = yield* Effect.promise(() =>
-        ColdStorage.maintain(sync, ColdStorage.prepareMaintenance({ operation: "vacuum", confirm: true }), {
+        ColdMaintain.maintain(sync, ColdMaintain.prepareMaintenance({ operation: "vacuum", confirm: true }), {
           lease: { assertOwned() {} },
           checkpoint: async () => {},
           run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),

@@ -10,7 +10,7 @@ import { Database as SQLite } from "bun:sqlite"
 import { Flock } from "@opencode-ai/core/util/flock"
 // #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
 import { ServerLock } from "../../src/cli/tui/server-lock"
-import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
+import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-maintain"
 import { tmpdir } from "../fixture/fixture"
 // 测试只走公开 CLI/PTY seam；不导入 renderer 或调用维护私有函数，避免实现重构产生假绿。
 const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
@@ -203,7 +203,7 @@ describe("database maintenance CLI", () => {
     expect(selected).toEqual(["run"])
     expect(parsed.message).toEqual(["db", "status"])
   })
-  // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
+  // 通过真实终端观察提交进度，百分比和ETA分别验证可见的完成度与剩余时间提示。
   ptyInteractive("reports committed compression progress in an interactive terminal", async () => {
     await using tmp = await tmpdir({ init: seedColdParts })
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], isolatedEnv(tmp.path))
@@ -214,6 +214,9 @@ describe("database maintenance CLI", () => {
     const output = cli.output()
     // 单一顺序断言同时锁定活动行与 terminal 汇总，避免两个宽松匹配分别命中无关输出。
     expect(output).toMatch(/Compressing cold data[\s\S]*owners[\s\S]*\/s[\s\S]*elapsed[\s\S]*Compression completed in (?:\d+\.\ds|\d+m \d+s)/)
+    // 独立检查新展示字段，旧的纯脉冲动画不能满足这两个断言。
+    expect(output).toMatch(/\d+\.\d%/)
+    expect(output).toContain("ETA ~")
     // 交互域不得输出 task JSON；JSON 只属于 machine 分支。
     expect(output).not.toContain('"operation": "compress"')
   }, 30_000)
