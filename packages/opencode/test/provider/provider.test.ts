@@ -2507,7 +2507,7 @@ it.instance(
 )
 
 // 由真实plugin/SDK驱动cancel与在途pull，不新增生产导出；正常EOF组钉住遥测可观测性。
-it.instance("SSE wrap: cancel during in-flight pull does not write to a closed controller", () => Effect.gen(function* () {
+Array.of("dev", "timestamp", "stderr").forEach((mode) => it.instance(`SSE wrap: in-flight cancel with prior ${mode} logging`, () => Effect.gen(function* () {
   const instance = yield* TestInstance
   const dir = instance.directory
   const encoder = new TextEncoder()
@@ -2569,7 +2569,14 @@ it.instance("SSE wrap: cancel during in-flight pull does not write to a closed c
     "race-b": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
   }))
   const logfile = path.join(dir, "sse-race.log")
-  yield* Effect.gen(function* () {
+  // 三种前序logger都真实获取资源；内层必须独立选择文件，不能继承旧目标。
+  const prior = Logger.layer([
+    mode === "stderr"
+      ? Logger.consolePretty({ stderr: true, colors: false })
+      : Logging.fileLogger(path.join(dir, mode === "dev" ? "dev.log" : "2026-10-21T000000.log")),
+  ]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)
+  // 先发布前序日志再运行现有真实SDK路径，保留目标不可变作用域而非复活全局Log.init。
+  yield* Effect.logInfo("previous SSE logger state", { mode }).pipe(Effect.andThen(Effect.gen(function* () {
       const provider = yield* Provider.Service
       const baseline = yield* Effect.promise(() => Bun.file(logfile).text())
       const g = globalThis as unknown as Record<PropertyKey, ReadableStreamDefaultController<Uint8Array>[] | undefined>
@@ -2601,7 +2608,10 @@ it.instance("SSE wrap: cancel during in-flight pull does not write to a closed c
           return
         }
         body.close()
-        yield* Effect.promise(() => reader.read().catch(() => undefined))
+        // 控制组消费到真正EOF；中间事件不代表结束，读取错误不能被吞掉。
+        for (;;) {
+          if ((yield* Effect.promise(() => reader.read())).done) break
+        }
       })
 
       // cancelled 组先行：buggy 写入若存在，必排在控制组之前进入日志 FIFO；
@@ -2610,13 +2620,14 @@ it.instance("SSE wrap: cancel during in-flight pull does not write to a closed c
       yield* race("race-b", false)
       const deadline = Date.now() + 10_000
       let delta = ""
-      while (Date.now() < deadline) {
-        delta = (yield* Effect.promise(() => Bun.file(logfile).text())).slice(baseline.length)
-        if (delta.includes("sse.end") && delta.includes("providerID=race-b")) break
-        yield* Effect.sleep("25 millis")
-      }
       const ended = (id: string) =>
         delta.split("\n").filter((line) => line.includes("sse.end") && line.includes(`providerID=${id}`))
+      while (Date.now() < deadline) {
+        delta = (yield* Effect.promise(() => Bun.file(logfile).text())).slice(baseline.length)
+        // 就绪必须来自同一条控制组EOF，不能拼接取消组EOF与控制组的其他事件。
+        if (ended("race-b").length > 0) break
+        yield* Effect.sleep("25 millis")
+      }
       // 控制组必须可见，证明遥测可观测、下面的空断言不是恒真。
       expect(ended("race-b")).not.toEqual([])
       expect(ended("race-a")).toEqual([])
@@ -2624,8 +2635,11 @@ it.instance("SSE wrap: cancel during in-flight pull does not write to a closed c
     // 在getSDK捕获EffectBridge之前安装真实文件logger，不改Global.Path.log或重建全局Log。
     Effect.provide(Logger.layer([Logging.fileLogger(logfile)]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)),
     Effect.scoped,
+  )),
+    Effect.provide(prior),
+    Effect.scoped,
   )
-}))
+})))
 
 it.effect("opencode loader keeps paid models when auth exists", () =>
   Effect.gen(function* () {
