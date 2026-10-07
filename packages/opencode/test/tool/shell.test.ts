@@ -2450,6 +2450,8 @@ describe("tool.shell abort", () => {
         const spawner = yield* ChildProcessSpawner
         const tmp = yield* tmpdirScoped()
         const file = path.join(tmp, "spawn-failure.log")
+        // 本用例显式拥有独占文件sink；先运文件的logger选择不决定这次隐私证据的去向。
+        const logging = Logger.layer([Logging.fileLogger(file)], { mergeWithExisting: false }).pipe(Layer.provide(NodeFileSystem.layer))
         const secret = `command-secret-${crypto.randomUUID()}`
         // 唯一call身份排除其它Session的历史日志，不能让一条无敏感内容的旧记录代替本次失败。
         const callID = `privacy-${crypto.randomUUID()}`
@@ -2467,8 +2469,8 @@ describe("tool.shell abort", () => {
                 }),
               ),
           }),
-          // 使用真实scoped文件logger，工具初始化及失败投影处于同一Layer；不恢复全局Log状态。
-          Effect.provide(Logger.layer([Logging.fileLogger(file)], { mergeWithExisting: false }).pipe(Layer.provide(NodeFileSystem.layer))),
+          // scope结算会关闭自持sink并恢复外层logger，失败退出也不影响同进程后续测试。
+          Effect.provide(logging),
           Effect.exit,
         )
         expect(Exit.isFailure(result)).toBe(true)
