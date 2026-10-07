@@ -2533,6 +2533,9 @@ describe("tool.shell abort", () => {
     runIn(
       projectRoot,
       Effect.gen(function* () {
+        // shard同进程的先运文件可把全局writer永久切为stderr（test/lsp/client.test.ts的print:true先例）；
+        // 本测试断言文件内容，必须自持sink：dev:false新建并truncate日期文件，天然排除同进程历史条目。
+        yield* Effect.promise(() => Log.init({ print: false, dev: false, level: "DEBUG" }))
         const spawner = yield* ChildProcessSpawner
         const secret = `command-secret-${crypto.randomUUID()}`
         // 唯一call身份排除其它Session的历史日志，不能让一条无敏感内容的旧记录代替本次失败。
@@ -2569,7 +2572,8 @@ describe("tool.shell abort", () => {
         )
         expect(entry).not.toContain(secret)
         expect(entry).toContain(String(ctx.sessionID))
-      }),
+        // 恢复preload的dev合同，后续文件的日志行为不受本测试影响。
+      }).pipe(Effect.ensuring(Effect.promise(() => Log.init({ print: false, dev: true, level: "DEBUG" })))),
     ),
   )
 
