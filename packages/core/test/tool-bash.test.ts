@@ -854,6 +854,45 @@ describe("BashTool", () => {
     ),
   )
 
+  it.live("preserves typed capture-host execution identity without exposing ordinary failures", () =>
+    Effect.acquireUseRelease(Effect.promise(() => tmpdir()), (tmp) => Effect.gen(function* () {
+      // 只替换AppProcess边界；真实工具授权、归档和canonical settlement仍执行。
+      const messages = [
+        "shell capture host lost (executionID=exec-lost hostPID=401 rootPID=402 exit=1/null)",
+        "shell capture host failed at read: broken pipe (executionID=exec-failed hostPID=401 rootPID=402)",
+        "shell capture protocol violation (missing end, executionID=exec-protocol)",
+      ]
+      // ready、双流和退出等待并发交付，不能仅接住capture方法而漏掉其余诊断。
+      for (const method of ["spawn", "capture", "fromReadable(stdout)", "fromReadable(stderr)"]) {
+        for (const description of messages) {
+          reset()
+          result = { ...result, output: Buffer.alloc(0), stdout: Buffer.alloc(0) }
+          runFailure = new AppProcess.AppProcessError({ command: "capture-probe", cause: PlatformError.systemError({
+            _tag: "Unknown", module: "ChildProcess", method, description, cause: new Error(description),
+          }) })
+          const settled = yield* withTool(tmp.path, registry => settleTool(registry, call({ command: "capture-probe" })))
+          expect(settled).toEqual({ result: { type: "error", value: description } })
+          expect(runs).toHaveLength(1)
+        }
+      }
+      // 其他owner、普通平台失败和只有相似文字的Error不能越过原有错误信息边界。
+      for (const cause of [
+        PlatformError.systemError({ _tag: "Unknown", module: "FileSystem", method: "writeFile", description: messages[0] }),
+        PlatformError.systemError({ _tag: "Unknown", module: "FileSystem", method: "writeFile", description: "ENOSPC: quota exhausted" }),
+        PlatformError.systemError({ _tag: "Unknown", module: "ChildProcess", method: "spawn", description: "ordinary failure" }),
+        new Error(messages[0]),
+        new Error("ENOSPC: quota exhausted"),
+      ]) {
+        reset()
+        result = { ...result, output: Buffer.alloc(0), stdout: Buffer.alloc(0) }
+        runFailure = new AppProcess.AppProcessError({ command: "capture-probe", cause })
+        const settled = yield* withTool(tmp.path, registry => settleTool(registry, call({ command: "capture-probe" })))
+        expect(settled).toEqual({ result: { type: "error", value: "Unable to execute command: capture-probe" } })
+        expect(runs).toHaveLength(1)
+      }
+    }), (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]())),
+  )
+
   it.live("returns a useful timeout settlement", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

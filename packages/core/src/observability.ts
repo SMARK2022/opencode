@@ -10,6 +10,8 @@ import { Otlp } from "./observability/otlp"
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
+    // 日志生命周期负责诊断目录保留；独立调用fileLogger不会触发与其scope无关的目录清理。
+    yield* Effect.promise(() => Logging.cleanupDaemonNative())
     const logs = Logger.layer([...Logging.loggers(), ...Otlp.loggers()], { mergeWithExisting: false }).pipe(
       Layer.provide(NodeFileSystem.layer),
       Layer.provide(OtlpSerialization.layerJson),
