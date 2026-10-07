@@ -1,35 +1,8 @@
-import yargs from "yargs"
-import { hideBin } from "yargs/helpers"
-import { RunCommand } from "./cli/cmd/run"
-import { GenerateCommand } from "./cli/cmd/generate"
-import { ConsoleCommand } from "./cli/cmd/account"
-import { ProvidersCommand } from "./cli/cmd/providers"
-import { AgentCommand } from "./cli/cmd/agent"
-import { UpgradeCommand } from "./cli/cmd/upgrade"
-import { UninstallCommand } from "./cli/cmd/uninstall"
-import { ModelsCommand } from "./cli/cmd/models"
-import { UI } from "./cli/ui"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import { FormatError } from "./cli/error"
-import { ServeCommand } from "./cli/cmd/serve"
-import { DebugCommand } from "./cli/cmd/debug"
-import { StatsCommand } from "./cli/cmd/stats"
-import { McpCommand } from "./cli/cmd/mcp"
-import { GithubCommand } from "./cli/cmd/github"
-import { ExportCommand } from "./cli/cmd/export"
-import { ImportCommand } from "./cli/cmd/import"
-import { AttachCommand } from "./cli/cmd/attach"
-import { TuiThreadCommand } from "./cli/cmd/tui"
-import { AcpCommand } from "./cli/cmd/acp"
-import { EOL } from "os"
-import { WebCommand } from "./cli/cmd/web"
-import { PrCommand } from "./cli/cmd/pr"
-import { SessionCommand } from "./cli/cmd/session"
-import { DbCommand } from "./cli/cmd/db"
-import { DaemonCommand } from "./cli/cmd/daemon"
-import { errorMessage } from "./util/error"
-import { PluginCommand } from "./cli/cmd/plug"
-import { Heap } from "./cli/heap"
+// 捕获宿主先于应用模块加载；仅把if写在静态import前仍会先初始化应用和数据库。
+if (process.env.OPENCODE_PROCESS_ROLE === "shell-capture") {
+  const { runHost } = await import("@opencode-ai/core/windows-shell-output")
+  process.exit(await runHost())
+}
 
 // 编译入口只凭明确的 worker 环境角色旁路 yargs，普通用户参数仍走原 CLI parser。
 if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
@@ -59,6 +32,40 @@ if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
   }
   process.exit(0)
 }
+
+// 普通CLI保留原命令注册顺序；worker和诊断角色不进入这些有副作用的应用依赖。
+const { default: yargs } = await import("yargs")
+const { hideBin } = await import("yargs/helpers")
+const { RunCommand } = await import("./cli/cmd/run")
+const { GenerateCommand } = await import("./cli/cmd/generate")
+const { ConsoleCommand } = await import("./cli/cmd/account")
+const { ProvidersCommand } = await import("./cli/cmd/providers")
+const { AgentCommand } = await import("./cli/cmd/agent")
+const { UpgradeCommand } = await import("./cli/cmd/upgrade")
+const { UninstallCommand } = await import("./cli/cmd/uninstall")
+const { ModelsCommand } = await import("./cli/cmd/models")
+const { UI } = await import("./cli/ui")
+const { InstallationVersion } = await import("@opencode-ai/core/installation/version")
+const { FormatError } = await import("./cli/error")
+const { ServeCommand } = await import("./cli/cmd/serve")
+const { DebugCommand } = await import("./cli/cmd/debug")
+const { StatsCommand } = await import("./cli/cmd/stats")
+const { McpCommand } = await import("./cli/cmd/mcp")
+const { GithubCommand } = await import("./cli/cmd/github")
+const { ExportCommand } = await import("./cli/cmd/export")
+const { ImportCommand } = await import("./cli/cmd/import")
+const { AttachCommand } = await import("./cli/cmd/attach")
+const { TuiThreadCommand } = await import("./cli/cmd/tui")
+const { AcpCommand } = await import("./cli/cmd/acp")
+const { EOL } = await import("os")
+const { WebCommand } = await import("./cli/cmd/web")
+const { PrCommand } = await import("./cli/cmd/pr")
+const { SessionCommand } = await import("./cli/cmd/session")
+const { DbCommand } = await import("./cli/cmd/db")
+const { DaemonCommand } = await import("./cli/cmd/daemon")
+const { errorMessage } = await import("./util/error")
+const { PluginCommand } = await import("./cli/cmd/plug")
+const { Heap } = await import("./cli/heap")
 
 const args = hideBin(process.argv)
 

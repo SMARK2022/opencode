@@ -3,6 +3,7 @@ export * as BashTool from "./bash"
 import path from "path"
 import { ToolFailure } from "@opencode-ai/llm"
 import { Clock, Duration, Effect, Layer, Schema } from "effect"
+import { PlatformError } from "effect/PlatformError"
 import { ChildProcess } from "effect/unstable/process"
 import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
@@ -430,8 +431,16 @@ const layer = Layer.effectDiscard(
                 structured: Schema.encodeSync(StructuredOutput)(value),
                 content: [{ type: "text", text: value.contextOutput }, { type: "text", text: modelOutput(value) }],
               }))))
-              // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
-            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to execute command: ${input.command}`, error }))),
+              // 捕获故障沿同一typed error返回原始身份，不把故障误报成普通命令失败。
+            }).pipe(Effect.mapError((error) => {
+              if (error instanceof ToolFailure) return error
+              const reason = error instanceof AppProcess.AppProcessError && error.cause instanceof PlatformError ? error.cause.reason : undefined
+              // 只接本项ChildProcess诊断；普通执行和归档写失败仍沿原generic合同。
+              const detail = reason?.module === "ChildProcess" && typeof reason.description === "string" && /^(?:shell capture host lost \(|shell capture host failed at |shell capture protocol violation \()/.test(reason.description)
+                ? reason.description
+                : undefined
+              return new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? detail ?? `Unable to execute command: ${input.command}`, error })
+            })),
         }),
       })
       .pipe(Effect.orDie)

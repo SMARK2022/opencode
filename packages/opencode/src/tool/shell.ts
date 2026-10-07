@@ -1,4 +1,4 @@
-import { Effect, Fiber, Stream } from "effect"
+import { Effect, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -583,9 +583,6 @@ export const ShellTool = Tool.define(
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
-          // 传输编码保持正文字符，变量展开和引用处理由选定 shell 执行。
-          const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
-
           // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
           // #128：按 input.encoding 锁定或自动探测
@@ -643,12 +640,19 @@ export const ShellTool = Tool.define(
             )
           }
 
-          // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成
-          const output = yield* Effect.forkScoped(
-            // #126：end 时 flush decoder 尾部不完整码点
-            Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
-              Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
-            ),
+          // spawn握手、双流消费和root退出同属可中断scope；传输仍使用授权后的原始输入。
+          // 固定失败日志只携带调用身份，不把命令正文、环境或Cause序列化进日志。
+          const execute = Effect.scoped(
+            Effect.gen(function* () {
+              const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env)).pipe(
+                Effect.tapCause(() => Effect.logError({ service: "tool.shell", message: "spawn failed", sessionID: ctx.sessionID, callID: ctx.callID })),
+              )
+              const output = Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
+                Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
+              )
+              const result = yield* Effect.all([handle.exitCode, output], { concurrency: "unbounded" })
+              return { kind: "exit" as const, code: result[0] }
+            }),
           )
 
           const abort = Effect.callback<void>((resume) => {
@@ -658,30 +662,21 @@ export const ShellTool = Tool.define(
             return Effect.sync(() => ctx.abort.removeEventListener("abort", handler))
           })
 
-          const timeout = Effect.sleep(`${input.timeout + 100} millis`)
+          const timeout = Effect.sleep(`${Math.max(0, input.timeout + 100 - (Date.now() - started))} millis`)
 
-          // 正常完成同时等待root退出与输出EOF，取消和原deadline覆盖整个消费阶段。
-          // 首完成竞争保留真实失败，不能等到另一分支成功才交付错误。
-          const exit = yield* Effect.raceAllFirst([
-            Effect.all([handle.exitCode, Fiber.join(output)], { concurrency: "unbounded" }).pipe(
-              Effect.map(([code]) => ({ kind: "exit" as const, code })),
-            ),
-            abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
-            timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
-          ])
+          // 同一竞争覆盖spawn握手到完整输出；取消分支等待执行scope清理，避免遗留宿主。
+          // deadline从批准后的started计时，不能在取得handle后重新给完整预算。
+          const exit = yield* ctx.abort.aborted
+            ? Effect.succeed({ kind: "abort" as const, code: null })
+            : Effect.raceAllFirst([
+                execute,
+                abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
+                timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+              ])
 
           if (exit.kind !== "exit") {
             aborted = exit.kind === "abort"
             expired = exit.kind === "timeout"
-            yield* Effect.gen(function* () {
-              // Windows死root不能再代表其后代；POSIX仍沿Core进程组与强杀升级收口。
-              if (process.platform === "win32" && !(yield* handle.isRunning)) return
-              yield* handle.kill({ forceKillAfter: TERMINATION_GRACE_MS })
-            }).pipe(
-              // 归还consumer时结清decoder及已捕获文本，不再等待未来writer的EOF。
-              Effect.ensuring(Fiber.interrupt(output)),
-              Effect.orDie,
-            )
           }
 
           return exit.kind === "exit" ? exit.code : null

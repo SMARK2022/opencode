@@ -1,4 +1,4 @@
-import { Formatter, Logger, type LogLevel } from "effect"
+import { Formatter, Logger, Schema, type LogLevel } from "effect"
 import fs from "fs"
 import path from "path"
 import { Global } from "../global"
@@ -75,6 +75,61 @@ export function minimumLogLevel() {
 
 export function loggers() {
   return process.env.OPENCODE_PRINT_LOGS === "1" ? [fileLogger(), stderrLogger] : [fileLogger()]
+}
+
+// 仅治理daemon-native证据，不改变scoped文件logger、普通日志保留或关闭时flush的目标合同。
+export async function cleanupDaemonNative(dir = Global.Path.log) {
+  const since = Date.now() - 24 * 60 * 60 * 1000
+  // daemon-native 诊断目录与普通日志同治理：活跃目录保留；完成目录保留最新10个或24h窗口；
+  // start-only 且进程已死且超窗的目录是 wrapper 夭折残留，删除。
+  const native = path.join(dir, "daemon-native")
+  const names = (await fs.promises.readdir(native, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+  const decode = Schema.decodeUnknownSync(
+    Schema.Struct({
+      workerPID: Schema.optional(Schema.Number),
+      wrapperPID: Schema.optional(Schema.Number),
+      exitedAt: Schema.optional(Schema.String),
+    }),
+  )
+  const runs = (
+    await Promise.all(
+      names.map(async (name) => {
+        const full = path.join(native, name)
+        const file = path.join(full, "lifecycle.json")
+        const record = await Bun.file(file)
+          .json()
+          .then(decode)
+          .catch(() => undefined)
+        // 已有记录暂不可读时无法确认owner死亡，不能按无记录孤儿删除正在更新的证据。
+        if (!record && (await Bun.file(file).exists())) return
+        // worker或supervisor尚活时均保留；PID复用只会多保留证据，不会误删。
+        const active = [record?.workerPID, record?.wrapperPID].some((pid) => {
+          if (pid === undefined) return false
+          try {
+            process.kill(pid, 0)
+            return true
+          } catch {
+            return false
+          }
+        })
+        if (active) return
+        // 无记录目录包含启动中间态；用目录年龄保护它，不能把缺记录当作时间零。
+        const stat = await fs.promises.stat(record ? file : full).catch(() => undefined)
+        return { full, mtime: stat?.mtimeMs ?? Date.now(), exited: record?.exitedAt !== undefined }
+      }),
+    )
+  )
+    .filter((run) => run !== undefined)
+    .sort((a, b) => b.mtime - a.mtime)
+  const retained = new Set(runs.filter((run) => run.exited).slice(0, 10))
+  await Promise.all(
+    runs.map(async (run) => {
+      if (run.mtime > since || retained.has(run)) return
+      await fs.promises.rm(run.full, { recursive: true, force: true }).catch(() => {})
+    }),
+  )
 }
 
 export * as Logging from "./logging"

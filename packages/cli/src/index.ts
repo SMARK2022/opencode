@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 
-import * as NodeRuntime from "@effect/platform-node/NodeRuntime"
-import * as NodeServices from "@effect/platform-node/NodeServices"
-import * as Effect from "effect/Effect"
-import { Commands } from "./commands/commands"
-import { Runtime } from "./framework/runtime"
-import { Daemon } from "./services/daemon"
+// 新CLI的编译产物也可能作为当前可执行文件；宿主不得先加载Commands、Runtime或Daemon层。
+if (process.env.OPENCODE_PROCESS_ROLE === "shell-capture") {
+  const { runHost } = await import("@opencode-ai/core/windows-shell-output")
+  process.exit(await runHost())
+}
 
 // probe在Runtime.run和Daemon.layer之前退出；不启动产品服务或加载native录音addon。
 if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
@@ -27,6 +26,13 @@ if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
   }
   process.exit(0)
 }
+
+const NodeRuntime = await import("@effect/platform-node/NodeRuntime")
+const NodeServices = await import("@effect/platform-node/NodeServices")
+const { Effect } = await import("effect")
+const { Commands } = await import("./commands/commands")
+const { Runtime } = await import("./framework/runtime")
+const { Daemon } = await import("./services/daemon")
 
 const Handlers = Runtime.handlers(Commands, {
   $: () => import("./commands/handlers/default"),
