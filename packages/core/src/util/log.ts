@@ -179,6 +179,58 @@ export async function close(): Promise<void> {
 }
 
 async function cleanup(dir: string) {
+  // 先治理daemon目录，普通日志数量少时的既有early-return不能跳过此责任。
+  const since = Date.now() - RETAIN_MS
+  // daemon-native 诊断目录与普通日志同治理：活跃目录保留；完成目录保留最新10个或24h窗口；
+  // start-only 且进程已死且超窗的目录是 wrapper 夭折残留，删除。
+  const native = path.join(dir, "daemon-native")
+  const names = (await fs.readdir(native, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+  const decode = Schema.decodeUnknownSync(
+    Schema.Struct({
+      workerPID: Schema.optional(Schema.Number),
+      wrapperPID: Schema.optional(Schema.Number),
+      exitedAt: Schema.optional(Schema.String),
+    }),
+  )
+  const runs = (
+    await Promise.all(
+      names.map(async (name) => {
+        const full = path.join(native, name)
+        const file = path.join(full, "lifecycle.json")
+        const record = await Bun.file(file)
+          .json()
+          .then(decode)
+          .catch(() => undefined)
+        // 已有记录暂不可读时无法确认owner死亡，不能按无记录孤儿删除正在更新的证据。
+        if (!record && (await Bun.file(file).exists())) return
+        // worker或supervisor尚活时均保留；PID复用只会多保留证据，不会误删。
+        const active = [record?.workerPID, record?.wrapperPID].some((pid) => {
+          if (pid === undefined) return false
+          try {
+            process.kill(pid, 0)
+            return true
+          } catch {
+            return false
+          }
+        })
+        if (active) return
+        // 无记录目录包含启动中间态；用目录年龄保护它，不能把缺记录当作时间零。
+        const stat = await fs.stat(record ? file : full).catch(() => undefined)
+        return { full, mtime: stat?.mtimeMs ?? Date.now(), exited: record?.exitedAt !== undefined }
+      }),
+    )
+  )
+    .filter((run) => run !== undefined)
+    .sort((a, b) => b.mtime - a.mtime)
+  const retained = new Set(runs.filter((run) => run.exited).slice(0, keep))
+  await Promise.all(
+    runs.map(async (run) => {
+      if (run.mtime > since || retained.has(run)) return
+      await fs.rm(run.full, { recursive: true, force: true }).catch(() => {})
+    }),
+  )
   const files = (
     await Glob.scan("????-??-??T??????.log", {
       cwd: dir,
@@ -202,6 +254,9 @@ async function cleanup(dir: string) {
     }),
   )
 }
+
+// 仅测试导入该内部入口；生产路径保持 init() -> cleanup(日志目录)。
+export const _cleanup = cleanup
 
 function formatError(error: Error, depth = 0): string {
   const result = error.message

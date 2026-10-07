@@ -52,6 +52,12 @@ if (processMetadata.processRole === "worker") {
   await import("./cli/cmd/tui/worker")
   await new Promise<never>(() => {})
 }
+// 编译版 bundle 中 windows-shell-output 的 import.meta.main 分支不成立：shell-capture
+// 角色必须在这里显式分发到宿主入口，进程退出码即 runHost 的结算结果。
+if (processMetadata.processRole === "shell-capture") {
+  const host = await import("@opencode-ai/core/windows-shell-output")
+  process.exit(await host.runHost())
+}
 if (processMetadata.processRole === "voice-smoke") {
   const { voiceWorkerPath } = await import("./cli/cmd/tui/prompt-voice-recorder")
   const worker = new Worker(voiceWorkerPath(), { ref: true }) // diagnostic role shares the production Worker address resolver.

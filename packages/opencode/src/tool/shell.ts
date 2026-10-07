@@ -906,12 +906,22 @@ export const ShellTool = Tool.define(
 
           yield* Effect.addFinalizer(closeSink)
           // 传输编码保持正文字符，变量展开和引用处理由选定 shell 执行。
-          const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
-
-          const output = yield* Effect.forkScoped(
-            Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
-              Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
-            ),
+          // 远端宿主故障不携带工具上下文：spawn 错误必须补记 session/call 身份以便归因。
+          const execute = Effect.scoped(
+            Effect.gen(function* () {
+              const handle = yield* spawner
+                .spawn(cmd(input.shell, input.command, input.cwd, input.env))
+                .pipe(
+                  Effect.tapCause(() =>
+                    Effect.sync(() => log.error("spawn failed", { sessionID: ctx.sessionID, callID: ctx.callID })),
+                  ),
+                )
+              const output = Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
+                Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
+              )
+              const result = yield* Effect.all([handle.exitCode, output], { concurrency: "unbounded" })
+              return { kind: "exit" as const, code: result[0] }
+            }),
           )
 
           const abort = Effect.callback<void>((resume) => {
@@ -921,47 +931,21 @@ export const ShellTool = Tool.define(
             return Effect.sync(() => ctx.abort.removeEventListener("abort", handler))
           })
 
-          const timeout = Effect.sleep(`${input.timeout + 100} millis`)
+          const timeout = Effect.sleep(`${Math.max(0, input.timeout + 100 - (Date.now() - started))} millis`)
 
-          // root退出与输出EOF是两个完成条件；共同竞争才能让排空期间的取消与原deadline继续有效。
-          // 首完成保留真实错误，避免exit/consumer失败后被首成功竞争改写为timeout。
-          const exit = yield* Effect.raceAllFirst([
-            Effect.all([handle.exitCode, Fiber.join(output)], { concurrency: "unbounded" }).pipe(
-              Effect.map(([code]) => ({ kind: "exit" as const, code })),
-            ),
-            abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
-            timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
-          ])
+          // 同一竞争覆盖spawn握手到完整输出；取消分支等待执行scope清理，避免遗留宿主。
+          // deadline从批准后的started计时，不能在取得handle后重新给完整预算。
+          const exit = yield* ctx.abort.aborted
+            ? Effect.succeed({ kind: "abort" as const, code: null })
+            : Effect.raceAllFirst([
+                execute,
+                abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
+                timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+              ])
 
           if (exit.kind !== "exit") {
             aborted = exit.kind === "abort"
             expired = exit.kind === "timeout"
-            const kill = (killSignal?: NodeJS.Signals) =>
-              handle.kill({ killSignal }).pipe(
-                // isRunning检查与kill之间允许真实退出；仅已退出时承认终止完成，存活进程保留错误。
-                Effect.catch((error) =>
-                  Effect.flatMap(handle.isRunning, (running) => (running ? Effect.fail(error) : Effect.void)),
-                ),
-              )
-            yield *
-              Effect.gen(function* () {
-                // Windows死root的PID不再拥有后代；结束本地读取无需再等taskkill寻找已退出进程。
-                // POSIX仍保留进程组终止，覆盖root已退但后代忽略TERM的既有合同。
-                if (process.platform === "win32" && !(yield* handle.isRunning)) return
-                yield* kill().pipe(
-                  Effect.andThen(Fiber.join(output)),
-                  Effect.timeoutOrElse({
-                    duration: TERMINATION_GRACE_MS,
-                    // 沿用强杀升级；进程组在升级前消失是既有可接受结果。
-                    orElse: () => kill("SIGKILL").pipe(Effect.ignore),
-                  }),
-                )
-              }).pipe(
-                // 取消结束剩余读取，同时等待decoder.end与已捕获文本提交；不再等未来writer的EOF。
-                // kill失败也释放consumer，真实异常仍通过外层scope传播。
-                Effect.ensuring(Fiber.interrupt(output)),
-                Effect.orDie,
-              )
           }
 
           return exit.kind === "exit" ? exit.code : null

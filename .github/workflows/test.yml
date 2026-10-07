@@ -190,6 +190,56 @@ jobs:
             echo "| ${{ matrix.label }} | ${{ matrix.os_label }} | ${result} | ${{ steps.junit.outputs.exists == 'true' && '已生成' || '未生成' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  core-stress-windows:
+    name: 压力 Windows shell 捕获宿主
+    runs-on: windows-latest
+    # 10 分钟硬上限包含安装与测试：规模 500 次调用（内部超时 5 分钟）为弱机预留整个 setup 窗口。
+    # 不设 continue-on-error：本分支是必过稳定性信号，健康时与核心套件同为绿标。
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Checkout的SHA固定Action供应链版本；未设置ref，待测源码仍是当前事件的commit。
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --filter './' --filter './packages/core'
+          cache-scope: test-packages/core-root-v1
+      - name: Run shell capture host stress
+        id: stress
+        working-directory: packages/core
+        env:
+          OPENCODE_STRESS: "1"
+          OPENCODE_STRESS_COUNT: "500" # 不按机器快慢减少样本，固定规模的每次执行都须完成。
+          OPENCODE_STRESS_ROUNDS: "1"
+        # 固定次数稳定性门槛：全部调用完成且父进程存活；只断言稳定性/正确性，不断言吞吐。
+        run: bun test test/stress/windows-shell-output-stress.test.ts
+      - name: Write stress summary
+        if: always()
+        run: |
+          case "${{ steps.stress.outcome }}" in
+            success) result="通过" ;;
+            failure) result="失败" ;;
+            cancelled) result="取消（触达 10 分钟上限）" ;;
+            skipped) result="跳过" ;;
+            *) result="${{ steps.stress.outcome }}" ;;
+          esac
+          {
+            echo "### 压力 Windows shell 捕获宿主"
+            echo "| 范围 | 结果 | 说明 |"
+            echo "| --- | --- | --- |"
+            echo "| 500 次 marked spawn | ${result} | 必过稳定性分支 |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   opentui-required:
     # closure、behavior test和consumer typecheck必须同一job执行，避免不同安装图互相掩盖peer漂移。
     name: 必过 OpenTUI 0.4.3 consumer gate

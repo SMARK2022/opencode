@@ -9,6 +9,7 @@ import * as Layer from "effect/Layer"
 import * as Path from "effect/Path"
 import * as PlatformError from "effect/PlatformError"
 import * as Predicate from "effect/Predicate"
+import * as Schedule from "effect/Schedule"
 import type * as Scope from "effect/Scope"
 import * as Sink from "effect/Sink"
 import * as Stream from "effect/Stream"
@@ -89,6 +90,8 @@ const toPlatformError = (
     method,
     pathOrDescriptor: cmd,
     syscall: err.syscall,
+    // 隔离捕获的错误身份必须进入公开错误文本，否则Tool只见Unknown而丢失host证据。
+    description: command._tag === "StandardCommand" && WindowsShellOutput.has(command) ? err.message : undefined,
     cause: err,
   })
 }
@@ -243,7 +246,7 @@ export const make = Effect.gen(function* () {
     proc: NodeChildProcess.ChildProcess,
     out: ChildProcess.StdoutConfig,
     err: ChildProcess.StderrConfig,
-    capture?: Awaited<ReturnType<typeof WindowsShellOutput.make>>,
+    capture?: Pick<Awaited<ReturnType<typeof WindowsShellOutput.make>>, "streams">,
   ) {
     // 急切缓冲（写入与订阅时序解耦）：spawn 建柄后立即把主 stdout/stderr pipe 进
     // PassThrough（与下方 extra-fd 输出同款模式）。惰性 fromReadable 下快退子进程
@@ -422,19 +425,35 @@ export const make = Effect.gen(function* () {
           const extra = fds(command.options)
           const dir = yield* cwd(command.options)
 
+          const marked = WindowsShellOutput.has(command)
+          // 原生捕获的进程级故障域必须限制在单次调用：普通进程把已标记命令委托给独占
+          // 执行宿主；只有宿主角色内才在当前进程创建本地 capture。
+          const remote = marked && !WindowsShellOutput.isHost()
           // capture先取得、后释放：原process finalizer仍负责取消存活进程。
           // marker来自ShellTool构造点，通用core、MCP和管道组合保持原EOF路径。
-          const capture = WindowsShellOutput.has(command)
+          const capture =
+            marked && !remote
+              ? yield* Effect.acquireRelease(
+                  Effect.tryPromise({
+                    try: WindowsShellOutput.make,
+                    catch: (cause) => toPlatformError("capture", toError(cause), command),
+                  }),
+                  (output) => Effect.promise(output.close),
+                )
+              : undefined
+          // 同步取得host立即登记回收；ready是可中断等待，不把用户取消锁在acquire内。
+          const session = remote
             ? yield* Effect.acquireRelease(
-                Effect.tryPromise({
-                  try: WindowsShellOutput.make,
+                Effect.try({
+                  try: () => WindowsShellOutput.openRemote(command, { cwd: dir, env: env(command.options) }),
                   catch: (cause) => toPlatformError("capture", toError(cause), command),
                 }),
-                (output) => Effect.promise(output.close),
+                (s) => Effect.promise(() => s.close()),
               )
             : undefined
 
-          const [proc, signal] = yield* Effect.acquireRelease(
+          // 本地资源合同保留在原owner；Effect是惰性的，remote分支不会执行这份本地spawn。
+          const local = Effect.acquireRelease(
             spawn(
               command,
               {
@@ -447,9 +466,25 @@ export const make = Effect.gen(function* () {
               },
               capture,
             ),
-            Effect.fnUntraced(function* ([proc, signal]) {
+            Effect.fnUntraced(function* ([proc, signal], outcome) {
               const done = yield* Deferred.isDone(signal)
               const kill = timeout(proc, command, command.options)
+              // 取消等待整个独占组：root在宽限期内先退出也不省略后代强杀；repeat以kill(-pid,0)探测，ESRCH即组已清空，20ms只是调度节拍。
+              if (process.platform !== "win32" && command.options.detached !== false && Exit.isFailure(outcome))
+                return yield* Effect.ignore(
+                  kill((cmd, child, sig) =>
+                    killGroup(cmd, child, sig).pipe(
+                      Effect.andThen(
+                        sig === "SIGKILL"
+                          ? Deferred.await(signal).pipe(Effect.asVoid)
+                          : Effect.try({
+                              try: () => process.kill(-Number(child.pid), 0),
+                              catch: (error) => error,
+                            }).pipe(Effect.repeat({ schedule: Schedule.spaced(20) }), Effect.asVoid),
+                      ),
+                    ),
+                  ),
+                )
               if (done) {
                 const [code] = yield* Deferred.await(signal)
                 if (process.platform === "win32") return yield* Effect.void
@@ -469,20 +504,38 @@ export const make = Effect.gen(function* () {
               return yield* Effect.ignore(escalated)
             }),
           )
+          const root = session
+            ? yield* Effect.tryPromise({
+                try: () => session.ready,
+                catch: (cause) => toPlatformError("spawn", toError(cause), command),
+              })
+            : undefined
+          const [proc, exit, done] = session
+            ? ([
+                session.proc,
+                Deferred.await(session.signal).pipe(
+                  Effect.mapError((cause) => toPlatformError("capture", cause, command)),
+                ),
+                Deferred.isDone(session.signal),
+              ] as const)
+            : yield* local.pipe(
+                Effect.map(([proc, signal]) => [proc, Deferred.await(signal), Deferred.isDone(signal)] as const),
+              )
 
           const fd = yield* setupFds(command, proc, extra)
-          const out = yield* setupOutput(command, proc, sout, serr, capture)
+          const out = yield* setupOutput(command, proc, sout, serr, capture ?? session?.capture)
           let ref = true
           return makeHandle({
-            pid: ProcessId(proc.pid!),
+            // 远端路径暴露真实命令 PID（宿主内根进程），不是宿主自身 PID。
+            pid: ProcessId(root ?? proc.pid!),
             stdin: yield* setupStdin(command, proc, sin),
             stdout: out.stdout,
             stderr: out.stderr,
             all: out.all,
             getInputFd: fd.getInputFd,
             getOutputFd: fd.getOutputFd,
-            isRunning: Effect.map(Deferred.isDone(signal), (done) => !done),
-            exitCode: Effect.flatMap(Deferred.await(signal), ([code, signal]) => {
+            isRunning: Effect.map(done, (value) => !value),
+            exitCode: Effect.flatMap(exit, ([code, signal]) => {
               if (Predicate.isNotNull(code)) return Effect.succeed(ExitCode(code))
               return Effect.fail(
                 toPlatformError(
@@ -493,14 +546,20 @@ export const make = Effect.gen(function* () {
               )
             }),
             kill: (opts?: ChildProcess.KillOptions) => {
+              // 远端回收由session持有真实host寿命，root已退也不能跳过仍未结算的host。
+              if (session)
+                return Effect.tryPromise({
+                  try: () => session.close(),
+                  catch: (cause) => toPlatformError("kill", toError(cause), command),
+                })
               const sig = opts?.killSignal ?? "SIGTERM"
               const send = (s: NodeJS.Signals) =>
                 Effect.catch(killGroup(command, proc, s), () => killOne(command, proc, s))
-              const attempt = send(sig).pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid)
+              const attempt = send(sig).pipe(Effect.andThen(exit), Effect.asVoid)
               if (!opts?.forceKillAfter) return attempt
               return Effect.timeoutOrElse(attempt, {
                 duration: opts.forceKillAfter,
-                orElse: () => send("SIGKILL").pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid),
+                orElse: () => send("SIGKILL").pipe(Effect.andThen(exit), Effect.asVoid),
               })
             },
             unref: Effect.sync(() => {

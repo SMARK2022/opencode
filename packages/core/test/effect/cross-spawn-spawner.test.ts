@@ -144,6 +144,19 @@ describe("cross-spawn spawner", () => {
         expect(values).toEqual(["first", "second"])
       }),
     )
+    fx.live("runs marked commands inside an isolated capture host", () =>
+      Effect.gen(function* () {
+        const command = WindowsShellOutput.mark(
+          ChildProcess.make(process.execPath, ["-e", "console.log(process.ppid)"], { stdin: "ignore" }),
+        )
+        const handle = yield* command
+        const out = yield* decodeByteStream(handle.stdout)
+        // 隔离验收：真实命令的直接父进程必须是本次调用独占的 capture host；
+        // 等于测试进程自身意味着原生捕获仍与共享宿主同地址空间，单一原生故障会拖死全部 Session。
+        expect(out).not.toBe(String(process.pid))
+        expect(Number(out)).toBeGreaterThan(0)
+      }),
+    )
   }
 
   describe("basic spawning", () => {
@@ -463,6 +476,58 @@ describe("cross-spawn spawner", () => {
   })
 
   describe("process control", () => {
+    for (const [stubborn, exited] of process.platform === "win32"
+      ? []
+      : [
+          [false, true],
+          [true, true],
+          [false, false],
+          [true, false],
+        ])
+      fx.live(
+        `reaps a POSIX descendant when cancelling (stubborn=${stubborn}, rootExited=${exited})`,
+        () =>
+          Effect.gen(function* () {
+            const ready = yield* Deferred.make<{ root: number; child: number }>()
+            const running = yield* Effect.forkScoped(
+              Effect.scoped(
+                Effect.gen(function* () {
+                  // 同时覆盖取消前root已退、以及收到TERM才退出；后者不能让宽限提前结算。
+                  const script = `${stubborn ? 'process.on("SIGTERM", () => {});' : ""} console.log(process.pid); setInterval(() => {}, 1000)`
+                  const handle = yield* ChildProcess.make(
+                    "/bin/sh",
+                    ["-c", `"${process.execPath}" -e '${script}' &${exited ? "" : " wait"}`],
+                    {
+                      stdin: "ignore",
+                      forceKillAfter: 100, // 短宽限只控制信号升级；慢机退出由gone轮询观察，不要求100ms内完成。
+                    },
+                  )
+                  if (exited) expect(Number(yield* handle.exitCode)).toBe(0)
+                  const pid = Number(yield* decodeByteStream(handle.stdout.pipe(Stream.take(1))))
+                  expect(yield* handle.isRunning).toBe(!exited)
+                  yield* Deferred.succeed(ready, { root: Number(handle.pid), child: pid })
+                  yield* Effect.never
+                }),
+              ),
+            )
+            const owned = yield* Deferred.await(ready)
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                try {
+                  process.kill(owned.child, "SIGKILL")
+                } catch {}
+              }),
+            )
+            expect(alive(owned.child)).toBe(true)
+            yield* Fiber.interrupt(running)
+            // 先观察生产finalizer的回收结果，再由fixture兜底清理，避免测试主动kill造成假绿。
+            expect(yield* Effect.promise(() => gone(owned.child))).toBe(true)
+            // root与后代分别核验，root先消失不能冒充整个进程组已经回收。
+            expect(yield* Effect.promise(() => gone(owned.root))).toBe(true)
+          }),
+        15000,
+      )
+
     fx.effect(
       "kills a running process",
       Effect.gen(function* () {

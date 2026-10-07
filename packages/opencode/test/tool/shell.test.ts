@@ -19,7 +19,8 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Plugin } from "../../src/plugin"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
+import { Log } from "@opencode-ai/core/util/log"
 import { Tool } from "@/tool/tool"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { PermissionReviewer } from "@/permission/reviewer/service"
@@ -2528,6 +2529,84 @@ describe("tool.shell post-root lifetime", () => {
 })
 
 describe("tool.shell abort", () => {
+  it.live("keeps command secrets out of the added spawn failure log", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner
+        const secret = `command-secret-${crypto.randomUUID()}`
+        // 唯一call身份排除其它Session的历史日志，不能让一条无敏感内容的旧记录代替本次失败。
+        const callID = `privacy-${crypto.randomUUID()}`
+        // 公开spawner错误含命令信息；验证新增日志的投影边界，同时保留真实失败传播。
+        const result = yield* run({ command: `echo ${secret}`, description: "Log privacy" }, { ...ctx, callID }).pipe(
+          Effect.provideService(ChildProcessSpawner, {
+            ...spawner,
+            spawn: () =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "Unknown",
+                  module: "ChildProcess",
+                  method: "spawn",
+                  pathOrDescriptor: secret,
+                }),
+              ),
+          }),
+          Effect.exit,
+        )
+        expect(Exit.isFailure(result)).toBe(true)
+        if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toContain(secret)
+        const entry = yield* pollWithTimeout(
+          Effect.promise(async () => {
+            const text = await Bun.file(Log.file()).text()
+            // Cause.pretty可能含换行；按唯一call身份读取完整条目，不能把正文所在行漏掉。
+            const at = text.indexOf(callID)
+            const end = text.indexOf("spawn failed", at)
+            if (at < 0 || end < 0) return
+            return text.slice(text.lastIndexOf("\n", at) + 1, end + "spawn failed".length)
+          }),
+          "spawn failure log was not persisted",
+          "5 seconds",
+        )
+        expect(entry).not.toContain(secret)
+        expect(entry).toContain(String(ctx.sessionID))
+      }),
+    ),
+  )
+
+  for (const mode of ["timeout", "abort"] as const) {
+    it.live(`covers pending spawn with the same ${mode} boundary`, () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const spawner = yield* ChildProcessSpawner
+          const entered = yield* Deferred.make<void>()
+          const controller = new AbortController()
+          // 公开spawner边界保持未决，锁定Tool的deadline范围；不伪造进程PID或完成报文。
+          // ready信号来自实际进入spawn，取消不会误打在权限检查之前。
+          const call = yield* run(
+            {
+              command: "echo startup",
+              timeout: mode === "timeout" ? 100 : 10000,
+              description: "Pending spawn lifecycle",
+            },
+            { ...ctx, abort: controller.signal },
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner, {
+              ...spawner,
+              spawn: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)), // 永不返回handle，确保旧的“拿到handle才计时”实现必定红。
+            }),
+            Effect.forkScoped, // 超时断言失败也由测试scope回收执行fiber，不遗留未决模拟调用。
+          )
+          yield* Deferred.await(entered) // 用户取消只在spawn已进入后触发，区别于预取消的零启动路径。
+          if (mode === "abort") controller.abort()
+          const result = yield* Fiber.join(call).pipe(Effect.timeout("3 seconds")) // 护栏显著宽于100ms业务deadline，用于发现永久等待。
+          expect(result.metadata.exit).toBeNull()
+          expect(result.output).toContain(`reason="${mode === "abort" ? "user_abort" : "timeout"}"`)
+        }),
+      ),
+    )
+  }
+
   it.live(
     "preserves output when aborted",
     () =>
