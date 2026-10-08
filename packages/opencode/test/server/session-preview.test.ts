@@ -388,6 +388,90 @@ describe("session preview endpoint", () => {
     { git: true },
   )
 
+  // 等价护栏：钉住「time_created 相同由 message.id 定序」的既有排序合同，
+  // 防止预览 SQL 重写后等时消息顺序漂移（与既有修复的三元组排序一致）
+  it.instance(
+    "orders equal-timestamp messages by id and returns old-to-new",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        // 等时戳：id 大者更新；输出保持旧→新
+        yield* createUserMessage(session.id, "older same-time", { time: 1000 })
+        yield* createUserMessage(session.id, "newer same-time", { time: 1000 })
+
+        const { status, json } = yield* postPreview({ sessionIDs: [session.id], limit: 2 })
+
+        expect(status).toBe(200)
+        expect(json[session.id]).toEqual(["older same-time", "newer same-time"])
+      }),
+    ),
+    { git: true },
+  )
+
+  // 等价护栏：text part 的拼接顺序由 part.id 决定而非插入顺序；
+  // 逆序插入时仍按 id 升序拼接
+  it.instance(
+    "joins text parts by part id even when inserted in reverse order",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const svc = yield* SessionNs.Service
+        const msgId = MessageID.ascending()
+        yield* svc.updateMessage({
+          id: msgId,
+          sessionID: session.id,
+          role: "user",
+          time: { created: 1000 },
+          agent: "test",
+          model,
+          tools: {},
+        } satisfies MessageV2.User)
+        // 先生成两个有序 PartID，再逆序落库
+        const first = PartID.ascending()
+        const second = PartID.ascending()
+        yield* svc.updatePart({
+          id: second,
+          sessionID: session.id,
+          messageID: msgId,
+          type: "text",
+          text: "second-by-id",
+        } satisfies MessageV2.TextPart)
+        yield* svc.updatePart({
+          id: first,
+          sessionID: session.id,
+          messageID: msgId,
+          type: "text",
+          text: "first-by-id",
+        } satisfies MessageV2.TextPart)
+
+        const { status, json } = yield* postPreview({ sessionIDs: [session.id], limit: 2 })
+
+        expect(status).toBe(200)
+        expect(json[session.id]).toEqual(["first-by-id second-by-id"])
+      }),
+    ),
+    { git: true },
+  )
+
+  // 等价护栏：最新 user 消息不可见（hidden）时，limit 作用于过滤后的可见序列，
+  // 必须回退到更早的可见消息而不是返回空
+  it.instance(
+    "falls back to an earlier visible message when the latest is hidden",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        yield* createUserMessage(session.id, "visible earlier", { time: 1000 })
+        yield* createUserMessage(session.id, "hidden latest", { time: 2000, hidden: true })
+
+        const { status, json } = yield* postPreview({ sessionIDs: [session.id], limit: 1 })
+
+        expect(status).toBe(200)
+        expect(json[session.id]).toEqual(["visible earlier"])
+      }),
+    ),
+    { git: true },
+  )
+
   it.instance(
     "defaults limit to 2 when not provided",
     withoutWatcher(
@@ -407,6 +491,56 @@ describe("session preview endpoint", () => {
         expect(json[session.id]).toHaveLength(2)
         expect(json[session.id][0]).toBe("second")
         expect(json[session.id][1]).toBe("third")
+      }),
+    ),
+    { git: true },
+  )
+
+  // 输入域护栏：公开 PreviewPayload 的 sessionIDs 是普通字符串数组（无唯一性约束），
+  // 旧窗口 SQL 的 IN 查询对重复 ID 是集合语义；逐 session 循环必须保持同一语义，
+  // 否则同一 session 的预览被重复追加且可突破 limit
+  it.instance(
+    "deduplicates repeated sessionIDs like the legacy IN query",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        yield* createUserMessage(session.id, "first", { time: 1000 })
+        yield* createUserMessage(session.id, "second", { time: 2000 })
+
+        const repeated = yield* postPreview({
+          sessionIDs: [session.id, session.id],
+          limit: 1,
+        })
+        const single = yield* postPreview({
+          sessionIDs: [session.id],
+          limit: 1,
+        })
+
+        expect(repeated.status).toBe(200)
+        // 集合语义：重复 ID 与单 ID 响应一致，每条消息只出现一次且不超过 limit
+        expect(repeated.json).toEqual(single.json)
+        expect(repeated.json[session.id]).toEqual(["second"])
+      }),
+    ),
+    { git: true },
+  )
+
+  // 输入域护栏：schema 接受 [1,10] 内 Number（含 1.5）；旧实现 msg_rn <= limit
+  // 对非整数取 floor 行数（整数排名），新实现必须保持同一已接受输入语义
+  it.instance(
+    "treats a fractional limit with the floor semantics of msg_rn <= limit",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        yield* createUserMessage(session.id, "first", { time: 1000 })
+        yield* createUserMessage(session.id, "second", { time: 2000 })
+
+        const fractional = yield* postPreview({ sessionIDs: [session.id], limit: 1.5 })
+        const floored = yield* postPreview({ sessionIDs: [session.id], limit: 1 })
+
+        expect(fractional.status).toBe(200)
+        expect(fractional.json).toEqual(floored.json)
+        expect(fractional.json[session.id]).toEqual(["second"])
       }),
     ),
     { git: true },

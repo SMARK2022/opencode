@@ -592,7 +592,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     // [local-smark] session preview handler
-    // 单条 SQL 窗口函数查询批量获取多个 session 的最近 N 条用户消息文本，
+    // 逐 session 有界查询批量获取多个 session 的最近 N 条用户消息文本，
     // 替代 TUI 中每 session 独立分页调用 session.messages 的 N×M 模式。
     // 过滤条件与 MessageV2.page(includeHidden=false) + textFromUserMessage 完全对齐：
     // - role = 'user' 且 message 无 hidden 标记
@@ -602,65 +602,69 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const preview = Effect.fn("SessionHttpApi.preview")(function* (ctx: {
       payload: typeof PreviewPayload.Type
     }) {
-      const { sessionIDs, limit: rawLimit } = ctx.payload
-      if (sessionIDs.length === 0) return {} as Record<string, string[]>
-      const limit = rawLimit ?? 2
+      const { sessionIDs: requestedIDs, limit: rawLimit } = ctx.payload
+      if (requestedIDs.length === 0) return {} as Record<string, string[]>
+      // 保持旧 IN 查询的集合语义：公开 PreviewPayload 不拒重复 ID，
+      // 逐 session 循环不去重会对同一 session 重复追加预览并突破 limit
+      const sessionIDs = [...new Set(requestedIDs)]
+      // 对齐旧实现 msg_rn <= limit 的行数语义：schema 接受 [1,10] 内 Number
+      //（含 1.5），SQLite LIMIT 只接受整数；msg_rn 为整数排名，floor 后二者等价
+      const limit = Math.floor(rawLimit ?? 2)
 
-      // 参数化 IN 子句，防止 SQL 注入；SQLite 参数上限 32766，400 远在限内
-      const idPlaceholders = sql.join(sessionIDs.map((id) => sql`${id}`), sql`, `)
-
-      const rows = Database.use((db) =>
-        db.all(sql`
-          WITH ranked_messages AS (
-            SELECT ${MessageTable.id} as message_id, ${MessageTable.session_id}, ${MessageTable.time_created},
-              ROW_NUMBER() OVER (
-                PARTITION BY ${MessageTable.session_id}
-                ORDER BY ${MessageTable.time_created} DESC, ${MessageTable.id} DESC
-              ) as msg_rn
-            FROM ${MessageTable}
-            WHERE json_extract(${MessageTable.data}, '$.role') = 'user'
-              AND json_type(${MessageTable.data}, '$.hidden') IS NULL
-              AND ${MessageTable.session_id} IN (${idPlaceholders})
-              AND EXISTS (
-                SELECT 1 FROM ${PartTable}
-                WHERE ${PartTable.message_id} = ${MessageTable.id}
-                  AND json_extract(${PartTable.data}, '$.type') = 'text'
-                  AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
-                  AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
-                  AND json_type(${PartTable.data}, '$.hidden') IS NULL
-              )
-          ),
-          preview_parts AS (
-            SELECT rm.session_id, rm.msg_rn, ${PartTable.id} as part_id,
-              json_extract(${PartTable.data}, '$.text') as text
-            FROM ranked_messages rm
-            INNER JOIN ${PartTable} ON ${PartTable.message_id} = rm.message_id
-              AND json_extract(${PartTable.data}, '$.type') = 'text'
-              AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
-              AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
-              AND json_type(${PartTable.data}, '$.hidden') IS NULL
-            WHERE rm.msg_rn <= ${limit}
-          )
-          SELECT session_id, msg_rn, group_concat(text, ' ') as joined_text
-          -- 子查询 ORDER BY 保证同一消息内多 text part 按 part.id 顺序拼接；
-          -- SQLite group_concat 不保证 GROUP BY 内顺序，需子查询喂入有序行
-          FROM (SELECT * FROM preview_parts ORDER BY part_id)
-          GROUP BY session_id, msg_rn
-          -- msg_rn 由窗口函数 ORDER BY time_created DESC 赋值：1=最新，2=次新。
-          -- 此处 DESC 使次新先返回、最新后返回，JS push 随之产出正序（旧→新）数组
-          ORDER BY session_id, msg_rn DESC
-        `),
-      ) as { session_id: string; msg_rn: number; joined_text: string | null }[]
-
-      // JS 侧完成空白归一化（与 textFromUserMessage 的
-      // .replace(/\s+/g, " ").trim() 对齐）并按 session 分组
+      // 逐 session 沿既有索引 ORDER BY ... LIMIT 早停，替代窗口函数全历史排名：
+      // ROW_NUMBER 必须先物化每 session 全部合格行才能过滤 msg_rn，结构上无法早停；
+      // 排名与窗口实现逐字节等价——等时戳由 id DESC 定序，part 由 id ASC 拼接
+      //（差分夹具：等时戳、part 逆序插入、hidden/synthetic、limit 1/2/3/10）
       const result: Record<string, string[]> = {}
-      for (const row of rows) {
-        // group_concat 对无匹配行返回 NULL；空文本跳过，与 if (text) 一致
-        const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()
-        if (!text) continue
-        if (!result[row.session_id]) result[row.session_id] = []
-        result[row.session_id].push(text)
+      for (const sessionID of sessionIDs) {
+        const rows = Database.use((db) =>
+          db.all(sql`
+            SELECT joined_text FROM (
+              SELECT m.id as message_id, m.time_created,
+                (
+                  SELECT group_concat(text, ' ') FROM (
+                    SELECT json_extract(p.data, '$.text') as text
+                    FROM ${PartTable} p
+                    WHERE p.message_id = m.id
+                      AND json_extract(p.data, '$.type') = 'text'
+                      AND coalesce(json_extract(p.data, '$.synthetic'), 0) = 0
+                      AND coalesce(json_extract(p.data, '$.ignored'), 0) = 0
+                      AND json_type(p.data, '$.hidden') IS NULL
+                    -- 子查询 ORDER BY 保证同一消息内多 text part 按 part.id 顺序拼接；
+                    -- SQLite group_concat 不保证聚合输入顺序，需子查询喂入有序行
+                    ORDER BY p.id
+                  )
+                ) as joined_text
+              FROM ${MessageTable} m
+              WHERE m.session_id = ${sessionID}
+                AND json_extract(m.data, '$.role') = 'user'
+                AND json_type(m.data, '$.hidden') IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM ${PartTable} ep
+                  WHERE ep.message_id = m.id
+                    AND json_extract(ep.data, '$.type') = 'text'
+                    AND coalesce(json_extract(ep.data, '$.synthetic'), 0) = 0
+                    AND coalesce(json_extract(ep.data, '$.ignored'), 0) = 0
+                    AND json_type(ep.data, '$.hidden') IS NULL
+                )
+              ORDER BY m.time_created DESC, m.id DESC
+              LIMIT ${limit}
+            )
+            -- 内层取最新 N 条后按升序输出，JS push 随之产出正序（旧→新）数组，
+            -- 与旧实现 ORDER BY msg_rn DESC 的输出顺序一致
+            ORDER BY time_created ASC, message_id ASC
+          `),
+        ) as { joined_text: string | null }[]
+
+        // JS 侧完成空白归一化（与 textFromUserMessage 的
+        // .replace(/\s+/g, " ").trim() 对齐）
+        for (const row of rows) {
+          // group_concat 对无匹配行返回 NULL；空文本跳过，与 if (text) 一致
+          const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()
+          if (!text) continue
+          if (!result[sessionID]) result[sessionID] = []
+          result[sessionID].push(text)
+        }
       }
       return result
     })

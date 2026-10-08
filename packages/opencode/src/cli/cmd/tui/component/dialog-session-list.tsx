@@ -225,40 +225,83 @@ export function DialogSessionList() {
   )
 
   // [local-smark] session list preview: 批量获取预览文本
+  // Part 编辑可以保持 Session 时间戳，因此版本键只在当前查询内用于去重。
+  // 查询 owner 同时拥有缓存、在途键和响应闭包；改词时 Solid 先清理旧 owner。
+  // 这使相同 ID/时间戳的新查询重新取数，也覆盖清空查询后返回浏览的路径。
   createEffect(
     on(
-      () => sessions(),
-      (currentSessions) => {
-        if (SESSION_LIST_PREVIEW_LINES <= 0) return
+      () => search(),
+      () => {
+        const previewCache = new Map<string, string[]>()
+        // 同查询各扫描批次共享在途请求，避免 phase 更新反复中止有效工作。
+        // 改词或卸载则释放整个 owner，旧请求不会满足新查询的刷新义务。
+        const previewInflight = new Map<string, AbortController>()
+        // id -> 当前显示版本键：版本推进后，旧版本的迟到响应只允许写版本键缓存，
+        // 不得写展示 record（展示 record 以裸 id 为键，无版本维度，必须在此校验）
+        const previewLatest = new Map<string, string>()
+        onCleanup(() => {
+          for (const controller of previewInflight.values()) controller.abort()
+          previewInflight.clear()
+        })
+        createEffect(
+          on(
+            () => sessions(),
+            (currentSessions) => {
+              if (SESSION_LIST_PREVIEW_LINES <= 0) return
 
-        const ids = currentSessions
-          .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
-          .map((s) => s.id)
-        if (ids.length === 0) return
+              // 身份快照：browse 态的 session 是 sync store 对象，SSE reconcile 原地
+              // 突变 time.updated；响应阶段重读可变对象会让旧响应冒充新版本（错版本
+              // 缓存、被 latest 误判、在途键遗留），身份必须在发出请求时固定
+              const wanted = currentSessions
+                .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
+                .map((s) => ({ id: s.id, key: `${s.id}:${s.time.updated}` }))
+              for (const w of wanted) previewLatest.set(w.id, w.key)
+              // missing 排除在途键：同键最多一个在途请求，级联触发（title→partial、
+              // partial→complete）对内容不变的集合零额外请求
+              const missing = wanted.filter((w) => !previewCache.has(w.key) && !previewInflight.has(w.key))
+              if (missing.length === 0) return
 
-        const controller = new AbortController()
-        onCleanup(() => controller.abort())
+              const controller = new AbortController()
+              for (const w of missing) previewInflight.set(w.key, controller)
 
-        void (async () => {
-          try {
-            const url = new URL("/session/preview", sdk.url)
-            directoryQuery(url)
+              void (async () => {
+                try {
+                  // 此处使用原始 fetch，显式携带 directory 供 workspace routing 定位实例。
+                  const url = new URL("/session/preview", sdk.url)
+                  directoryQuery(url)
 
-            const res = await sdk.fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ sessionIDs: ids, limit: SESSION_LIST_PREVIEW_LINES }),
-              signal: controller.signal,
-            })
-            if (!res.ok) return
-            const data = (await res.json()) as Record<string, string[]>
-            if (!controller.signal.aborted) {
-              setPreviews(data)
-            }
-          } catch {
-            // 预览加载失败不阻塞 session list 显示
-          }
-        })()
+                  const res = await sdk.fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ sessionIDs: missing.map((w) => w.id), limit: SESSION_LIST_PREVIEW_LINES }),
+                    signal: controller.signal,
+                  })
+                  if (!res.ok) return
+                  const data = (await res.json()) as Record<string, string[]>
+                  // 传输可能在 abort 后仍交付响应；查询 owner 失效后阻止缓存及展示写回。
+                  if (controller.signal.aborted) return
+                  // 响应缺省 ID 表示该 session 无可见文本（既有 wire 契约）；
+                  // 记空数组入缓存，防止零新增批次对其反复重取
+                  setPreviews((prev) => {
+                    const next = { ...prev }
+                    for (const w of missing) {
+                      const lines = data[w.id] ?? []
+                      previewCache.set(w.key, lines)
+                      if (previewLatest.get(w.id) === w.key) next[w.id] = lines
+                    }
+                    return next
+                  })
+                } catch {
+                  // 预览加载失败不阻塞 session list 显示；失败不写缓存，
+                  // 缺失键随下一次触发自然重试（等价旧整批重试、范围收窄）
+                } finally {
+                  // 闭包只持有本查询的 Map；旧 finally 不能删除新查询同名的在途键。
+                  for (const w of missing) previewInflight.delete(w.key)
+                }
+              })()
+            },
+          ),
+        )
       },
     ),
   )
