@@ -105,6 +105,12 @@ describe("permission reviewer prompt", () => {
     expect(prompt).toContain("read→write, local→network, copy→delete are new effect classes")
     expect(prompt).toContain("Every rationale must quote the user message carrying the authorization")
     expect(prompt).toContain("Inferred intent is not authorization")
+    // 抱怨/反问/观察不是祈使指令（"你为什么还留着它" ≠ 授权删除）。
+    // "提交一次"不构成后续 commit 的常设授权，standing scope须有独立指令依据。
+    expect(prompt).toContain("Authorization requires a directive")
+    expect(prompt).toContain("are not directives")
+    expect(prompt).toContain("A one-time directive authorizes a single performance")
+    expect(prompt).toContain("standing scope")
     expect(prompt).not.toContain("safer alternatives exist")
     expect(prompt).toContain("Deny pushes unless the user explicitly asks for push.")
     // 227把首选协议改为真实裁决工具；纯JSON只在运行时兼容，不再向模型宣传。
