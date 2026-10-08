@@ -478,6 +478,8 @@ describe("SessionProjector", () => {
         [a]: ["middle", "latest user"], [b]: ["b first", "b latest"],
       })
       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 })).toEqual({ [a]: ["latest user"] })
+      // 重复ID与小数窗口沿旧集合/整数排名语义，Native不能重复追加。
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a, a], limit: 1.5 })).toEqual({ [a]: ["latest user"] })
       // 全量窗口证明压缩前正文仍可取，hidden/synthetic/inbox都不能占名额。
       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 10 })).toEqual({
         [a]: ["old before compaction", "false marker", "middle", "latest user"],
@@ -509,6 +511,14 @@ describe("SessionProjector", () => {
       // 同一Session内的两代表不能互相补查，Native结果不受V1新行影响。
       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["middle", "latest user"] })
       expect(yield* SessionPreview.load(db, { sessionIDs: [] }, "v1")).toEqual({})
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a, a], limit: 1.5 }, "v1")).toEqual({ [a]: ["second"] })
+      // 空白在选窗后丢弃；最新seq即使归一化为空也不能回填更早消息。
+      const latest = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, SessionMessage.ID.make("msg_preview_latest"))).get()
+      if (!latest) return yield* Effect.die("Missing latest preview user")
+      const whitespace = { ...latest.data, text: " \n " }
+      yield* db.update(SessionMessageTable).set({ data: whitespace }).where(eq(SessionMessageTable.id, latest.id)).run()
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a, a], limit: 1.5 })).toEqual({})
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["middle"] })
     }),
   )
 
