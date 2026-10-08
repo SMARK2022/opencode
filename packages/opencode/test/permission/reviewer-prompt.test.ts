@@ -91,6 +91,13 @@ describe("permission reviewer prompt", () => {
     expect(prompt).toContain("read→write, local→network, copy→delete are new effect classes")
     expect(prompt).toContain("Every rationale must quote the user message carrying the authorization")
     expect(prompt).toContain("Inferred intent is not authorization")
+    // [local-smark] 授权语义两条边界（生产误放取证）：抱怨/反问/观察不是祈使
+    // 指令（"你为什么还留着它" ≠ 授权删除）；一次性指令只授权单次执行（"提交一次"
+    // 不构成后续 commit 的常设授权）。
+    expect(prompt).toContain("Authorization requires a directive")
+    expect(prompt).toContain("are not directives")
+    expect(prompt).toContain("A one-time directive authorizes a single performance")
+    expect(prompt).toContain("standing scope")
     expect(prompt).not.toContain("safer alternatives exist")
     expect(prompt).toContain("Deny pushes unless the user explicitly asks for push.")
     expect(prompt).toContain("Use this tool input schema for every decision")
