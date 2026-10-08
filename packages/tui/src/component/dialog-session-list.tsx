@@ -329,36 +329,68 @@ export function DialogSessionList() {
       body: JSON.stringify({ sessionIDs, limit: SESSION_LIST_PREVIEW_LINES }),
       signal,
     })
-    if (!resp.ok) return {}
+    // 非成功响应不能冒充有效空预览，否则缓存会吞掉下一批的重试。
+    if (!resp.ok) return undefined
     return (await resp.json()) as Record<string, string[]>
   }
 
+  // Part 编辑不一定推进时间戳，版本缓存只在当前查询内复用，改词或清空即换 owner。
   createEffect(
     on(
-      () => sessions(),
-      (sessions) => {
-        if (SESSION_LIST_PREVIEW_LINES <= 0) return
-        // #120：跳过已加载预览的会话
-        const unloaded = sessions
-          .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
-          .filter((s) => !(s.id in (previews() ?? {})))
-        if (unloaded.length === 0) return
-        void (async () => {
-          // #366：竞态防护——每次 sessions 变化创建新 controller；onCleanup 在下次
-          // 触发或卸载时 abort，防止已取消的旧批量响应覆盖新数据（source AbortController 语义）。
-          const controller = new AbortController()
-          onCleanup(() => controller.abort())
-          try {
-            // #366：一次批量请求覆盖所有未加载会话；无用户消息的 session
-            // 不在响应中——调用方按需跳过，与旧逻辑的 lines.length 守卫等价
-            const next = await loadPreviewsBatch(unloaded.map((s) => s.id), controller.signal)
-            if (!controller.signal.aborted && Object.keys(next).length > 0) {
-              setPreviews((prev) => ({ ...prev, ...next }))
-            }
-          } catch {
-            // #120：预览失败不阻断列表
-          }
-        })()
+      () => search(),
+      () => {
+        const previewCache = new Map<string, string[]>()
+        // 同查询各扫描批次共享在途键，避免 phase 更新反复中止有效工作。
+        const previewInflight = new Map<string, AbortController>()
+        // 展示以裸 id 为键；旧版本迟到响应只能缓存，不能覆盖已推进的展示。
+        const previewLatest = new Map<string, string>()
+        onCleanup(() => {
+          for (const controller of previewInflight.values()) controller.abort()
+          previewInflight.clear()
+        })
+        createEffect(
+          on(
+            () => sessions(),
+            (currentSessions) => {
+              if (SESSION_LIST_PREVIEW_LINES <= 0) return
+
+              // browse 的 Store 可被 SSE 原地更新，必须在发送时固定身份，响应时不能重读。
+              const wanted = currentSessions
+                .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
+                .map((s) => ({ id: s.id, key: `${s.id}:${s.time.updated}` }))
+              for (const w of wanted) previewLatest.set(w.id, w.key)
+              // 同键最多一个在途请求，title→partial→complete 不重复取得相同内容。
+              const missing = wanted.filter((w) => !previewCache.has(w.key) && !previewInflight.has(w.key))
+              if (missing.length === 0) return
+
+              const controller = new AbortController()
+              for (const w of missing) previewInflight.set(w.key, controller)
+
+              void (async () => {
+                try {
+                  const data = await loadPreviewsBatch(missing.map((w) => w.id), controller.signal)
+                  // 传输可能在 abort 后仍交付响应；查询 owner 失效后阻止缓存及展示写回。
+                  if (!data || controller.signal.aborted) return
+                  // 响应缺省 ID 表示无可见文本；记空数组，避免零新增批次反复请求。
+                  setPreviews((prev) => {
+                    const next = { ...prev }
+                    for (const w of missing) {
+                      const lines = data[w.id] ?? []
+                      previewCache.set(w.key, lines)
+                      if (previewLatest.get(w.id) === w.key) next[w.id] = lines
+                    }
+                    return next
+                  })
+                } catch {
+                  // 失败不阻断列表也不写缓存，缺失键随下一次触发自然重试。
+                } finally {
+                  // 闭包只持有本查询的 Map；旧 finally 不能删除新查询同名的在途键。
+                  for (const w of missing) previewInflight.delete(w.key)
+                }
+              })()
+            },
+          ),
+        )
       },
     ),
   )
