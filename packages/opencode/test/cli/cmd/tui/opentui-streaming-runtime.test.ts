@@ -183,4 +183,112 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       setup.renderer.destroy()
     }
   })
+
+  test("stale one-shot settle reports no in-flight highlight and the next render re-highlights", async () => {
+    await using tmp = await tmpdir()
+    const client = new TreeSitterClient({ dataPath: tmp.path })
+    const setup = await createTestRenderer({ width: 60, height: 10 })
+    const style = SyntaxStyle.create()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    // one-shot（非 streaming）是已完成消息正文的实际高亮路径；onHighlight 门闩把
+    // 首次高亮钉在在途状态，使 content 变更确定落在 stale 窗口内，不靠睡眠猜时序。
+    const code = new CodeRenderable(setup.renderer, {
+      id: "stale-one-shot",
+      content: "# First\n",
+      filetype: "markdown",
+      syntaxStyle: style,
+      treeSitterClient: client,
+      onHighlight: async () => {
+        entered.resolve()
+        await release.promise
+        // 显式 undefined 满足 OnHighlightCallback 的返回契约（不修改高亮结果）；
+        // 字面量键会被类型检查，不能用计算键的宽松路径。
+        return undefined
+      },
+    })
+    setup.renderer.root.add(code)
+    try {
+      await client.initialize()
+      await setup.renderOnce()
+      await entered.promise
+      // 内容换代后故意不再渲染：任何在 stale 结算前到达的新渲染都会启动下一代
+      // 高亮，让断言失去对「旧请求是否归位标志」的分辨力。
+      code.content = "# Second\n"
+      release.resolve()
+      await code.highlightingDone
+      // 过期结算不等于在途：驻留驱逐与重测门闩都信任该标志，滞留 true 会把屏外
+      // 消息永久钉在挂载态并逐帧请求重绘（用户可见的分钟级卡死链路的起点）。
+      expect(code.isHighlighting).toBe(false)
+      // 归位不能吃掉更新：setter 留下的脏标志须驱动下一次真实渲染重启高亮。
+      await setup.renderOnce()
+      await code.highlightingDone
+      expect(code.isHighlighting).toBe(false)
+      // plainText 读出 "Second\n" 而非 "# Second\n"：conceal 只在高亮落地后生效，
+      // 该断言同时证明重启的高亮真实完成，而不是仅归位了标志。
+      expect(code.plainText).toBe("Second\n")
+    } finally {
+      release.resolve()
+      code.destroy()
+      await client.destroy()
+      setup.renderer.destroy()
+      style.destroy()
+    }
+  }, 30_000)
+
+  test("stale settle of a superseded one-shot keeps the in-flight flag owned by the newer request", async () => {
+    await using tmp = await tmpdir()
+    const client = new TreeSitterClient({ dataPath: tmp.path })
+    const setup = await createTestRenderer({ width: 60, height: 10 })
+    const style = SyntaxStyle.create()
+    // 双门闩按调用次序绑定请求代次：第 1 次 onHighlight 属 A，第 2 次属 B。
+    // 必须先确认 B 已在途再放行 A，才能确定性构造「旧请求 stale 结算时
+    // 新请求仍持有标志」的重叠窗口；顺序颠倒会让断言失去分辨力。
+    const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()]
+    const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()]
+    let call = 0
+    const code = new CodeRenderable(setup.renderer, {
+      id: "stale-overlap",
+      content: "# First\n",
+      filetype: "markdown",
+      syntaxStyle: style,
+      treeSitterClient: client,
+      onHighlight: async () => {
+        const index = call++
+        entered[index].resolve()
+        await release[index].promise
+        // 与切片 1 相同：显式 undefined 满足 OnHighlightCallback 返回契约。
+        return undefined
+      },
+    })
+    setup.renderer.root.add(code)
+    try {
+      await client.initialize()
+      await setup.renderOnce()
+      await entered[0].promise
+      code.content = "# Second\n"
+      // 脏渲染立即启动 B（renderSelf 不等待旧请求），entered[1] 确认 B 已在途。
+      await setup.renderOnce()
+      await entered[1].promise
+      release[0].resolve()
+      // macrotask 排空：A 放行后的 stale 判定与分支是纯同步尾巴，setTimeout(0)
+      // 保证微任务队列 drain 后再断言，这是确定性同步点而非睡眠猜时序。
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      // 旧请求的过期结算不得清掉 B 已置位的在途标志；否则驻留层会把 B 在途的
+      // 节点当作高亮已排空，提前冻结高度并销毁正文（B-01 回归锁）。
+      expect(code.isHighlighting).toBe(true)
+      release[1].resolve()
+      await code.highlightingDone
+      // 只有最新请求的终结才归位标志；conceal 生效证明 B 的高亮真实落地。
+      expect(code.isHighlighting).toBe(false)
+      expect(code.plainText).toBe("Second\n")
+    } finally {
+      release[0].resolve()
+      release[1].resolve()
+      code.destroy()
+      await client.destroy()
+      setup.renderer.destroy()
+      style.destroy()
+    }
+  }, 30_000)
 })

@@ -85,3 +85,71 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
          const content = this._streamingPending;
          this._streamingPending = undefined;
          const snapshot = this._highlightSnapshotId;
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -3582,6 +3582,10 @@
+       const result = await this._treeSitterClient.highlightOnce(content, filetype);
+       if (snapshotId !== this._highlightSnapshotId) {
++        // 只有最新启动请求的过期结算才能归位在途标志；已有更新请求在途时，标志归新请求所有（B-01）。
++        if (snapshotId === this._latestOneShotSnapshotId) {
++          this._isHighlighting = false;
++        }
+         this.requestRender();
+         return;
+       }
+       if (this.isDestroyed)
+@@ -3596,12 +3600,15 @@
+         const modified = await this._onHighlight(highlights, context);
+         if (modified !== undefined) {
+           highlights = modified;
+         }
+       }
+       if (snapshotId !== this._highlightSnapshotId) {
++        if (snapshotId === this._latestOneShotSnapshotId) {
++          this._isHighlighting = false;
++        }
+         this.requestRender();
+         return;
+       }
+       if (this.isDestroyed)
+         return;
+       if (highlights.length > 0) {
+@@ -3624,7 +3631,10 @@
+         chunks = await this.transformChunks(chunks, context);
+         if (snapshotId !== this._highlightSnapshotId) {
++          if (snapshotId === this._latestOneShotSnapshotId) {
++            this._isHighlighting = false;
++          }
+           this.requestRender();
+           return;
+         }
+         if (this.isDestroyed)
+           return;
+@@ -3643,6 +3653,9 @@
+     } catch (error) {
+       if (snapshotId !== this._highlightSnapshotId) {
++        if (snapshotId === this._latestOneShotSnapshotId) {
++          this._isHighlighting = false;
++        }
+         this.requestRender();
+         return;
+       }
+       if (this.isDestroyed)
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -3131,3 +3131,5 @@
+   _highlightsDirty = false;
+   _highlightSnapshotId = 0;
++  // 最新启动的 one-shot 请求代次：stale 分支据此判断结算者是否仍持有标志所有权。
++  _latestOneShotSnapshotId = 0;
+   _conceal;
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -3578,3 +3578,4 @@
+     const snapshotId = ++this._highlightSnapshotId;
++    this._latestOneShotSnapshotId = snapshotId;
+     if (!filetype)
+       return;
