@@ -20,7 +20,8 @@ export const OpenAIResponseIncludables = [
   "message.output_text.logprobs",
 ] as const
 export type OpenAIResponseIncludable = (typeof OpenAIResponseIncludables)[number]
-export const OpenAIServiceTiers = ["auto", "default", "flex", "priority"] as const
+// 原生协议与SDK接受同一显式tier；是否可用由服务端判定，不能静默降回默认。
+export const OpenAIServiceTiers = ["auto", "default", "flex", "priority", "ultrafast"] as const
 export type OpenAIServiceTier = (typeof OpenAIServiceTiers)[number]
 
 const REASONING_EFFORTS = new Set<string>(ReasoningEfforts)

@@ -2131,6 +2131,9 @@ describe("SessionRunnerLLM", () => {
         ["gpt-6-astra", "openai", PROMPT_ASTRA],
         ["gpt-6", "openai", PROMPT_ASTRA],
         ["gpt-6-codex", "openai", PROMPT_ASTRA],
+        // Native真实请求同样遵从上游GPT-6优先级，不按Sol/Luna后缀降级模板。
+        ["gpt-6-sol", "openai", PROMPT_ASTRA],
+        ["gpt-6-luna", "openai", PROMPT_ASTRA],
         ["gpt-5.6-luna", "openai", PROMPT_GPT],
         ["gpt-5.4-codex", "openai", PROMPT_CODEX],
         ["gpt-4.1", "openai", PROMPT_BEAST],

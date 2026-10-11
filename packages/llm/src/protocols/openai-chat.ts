@@ -98,6 +98,8 @@ export const bodyFields = {
   stream: Schema.Literal(true),
   stream_options: Schema.optional(Schema.Struct({ include_usage: Schema.Boolean })),
   store: Schema.optional(Schema.Boolean),
+  // Chat和Responses共享显式tier合同，字段必须经过原生Schema而非HTTP绕写。
+  service_tier: Schema.optional(OpenAIOptions.OpenAIServiceTier),
   reasoning_effort: Schema.optional(OpenAIOptions.OpenAIReasoningEffort),
   max_tokens: Schema.optional(Schema.Number),
   temperature: Schema.optional(Schema.Number),
@@ -349,6 +351,7 @@ const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: 
 const lowerOptions = Effect.fn("OpenAIChat.lowerOptions")(function* (request: LLMRequest) {
   const store = OpenAIOptions.store(request)
   const parallelToolCalls = OpenAIOptions.parallelToolCalls(request)
+  const serviceTier = OpenAIOptions.serviceTier(request)
   const reasoningEffort = OpenAIOptions.reasoningEffort(request)
   if (reasoningEffort && !OpenAIOptions.isReasoningEffort(reasoningEffort))
     return yield* invalid(`OpenAI Chat does not support reasoning effort ${reasoningEffort}`)
@@ -356,6 +359,7 @@ const lowerOptions = Effect.fn("OpenAIChat.lowerOptions")(function* (request: LL
     ...(store !== undefined ? { store } : {}),
     // 不把 false 当缺失；无选项的 DeepSeek 等兼容协议保持旧请求体。
     ...(parallelToolCalls !== undefined ? { parallel_tool_calls: parallelToolCalls } : {}),
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   }
 })

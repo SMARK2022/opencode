@@ -106,7 +106,8 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
       // V2 catalog 无 interleaved 能力位，以目标路由等价表达 reasoning_content 回放边界。
       const replaysForeignReasoning = model.route.id === "openai-compatible-chat"
       const replaysForeignOpenAIReasoning =
-        // 按用户指定的 GPT 家族边界回放，不把 provider 名称当作兼容性依据。
+        // 密文以历史Provider为账号域边界；同Provider切换GPT仍保留既有续接。
+        String(message.model.providerID) === String(model.provider) &&
         model.route.id.startsWith("openai-responses") &&
         String(model.id).toLowerCase().startsWith("gpt") &&
         String(message.model.id).toLowerCase().startsWith("gpt")
