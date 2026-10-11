@@ -346,11 +346,16 @@ describe("session.system", () => {
     expect(SystemPrompt.staticSections().some((section) => section.includes("auto-review"))).toBe(false)
   })
 
-  // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
+  // 使用实际 API id 验证分流；展示别名不能决定模板，Astra 家族优先于 Codex 后缀。
   test.each([
     ["gpt-6-astra", PROMPT_ASTRA],
-    ["gpt-6", PROMPT_ASTRA],
-    ["gpt-6-codex", PROMPT_ASTRA],
+    ["gpt-5-astra", PROMPT_ASTRA],
+    ["gpt-6-astra-codex", PROMPT_ASTRA],
+    // 同代模型不共享专用模板；收窄后仍遵守既有 Codex 与通用 GPT 路由。
+    ["gpt-6", PROMPT_GPT],
+    ["gpt-6-sol", PROMPT_GPT],
+    ["gpt-6-luna", PROMPT_GPT],
+    ["gpt-6-codex", PROMPT_CODEX],
     ["gpt-5.6-luna", PROMPT_GPT],
     ["gpt-5.4-codex", PROMPT_CODEX],
     ["gpt-4.1", PROMPT_BEAST],

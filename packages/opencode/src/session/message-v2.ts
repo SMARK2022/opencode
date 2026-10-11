@@ -1418,7 +1418,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         typeof model.capabilities.interleaved === "object" &&
         model.capabilities.interleaved.field === "reasoning_content"
       const replaysForeignOpenAIReasoning =
-        // 按用户指定的 GPT 家族边界回放，不把自定义 provider 名称当作兼容性依据。
+        // 加密续接状态属于账号域；历史只记录 Provider，因此不同 Provider 不共享密文。
+        model.providerID === msg.info.providerID &&
+        // 同 Provider 切换 GPT 模型仍可回放，避免把隔离边界扩大为每个模型独立。
         model.id.toLowerCase().startsWith("gpt") && msg.info.modelID.toLowerCase().startsWith("gpt")
       // 两端都检查，避免非 GPT 模型的签名因目标为 GPT 而被放行。
       // 此处保留语义信息；最终 wire 字段由目标协议适配器编码。

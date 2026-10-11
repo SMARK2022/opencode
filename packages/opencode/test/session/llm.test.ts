@@ -1276,14 +1276,15 @@ describe("session.llm.stream", () => {
     })
   })
 
-  test("sends responses API payload for OpenAI models", async () => {
+  // 保留旧模型对照，并让 Astra 经过真实配置、已选 Variant、LLM.stream 和 HTTP 捕获链路。
+  test.each(["gpt-5.2", "gpt-6-astra"])("sends responses API payload for OpenAI model %s", async (modelID) => {
     const server = state.server
     if (!server) {
       throw new Error("Server not initialized")
     }
 
     const source = await loadFixture("openai", "gpt-5.2")
-    const model = source.model
+    const model = { ...source.model, id: modelID }
 
     const responseChunks = [
       {
@@ -1331,7 +1332,11 @@ describe("session.llm.stream", () => {
                 npm: "@ai-sdk/openai",
                 api: "https://api.openai.com/v1",
                 models: {
-                  [model.id]: configModel(model),
+                  [model.id]: {
+                    ...configModel(model),
+                    // 定义 Variant 不会自动启用；下面 user.model.variant 明确选中它。
+                    variants: { ultrafast: { serviceTier: "ultrafast", reasoningEffort: "high" } },
+                  },
                 },
                 options: {
                   apiKey: "test-openai-key",
@@ -1363,7 +1368,11 @@ describe("session.llm.stream", () => {
           role: "user",
           time: { created: Date.now() },
           agent: agent.name,
-          model: { providerID: ProviderID.make("openai"), modelID: resolved.id, variant: "high" },
+          model: {
+            providerID: ProviderID.make("openai"),
+            modelID: resolved.id,
+            variant: modelID === "gpt-6-astra" ? "ultrafast" : "high",
+          },
         } satisfies MessageV2.User
 
         await drain(
@@ -1386,6 +1395,9 @@ describe("session.llm.stream", () => {
         expect(body.model).toBe(resolved.api.id)
         expect(body.stream).toBe(true)
         expect((body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
+
+        // 请求成功不足以证明加速生效，必须核对最终序列化字段；对照模型不应被强制加 tier。
+        expect(body.service_tier).toBe(modelID === "gpt-6-astra" ? "ultrafast" : undefined)
 
         const maxTokens = body.max_output_tokens as number | undefined
         expect(maxTokens).toBe(undefined) // match codex cli behavior

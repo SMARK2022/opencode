@@ -35,8 +35,8 @@ export function provider(model: Provider.Model) {
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
     return [PROMPT_BEAST]
   if (model.api.id.includes("gpt")) {
-    // 与上游保持路由优先级：GPT-6（含 Codex 名称）使用本地 Astra 模板。
-    if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
+    // Astra 专用指令按家族选择，避免 Sol/Luna 等同代模型误用；仍以实际 API id 为准。
+    if (model.api.id.includes("astra")) return [PROMPT_ASTRA]
     if (model.api.id.includes("codex")) {
       return [PROMPT_CODEX]
     }

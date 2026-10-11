@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { createOpencodeClient } from "@opencode-ai/sdk"
+import type { Provider } from "@opencode-ai/sdk/v2"
 import {
   CODEX_HEADERS,
   CODEX_USER_AGENT,
@@ -16,6 +18,71 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  test("filters OAuth GPT versions without treating minor versions as decimals", async () => {
+    // 只调用 models hook；完整输入满足插件接口，但不启动认证或实际 HTTP 请求。
+    const hooks = await CodexAuthPlugin({
+      client: createOpencodeClient(),
+      project: { id: "test", worktree: ".", time: { created: 0 } },
+      directory: ".",
+      worktree: ".",
+      serverUrl: new URL("http://localhost"),
+      $: Bun.$,
+      experimental_workspace: { register() {} },
+    })
+    const models = hooks.provider?.models
+    if (!models) throw new Error("Codex models hook missing")
+    // 独立预期包含整数与多位 minor；5.10 大于 5.4，不能按十进制小数排序。
+    const allowed = ["gpt-6-astra", "gpt-6", "gpt-5.10", "gpt-10", "gpt-5.5"]
+    // 本地原有白名单仍放行 5.2；回移不能夹带上游的模型下线策略。
+    const legacy = ["gpt-5.2", "gpt-5.4"]
+    // suffix 不能提升版本，4.99 的大 minor 也不能越过 major 边界。
+    const blocked = ["gpt-5", "gpt-5.4-astra", "gpt-4.99", "not-a-gpt-model"]
+    const provider: Provider = {
+      id: "openai",
+      name: "OpenAI",
+      source: "config",
+      env: [],
+      options: {},
+      models: Object.fromEntries(
+        [...allowed, ...legacy, ...blocked].map((id) => [
+          id,
+          {
+            id,
+            providerID: "openai",
+            name: id,
+            api: { id, url: "https://example.com", npm: "@ai-sdk/openai" },
+            capabilities: {
+              temperature: false,
+              reasoning: true,
+              attachment: false,
+              toolcall: true,
+              interleaved: false,
+              input: { text: true, audio: false, image: false, video: false, pdf: false },
+              output: { text: true, audio: false, image: false, video: false, pdf: false },
+            },
+            // 非零 API 价格让 OAuth 的零计费转换可被观察，而非零值 fixture 的自证。
+            cost: { input: 1, output: 2, cache: { read: 1, write: 1 } },
+            limit: { context: 100, output: 10 },
+            status: "active",
+            options: {},
+            headers: {},
+            release_date: "",
+          },
+        ]),
+      ),
+    }
+    // API-key 目录不受订阅筛选影响；OAuth 的免费计费元数据仍由插件维护。
+    expect(await models(provider, { auth: { type: "api", key: "offline" } })).toEqual(provider.models)
+    const filtered = await models(provider, {
+      auth: { type: "oauth", access: "offline", refresh: "offline", expires: 0 },
+    })
+    expect(Object.keys(filtered)).toEqual([...allowed, ...legacy])
+    expect(filtered["gpt-6-astra"]?.cost).toEqual({ input: 0, output: 0, cache: { read: 0, write: 0 } })
+    // 版本比较不负责重定义上下文窗口；5.5 特例和其他模型原限额均须保持。
+    expect(filtered["gpt-5.5"]?.limit).toEqual({ context: 400_000, input: 272_000, output: 128_000 })
+    expect(filtered["gpt-6-astra"]?.limit).toEqual({ context: 100, output: 10 })
+  })
+
   test("uses Codex TUI User-Agent for OAuth model requests", async () => {
     const hooks = await CodexAuthPlugin({} as never)
     const options = await hooks.auth!.loader!(() =>

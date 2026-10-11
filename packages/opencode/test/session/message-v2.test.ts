@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { APICallError } from "ai"
+import { APICallError, generateText } from "ai"
+import { createOpenAI } from "@ai-sdk/openai"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderTransform } from "@/provider/transform"
 import type { Provider } from "@/provider/provider"
@@ -797,15 +798,22 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test.each(["openai", "smark-codex"])("preserves encrypted GPT reasoning for %s", async (targetProvider) => {
-    // 该测试覆盖 Session projection 与 provider transform 的完整边界。
+  // 相同模型名不能跨账号域复用密文；同 Provider 的模型切换仍应保留续接能力。
+  test.each([
+    ["openai", "gpt-6-astra", "foreign summary", false],
+    ["openai", "gpt-5.5", "foreign summary", false],
+    ["openai", "gpt-5.5", "", false],
+    ["smark-codex", "gpt-6-astra", "foreign summary", true],
+    ["smark-codex", "gpt-5.5", "foreign summary", true],
+    ["smark-codex", "gpt-5.5", "", true],
+  ] as const)("isolates encrypted GPT reasoning for %s/%s (%s)", async (targetProvider, targetModel, summary, replay) => {
     const assistantID = "m-assistant"
-    // 目标模型满足 OpenAI Responses 与 gpt 前缀两个边界条件。
+    // 使用真实 Responses adapter，避免只在投影对象上通过、实际 wire 仍泄漏 metadata。
     const gpt: Provider.Model = {
       ...model,
-      id: ModelID.make("gpt-5.5"),
+      id: ModelID.make(targetModel),
       providerID: ProviderID.make(targetProvider),
-      api: { ...model.api, id: "gpt-5.5", npm: "@ai-sdk/openai" },
+      api: { ...model.api, id: targetModel, npm: "@ai-sdk/openai" },
       capabilities: { ...model.capabilities, reasoning: true },
     }
     const input: MessageV2.WithParts[] = [
@@ -815,7 +823,7 @@ describe("session.message-v2.toModelMessage", () => {
           {
             ...basePart(assistantID, "a1"),
             type: "reasoning",
-            text: "foreign summary",
+            text: summary,
             // 持久化 metadata 会在 adapter 边界投影为 providerOptions。
             metadata: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
             time: { start: 0 },
@@ -829,23 +837,50 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    // adapter 边界接收 providerOptions，Session 持久化的 MessageV2 Part 仍保留原 metadata 形态。
-    // GPT Responses 在模型切换时保留不透明的续接状态。
-    // 只有目标 GPT 协议接收这类 provider metadata。
-    expect(ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, {})).toStrictEqual([
-      {
-        role: "assistant",
-        ...(targetProvider === "openai" ? {} : { providerOptions: undefined }),
-        content: [
-          {
+    // 切换 Provider 只改变发送投影，不得破坏返回原 Provider 后仍可用的持久化历史。
+    const original = structuredClone(input)
+    const messages = ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, {})
+    const content = messages.flatMap((message) =>
+      message.role === "assistant" && Array.isArray(message.content) ? message.content : [],
+    )
+    expect(input).toEqual(original)
+    expect(content).toContainEqual(expect.objectContaining({ type: "text", text: "answer" }))
+    // 明文 summary 必须可见；空 summary 则无需制造一个空文本占位。
+    if (!replay && summary) expect(content).toContainEqual(expect.objectContaining({ type: "text", text: summary }))
+    // 同域不仅保留密文，还要保留 itemId 与原摘要，避免生成一个不可续接的残缺 reasoning item。
+    expect(content.filter((part) => part.type === "reasoning")).toEqual(
+      replay
+        ? [{
             type: "reasoning",
-            text: "foreign summary",
+            text: summary,
             providerOptions: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
-          },
-          { type: "text", text: "answer", ...(targetProvider === "openai" ? {} : { providerOptions: undefined }) },
-        ],
-      },
-    ])
+          }]
+        : [],
+    )
+
+    // 在发送边界终止，既不使用真实凭据，也不让 SDK 重试掩盖原始请求。
+    const requests: unknown[] = []
+    const stop = new Error("request captured")
+    const sdk = createOpenAI({
+      apiKey: "offline-test",
+      fetch: Object.assign(
+        async (url: RequestInfo | URL, init?: RequestInit) => {
+          requests.push(await new Request(url, init).json())
+          throw stop
+        },
+        { preconnect() {} },
+      ),
+    })
+    // 生产请求使用 stateless 模式；store=true 会只发 item reference，无法证明密文回放边界。
+    await expect(generateText({
+      model: sdk.responses(targetModel),
+      messages,
+      providerOptions: { openai: { store: false } },
+      maxRetries: 0,
+    })).rejects.toBe(stop)
+    // 独立检查最终 wire 字段，防止未来转换步骤重新引入加密续接内容。
+    expect(JSON.stringify(requests)).toContain('"answer"')
+    expect(JSON.stringify(requests).includes('"encrypted_content":"encrypted-state"')).toBe(replay)
   })
 
   test("replaces compacted tool output with placeholder", async () => {
