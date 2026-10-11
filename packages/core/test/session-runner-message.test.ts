@@ -755,8 +755,12 @@ Recent work
     ])
   })
 
-  test.each([false, true])("replays encrypted GPT reasoning across providers (failed=%s)", (failed) => {
-    const gpt = Model.make({ id: "gpt-5.5", provider: "openai", route: OpenAIResponses.route })
+  test.each([
+    [false, "openai"], [true, "openai"],
+    [false, "smark-codex"], [true, "smark-codex"],
+  ] as const)("isolates encrypted GPT reasoning (failed=%s, provider=%s)", (failed, targetProvider) => {
+    // 真实投影同时覆盖跨域隔离、同域续接和失败轮次不能复用密文。
+    const gpt = Model.make({ id: "gpt-5.5", provider: targetProvider, route: OpenAIResponses.route })
     const messages = toLLMMessages(
       [
         SessionMessage.Assistant.make({
@@ -764,7 +768,7 @@ Recent work
           type: "assistant",
           agent: "build",
           error: failed ? { type: "unknown", message: "Provider turn interrupted" } : undefined,
-          // 源与目标都是 GPT 家族，但 provider 不同；加密续接状态仍可回放。
+          // 同样的GPT名称不能证明不同Provider属于同一个账号域。
           model: { id: ModelV2.ID.make("gpt-6-astra"), providerID: ProviderV2.ID.make("smark-codex") },
           content: [
             SessionMessage.AssistantReasoning.make({
@@ -784,13 +788,12 @@ Recent work
     )
 
     expect(messages[0]?.content).toEqual([
-      // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
-      // 源 provider 与目标不同；回放凭据只按 GPT 家族边界判定。
-      {
-        type: "reasoning",
-        text: "foreign summary",
-        providerMetadata: failed ? undefined : { openai: { reasoningEncryptedContent: "encrypted-state" } },
-      },
+      // 跨域只留可见文本；同域仍剥离源ID，持久历史和明文兼容路径保持不变。
+      targetProvider === "smark-codex" ? {
+          type: "reasoning",
+          text: "foreign summary",
+          providerMetadata: failed ? undefined : { openai: { reasoningEncryptedContent: "encrypted-state" } },
+        } : { type: "text", text: "foreign summary" },
       { type: "text", text: "answer" },
     ])
   })

@@ -13,6 +13,7 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { ConfigProviderOptionsV1 } from "@opencode-ai/core/v1/config/provider-options"
 import { it } from "./lib/effect"
 
 type Api =
@@ -231,6 +232,22 @@ describe("SessionRunnerModel", () => {
       }))
       expect(prepared.body).toHaveProperty("parallel_tool_calls", false)
       expect(prepared.body).toHaveProperty("temperature", 0.2)
+      // 在唯一HTTP准备链观察最终body，prepare.body尚未合并合法的HTTP扩展。
+      for (const serviceTier of ["ultrafast", "priority", undefined] as const) {
+        const selected = yield* SessionRunnerModel.resolve(serviceTier === undefined ? SessionV2.Info.make({ ...session, model: { id: catalog.id, providerID: catalog.providerID } }) : session, ModelV2.Info.make({
+          ...catalog, variants: catalog.variants.map(variant => ({
+            ...variant, body: ConfigProviderOptionsV1.get("@ai-sdk/openai").request({ ...(serviceTier === undefined ? {} : { serviceTier }), reasoningEffort: "high" }),
+          })),
+        }))
+        const route = selected.route.with({ auth: selected.route.auth.andThen(Auth.custom(input => Effect.sync(() => {
+          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(input.body)
+          serviceTier === undefined
+            ? expect(body).not.toHaveProperty("service_tier")
+            : expect(body).toHaveProperty("service_tier", serviceTier)
+          return input.headers
+        }))) })
+        yield* LLMClient.prepare(LLM.request({ model: route.model({ id: selected.id }), prompt: "Hello" }))
+      }
     }),
   )
 

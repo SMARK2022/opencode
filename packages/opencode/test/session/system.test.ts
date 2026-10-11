@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
+import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 import { DateTime, Effect, Layer } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -254,11 +255,16 @@ describe("session.system", () => {
     expect([SystemContextBuiltIns.ACTION_GUIDANCE, SystemContextBuiltIns.OUTPUT_GUIDANCE].some((section) => section.includes("auto-review"))).toBe(false)
   })
 
-  // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
+  // 使用实际 API id 验证分流；展示别名不能决定模板，Astra 家族优先于 Codex 后缀。
   test.each([
     ["gpt-6-astra", PROMPT_ASTRA],
-    ["gpt-6", PROMPT_ASTRA],
-    ["gpt-6-codex", PROMPT_ASTRA],
+    ["gpt-5-astra", PROMPT_ASTRA],
+    ["gpt-6-astra-codex", PROMPT_ASTRA],
+    // 同代模型不共享专用模板；收窄后仍遵守既有 Codex 与通用 GPT 路由。
+    ["gpt-6", PROMPT_GPT],
+    ["gpt-6-sol", PROMPT_GPT],
+    ["gpt-6-luna", PROMPT_GPT],
+    ["gpt-6-codex", PROMPT_CODEX],
     ["gpt-5.6-luna", PROMPT_GPT],
     ["gpt-5.4-codex", PROMPT_CODEX],
     ["gpt-4.1", PROMPT_BEAST],
@@ -266,6 +272,8 @@ describe("session.system", () => {
   ])("selects the provider prompt for %s", (id, expected) => {
     // 展示别名与API id分开，模板不能误按展示名选择；fixture沿用现有Muse测试形式。
     expect(SystemPrompt.provider({ id: "display-alias", api: { id } } as Provider.Model)).toEqual([expected])
+    // Native真实runner也用同一完整正文，不能只验证退休的族摘要选择。
+    expect(SessionPrompts.provider(id, "openai")).toBe(expected)
   })
 
   it.instance("retains the Session Git snapshot after the worktree changes", () => Effect.gen(function* () {

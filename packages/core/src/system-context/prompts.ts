@@ -25,8 +25,8 @@ export function provider(id: string, providerID: string) {
   // 保留上游选择优先级，不能先匹配宽泛GPT分支改变已有模型的模板。
   if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
   if (id.includes("gpt")) {
-    // 与上游保持路由优先级：GPT-6（含 Codex 名称）使用本地 Astra 模板。
-    if (id.includes("gpt-6")) return PROMPT_ASTRA
+    // Astra专用指令按实际API家族选择，两代同时避免Sol/Luna等同代模型误用。
+    if (id.includes("astra")) return PROMPT_ASTRA
     if (id.includes("codex")) return PROMPT_CODEX
     return PROMPT_GPT
   }

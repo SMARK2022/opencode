@@ -1930,11 +1930,13 @@ describe("session.llm.stream", () => {
     },
   )
 
+  // 保留旧模型对照，Astra经真实配置、选定Variant和LLM.stream到HTTP边界。
+  for (const modelID of ["gpt-5.2", "gpt-6-astra"]) {
   it.instance(
-    "sends responses API payload for OpenAI models",
+    `sends responses API payload for OpenAI model ${modelID}`,
     () =>
       Effect.gen(function* () {
-        const model = loadFixture("openai", "gpt-5.2").model
+        const model = { ...loadFixture("openai", "gpt-5.2").model, id: modelID }
 
         const responseChunks = [
           {
@@ -1996,7 +1998,11 @@ describe("session.llm.stream", () => {
           role: "user",
           time: { created: Date.now() },
           agent: agent.name,
-          model: { providerID: ProviderV2.ID.make("openai"), modelID: resolved.id, variant: "high" },
+          model: {
+            providerID: ProviderV2.ID.make("openai"),
+            modelID: resolved.id,
+            variant: modelID === "gpt-6-astra" ? "ultrafast" : "high",
+          },
         } satisfies SessionV1.User
 
         yield* drain({
@@ -2017,12 +2023,26 @@ describe("session.llm.stream", () => {
         expect(body.stream).toBe(true)
         expect((body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
         expect((body.reasoning as { mode?: string } | undefined)?.mode).toBe("pro")
+        // 核对实际编码字段；旧模型对照不能被配置定义本身强行加速。
+        expect(body.service_tier).toBe(modelID === "gpt-6-astra" ? "ultrafast" : undefined)
 
         const maxTokens = body.max_output_tokens as number | undefined
         expect(maxTokens).toBe(undefined) // match codex cli behavior
       }),
-    { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
+    { config: () => {
+      const model = { ...loadFixture("openai", "gpt-5.2").model, id: modelID }
+      const config = openAIConfig(model, `${state.server!.url.origin}/v1`)
+      return { ...config, provider: { ...config.provider, openai: {
+        ...config.provider?.openai,
+        models: { [modelID]: {
+          ...config.provider?.openai?.models?.[modelID],
+          // 定义不等于启用，上面的user.model.variant才选择此配置。
+          variants: { ultrafast: { serviceTier: "ultrafast", reasoningEffort: "high" } },
+        } },
+      } } }
+    } },
   )
+  }
 
   it.instance(
     "keeps supported OpenAI models on AI SDK path when native flag is off",

@@ -62,12 +62,26 @@ describe("OpenAI Responses route", () => {
 
   it.effect("lowers semantic service tier options", () =>
     Effect.gen(function* () {
-      const input = LLM.updateRequest(request, { providerOptions: { openai: { serviceTier: "priority" } } })
-      expect(input.providerOptions).toEqual({ openai: { serviceTier: "priority" } })
-      const prepared = yield* LLMClient.prepare(input)
-
-      expect(prepared.body).toMatchObject({ service_tier: "priority" })
-      expect(prepared.body).not.toHaveProperty("serviceTier")
+      for (const model of [
+        OpenAI.configure({ apiKey: "test" }).responses("gpt-6-astra"),
+        OpenAI.configure({ apiKey: "test" }).chat("gpt-6-astra"),
+      ]) {
+        for (const serviceTier of ["ultrafast", "default", "priority", "flex"] as const) {
+          const input = LLM.updateRequest(request, { model, providerOptions: { openai: { serviceTier } } })
+          expect(input.providerOptions?.openai).toMatchObject({ serviceTier })
+          const prepared = yield* LLMClient.prepare(input)
+          expect(prepared.body).toMatchObject({ service_tier: serviceTier })
+          expect(prepared.body).not.toHaveProperty("serviceTier")
+          // 真实route/executor编码到HTTP边界，避免只验证prepare而漏掉后续合并或序列化。
+          yield* LLMClient.stream(input).pipe(
+            Stream.runDrain,
+            Effect.provide(dynamicResponse((capture) => Effect.sync(() => {
+              expect(JSON.parse(capture.text)).toMatchObject({ service_tier: serviceTier })
+              return capture.respond(sseEvents(), { headers: { "content-type": "text/event-stream" } })
+            }))),
+          )
+        }
+      }
       // 源补丁的三个 facade 均走真实 Responses lowering，不用复制 options 逻辑自证。
       const models = [
         OpenAI.configure({ apiKey: "test" }).responses("gpt-4o-mini"),
