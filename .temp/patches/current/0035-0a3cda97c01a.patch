@@ -169,18 +169,24 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
        <Match when={true}>
 
 
+diff --git a/packages/session-ui/src/components/part-default-open.ts b/packages/session-ui/src/components/part-default-open.ts
+--- a/packages/session-ui/src/components/part-default-open.ts
++++ b/packages/session-ui/src/components/part-default-open.ts
+@@ -19,8 +19,10 @@
+ export function partDefaultOpen(part: PartType, shell = false, edit = false) {
+   if (part.type !== "tool") return
+   if (part.tool === "bash" || part.tool === "shell") return shell
+   if (part.tool === "edit" || part.tool === "write" || part.tool === "patch" || part.tool === "apply_patch") {
+     if (!edit) return false
+     return !deletionOnly(part)
+   }
++  // 非工具消息与未列出的工具不默认展开
++  return undefined
+ }
+
 diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
 --- a/packages/session-ui/src/components/message-part.tsx
 +++ b/packages/session-ui/src/components/message-part.tsx
-@@ -730,6 +730,8 @@
- function toolDefaultOpen(tool: string, shell = false, edit = false) {
-   if (tool === "bash") return shell
-   if (tool === "edit" || tool === "write" || tool === "apply_patch") return edit
-+  // 非工具消息不默认展开
-+  return undefined
- }
- 
- export function partDefaultOpen(part: PartType, shell = false, edit = false) {
 @@ -2184,9 +2186,11 @@ ToolRegistry.register({
      return (
        <div data-component="edit-tool">
@@ -234,13 +240,13 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
  }
  
  .scroll-view__viewport {
-@@ -21,13 +23,18 @@
+@@ -21,14 +23,19 @@
  
  .scroll-view__thumb {
    position: absolute;
--  right: 0;
+-  inset-inline-end: 0;
 +  /* 滚动条右移 4px，避免遮挡内容 */
-+  right: 4px;
++  inset-inline-end: 4px;
    top: 0;
    width: 12px;
    transition: opacity 200ms ease;
@@ -250,8 +256,10 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
    user-select: none;
 +  /* 确保滚动条显示在内容之上，包括 sticky header */
 +  z-index: 100;
+-  pointer-events: auto;
++  /* 默认不拦截指针事件，仅在可见时启用拖拽 */
++  pointer-events: none;
    opacity: 0;
-+  pointer-events: none; /* 默认不拦截指针事件，仅在可见时启用拖拽 */
  }
  
  .scroll-view__thumb::after {
@@ -300,21 +308,20 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
 diff --git a/packages/ui/src/components/scroll-view.tsx b/packages/ui/src/components/scroll-view.tsx
 --- a/packages/ui/src/components/scroll-view.tsx
 +++ b/packages/ui/src/components/scroll-view.tsx
-@@ -296,12 +296,14 @@
-           ref={thumbRef}
-           onPointerDown={onThumbPointerDown}
-           class="scroll-view__thumb"
--          data-visible={thumbVisible()}
-+          // data-visible 用字符串 "true" 而非布尔值，匹配 CSS [data-visible="true"] 选择器
-+        data-visible={thumbVisible() ? "true" : undefined}
-           data-dragging={isDragging()}
-           style={{
-             height: `${thumbHeight()}px`,
-             transform: `translateY(${thumbTop()}px)`,
--            "z-index": 100, // ensure it displays over content
-+            // 滚动条可交互：启用指针事件以便拖拽
-+        "pointer-events": "auto", // ensure it displays over content
-           }}
+@@ -277,9 +277,11 @@
+      onPointerDown={onThumbPointerDown}
+      class="scroll-view__thumb"
+-      data-visible={thumbVisible()}
++      // data-visible 用字符串 "true" 而非布尔值，匹配 CSS [data-visible="true"] 选择器
++      data-visible={thumbVisible() ? "true" : undefined}
+      data-dragging={isDragging()}
+      style={{
+        height: `${thumbHeight()}px`,
+        transform: `translateY(${thumbTop()}px)`,
+-        "z-index": 100, // ensure it displays over content
++        // 滚动条可交互：启用指针事件以便拖拽；z-index 已移至 scroll-view.css
++        "pointer-events": "auto",
+      }}
          />
        </Show>
 

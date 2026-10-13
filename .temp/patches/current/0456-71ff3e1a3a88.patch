@@ -8,35 +8,19 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E4=BC=9A=E8=AF=9D?=
  =?UTF-8?q?=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
+融合适配：目标 #194 已以 TokenEstimate/estimateUploadInput 承载 summary 输入估算（更强路径，保留）；
+本 patch 补足源 0456 缺失语义——assistant msg 的 inputBreakdown 细分与 processor 流式交接（防压缩期间 TUI 闪零）。AttachmentToken 由 core re-home 为 TokenEstimate，无需 import。
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index c1b1d05d86e15e3652d189d516c2e1137f880813..ae714bc9b94de7953c2b187caf64b915683049c9 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -5,6 +5,7 @@ import { SessionID, MessageID, PartID } from "./schema"
- import { Provider } from "@/provider/provider"
- import { MessageV2 } from "./message-v2"
- import { Token } from "@/util/token"
-+import { AttachmentToken } from "@/util/attachment-token"
- import * as Log from "@opencode-ai/core/util/log"
- import { SessionProcessor } from "./processor"
- import { Agent } from "@/agent/agent"
-@@ -433,6 +434,32 @@ export const layer = Layer.effect(
-         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-       })
-       const ctx = yield* InstanceState.context
-+      const compactionMessages = [
-+        ...modelMessages,
-+        {
-+          role: "user" as const,
-+          content: [{ type: "text" as const, text: nextPrompt }],
-+        },
-+      ]
-+      const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(compactionMessages)
+@@ -543,6 +543,28 @@
+         attachments: compactionEstimate.attachments,
+         history: selected.head,
+         model,
+       }).inputTokens
++      // #456：pending 细分与 processor 交接——summary 请求绕过 prompt.ts，流式期间不能闪回 0。
 +      const rawMessagesText = JSON.stringify(compactionMessages)
-+      const estimatedInput = Token.estimate(messageEstimate.text) + messageEstimate.attachments.tokens
++      // userText/assistantText 按估算文本拆分；attachments 用 rawChars 表达未计入文本的附件体量。
 +      const inputBreakdown = {
 +        system: 0,
 +        instructions: 0,
@@ -44,70 +28,39 @@ index c1b1d05d86e15e3652d189d516c2e1137f880813..ae714bc9b94de7953c2b187caf64b915
 +        tools: 0,
 +        messages: {
 +          userText: nextPrompt.length,
-+          assistantText: Math.max(0, messageEstimate.textChars - nextPrompt.length),
++          // userText 只含本次 summary prompt；其余估算文本归入 assistantText。
++          assistantText: Math.max(0, compactionEstimate.attachments.textChars + compactionEstimate.text.length - nextPrompt.length),
 +          reasoning: 0,
 +          toolInput: 0,
 +          toolOutput: 0,
-+          attachments: messageEstimate.attachments.rawChars,
++          attachments: compactionEstimate.attachments.rawChars,
 +          total: rawMessagesText.length,
++          // total 以序列化请求体长度为准，与 inputChars 同源。
 +        },
-+        ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
++        // 附件仅在存在时给出 media 细分，避免空对象污染序列化形态。
++        ...(compactionEstimate.attachments.count > 0 ? { media: compactionEstimate.attachments } : {}),
 +      }
-       const msg: MessageV2.Assistant = {
-         id: MessageID.ascending(),
-         role: "assistant",
-@@ -449,10 +476,18 @@ export const layer = Layer.effect(
-         cost: 0,
-         tokens: {
-           output: 0,
--          input: 0,
-+          // The compaction request is uploaded through SessionProcessor directly,
-+          // bypassing prompt.ts where normal assistant requests get their pending
-+          // input snapshot.  Seed the same estimate here so the TUI does not show
-+          // 0 tokens while the summary request is streaming; finish-step replaces
-+          // this with provider-confirmed usage once the model responds.
-+          input: estimatedInput,
-           reasoning: 0,
-           cache: { read: 0, write: 0 },
-         },
-+        inputChars: rawMessagesText.length,
-+        inputTokens: estimatedInput,
+       const ctx = yield* InstanceState.context
+       const msg: SessionV1.Assistant = {
+@@ -568,5 +590,6 @@
+         // #194：inputChars/inputTokens 供 TUI pending 展示——与 prompt.ts 对齐
+         inputChars: JSON.stringify(compactionMessages).length,
+         inputTokens: estimatedInput,
 +        inputBreakdown,
          modelID: model.id,
          providerID: model.providerID,
-         time: {
-@@ -465,19 +500,19 @@ export const layer = Layer.effect(
-         sessionID: input.sessionID,
-         model,
+@@ -581,3 +604,6 @@
        })
-+      // SessionProcessor copies these fields into step-start/step-finish parts.
-+      // Without this handoff, the assistant message has a pending estimate but
-+      // the streaming parts still look empty, which makes live context accounting
-+      // flicker back to zero during manual or automatic compaction.
++      // processor 把该快照复制进 step-start/step-finish，与 prompt.ts 主路径同构。
 +      processor.inputChars = rawMessagesText.length
 +      processor.inputBreakdown = inputBreakdown
        const result = yield* processor.process({
          user: userMessage,
-         agent,
-         sessionID: input.sessionID,
-         tools: {},
-         system: [],
--        messages: [
--          ...modelMessages,
--          {
--            role: "user",
--            content: [{ type: "text", text: nextPrompt }],
--          },
--        ],
-+        messages: compactionMessages,
-         model,
-       })
- 
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 index ac1f7afc18c60d5430847ef684a4226f4bf9104a..247db46c9ac5c7a0bc3a18a80a525410f782cb66 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -875,6 +875,33 @@ describe("session.compaction.process", () => {
+@@ -875,6 +901,35 @@
      }),
    )
  
@@ -132,8 +85,10 @@ index ac1f7afc18c60d5430847ef684a4226f4bf9104a..247db46c9ac5c7a0bc3a18a80a525410
 +
 +      expect(summary?.info.role).toBe("assistant")
 +      if (summary?.info.role !== "assistant") return
++      // 三个断言分别锁 pending 估算的三个落点：tokens、字符数、组件细分。
 +      expect(summary.info.inputTokens).toBeGreaterThan(0)
 +      expect(summary.info.inputChars).toBeGreaterThan(0)
++      // breakdown.total>0 证明 summary 消息携带了完整请求体口径，而非 0 占位。
 +      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
 +    }),
 +  )

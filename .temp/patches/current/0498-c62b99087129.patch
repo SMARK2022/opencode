@@ -1,19 +1,16 @@
-From c62b990871294affaa9deb6c9fd991a80e4aaf71 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 19 Jul 2026 20:03:52 +0800
-Subject: [PATCH] =?UTF-8?q?test(session):=20=E7=A8=B3=E5=AE=9A=E9=A6=96?=
- =?UTF-8?q?=E5=9D=97=E8=B6=85=E6=97=B6=E9=87=8D=E8=AF=95=E8=A1=8C=E4=B8=BA?=
+From c62b99087129 Mon Sep 17 00:00:00 2001
+From: SMARK <smark@local>
+Date: Sat, 18 Jul 2026 09:30:12 +0800
+Subject: [PATCH] test(session): 稳定首块超时重试行为
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-使用真实请求、重试状态与最终消息验证恢复，移除固定调用次数和短时序竞态。
-
-为测试 LLM 队列增加显式可重复响应，覆盖额外超时后的第三次请求并确保作用域清理。
-
+适配：llm-server 五 hunks 内容原样（仅行号漂移）。processor-effect 测试按目标 harness 重写
+readiness：EventV2Bridge off 为 Effect（finalizer 直持有）、gated 而非 dead gate、
+MessageV2.parts 需 yield、chunkTimeout 25→500、repeat 契约下以最终消息内容断言替代 calls 计数。
 diff --git a/docs/plans/session-processor-first-progress-timeout-ci-stability.md b/docs/plans/session-processor-first-progress-timeout-ci-stability.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..6fb0fe0e7dd192c6a9eb16efd8bbe39974cdba0a
 --- /dev/null
 +++ b/docs/plans/session-processor-first-progress-timeout-ci-stability.md
 @@ -0,0 +1,1132 @@
@@ -1150,7 +1147,6 @@ index 0000000000000000000000000000000000000000..6fb0fe0e7dd192c6a9eb16efd8bbe399
 +passes all required verification, records the actual path/diff/E/C evidence,
 +and receives an independent full-scope result of `No blocking findings`.
 diff --git a/packages/opencode/test/lib/llm-server.ts b/packages/opencode/test/lib/llm-server.ts
-index c0f92c737ee9191595d00892e4870cdc65297f32..037d6384139c19b2ea54d3e1cab0c6d50c42d15e 100644
 --- a/packages/opencode/test/lib/llm-server.ts
 +++ b/packages/opencode/test/lib/llm-server.ts
 @@ -25,6 +25,8 @@ type Match = (hit: Hit) => boolean
@@ -1162,7 +1158,7 @@ index c0f92c737ee9191595d00892e4870cdc65297f32..037d6384139c19b2ea54d3e1cab0c6d5
  }
  
  type Wait = {
-@@ -609,6 +611,7 @@ namespace TestLLMServer {
+@@ -617,6 +619,7 @@ namespace TestLLMServer {
    export interface Service {
      readonly url: string
      readonly push: (...input: (Item | Reply)[]) => Effect.Effect<void>
@@ -1170,7 +1166,7 @@ index c0f92c737ee9191595d00892e4870cdc65297f32..037d6384139c19b2ea54d3e1cab0c6d5
      readonly pushMatch: (match: Match, ...input: (Item | Reply)[]) => Effect.Effect<void>
      readonly textMatch: (match: Match, value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
      readonly toolMatch: (match: Match, name: string, input: unknown) => Effect.Effect<void>
-@@ -646,6 +649,11 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
+@@ -654,6 +657,11 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
          list = [...list, ...input.map((value) => ({ item: item(value) }))]
        }
  
@@ -1182,7 +1178,7 @@ index c0f92c737ee9191595d00892e4870cdc65297f32..037d6384139c19b2ea54d3e1cab0c6d5
        const queueMatch = (match: Match, ...input: (Item | Reply)[]) => {
          list = [...list, ...input.map((value) => ({ item: item(value), match }))]
        }
-@@ -661,7 +669,8 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
+@@ -669,7 +677,8 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
          const index = list.findIndex((entry) => !entry.match || entry.match(hit))
          if (index === -1) return
          const first = list[index]
@@ -1192,7 +1188,7 @@ index c0f92c737ee9191595d00892e4870cdc65297f32..037d6384139c19b2ea54d3e1cab0c6d5
          return first.item
        }
  
-@@ -713,6 +722,9 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
+@@ -721,6 +730,9 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
          push: Effect.fn("TestLLMServer.push")(function* (...input: (Item | Reply)[]) {
            queue(...input)
          }),
@@ -1202,91 +1198,95 @@ index c0f92c737ee9191595d00892e4870cdc65297f32..037d6384139c19b2ea54d3e1cab0c6d5
          pushMatch: Effect.fn("TestLLMServer.pushMatch")(function* (match: Match, ...input: (Item | Reply)[]) {
            queueMatch(match, ...input)
          }),
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index 51fa40a24e49a47061f643ee5d5a93c3fa5f0ca2..5eaf274b2b2220b49a0636a53cb129221d87f0cb 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -22,7 +22,7 @@ import { Snapshot } from "../../src/snapshot"
- import * as Log from "@opencode-ai/core/util/log"
+@@ -21,7 +21,7 @@ import { SessionStatus } from "../../src/session/status"
+ import { SessionSummary } from "../../src/session/summary"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { provideTmpdirServer } from "../fixture/fixture"
+ import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 -import { testEffect } from "../lib/effect"
 +import { awaitWithTimeout, testEffect } from "../lib/effect"
  import { httpError, raw, reply, TestLLMServer } from "../lib/llm-server"
- import { SyncEvent } from "@/sync"
  import { RuntimeFlags } from "@/effect/runtime-flags"
-@@ -756,12 +756,15 @@ it.live("session.processor retries a real first-progress timeout", () =>
-         const { processors, session, provider } = yield* boot()
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+@@ -873,17 +873,19 @@ it.live("session.processor retries a real first-progress timeout", () =>
          const gate = defer<void>()
          const retry = defer<{ attempt: number; message: string }>()
-+        // gate属于测试夹具；内部失败边界关闭scope时必须释放仍在等待的HTTP handler。
-+        yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve(undefined)))
  
 -        // 闸门让首个 HTTP response 永远晚于 25ms；只有 Provider 的 dispatch deadline 能先发布 retry。
--        // 第一项是延迟的 HTTP error，第二项是同一 Provider 的成功响应，不引入备用 Provider 或 hedging。
-+        // 闸门让首个HTTP response永远晚于500ms；只有Provider的dispatch deadline能先发布retry。
-+        // 延迟错误保持one-shot；显式repeat响应为任意合法后续retry提供同一Provider结果。
++        // 闸门让首个 HTTP response 永远晚于 chunkTimeout（现 500ms，CI 稳定值）；只有 Provider 的 dispatch deadline 能先发布 retry。
+         // 第一项是延迟的 HTTP error，第二项是同一 Provider 的成功响应，不引入备用 Provider 或 hedging。
          // 这条顺序把 first-progress timeout 放在真实 HTTP producer 与现有 retry consumer 之间验证。
          // 503 仍保留原有服务器错误形状，只有新增的 progress deadline 改变 failure 的产生时机。
--        yield* llm.push(httpError(503, { error: "delayed" }, gate.promise), reply().text("after"))
-+        yield* llm.push(httpError(503, { error: "delayed" }, gate.promise))
+         // 目标 0434 态的 llm-server 尚无 gate 形参；闸门由 raw() 的 wait 承载（llm-server 内建能力），
+-        // 首块永远晚于 25ms progress deadline，同时保留"延迟的 HTTP error + 同 Provider 成功响应"的源顺序。
++        // 首块永远晚于 progress deadline（chunkTimeout=500），同时保留"延迟的 HTTP error + 同 Provider 成功响应"的源顺序。
+         const gated = defer<void>()
+-        yield* llm.push(
+-          raw({ wait: gated.promise, error: { message: "delayed" } }),
+-          reply().text("after"),
+-        )
++        // #498：scope finalizer 兜底释放 gate——断言路径提前失败也不能让后续 provider 请求永久挂起。
++        yield* Effect.addFinalizer(() => Effect.sync(() => gated.resolve(undefined)))
++        yield* llm.push(raw({ wait: gated.promise, error: { message: "delayed" } }))
++        // #498：成功响应以 repeat 形式入队——每次 retry 请求都由同一 queued 响应服务，
++        // 固定 calls 计数断言不再成立（repeat 是可重放契约，count 由行为而非次数证明）。
 +        yield* llm.pushRepeat(reply().text("after"))
  
          const chat = yield* session.create({})
          const parent = yield* user(chat.id, "first progress")
-@@ -771,6 +774,7 @@ it.live("session.processor retries a real first-progress timeout", () =>
-           if (evt.properties.sessionID !== chat.id || evt.properties.status.type !== "retry") return
-           retry.resolve({ attempt: evt.properties.status.attempt, message: evt.properties.status.message })
+@@ -897,6 +899,8 @@ it.live("session.processor retries a real first-progress timeout", () =>
+           retry.resolve({ attempt: data.status.attempt, message: data.status.message })
+           return Effect.void
          })
-+        yield* Effect.addFinalizer(() => Effect.sync(off))
++        // #498：订阅退订由 scope finalizer 持有——断言提前退出也不泄漏 Status 监听。
++        yield* Effect.addFinalizer(() => off)
          // 监听真实 Status bus，而不是读取 processor 内部 retry counter，保护用户可见的行为契约。
          // 订阅在 process fork 前建立，避免 retry event 已发布后测试才开始等待。
          // retry Status 的 attempt/message 是 Session 用户可见合同，也是没有 retry cap 的可观测边界。
-@@ -795,27 +799,34 @@ it.live("session.processor retries a real first-progress timeout", () =>
+@@ -921,17 +925,25 @@ it.live("session.processor retries a real first-progress timeout", () =>
            })
            .pipe(Effect.forkIn(scope, { startImmediately: true }))
  
 -        const observed = yield* Effect.promise(() =>
 -          Promise.race([retry.promise, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100))]),
-+        // request、Status与Message决定正向结果；20秒边界只在行为缺失时失败并触发scope清理。
-+        const { observed, result } = yield* awaitWithTimeout(
++        // #498：readiness 等待以已发布信号为准——llm.wait(1) 证明首个请求已到达 fixture，
++        // 再无限等待 retry promise（包级 20s 只防挂死，不构成计时断言）。
++        const observed = yield* awaitWithTimeout(
 +          Effect.gen(function* () {
 +            yield* llm.wait(1)
-+            const observed = yield* Effect.promise(() => retry.promise)
-+            gate.resolve(undefined)
-+            const result = yield* Fiber.join(fiber)
-+            return { observed, result }
++            return yield* Effect.promise(() => retry.promise)
 +          }),
-+          "first-progress timeout did not publish retry status and recover",
++          "first-progress retry was not published",
 +          "20 seconds",
          )
 -        // 100ms 只是 red-capable readiness gate，不是产品 timeout；正常路径应在 25ms 附近先发布 retry。
--        // 释放延迟服务器，确保第二次真实 Provider 请求可以完成并验证现有 retry 路径。
--        gate.resolve(undefined)
--        const result = yield* Fiber.join(fiber)
+         // 释放延迟服务器，确保第二次真实 Provider 请求可以完成并验证现有 retry 路径。
+         gated.resolve(undefined)
+         const result = yield* Fiber.join(fiber)
          // gate 只释放服务器 fixture；SessionRetry 的既有 backoff 和 retryable 分类保持真实执行。
 -        // 第二次响应沿着同一 processor 成功完成，证明 timeout 没有把 Session 降级为终态失败。
 -        // llm.calls=2 同时确认失败请求和重试请求都实际到达 fixture，而不是测试直接 resolve fiber。
--        off()
-+        // 后续响应沿着同一processor成功完成，不把恢复错误绑定到某个固定retry次数。
-+        const parts = MessageV2.parts(msg.id)
+-        yield* off
++        const parts = yield* MessageV2.parts(msg.id)
++        // #498：成功终态以最终消息内容证明（repeat 响应真实完成），次数断言随 repeat 契约移除。
++        expect(
++          parts.some((part) => part.type === "text" && part.text === "after"),
++        ).toBe(true)
  
          expect(observed?.attempt).toBe(1)
          // message 必须来自真实 Provider progress producer，不能由测试手工构造 APIError 冒充。
-         expect(observed?.message).toBe("SSE read timed out")
--        // attempt=1 只证明现有 retry 状态可见，不规定总次数，也不引入新的 attempt cap。
--        // 该断言故意不检查“最多一次”，以防测试把已删除的 RP-04 重新固化成产品行为。
+@@ -939,9 +951,8 @@ it.live("session.processor retries a real first-progress timeout", () =>
+         // attempt=1 只证明现有 retry 状态可见，不规定总次数，也不引入新的 attempt cap。
+         // 该断言故意不检查“最多一次”，以防测试把已删除的 RP-04 重新固化成产品行为。
          expect(result).toBe("continue")
 -        expect(yield* llm.calls).toBe(2)
-+        // 显式响应内容证明Session已恢复，避免把无上限retry误写成固定HTTP调用次数。
-+        expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
        }),
 -    { git: true, config: (url) => providerCfg(url, { chunkTimeout: 25 }) },
-+    {
-+      git: true,
-+      // 首次响应由gate持续阻塞；500ms只触发被测超时，并为后续loopback成功保留调度余量。
-+      config: (url) => providerCfg(url, { chunkTimeout: 500 }),
-+    },
++    { git: true, config: (url) => providerCfg(url, { chunkTimeout: 500 }) },
    ),
  )
  
+

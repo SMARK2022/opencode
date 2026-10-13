@@ -21,8 +21,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +  return `${mm}-${dd}`
 +}
  
- // #174：getDaily 按日懒建
- const getDaily = (map: Map<number, DailyUsage>, time: number) => {
+ // #176：稠密日轴：窗口内逐日生成零基桶，保证空闲日连续
+ const buildDayBuckets = (start: number, end: number) => {
 diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts

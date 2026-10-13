@@ -31,16 +31,17 @@ index dcb5102a66..b6b3688ffd 100644
      ).test(normalized)
    ) {
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index c3e9320652..86f3a64c20 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -2,11 +2,16 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -2,14 +2,18 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
  import { Config } from "@/config/config"
  import { Provider } from "@/provider/provider"
 +import { ProviderTransform } from "@/provider/transform"
  import { Session } from "@/session/session"
-+import { MessageV2 } from "@/session/message-v2"
+ import { MessageV2 } from "@/session/message-v2"
+ import { Database } from "@opencode-ai/core/database/database"
+ 
  import { MessageID, PartID, SessionID } from "@/session/schema"
 -import type { ToolPart, User, Assistant, TextPart } from "@opencode-ai/core/v1/session"
 -import { generateObject, type ModelMessage } from "ai"
@@ -53,7 +54,7 @@ index c3e9320652..86f3a64c20 100644
  import { PermissionReviewerPrompt } from "./prompt"
  import { Assessment, ReviewerRequest } from "./schema"
  import { PermissionReviewerTranscript } from "./transcript"
-@@ -58,6 +63,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
+@@ -61,6 +65,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
  // #206：拉取比最终 reviewer prompt 更宽的最近窗口——transcript 选择再保留用户锚点并限制条目/字符，避免在权限路径遍历过旧会话
  const REVIEWER_MESSAGE_FETCH_LIMIT = 120
  
@@ -64,7 +65,7 @@ index c3e9320652..86f3a64c20 100644
  export const layer = Layer.effect(
    Service,
    Effect.gen(function* () {
-@@ -68,107 +77,119 @@ export const layer = Layer.effect(
+@@ -73,112 +81,124 @@ export const layer = Layer.effect(
      // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
      const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
  
@@ -84,15 +85,20 @@ index c3e9320652..86f3a64c20 100644
 -        })
 -        const tenantPolicy = yield* loadTenantPolicy(autoReview)
 -        // #206：transcript 收集双重有界——先拉 120 条宽窗口再由 transcript 选择保留用户锚点和截短条目
--        // #206：session.messages 内部调用 MessageV2.page 并 provideService(Database)——避免 Database.Service 泄漏到 review 类型
--        // #206：fromMessages 的 truncated 已覆盖 page.more 语义——ENTRY_LIMIT(40) < fetch limit(120) 时 selectEntries 必定截短
+-        // #206：page.more 表示获取窗口外还有更早消息（含 hidden 行的原始窗口探测）——hidden 挤占
+-        // #206：窗口时可见条目可能 ≤ENTRY_LIMIT，必须与 selectEntries 截短合并披露，否则 reviewer
+-        // #206：会把部分历史当作完整对话评估 user_authorization（修复 page.more 语义丢失）
 -        const transcript = input.sessionID
--          ? yield* session
--              .messages({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
--              .pipe(
--                Effect.map(PermissionReviewerTranscript.fromMessages),
--                // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
--                Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
+-          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
+-              // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
+-              Effect.provideService(Database.Service, database),
+-              Effect.map((page) => {
+-                const transcript = PermissionReviewerTranscript.fromMessages(page.items)
+-                // #206：窗口溢出与条目截短任一存在都置 truncated——省略标记是 reviewer 的缺失证据
+-                return { ...transcript, truncated: transcript.truncated || page.more }
+-              }),
+-              // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
+-              Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
 +    const review: Interface["review"] = (input) =>
 +      // #209：streaming refactor——generateObject 替换为 streamText + permission_review_decision tool，让 reviewer 子会话留下可审计的推理与文本轨迹
 +      Effect.gen(function* () {
@@ -163,16 +169,21 @@ index c3e9320652..86f3a64c20 100644
 +          yield* markToolReviewing(input, reviewerSession?.id)
 +          const tenantPolicy = yield* loadTenantPolicy(autoReview)
 +          // #206：transcript 收集双重有界——先拉 120 条宽窗口再由 transcript 选择保留用户锚点和截短条目
-+          // #206：session.messages 内部调用 MessageV2.page 并 provideService(Database)——避免 Database.Service 泄漏到 review 类型
-+          // #206：fromMessages 的 truncated 已覆盖 page.more 语义——ENTRY_LIMIT(40) < fetch limit(120) 时 selectEntries 必定截短
++          // #206：page.more 表示获取窗口外还有更早消息（含 hidden 行的原始窗口探测）——hidden 挤占
++          // #206：窗口时可见条目可能 ≤ENTRY_LIMIT，必须与 selectEntries 截短合并披露，否则 reviewer
++          // #206：会把部分历史当作完整对话评估 user_authorization（page.more 语义合并）
 +          const transcript = input.sessionID
-+            ? yield* session
-+                .messages({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
-+                .pipe(
-+                  Effect.map(PermissionReviewerTranscript.fromMessages),
-+                  // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
-+                  Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
-+                )
++            ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
++                // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
++                Effect.provideService(Database.Service, database),
++                Effect.map((page) => {
++                  const transcript = PermissionReviewerTranscript.fromMessages(page.items)
++                  // #206：窗口溢出与条目截短任一存在都置 truncated——省略标记是 reviewer 的缺失证据
++                  return { ...transcript, truncated: transcript.truncated || page.more }
++                }),
++                // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
++                Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
++              )
 +            : { entries: [], truncated: false, entryTruncated: false }
 +          const messages = buildMessages({
 +            system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
@@ -279,7 +290,7 @@ index c3e9320652..86f3a64c20 100644
      return Service.of({ review })
  
      // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
-@@ -196,7 +217,7 @@ export const layer = Layer.effect(
+@@ -206,7 +226,7 @@ export const layer = Layer.effect(
        return next
      }
  
@@ -288,7 +299,7 @@ index c3e9320652..86f3a64c20 100644
      function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
        return Effect.gen(function* () {
          const message = yield* session.updateMessage({
-@@ -212,60 +233,327 @@ export const layer = Layer.effect(
+@@ -222,60 +242,327 @@ export const layer = Layer.effect(
            sessionID: input.session.id,
            messageID: message.id,
            type: "text",
@@ -649,7 +660,7 @@ index c3e9320652..86f3a64c20 100644
        if (!input.sessionID || !input.tool) return Effect.void
        return Effect.gen(function* () {
          // #208：用 session.messages 替代 MessageV2.get——避免 Database.Service 泄漏到 review 类型
-@@ -276,18 +564,28 @@ export const layer = Layer.effect(
+@@ -286,18 +573,28 @@ export const layer = Layer.effect(
            (item): item is ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
          )
          if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
@@ -680,7 +691,7 @@ index c3e9320652..86f3a64c20 100644
                },
              },
              time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
-@@ -310,8 +608,20 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
+@@ -320,8 +617,20 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
    ] satisfies ModelMessage[]
  }
  
@@ -702,7 +713,7 @@ index c3e9320652..86f3a64c20 100644
  function isReviewerError(error: unknown): error is Error {
    return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
  }
-@@ -327,7 +637,8 @@ function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metada
+@@ -337,7 +646,8 @@ function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metada
  // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
  function errorMessage(error: unknown) {
    if (error instanceof Error) return error.message
@@ -1068,8 +1079,8 @@ index 0869a3de22..58ec5022bd 100644
 +  )
 +}
  
--// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats
- function createPendingToolInputStats(part: () => ToolPart) {
+-// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats；导出供行为测试直接驱动
+ export function createPendingToolInputStats(part: () => ToolPart) {
    const [stats, setStats] = createSignal<PendingToolInputStats>()
    let parser = createPendingToolInputParser(part().tool)
 @@ -2505,7 +2623,12 @@ function Shell(props: ToolProps) {
@@ -1109,12 +1120,12 @@ index 0869a3de22..58ec5022bd 100644
          </BlockTool>
        </Match>
        <Match when={true}>
--        <InlineTool icon="$" pending="Writing command..." complete={stringValue(props.input.command)} part={props.part}>
+-        <InlineTool icon="$" pending="Writing command…" complete={stringValue(props.input.command)} part={props.part}>
 -          {stringValue(props.input.command)}
 +        {/* #209：InlineTool 支持点击导航到 reviewer 子会话，children 附加 auto-review 状态行 */}
 +        <InlineTool
 +          icon="$"
-+          pending="Writing command..."
++          pending="Writing command…"
 +          complete={stringValue(props.input.command)}
 +          part={props.part}
 +          onClick={() => {

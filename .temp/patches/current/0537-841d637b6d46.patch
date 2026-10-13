@@ -14,6 +14,7 @@ HITL 窗口可按 project 展示跨目录 asked，但 pending 按 InstanceState.
 统一用 session.directory 与 session.workspaceID 路由 once/always/reject 与
 question 同源路径，并补错 directory 隔离回归测试。
 
+
 diff --git a/docs/plans/tui-permission-reply-directory-routing.md b/docs/plans/tui-permission-reply-directory-routing.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..1bf020c1dee6fbfdaf929f53d6bf030b07350486
@@ -438,130 +439,24 @@ index 0000000000000000000000000000000000000000..1bf020c1dee6fbfdaf929f53d6bf030b
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx
-index 3d8a5bf655ec9a4c19a4d176f623126b78d3515c..819e5a60a1ab35f2b8dc81fc5000c21e73d23087 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx
-@@ -123,6 +123,13 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
-   const pathFormatter = usePathFormatter()
- 
-   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
-+  // pending Permission 按 InstanceState.directory 隔离；SSE 可按 project 跨目录展示 asked，
-+  // reply 必须打回 request 所属 session.directory，否则服务端静默 no-op、窗口关不掉。
-+  // workspace 优先 session.workspaceID，避免 session warp 后仍打到 project.current 的旧值。
-+  const replyRoute = () => ({
-+    directory: session()?.directory,
-+    workspace: session()?.workspaceID ?? project.workspace.current(),
-+  })
- 
-   const input = createMemo(() => {
-     const tool = props.request.tool
-@@ -173,7 +180,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
-             void sdk.client.permission.reply({
-               reply: "always",
-               requestID: props.request.id,
--              workspace: project.workspace.current(),
-+              ...replyRoute(),
-             })
-           }}
-         />
-@@ -185,7 +192,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
-               reply: "reject",
-               requestID: props.request.id,
-               message: message || undefined,
--              workspace: project.workspace.current(),
-+              ...replyRoute(),
-             })
-           }}
-           onCancel={() => {
-@@ -423,14 +430,14 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
-                   void sdk.client.permission.reply({
-                     reply: "reject",
-                     requestID: props.request.id,
--                    workspace: project.workspace.current(),
-+                    ...replyRoute(),
-                   })
-                   return
-                 }
-                 void sdk.client.permission.reply({
-                   reply: "once",
-                   requestID: props.request.id,
--                  workspace: project.workspace.current(),
-+                  ...replyRoute(),
-                 })
-               }}
-             />
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-index 222bc053b42c6cad71add68df7d8c3b2c0b37c65..65f65fe7a134849b2ef64142ba8a3b5da8e29450 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-@@ -5,6 +5,8 @@ import type { TextareaRenderable } from "@opentui/core"
- import { selectedForeground, tint, useTheme } from "../../context/theme"
- import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
- import { useSDK } from "../../context/sdk"
-+import { useProject } from "../../context/project"
-+import { useSync } from "../../context/sync"
- import { useToast } from "../../ui/toast"
- import { SplitBorder } from "../../component/border"
- import { useDialog } from "../../ui/dialog"
-@@ -17,10 +19,18 @@ import { createRefreshClock } from "../../util/signal"
- 
- export function QuestionPrompt(props: { request: QuestionRequest }) {
-   const sdk = useSDK()
-+  const project = useProject()
-+  const sync = useSync()
-   const { theme } = useTheme()
-   const renderer = useRenderer()
-   const tuiConfig = useTuiConfig()
-   const toast = useToast()
-+  // Question pending 与 Permission 同属 InstanceState.directory；reply/reject 必须带 session.directory。
-+  const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
-+  const replyRoute = () => ({
-+    directory: session()?.directory,
-+    workspace: session()?.workspaceID ?? project.workspace.current(),
-+  })
- 
-   const questions = createMemo(() => props.request.questions)
-   const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
-@@ -105,12 +115,14 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
-     void sdk.client.question.reply({
-       requestID: props.request.id,
-       answers,
-+      ...replyRoute(),
-     })
-   }
- 
-   function reject() {
-     void sdk.client.question.reject({
-       requestID: props.request.id,
-+      ...replyRoute(),
-     })
-   }
- 
-@@ -127,6 +139,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
-       void sdk.client.question.reply({
-         requestID: props.request.id,
-         answers: [[answer]],
-+        ...replyRoute(),
-       })
-       return
-     }
+
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
-index 3cddb0d78f1b004417c3419448757fb35e551c95..91154c7a9f0df2701a7770b8b17db0fe6a7023e7 100644
+index 6f1bc5341..632d3025d 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -1575,6 +1575,45 @@ it.live("permission requests stay isolated by directory", () =>
+@@ -1655,6 +1655,52 @@ it.live("permission requests stay isolated by directory", () =>
    }),
  )
  
-+// 错 directory 的 reply 模拟 TUI 启动目录 ≠ session.directory：pending 必须仍挂起，
-+// 正确 directory 的 once 才 resolve，防止 HITL 窗口因 Instance 路由静默 no-op 关不掉。
++// #537：错 directory 的 reply 模拟 TUI 启动目录 ≠ session.directory——目标服务 seam 对 unknown
++// request 返回 NotFoundError（比 source 时代的静默 no-op 更可观测）；pending 必须仍挂起，
++// 正确 directory 的 once 才 resolve，防止 HITL 窗口因 Instance 路由错误而关不掉。
 +it.live("reply on wrong directory leaves the original pending ask unresolved", () =>
 +  Effect.gen(function* () {
 +    const owner = yield* tmpdirScoped({ git: true })
 +    const other = yield* tmpdirScoped({ git: true })
 +    const store = yield* InstanceStore.Service
-+    const requestID = PermissionID.make("per_wrong_dir")
++    const requestID = PermissionV1.ID.make("per_wrong_dir")
 +
 +    const fiber = yield* store
 +      .provide(
@@ -580,7 +475,12 @@ index 3cddb0d78f1b004417c3419448757fb35e551c95..91154c7a9f0df2701a7770b8b17db0fe
 +
 +    yield* store.provide({ directory: owner }, waitForPending(1))
 +
-+    yield* store.provide({ directory: other }, reply({ requestID, reply: "once" }))
++    // 错 instance 的 reply 失败为 NotFoundError——不静默、也不误清 owner pending。
++    const wrong = yield* Effect.exit(store.provide({ directory: other }, reply({ requestID, reply: "once" })))
++    expect(Exit.isSuccess(wrong)).toBe(false)
++    if (Exit.isFailure(wrong)) {
++      expect(Cause.squash(wrong.cause)).toBeInstanceOf(PermissionV1.NotFoundError)
++    }
 +
 +    const stillPending = yield* store.provide({ directory: owner }, list())
 +    // 错 instance 的 once 不得清空 owner pending，对应 TUI 按了无反应。
@@ -589,6 +489,7 @@ index 3cddb0d78f1b004417c3419448757fb35e551c95..91154c7a9f0df2701a7770b8b17db0fe
 +    yield* store.provide({ directory: owner }, reply({ requestID, reply: "once" }))
 +    yield* Fiber.join(fiber)
 +    // 正确 directory 的 once 必须清空 list 并结束 ask fiber。
++    // join 不带超时：owner reply 已在同一 store 中挂起等待，死锁会以测试超时暴露而非假绿。
 +    expect(yield* store.provide({ directory: owner }, list())).toEqual([])
 +  }),
 +)

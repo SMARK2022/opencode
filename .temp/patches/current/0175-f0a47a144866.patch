@@ -331,7 +331,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
              } as SessionV1.StepFinishPart["inputBreakdown"]
              // #140：输入侧比率校准（历史 step-finish inputChars/tokens），夹紧到 [3,4]
              // #140：history 校准样本来自 step-finish.inputChars
-@@ -1620,16 +1628,21 @@ const layer = Layer.effect(
+@@ -1615,16 +1623,22 @@ const layer = Layer.effect(
                if (typeof chars === "number" && chars > 0 && tokens > 0) {
                  // 附件不参与输入侧 chars/token 密度校准
                  const bd = (sf as any).inputBreakdown
@@ -348,7 +348,9 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
              const estimatedInput =
 -              historyInputTokens > 0 && historyInputChars > 500
 +              (historyInputTokens > 0 && historyInputChars > 500
-                 ? Math.round(inputChars / clampCharsPerToken(historyInputChars / historyInputTokens))
+-                ? Math.round(inputChars / clampCharsPerToken(historyInputChars / historyInputTokens))
++                // #175：校准分支被除数用消毒文本；raw 含 base64 会导致 media.tokens 二次计入
++                ? Math.round([systemText, messagesText, toolsText].join("\n").length / clampCharsPerToken(historyInputChars / historyInputTokens))
 -                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))
 +                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))) + messageEstimate.attachments.tokens
              // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量

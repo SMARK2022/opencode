@@ -11,25 +11,26 @@ Content-Transfer-Encoding: 8bit
 为 session 请求补充 refresh=true，避免返回已被转录服务拒绝的旧 token；沿用现有凭据回写及 401 重试，恢复后续请求的无浏览器直连。
 
 补充刷新 URL 回归测试；相关测试 51 通过、2 跳过。使用 OpenCode 配置凭据完成真实验证：首次刷新写回后转录成功，第二次直接命中缓存，无浏览器收割。
+适配说明：voice-auth 生产与测试已随 TUI 迁移至 packages/tui（src/util 与 test/util），hunk 按目标路径与上下文重锚；URL 刷新参数、导入与回归用例语义与 source 逐字一致。
 
-diff --git a/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts b/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts
-index 4d33d12046f4683cd2e82d9715680aa3e61ac2a2..2bca71f6edc101fbe99c1e4f59a73943e082b48d 100644
---- a/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/voice-auth.ts
-@@ -26,7 +26,7 @@ export const VOICE_HARVEST_TIMEOUT_MS = 240_000
+diff --git a/packages/tui/src/util/voice-auth.ts b/packages/tui/src/util/voice-auth.ts
+--- a/packages/tui/src/util/voice-auth.ts
++++ b/packages/tui/src/util/voice-auth.ts
+@@ -25,7 +25,8 @@ export const VOICE_HARVEST_TIMEOUT_MS = 240_000
  export const VOICE_REFRESH_TIMEOUT_MS = 60_000
  export const VOICE_DIRECT_TIMEOUT_MS = 30_000
  
 -export const VOICE_SESSION_URL = "https://chatgpt.com/api/auth/session"
++// 普通 session 查询会返回已被转录服务拒绝的旧 token；刷新必须显式携带 refresh=true。
 +export const VOICE_SESSION_URL = "https://chatgpt.com/api/auth/session?refresh=true"
- // 与 agent 页面路径同一私有端点（chatgpt-dom.js:796）；请求形态变化时两处必须同源更新。
+ // 与 agent 页面路径同一私有端点（chatgpt-dom.js）；请求形态变化时两处必须同源更新。
  export const VOICE_TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe"
  // 刷新授权链只由 NextAuth 会话令牌族承载；其它 cookie（如 __cf_bm）无授权语义，不参与状态机门控。
-diff --git a/packages/opencode/test/cli/tui/voice-auth.test.ts b/packages/opencode/test/cli/tui/voice-auth.test.ts
-index ace0408d41848670dfee3373e762b00926f2c791..688befa28828db82841d36329d006f73793dc697 100644
---- a/packages/opencode/test/cli/tui/voice-auth.test.ts
-+++ b/packages/opencode/test/cli/tui/voice-auth.test.ts
-@@ -6,6 +6,7 @@ import { ConfigMCP } from "../../../src/config/mcp"
+
+diff --git a/packages/tui/test/util/voice-auth.test.ts b/packages/tui/test/util/voice-auth.test.ts
+--- a/packages/tui/test/util/voice-auth.test.ts
++++ b/packages/tui/test/util/voice-auth.test.ts
+@@ -4,6 +4,7 @@ import { tmpdir } from "../fixture/fixture"
  import {
    authFromHarvest,
    buildDirectTranscribeRequest,
@@ -37,7 +38,7 @@ index ace0408d41848670dfee3373e762b00926f2c791..688befa28828db82841d36329d006f73
    ensureVoiceCredential,
    jwtExpiresAt,
    mergeSetCookieCookies,
-@@ -43,6 +44,11 @@ const handwritten = `{
+@@ -41,6 +42,11 @@ const handwritten = `{
  `
  
  describe("voice auth node", () => {

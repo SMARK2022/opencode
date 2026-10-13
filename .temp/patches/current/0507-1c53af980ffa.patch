@@ -462,11 +462,12 @@ index 0000000000000000000000000000000000000000..f9ca3d4004e2391537bb8d0a08a3aae3
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index beca15905e47119e0f7cb521236453d7212e95d4..e990bd0efad4d4b489392a5ca9bb40aca9fe6704 100644
+index 13d0ff55b..0932d90e9 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -19,6 +19,10 @@ import { Permission } from "@/permission"
+@@ -18,6 +18,10 @@ import { Permission } from "@/permission"
  import path from "path"
  import { InstanceState } from "@/effect/instance-state"
  import { mergeRanges } from "@/util/range"
@@ -477,42 +478,28 @@ index beca15905e47119e0f7cb521236453d7212e95d4..e990bd0efad4d4b489392a5ca9bb40ac
  
  // [local-smark] 从父 session 的 messages 提取已读文件列表，
  // 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
-@@ -137,9 +141,11 @@ export const Parameters = Schema.Struct({
-   }),
- })
- 
--function output(sessionID: SessionID, text: string) {
-+// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析
-+function output(sessionID: SessionID, text: string, notice?: string) {
+@@ -145,10 +149,13 @@ function renderOutput(input: {
+   state: "running" | "completed" | "error"
+   summary?: string
+   text: string
++  notice?: string
+ }) {
+   const tag = input.state === "error" ? "task_error" : "task_result"
    return [
-     `task_id: ${sessionID} (for resuming to continue this task if needed)`,
-+    ...(notice ? [notice] : []),
-     "",
-     "<task_result>",
-     text,
-@@ -147,10 +153,12 @@ function output(sessionID: SessionID, text: string) {
-   ].join("\n")
- }
- 
--function backgroundOutput(sessionID: SessionID) {
-+// background 与 foreground 共用同一 invalid notice 插入点，避免只修 output() 漏 background
-+function backgroundOutput(sessionID: SessionID, notice?: string) {
-   return [
-     `task_id: ${sessionID} (for polling this task with task_status)`,
-     "state: running",
-+    ...(notice ? [notice] : []),
-     "",
-     "<task_result>",
-     "Background task started. Continue your current work and call task_status when you need the result.",
-@@ -232,10 +240,40 @@ export const TaskTool = Tool.define(
+     `<task id="${input.sessionID}" state="${input.state}">`,
++    // #507：notice 插在骨架元信息与结果体之间，供模型读，不影响 task_result 解析
++    ...(input.notice ? [input.notice] : []),
+     ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
+     `<${tag}>`,
+     input.text,
+@@ -224,9 +231,41 @@ export const TaskTool = Tool.define(
          })
        }
  
--      const taskID = params.task_id
--      const session = taskID
--        ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+-      const session = params.task_id
+-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
 -        : undefined
-+      // task_id 是 optional string，不是 SessionID brand。对非 "ses*" raw 直接
++      // #507：task_id 是 optional string，不是 SessionID brand。对非 "ses*" raw 直接
 +      // SessionID.make 会同步抛 brand 错误并中断整次 execute；只能对已过域门闸的候选 make+get。
 +      const lookupSession = (id: string) =>
 +        id.startsWith("ses")
@@ -528,6 +515,8 @@ index beca15905e47119e0f7cb521236453d7212e95d4..e990bd0efad4d4b489392a5ca9bb40ac
 +        if (exact) return { mode: "resume" as const, session: exact }
 +
 +        // 候选 2：用户指定的 26-body 补全（生成器字面量 ses_）；与 brand 边界 "ses" 分工
++        // 补全后仍是普通 ses* 候选——miss 不再二次变换（不加前缀/截断），
++        // 与乱串同归 invalid_provided，保证 miss 路径单一。
 +        if (rawTaskID.length === SESSION_ID_BODY_LENGTH && !rawTaskID.startsWith("ses")) {
 +          const prefixed = yield* lookupSession("ses_" + rawTaskID)
 +          if (prefixed) return { mode: "resume" as const, session: prefixed }
@@ -545,20 +534,15 @@ index beca15905e47119e0f7cb521236453d7212e95d4..e990bd0efad4d4b489392a5ca9bb40ac
 +        resolved.mode === "create" && resolved.reason === "invalid_provided"
 +          ? formatTaskIdNotice({ provided: resolved.provided })
 +          : undefined
-+
-       const parent = yield* sessions.get(ctx.sessionID)
-       // The current tool context is the actual delegation source. Persisted
-       // session.agent can be absent or stale on resumed sessions, so it is only a
-@@ -304,12 +342,14 @@ export const TaskTool = Tool.define(
-         const parts = yield* ops.resolvePromptParts(params.prompt)
- 
-         // [local-smark] 根据 inspected_files 参数传递父 session 的已读文件列表。
--        // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
-+        // 默认必须跟真实 resolve.mode：resume→none，新建（含非法 task_id 导致的新建）→summary。
-+        // 不能用 raw params.task_id 真值——假 ID 会伪装成 resume 并丢掉父 inspected 摘要。
+       // 以当前执行代理 ctx.agent 为父权限源（非仅持久化 parent.agent）
+       // #280：derive 失败不存在于本路径——agent.get 缺失时直接失败，不静默降级
+       const parentAgent = yield* agent.get(ctx.agent)
+@@ -310,8 +349,11 @@ export const TaskTool = Tool.define(
          // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
          // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
          // worktree 用于计算相对路径，通过 InstanceState.context 获取（与 read.ts 同款用法）。
++        // #507：默认必须跟真实 resolve.mode：resume→none，新建（含非法 task_id 导致的新建）→summary。
++        // 不能用 raw params.task_id 真值——假 ID 会伪装成 resume 并丢掉父 inspected 摘要。
          const instance = yield* InstanceState.context
 -        const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
 +        const inspectedFilesMode =
@@ -566,34 +550,58 @@ index beca15905e47119e0f7cb521236453d7212e95d4..e990bd0efad4d4b489392a5ca9bb40ac
          const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
            ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
            : undefined
-@@ -449,7 +489,8 @@ export const TaskTool = Tool.define(
-             ...metadata,
-             jobId: info.id,
-           },
--          output: backgroundOutput(nextSession.id),
-+          // background 启动回执同样挂 invalid notice（若有），与前台 output 合同一致
-+          output: backgroundOutput(nextSession.id, invalidTaskIdNotice),
+@@ -375,6 +417,8 @@ export const TaskTool = Tool.define(
+       })
+ 
+       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
++        // #507：inject 是子任务完成后注入父会话的 synthetic 结果文本，不属于创建时回执，
++        // 不挂 invalid notice（notice 只随 started/updated/completed 回执出现）。
+         state: "completed" | "error",
+         text: string,
+       ) {
+@@ -427,6 +471,9 @@ export const TaskTool = Tool.define(
+             state: "running",
+             summary: "Background task updated",
+             text: BACKGROUND_UPDATED,
++            // #507：background 回执同样挂 invalid notice（若有），与前台 output 合同一致；
++            // extend 更新回执与 started 同属「本次调用回执」，一致性挂载而非语义新增。
++            notice: invalidTaskIdNotice,
+           }),
          }
        }
- 
-@@ -469,7 +510,7 @@ export const TaskTool = Tool.define(
+@@ -459,6 +506,8 @@ export const TaskTool = Tool.define(
+             state: "running",
+             summary: "Background task started",
+             text: BACKGROUND_STARTED,
++            // #507：background 启动回执同样挂 invalid notice（若有），与前台 output 合同一致
++            notice: invalidTaskIdNotice,
+           }),
+         }
+       }
+@@ -491,7 +540,12 @@ export const TaskTool = Tool.define(
              return {
                title: params.description,
                metadata,
--              output: output(nextSession.id, text),
-+              output: output(nextSession.id, text, invalidTaskIdNotice),
+-              output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
++              output: renderOutput({
++                sessionID: nextSession.id,
++                state: "completed",
++                text: result?.output ?? "",
++                notice: invalidTaskIdNotice,
++              }),
              }
            }),
          (_, exit) =>
+
 diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
-index 18e0428ba9e95c1c15e0da3c06f0296ebbcde6df..355345d47d1158f90933c49b6b2e8bb57e92ca82 100644
+index edd2f93fc..39f61b437 100644
 --- a/packages/opencode/src/util/output-notice.ts
 +++ b/packages/opencode/src/util/output-notice.ts
-@@ -118,6 +118,21 @@ export function formatCompactionClearedNotice() {
+@@ -125,6 +125,21 @@ export function formatCompactionClearedNotice() {
    return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
  }
  
-+// task 工具：模型传了无法解析为已有 Session 的 task_id 时，仍新建任务但用 notice 标明独立上下文。
++// #507：task 工具：模型传了无法解析为已有 Session 的 task_id 时，仍新建任务但用 notice 标明独立上下文。
 +// provided 走 attribute escape，避免引号/尖括号破坏 <opencode_notice> 骨架。
 +export function formatTaskIdNotice(input: { provided: string }) {
 +  // severity=warning：任务已成功创建，但模型应改用返回的合法 task_id 继续
@@ -609,18 +617,20 @@ index 18e0428ba9e95c1c15e0da3c06f0296ebbcde6df..355345d47d1158f90933c49b6b2e8bb5
 +}
 +
  function formatNotice(input: Notice) {
+   // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
    return `<opencode_notice ${Object.entries(input)
-     .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))
+
 diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
-index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb237202646868c 100644
+index a50a80ca4..e3efaf17d 100644
 --- a/packages/opencode/test/tool/task.test.ts
 +++ b/packages/opencode/test/tool/task.test.ts
-@@ -452,10 +452,285 @@ describe("tool.task", () => {
+@@ -582,10 +582,291 @@ describe("tool.task", () => {
        expect(kids[0]?.id).toBe(result.metadata.sessionId)
        expect(result.metadata.sessionId).not.toBe("ses_missing")
-       expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
-+      // ses* 但 DB 不存在：新建独立上下文，并 notice 标明非法 provided
+       expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
++      // #507：ses* 但 DB 不存在：新建独立上下文，并 notice 标明非法 provided
 +      // notice 字段固定：type/reason/provided/action，供模型识别「非法 ID → 独立新上下文」
++      // 四属性逐一断言：任一字段重命名/丢失都会在此暴露，避免 notice 形态静默漂移。
 +      expect(result.output).toContain('type="task_id"')
 +      expect(result.output).toContain('reason="invalid_provided"')
 +      expect(result.output).toContain('provided="ses_missing"')
@@ -630,13 +640,14 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
      }),
    )
  
-+  // INV-04：裸 26-body 补 ses_ 后若 session 存在则 resume，不得 brand 失败也不得新建
++  // #507 INV-04：裸 26-body 补 ses_ 后若 session 存在则 resume，不得 brand 失败也不得新建
 +  it.instance("execute resumes when task_id is the 26-char body of an existing session", () =>
 +    Effect.gen(function* () {
 +      const sessions = yield* Session.Service
 +      const { chat, assistant } = yield* seed()
 +      const child = yield* sessions.create({ parentID: chat.id, title: "Body resume child" })
 +      // 生成器 ID = "ses_" + 26 body；模型漏前缀时应命中同一 session
++      // slice("ses_".length) 即去掉固定 4 字符前缀，剩下的正是补全候选要拼回去的 body。
 +      const body = child.id.slice("ses_".length)
 +      expect(body.length).toBe(26)
 +      const tool = yield* TaskTool
@@ -665,14 +676,14 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +
 +      // resume 成功：metadata 与 prompt 的 session 必须是原 child，不是新建 ID
 +      expect(result.metadata.sessionId).toBe(child.id)
-+      expect(result.output).toContain(`task_id: ${child.id}`)
++      expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
 +      // 合法恢复路径禁止 illegal notice，避免模型误判为新上下文
 +      expect(result.output).not.toContain('reason="invalid_provided"')
 +      expect(seen?.sessionID).toBe(child.id)
 +    }),
 +  )
 +
-+  // INV-03/09：非 ses* 乱串不得让 SessionID.make 炸掉工具；应 create + invalid notice
++  // #507 INV-03/09：非 ses* 乱串不得让 SessionID.make 炸掉工具；应 create + invalid notice
 +  it.instance("execute creates a child for non-ses task_id without brand failure", () =>
 +    Effect.gen(function* () {
 +      const sessions = yield* Session.Service
@@ -709,16 +720,17 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +      expect(result.metadata.sessionId).toBe(kids[0]?.id)
 +      // 主键永远是系统 ses_ ID，从不把非法 provided 当 session 主键
 +      expect(result.metadata.sessionId).not.toBe(provided)
-+      expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
++      expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
 +      expect(result.output).toContain('reason="invalid_provided"')
 +      expect(result.output).toContain('action="created_new"')
 +      // provided 中的引号须 attribute-escape，不能原样打断 notice
++      // escape 先替换 & 再替换 "，断言值 &quot; 同时锁定了转义发生与替换顺序。
 +      expect(result.output).toContain('provided="not-a-session&quot;with-quote"')
 +      expect(seen?.sessionID).toBe(result.metadata.sessionId)
 +    }),
 +  )
 +
-+  // INV-01：省略 task_id 是正常新建，不得出现 invalid_provided notice
++  // #507 INV-01：省略 task_id 是正常新建，不得出现 invalid_provided notice
 +  it.instance("execute creates without invalid notice when task_id is omitted", () =>
 +    Effect.gen(function* () {
 +      const { chat, assistant } = yield* seed()
@@ -744,19 +756,19 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +        },
 +      )
 +
-+      // 省略参数时只有 task_id 行与 task_result，没有 task_id 类型 notice
-+      expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
++      // 省略参数时只有骨架与 task_result，没有 task_id 类型 notice
++      // omit 与 invalid 的 notice 差异是模型可区分合同：只有「传了但没用上」才需要引导。
++      expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
 +      expect(result.output).not.toContain('reason="invalid_provided"')
 +      expect(result.output).not.toContain('type="task_id"')
 +    }),
 +  )
 +
-+  // INV-02/08：完整合法 resume 骨架保持兼容，且无 illegal notice
++  // #507 INV-02/08：完整合法 resume 骨架保持兼容，且无 illegal notice
 +  it.instance("execute resumes full task_id without invalid notice", () =>
 +    Effect.gen(function* () {
-+      const sessions = yield* Session.Service
 +      const { chat, assistant } = yield* seed()
-+      const child = yield* sessions.create({ parentID: chat.id, title: "Full id child" })
++      const child = yield* (yield* Session.Service).create({ parentID: chat.id, title: "Full id child" })
 +      const tool = yield* TaskTool
 +      const def = yield* tool.init()
 +      const promptOps = stubOps({ text: "full-resume" })
@@ -781,12 +793,13 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +      )
 +
 +      // 完整 ID 命中：sessionId 不变，且无 invalid notice
++      // 与 26-body 用例互补：直连命中不经过补全分支，两条 resume 路径都不产生 notice。
 +      expect(result.metadata.sessionId).toBe(child.id)
 +      expect(result.output).not.toContain('reason="invalid_provided"')
 +    }),
 +  )
 +
-+  // INV-05：26-body 补前缀后仍不存在 → 与其他 invalid 相同，create + notice
++  // #507 INV-05：26-body 补前缀后仍不存在 → 与其他 invalid 相同，create + notice
 +  it.instance("execute creates for unknown 26-char body with invalid notice", () =>
 +    Effect.gen(function* () {
 +      const sessions = yield* Session.Service
@@ -818,6 +831,7 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +      )
 +
 +      // 26 乱串：触发 body 候选但 get miss，仍 create 且 notice 回显 provided body
++      // miss 后与乱串同归 invalid_provided——验证补全分支不会制造第三种结果形态。
 +      const kids = yield* sessions.children(chat.id)
 +      expect(kids).toHaveLength(1)
 +      expect(result.metadata.sessionId).toBe(kids[0]?.id)
@@ -826,7 +840,7 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +    }),
 +  )
 +
-+  // INV-06：非法 task_id 导致的新建必须走 summary 默认，不能因 raw task_id 真值伪装 resume
++  // #507 INV-06：非法 task_id 导致的新建必须走 summary 默认，不能因 raw task_id 真值伪装 resume
 +  it.instance("execute uses summary inspected_files default when invalid task_id creates", () =>
 +    Effect.gen(function* () {
 +      const { chat, assistant } = yield* seed()
@@ -835,15 +849,15 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +      let seen: SessionPrompt.PromptInput | undefined
 +      const promptOps = stubOps({ text: "with-context", onPrompt: (input) => (seen = input) })
 +      // 最小已完成 read part：非法 task_id 新建应默认 summary 并注入 parent_context
-+      const readPart: MessageV2.ToolPart = {
++      const readPart = {
 +        id: PartID.ascending(),
-+        type: "tool",
++        messageID: assistant.id,
++        sessionID: chat.id,
++        type: "tool" as const,
 +        tool: "read",
 +        callID: "call-read-1",
-+        sessionID: chat.id,
-+        messageID: assistant.id,
 +        state: {
-+          status: "completed",
++          status: "completed" as const,
 +          input: { filePath: "/tmp/repo/src/a.ts" },
 +          output: "ok",
 +          title: "Read",
@@ -862,7 +876,7 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +          time: { start: Date.now(), end: Date.now() },
 +        },
 +      }
-+      const messages: MessageV2.WithParts[] = [
++      const messages: SessionV1.WithParts[] = [
 +        {
 +          info: assistant,
 +          parts: [readPart],
@@ -889,6 +903,7 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +      )
 +
 +      // 非法 ID 新建仍应带 invalid notice
++      // 旧缺陷回照：若 inspected 默认仍看 raw task_id 真值，本用例会走 none 而丢 parent_context。
 +      expect(result.output).toContain('reason="invalid_provided"')
 +      // prompt parts 中必须出现 parent_context，证明 inspected 默认是 summary 而非 none
 +      const parentCtx = seen?.parts.find(
@@ -898,6 +913,6 @@ index a0bdd2bf6fe38589d926766c4e85fd390e667db3..924ad8d8356ef4c14c091a3d2bb23720
 +    }),
 +  )
 +
-   it.instance("execute records the subagent and tightens permissions from the executing parent agent", () =>
+   it.instance("prevents subagents from launching subagents by default", () =>
      Effect.gen(function* () {
        const sessions = yield* Session.Service

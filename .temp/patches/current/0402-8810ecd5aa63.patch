@@ -1118,16 +1118,16 @@ index 0000000000000000000000000000000000000000..7e8cb2829a0b919198fab35a6d8da589
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -3090,7 +3090,7 @@ function Write(props: ToolProps) {
-             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-           </Show>
+@@ -3076,7 +3076,7 @@ function Write(props: ToolProps) {
+         >
+           <DiffView diff={diff()!} filePath={stringValue(props.input.filePath)} view={diffView()} />
            {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
 -          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
 +          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
          </BlockTool>
        </Match>
        <Match when={props.metadata.diagnostics !== undefined}>
-@@ -3117,7 +3117,7 @@ function Write(props: ToolProps) {
+@@ -3103,7 +3103,7 @@ function Write(props: ToolProps) {
            <Show when={writeCanCollapse()}>
              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
            </Show>
@@ -1136,16 +1136,15 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          </BlockTool>
        </Match>
        <Match when={true}>
-@@ -3512,7 +3512,7 @@ function Edit(props: ToolProps) {
-           <Show when={overflow()}>
-             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-           </Show>
+@@ -3475,6 +3475,6 @@ function Edit(props: ToolProps) {
+         >
+           <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
 -          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
 +          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
          </BlockTool>
        </Match>
        <Match when={true}>
-@@ -3646,7 +3646,7 @@ function ApplyPatch(props: ToolProps) {
+@@ -3604,7 +3604,7 @@ function ApplyPatch(props: ToolProps) {
                  <Show when={patchOverflow()}>
                    <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
                  </Show>
@@ -1154,7 +1153,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
                </Show>
              </BlockTool>
              )
-@@ -3733,7 +3733,14 @@ function Skill(props: ToolProps) {
+@@ -3685,7 +3685,14 @@ function Skill(props: ToolProps) {
    )
  }
  
@@ -1170,7 +1169,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const { theme } = useTheme()
    const terminalEnvironment = useTuiTerminalEnvironment()
    const errors = createMemo(() => {
-@@ -3743,19 +3750,53 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
+@@ -3695,19 +3702,53 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
      )
      return parseDiagnostics(props.diagnostics, normalized)
    })
@@ -1312,8 +1311,7 @@ diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
          const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
          if (touched) return
        }
--      log.info("touching file", { file: input })
-+      yield* Effect.logInfo("touching file", { file: input })
+       yield* Effect.logInfo("touching file", { file: input })
        const clients = yield* getClients(input)
        yield* Effect.promise(() =>
          Promise.all(

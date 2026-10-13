@@ -22,7 +22,7 @@ diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/open
 +  // #233：目标 VscodeBridgePlugin 签名要求 PluginInput——空对象适配，函数体不使用
    // #233：超大 insert 有界预览可见但完整源码不持久化
    test("keeps oversized notebook insert previews visible without persisting the full cell source", async () => {
--    const plugin = await VscodeBridgePlugin()
+-    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
 +    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
      const filePath = "F:\\project with spaces\\large notebook.ipynb"
      const inserted = ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()", ...Array.from({ length: 3000 }, (_, i) => `row_${i}`)].join("\n")
@@ -31,7 +31,7 @@ diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/open
    // #233：单行超大 insert 预览有界且非空
    // #233：4KB 字符上限截断单行——预览保留前缀，完整内容仍走 source 工具
    test("keeps oversized single-line notebook insert previews bounded and non-empty", async () => {
--    const plugin = await VscodeBridgePlugin()
+-    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
 +    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
      const filePath = "F:\\project with spaces\\wide notebook.ipynb"
      const inserted = `visible-prefix-${"x".repeat(20_000)}-hidden-suffix`
@@ -40,7 +40,7 @@ diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/open
    // #233：恰好十行且末尾换行的 insert 预览不算截断（尾部空行被剥离）
    // #233：diff 构造补的换行不应触发 truncated——否则 10 行内的普通插入也标记截断
    test("does not mark exact ten-line notebook insert previews truncated because of the final newline", async () => {
--    const plugin = await VscodeBridgePlugin()
+-    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
 +    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
      const filePath = "F:\\project with spaces\\ten-line notebook.ipynb"
      const inserted = `${Array.from({ length: 10 }, (_, i) => `line_${i + 1}`).join("\n")}\n`
@@ -675,6 +675,20 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
        `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
        `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
        saveError ? `Save error: ${saveError}` : undefined,
+@@ -365,11 +366,13 @@
+    const { status, statusSummary } = resolveConfigureStatus(
+      postProbe.configured,
+      selectKernelInvoked,
+      selectKernelAccepted,
+      selectKernelRejected,
+      selectKernelError,
+    )
+
+    return configureResult({
++      // #234：node 10 主路径——Env 头部依赖 notebook 元数据，缺参会破坏 header 契约
++      notebook,
+      path: primaryPath,
+      reason,
 diff --git a/sdks/vscode/src/notebook/format.ts b/sdks/vscode/src/notebook/format.ts
 --- a/sdks/vscode/src/notebook/format.ts
 +++ b/sdks/vscode/src/notebook/format.ts

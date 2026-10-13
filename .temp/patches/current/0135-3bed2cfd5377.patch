@@ -9,15 +9,13 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 0f1c49feef..ef3c2d981a 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -226,6 +226,8 @@ export function Session() {
+@@ -225,4 +225,6 @@ export function Session() {
        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
    })
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
 +  // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
 +  const streamingActive = createMemo(() => messages().some((x: any) => x.role === "assistant" && !x.time?.completed))
-   const foregroundTasks = createMemo(() =>
-     sync.data.capabilities.experimentalBackgroundSubagents
-       ? messages().flatMap((message) =>
+   const messagesBeforeRevert = () => {
 @@ -1253,6 +1255,8 @@ export function Session() {
              <Show when={session()}>
                <scrollbox

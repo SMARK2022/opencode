@@ -1,18 +1,17 @@
-From fe6154a3c7b4b79b8f388f738e801f3f226de6a9 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sat, 18 Jul 2026 06:37:25 +0800
-Subject: [PATCH] =?UTF-8?q?test(httpapi):=20=E9=9A=94=E7=A6=BB=20promptAsy?=
- =?UTF-8?q?nc=20=E8=A1=8C=E4=B8=BA=E6=B5=8B=E8=AF=95=E7=94=9F=E5=91=BD?=
- =?UTF-8?q?=E5=91=A8=E6=9C=9F?=
+From fe6154a3c7b4f8dcdd81462ebb6fce7bddb6b2a2 Mon Sep 17 00:00:00 2001
+From: SMARK <smark@local>
+Date: Thu, 16 Jul 2026 04:12:09 +0800
+Subject: [PATCH] test(httpapi): 隔离 promptAsync 行为测试生命周期
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-将 noReply parity 场景移入独立 worker，复用测试 preload 与 public SDK 完成态，避免父进程 teardown 与后台 fiber、SQLite 竞争。\n\n保留 default/raw parity、非零失败传播和请求用量完成断言，生产 promptAsync 异步语义保持不变。
-
+适配：worker 的 fixture 契约（markPluginDependenciesReady）、日志边界（observability 迁移后
+不初始化以独占 stdout）、raw 装配（canonical webHandler seam）、requestUsage（SDK v2 未生成，
+经同一 app.fetch 原始 GET + x-opencode-directory）、Database core 路径；测试三 hunk 锚点重写
+（目标 serverPathParity 单行形态 + no-reply 块含上游新增注释行）。
 diff --git a/docs/plans/promptasync-teardown-race.md b/docs/plans/promptasync-teardown-race.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc15f2ddd34fb8ef7cfa094c1b74253806fba0e6
 --- /dev/null
 +++ b/docs/plans/promptasync-teardown-race.md
 @@ -0,0 +1,453 @@
@@ -471,10 +470,9 @@ index 0000000000000000000000000000000000000000..cc15f2ddd34fb8ef7cfa094c1b742538
 +revision.
 diff --git a/packages/opencode/test/server/httpapi-promptasync-worker.ts b/packages/opencode/test/server/httpapi-promptasync-worker.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c825b948b1
 --- /dev/null
 +++ b/packages/opencode/test/server/httpapi-promptasync-worker.ts
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,273 @@
 +import { mkdir, rm } from "node:fs/promises"
 +import path from "node:path"
 +import { createOpencodeClient } from "@opencode-ai/sdk/v2"
@@ -570,15 +568,16 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +
 +  // 配置依赖标记属于测试启动契约，先写入再加载任何会触发 Config 的生产模块。
 +  await mkdir(xdg.config, { recursive: true })
-+  const { markConfigDependenciesInstalled } = await import("../fixture/plugin-deps")
-+  await markConfigDependenciesInstalled(path.join(xdg.config, "opencode"))
++  // #494：目标 fixture 契约是 markPluginDependenciesReady（plugin-deps 已不存在）——与 test/preload.ts 同源。
++  const { markPluginDependenciesReady } = await import("../fixture/plugin")
++  await markPluginDependenciesReady(path.join(xdg.config, "opencode"))
 +}
 +
 +async function initializeSource() {
 +  // 关闭日志 stdout，保证 worker 的 stdout 只承载最终 JSON，而错误仍通过 stderr 传播。
 +  // 日志仍写入 worker-local 文件，保留诊断能力但不污染父测试的 JSON parser。
-+  const { Log } = await import("@opencode-ai/core/util/log")
-+  await Log.init({ print: false, dev: true, level: "DEBUG" })
++  // #494：目标日志入口已迁至 observability/logging（默认写文件、print 受 env 门控）——worker
++  // 不初始化日志即等效 Log.init({print:false})：结果 JSON 独占 stdout，失败诊断走 stderr。
 +  // Projector 必须在请求进入前注册，否则 public messages 可能缺少测试 preload 的事件转换行为。
 +  const { initProjectors } = await import("../../src/server/projectors")
 +  initProjectors()
@@ -592,23 +591,11 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +  }
 +
 +  // raw route 使用与父测试相同的 HttpApiApp.routes，只改变 app 装配方式而不改变 endpoint。
-+  const { ConfigProvider, Layer } = await import("effect")
-+  const { HttpRouter } = await import("effect/unstable/http")
 +  const { HttpApiApp } = await import("../../src/server/routes/instance/httpapi/server")
-+  // 清空认证配置后再显式提供 undefined，确保 raw path 不读取父进程的 server password。
-+  const handler = HttpRouter.toWebHandler(
-+    HttpApiApp.routes.pipe(
-+      Layer.provide(
-+        ConfigProvider.layer(
-+          ConfigProvider.fromUnknown({
-+            OPENCODE_SERVER_PASSWORD: undefined,
-+            OPENCODE_SERVER_USERNAME: undefined,
-+          }),
-+        ),
-+      ),
-+    ),
-+    { disableLogger: true },
-+  ).handler
++  // #494：目标 routes 已是 fully-provided HttpRouter——复用目标 canonical webHandler seam
++  // （与 Server.Default app 同一装配，含 memoMap/disposeMiddleware）；服务端密码经 Flag
++  // 读取，worker 进程未设置 OPENCODE_SERVER_PASSWORD 即等效清空认证。
++  const handler = HttpApiApp.webHandler().handler
 +  return { fetch: (request) => handler(request, HttpApiApp.context) }
 +}
 +
@@ -625,7 +612,9 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +
 +async function runScenario(input: { path: ServerPath; directory: string }): Promise<PromptAsyncWorkerResult> {
 +  const { pollWithTimeout } = await import("../lib/effect")
-+  const sdk = createClient(await createApp(input.path), input.directory)
++  // #494：保留 app 引用——requestUsage 经同一 app.fetch 原始直读（SDK v2 未生成该路由）。
++  const app = await createApp(input.path)
++  const sdk = createClient(app, input.directory)
 +  // 先执行同步 noReply，再执行 async noReply，与原 parity 场景保持相同的 accepted-operation 顺序。
 +  const session = await sdk.session.create({ title: "prompt" })
 +  if (session.response.status !== 200 || !session.data)
@@ -656,10 +645,18 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +          message.parts.some((part) => part.type === "text" && part.text === "async hello"),
 +        )
 +        if (!asyncMessage) return undefined
-+        const requestUsage = await sdk.session.requestUsage.get({
-+          sessionID,
-+          requestID: asyncMessage.info.id,
-+        })
++        // #494：目标 SDK v2 尚未暴露 requestUsage 路由——与 httpapi-session.test 同款原始 GET
++        // + x-opencode-directory 直读公共端点（经同一 app.fetch 保持同源路由判定）；
++        // status==="completed" 判定语义不变。
++        const usageResponse = await app.fetch(
++          new Request(`http://localhost/session/${sessionID}/request_usage/${asyncMessage.info.id}`, {
++            headers: { "x-opencode-directory": input.directory },
++          }),
++        )
++        const requestUsage = {
++          response: { status: usageResponse.status },
++          data: (await usageResponse.json().catch(() => undefined)) as { status?: string } | undefined,
++        }
 +        // 未生成或仍为 running 的 usage 继续等待，HTTP 错误不能被转换成成功结果。
 +        if (requestUsage.response.status !== 200 || !requestUsage.data || requestUsage.data.status !== "completed") {
 +          return undefined
@@ -682,7 +679,7 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +  if (JSON.stringify(messageTexts) !== JSON.stringify(["async hello", "hello"])) {
 +    throw new Error(`unexpected message texts: ${JSON.stringify(messageTexts)}`)
 +  }
-+  if (completed.requestUsage.data.status !== "completed") throw new Error("request usage did not complete")
++  if (completed.requestUsage.data?.status !== "completed") throw new Error("request usage did not complete")
 +  // 返回完整状态而不是只返回文本，使父测试同时比较 HTTP、Message 和 usage 三类行为。
 +  return {
 +    statuses: {
@@ -695,7 +692,7 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +    promptRole,
 +    messageCount: completed.messages.data.length,
 +    messageTexts,
-+    requestUsageStatus: completed.requestUsage.data.status,
++    requestUsageStatus: completed.requestUsage.data?.status ?? "unknown",
 +  }
 +}
 +
@@ -721,7 +718,7 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +    disposeProject = () => project[Symbol.asyncDispose]()
 +    await initializeSource()
 +    // 只在环境边界完成后加载生产 Database，避免模块级 Flag 缓存错误路径。
-+    const { Database } = await import("../../src/storage/db")
++    const { Database } = await import("@opencode-ai/core/database/database")
 +    closeDatabase = () => Database.close()
 +    return await runScenario({ path: serverPath, directory })
 +  } finally {
@@ -750,20 +747,21 @@ index 0000000000000000000000000000000000000000..053f8922fedcb79d0b754c1cec84d2c8
 +  process.exit(1)
 +}
 diff --git a/packages/opencode/test/server/httpapi-sdk.test.ts b/packages/opencode/test/server/httpapi-sdk.test.ts
-index 5b43722e2d582966e2726b489e5be3b26a121a97..9c055e4ad5c096bc490155e95ce2b4ef9f4daac3 100644
 --- a/packages/opencode/test/server/httpapi-sdk.test.ts
 +++ b/packages/opencode/test/server/httpapi-sdk.test.ts
 @@ -1,4 +1,6 @@
  import { afterEach, describe, expect } from "bun:test"
 +import crypto from "node:crypto"
 +import os from "node:os"
- import { ConfigProvider, Effect, Layer } from "effect"
- import type * as Scope from "effect/Scope"
- import { HttpRouter } from "effect/unstable/http"
-@@ -255,6 +257,31 @@ function serverPathParity<A, E>(name: string, scenario: (serverPath: ServerPath)
-   )
+ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { Deferred, Effect, Layer } from "effect"
+@@ -223,6 +225,33 @@ function serverPathParity<A, E>(name: string, scenario: (serverPath: ServerPath)
+   it.live(name, scenario("raw"))
  }
  
++// #494：promptAsync 生命周期隔离到子进程 worker——parent 的 process-global teardown
++// （afterEach dispose+resetDatabase）不再与仍在运行的 promptAsync fiber 竞态。
 +const promptAsyncWorkerPath = path.join(import.meta.dir, "httpapi-promptasync-worker.ts")
 +
 +async function runPromptAsyncWorker(serverPath: ServerPath) {
@@ -792,9 +790,12 @@ index 5b43722e2d582966e2726b489e5be3b26a121a97..9c055e4ad5c096bc490155e95ce2b4ef
  function withProject<A, E, E2 = never>(
    serverPath: ServerPath,
    options: {
-@@ -673,58 +700,7 @@ describe("HttpApi SDK", () => {
+@@ -735,61 +764,10 @@ describe("HttpApi SDK", () => {
+     ),
    )
  
++  // #494：场景体改为子进程 worker 断言——204 acceptance、公开可观察性与 usage 终态
++  // 都在隔离 DB/环境中验证；parent 仅保留 parity 注册与 afterEach，不再持有活跃 fiber。
    serverPathParity("matches generated SDK prompt no-reply routes", (serverPath) =>
 -    withStandardProject(serverPath, ({ sdk }) =>
 -      Effect.gen(function* () {
@@ -822,6 +823,7 @@ index 5b43722e2d582966e2726b489e5be3b26a121a97..9c055e4ad5c096bc490155e95ce2b4ef
 -            .map((part) => record(part).text)
 -            .filter((text): text is string => typeof text === "string")
 -            .sort()
+-        // helper 只在断言中使用；messages 的真实结构由 server 返回契约决定，这里只提取 text 字段。
 -        // promptAsync 的 204 只承诺后台任务已接受；通过公开 messages seam 等待
 -        // 目标消息持久化，避免把不同平台的 fiber 调度顺序误当成 server-path 差异。
 -        const messages = yield* pollWithTimeout(
@@ -838,6 +840,7 @@ index 5b43722e2d582966e2726b489e5be3b26a121a97..9c055e4ad5c096bc490155e95ce2b4ef
 -          asyncPrompt: 204,
 -          messages: 200,
 -        })
+-        // 归序后的两条文本必须同时包含 prompt 与 asyncPrompt 的产出，任何缺失都说明后台任务丢失。
 -        expect(messageTexts(messages)).toEqual(["async hello", "hello"])
 -
 -        return {
@@ -848,7 +851,8 @@ index 5b43722e2d582966e2726b489e5be3b26a121a97..9c055e4ad5c096bc490155e95ce2b4ef
 -        }
 -      }),
 -    ),
-+    Effect.promise(() => runPromptAsyncWorker(serverPath)),
++    Effect.promise(() => runPromptAsyncWorker(serverPath))
    )
  
    serverPathParity("matches generated SDK prompt streaming through fake LLM", (serverPath) =>
+

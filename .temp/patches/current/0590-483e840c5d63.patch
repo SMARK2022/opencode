@@ -1,20 +1,20 @@
 From 483e840c5d63e4fd831dc90c677176f2833d970f Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sun, 30 Aug 2026 04:52:07 +0800
-Subject: [PATCH] =?UTF-8?q?fix(test):=20spawner=20=E8=BE=93=E5=87=BA?=
- =?UTF-8?q?=E4=BF=9D=E7=9C=9F=E4=B8=8E=E8=B7=A8=E5=B9=B3=E5=8F=B0=E7=BA=A2?=
- =?UTF-8?q?=E6=B5=8B=E6=A0=B9=E5=9B=A0=E4=BF=AE=E5=A4=8D?=
+Subject: [PATCH] =?UTF-8?q?fix(test):=20spawner=20=E8=BE=93=E5=87=BA=E4=BF=9D?=
+ =?UTF-8?q?=E7=9C=9F=E4=B8=8E=E8=B7=A8=E5=B9=B3=E5=8F=B0=E7=BA=A2=E6=B5=8B?=
+ =?UTF-8?q?=E6=A0=B9=E5=9B=A0=E4=BF=AE=E5=A4=8D?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-cross-spawn-spawner setupOutput 此前用惰性 fromReadable 包装主 stdout/stderr，快退子进程在订阅前写入并退出会丢管道数据（macOS CI shell basic 红与 Windows 10/10 探针同构）；现与 extra-fd 路径对齐为 spawn 时急切 pipe(PassThrough)，写入与订阅时序解耦，并删除 shell.test.ts 五处 sleep 保活补丁。
+spawner 主 stdout/stderr 改为 spawn 建柄时急切 PassThrough 缓冲（与 extra-fd 同款），快退子进程在订阅前写入不再丢数据；echo 写手换 js() 消除 Windows cmd 包装引号分叉；30s 超时契约内化到 live/instance 注册 seam；平台化 reviewPollBudget/负载预算；删除 sleep 0.01 保活补丁。
 
-同步归一平台敏感测试：core echo 写手换 js()（Windows 无 echo.exe 被 cmd 包装加引号）、prompt 队列权限用例换 bun -e Bun.write 跨平台写盘、live/instance 注册 seam 内化 canonical 30s 预算、四个负载敏感用例接入平台化预算（heavyLoopBudget/reviewPollBudget/snapshotMatrixBudget，内层严格小于注册硬顶）。prompt 全文件 96 pass/14 skip/0 fail，双包 typecheck 通过。
+适配说明：R1 spawner 急切缓冲、core echo→js 写手、INV-01 retention 回归、defaultLiveTimeout seam 内化（重锚至目标 Runner/isolatedRun/sharedRun 重构形态）、shell 五处 sleep 保活删除（按目标 each()/无 description 结构重写）、auto-review cancel 六处 reviewPollBudget 注入均原样落地；R2 printf→bun -e 写盘与 heavyLoopBudget/snapshotMatrixBudget 注册重设裁记——目标该用例已是跨平台安全的 echo>重定向形态且对应用例注册已是 30_000/120_000（不低于源预算 win32 30s/90s），重设只会收紧。
+
 
 diff --git a/docs/plans/cross-platform-red-root-repair.md b/docs/plans/cross-platform-red-root-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..b01007fa71b009b499ac9f0eea986f1c0efa75a0
 --- /dev/null
 +++ b/docs/plans/cross-platform-red-root-repair.md
 @@ -0,0 +1,840 @@
@@ -858,19 +858,19 @@ index 0000000000000000000000000000000000000000..b01007fa71b009b499ac9f0eea986f1c
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
-index ad8d4126d454e05ebb5c084c960403ec08f1e564..093a6b4f65db2bd811ba330751d319ef3957cabe 100644
 --- a/packages/core/src/cross-spawn-spawner.ts
 +++ b/packages/core/src/cross-spawn-spawner.ts
-@@ -243,15 +243,29 @@ export const make = Effect.gen(function* () {
+@@ -245,15 +245,29 @@ export const make = Effect.gen(function* () {
      out: ChildProcess.StdoutConfig,
      err: ChildProcess.StderrConfig,
    ) => {
 -    let stdout = proc.stdout
 +    // 急切缓冲（写入与订阅时序解耦）：spawn 建柄后立即把主 stdout/stderr pipe 进
-+    // PassThrough（与下方 extra-fd 输出同款模式）。惰性 fromReadable 下快退子进程
-+    // 在订阅前写入并退出会丢管道数据（macOS CI shell basic 红 + Windows 10/10
-+    // 探针复现）；立即 pipe 让读取端自 spawn 时刻持有数据，订阅延迟只推迟消费
++    // PassThrough（与 extra-fd 输出同款模式）。惰性 fromReadable 下快退子进程
++    // 在订阅前写入并退出会丢管道数据（macOS CI shell basic 红 + Windows 探针
++    // 复现）；立即 pipe 让读取端自 spawn 时刻持有数据，订阅延迟只推迟消费
 +    // 时刻、不再影响输出保真。
 +    const tapOutput = (node: NodeChildProcess.ChildProcess["stdout"]) => {
 +      if (!node) return
@@ -896,31 +896,29 @@ index ad8d4126d454e05ebb5c084c960403ec08f1e564..093a6b4f65db2bd811ba330751d319ef
            onError: (cause) => toPlatformError("fromReadable(stderr)", toError(cause), command),
          })
        : Stream.empty
+
 diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/core/test/effect/cross-spawn-spawner.test.ts
-index 35021d0083ba72351d953b1842767995c0126b91..f45cc69040a3b8efcdb53da1cabb7b168c998770 100644
 --- a/packages/core/test/effect/cross-spawn-spawner.test.ts
 +++ b/packages/core/test/effect/cross-spawn-spawner.test.ts
-@@ -197,7 +197,9 @@ describe("cross-spawn spawner", () => {
+@@ -198,7 +198,9 @@ describe("cross-spawn spawner", () => {
      fx.effect(
        "captures stdout via .all when no stderr",
        Effect.gen(function* () {
 -        const handle = yield* ChildProcess.make("echo", ["hello from stdout"])
-+        // js() 写手替代 echo：Windows 无 echo.exe，cross-spawn 回退 cmd 包装会对
++        // #590：js() 写手替代 echo：Windows 无 echo.exe，cross-spawn 回退 cmd 包装会对
 +        // 参数加引号，输出含字面引号使断言平台分叉；node 写 stdout 字节确定。
 +        const handle = yield* js('process.stdout.write("hello from stdout")')
          const all = yield* decodeByteStream(handle.all)
          expect(all).toBe("hello from stdout")
        }),
-@@ -213,6 +215,25 @@ describe("cross-spawn spawner", () => {
+@@ -214,6 +216,23 @@ describe("cross-spawn spawner", () => {
      )
    })
  
 +  describe("output retention across subscription timing", () => {
-+    // INV-01：快退写手 + exit 后订阅是「写入↔订阅」窗口的最对抗性排序；
-+    // 惰性订阅下该形态实测确定性丢失输出（Windows 10/10、macOS CI basic 红），
-+    // 急切缓冲后必须完整保留。fx.live（实时钟）+ 显式 30s 预算：
-+    // packages/core 裸跑无 canonical --timeout，循环 10 次实测 ~2.5s，
-+    // 5s 默认仅 2 倍余量。
++    // #590 INV-01：快退写手 + exit 后订阅是「写入↔订阅」窗口的最对抗性排序；
++    // 惰性订阅下该形态实测确定性丢失输出，急切缓冲后必须完整保留。
++    // fx.live（实时钟）+ 显式 30s 预算：packages/core 裸跑无 canonical --timeout。
 +    fx.live(
 +      "retains fast-exit stdout when subscription happens after exit",
 +      Effect.gen(function* () {
@@ -937,24 +935,24 @@ index 35021d0083ba72351d953b1842767995c0126b91..f45cc69040a3b8efcdb53da1cabb7b16
    describe("stdin", () => {
      fx.effect(
        "allows providing standard input to a command",
+
 diff --git a/packages/opencode/test/lib/effect.ts b/packages/opencode/test/lib/effect.ts
-index 6ad2838fcae92779db756e729cc31b9ac13e122c..da687e656a234af195692fc2a4d89b773a1d231d 100644
 --- a/packages/opencode/test/lib/effect.ts
 +++ b/packages/opencode/test/lib/effect.ts
-@@ -24,6 +24,12 @@ function instanceArgs(
+@@ -33,6 +33,12 @@ function instanceArgs<E, R>(
  
  const body = <A, E, R>(value: Body<A, E, R>) => Effect.suspend(() => (typeof value === "function" ? value() : value))
  
 +// 集成级（真实 fs/git/HTTP/socket，live/instance 注册）测试的默认 bun 预算，
-+// 与 canonical runner（package.json `bun test --timeout 30000` 与 test-ci.ts）
-+// 一字不差：超时契约内化到注册 seam，裸 bun test / IDE 调用不再落回 5s 默认值，
++// 与 canonical runner（package.json `bun test --timeout 30000`）一字不差：
++// 超时契约内化到注册 seam，裸 bun test / IDE 调用不再落回 5s 默认值，
 +// 把"主机慢"误判为行为失败。显式传入的 number | TestOptions 优先于该默认。
 +const defaultLiveTimeout = { timeout: 30_000 } as const
 +
- const run = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) =>
-   Effect.gen(function* () {
-     const exit = yield* body(value).pipe(Effect.scoped, Effect.provide(layer), Effect.exit)
-@@ -46,10 +52,10 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>)
+ type Runner = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) => Promise<A>
+ 
+ const isolatedRun: Runner = (value, layer) =>
+@@ -75,10 +81,10 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>,
      test.skip(name, () => run(value, testLayer), opts)
  
    const live = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
@@ -967,7 +965,7 @@ index 6ad2838fcae92779db756e729cc31b9ac13e122c..da687e656a234af195692fc2a4d89b77
  
    live.skip = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>
      test.skip(name, () => run(value, liveLayer), opts)
-@@ -64,7 +70,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>)
+@@ -93,7 +99,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>,
      return test(
        name,
        () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
@@ -976,7 +974,7 @@ index 6ad2838fcae92779db756e729cc31b9ac13e122c..da687e656a234af195692fc2a4d89b77
      )
    }
  
-@@ -78,7 +84,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>)
+@@ -107,7 +113,7 @@ const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>,
      return test.only(
        name,
        () => run(body(value).pipe(withTmpdirInstance(args.instanceOptions)), liveLayer),
@@ -985,48 +983,35 @@ index 6ad2838fcae92779db756e729cc31b9ac13e122c..da687e656a234af195692fc2a4d89b77
      )
    }
  
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index c3ecf398a88f8c6b2c9bc1e31071f02b93bfca19..64c80af9c45ba982c31100e1510ef5e5e7b10d35 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -82,6 +82,13 @@ const ref = {
-   modelID: ModelID.make("test-model"),
- }
+@@ -124,6 +124,14 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
+ // #315：短会话用例在 Windows CI 上冷启动开销大；win32 放宽到 15s，其他平台保持 3s 快速反馈。
  const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
-+// 负载敏感集成用例的平台化预算（先例：shortSessionTimeout 与 shell.test.ts timeoutMs）：
-+// 本机退化态实测 pwsh 冷启 + fsmonitor 后台占用使固定 10s/15s/5s 预算顶格（对照实验
-+// 证明与代码版本无关）；预算只放宽等待时长，不改变任何断言。内层 wait 预算必须
-+// 严格小于所属用例的注册硬顶（reviewPollBudget < heavyLoopBudget，两平台均成立）。
-+const heavyLoopBudget = process.platform === "win32" ? 30_000 : 12_000
-+const reviewPollBudget = process.platform === "win32" ? "12 seconds" : "5 seconds"
-+const snapshotMatrixBudget = process.platform === "win32" ? 90_000 : 40_000
- const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
- const twoFrameGif = "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs="
  
-@@ -1127,7 +1134,13 @@ dynamicSurfaces.instance(
-       yield* llm.push(
-         reply().wait(gate.promise).tool("read", { filePath: file }).item(),
-         reply()
--          .tool("bash", { command: `printf allowed > ${JSON.stringify(bashFile)}`, description: "fresh permission" })
-+          // 跨平台写盘：单引号字面量在 POSIX sh 与 pwsh 下语义一致；bun 在测试进程
-+          // PATH 内（shortShellDelayCommand 先例）；Bun.write 接受正斜杠 Windows 路径，
-+          // 规避 printf 仅 POSIX 的平台分叉。
-+          .tool("bash", {
-+            command: `bun -e 'await Bun.write(${JSON.stringify(bashFile.replaceAll("\\", "/"))}, "allowed")'`,
-+            description: "fresh permission",
-+          })
-           .item(),
-         reply().text("after queue").stop().item(),
-       )
-@@ -2315,6 +2328,7 @@ it.instance(
++// #590：负载敏感集成用例的平台化内层预算（先例：shortSessionTimeout）：
++// 本机退化态实测 pwsh 冷启 + fsmonitor 后台占用使固定 5s 轮询预算顶格（对照实验
++// 证明与代码版本无关）；预算只放宽等待时长，不改变任何断言，且必须严格小于
++// 所属用例的注册硬顶（win32 12s<30s / 其余 5s<15s，两平台均成立）。
++// heavyLoopBudget/snapshotMatrixBudget 裁记：目标对应用例注册已是 30_000/120_000，
++// 均不低于源预算（win32 30s/90s），无需重设。
++const reviewPollBudget = process.platform === "win32" ? "12 seconds" : "5 seconds"
++
+ function shortShellDelayCommand() {
+   // Windows 的默认 shell 会把 `sleep 0.2` 解析成 PowerShell 命令，CI 冷启动时足以吃掉 3s 用例预算。
+   // 这里使用测试进程已依赖的 PATH 内 `bun` 执行短延迟脚本，避免 PowerShell 对引号路径需要 `&` 的差异。
+@@ -2599,6 +2607,8 @@ it.instance(
            if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
          }),
          "shell auto review never started",
++        // #590：平台化内层预算，严格小于注册硬顶（win32 12s<30s / 其余 5s<15s）。
 +        reviewPollBudget,
        )
        const reviewID = reviewing.state.status === "running" ? reviewing.state.metadata?.autoReview?.reviewID : undefined
        expect(typeof reviewID).toBe("string")
-@@ -2323,6 +2337,7 @@ it.instance(
+@@ -2608,6 +2618,7 @@ it.instance(
            return (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
          }),
          "reviewer child session never started",
@@ -1034,21 +1019,22 @@ index c3ecf398a88f8c6b2c9bc1e31071f02b93bfca19..64c80af9c45ba982c31100e1510ef5e5
        )
        yield* pollWithTimeout(
          Effect.gen(function* () {
-@@ -2332,11 +2347,12 @@ it.instance(
+@@ -2617,12 +2628,13 @@ it.instance(
            )
          }),
          "reviewer child assistant never started",
 +        reviewPollBudget,
        )
  
+       // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
        yield* prompt.cancel(chat.id)
        gate.resolve()
--      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
-+      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", reviewPollBudget).pipe(Effect.ignore)
+-      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds")
++      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", reviewPollBudget)
+       expect(Exit.isSuccess(exit)).toBe(true)
  
        const shell = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2346,6 +2362,7 @@ it.instance(
+@@ -2633,6 +2645,7 @@ it.instance(
            return part?.state.status === "error" ? part : undefined
          }),
          "shell tool never recorded the review cancellation",
@@ -1056,59 +1042,19 @@ index c3ecf398a88f8c6b2c9bc1e31071f02b93bfca19..64c80af9c45ba982c31100e1510ef5e5
        )
        expect(shell.state.status).toBe("error")
        if (shell.state.status !== "error") return
-@@ -2366,6 +2383,7 @@ it.instance(
+@@ -2654,6 +2667,7 @@ it.instance(
            return assistants.every((msg) => msg.info.time.completed) ? messages : undefined
          }),
          "reviewer child assistant remained active after cancellation",
 +        reviewPollBudget,
        )
        const reviewerParts = reviewerMessages.flatMap((msg) => msg.parts)
-       expect(
-@@ -2382,7 +2400,8 @@ it.instance(
-       ).toBe(false)
-     }),
-   { git: true },
--  15_000,
-+  // 注册硬顶与体内 reviewPollBudget 保持连贯（内层严格小于外层，两平台均成立）。
-+  heavyLoopBudget,
- )
- 
- it.instance(
-@@ -3746,6 +3765,8 @@ observed.instance(
-       expect(yield* Effect.promise(() => Bun.file(declaredFile).exists())).toBe(false)
-     }),
-   { git: true },
-+  // 该用例含 3 个会话多轮 loop + git snapshot/revert，是最重用例；平台化预算给足余量。
-+  snapshotMatrixBudget,
- )
- 
- it.instance(
-@@ -4057,8 +4078,9 @@ it.instance(
-       expect(lspDirectories.slice(offset)).toEqual([target])
-     }),
-   { git: true },
--  // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
--  10_000,
-+  // shell 进程与测试 LLM 首次请求都有冷启动开销；平台化预算兼顾负载余量与死锁
-+  // 检测时延（win32 30s / 其余 12s），断言与并发语义不变。
-+  heavyLoopBudget,
- )
- 
- it.instance(
-@@ -4098,7 +4120,7 @@ it.instance(
-     }),
-   { git: true },
-   // 该用例断言两个 loop 调用共享 shell 完成后的同一次结果；放宽预算不改变并发语义断言。
--  10_000,
-+  heavyLoopBudget,
- )
- 
- unix(
+       // #216：reviewer 的 permission_review_decision 不得在 cancel 后完成——中止须阻止延迟到达的审查决策
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 47a646747f1ee0287b8f34beb187751a0c0a76b3..851c5cbcb7e4787adef4af65d3b67cb21ad05715 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -213,10 +213,8 @@ describe("tool.shell", () => {
+@@ -282,10 +282,8 @@ it.live("sanitizes BEL and control characters in shell output", () =>
        projectRoot,
        Effect.gen(function* () {
          const result = yield* run({
@@ -1116,50 +1062,56 @@ index 47a646747f1ee0287b8f34beb187751a0c0a76b3..851c5cbcb7e4787adef4af65d3b67cb2
 -          // detached:true 创建新进程组时，Effect stream consumer 可能尚未订阅 proc.stdout，
 -          // echo 已写入并退出，数据丢失。sleep 让 shell 存活足够久让 stream 订阅完成。
 -          command: "echo test; sleep 0.01",
-+          // 快退 echo 的输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
++          // #590：快退 echo 的输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
 +          command: "echo test",
-           description: "Echo test message",
          })
          expect(result.metadata.exit).toBe(0)
-@@ -338,10 +336,8 @@ describe("tool.shell", () => {
+         expect(result.metadata.output).toContain("test")
+@@ -411,11 +409,10 @@ it.live("sanitizes BEL and control characters in shell output", () =>
+       runIn(
          projectRoot,
          Effect.gen(function* () {
-           // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
+-          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
 -          // sleep 0.01 防止 macOS CI 上 echo|tr 管道退出过快导致 stdout 竞态
--          //（detached:true + Bun 调度抖动，与 "basic" 测试同款问题，见 line 217 注释）
+-          //（detached:true + Bun 调度抖动，与 "basic" 测试同款问题）
++          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec；
++          // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
            const result = yield* run({
 -            command: "echo 'hello world' | tr a-z A-Z; sleep 0.01",
 +            command: "echo 'hello world' | tr a-z A-Z",
-             description: "Echo with quotes and pipe",
            })
            expect(result.metadata.exit).toBe(0)
-@@ -365,8 +361,7 @@ describe("tool.shell", () => {
+           expect(result.metadata.output).toContain("HELLO WORLD")
+@@ -440,8 +437,8 @@ it.live("falls back from terminal-only configured shell", () =>
  
            const result = yield* bash.execute(
              {
 -              // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态
 -              command: "echo fallback; sleep 0.01",
++              // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
 +              command: "echo fallback",
-               description: "Echo fallback text",
              },
              ctx,
-@@ -1975,8 +1970,7 @@ describe("tool.shell abort", () => {
+           )
+@@ -1827,8 +1824,8 @@ describe("tool.shell abort", () => {
          projectRoot,
          Effect.gen(function* () {
            const result = yield* run({
 -            // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
 -            command: `echo stdout_msg && echo stderr_msg >&2; sleep 0.01`,
++            // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
 +            command: `echo stdout_msg && echo stderr_msg >&2`,
-             description: "Stderr test",
            })
            expect(result.output).toContain("stdout_msg")
-@@ -2125,8 +2119,7 @@ describe("tool.shell abort", () => {
+           expect(result.output).toContain("stderr_msg")
+@@ -1977,8 +1974,8 @@ describe("tool.shell abort", () => {
        projectRoot,
        Effect.gen(function* () {
          const result = yield* run({
 -          // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
 -          command: `echo ok; sleep 0.01`,
++          // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
 +          command: `echo ok`,
-           description: "Non-empty successful command",
          })
  
+         expect(result.metadata.exit).toBe(0)

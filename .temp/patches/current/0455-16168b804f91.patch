@@ -8,25 +8,21 @@ Subject: [PATCH] =?UTF-8?q?docs:=20=E9=87=8D=E5=86=99=E4=B8=AD=E6=96=87=20?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-
+README.en.md 侧按目标实态适配（上游 switcher 的根 English 链接在 0453 后悬空，
+与源 hunk 语义一致地换成 简体中文→README.md、English→README.en.md）；README.md 重写沿用源 hunks，仅语言切换 ctx 链接适配 docs/readme/ 实际路径、版本示例映射 1.18.43-smark。
 diff --git a/README.en.md b/README.en.md
-index ccce3e97bb925437e776e9646508f4d69f699bd3..8f1e897ddac2443cf80f84bd6ca7fdde582188f3 100644
 --- a/README.en.md
 +++ b/README.en.md
-@@ -15,8 +15,8 @@
- </p>
- 
+@@ -18,6 +18,6 @@
  <p align="center">
 -  <a href="README.md">English</a> |
--  <a href="README.zh.md">简体中文</a> |
+-  <a href="docs/readme/README.zh.md">简体中文</a> |
 +  <a href="README.md">简体中文</a> |
 +  <a href="README.en.md">English</a> |
-   <a href="README.zht.md">繁體中文</a> |
-   <a href="README.ko.md">한국어</a> |
-   <a href="README.de.md">Deutsch</a> |
+   <a href="docs/readme/README.zht.md">繁體中文</a> |
+   <a href="docs/readme/README.ko.md">한국어</a> |
+   <a href="docs/readme/README.de.md">Deutsch</a> |
 diff --git a/README.md b/README.md
-index 99b701b896f396fee7dbf10fbec252a82ca12c92..707bda288fb81cd1bf21645dc055623151352c53 100644
 --- a/README.md
 +++ b/README.md
 @@ -7,7 +7,7 @@
@@ -46,11 +42,11 @@ index 99b701b896f396fee7dbf10fbec252a82ca12c92..707bda288fb81cd1bf21645dc0556231
 -  <a href="README.zh.md">简体中文</a> |
 +  <a href="README.md">简体中文</a> |
 +  <a href="README.en.md">English</a> |
-   <a href="README.zht.md">繁體中文</a> |
-   <a href="README.ko.md">한국어</a> |
-   <a href="README.de.md">Deutsch</a> |
+   <a href="docs/readme/README.zht.md">繁體中文</a> |
+   <a href="docs/readme/README.ko.md">한국어</a> |
+   <a href="docs/readme/README.de.md">Deutsch</a> |
 @@ -39,16 +39,46 @@
-   <a href="README.vi.md">Tiếng Việt</a>
+   <a href="docs/readme/README.vi.md">Tiếng Việt</a>
  </p>
  
 +<!-- TODO: 替换为实际的 TUI 主界面截图 -->
@@ -59,7 +55,7 @@ index 99b701b896f396fee7dbf10fbec252a82ca12c92..707bda288fb81cd1bf21645dc0556231
  ---
  
 -### 安装
-+> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.14.42-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
++> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.18.43-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
 +
 +---
 +
@@ -93,7 +89,7 @@ index 99b701b896f396fee7dbf10fbec252a82ca12c92..707bda288fb81cd1bf21645dc0556231
  curl -fsSL https://opencode.ai/install | bash
  
 +# 指定版本安装
-+OPENCODE_VERSION=1.14.42 curl -fsSL https://opencode.ai/install | bash
++OPENCODE_VERSION=1.18.43 curl -fsSL https://opencode.ai/install | bash
 +
  # 软件包管理器
  npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn

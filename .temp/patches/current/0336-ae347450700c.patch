@@ -73,7 +73,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      function mergeLivePart(existing: Part | undefined, next: Part) {
        if (!existing) return next
        if (next.type === "text") {
-@@ -671,12 +716,16 @@ export const {
+@@ -615,12 +660,16 @@ export const {
                  draft.splice(foundAt.index, 1)
                }),
              )
@@ -89,8 +89,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +            replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
              break
            }
-           const result = search(parts, event.properties.part.id, (p) => p.id)
-@@ -692,6 +741,8 @@ export const {
+           const result = search(parts, event.properties.part.id, (part) => part.id)
+@@ -636,6 +685,8 @@ export const {
                draft.splice(result.index, 0, event.properties.part)
              }),
            )
@@ -99,7 +99,17 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            break
          }
  
-@@ -738,6 +789,7 @@ export const {
+@@ -657,7 +708,9 @@ export const {
+               produce((draft) => {
+                 draft.splice(result.index, 1)
+               }),
+             )
+           }
++          // 清除该 part 的缓冲 delta（part 已移除，缓冲的 bus-only delta 不再需要，防止 Map 无界驻留）
++          orphanPartDeltas.delete(event.properties.partID)
+           break
+         }
+@@ -682,6 +735,7 @@ export const {
        // #186：不在 cleanup 里 flush——组件已拆，UI 不再需要最后一帧
        if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
        pendingPartDeltas = []
@@ -107,10 +117,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
        loggedPartDeltaApplications.clear()
      })
  
-@@ -954,6 +1006,14 @@ export const {
+@@ -963,4 +1017,12 @@ export const {
              )
-             // #153：status 在 produce 外 reconcile，避免与 draft 路径交错
-             setStore("session_status", reconcile(status.data ?? {}))
 +            // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
 +            // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
 +            // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
@@ -122,8 +130,6 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              fullSyncedSessions.add(sessionID)
            })().finally(() => {
              syncingSessions.delete(sessionID)
-
-
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx

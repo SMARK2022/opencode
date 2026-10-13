@@ -20,20 +20,21 @@ index 1111111111..2222222222 100644
              const oldest = updated[0]
              batch(() => {
                setStore(
-@@ -660,7 +661,8 @@
-             // #153：force-sync 必须并拉取 session_status，否则 stale-busy 无法清 busy 位
-             const [session, messages, todo, diff, status] = await Promise.all([
+@@ -667,7 +668,8 @@
+             const [session, messages, todo, diff] = await Promise.all([
                sdk.client.session.get({ sessionID }, { throwOnError: true }),
 -              sdk.client.session.messages({ sessionID, limit: 100 }),
 +              // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
 +              sdk.client.session.messages({ sessionID, limit: 200 }),
                sdk.client.session.todo({ sessionID }),
                sdk.client.session.diff({ sessionID }),
+               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
                sdk.client.session.status({ workspace: project.workspace.current() }),
-@@ -682,8 +684,10 @@
+@@ -693,8 +694,10 @@
                      (message) => tracker.messages.has(message.id) && !infos.some((item) => item.id === message.id),
                    ),
                  )
+                 infos.sort(compareMessage)
 -                const removed = infos.slice(0, -100)
 -                const visible = infos.slice(-100)
 +                // #162：裁掉窗口外旧消息，保留最近 200

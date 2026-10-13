@@ -68,9 +68,12 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
            async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
              if (init?.headers) {
                if (init.headers instanceof Headers) {
-@@ -418,6 +436,11 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
-                 ? new URL(codexApiEndpoint)
-                 : parsed
+@@ -425,9 +443,14 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPluginOptions
+             const url = rewrite ? new URL(codexApiEndpoint) : parsed
+             if (rewrite) {
+               const residency = extractResidency(currentAuth.access)
+               if (residency) headers.set("x-openai-internal-codex-residency", residency)
+             }
  
 +            // #169：改写到 Codex API 后强制官方头（含可配置 codexApiEndpoint）
 +            if (url.href === new URL(codexApiEndpoint).href) {
@@ -151,8 +154,11 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
 --- a/packages/opencode/test/plugin/codex.test.ts
 +++ b/packages/opencode/test/plugin/codex.test.ts
-@@ -1,5 +1,7 @@
+@@ -1,8 +1,10 @@
  import { describe, expect, test } from "bun:test"
+ import { createServer, type IncomingMessage } from "node:http"
+ import { type AddressInfo } from "node:net"
+ import { WebSocketServer } from "ws"
  import {
 +  CODEX_HEADERS,
 +  CODEX_USER_AGENT,
@@ -206,9 +212,9 @@ diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/tes
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -828,6 +828,75 @@ describe("session.llm.stream", () => {
-     )
-   }
+@@ -832,5 +832,74 @@ describe("session.llm.stream", () => {
+    )
+  }
  
 +  // #169：openai 别名 provider 上配置 UA 必须无条件到达线上（验证 #169 去掉 startsWith 守卫）
 +  it.instance(
@@ -279,6 +285,5 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +    },
 +  )
 +
-   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
-   it.instance(
-     "sends temperature, tokens, and reasoning options for openai-compatible models",
+  it.instance(
+    "sends the parent session header for opencode providers",

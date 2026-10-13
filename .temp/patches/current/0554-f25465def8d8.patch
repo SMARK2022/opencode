@@ -12,6 +12,7 @@ Content-Transfer-Encoding: 8bit
 diff --git a/docs/plans/session-status-cross-directory-visibility.md b/docs/plans/session-status-cross-directory-visibility.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..34ad5166aec95b85f723a9b8cb7143c76322a3be
+
 --- /dev/null
 +++ b/docs/plans/session-status-cross-directory-visibility.md
 @@ -0,0 +1,432 @@
@@ -447,26 +448,24 @@ index 0000000000000000000000000000000000000000..34ad5166aec95b85f723a9b8cb7143c7
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/session/status.ts b/packages/opencode/src/session/status.ts
-index 089559e2cd7b81f3dfb81ff221c8932fe9e00658..83fe510fa3980d0be05b8515f2c43cee41b09612 100644
 --- a/packages/opencode/src/session/status.ts
 +++ b/packages/opencode/src/session/status.ts
-@@ -1,6 +1,5 @@
- import { BusEvent } from "@/bus/bus-event"
- import { Bus } from "@/bus"
+@@ -1,5 +1,4 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 -import { InstanceState } from "@/effect/instance-state"
  import { SessionID } from "./schema"
- import { NonNegativeInt } from "@opencode-ai/core/schema"
- import { Effect, Layer, Context, Schema } from "effect"
-@@ -60,25 +59,22 @@ export const layer = Layer.effect(
-   Service,
+ import { Effect, Layer, Context } from "effect"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+@@ -23,24 +22,22 @@ const layer = Layer.effect(
    Effect.gen(function* () {
-     const bus = yield* Bus.Service
--
+     const events = yield* EventV2Bridge.Service
+ 
 -    const state = yield* InstanceState.make(
 -      Effect.fn("SessionStatus.state")(() => Effect.succeed(new Map<SessionID, Info>())),
 -    )
-+    // SessionID 是 daemon 内全局唯一的运行身份；directory 只负责 Runner 资源归属，不能切分观察状态。
++    // #554：SessionID 是 daemon 内全局唯一的运行身份；directory 只负责 Runner 资源归属，不能切分观察状态。
 +    const data = new Map<SessionID, Info>()
  
      const get = Effect.fn("SessionStatus.get")(function* (sessionID: SessionID) {
@@ -481,29 +480,33 @@ index 089559e2cd7b81f3dfb81ff221c8932fe9e00658..83fe510fa3980d0be05b8515f2c43cee
  
      const set = Effect.fn("SessionStatus.set")(function* (sessionID: SessionID, status: Info) {
 -      const data = yield* InstanceState.get(state)
-       yield* bus.publish(Event.Status, { sessionID, status })
+       yield* events.publish(Event.Status, { sessionID, status })
        if (status.type === "idle") {
-         yield* bus.publish(Event.Idle, { sessionID })
-+        // idle 不留在快照中，使 list 的成本和内存都只随当前活跃 Session 数量增长。
+         yield* events.publish(Event.Idle, { sessionID })
++        // #554：idle 不留在快照中，使 list 的成本和内存都只随当前活跃 Session 数量增长。
          data.delete(sessionID)
          return
        }
+
 diff --git a/packages/opencode/test/session/status.test.ts b/packages/opencode/test/session/status.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e9b25b2cbbcb5c0353cfddba3f38676438a3a04a
 --- /dev/null
 +++ b/packages/opencode/test/session/status.test.ts
-@@ -0,0 +1,29 @@
-+import { expect } from "bun:test"
-+import { Effect, Layer } from "effect"
+@@ -0,0 +1,33 @@
++import { expect, it as rawIt } from "bun:test"
++import { Effect } from "effect"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 +import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 +import { SessionID } from "../../src/session/schema"
 +import { SessionStatus } from "../../src/session/status"
 +import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 +import { testEffect } from "../lib/effect"
 +
-+const it = testEffect(Layer.mergeAll(SessionStatus.defaultLayer, CrossSpawnSpawner.defaultLayer))
++// #554：SessionStatus 是 daemon 内按 Session ID 的全局观察注册表——LayerNode 组装其真实 node 依赖（EventV2Bridge）。
++const it = testEffect(LayerNode.compile(LayerNode.group([SessionStatus.node, CrossSpawnSpawner.node])))
 +
++// 跨目录快照回归：producer 目录写入 busy，observer 目录（另一真实 InstanceRef）必须仍能观察到；
++// idle 后全局快照删除该 entry。若 directory-local InstanceState 回归，observer 将看到假 idle。
 +it.instance("shares active status by session ID across directory contexts", () =>
 +  Effect.gen(function* () {
 +    const source = yield* TestInstance

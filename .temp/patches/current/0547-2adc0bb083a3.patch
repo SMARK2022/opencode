@@ -12,6 +12,7 @@ Content-Transfer-Encoding: 8bit
 daemon 原先只恢复 maintenance，TUI 误显示 streaming。
 
 在 lock 对外可见前对最近 16 个 session 做 L1 durable 中断终态；优雅退出在
+
 dispose 后按 5s 残余预算清扫全库 incomplete 与预算内孤儿 tool。写入仅走
 SyncEvent publish:false，避免 InstanceRef 依赖并保持 cancel 等价语义。
 
@@ -488,78 +489,85 @@ index 0000000000000000000000000000000000000000..4f319c47a49ffabaaa930e1b60e2121a
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R3 | yes | B-01 residual clock from dispose only; B-02 orphan unbounded .all() before budget | N-01 D/E unbounded; N-02 worker order untested; N-03 HTTP during exit-full; N-04 verification not re-run by auditor | BLOCK | ses_069d2ea83ffe3P6cRh2KuLRL7q |
 +| 2 | R3 | yes | No blocking findings. | N-01 D/E mid-loop unbounded; N-02 worker order untested at process seam; N-03 orphan mid-scan stop untested; N-04 session.time_updated ranking | APPROVE | ses_069cc9c66ffeqWY9NXxe7ixsMk |
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 878e675de8ab7410ce7fe5b59e57ae5b68f303d4..980168e87de48c73193e316a918863c1d625fa9a 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -7,6 +7,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
- import { AppRuntime } from "@/effect/app-runtime"
- import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
- import * as Database from "@/storage/db"
+
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -12,6 +12,7 @@ import { AppRuntime } from "@/effect/app-runtime"
+ import { Effect } from "effect"
+ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+ import { Database } from "@opencode-ai/core/database/database"
 +import { SessionStaleTurn } from "@/session/stale-turn"
- import { ServerLock } from "@/cli/cmd/tui/server-lock"
- import { Heap } from "@/cli/heap"
- import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
-@@ -268,6 +269,8 @@ async function recoverInterruptedMaintenance() {
- async function gracefulShutdown(reason = "unknown") {
-   if (shutdownInProgress) return
-   shutdownInProgress = true
-+  // residual 与 process.exit 硬截止必须同一 t0：maintenance abort 也吃墙钟，不能只从 dispose 起算。
-+  const shutdownStartedAt = Date.now()
-   shutdownDeadlineTimer = setTimeout(() => {
-     // deadline 到达时不能继续等待 disposer；进程退出后由下一次 owner 选举清理 stale lock。
-     // 不在这里清理 lock，避免另一个进程误以为 SQLite 已经释放。
-@@ -298,6 +301,17 @@ async function gracefulShutdown(reason = "unknown") {
-   })
-   if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
-   await InstanceRuntime.disposeAllInstances()
-+  // 残余预算 = 5s 硬截止 − 已用墙钟 − SAFETY_MARGIN（stop/close/clear lock）。
-+  const remaining =
-+    SHUTDOWN_TIMEOUT_MS - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
-+  if (remaining > 0) {
-+    await SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => {
-+      log.error("stale-turn exit-full failed", { error: String(error) })
-+    })
-+  } else {
-+    // maintenance/dispose 已占满 5s 窗口：跳过 transcript 清扫，残留由下次 pre-lock L1 覆盖 top-16。
-+    log.info("stale-turn exit-full skipped: no residual budget")
-+  }
-   controlServer?.stop(true)
-   if (externalServer) await externalServer.stop(true)
-   await internalServer.stop(true)
-@@ -477,6 +491,13 @@ controlServer = Bun.serve({
- maintenanceRecoveryPromise = recoverInterruptedMaintenance()
- // 这里只等待 recovery 完成“无需恢复或已发布 active”判定，不等待后台 maintenance 跑到 terminal。
- await maintenanceRecoveryPromise
-+// L1 必须在 lock 对外可见前完成：ensure 以 lock+health 放行，publish:false 不会推 bus，首份 snapshot 只能依赖预写终态。
-+// L1 失败不阻止 lock 发布：宁可带脏数据启动，也不让 ensure 永久卡住无法选主。
-+await SessionStaleTurn.reconcile({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch(
-+  (error) => {
-+    log.error("stale-turn recent L1 failed", { error: String(error) })
-+  },
-+)
- lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
- log.info("daemon lock written", {
-   pid: process.pid,
+ import { ServerLock } from "@/cli/tui/server-lock"
+ // #493：daemon maintenance 全部 SQL 位于 core ColdStorage；worker 只装配生命周期。
+ import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+@@ -280,6 +281,8 @@ if (isDaemon) {
+   async function gracefulShutdown(reason = "unknown") {
+     if (shutdownInProgress) return
+     shutdownInProgress = true
++    // #547：residual 与 process.exit 硬截止必须同一 t0——maintenance abort 也吃墙钟，不能只从 dispose 起算。
++    const shutdownStartedAt = Date.now()
+     // #523：到点仍未完成说明某个清理阶段挂死；exit(1) 保留现场给上层 force 路径
+     shutdownDeadlineTimer = setTimeout(() => {
+       log.error("daemon shutdown deadline exceeded", { reason, pid: process.pid })
+@@ -326,6 +329,18 @@ if (isDaemon) {
+       }),
+       Bun.sleep(3_000),
+     ])
++    // #547：残余预算 = 5s 硬截止 − 已用墙钟 − SAFETY_MARGIN（stop/close/clear lock）。
++    const remaining =
++      SHUTDOWN_TIMEOUT_MS - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
++    if (remaining > 0) {
++      // exit-full 在 dispose 后、Database.close 前清扫残留 turn（D/E 优先，C 孤儿 best-effort）。
++      await SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => {
++        log.error("stale-turn exit-full failed", { error: String(error) })
++      })
++    } else {
++      // maintenance/dispose 已占满 5s 窗口：跳过 transcript 清扫，残留由下次 pre-lock L1 覆盖 top-16。
++      log.info("stale-turn exit-full skipped: no residual budget")
++    }
+     // #259：control server 随 daemon 一起关闭——避免端口残留
+     // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
+     controlServer?.stop(true)
+@@ -516,6 +531,13 @@ if (isDaemon) {
+   maintenanceRecoveryPromise = recoverInterruptedMaintenance()
+   // 这里只等待 recovery 完成“无需恢复或已发布 active”判定，不等待后台 maintenance 跑到 terminal。
+   await maintenanceRecoveryPromise
++  // #547：L1 必须在 lock 对外可见前完成——ensure 以 lock+health 放行，首份 snapshot 只能依赖预写终态。
++  // L1 失败不阻止 lock 发布：宁可带脏数据启动，也不让 ensure 永久卡住无法选主。
++  await SessionStaleTurn.reconcile({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch(
++    (error) => {
++      log.error("stale-turn recent L1 failed", { error: String(error) })
++    },
++  )
+   lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
+   // #259：lock 写入延后到 controlPort 已知——锁文件与控制面端口原子地对外可见
+   log.info("daemon lock written", {
+
 diff --git a/packages/opencode/src/session/stale-turn.ts b/packages/opencode/src/session/stale-turn.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f33928ea2553
 --- /dev/null
 +++ b/packages/opencode/src/session/stale-turn.ts
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,316 @@
 +import { Effect } from "effect"
 +import { and, desc, eq, inArray, sql } from "drizzle-orm"
 +import { AppRuntime } from "@/effect/app-runtime"
-+import { Database } from "@/storage/db"
-+import { Log } from "@opencode-ai/core/util/log"
-+import { SyncEvent } from "@/sync"
-+import { MessageTable, SessionTable } from "./session.sql"
-+import { RequestUsageTable } from "./request-usage.sql"
++import { Database } from "@opencode-ai/core/database/database"
++import type { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
++import type { Sqlite } from "@opencode-ai/core/database/sqlite"
++import { EventV2Bridge } from "@/event-v2-bridge"
++import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
 +import { MessageV2 } from "./message-v2"
 +import { SessionProcessor } from "./processor"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
 +import type { MessageID, SessionID } from "./schema"
 +
-+const log = Log.create({ service: "session.stale-turn" })
++// #547：worker 进程级结构化日志——与 worker.ts #235 的 daemon log 同构（目标无 core Log 模块）。
++const log = {
++  info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[stale-turn] ${message}`, fields),
++  error: (message: string, fields: Record<string, unknown> = {}) => console.log(`[stale-turn] [ERROR] ${message}`, fields),
++}
 +
 +// L1 产品范围：最近 16 个活跃 session。
 +// 不变量 INV-06：启动路径禁止 full part SCAN（1.8GB DB 上约 1–5s）。
@@ -571,11 +579,12 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 +// 该余量保证 worker 硬截止不会被 exit-full 吃光，CLI force-kill 不会先于 worker deadline。
 +export const SAFETY_MARGIN_MS = 500
 +
++// #547：scope 词表与 worker 两个调用点一一对应——recent=pre-lock L1，exit-full=退出残余清扫。
 +export type Scope = { kind: "recent"; limit?: number } | { kind: "exit-full" }
 +
-+type OpenToolPart = MessageV2.ToolPart & {
-+  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning
-+}
++// #547：open 状态集合的精确类型收窄——结构与 processor cleanup 的判定同源。
++type OpenToolState = Extract<MessageV2.ToolPart["state"], { status: "pending" | "running" }>
++type OpenToolPart = MessageV2.ToolPart & { state: OpenToolState }
 +
 +// open 仅 pending/running：completed/error 已是终态，重复写入会破坏幂等。
 +function isOpenToolPart(part: MessageV2.Part): part is OpenToolPart {
@@ -583,11 +592,8 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 +}
 +
 +// 与 SessionPrompt.interruptedToolState 同形。
-+// 不变量：error 文案与 interrupted metadata 必须匹配 cancel/processor，UI 才渲染 “· interrupted”。
-+function interruptedToolState(
-+  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
-+  now: number,
-+): MessageV2.ToolStateError {
++// 不变量：error 文案与 interrupted metadata 必须匹配 cancel/processor，UI 才渲染「· interrupted」。
++function interruptedToolState(state: OpenToolState, now: number) {
 +  const start = state.status === "running" ? state.time.start : now
 +  return {
 +    status: "error",
@@ -598,163 +604,179 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 +      now - start,
 +    ),
 +    time: { start, end: now },
-+  }
++  } as Extract<MessageV2.ToolPart["state"], { status: "error" }>
 +}
 +
 +// incomplete 检测只读 hot fields（role / time.completed），与 cancelSnapshot 同源，避免为 L1 全量 thaw。
-+function hotInfo(row: typeof MessageTable.$inferSelect): MessageV2.Info {
++// #547 适配：目标无 MessageV2.Info 导出——以 WithParts["info"]（SessionV1 消息联合）承载。
++function hotInfo(row: typeof MessageTable.$inferSelect): MessageV2.WithParts["info"] {
 +  return {
 +    ...row.data,
 +    id: row.id,
 +    sessionID: row.session_id,
-+  } as MessageV2.Info
++  } as MessageV2.WithParts["info"]
 +}
 +
-+function recentSessionIDs(limit: number): SessionID[] {
-+  return Database.use((db) => {
-+    const roots = db
-+      .select({ id: SessionTable.id })
-+      .from(SessionTable)
-+      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
-+      .limit(limit)
-+      .all()
-+      .map((row) => row.id)
-+    if (roots.length === 0) return []
-+    // 子 session（subagent）与 cancel 递归范围一致：parent 在 top-N 时一并终端化。
-+    // 否则 reviewer/task 子会话 crash 残留不会被 L1 覆盖。
-+    const children = db
-+      .select({ id: SessionTable.id })
-+      .from(SessionTable)
-+      .where(inArray(SessionTable.parent_id, roots))
-+      .all()
-+      .map((row) => row.id)
-+    return Array.from(new Set([...roots, ...children]))
-+  })
++// #547 适配：目标 MessageV2.parts 是需 Database.Service 的 cold-aware Effect；
++// reconcile 在 Effect Layer 外的启动/退出路径运行，改为 sync drizzle 直查 + decodePartRow
++// （与 Session.getPart 同一 row decoder，cold projection 语义不绕过）。
++function hotParts(db: ColdStorage.TxOrDb, messageID: MessageID): MessageV2.Part[] {
++  return db
++    .select()
++    .from(PartTable)
++    .where(eq(PartTable.message_id, messageID))
++    .all()
++    .map((row) => MessageV2.decodePartRow(db, row))
++}
++
++// #547：recent 排序键 time_updated DESC+id tiebreak——与 TUI 列表默认序一致，用户最可能先打开。
++function recentSessionIDs(db: ColdStorage.TxOrDb, limit: number): SessionID[] {
++  const roots = db
++    .select({ id: SessionTable.id })
++    .from(SessionTable)
++    .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
++    .limit(limit)
++    .all()
++    .map((row) => row.id)
++  if (roots.length === 0) return []
++  // 子 session（subagent）与 cancel 递归范围一致：parent 在 top-N 时一并终端化。
++  // 否则 reviewer/task 子会话 crash 残留不会被 L1 覆盖。
++  const children = db
++    .select({ id: SessionTable.id })
++    .from(SessionTable)
++    .where(inArray(SessionTable.parent_id, roots))
++    .all()
++    .map((row) => row.id)
++  return Array.from(new Set([...roots, ...children]))
 +}
 +
 +// sessionIDs 缺省表示 exit-full 的 D 步：全库 incomplete assistant（json 扫描，实测约 0.4s）。
 +// 有 sessionIDs 时是 L1 会话范围查询，保持启动预算。
-+function incompleteAssistants(sessionIDs?: SessionID[]) {
-+  return Database.use((db) => {
-+    const rows =
-+      sessionIDs === undefined
-+        ? db
++function incompleteAssistants(db: ColdStorage.TxOrDb, sessionIDs?: SessionID[]) {
++  const rows =
++    sessionIDs === undefined
++      ? db
++          .select()
++          .from(MessageTable)
++          .where(
++            and(
++              sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
++              sql`json_extract(${MessageTable.data}, '$.time.completed') is null`,
++            ),
++          )
++          .all()
++      : sessionIDs.length === 0
++        ? []
++        : db
 +            .select()
 +            .from(MessageTable)
 +            .where(
 +              and(
++                inArray(MessageTable.session_id, sessionIDs),
 +                sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
 +                sql`json_extract(${MessageTable.data}, '$.time.completed') is null`,
 +              ),
 +            )
 +            .all()
-+        : sessionIDs.length === 0
-+          ? []
-+          : db
-+              .select()
-+              .from(MessageTable)
-+              .where(
-+                and(
-+                  inArray(MessageTable.session_id, sessionIDs),
-+                  sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
-+                  sql`json_extract(${MessageTable.data}, '$.time.completed') is null`,
-+                ),
-+              )
-+              .all()
-+    return rows.flatMap((row) => {
-+      const info = hotInfo(row)
-+      if (info.role !== "assistant" || info.time.completed) return []
-+      return [{ info, parts: MessageV2.parts(info.id) }]
-+    })
++  return rows.flatMap((row) => {
++    const info = hotInfo(row)
++    if (info.role !== "assistant" || info.time.completed) return []
++    return [{ info, parts: hotParts(db, info.id) }]
 +  })
 +}
 +
-+// usage 表不走 SyncEvent；字段对齐 RequestUsage.complete(status=aborted)。
++// usage 表不走事件投影；字段对齐 RequestUsage.complete(status=aborted)。
 +// 只关 request_usage 行即可清 running 聚合；assistant 子表 parity 非本路径硬要求。
-+function abortUsageRunning(sessionIDs?: SessionID[]) {
++// #547：usage 直写不走事件投影——request_usage 表无投影器；字段与 RequestUsage.complete(aborted) 逐一对齐。
++function abortUsageRunning(db: ColdStorage.TxOrDb, sessionIDs?: SessionID[]) {
 +  const now = Date.now()
-+  Database.use((db) => {
-+    const where =
-+      sessionIDs === undefined
-+        ? eq(RequestUsageTable.status, "running")
-+        : sessionIDs.length === 0
-+          ? sql`0`
-+          : and(eq(RequestUsageTable.status, "running"), inArray(RequestUsageTable.session_id, sessionIDs))
-+    db.update(RequestUsageTable)
-+      .set({
-+        status: "aborted",
-+        time_completed: now,
-+        time_updated: now,
-+      })
-+      .where(where)
-+      .run()
-+  })
++  const where =
++    sessionIDs === undefined
++      ? eq(RequestUsageTable.status, "running")
++      : sessionIDs.length === 0
++        ? sql`0`
++        : and(eq(RequestUsageTable.status, "running"), inArray(RequestUsageTable.session_id, sessionIDs))
++  db.update(RequestUsageTable)
++    .set({
++      status: "aborted",
++      time_completed: now,
++      time_updated: now,
++    })
++    .where(where)
++    .run()
 +}
 +
-+// 单条 incomplete assistant 的 durable 终端化事务入口。
++// 单条 incomplete assistant 的 durable 终端化入口。
 +// Part 先于 Message：与 cancel 顺序一致，避免读到 completed message 仍挂 open tool 的中间态。
++// #547 适配：目标 SyncEvent 已删除——durable 写入经 EventV2Bridge.publish（projector 订阅落
++// SQLite）。与 source 的 publish:false 差异：bridge 在无 InstanceRef 时也会广播 bus；pre-lock
++// 阶段无订阅者无害，exit-full 时已连 TUI 会收到无 directory 事件（SSE 端按 directory 过滤）。
++// 可见性不靠 bus：pre-lock L1 完成后 ensure 才放行，首份 HTTP snapshot 已是终态（INV-01 不变）。
++type RunEvents = <A, E>(effect: Effect.Effect<A, E, EventV2Bridge.Service>) => Promise<A>
++
 +async function writeTerminal(input: {
 +  sessionID: SessionID
 +  assistant: MessageV2.Assistant
 +  parts: MessageV2.Part[]
 +  now: number
++  run: RunEvents
 +}) {
-+  // publish:false：worker 进程级 owner 切换没有 directory InstanceRef。
-+  // 不变量 INV-08：禁止 Session.update* 默认 publish（会 yield InstanceState.context）。
-+  // 可见性不靠 bus：pre-lock L1 完成后 ensure 才放行，首份 HTTP snapshot 已是终态。
-+  await AppRuntime.runPromise(
-+    SyncEvent.Service.use((sync) =>
++  await input.run(
++    EventV2Bridge.Service.use((events) =>
 +      Effect.gen(function* () {
 +        for (const part of input.parts.filter(isOpenToolPart)) {
 +          const next = {
 +            ...part,
 +            state: interruptedToolState(part.state, input.now),
 +          }
-+          yield* sync.run(
-+            MessageV2.Event.PartUpdated,
-+            { sessionID: input.sessionID, part: structuredClone(next), time: input.now },
-+            { publish: false },
-+          )
++          yield* events.publish(MessageV2.Event.PartUpdated, {
++            sessionID: input.sessionID,
++            part: structuredClone(next),
++            time: input.now,
++          })
 +        }
++        // 浅拷贝后写终态——不改动 incompleteAssistants 读到的快照引用。
 +        const assistant = { ...input.assistant }
 +        assistant.time = { ...assistant.time, completed: input.now }
 +        // error ??= 保留已有终态错误；仅补 MessageAbortedError 以触发 UI interrupted 标签。
-+        assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
++        assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
 +        // 空 dangling assistant 与 cancel 一致：隐藏以免 UI 留下无内容终态气泡。
 +        if (input.parts.length === 0) {
 +          assistant.hidden = { time: input.now, reason: "repair-empty-dangling-assistant" }
 +        }
-+        yield* sync.run(
-+          MessageV2.Event.Updated,
-+          { sessionID: input.sessionID, info: assistant },
-+          { publish: false },
-+        )
++        yield* events.publish(MessageV2.Event.Updated, {
++          sessionID: input.sessionID,
++          info: assistant,
++        })
 +      }),
 +    ),
 +  )
 +}
 +
 +// 幂等：已 completed 的 assistant / 非 open tool 不会进入 incompleteAssistants 集合。
-+async function terminalizeIncomplete(sessionIDs?: SessionID[]) {
++async function terminalizeIncomplete(db: ColdStorage.TxOrDb, run: RunEvents, sessionIDs?: SessionID[]) {
 +  const now = Date.now()
-+  for (const item of incompleteAssistants(sessionIDs)) {
++  for (const item of incompleteAssistants(db, sessionIDs)) {
 +    await writeTerminal({
 +      sessionID: item.info.sessionID,
-+      assistant: item.info,
++      assistant: item.info as MessageV2.Assistant,
 +      parts: item.parts,
 +      now,
++      run,
 +    })
 +  }
-+  abortUsageRunning(sessionIDs)
++  abortUsageRunning(db, sessionIDs)
 +}
 +
-+async function terminalizeOrphanTools(deadlineMs: number) {
++async function terminalizeOrphanTools(db: ColdStorage.TxOrDb, run: RunEvents, deadlineMs: number) {
 +  // 孤儿 tool：message 已 completed 但 tool 仍 pending/running。
 +  // cancelSnapshot 只处理 incomplete assistant，因此 half-write 残留必须在 exit-full C 步清掉。
 +  // 只改 tool part，不改写已 completed message 的 error（保持历史终态语义）。
 +  // 关键：SCAN 本身必须服从 deadline——1.8GB DB 上 full open-tool SCAN 约 5.3s，禁止 .all() 后再计时。
++  // found 只携带定位字段——扫描阶段不解码 part JSON，预算花在行进上。
 +  const found: Array<{ id: string; message_id: string }> = []
-+  const stmt = Database.Client().$client.prepare(`
++  // $client 仅存在于基础 Db（cold-storage 同款 cast）；事务句柄不参与孤儿扫描路径。
++  const stmt = (db as Sqlite.DrizzleClient).$client.prepare(`
 +    SELECT part.id AS id, part.message_id AS message_id
 +    FROM part
 +    INNER JOIN message ON message.id = part.message_id
@@ -770,6 +792,7 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 +    found.push(row)
 +  }
 +
++  // 写阶段时钟单独取样：scan 与 write 之间的耗时不计入 tool 的 executionElapsedMs。
 +  const now = Date.now()
 +  for (const row of found) {
 +    // 写循环同样检查预算：扫描后仍可能耗尽。
@@ -777,19 +800,15 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 +      log.info("orphan tool write budget exhausted", { remaining: found.length })
 +      return
 +    }
-+    const part = MessageV2.parts(row.message_id as MessageID).find((item) => item.id === row.id)
++    const part = hotParts(db, row.message_id as MessageID).find((item) => item.id === row.id)
 +    if (!part || !isOpenToolPart(part)) continue
-+    await AppRuntime.runPromise(
-+      SyncEvent.Service.use((sync) =>
-+        sync.run(
-+          MessageV2.Event.PartUpdated,
-+          {
-+            sessionID: part.sessionID,
-+            part: structuredClone({ ...part, state: interruptedToolState(part.state, now) }),
-+            time: now,
-+          },
-+          { publish: false },
-+        ),
++    await run(
++      EventV2Bridge.Service.use((events) =>
++        events.publish(MessageV2.Event.PartUpdated, {
++          sessionID: part.sessionID,
++          part: structuredClone({ ...part, state: interruptedToolState(part.state, now) }),
++          time: now,
++        }),
 +      ),
 +    )
 +  }
@@ -800,26 +819,41 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 + * recent：启动 L1，必须在 ServerLock.write 之前调用。
 + * exit-full：优雅退出，必须在 dispose 之后、Database.close 之前，并带 residual budgetMs。
 + */
-+export async function reconcile(scope: Scope, opts?: { budgetMs?: number }) {
++export async function reconcile(
++  scope: Scope,
++  opts?: {
++    budgetMs?: number
++    // #547 适配：目标存在实例库/进程库两个 Database 形态——worker 调用方不传（默认进程库
++    // Database.client()，与 AppRuntime 全局图同库）；测试传实例 sync 与测试 runtime 的 bridge，
++    // 保证读写与投影落在同一库。run 只替换执行器，不改变事件语义（INV-08 不变）。
++    db?: ColdStorage.TxOrDb
++    run?: RunEvents
++  },
++) {
++  const db = opts?.db ?? Database.client()
++  // 默认执行器走 AppRuntime 全局图——worker 内全局库与投影器同库，事件即达。
++  const run: RunEvents = opts?.run ?? ((effect) => AppRuntime.runPromise(effect) as never)
 +  if (scope.kind === "recent") {
 +    // recent 不扫描孤儿 completed-message tools：L1 只修用户最可能打开的 streaming 会话。
 +    // 孤儿清理由 exit-full C 步或下次 graceful stop 承担（产品 L1 延迟预算约束）。
 +    const limit = scope.limit ?? RECENT_ACTIVE_SESSION_LIMIT
-+    const sessionIDs = recentSessionIDs(limit)
-+    await terminalizeIncomplete(sessionIDs)
++    const sessionIDs = recentSessionIDs(db, limit)
++    await terminalizeIncomplete(db, run, sessionIDs)
 +    return
 +  }
 +
 +  // exit-full：仅在 worker residual budget 内运行。
 +  // budgetMs<=0 表示 dispose 已吃光 5s 窗口，整段跳过，残留交给下次 pre-lock L1。
++  // budgetMs 缺省按 0：非 worker 调用方（测试直调）必须显式传预算才执行 exit-full。
 +  const budgetMs = opts?.budgetMs ?? 0
 +  if (budgetMs <= 0) {
 +    log.info("exit-full skipped: no residual budget")
 +    return
 +  }
++  // deadline 是软预算：D/E 完成后剩余才给 C，越界立即返回而非补偿重试。
 +  const deadline = Date.now() + budgetMs
 +  // D+E 优先：incomplete assistant / open tools / running usage 是用户可见 streaming 的主因。
-+  await terminalizeIncomplete()
++  await terminalizeIncomplete(db, run)
 +  if (Date.now() >= deadline) {
 +    log.info("exit-full stopped after D/E: budget exhausted")
 +    return
@@ -827,59 +861,60 @@ index 0000000000000000000000000000000000000000..1194398958ad876f4d97a9b86be6f339
 +  // C 步 best-effort：孤儿 open-tool 再占 min(2000ms, 剩余预算)。
 +  const orphanBudget = Math.min(ORPHAN_TOOL_SCAN_BUDGET_MS, deadline - Date.now())
 +  if (orphanBudget <= 0) return
-+  await terminalizeOrphanTools(Date.now() + orphanBudget)
++  await terminalizeOrphanTools(db, run, Date.now() + orphanBudget)
 +}
 +
 +export * as SessionStaleTurn from "./stale-turn"
+
 diff --git a/packages/opencode/test/session/stale-turn.test.ts b/packages/opencode/test/session/stale-turn.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401da456a59
 --- /dev/null
 +++ b/packages/opencode/test/session/stale-turn.test.ts
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,325 @@
 +import { describe, expect } from "bun:test"
-+import { Effect, Layer } from "effect"
++import { Effect } from "effect"
 +import { eq } from "drizzle-orm"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
 +import { Session as SessionNs } from "@/session/session"
 +import { MessageV2 } from "@/session/message-v2"
 +import { MessageID, PartID, type SessionID } from "@/session/schema"
-+import { ModelID, ProviderID } from "@/provider/schema"
 +import { SessionStaleTurn } from "@/session/stale-turn"
 +import { SessionProcessor } from "@/session/processor"
-+import { Database } from "@/storage/db"
-+import { RequestUsageTable } from "@/session/request-usage.sql"
-+import { Bus } from "@/bus"
-+import { Storage } from "@/storage/storage"
-+import { SyncEvent } from "@/sync"
-+import { RuntimeFlags } from "@/effect/runtime-flags"
-+import { BackgroundJob } from "@/background/job"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
++import { Database } from "@opencode-ai/core/database/database"
++import { RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import { EventV2Bridge } from "@/event-v2-bridge"
 +import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import type { EventV2 } from "@opencode-ai/core/event"
++import { Storage } from "@/storage/storage"
 +import { testEffect } from "../lib/effect"
-+import { provideInstance, tmpdirScoped } from "../fixture/fixture"
-+import * as Log from "@opencode-ai/core/util/log"
 +
-+void Log.init({ print: false })
-+
-+// 测试层只提供 Session + SyncEvent，与 worker 调用 SessionStaleTurn 时的最小依赖一致。
-+// experimentalWorkspaces=false：避免 event-log 旁路干扰 publish:false 投影路径。
++// #547：测试层与 cold.test 同构——Session 全图（含 projector/bridge/Database 全局 node）。
++// EventV2/Database 均 makeGlobalNode 且 AppRuntime 共享同一 memoMap：reconcile 内部经
++// AppRuntime.runPromise 发布的事件会到达本层 projector 的订阅（同一 EventV2.Service 实例）。
 +const it = testEffect(
-+  Layer.mergeAll(
-+    SessionNs.layer.pipe(
-+      Layer.provide(Bus.layer),
-+      Layer.provide(Storage.defaultLayer),
-+      Layer.provide(SyncEvent.defaultLayer),
-+      Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
-+      Layer.provide(BackgroundJob.defaultLayer),
-+    ),
-+    CrossSpawnSpawner.defaultLayer,
++  LayerNode.compile(
++    LayerNode.group([
++      SessionNs.node,
++      MessageV2.node,
++      SessionProjector.node,
++      CrossSpawnSpawner.node,
++      Database.node,
++      EventV2Bridge.node,
++      Storage.node,
++    ]),
 +  ),
 +)
 +
 +// 构造 crash 残留：incomplete assistant + pending tool + running usage。
 +// 对应真实 daemon 死亡现场，而不是 live cancel 的内存 runner 状态。
-+// seed 经 Session.update*（有 instance）写入；reconcile 本身必须在无 InstanceRef 下仍可执行。
++// seed 经 Session.update*（有 instance）写入；reconcile 本身在独立 runtime 上执行。
 +function seedIncompleteTurn(sessions: SessionNs.Interface, sessionID: SessionID) {
 +  return Effect.gen(function* () {
++    // user 消息先行：request_usage 的 PK 含 request_id=user messageID，种子必须先落 user 行。
 +    const userID = MessageID.ascending()
 +    yield* sessions.updateMessage({
 +      id: userID,
@@ -887,7 +922,7 @@ index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401
 +      role: "user",
 +      time: { created: Date.now() },
 +      agent: "build",
-+      model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
++      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
 +    })
 +    const assistantID = MessageID.ascending()
 +    // assistant 故意不写 time.completed：模拟 agent 循环中途进程退出。
@@ -901,8 +936,8 @@ index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401
 +      path: { cwd: "/tmp", root: "/tmp" },
 +      cost: 0,
 +      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+      modelID: ModelID.make("test"),
-+      providerID: ProviderID.make("test"),
++      modelID: ModelV2.ID.make("test"),
++      providerID: ProviderV2.ID.make("test"),
 +      time: { created: Date.now() },
 +    })
 +    const partID = PartID.ascending()
@@ -921,134 +956,157 @@ index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401
 +      },
 +    })
 +    // usage 直接插 running 行：绕过 begin() 的 Effect 服务，聚焦 reconcile 的 SQL 终态。
-+    Database.use((db) => {
-+      db.insert(RequestUsageTable)
-+        .values({
-+          session_id: sessionID,
-+          request_id: userID,
-+          root_request_id: userID,
-+          source: "prompt",
-+          status: "running",
-+          agent: "build",
-+          provider_id: "test",
-+          model_id: "test",
-+          time_created: Date.now(),
-+          time_updated: Date.now(),
-+        })
-+        .run()
-+    })
++    // 测试侧用上下文 Database.Service 的 sync——Database.client() 的 syncRef 指向进程
++    // 首个初始化的库，与 it.instance 的隔离库不同（生产 worker 内二者一致）。
++    const { sync } = yield* Database.Service
++    sync.insert(RequestUsageTable)
++      .values({
++        session_id: sessionID,
++        request_id: userID,
++        root_request_id: userID,
++        source: "prompt",
++        status: "running",
++        agent: "build",
++        provider_id: "test",
++        model_id: "test",
++        time_created: Date.now(),
++        time_updated: Date.now(),
++      })
++      .run()
 +    return { userID, assistant, tool }
 +  })
 +}
 +
++// #547 适配：目标实例库与进程全局库是两个文件——reconcile 注入实例 sync 与测试上下文 bridge，
++// 使读写/投影与种子落在同一库（worker 不注入，默认全局库，语义不变）。
++function instanceReconcileOpts(svc: Database.Interface, events: EventV2.Interface) {
++  return {
++    db: svc.sync,
++    run: <A, E>(effect: Effect.Effect<A, E, EventV2Bridge.Service>) =>
++      Effect.runPromise(Effect.provideService(EventV2Bridge.Service, events)(effect)) as Promise<A>,
++  }
++}
++
 +describe("SessionStaleTurn", () => {
 +  // 行为：owner-transition reconcile 把 incomplete assistant 写成 cancel 等价终态（time.completed + MessageAbortedError）。
-+  // 这是 INV-01 / 用户可见 “· interrupted” 的 durable 前提。
-+  it.live("recent reconcile terminalizes incomplete assistant in top sessions", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-recent" }))
-+      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++  // 这是 INV-01 / 用户可见「· interrupted」的 durable 前提。
++  it.instance(
++    "recent reconcile terminalizes incomplete assistant in top sessions",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-recent" })
++        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+      // 期望值来自 cancel 合同字面量，不复制 reconcile 内部算法。
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++        // 期望值来自 cancel 合同字面量，不复制 reconcile 内部算法。
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
 +
-+      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
-+      expect(msg.info.role).toBe("assistant")
-+      if (msg.info.role !== "assistant") return
-+      // time.completed 存在即退出 streaming；error.name 驱动 TUI interrupted 后缀。
-+      expect(msg.info.time.completed).toBeDefined()
-+      expect(msg.info.error?.name).toBe("MessageAbortedError")
-+    }),
++        // MessageV2.get 走 effect 上下文读回投影终态——断言面是 durable 结果而非内存种子。
++        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++        expect(msg.info.role).toBe("assistant")
++        if (msg.info.role !== "assistant") return
++        // time.completed 存在即退出 streaming；error.name 驱动 TUI interrupted 后缀。
++        expect(msg.info.time.completed).toBeDefined()
++        expect(msg.info.error?.name).toBe("MessageAbortedError")
++      }),
++    { git: true },
 +  )
 +
 +  // 行为：open tool 必须带 TOOL_ABORTED_ERROR + interrupted metadata。
-+  // UI 与 LLM 回放都依赖该合同；新文案会分叉 “· interrupted” 路径。
-+  it.live("recent reconcile aborts open tools with interrupted metadata", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-tool" }))
-+      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++  // UI 与 LLM 回放都依赖该合同；新文案会分叉「· interrupted」路径。
++  it.instance(
++    "recent reconcile aborts open tools with interrupted metadata",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-tool" })
++        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
 +
-+      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
-+      const tool = msg.parts.find((part) => part.id === seeded.tool.id)
-+      expect(tool?.type).toBe("tool")
-+      if (tool?.type !== "tool") return
-+      expect(tool.state.status).toBe("error")
-+      if (tool.state.status !== "error") return
-+      // 独立字面量：与 SessionProcessor 导出常量对齐，防止实现方另造 error 字符串。
-+      expect(tool.state.error).toBe(SessionProcessor.TOOL_ABORTED_ERROR)
-+      expect(tool.state.metadata?.interrupted).toBe(true)
-+    }),
++        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++        const tool = msg.parts.find((part) => part.id === seeded.tool.id)
++        expect(tool?.type).toBe("tool")
++        if (tool?.type !== "tool") return
++        expect(tool.state.status).toBe("error")
++        if (tool.state.status !== "error") return
++        // 独立字面量：与 SessionProcessor 导出常量对齐，防止实现方另造 error 字符串。
++        expect(tool.state.error).toBe(SessionProcessor.TOOL_ABORTED_ERROR)
++        expect(tool.state.metadata?.interrupted).toBe(true)
++      }),
++    { git: true },
 +  )
 +
 +  // 行为：running usage 必须变为 aborted，避免计费/状态聚合长期卡在 running。
-+  it.live("recent reconcile aborts running request usage", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-usage" }))
-+      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++  it.instance(
++    "recent reconcile aborts running request usage",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-usage" })
++        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
 +
-+      const row = Database.use((db) =>
-+        db
++        // usage 断言直接查表——status 是计费聚合的输入，不经事件重放。
++        const { sync } = yield* Database.Service
++        const row = sync
 +          .select()
 +          .from(RequestUsageTable)
 +          .where(eq(RequestUsageTable.request_id, seeded.userID))
-+          .get(),
-+      )
-+      // status 与 time_completed 对齐 RequestUsage.complete(aborted) 字段合同。
-+      expect(row?.status).toBe("aborted")
-+      expect(row?.time_completed).toBeDefined()
-+    }),
++          .get()
++        // status 与 time_completed 对齐 RequestUsage.complete(aborted) 字段合同。
++        expect(row?.status).toBe("aborted")
++        expect(row?.time_completed).toBeDefined()
++      }),
++    { git: true },
 +  )
 +
-+  // INV-08：reconcile 不得依赖 InstanceRef（必须走 publish:false）。
-+  // worker boot/exit 没有 directory instance；若误走 Session.update* 会在 InstanceState.context 处失败。
-+  it.live("reconcile succeeds without instance context", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-no-instance" }))
-+      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++  // INV-08 适配形态：目标 bridge 在无 InstanceRef 时直接 events.publish（不再失败）。
++  // worker boot/exit 没有 directory instance；若误走 Session.update* 仍会在 InstanceState.context 处失败——
++  // reconcile 内部固定经 AppRuntime.runPromise（独立 runtime、无 InstanceRef），本用例锁该可执行合同。
++  it.instance(
++    "reconcile succeeds without instance context",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-no-instance" })
++        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+      // 在无 InstanceRef 的 fiber 上调用：不得抛 InstanceState.context 错误。
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
++        // reconcile 在独立 AppRuntime fiber 上执行：不得依赖调用方 InstanceRef。
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
 +
-+      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
-+      if (msg.info.role !== "assistant") throw new Error("expected assistant")
-+      // 成功本身即证明无 InstanceRef 路径可写 durable 终态。
-+      expect(msg.info.time.completed).toBeDefined()
-+    }),
++        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++        if (msg.info.role !== "assistant") throw new Error("expected assistant")
++        // 成功本身即证明无 InstanceRef 路径可写 durable 终态。
++        expect(msg.info.time.completed).toBeDefined()
++      }),
++    { git: true },
 +  )
 +
-+  // 行为：exit-full C 步关闭“message 已 completed 但 tool 仍 open”的孤儿。
++  // 行为：exit-full C 步关闭「message 已 completed 但 tool 仍 open」的孤儿。
 +  // cancelSnapshot 故意跳过 completed assistant，因此必须 tool-only 终端化且不改写 message.error。
-+  it.live("exit-full closes orphan open tool on completed message", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-orphan" }))
-+      const userID = MessageID.ascending()
-+      yield* provideInstance(dir)(
-+        sessions.updateMessage({
++  it.instance(
++    "exit-full closes orphan open tool on completed message",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-orphan" })
++        const userID = MessageID.ascending()
++        yield* sessions.updateMessage({
 +          id: userID,
 +          sessionID: chat.id,
 +          role: "user",
 +          time: { created: Date.now() },
 +          agent: "build",
-+          model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
-+        }),
-+      )
-+      const assistantID = MessageID.ascending()
-+      yield* provideInstance(dir)(
-+        sessions.updateMessage({
++          model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++        })
++        const assistantID = MessageID.ascending()
++        yield* sessions.updateMessage({
 +          id: assistantID,
 +          sessionID: chat.id,
 +          role: "assistant",
@@ -1058,15 +1116,13 @@ index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401
 +          path: { cwd: "/tmp", root: "/tmp" },
 +          cost: 0,
 +          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+          modelID: ModelID.make("test"),
-+          providerID: ProviderID.make("test"),
++          modelID: ModelV2.ID.make("test"),
++          providerID: ProviderV2.ID.make("test"),
 +          time: { created: Date.now(), completed: Date.now() },
-+          error: new MessageV2.AbortedError({ message: "Aborted" }).toObject(),
-+        }),
-+      )
-+      const partID = PartID.ascending()
-+      yield* provideInstance(dir)(
-+        sessions.updatePart({
++          error: new SessionV1.AbortedError({ message: "Aborted" }).toObject(),
++        })
++        const partID = PartID.ascending()
++        yield* sessions.updatePart({
 +          id: partID,
 +          sessionID: chat.id,
 +          messageID: assistantID,
@@ -1074,59 +1130,69 @@ index 0000000000000000000000000000000000000000..47d57a572ab21c88926f8849d354f401
 +          tool: "bash",
 +          callID: "call_orphan",
 +          state: { status: "running", input: {}, time: { start: Date.now() } },
-+        }),
-+      )
++        })
 +
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 5_000 }))
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++          // exit-full 走完整 D/E/C 链：先 incomplete 后孤儿，预算 5s 覆盖两段。
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 5_000, ...opts }))
 +
-+      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: assistantID })
-+      const tool = msg.parts.find((part) => part.id === partID)
-+      expect(tool?.type).toBe("tool")
-+      if (tool?.type !== "tool" || tool.state.status !== "error") throw new Error("expected aborted tool")
-+      expect(tool.state.error).toBe(SessionProcessor.TOOL_ABORTED_ERROR)
-+      // message 已 terminal：孤儿路径不得改写 error（历史终态语义）。
-+      if (msg.info.role !== "assistant") throw new Error("expected assistant")
-+      expect(msg.info.error?.name).toBe("MessageAbortedError")
-+    }),
++        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: assistantID })
++        const tool = msg.parts.find((part) => part.id === partID)
++        expect(tool?.type).toBe("tool")
++        if (tool?.type !== "tool" || tool.state.status !== "error") throw new Error("expected aborted tool")
++        expect(tool.state.error).toBe(SessionProcessor.TOOL_ABORTED_ERROR)
++        // message 已 terminal：孤儿路径不得改写 error（历史终态语义）。
++        if (msg.info.role !== "assistant") throw new Error("expected assistant")
++        expect(msg.info.error?.name).toBe("MessageAbortedError")
++      }),
++    { git: true },
 +  )
 +
 +  // 行为：budgetMs=0 表示 dispose 吃光 worker 5s 窗口，exit-full 必须整段跳过（残留交给下次 L1）。
-+  it.live("exit-full with budgetMs 0 leaves incomplete state unchanged", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-budget-zero" }))
-+      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++  it.instance(
++    "exit-full with budgetMs 0 leaves incomplete state unchanged",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-budget-zero" })
++        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+      // budgetMs=0 是 worker residual 计算的边界：remaining<=0 时不得触碰 SQLite 行。
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 0 }))
++        // budgetMs=0 是 worker residual 计算的边界：remaining<=0 时不得触碰 SQLite 行。
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 0, ...opts }))
 +
-+      const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
-+      if (msg.info.role !== "assistant") throw new Error("expected assistant")
-+      expect(msg.info.time.completed).toBeUndefined()
-+    }),
++        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++        if (msg.info.role !== "assistant") throw new Error("expected assistant")
++        // budget=0 整段跳过：completed 必须保持 undefined，证明 SQLite 行未被触碰。
++        expect(msg.info.time.completed).toBeUndefined()
++      }),
++    { git: true },
 +  )
 +
 +  // 行为：二次 reconcile 幂等，防止 double-start / 重复 exit 改写已终态字段。
-+  it.live("second reconcile is idempotent", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const dir = yield* tmpdirScoped({ git: true })
-+      const chat = yield* provideInstance(dir)(sessions.create({ title: "stale-idempotent" }))
-+      const seeded = yield* provideInstance(dir)(seedIncompleteTurn(sessions, chat.id))
++  it.instance(
++    "second reconcile is idempotent",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* SessionNs.Service
++        const chat = yield* sessions.create({ title: "stale-idempotent" })
++        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
-+      const first = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
-+      yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }))
-+      const second = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        const first = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
++        // 幂等二次调用复用同一 opts：db/bridge 在两次调用间不变，变量不重声明。
++        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        const second = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
 +
-+      if (first.info.role !== "assistant" || second.info.role !== "assistant") throw new Error("expected assistant")
-+      // 二次调用不得推进 time.completed 或改写 tool 快照（幂等 INV-05）。
-+      expect(second.info.time.completed).toBe(first.info.time.completed)
-+      expect(second.info.error).toEqual(first.info.error)
-+      const firstTool = first.parts.find((part) => part.id === seeded.tool.id)
-+      const secondTool = second.parts.find((part) => part.id === seeded.tool.id)
-+      expect(secondTool).toEqual(firstTool)
-+    }),
++        if (first.info.role !== "assistant" || second.info.role !== "assistant") throw new Error("expected assistant")
++        // 二次调用不得推进 time.completed 或改写 tool 快照（幂等 INV-05）。
++        expect(second.info.time.completed).toBe(first.info.time.completed)
++        expect(second.info.error).toEqual(first.info.error)
++        const firstTool = first.parts.find((part) => part.id === seeded.tool.id)
++        const secondTool = second.parts.find((part) => part.id === seeded.tool.id)
++        expect(secondTool).toEqual(firstTool)
++      }),
++    { git: true },
 +  )
 +})

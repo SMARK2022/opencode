@@ -2332,13 +2332,13 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
      ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
    ].join("\n")
-@@ -464,7 +466,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
+@@ -467,7 +469,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
      return b.cost - a.cost
    })
    return [
 -    ...header(report, "stats sessions"),
 +    ...header(report, "stats sessions", options.color),
-     ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)}`),
+     ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)} avg=${Math.round(s.durationMs / Math.max(1, s.requests))}ms`),
    ].join("\n")
  }
 @@ -473,7 +475,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions

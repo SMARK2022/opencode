@@ -752,72 +752,71 @@ index 0000000000000000000000000000000000000000..01514dbda9fc35058944c2809f494735
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index da2a75cdba99efafe5ca1782512c65e90a0cafa4..6813b3efa77a2d802227f8eb4f46aeeb666b0d88 100644
+index cc32b5da3..e88f2e2c1 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -763,11 +763,11 @@ it.live("session.processor retries a real first-progress timeout", () =>
-         yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve(undefined)))
- 
-         // 闸门让首个HTTP response永远晚于500ms；只有Provider的dispatch deadline能先发布retry。
--        // 延迟错误保持one-shot；显式repeat响应为任意合法后续retry提供同一Provider结果。
-+        // 延迟错误保持one-shot；repeat响应必须携带stop，才能沿现有other重试合同终止并证明恢复。
-         // 这条顺序把 first-progress timeout 放在真实 HTTP producer 与现有 retry consumer 之间验证。
-         // 503 仍保留原有服务器错误形状，只有新增的 progress deadline 改变 failure 的产生时机。
-         yield* llm.push(httpError(503, { error: "delayed" }, gate.promise))
+@@ -885,7 +885,9 @@ it.live("session.processor retries a real first-progress timeout", () =>
+         yield* llm.push(raw({ wait: gated.promise, error: { message: "delayed" } }))
+         // #498：成功响应以 repeat 形式入队——每次 retry 请求都由同一 queued 响应服务，
+         // 固定 calls 计数断言不再成立（repeat 是可重放契约，count 由行为而非次数证明）。
 -        yield* llm.pushRepeat(reply().text("after"))
++        // #525：repeat 响应必须携带 stop——无 Tool 的 other/unknown finish 是可重试 incomplete，
++        // 只有显式 stop 才代表恢复成功并沿既有 other 重试合同终止。
 +        yield* llm.pushRepeat(reply().text("after").stop())
  
          const chat = yield* session.create({})
          const parent = yield* user(chat.id, "first progress")
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index cbedefcd3042ef673f0f94a8c6bb1bdb82df2ef4..ed0d924f5c0d9f0bb38501933c511858e7be3407 100644
+index 1ed5bde6f..942c83d3f 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -4644,8 +4644,12 @@ it.instance(
+@@ -5228,8 +5228,13 @@ it.instance(
        yield* goalSvc.set(chat.id, { objective: "verify changing external state" })
        yield* user(chat.id, "start")
  
 -      const statusPath = path.join(dir, "verification-status.txt")
-+      // 状态放在 Project 外；否则 generic mutation 会被 Snapshot 误记为 Patch advancement。
++      // #525：状态放在 Project 外；否则 generic mutation 会被 Snapshot 误记为 Patch advancement。
 +      const stateDir = yield* tmpdirScoped()
 +      const statusPath = path.join(stateDir, "verification-status.txt")
        const fixturePath = path.join(dir, "verification.test.ts")
 +      const changePath = path.join(dir, "verification-change.ts")
++      // #525：输出日志被 gitignore；命令重定向到文件而不是 /dev/null（Windows shell 解析差异）。
 +      yield* writeText(path.join(dir, ".gitignore"), "verification-output.log\n")
        yield* writeText(statusPath, "one\n")
        yield* writeText(
          fixturePath,
-@@ -4654,10 +4658,12 @@ it.instance(
+@@ -5238,17 +5243,19 @@ it.instance(
            `test("status", async () => expect(await Bun.file(${JSON.stringify(statusPath)}).text()).toBe("one\\n"))`,
          ].join("\n"),
        )
--      const verify = `bun test --timeout 30000 ${fixturePath} >/dev/null 2>&1`
--      const change = `bun -e "await Bun.write('${statusPath}', 'two\\n')"`
+-      const verify = `bun test --timeout 30000 ${fixturePath.replaceAll("\\", "/")} >/dev/null 2>&1`
+-      const change = `bun -e "await Bun.write('${statusPath.replaceAll("\\", "/")}', 'two\\n')"`
++      // #525：mutation 落盘为不可变相对脚本；外部绝对路径只出现在 Bun 字面量内，不进入 Shell 解析。
 +      yield* writeText(changePath, `await Bun.write(${JSON.stringify(statusPath)}, "two\\n")`)
-+      // 命令只引用预先存在的相对脚本；外部路径留在 Bun 字面量内，避免进入 Shell 的 Windows 解析。
 +      const verify = "bun test --timeout 30000 verification.test.ts > verification-output.log 2>&1"
 +      const change = "bun verification-change.ts"
  
 -      // redirect stdout 使同一 verification 的 signature 只由 exit/result 改变，不受耗时噪声影响。
 +      // 忽略输出文件使同一 verification 的 signature 只由 exit/result 改变，不受耗时噪声或 Patch 影响。
-       // 第一次相同结果只启动 verification baseline，第二次相同结果必须保持旧 baseline。
        yield* llm.push(reply().text("idle 1").stop())
        yield* llm.push(reply().text("idle 2").stop())
-@@ -4665,7 +4671,7 @@ it.instance(
+       yield* llm.push(reply().tool("bash", { command: verify, description: "verification one" }).item(), reply().text("verified").stop())
        // 第二次调用使用同一 command，必须复用 baseline 而不是制造 changed result。
        yield* llm.push(reply().tool("bash", { command: verify, description: "verification repeat" }).item(), reply().text("same verification").stop())
        yield* llm.push(reply().tool("bash", { command: change, description: "change verification fixture" }).item(), reply().text("fixture changed").stop())
 -      // generic mutation 不提供 advancement；它只改变下一次相同 verification 的结果。
-+      // generic mutation 只改变外部状态，不提供 Patch 或 verification advancement。
++      // #525：generic mutation 只改变外部状态，不提供 Patch 或 verification advancement。
        yield* llm.push(reply().tool("bash", { command: verify, description: "verification changed" }).item(), reply().text("verification changed").stop())
        // 相同 command 的 exit 从 0 变 1，才是允许离开 re-plan 的 advancement。
        yield* llm.push(reply().text("after changed verification").stop())
-@@ -4678,6 +4684,8 @@ it.instance(
+@@ -5261,6 +5268,8 @@ it.instance(
        // only the later changed result may clear the persisted re-plan mode.
        expect(texts[2]).toContain("<strategy-switch")
        expect(texts[3]).toContain("<strategy-switch")
-+      // generic mutation 只能改变外部验证状态；它不能绕过 re-plan 的 advancement 门槛。
++      // #525：generic mutation 只能改变外部验证状态；它不能绕过 re-plan 的 advancement 门槛。
 +      expect(texts[4]).toContain("<strategy-switch")
        // changed verification 是 advancement；若只算 exploration，下一轮 idle 就会错误进入 replan。
        expect(texts[5]).not.toContain("<strategy-switch")

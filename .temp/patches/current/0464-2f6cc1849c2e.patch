@@ -8,18 +8,13 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=AF=B9compaction=E8=BF=9B=E8=A1=8C?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-- Introduced Evidence Handoff to provide a public list of evidence after compaction.
-- Implemented logic to filter out evidence from the summary to prevent context inflation.
-- Enhanced the rendering of inspected files, verified commands, and outstanding todos in the evidence handoff.
-- Updated tests to verify the correct behavior of the new evidence handoff feature, ensuring it does not replace the original LLM summary.
-- Added handling for moved files and command omissions in the evidence reporting.
-
+融合适配：目标 compaction 为 SessionV1 架构（源为 MessageV2）——evidence 体系全量重建于 V1 形态；
+0350 折叠义务（Search History/compactionCount）与 0353 折叠义务（Executed Commands 去 白名单）一并落位。
 diff --git a/docs/opencode-deepseek--agent-workflow-forensic-report.md b/docs/opencode-deepseek--agent-workflow-forensic-report.md
 index 5e13e16a9a15d0e0ac042e0836106c3e14dc481a..41953c012f848fdd35f7a474a9641eb0970aa710 100644
 --- a/docs/opencode-deepseek--agent-workflow-forensic-report.md
 +++ b/docs/opencode-deepseek--agent-workflow-forensic-report.md
-@@ -3417,3 +3417,82 @@ Qwen 报告可能检查了 `edit` 工具但没有检查 `apply_patch` 工具。b
+@@ -3417,3 +3417,82 @@
  
  
  
@@ -103,63 +98,55 @@ index 5e13e16a9a15d0e0ac042e0836106c3e14dc481a..41953c012f848fdd35f7a474a9641eb0
 +
 +---
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7efc202249 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -18,6 +18,7 @@ import { InstanceState } from "@/effect/instance-state"
- import { isOverflow as overflow, usable } from "./overflow"
- import { makeRuntime } from "@/effect/run-service"
- import { fn } from "@/util/fn"
+@@ -18,4 +97,7 @@
+ import { Effect, Exit, Option, Layer, Context } from "effect"
+ import { InstanceState } from "@/effect/instance-state"
 +import { Todo } from "./todo"
- // [local-smark] request usage tracking
- import { SessionRequestUsage } from "./request-usage"
- import { serviceUse } from "@/effect/service-use"
-@@ -25,6 +26,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
- import { EventV2 } from "@opencode-ai/core/event"
- import { EventV2Bridge } from "@/event-v2-bridge"
- import { SessionEvent } from "@opencode-ai/core/session-event"
 +import path from "path"
 +import { createHash } from "crypto"
- 
- const log = Log.create({ service: "session.compaction" })
- 
-@@ -55,6 +58,16 @@ const MAX_PRESERVE_RECENT_TOKENS = 16_000
- // window so a 100k-token usable window can spend at most 20k on the memento.
- const DEFAULT_PRESERVE_RECENT_USER_TOKENS = 20_000
- const PRESERVE_RECENT_USER_RATIO = 0.2
-+// Evidence Handoff 是压缩摘要后的公开证据清单：它作为 assistant text part
-+// 同时给用户和模型看，不能变成隐藏状态或第二套 summary。下面这些上限只防止
-+// evidence 自身成为新的上下文膨胀源；被裁剪的数量会在同一段文本里公开显示。
+ import { isOverflow as overflow, usable } from "./overflow"
+ import { serviceUse } from "@opencode-ai/core/effect/service-use"
+@@ -45,3 +127,18 @@
+ const MIN_PRESERVE_RECENT_TOKENS = 4_000
+ const MAX_PRESERVE_RECENT_TOKENS = 16_000
++// #464：Evidence Handoff 是压缩摘要后的公开证据清单：作为 summary assistant 的
++// synthetic text part 同时给用户和模型看，不引入隐藏状态或第二套 summary。
++// 上限只防止 evidence 自身成为新的上下文膨胀源；被裁剪数量在同段文本公开。
 +const EVIDENCE_HANDOFF_KIND = "compaction_evidence_handoff"
 +const EVIDENCE_FILE_LIMIT = 20
++// 文件上限 20：覆盖主要读写面即可，历史文件由 summary 文本承载。
 +const EVIDENCE_FILE_RANGE_LIMIT = 8
++// #353：命令上限维持 10——去重后按 recency 展示全部 executed commands。
 +const EVIDENCE_COMMAND_LIMIT = 10
 +const EVIDENCE_TODO_LIMIT = 100
 +const EVIDENCE_COMMAND_MAX_CHARS = 120
 +const EVIDENCE_CELL_MAX_CHARS = 160
- // The truncation marker is part of the model-visible handoff so the next model
- // knows missing text was intentionally omitted by the memento budget, not by the
- // user. Keep it short because it can appear inside an already tight context.
-@@ -122,6 +135,10 @@ type CompletedCompaction = {
- function summaryText(message: MessageV2.WithParts) {
++// 单 cell 160 字符：容纳常见路径/命令主干，超出即截断并附指纹。
++// #350：搜索历史上限独立于命令预算，避免互相挤占。
++const EVIDENCE_SEARCH_LIMIT = 10
+ // #256：整轮尾部保留之外，还需要一条独立的最近用户指令通道（memento）：工具密集的
+@@ -111,5 +208,8 @@
+ 
+ function summaryText(message: SessionV1.WithParts) {
    const text = message.parts
-     .filter((part): part is MessageV2.TextPart => part.type === "text")
-+    // Evidence Handoff 是原始 summary 的公开附录，不是 LLM 生成的 anchored
-+    // summary 内容。这里过滤它，避免下一轮 compaction 把结构化表格写进
-+    // <previous-summary> 后再被 LLM 改写或重复总结。
-+    .filter((part) => part.metadata?.kind !== EVIDENCE_HANDOFF_KIND)
++    // #464：Evidence Handoff 是 summary 的公开附录而非 LLM 生成内容；过滤后
++    // 下一轮 compaction 才不会把结构化表格写进 <previous-summary> 再被改写。
+     .filter((part): part is SessionV1.TextPart => part.type === "text")
++    .filter((part) => (part.metadata as { kind?: string } | undefined)?.kind !== EVIDENCE_HANDOFF_KIND)
      .map((part) => part.text.trim())
-     .filter(Boolean)
-     .join("\n\n")
-@@ -234,6 +251,297 @@ function truncateRecentUserMessage(input: {
-   return best
+@@ -220,3 +320,346 @@
  }
  
-+type CompletedToolPart = MessageV2.ToolPart & { state: MessageV2.ToolStateCompleted }
++// #464：以下 evidence 收集体系以 completed tool parts 为唯一事实源。
++type CompletedToolPart = SessionV1.ToolPart & { state: SessionV1.ToolStateCompleted }
++// 收窄到 completed——error/pending 工具输出尚未成为事实，不能进 evidence。
 +
 +type ToolEvent = {
 +  part: CompletedToolPart
 +  sequence: number
++  // 全局单调序，用于 recency 排序与"最近优先"裁剪，不用时间戳避免时钟抖动。
 +}
 +
 +type InspectedFileEvidence = {
@@ -170,6 +157,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +  modified: string
 +  lastRead: number
 +  status: "current" | "stale" | "deleted"
++  // deleted 由 apply_patch/move 推导；stale 表示读后又写过，需重读。
 +}
 +
 +type MutationEvidence = {
@@ -179,20 +167,23 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +}
 +
 +function isRecord(input: unknown): input is Record<string, unknown> {
++// tool state metadata 是 untyped JSON，所有字段访问必须经窄化读取防伪造。
 +  return typeof input === "object" && input !== null && !Array.isArray(input)
 +}
 +
 +function stringField(input: Record<string, unknown>, key: string) {
 +  const value = input[key]
 +  return typeof value === "string" ? value : undefined
++  // 只接受 string——number/bool 直接丢弃而非字符串化，保持 evidence 可信。
 +}
 +
 +function numberField(input: Record<string, unknown>, key: string) {
 +  const value = input[key]
 +  return typeof value === "number" && Number.isFinite(value) ? value : undefined
++  // NaN/Infinity 视为缺失：无法在表格中稳定渲染也不构成可比数据。
 +}
 +
-+function completedToolEvents(messages: MessageV2.WithParts[]) {
++function completedToolEvents(messages: SessionV1.WithParts[]) {
 +  const result: ToolEvent[] = []
 +  let sequence = 0
 +  for (const msg of messages) {
@@ -200,6 +191,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +      sequence++
 +      if (part.type !== "tool") continue
 +      if (part.state.status !== "completed") continue
++      // 只统计 completed 工具调用：运行中/失败的不算已发生事实。
 +      result.push({ part: part as CompletedToolPart, sequence })
 +    }
 +  }
@@ -210,13 +202,13 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +  const resolved = path.isAbsolute(input) ? input : path.join(worktree, input)
 +  const normalized = resolved.replaceAll("\\", "/")
 +  return process.platform === "win32" ? normalized.toLowerCase() : normalized
++  // 统一 win32 大小写与斜杠方向，避免同一文件因路径形态分裂成多行。
 +}
 +
 +function displayPath(input: string, worktree: string) {
 +  const resolved = path.isAbsolute(input) ? input : path.join(worktree, input)
 +  const relative = path.relative(worktree, resolved)
-+  // worktree 根目录是最常见的默认 shell cwd；渲染为 "." 避免 evidence
-+  // 暴露冗长临时目录，同时仍让工作区外路径保持绝对路径。
++  // worktree 根是最常见的默认 shell cwd；渲染为 "." 避免 evidence 暴露冗长临时目录。
 +  if (relative === "") return "."
 +  const display = relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : resolved
 +  return display.replaceAll("\\", "/") || "."
@@ -224,6 +216,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +
 +function mergeRanges(ranges: Array<{ start: number; end: number }>) {
 +  const sorted = ranges.toSorted((a, b) => a.start - b.start || a.end - b.end)
++  // 相邻/重叠读取区间合并为一段，与区间上限共同控制 ranges 列宽。
 +  return sorted.reduce<Array<{ start: number; end: number }>>((result, range) => {
 +    const last = result.at(-1)
 +    if (!last || range.start > last.end + 1) return [...result, { ...range }]
@@ -233,18 +226,20 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +}
 +
 +function hash8(input: string) {
-+  // 这里只需要稳定短指纹来区分被截断的公开文本，不把它当安全哈希使用。
++  // 只需稳定短指纹区分被截断的公开文本，不作安全哈希使用。
 +  return createHash("sha256").update(input).digest("hex").slice(0, 8)
 +}
 +
 +function evidenceCell(input: string) {
 +  return input.replaceAll("|", "\\|").replace(/\r?\n/g, " ").trim()
++  // 转义竖杠与换行，保证 markdown 表格结构不被 cell 内容破坏。
 +}
 +
 +function compactCell(input: string, max: number, label: string) {
 +  const clean = evidenceCell(input)
 +  if (clean.length <= max) return clean
 +  return `${clean.slice(0, Math.max(0, max - 18)).trimEnd()}... [${label}:${hash8(clean)}]`
++  // 截断时保留短哈希指纹，模型可在后续读取中核对是否同一长文本。
 +}
 +
 +function collectMutationPaths(events: ToolEvent[], worktree: string) {
@@ -252,7 +247,6 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +    const metadata = event.part.state.metadata
 +    const add = (file: string | undefined, deleted = false): MutationEvidence[] =>
 +      file ? [{ canonicalPath: canonicalEvidencePath(file, worktree), sequence: event.sequence, deleted }] : []
-+
 +    if (event.part.tool === "write") return add(stringField(metadata, "filepath") ?? stringField(event.part.state.input, "filePath"))
 +    if (event.part.tool === "edit") {
 +      const filediff = isRecord(metadata.filediff) ? stringField(metadata.filediff, "file") : undefined
@@ -265,8 +259,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +      const type = stringField(file, "type")
 +      const filePath = stringField(file, "filePath")
 +      const movePath = stringField(file, "movePath")
-+      // apply_patch 的 move 会同时让旧路径失效并产生新路径；Evidence 只给
-+      // 已读文件判定状态，所以旧路径必须标记 deleted，不能泛化成 stale。
++      // apply_patch 的 move 让旧路径失效并产生新路径；旧路径必须标 deleted 而非 stale。
 +      if (type === "move") return [...add(filePath, true), ...add(movePath)]
 +      return add(filePath, type === "delete")
 +    })
@@ -281,6 +274,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +    if (event.part.tool !== "read") continue
 +    const read = isRecord(event.part.state.metadata.read) ? event.part.state.metadata.read : undefined
 +    if (!read || read.stub === true) continue
++    // stub 读取（目录清单等）没有行号区间，不进入 Inspected Files。
 +    const filePath = stringField(read, "path")
 +    const canonicalPath = stringField(read, "canonicalPath")
 +    const start = numberField(read, "start")
@@ -303,6 +297,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +      continue
 +    }
 +    current.ranges = mergeRanges([...current.ranges, { start, end }])
++    // 同文件多次读取合并区间并刷新 lastRead，维持单一聚合行。
 +    current.total = total
 +    current.modified = modified
 +    current.lastRead = event.sequence
@@ -310,12 +305,16 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +
 +  for (const file of files.values()) {
 +    const mutation = mutations.filter((item) => item.canonicalPath === file.canonicalPath && item.sequence > file.lastRead).at(-1)
++    // filter 后取 at(-1)：读后最后一次变更生效，更早的写不回撤已判定状态。
 +    if (!mutation) continue
 +    file.status = mutation.deleted ? "deleted" : "stale"
++    // 读后写/删即失效；status 是下一轮"要不要重读"的决策依据。
 +  }
 +
 +  const rows = [...files.values()].toSorted((a, b) => b.lastRead - a.lastRead)
++  // Inspected 按 lastRead 降序：与命令/搜索的 recency 裁剪同一语义，最旧读取先出局。
 +  const rendered = rows.slice(0, EVIDENCE_FILE_LIMIT)
++  // 预算切片发生在排序之后：保证被保留的是最新读取而非插入序。
 +  const omitted = Math.max(0, rows.length - rendered.length)
 +  const output = [
 +    "### Inspected Files",
@@ -324,7 +323,8 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +    ...rendered.map((file) => {
 +      const ranges = file.ranges.slice(0, EVIDENCE_FILE_RANGE_LIMIT).map((range) => `${range.start}-${range.end}`)
 +      const omittedRanges = Math.max(0, file.ranges.length - ranges.length)
-+      return `| ${evidenceCell(file.path)} | ${ranges.join(", ")}${omittedRanges ? `, ...(+${omittedRanges})` : ""} | ${file.total} | ${evidenceCell(file.modified)} | ${file.status} |`
++      // 区间上限与 cell 截断独立：多区间文件以 ", ...(+N)" 公开被折叠数。
++      return `| ${evidenceCell(file.path)} | ${ranges.join(", ")}${omittedRanges ? `, ...(+${omittedRanges})` : ``} | ${file.total} | ${evidenceCell(file.modified)} | ${file.status} |`
 +    }),
 +  ]
 +  if (omitted > 0) output.push(`Omitted: ${omitted} inspected files due to evidence budget.`)
@@ -333,6 +333,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +
 +function redactCommand(input: string) {
 +  return input
++  // redaction 只做保守凭据清除，其余命令保持原样供模型自行判断。
 +    .replace(/(authorization:\s*bearer\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
 +    .replace(/((?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
 +    .replace(/(--(?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
@@ -342,6 +343,7 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +function commandDisplay(input: string) {
 +  const redacted = redactCommand(input).replace(/\s+/g, " ").trim()
 +  return compactCell(redacted, EVIDENCE_COMMAND_MAX_CHARS, "cmd")
++  // 命令先 redact 再压缩空白，避免多行命令在表格中断裂。
 +}
 +
 +function stripLeadingEnvAssignments(input: string) {
@@ -350,67 +352,94 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +    const match = command.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
 +    if (!match) return command
 +    command = command.slice(match[0].length).trimStart()
++    // 前置 env 赋值（FOO=bar cmd）不属于命令本体，去重键必须剥离。
 +  }
-+}
-+
-+function isSimpleVerificationCommand(command: string) {
-+  const trimmed = command.trim()
-+  if (!trimmed) return false
-+  // Evidence 只记录已经完成的简单验证命令。带管道、重定向、子命令或链式操作的
-+  // shell 片段可能混入副作用，不能被压缩摘要误呈现为单纯 verification 结果。
-+  if (/[|<>`;]/.test(trimmed) || trimmed.includes("$(") || trimmed.includes("&&") || trimmed.includes("||")) return false
-+  const normalized = stripLeadingEnvAssignments(trimmed).toLowerCase()
-+  return (
-+    /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(normalized) ||
-+    /^node\s+--check(\s|$)/.test(normalized) ||
-+    /^python\s+-m\s+py_compile(\s|$)/.test(normalized) ||
-+    /^tsc\s+--noemit(\s|$)/.test(normalized) ||
-+    /^eslint(\s|$)/.test(normalized) ||
-+    /^prettier\s+--check(\s|$)/.test(normalized)
-+  )
 +}
 +
 +function commandCwd(input: Record<string, unknown>, directory: string) {
 +  const legacy = stringField(input, "cwd")
 +  if (legacy) return legacy
 +  const workdir = stringField(input, "workdir")
-+  // 真实 bash tool input 保存的是用户传入的 workdir，而不是 shell.ts 运行时
-+  // 解析后的 cwd；缺省 workdir 时命令实际在实例目录执行。
++  // 真实 bash input 保存的是用户传入的 workdir，不是 shell 运行时解析的 cwd；
++  // 缺省时命令实际在实例目录执行。
 +  if (!workdir) return directory
 +  return path.isAbsolute(workdir) ? workdir : path.join(directory, workdir)
 +}
 +
-+function renderVerifiedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
++// #353：渲染全部已执行命令（非仅验证命令）——白名单会漏掉合法命令（链式、
++// 自定义前缀等），不如全部展示让模型自行判断；redaction 不依赖类型过滤。
++function renderExecutedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
 +  const commands = new Map<string, { command: string; cwd: string; exit: string; sequence: number }>()
 +  for (const event of input.events) {
 +    if (event.part.tool !== "bash") continue
 +    const command = stringField(event.part.state.input, "command")
-+    if (!command || !isSimpleVerificationCommand(command)) continue
++    if (!command) continue
 +    const cwd = commandCwd(event.part.state.input, input.directory)
++    // cwd 参与去重键：不同目录下的同名命令是两次独立执行，不得合并。
 +    const exit = numberField(event.part.state.metadata, "exit")
 +    commands.set(`${canonicalEvidencePath(cwd, input.worktree)}\u0000${stripLeadingEnvAssignments(command)}`, {
 +      command,
 +      cwd,
 +      exit: exit === undefined ? "unknown" : String(exit),
++      // 无退出码（后台/被杀）渲染 unknown 而非空串，保持列语义完整。
 +      sequence: event.sequence,
 +    })
 +  }
 +  const all = [...commands.values()].toSorted((a, b) => b.sequence - a.sequence)
++  // Map 去重 + sequence 降序：同一命令重试只保留最新一次的语义。
 +  const rows = all.slice(0, EVIDENCE_COMMAND_LIMIT)
 +  const omitted = Math.max(0, all.length - rows.length)
 +  const output = [
-+    "### Verified Commands",
++    "### Executed Commands",
 +    "| command | cwd | exit |",
 +    "|---|---|---:|",
 +    ...rows.map((item) => `| ${commandDisplay(item.command)} | ${evidenceCell(displayPath(item.cwd, input.worktree))} | ${item.exit} |`),
 +  ]
-+  if (omitted > 0) output.push(`Omitted: ${omitted} verified commands due to evidence budget.`)
++  if (omitted > 0) output.push(`Omitted: ${omitted} executed commands due to evidence budget.`)
++  return output.join("\n")
++}
++
++// #350：Search History——从 grep/glob events 提取搜索历史，避免 compaction 后重复搜索。
++function renderSearchHistory(input: { events: ToolEvent[]; worktree: string }): string {
++  const searches = new Map<string, { tool: string; pattern: string; path: string; matches: string; sequence: number }>()
++  for (const event of input.events) {
++    if (event.part.tool !== "grep" && event.part.tool !== "glob") continue
++    const pattern = stringField(event.part.state.input, "pattern")
++    if (!pattern) continue
++    const searchPath = stringField(event.part.state.input, "path") ?? "."
++    // grep metadata 用 matches/totalMatches，glob 用 count/total。
++    const meta = event.part.state.metadata
++    const matchCount = event.part.tool === "grep"
++      ? (numberField(meta, "totalMatches") ?? numberField(meta, "matches") ?? 0)
++      : (numberField(meta, "total") ?? numberField(meta, "count") ?? 0)
++    const key = `${event.part.tool}:${pattern}:${searchPath}`
++    searches.set(key, {
++    // 同 tool+pattern+path 视为同一搜索，命中数以最新一次为准。
++      tool: event.part.tool,
++      pattern: pattern.slice(0, 60),
++      path: displayPath(searchPath, input.worktree),
++      matches: String(matchCount),
++      sequence: event.sequence,
++    })
++  }
++  const all = [...searches.values()].toSorted((a, b) => b.sequence - a.sequence)
++  // 搜索去重后仍按 recency 截断，防止 fan-out 搜索刷屏挤占预算。
++  const rows = all.slice(0, EVIDENCE_SEARCH_LIMIT)
++  const omitted = Math.max(0, all.length - rows.length)
++  const output = [
++    "### Search History",
++    "| tool | pattern | path | matches |",
++    "|---|---|---|---:|",
++    ...rows.map((item) => `| ${item.tool} | ${evidenceCell(item.pattern)} | ${evidenceCell(item.path)} | ${item.matches} |`),
++  ]
++  if (omitted > 0) output.push(`Omitted: ${omitted} searches due to evidence budget.`)
 +  return output.join("\n")
 +}
 +
 +function renderOutstandingTodos(todos: Todo.Info[]) {
 +  const rendered = todos.slice(0, EVIDENCE_TODO_LIMIT)
 +  const omitted = Math.max(0, todos.length - rendered.length)
++  // Todo 上限宽松（100）：任务主干信息优先级高于文件/命令明细。
 +  const output = [
 +    "### Outstanding Todos",
 +    "| status | priority | content |",
@@ -424,18 +453,24 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +}
 +
 +function renderEvidenceHandoff(input: {
-+  messages: MessageV2.WithParts[]
++  messages: SessionV1.WithParts[]
 +  todos: Todo.Info[]
 +  directory: string
 +  worktree: string
 +}) {
 +  const events = completedToolEvents(input.messages)
++  // 所有 section 共享同一份 completed events——单一事实源避免口径漂移。
++  // #350：compaction 计数暴露已压缩次数，提示 summary 可能降级。
++  const compactionCount = completedCompactions(input.messages).length
 +  return [
 +    "## Evidence Handoff",
++    // section 顺序固定：文件→命令→搜索→TODO，从环境事实到任务状态递进。
 +    "",
 +    renderInspectedFiles({ events, worktree: input.worktree }),
 +    "",
-+    renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
++    renderExecutedCommands({ events, directory: input.directory, worktree: input.worktree }),
++    "",
++    renderSearchHistory({ events, worktree: input.worktree }),
 +    "",
 +    renderOutstandingTodos(input.todos),
 +    "",
@@ -443,23 +478,21 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +    "- Older raw tool outputs were compacted.",
 +    "- Use current evidence before repeating reads or commands.",
 +    "- Treat stale evidence as advisory only.",
++    `- This is compaction #${compactionCount + 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
 +  ].join("\n")
 +}
 +
- function turns(messages: MessageV2.WithParts[]) {
-   const result: Turn[] = []
-   for (let i = 0; i < messages.length; i++) {
-@@ -654,6 +962,25 @@ export const layer = Layer.effect(
-         return "stop"
-       }
- 
-+      if (result === "continue" && !processor.message.error) {
+ function turns(messages: SessionV1.WithParts[]) {
+@@ -749,4 +1192,22 @@
+       if (processor.message.error) return "stop"
+       if (result === "continue") {
++        // #464：Evidence 作为同一条 summary assistant 的 synthetic text 追加——用户可见
++        // 内容与模型 replay 内容一致，不写隐藏 JSON 防止后续维护者误判模型看到了什么。
 +        const todo = Option.getOrUndefined(yield* Effect.serviceOption(Todo.Service))
 +        const todos = todo
++        // Todo 服务缺失（纯测试环境）时渲染空表而非失败——evidence 不阻断压缩主流程。
 +          ? yield* todo.get(input.sessionID).pipe(Effect.catch(() => Effect.succeed([] as Todo.Info[])))
 +          : []
-+        // Evidence 作为同一条 summary assistant 的 synthetic text 追加，保证用户可见内容
-+        // 和模型 replay 内容一致；不写隐藏 JSON，避免后续维护者误以为模型看到了 UI 看不到的状态。
 +        yield* session.updatePart({
 +          id: PartID.ascending(),
 +          messageID: msg.id,
@@ -468,152 +501,85 @@ index a2f2ec13651514d3e1fcc7b02380f1d382778760..1143ed322dd915c9d972afd9e432ea7e
 +          text: renderEvidenceHandoff({ messages: history, todos, directory: ctx.directory, worktree: ctx.worktree }),
 +          synthetic: true,
 +          metadata: { kind: EVIDENCE_HANDOFF_KIND, version: 1 },
++          // kind/version 标记供下一轮 summaryText 过滤与未来 schema 演进识别。
 +          time: { start: Date.now(), end: Date.now() },
 +        })
-+      }
-+
-       const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
-       if (
-         compactionPart &&
+         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
+       }
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 73de33fa7bbff55b7e7839cadc5f2f3a5caf6011..e0f601d256bd483f6f66f65f09712d80f1b6b590 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1,7 +1,7 @@
- import { BusEvent } from "@/bus/bus-event"
- import { SessionID, MessageID, PartID } from "./schema"
- import { NamedError } from "@opencode-ai/core/util/error"
--import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
-+import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type ProviderMetadata, type UIMessage } from "ai"
- import { LSP } from "@/lsp/lsp"
- import { Snapshot } from "@/snapshot"
- import { SyncEvent } from "../sync"
-@@ -761,12 +761,22 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
-   }))
+@@ -169,10 +630,21 @@
  }
  
 -function providerMeta(metadata: Record<string, any> | undefined) {
-+function providerMeta(metadata: Record<string, unknown> | undefined): ProviderMetadata | undefined {
-   if (!metadata) return undefined
+-  if (!metadata) return undefined
 -  const { providerExecuted: _, ...rest } = metadata
-+  // part.metadata 同时承载 provider 回放信息和 opencode 内部控制标记。
-+  // 进入 AI SDK 的 providerOptions 必须保持 provider-name -> JSON object 的形态，
-+  // 这里仅过滤会破坏 schema 的 primitive 内部标记和 providerExecuted；object
-+  // 命名空间保持透传，避免破坏自定义 provider namespace 的既有兼容性。
+-  return Object.keys(rest).length > 0 ? rest : undefined
+-}
+-
++// #464：part.metadata 同时承载 provider 回放信息和 opencode 内部标记（kind 等）；
++// 进入 providerOptions 必须保持 provider-name -> JSON object 形态，这里过滤
++// 会破坏 schema 的 primitive 内部标记和 providerExecuted；object 命名空间透传。
++function providerMeta(metadata: Record<string, any> | undefined) {
++  if (!metadata) return undefined
 +  const rest = Object.fromEntries(
 +    Object.entries(metadata).filter(([key, value]) => key !== "providerExecuted" && providerMetaValue(value)),
-+  ) as ProviderMetadata
-   return Object.keys(rest).length > 0 ? rest : undefined
- }
- 
-+function providerMetaValue(input: unknown): input is ProviderMetadata[string] {
-+  return typeof input === "object" && input !== null && !Array.isArray(input)
++    // 双调用 providerMeta 是刻意的短表达式：等价缓存无收益，保持单行可读。
++  )
++  return Object.keys(rest).length > 0 ? rest : undefined
++  // 空对象归一 undefined：providerOptions 不接受空命名空间，透传空会破坏 object-of-object 合同。
 +}
 +
++function providerMetaValue(input: unknown) {
++  return typeof input === "object" && input !== null && !Array.isArray(input)
++  // 数组/原始值命名空间一律剔除：ai-sdk providerOptions 要求 object-of-object。
++}
  export const toModelMessagesEffect = Effect.fnUntraced(function* (
    input: WithParts[],
-   model: Provider.Model,
-@@ -921,15 +931,16 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
-         if (part.type !== "reasoning") return false
-         return part.metadata?.anthropic?.signature != null
-       })
--      for (const part of msg.parts) {
--        if (part.type === "text") {
--          const text = part.text === "" && hasSignedReasoning ? " " : part.text
--          assistantMessage.parts.push({
--            type: "text",
--            text,
--            ...(differentModel ? {} : { providerMetadata: part.metadata }),
--          })
--        }
-+        for (const part of msg.parts) {
-+          if (part.type === "text") {
-+            const text = part.text === "" && hasSignedReasoning ? " " : part.text
-+            const providerMetadata = differentModel ? undefined : providerMeta(part.metadata)
-+            assistantMessage.parts.push({
-+              type: "text",
-+              text,
-+              ...(providerMetadata ? { providerMetadata } : {}),
-+            })
-+          }
-         if (part.type === "step-start")
+@@ -340,6 +812,7 @@
            assistantMessage.parts.push({
-             type: "step-start",
-@@ -1015,10 +1026,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
-               })
-             continue
-           }
-+          const providerMetadata = providerMeta(part.metadata)
+             type: "text",
+             text,
+-            ...(differentModel ? {} : { providerMetadata: part.metadata }),
++          // #464：text part 的 providerMetadata 经 providerMeta 过滤内部标记后按需附加。
++          ...(differentModel ? {} : providerMeta(part.metadata) ? { providerMetadata: providerMeta(part.metadata)! } : {}),
+           })
+         }
+@@ -442,6 +915,7 @@
            assistantMessage.parts.push({
              type: "reasoning",
              text: part.text,
 -            providerMetadata: part.metadata,
-+            ...(providerMetadata ? { providerMetadata } : {}),
++            // #464：reasoning 的 providerMetadata 同样经 providerMeta 过滤 primitive 内部标记。
++            ...(providerMeta(part.metadata) ? { providerMetadata: providerMeta(part.metadata)! } : {}),
            })
          }
-       }
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb91c65e8c 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test"
- import { APICallError } from "ai"
- import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
- import * as Stream from "effect/Stream"
+@@ -22,2 +496,5 @@
+ import { SessionProjector } from "@opencode-ai/core/session/projector"
++// #464：evidence 内容级断言需要 path 拼平台真实分隔符；Todo 注入依赖其 node。
 +import path from "path"
- import { Bus } from "../../src/bus"
- import { Config } from "@/config/config"
- import { Image } from "@/image/image"
-@@ -18,13 +19,14 @@ import { MessageV2 } from "../../src/session/message-v2"
- import { MessageID, PartID, SessionID } from "../../src/session/schema"
- import { SessionStatus } from "../../src/session/status"
- import { SessionSummary } from "../../src/session/summary"
 +import { Todo } from "../../src/session/todo"
- import { SessionV2 } from "../../src/v2/session"
- import { ModelID, ProviderID } from "../../src/provider/schema"
- import type { Provider } from "@/provider/provider"
- import * as SessionProcessorModule from "../../src/session/processor"
- import { Snapshot } from "../../src/snapshot"
- import { ProviderTest } from "../fake/provider"
--import { testEffect } from "../lib/effect"
-+import { pollWithTimeout, testEffect } from "../lib/effect"
- import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { TestConfig } from "../fixture/config"
- import { SyncEvent } from "@/sync"
-@@ -274,6 +276,7 @@ function withCompaction(options?: CompactionProcessOptions) {
- function compactionProcessLayer(options?: CompactionProcessOptions) {
-   const bus = Bus.layer
-   const status = SessionStatus.layer.pipe(Layer.provide(bus))
-+  const todo = Todo.layer.pipe(Layer.provide(bus))
-   const processor = options?.llm
-     ? SessionProcessorModule.SessionProcessor.layer.pipe(
-         Layer.provide(summary),
-@@ -282,7 +285,7 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
-         Layer.provide(status),
-       )
-     : layer(options?.result ?? "continue")
--  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status).pipe(
-+  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status, todo).pipe(
-     Layer.provide(SessionNs.defaultLayer),
-     Layer.provide((options?.provider ?? wide()).layer),
-     Layer.provide(Snapshot.defaultLayer),
-@@ -290,7 +293,6 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
-     Layer.provide(Permission.defaultLayer),
-     Layer.provide(Agent.defaultLayer),
-     Layer.provide(options?.plugin ?? Plugin.defaultLayer),
--    Layer.provide(status),
-     Layer.provide(bus),
-     Layer.provide(options?.config ?? Config.defaultLayer),
-     Layer.provide(SyncEvent.defaultLayer),
-@@ -311,6 +313,52 @@ function readCompactionPart(sessionID: SessionID) {
-   )
+ 
+@@ -249,2 +726,4 @@
+   EventV2Bridge.node,
++  // #464：evidence 的 Outstanding Todos 段读取 Todo 服务；node 架构下经 group 注入。
++  Todo.node,
+   CrossSpawnSpawner.node,
+@@ -311,3 +790,56 @@
  }
  
 +function canonicalTestPath(file: string) {
++  // 与生产 canonicalEvidencePath 同构：win32 大小写归一 + 反斜杠归一，
++  // 用真实平台分隔符锁定 Inspected Files 去重键不受路径形态影响。
 +  return (process.platform === "win32" ? file.toLowerCase() : file).replaceAll("\\", "/")
 +}
 +
 +function addCompletedToolPart(input: {
++// 多用例共享的 part 构造器：state 形态与生产 ToolStateCompleted 一致，避免各测试手搓漂移。
 +  sessionID: SessionID
 +  messageID: MessageID
 +  tool: string
@@ -636,36 +602,91 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        input: input.toolInput ?? {},
 +        output: input.output ?? "",
 +        title: input.tool,
++        // title 兜底为工具名：V1 列表渲染依赖该字段，缺失会破坏 summary 消费端。
 +        metadata: input.metadata ?? {},
 +        time: { start: input.start ?? Date.now(), end: input.end ?? Date.now() },
++        // 缺省时间取当前时刻：evidence 的 recency 只依赖 sequence，不读该时间。
 +      },
 +    }),
 +  )
 +}
 +
 +function readLatestSummaryText(sessionID: SessionID) {
++// 读取器锁定最后一个 summary assistant：多次压缩时断言只看最新边界。
 +  return SessionNs.Service.use((ssn) => ssn.messages({ sessionID })).pipe(
 +    Effect.map((messages) => {
 +      const summary = messages.findLast((msg) => msg.info.role === "assistant" && msg.info.summary)
 +      return summary?.parts
-+        .filter((part): part is MessageV2.TextPart => part.type === "text")
++        .filter((part): part is SessionV1.TextPart => part.type === "text")
 +        .map((part) => part.text)
 +        .join("\n\n")
++        // join 用双换行：与生产 parts 间呈现形态一致，断言不受分隔符影响。
 +    }),
 +  )
 +}
 +
  function llm() {
-   const queue: Array<
-     Stream.Stream<LLM.Event, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLM.Event, unknown>)
-@@ -861,6 +909,327 @@ describe("session.compaction.process", () => {
-     { git: true },
-   )
- 
+@@ -2117,4 +2649,6 @@
+         expect(captured).toContain("<previous-summary>")
+         expect(captured).toContain("PREVIOUS SUMMARY")
++        // #464：Evidence Handoff 是 synthetic 公开附录，不得回流进下一轮 summary prompt。
++        expect(captured).not.toContain("## Evidence Handoff")
+         expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
+         expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")
+@@ -2537,3 +3071,419 @@
+     expect(result.tokens.cache.write).toBe(300)
+   })
++
++  // #464：Evidence Handoff E2E——summary assistant 上必须出现 synthetic evidence part，
++  // 且带 kind 标记供下一轮 summaryText 过滤（0350/0353 折叠语义一并在此覆盖）。
++  itCompaction.instance(
++    "appends evidence handoff to summary assistant after compaction",
++    () =>
++      Effect.gen(function* () {
++        const ssn = yield* SessionNs.Service
++        const session = yield* ssn.create({})
++        // 创建独立 session，避免与其他用例的 todo/事件串扰。
++        const msg = yield* createUserMessage(session.id, "hello")
++        const msgs = yield* ssn.messages({ sessionID: session.id })
++        // 先取全量消息再触发压缩，锁定压缩前输入快照避免竞态。
++
++        yield* SessionCompaction.use.process({
++          parentID: msg.id,
++          messages: msgs,
++          sessionID: session.id,
++          auto: false,
++          // auto:false 强制单轮压缩，避免阈值策略引入非确定性。
++        })
++
++        const summary = (yield* ssn.messages({ sessionID: session.id })).find(
++          (item) => item.info.role === "assistant" && item.info.summary,
++        )
++        expect(summary?.info.role).toBe("assistant")
++        // 先断言 summary 存在再窄化类型，保持类型收窄链路显式。
++        if (summary?.info.role !== "assistant") return
++        const evidence = summary.parts.find(
++          (part) => part.type === "text" && (part.metadata as { kind?: string } | undefined)?.kind === "compaction_evidence_handoff",
++        )
++        expect(evidence?.type).toBe("text")
++        if (evidence?.type !== "text") return
++        // Evidence 是 synthetic 公开附录：三个 section 与 Lost Context 提示都在同一 text 里。
++        expect(evidence.synthetic).toBe(true)
++        expect(evidence.text).toContain("## Evidence Handoff")
++        expect(evidence.text).toContain("### Inspected Files")
++        // #353：命令 section 标题为 Executed Commands（全部命令，非白名单验证命令）。
++        expect(evidence.text).toContain("### Executed Commands")
++        // #350：Search History section 与 compaction 计数行在位。
++        expect(evidence.text).toContain("### Search History")
++        expect(evidence.text).toContain("### Outstanding Todos")
++        // TODO section 来自 Todo 服务——空表也必须有标题占位，结构不可缺。
++        expect(evidence.text).toContain("This is compaction #1.")
++      }).pipe(withCompaction()),
++  )
 +  itCompaction.instance(
 +    "appends evidence handoff without replacing the LLM summary",
 +    () => {
 +      const stub = llm()
++      // LLM stub 单 reply：摘要请求恰好消费一次，多余消费会让断言直接暴露。
 +      stub.push(reply("ORIGINAL SUMMARY"))
 +      return Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -673,26 +694,33 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        const todo = yield* Todo.Service
 +        const session = yield* ssn.create({})
 +        const user = yield* createUserMessage(session.id, "collect evidence")
++        // user 文本不参与 evidence：只有 completed tool parts 是事实源。
 +        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
 +        const staleFile = path.join(test.directory, "src", "compaction.ts")
++        // fixture 用真实平台分隔符构造绝对路径：canonical 归一必须吃下 win32 反斜杠形态。
 +        const currentFile = path.join(test.directory, "src", "message-v2.ts")
 +
++        // 同文件两段读取 1-100 与 90-170：evidence 必须合并为单一区间行 1-170。
 +        yield* addCompletedToolPart({
 +          sessionID: session.id,
 +          messageID: assistant.id,
 +          tool: "read",
++          // 首个 read fixture：同文件第二段读取在下方验证区间合并为 1-170。
 +          metadata: {
 +            read: {
 +              path: staleFile,
 +              canonicalPath: canonicalTestPath(staleFile),
 +              type: "file",
 +              size: 100,
++              // size/modifiedMs 不参与渲染，仅保证 read metadata 形态完整不缺字段。
 +              modified: "2026-06-09 01:00:00",
++              // modified 字符串原样透传：evidence 不解析时间只渲染，保持来源格式。
 +              modifiedMs: 1000,
 +              start: 1,
 +              end: 100,
 +              total: 200,
 +              returned: 100,
++              // returned 与 end 是两个语义：区间渲染只取 start/end/total 三元组。
 +              stub: false,
 +            },
 +          },
@@ -728,6 +756,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +              type: "file",
 +              size: 100,
 +              modified: "2026-06-09 02:00:00",
++              // currentFile 的 modified 晚于 staleFile：时间值不参与状态判定，仅作渲染对照。
 +              modifiedMs: 2000,
 +              start: 220,
 +              end: 359,
@@ -737,6 +766,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +            },
 +          },
 +        })
++        // 读后写：write 的 filepath 让该文件从 current 降级为 stale。
 +        yield* addCompletedToolPart({
 +          sessionID: session.id,
 +          messageID: assistant.id,
@@ -748,6 +778,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +          sessionID: session.id,
 +          messageID: assistant.id,
 +          tool: "bash",
++          // bash fixture 的 exit 从 metadata 读取：input 只有 command/workdir 两键。
 +          toolInput: { command: "bun typecheck" },
 +          metadata: { exit: 0 },
 +        })
@@ -758,7 +789,9 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +          toolInput: { command: "git status" },
 +          metadata: { exit: 0 },
 +        })
++        // Todo 快照整体进入 Outstanding Todos 段，四状态全覆盖。
 +        yield* todo.update({
++        // todo.update 走事件写入：evidence 渲染读取 Todo.get 而非测试内存态。
 +          sessionID: session.id,
 +          todos: [
 +            { content: "Read forensic report", status: "completed", priority: "high" },
@@ -768,6 +801,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +          ],
 +        })
 +
++        // 目标 V1 契约：marker（user）先落库，at(-1) 即 marker——parent 校验与 provider 尾消息同为 user 形态。
 +        yield* createSummaryCompaction(session.id)
 +        const msgs = yield* ssn.messages({ sessionID: session.id })
 +        const parent = msgs.at(-1)?.info.id
@@ -775,15 +809,21 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 +
 +        const text = yield* readLatestSummaryText(session.id)
++        // evidence 是追加而非替换：LLM 生成的原始摘要必须原样保留。
 +        expect(text).toContain("ORIGINAL SUMMARY")
 +        expect(text).toContain("## Evidence Handoff")
 +        expect(text).toContain("### Inspected Files")
++        // 路径必须渲染为 worktree 相对 + 正斜杠形态（win32 反斜杠归一）。
 +        expect(text).toContain("| src/compaction.ts | 1-170 | 200 | 2026-06-09 01:00:00 | stale |")
 +        expect(text).toContain("| src/message-v2.ts | 220-359 | 1547 | 2026-06-09 02:00:00 | current |")
-+        expect(text).toContain("### Verified Commands")
++        // 未再写的文件保持 current：与 stale 行成对照，锁定状态推导两个方向。
++        // #353 折叠语义：无白名单，全部命令按 recency 展示（源断言 not git status 随折叠反转）。
++        expect(text).toContain("### Executed Commands")
 +        expect(text).toContain("| bun typecheck | . | 0 |")
-+        expect(text).toContain("| 0 |")
-+        expect(text).not.toContain("git status")
++        expect(text).toContain("| git status | . | 0 |")
++        // 两条命令都展示且按 recency 排序：git status 行序在 bun typecheck 之前。
++        // #350 折叠义务：Search History section 标题结构性在场（无搜索时空表）。
++        expect(text).toContain("### Search History")
 +        expect(text).toContain("### Outstanding Todos")
 +        expect(text).toContain("| completed | high | Read forensic report |")
 +        expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
@@ -793,7 +833,8 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        expect(text).toContain("- Older raw tool outputs were compacted.")
 +        expect(text).toContain("- Use current evidence before repeating reads or commands.")
 +        expect(text).toContain("- Treat stale evidence as advisory only.")
-+      }).pipe(withCompaction({ llm: stub.layer }))
++        // Lost Context 三条提示逐条断言：任意一条被裁剪都视为结构破坏。
++      }).pipe(withCompaction({ llm: stub.llmLayer }))
 +    },
 +    { git: true },
 +  )
@@ -810,6 +851,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        const user = yield* createUserMessage(session.id, "move and commands")
 +        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
 +        const movedFrom = path.join(test.directory, "src", "old.ts")
++        // move 双路径：old 读过入 Inspected，new 从未读不入表——只标 old。
 +        const movedTo = path.join(test.directory, "src", "new.ts")
 +
 +        yield* addCompletedToolPart({
@@ -832,10 +874,12 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +            },
 +          },
 +        })
++        // apply_patch move：旧路径必须标 deleted（不可再读），新路径不入 Inspected（未读过）。
 +        yield* addCompletedToolPart({
 +          sessionID: session.id,
 +          messageID: assistant.id,
 +          tool: "apply_patch",
++          // apply_patch 的 files metadata 是 move/delete 事实源：toolInput 不参与判定。
 +          metadata: {
 +            files: [
 +              {
@@ -846,6 +890,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +            ],
 +          },
 +        })
++        // 11 条不同命令：命令预算 10，最旧一条必须被裁剪并公开 Omitted 计数。
 +        for (let i = 0; i < 11; i++) {
 +          yield* addCompletedToolPart({
 +            sessionID: session.id,
@@ -853,9 +898,11 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +            tool: "bash",
 +            toolInput: { command: `node --check file-${i}.js`, workdir: "src" },
 +            metadata: { exit: i === 10 ? 1 : 0 },
++            // 最新命令 exit=1：非零退出码必须原样渲染而非吞掉。
 +          })
 +        }
 +
++        // 同一契约在 move 场景的意义：apply_patch 双路径的事实源判定不受 marker 影响，仅 parent 定位依赖它。
 +        yield* createSummaryCompaction(session.id)
 +        const msgs = yield* ssn.messages({ sessionID: session.id })
 +        const parent = msgs.at(-1)?.info.id
@@ -864,10 +911,14 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +
 +        const text = yield* readLatestSummaryText(session.id)
 +        expect(text).toContain("| src/old.ts | 1-10 | 10 | 2026-06-09 03:00:00 | deleted |")
++        // deleted 行是 move 的直接断言：旧路径失效而非 stale，防止降级渲染。
++        // 最新命令保留且 exit 码原样渲染；workdir 相对实例目录解析为 src。
 +        expect(text).toContain("| node --check file-10.js | src | 1 |")
-+        expect(text).toContain("Omitted: 1 verified commands due to evidence budget.")
++        // #353 折叠措辞：executed commands（源为 verified commands）。
++        expect(text).toContain("Omitted: 1 executed commands due to evidence budget.")
 +        expect(text).not.toContain("node --check file-0.js")
-+      }).pipe(withCompaction({ llm: stub.layer }))
++        // 被裁的是最旧 file-0：预算裁剪按 recency，不是按命令序号。
++      }).pipe(withCompaction({ llm: stub.llmLayer }))
 +    },
 +    { git: true },
 +  )
@@ -883,8 +934,10 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        const session = yield* ssn.create({})
 +        const user = yield* createUserMessage(session.id, "many reads")
 +        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
++        // 21 个文件超过文件预算 20：recency 保留最新 20，最旧的 file-0 被裁剪。
 +        for (let i = 0; i < 21; i++) {
 +          const file = path.join(test.directory, "src", `file-${i}.ts`)
++          // 21 个文件各自独立 canonical key：互不去重才能真实触达文件预算。
 +          yield* addCompletedToolPart({
 +            sessionID: session.id,
 +            messageID: assistant.id,
@@ -907,6 +960,7 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +          })
 +        }
 +
++        // 同一契约在预算场景的意义：21 文件的 recency 排序发生在 evidence 渲染内，与 marker 定位解耦。
 +        yield* createSummaryCompaction(session.id)
 +        const msgs = yield* ssn.messages({ sessionID: session.id })
 +        const parent = msgs.at(-1)?.info.id
@@ -915,15 +969,18 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +
 +        const text = yield* readLatestSummaryText(session.id)
 +        expect(text).toContain("| src/file-20.ts | 1-10 | 10 | 2026-06-09 00:20:00 | current |")
++        // file-20 是最后读取：预算内保留的是 lastRead 最新的前 20 个。
++        // 裁剪数量必须公开在文本内，模型与用户都能看到预算消耗。
 +        expect(text).toContain("Omitted: 1 inspected files due to evidence budget.")
 +        expect(text).not.toContain("src/file-0.ts")
-+      }).pipe(withCompaction({ llm: stub.layer }))
++        // 最旧读取第一个被裁：与命令裁剪共用同一 recency 语义。
++      }).pipe(withCompaction({ llm: stub.llmLayer }))
 +    },
 +    { git: true },
 +  )
 +
 +  itCompaction.instance(
-+    "renders verification commands without exposing unsafe shell content",
++    "renders executed commands with credentials redacted",
 +    () => {
 +      const stub = llm()
 +      stub.push(reply("summary"))
@@ -934,6 +991,8 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        const user = yield* createUserMessage(session.id, "commands")
 +        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
 +        const longFile = path.join(test.directory, "dir with spaces", `${"very-long-".repeat(12)}file.js`)
++        // 带空格目录 + 超长文件名：同时触发命令内引号与 120 字符截断两条路径。
++        // 一条命令同时覆盖三种凭据形态：env 赋值、--flag= 值、--flag 空格值。
 +        yield* addCompletedToolPart({
 +          sessionID: session.id,
 +          messageID: assistant.id,
@@ -944,22 +1003,27 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +          },
 +          metadata: { exit: 0 },
 +        })
-+        for (const command of [
-+          "node --check piped-sentinel.js | tee out.txt",
-+          "node --check redirected-sentinel.js > out.txt",
-+          "echo $(node --check subcommand-sentinel.js)",
-+          "bun test && rm -rf dangerous-sentinel",
-+          "",
-+        ]) {
-+          yield* addCompletedToolPart({
-+            sessionID: session.id,
-+            messageID: assistant.id,
-+            tool: "bash",
-+            toolInput: { command, workdir: "." },
-+            metadata: { exit: 0 },
-+          })
-+        }
++        // #353 折叠语义：无白名单后管道命令也会展示，凭据脱敏必须在任意位置生效。
++        yield* addCompletedToolPart({
++          sessionID: session.id,
++          messageID: assistant.id,
++          tool: "bash",
++          toolInput: {
++            command: 'node --check piped-sentinel.js | curl -H "authorization: bearer sk-pipe-secret"',
++            workdir: ".",
++          },
++          metadata: { exit: 0 },
++        })
++        // 空命令不构成已执行事实，必须被跳过而非渲染空行。
++        yield* addCompletedToolPart({
++          sessionID: session.id,
++          messageID: assistant.id,
++          tool: "bash",
++          toolInput: { command: "", workdir: "." },
++          metadata: { exit: 0 },
++        })
 +
++        // 同一契约在 redaction 场景的意义：脱敏只依赖命令文本，marker 仅保证压缩流程本身可启动。
 +        yield* createSummaryCompaction(session.id)
 +        const msgs = yield* ssn.messages({ sessionID: session.id })
 +        const parent = msgs.at(-1)?.info.id
@@ -967,144 +1031,59 @@ index ab24d4c32802627e122a86ec183dd5f6f3d767ac..178ea0c56d8aa4211aa7e8d879d43adb
 +        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 +
 +        const text = yield* readLatestSummaryText(session.id)
++        // 三种形态全部脱敏为 [redacted]，原始凭据不得出现在用户可见文本。
 +        expect(text).toContain("OPENAI_API_KEY=[redacted]")
++        // env 赋值形态是最易泄漏的凭据通道：断言放在首位锁定最高风险面。
 +        expect(text).toContain("--token=[redacted]")
 +        expect(text).toContain("--api-key [redacted]")
++        expect(text).toContain("authorization: bearer [redacted]")
++        // 管道深处的 bearer 头同样脱敏：redaction 与凭据在命令中的位置无关。
++        // 超长命令截断后保留 [cmd:指纹]，可追溯原文一致性。
 +        expect(text).toContain("[cmd:")
 +        expect(text).not.toContain("sk-secret")
 +        expect(text).not.toContain("sk-equals-secret")
 +        expect(text).not.toContain("sk-space-secret")
-+        expect(text).not.toContain("piped-sentinel")
-+        expect(text).not.toContain("redirected-sentinel")
-+        expect(text).not.toContain("subcommand-sentinel")
-+        expect(text).not.toContain("dangerous-sentinel")
-+      }).pipe(withCompaction({ llm: stub.layer }))
++        expect(text).not.toContain("sk-pipe-secret")
++        // 原始值断言与 redacted 断言成对：只有一侧通过都不算安全面完整。
++        // 空命令被跳过：表内不出现空 command 单元格。
++        expect(text).not.toContain("|  | . | 0 |")
++        // 空命令不产生空单元格行：必须跳过而非渲染空 command 单元。
++      }).pipe(withCompaction({ llm: stub.llmLayer }))
 +    },
 +    { git: true },
 +  )
-+
-   itCompaction.instance(
-     "hides visible compaction state when interrupted before summary request starts",
-     () =>
-@@ -1608,17 +1977,10 @@ describe("session.compaction.process", () => {
- 
-       return Effect.gen(function* () {
-         const ssn = yield* SessionNs.Service
--        const bus = yield* Bus.Service
--        const ready = yield* Deferred.make<void>()
-+        const status = yield* SessionStatus.Service
-         const session = yield* ssn.create({})
-         const msg = yield* createUserMessage(session.id, "hello")
-         const msgs = yield* ssn.messages({ sessionID: session.id })
--        const off = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
--          if (evt.properties.sessionID !== session.id) return
--          if (evt.properties.status.type !== "retry") return
--          Deferred.doneUnsafe(ready, Effect.void)
--        })
--        yield* Effect.addFinalizer(() => Effect.sync(off))
- 
-         const fiber = yield* SessionCompaction.use
-           .process({
-@@ -1629,15 +1991,23 @@ describe("session.compaction.process", () => {
-           })
-           .pipe(Effect.forkChild)
- 
--        yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
-+        yield* pollWithTimeout(
-+          status.get(session.id).pipe(Effect.map((current) => (current.type === "retry" ? current : undefined))),
-+          "compaction did not enter retry backoff",
-+          "5 seconds",
-+        )
-         const start = Date.now()
-         yield* Fiber.interrupt(fiber)
--        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
-+        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("1 second"))
- 
-         expect(Exit.isFailure(exit)).toBe(true)
-         if (Exit.isFailure(exit)) {
-           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
--          expect(Date.now() - start).toBeLessThan(250)
-+          // This protects the retry-backoff invariant: abort must not wait for the
-+          // provider's long retry-after delay. Windows process cleanup can take a
-+          // few hundred milliseconds, so the bound is intentionally below the
-+          // 10s retry delay rather than an unrealistically tight scheduler tick.
-+          expect(Date.now() - start).toBeLessThan(1_000)
-         }
-       }).pipe(withCompaction({ llm: stub.layer }))
-     },
-@@ -1892,6 +2262,7 @@ describe("session.compaction.process", () => {
- 
-         expect(captured).toContain("<previous-summary>")
-         expect(captured).toContain("PREVIOUS SUMMARY")
-+        expect(captured).not.toContain("## Evidence Handoff")
-         expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
-         expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")
-         expect(captured).not.toContain("OLD_HEAD_USER_SHOULD_NOT_REAPPEAR")
+ })
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index 11cd07c33c4331fe71af992f5f2de2d1eea821c1..f75173beff377b01a55aeb49d34ecd90f182154f 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -408,6 +408,63 @@ describe("session.message-v2.toModelMessage", () => {
-     ])
+@@ -2370,3 +3320,30 @@
+     expect((result.data as { metadata: Record<string, string> }).metadata.finishReason).toBe("other")
    })
- 
-+  test("keeps internal assistant metadata out of provider replay", async () => {
-+    const userID = "m-user"
-+    const assistantID = "m-assistant"
 +
++  // #464：providerMeta 必须过滤 primitive 内部标记（kind/version），只透传 object 命名空间。
++  test("providerMeta filters primitive internal markers and keeps object namespaces", async () => {
 +    const input: MessageV2.WithParts[] = [
 +      {
-+        info: userInfo(userID),
++        info: assistantInfo("m-meta", "m-meta-user"),
 +        parts: [
 +          {
-+            ...basePart(userID, "u1"),
-+            type: "text",
-+            text: "continue",
-+          },
-+        ] as MessageV2.Part[],
-+      },
-+      {
-+        info: assistantInfo(assistantID, userID),
-+        parts: [
-+          {
-+            ...basePart(assistantID, "a1"),
-+            type: "text",
-+            text: "handoff",
-+            synthetic: true,
-+            metadata: { kind: "compaction_evidence_handoff", version: 1 },
-+          },
-+          {
-+            ...basePart(assistantID, "a2"),
-+            type: "text",
-+            text: "provider text",
-+            metadata: { openai: { assistant: "meta" }, kind: "internal" },
-+          },
-+          {
-+            ...basePart(assistantID, "a3"),
++            ...basePart("m-meta", "a1"),
 +            type: "reasoning",
-+            text: "signed thinking",
-+            metadata: { anthropic: { signature: "sig1" }, kind: "internal" },
-+          },
-+        ] as MessageV2.Part[],
-+      },
-+    ]
-+
-+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
-+      {
-+        role: "user",
-+        content: [{ type: "text", text: "continue" }],
-+      },
-+      {
-+        role: "assistant",
-+        content: [
-+          { type: "text", text: "handoff" },
-+          { type: "text", text: "provider text", providerOptions: { openai: { assistant: "meta" } } },
-+          { type: "reasoning", text: "signed thinking", providerOptions: { anthropic: { signature: "sig1" } } },
++            text: "thinking",
++            metadata: { kind: "compaction_evidence_handoff", version: 1, anthropic: { signature: "sig" } },
++            // fixture 同时携带 primitive 标记与 object 命名空间：一次输入覆盖过滤两侧。
++            time: { start: 0, end: 1 },
++          } as MessageV2.Part,
 +        ],
 +      },
-+    ])
++    ]
++    const result = await MessageV2.toModelMessages(input, model)
++    // convertToModelMessages 输出侧字段名为 providerOptions，与 UIMessage 的 providerMetadata 区分。
++    const part = (result[0] as unknown as { content: Array<{ type: string; providerOptions?: Record<string, unknown> }> }).content[0]
++    expect(part?.providerOptions?.["kind"]).toBeUndefined()
++    // 反向断言面：primitive 内部标记（kind）不得泄漏进 provider 选项。
++    expect(part?.providerOptions?.["version"]).toBeUndefined()
++    expect((part?.providerOptions?.["anthropic"] as { signature?: string } | undefined)?.signature).toBe("sig")
++    // object 命名空间（anthropic.signature）必须原样透传给 provider。
 +  })
-+
-   test("preserves jpeg tool-result media for anthropic models", async () => {
-     const anthropicModel: Provider.Model = {
-       ...model,
+ })

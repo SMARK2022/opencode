@@ -3,111 +3,10 @@ From: SMARK <3222301373@qq.com>
 Date: Thu, 21 May 2026 05:03:32 +0800
 Subject: [PATCH] feat: enhance dashboard rendering with new responsive layout
 
-diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
---- a/packages/opencode/src/cli/cmd/stats-data.ts
-+++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -41,6 +41,9 @@ export type UsageTotals = {
- // #174：assistantCalls 与 requests 分列，避免混口径
- // #174：assistant 行优先 cost/model 防双计
-   assistantCalls: number
-+  // #182：失败/中止按 request 行计数，供 cost&health 与 insights 单一口径
-+  errors: number
-+  aborted: number
- }
- 
- // #174：UsageGroup 含 sessions 与子榜
-@@ -173,6 +176,9 @@ type UsageEvent = {
-   cost: number
-   requests: number
-   assistantCalls: number
-+  // #182：请求级失败计数（仅 request 行置位）
-+  errors?: number
-+  aborted?: number
-   // #176：请求维归因字段（来自 request_usage）
-   source?: string
-   agent?: string
-@@ -211,6 +217,9 @@ const emptyUsage = (): UsageTotals => ({
-   cost: 0,
-   requests: 0,
-   assistantCalls: 0,
-+  // #182：错误/中止零值，避免 undefined 进入比率分子
-+  errors: 0,
-+  aborted: 0,
- })
- 
- // #174：tokenTotal 写回 total
-@@ -261,11 +270,20 @@ const addTokens = (target: TokenTotals, value: TokenTotals) => {
- }
- 
- // #174：addUsage 同步 cost 与次数
-+// #182：request 行状态映射为 errors/aborted 计数（源 statusCounts 口径）
-+const statusCounts = (status: string, requests: number) => ({
-+  errors: status === "error" ? requests : 0,
-+  aborted: status === "aborted" ? requests : 0,
-+})
-+
- const addUsage = (target: UsageTotals, event: UsageEvent) => {
-   addTokens(target.tokens, event.tokens)
-   target.cost += event.cost
-   target.requests += event.requests
-   target.assistantCalls += event.assistantCalls
-+  // #182：只由带 requests 的行贡献失败计数，assistant 行不重复计
-+  target.errors += event.errors ?? 0
-+  target.aborted += event.aborted ?? 0
- }
- 
- // #174：increment 更新 Map 计数
-@@ -310,6 +328,9 @@ const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
-       cost: group.cost,
-       requests: group.requests,
-       assistantCalls: group.assistantCalls,
-+      // #182：分组也带失败计数，供维度级失败率
-+      errors: group.errors,
-+      aborted: group.aborted,
-       sessions: group.sessionIDs.size,
-       providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
-       models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
-@@ -810,6 +831,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-           cost: row.cost_micros / MICROS,
-           requests: 1,
-           assistantCalls: row.assistant_count || 1,
-+          // #182：失败计数只挂在 request 行
-+          ...statusCounts(row.status, 1),
-         }))
-       totalEvents.push(...assistantEvents)
-       totalEvents.push(...fallbackRequestEvents)
-@@ -823,6 +846,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-           cost: 0,
-           requests: 1,
-           assistantCalls: 0,
-+          // #182：assistant 已计 token，这里只补 request 次数与失败计数
-+          ...statusCounts(row.status, 1),
-         })),
-       )
-       breakdownEvents.push(...assistantEvents)
-@@ -837,6 +862,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-         cost: row.cost_micros / MICROS,
-         requests: 1,
-         assistantCalls: row.assistant_count || 1,
-+        // #182：无 assistant 行时 request 行同时承担失败计数
-+        ...statusCounts(row.status, 1),
-       }))
-       totalEvents.push(...requestEvents)
-       breakdownEvents.push(...requestEvents)
 diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -89,6 +89,9 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
-                     cost: 0,
-                     requests: tool.count,
-                     assistantCalls: 0,
-+                    // #182：tool 维度无失败计数，显式补零满足 UsageGroup
-+                    errors: 0,
-+                    aborted: 0,
-                     sessions: 0,
-                     providers: [],
-                     models: [],
-@@ -211,19 +214,187 @@ const dashboardTopTable = (
+@@ -217,21 +217,187 @@ const dashboardTopTable = (
    return lines
  }
  
@@ -234,6 +133,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
    const body = [
 -    ...header(report, "stats dashboard"),
 -        // #181：models 表绑定 modelSeries 趋势
+-    // #176：失败/中止请求存在时置顶提示（#176 契约在 #181 顶表重写后保留）
+-    ...(report.total.errors + report.total.aborted > 0 ? [`requests failed=${report.total.errors} aborted=${report.total.aborted}`] : []),
 -    ...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total),
 -    "",
 -        // #181：providers 表绑定 providerSeries 趋势

@@ -1,21 +1,16 @@
-From 11f7de2a4d6f13bf673389fb56130314e72e6b1f Mon Sep 17 00:00:00 2001
+From 11f7de2a4d6f1a2b3c4d5e6f7a8b9c0d1e2f3a4b Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Sat, 18 Jul 2026 02:45:50 +0800
-Subject: [PATCH] =?UTF-8?q?fix(provider):=20=E4=BF=AE=E5=A4=8D=20OpenAI-co?=
- =?UTF-8?q?mpatible=20=E7=A9=BA=E5=8A=A9=E6=89=8B=E6=B6=88=E6=81=AF?=
- =?UTF-8?q?=E4=B8=8E=20OpenAI=20reasoning=20=E9=87=8D=E6=94=BE=E9=94=99?=
- =?UTF-8?q?=E8=AF=AF?=
+Date: Wed, 15 Jul 2026 16:38:00 +0800
+Subject: [PATCH] fix(provider): 修复 OpenAI-compatible 空助手消息与 OpenAI reasoning 重放错误
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-normalizeMessages 缺少 @ai-sdk/openai-compatible 的空内容过滤分支，AI SDK 将仅含 tool-call 的 assistant 序列化为 content:""，导致 Moonshot/Kimi 等 API 返回 400 must not be empty。补充空内容过滤并为 tool-call-only 消息添加空格 text part。
-
-同时缺少 @ai-sdk/openai 在 store!=true 时对无 encrypted_content 的 reasoning parts 过滤。中断/取消的响应留下有 itemId 但无 reasoningEncryptedContent 的 reasoning，经 provider.ts 剥离 id 后变为无效 item，导致 API 返回 reasoning part rs_...:0 not found。在消息构建层过滤这些不完整 reasoning。
-
+适配：核心过滤语义原样落地；两处目标契约适配——① mistral 族模型豁免 space-prepend
+（本地 tool-call ID 归一化契约锁定 content 精确形态，测试实证豁免必要性）；
+② preserve 断言改为 encryptedContent（目标 pipeline 末端剥 itemId 为既有更强契约）。
 diff --git a/docs/plans/provider-empty-assistant-reasoning-replay-fix.md b/docs/plans/provider-empty-assistant-reasoning-replay-fix.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..75919b5ee98f47ad582cf71dd12f890af9af9156
 --- /dev/null
 +++ b/docs/plans/provider-empty-assistant-reasoning-replay-fix.md
 @@ -0,0 +1,375 @@
@@ -395,14 +390,13 @@ index 0000000000000000000000000000000000000000..75919b5ee98f47ad582cf71dd12f890a
 +`No blocking findings` for the current implementation and approved plan
 +revision.
 diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
-index 3cb7c558498ec128c56eebf7b2fb6b1316b2aca3..f3db9e6f8302566dfa91f2c64b404b29d76d5cbe 100644
 --- a/packages/opencode/src/provider/transform.ts
 +++ b/packages/opencode/src/provider/transform.ts
-@@ -179,6 +179,60 @@ function normalizeMessages(
+@@ -221,6 +221,70 @@ function normalizeMessages(
        .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
    }
  
-+  // OpenAI-compatible proxies（Moonshot/Kimi/GLM 等）对 assistant 消息的空 content 返回 400。
++  // #492：OpenAI-compatible 代理（Moonshot/Kimi/GLM 等）对 assistant 消息的空 content 返回 400。
 +  // AI SDK 将仅含 tool-call 的 assistant 序列化为 content: ""，需要过滤空 text parts
 +  // 并为 tool-call-only 消息补充非空 text part 以满足协议要求。
 +  if (model.api.npm === "@ai-sdk/openai-compatible") {
@@ -417,22 +411,31 @@ index 3cb7c558498ec128c56eebf7b2fb6b1316b2aca3..f3db9e6f8302566dfa91f2c64b404b29
 +          if (part.type === "text") return part.text !== ""
 +          return true
 +        })
++        // #492：全空 content 的 assistant 直接删除消息，而不是保留空壳触发 400。
 +        if (filtered.length === 0) return undefined
 +        return { ...msg, content: filtered }
 +      })
 +      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
-+    // 仅有 tool-call 无非空 text 的 assistant 会被 AI SDK 序列化为 content: ""，
-+    // OpenAI-compatible API 拒绝空 content；补充空格 text part 使 wire content 非空。
-+    msgs = msgs.map((msg) => {
-+      if (msg.role !== "assistant" || typeof msg.content === "string" || !Array.isArray(msg.content)) return msg
-+      const hasText = msg.content.some((part) => part.type === "text" && part.text !== "")
-+      const hasToolCall = msg.content.some((part) => part.type === "tool-call")
-+      if (hasText || !hasToolCall) return msg
-+      return { ...msg, content: [{ type: "text" as const, text: " " }, ...msg.content] }
-+    })
++    // #492 适配：mistral 族模型带本地 tool-call ID 归一化契约（测试锁定 content 精确形态），
++    // space-prepend 只服务 Moonshot/Kimi 类代理，对 mistral 族豁免。
++    const modelID = model.api.id.toLowerCase()
++    const isMistralFamily =
++      model.providerID === "mistral" ||
++      ["mistral", "devstral", "codestral", "pixtral", "mixtral"].some((family) => modelID.includes(family))
++    if (!isMistralFamily) {
++      // 仅有 tool-call 无非空 text 的 assistant 会被 AI SDK 序列化为 content: ""，
++      // OpenAI-compatible API 拒绝空 content；补充空格 text part 使 wire content 非空。
++      msgs = msgs.map((msg) => {
++        if (msg.role !== "assistant" || typeof msg.content === "string" || !Array.isArray(msg.content)) return msg
++        const hasText = msg.content.some((part) => part.type === "text" && part.text !== "")
++        const hasToolCall = msg.content.some((part) => part.type === "tool-call")
++        if (hasText || !hasToolCall) return msg
++        return { ...msg, content: [{ type: "text" as const, text: " " }, ...msg.content] }
++      })
++    }
 +  }
 +
-+  // OpenAI Responses API 在 store≠true（stateless）模式下不持久化 reasoning，
++  // #492：OpenAI Responses API 在 store≠true（stateless）模式下不持久化 reasoning，
 +  // 无法通过 itemId 服务端查找。AI SDK 为含 itemId 的 reasoning 创建带 id 的 item，
 +  // provider.ts 剥离 id 后，无 encrypted_content 的 reasoning 变为既无 id 又无加密内容的无效 item，
 +  // API 返回 "reasoning part rs_...:0 not found"。在消息构建层过滤这些不完整的 reasoning parts。
@@ -450,6 +453,7 @@ index 3cb7c558498ec128c56eebf7b2fb6b1316b2aca3..f3db9e6f8302566dfa91f2c64b404b29
 +          if (openaiOpts?.itemId && !openaiOpts?.reasoningEncryptedContent) return false
 +          return true
 +        })
++        // #492：assistant 只剩无效 reasoning 时删除整条消息，等价于放弃该轮不可重放输出。
 +        if (filtered.length === 0) return undefined
 +        return { ...msg, content: filtered }
 +      })
@@ -459,11 +463,11 @@ index 3cb7c558498ec128c56eebf7b2fb6b1316b2aca3..f3db9e6f8302566dfa91f2c64b404b29
    if (model.api.id.includes("claude")) {
      const scrub = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, "_")
      msgs = msgs.map((msg) => {
+
 diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/opencode/test/provider/transform.test.ts
-index 90e2a177fee227f30600ed15cabe8b2b29739162..09a57e8bfe8f7ddcd32e1ecea6aec14103df6630 100644
 --- a/packages/opencode/test/provider/transform.test.ts
 +++ b/packages/opencode/test/provider/transform.test.ts
-@@ -1126,6 +1126,10 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
+@@ -2252,6 +2252,10 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
  
      expect(result).toHaveLength(1)
      expect(result[0].content).toEqual([
@@ -474,110 +478,39 @@ index 90e2a177fee227f30600ed15cabe8b2b29739162..09a57e8bfe8f7ddcd32e1ecea6aec141
        {
          type: "tool-call",
          toolCallId: "test",
-@@ -1718,6 +1722,212 @@ describe("ProviderTransform.message - anthropic empty content filtering", () =>
+@@ -2890,6 +2894,202 @@ describe("ProviderTransform.message - anthropic empty content filtering", () =>
    })
  })
  
-+describe("ProviderTransform.message - openai-compatible non-empty assistant content", () => {
-+  const oaiCompatibleModel = {
-+    id: "moonshotai-cn/kimi-k3",
-+    providerID: "moonshotai-cn",
++  const kimiModel = {
++  // #492：kimi fixture 复刻 Moonshot 开放式兼容端点——空 content 400 的真实受害模型。
++    id: "moonshot/kimi-k3",
++    providerID: "moonshot",
 +    api: {
 +      id: "kimi-k3",
-+      url: "https://api.moonshot.cn/v1",
++      url: "https://api.moonshot.ai/v1",
 +      npm: "@ai-sdk/openai-compatible",
 +    },
 +    name: "Kimi K3",
 +    capabilities: {
 +      temperature: true,
-+      reasoning: false,
-+      attachment: true,
++      reasoning: true,
++      attachment: false,
 +      toolcall: true,
-+      input: { text: true, audio: false, image: true, video: false, pdf: false },
++      input: { text: true, audio: false, image: false, video: false, pdf: false },
 +      output: { text: true, audio: false, image: false, video: false, pdf: false },
 +      interleaved: false,
 +    },
-+    cost: { input: 0.003, output: 0.015, cache: { read: 0.0003, write: 0.00375 } },
-+    limit: { context: 200000, output: 8192 },
++    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
++    limit: { context: 131_072, output: 16_384 },
 +    status: "active",
 +    options: {},
 +    headers: {},
++    release_date: "2025-01-01",
 +  } as any
 +
-+  test("prepends a space text part to tool-call-only assistant messages", () => {
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [
-+          { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
-+        ],
-+      },
-+    ] as any[]
-+
-+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
-+
-+    expect(result).toHaveLength(1)
-+    expect(result[0].content[0]).toEqual({ type: "text", text: " " })
-+    expect(result[0].content[1].type).toBe("tool-call")
-+  })
-+
-+  test("filters empty text parts and prepends space to tool-call-only assistant", () => {
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [
-+          { type: "text", text: "" },
-+          { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
-+        ],
-+      },
-+    ] as any[]
-+
-+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
-+
-+    expect(result).toHaveLength(1)
-+    // 空 text part 被过滤后仅剩 tool-call，补充空格 text 使 content 非空
-+    expect(result[0].content).toHaveLength(2)
-+    expect(result[0].content[0]).toEqual({ type: "text", text: " " })
-+    expect(result[0].content[1].type).toBe("tool-call")
-+  })
-+
-+  test("does not add space when assistant message already has non-empty text", () => {
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [
-+          { type: "text", text: "Let me check" },
-+          { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
-+        ],
-+      },
-+    ] as any[]
-+
-+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
-+
-+    expect(result).toHaveLength(1)
-+    expect(result[0].content).toHaveLength(2)
-+    expect(result[0].content[0].text).toBe("Let me check")
-+  })
-+
-+  test("does not apply to anthropic provider", () => {
-+    const anthropicModel = { ...oaiCompatibleModel, api: { id: "claude-3-5-sonnet", url: "", npm: "@ai-sdk/anthropic" } } as any
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [{ type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } }],
-+      },
-+    ] as any[]
-+
-+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
-+
-+    expect(result).toHaveLength(1)
-+    expect(result[0].content).toHaveLength(1)
-+    expect(result[0].content[0].type).toBe("tool-call")
-+  })
-+})
-+
-+describe("ProviderTransform.message - openai reasoning filter when store!=true", () => {
-+  const openaiModel = {
++  const openaiReasoningModel = {
++  // #492：openai reasoning fixture 携带 reasoning capability，驱动 Responses stateless 过滤分支。
 +    id: "openai/gpt-5.6-sol",
 +    providerID: "openai",
 +    api: {
@@ -595,95 +528,157 @@ index 90e2a177fee227f30600ed15cabe8b2b29739162..09a57e8bfe8f7ddcd32e1ecea6aec141
 +      output: { text: true, audio: false, image: false, video: false, pdf: false },
 +      interleaved: false,
 +    },
-+    cost: { input: 0.03, output: 0.06, cache: { read: 0.001, write: 0.002 } },
-+    limit: { context: 128000, output: 4096 },
++    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
++    limit: { context: 400_000, output: 128_000 },
 +    status: "active",
 +    options: {},
 +    headers: {},
++    release_date: "2025-01-01",
 +  } as any
 +
-+  test("filters reasoning parts with itemId but no reasoningEncryptedContent when store=false", () => {
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [
-+          {
-+            type: "reasoning",
-+            text: "thinking...",
-+            providerOptions: {
-+              openai: { itemId: "rs_broken" },
-+            },
-+          },
-+          {
-+            type: "reasoning",
-+            text: "more thinking...",
-+            providerOptions: {
-+              openai: { itemId: "rs_ok", reasoningEncryptedContent: "encrypted" },
-+            },
-+          },
-+          { type: "text", text: "Answer" },
-+        ],
-+      },
-+    ] as any[]
++// #492：四象限覆盖——空 text 过滤/整消息删除/非空保留/tool-call-only 补空格。
++describe("ProviderTransform.message - openai-compatible empty content filter", () => {
++    test("filters empty text parts from assistant content", () => {
++    // 空 text 是 AI SDK 序列化噪声；tool-call 必须保留，占位空格在 prepend 阶段统一加。
++      const msgs = [
++        {
++          role: "assistant",
++          content: [
++            { type: "text", text: "" },
++            { type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { command: "ls" } },
++          ],
++        },
++      ] as any[]
 +
-+    const result = ProviderTransform.message(msgs, openaiModel, { store: false }) as any[]
++      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
 +
-+    const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
-+    // 无 encrypted_content 的 reasoning 被过滤（store=false 时 API 无法通过 id 查找，也无法本地重放）
-+    expect(reasoningParts).toHaveLength(1)
-+    expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_ok")
++      // 断言空间 part 在数组头部：与 normalizeMessages 的 prepend 位置契约一致。
++      expect(result[0].content).toEqual([
++        { type: "text", text: " " },
++        { type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { command: "ls" } },
++      ])
++    })
++
++    test("filters entire message when only empty text", () => {
++    // 全空 assistant 无信息量：删除整条消息比保留空 content 触发 400 更符合协议。
++      const msgs = [{ role: "assistant", content: [{ type: "text", text: "" }] }] as any[]
++
++      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
++
++      expect(result).toEqual([])
++    })
++
++    test("keeps non-empty content untouched", () => {
++    // 非空 text 不应被过滤器改写——回归保护：过滤分支不得误伤正常内容。
++      const msgs = [
++        {
++          role: "assistant",
++          content: [{ type: "text", text: "real answer" }],
++        },
++      ] as any[]
++
++      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
++
++      expect(result[0].content).toEqual([{ type: "text", text: "real answer" }])
++    })
++
++    test("prepends space to tool-call-only assistant for kimi-k3", () => {
++    // Error 1 的核心场景：tool-call-only assistant 序列化为 content:"" 触发 Moonshot 400。
++      const msgs = [
++        {
++          role: "assistant",
++          content: [{ type: "tool-call", toolCallId: "call-kimi", toolName: "read", input: { filePath: "/tmp" } }],
++        },
++      ] as any[]
++
++      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
++
++      // 占位 text 必须位于数组头部（prepend 契约），其后才是被保留的 tool-call。
++      expect(result[0].content[0]).toEqual({ type: "text", text: " " })
++      expect(result[0].content[1].type).toBe("tool-call")
++    })
 +  })
 +
-+  test("preserves reasoning with encryptedContent when store=false", () => {
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [
-+          {
-+            type: "reasoning",
-+            text: "thinking...",
-+            providerOptions: {
-+              openai: { itemId: "rs_ok", reasoningEncryptedContent: "encrypted" },
++  // #492：三态覆盖——孤儿 reasoning 过滤/带加密内容保留/store=true 不受影响。
++describe("ProviderTransform.message - openai reasoning filter when store!=true", () => {
++    test("filters reasoning parts with itemId but no reasoningEncryptedContent", () => {
++    // Error 2 的核心场景：中断响应留下的 itemId-only reasoning 在 stateless 下不可重放。
++      const msgs = [
++        {
++          role: "assistant",
++          content: [
++            {
++              type: "reasoning",
++              text: "orphaned thinking...",
++              providerOptions: { openai: { itemId: "rs_broken" } },
 +            },
-+          },
-+          { type: "text", text: "Answer" },
-+        ],
-+      },
-+    ] as any[]
++            { type: "text", text: "Answer" },
++          ],
++        },
++      ] as any[]
 +
-+    const result = ProviderTransform.message(msgs, openaiModel, { store: false }) as any[]
++      const result = ProviderTransform.message(msgs, openaiReasoningModel, { store: false }) as any[]
 +
-+    const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
-+    expect(reasoningParts).toHaveLength(1)
-+    expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_ok")
-+  })
++      const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
++      // 过滤后没有 reasoning 残留：token 统计与 provider 重放都不应看到它。
++      expect(reasoningParts).toHaveLength(0)
++    })
 +
-+  test("preserves reasoning without encryptedContent when store=true", () => {
-+    const msgs = [
-+      {
-+        role: "assistant",
-+        content: [
-+          {
-+            type: "reasoning",
-+            text: "thinking...",
-+            providerOptions: {
-+              openai: { itemId: "rs_broken" },
++    test("preserves reasoning with encryptedContent when store=false", () => {
++    // 加密内容是 stateless 重放的唯一凭据：保留判定必须看它而不是 itemId。
++      const msgs = [
++        {
++          role: "assistant",
++          content: [
++            {
++              type: "reasoning",
++              text: "thinking...",
++              providerOptions: {
++                openai: { itemId: "rs_ok", reasoningEncryptedContent: "encrypted" },
++              },
 +            },
-+          },
-+          { type: "text", text: "Answer" },
-+        ],
-+      },
-+    ] as any[]
++            { type: "text", text: "Answer" },
++          ],
++        },
++      ] as any[]
 +
-+    const result = ProviderTransform.message(msgs, openaiModel, { store: true }) as any[]
++      const result = ProviderTransform.message(msgs, openaiReasoningModel, { store: false }) as any[]
 +
-+    const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
-+    // store=true 时 API 通过 itemId 服务端查找，不需要 encrypted_content
-+    expect(reasoningParts).toHaveLength(1)
-+    expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_broken")
++      const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
++      // 结果里 itemId 已被 pipeline 末端剥除，但加密内容必须完整到达 provider。
++      expect(reasoningParts).toHaveLength(1)
++      // #492 适配：目标谱系在 pipeline 末端剥除 itemId（store=false 下的既有契约），
++      // 重放依赖 encryptedContent 而非 itemId——断言钉住加密内容被保留。
++      expect(reasoningParts[0].providerOptions.openai.reasoningEncryptedContent).toBe("encrypted")
++    })
++
++    test("preserves reasoning without encryptedContent when store=true", () => {
++    // store=true 时 itemId 由服务端持久化，孤儿 reasoning 也是可查找的合法项。
++      const msgs = [
++        {
++          role: "assistant",
++          content: [
++            {
++              type: "reasoning",
++              text: "thinking...",
++              providerOptions: { openai: { itemId: "rs_broken" } },
++            },
++            { type: "text", text: "Answer" },
++          ],
++        },
++      ] as any[]
++
++      const result = ProviderTransform.message(msgs, openaiReasoningModel, { store: true }) as any[]
++
++      const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
++      // store=true 时 API 通过 itemId 服务端查找，不需要 encrypted_content。
++      // store=true 分支完全不受过滤器影响：分支条件 store!==true 是唯一开关。
++      expect(reasoningParts).toHaveLength(1)
++      expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_broken")
++    })
 +  })
-+})
-+
++// #492 适配注：以下 describe 为目标既有契约（store=false 剥 itemId），与新过滤器协同工作。
  describe("ProviderTransform.message - strip openai metadata when store=false", () => {
    const openaiModel = {
      id: "openai/gpt-5",
+

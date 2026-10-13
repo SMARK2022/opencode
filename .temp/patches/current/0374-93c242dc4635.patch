@@ -32,9 +32,7 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
  const BaseParameterFields = {
    description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
    prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
-@@ -327,10 +332,30 @@
-             : parts,
-         })
+@@ -337,8 +342,28 @@
          let text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
 -        // [local-smark] 空结果验证：子 agent 未产出任何文本时返回提示，
 -        // 返回裸字符串由调用方统一包裹，避免 <task_result> 双重嵌套。

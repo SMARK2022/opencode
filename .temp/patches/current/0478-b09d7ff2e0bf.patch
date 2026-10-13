@@ -1,53 +1,40 @@
-From b09d7ff2e0bf6268a4ee5044d62e45201e4ad0a0 Mon Sep 17 00:00:00 2001
+From b09d7ff2e0bf8e33a15a8b1ac4a8f9c0e0f8d2a5 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 5 Jul 2026 22:32:03 +0800
-Subject: [PATCH] =?UTF-8?q?fix(revert):=20revert/restore=20=E6=8C=89?=
- =?UTF-8?q?=E5=B7=A5=E5=85=B7=E8=A7=A6=E7=A2=B0=E6=96=87=E4=BB=B6=E8=BF=87?=
- =?UTF-8?q?=E6=BB=A4=EF=BC=8C=E9=81=BF=E5=85=8D=E8=B7=A8=20session=20?=
- =?UTF-8?q?=E6=B1=A1=E6=9F=93?=
+Date: Tue, 7 Jul 2026 10:12:29 +0800
+Subject: [PATCH] =?UTF-8?q?fix(revert):=20revert/restore=20=E6=8C=89=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E8=A7=A6=E7=A2=B0=E6=96=87=E4=BB=B6=E8=BF=87=E6=BB=A4?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-同目录多 session 共享 snapshot gitdir，snapshot.patch() 列出的变更文件
-包含其他 session 的改动。revert 前用 computeDiff 提取本 session 工具
-触碰的文件，过滤 patch.files 避免撤回其他 session 的文件。
-
-安全网：当 session 无工具 metadata（纯 bash 等）时不过滤，保持原始
-全部 revert 行为，确保向后兼容。
-
-restore 改为 git checkout <snapshot> -- <files> 精确恢复，unrevert/
-二次 revert 只恢复被 revert 的文件。Revert schema 新增 files 字段
-存储 revert 文件列表。restore 同时从 read-tree+checkout-index -a 改为
-git checkout -- . 目录限定，snap.diff cwd 从 worktree 改为 directory
-保持与 patch/diffFull 一致。
-
+适配（V1-only）：目标 schema 包 Revert.State 已有 files: FileDiff[]（V2 语义，core
+revert/projector 消费），V1 路径列表另立 revertedPaths 键避免同键不同义；opencode
+session.ts Revert struct + fromRow + toRow 三处显式映射同步；core/sql.ts revert 列
+$type<Revert.State>() 自动吸收新可选字段零改动。computeDiff 经 0477 已是纯工具流，
+安全网前提（纯 bash turn → toolFiles 空 → 不过滤）在本目标重新成立。revert.ts 链上
+#393/#242 重写后以 acquireUseRelease + EventV2Bridge 结构手工重放源语义；snapshot
+四 hunk 近机械（log API 为 Effect.logInfo/logError 风格）。
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
-index 26367d93fe58675fb807e338309f73ba8024cb5b..cddc49680dc9de8f0a771cda7e898165a4f4a944 100644
 --- a/packages/opencode/src/session/revert.ts
 +++ b/packages/opencode/src/session/revert.ts
-@@ -1,8 +1,10 @@
+@@ -2,2 +2,4 @@
  import { Effect, Layer, Context, Schema, Option } from "effect"
 +import path from "path"
- import { Bus } from "../bus"
- import { Snapshot } from "../snapshot"
- import { Storage } from "@/storage/storage"
- import { SyncEvent } from "../sync"
 +import { InstanceState } from "@/effect/instance-state"
- import * as Log from "@opencode-ai/core/util/log"
- import * as Session from "./session"
- import { MessageV2 } from "./message-v2"
-@@ -71,17 +73,37 @@ export const layer = Layer.effect(
- 
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
+--- a/packages/opencode/src/session/revert.ts
++++ b/packages/opencode/src/session/revert.ts
+@@ -83,15 +83,35 @@
        if (!rev) return session
  
-+      // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
-+      // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
-+      // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
-+      // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
-+      // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
-+      const range = all.filter((msg) => msg.info.id >= rev.messageID)
-+      const toolDiffs = yield* summary.computeDiff({ messages: range })
++      // 按工具触碰文件过滤 patch：同目录多 session 共享 snapshot gitdir 时 patch.files
++      // 含其他 session 的改动。computeDiff（0477 后纯工具流）提取本 session 工具实际
++      // 触碰的文件，过滤 patch.files 避免 revert 覆盖其他 session 的文件。
++      // 安全网：无工具 metadata（纯 bash turn 或旧数据）时 toolFiles 为空，不过滤，
++      // 保持原始全量 revert 行为——不误丢非工具 session 的回滚能力。
++      const toolIndex = all.findIndex((msg) => msg.info.id === rev.messageID)
++      const toolRange = toolIndex < 0 ? [] : all.slice(toolIndex)
++      const toolDiffs = yield* summary.computeDiff({ messages: toolRange })
 +      const ictx = yield* InstanceState.context
 +      const toolFiles = new Set(
 +        toolDiffs
@@ -58,151 +45,140 @@ index 26367d93fe58675fb807e338309f73ba8024cb5b..cddc49680dc9de8f0a771cda7e898165
 +      const filteredPatches = toolFiles.size > 0
 +        ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
 +        : patches
-+      // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
++      // 记录被 revert 的文件列表（revertedPaths），供 unrevert/二次 revert 精确恢复
 +      const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
 +
        rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
 -      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
 -      yield* snap.revert(patches)
 +      // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
-+      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
++      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.revertedPaths)
 +      yield* snap.revert(filteredPatches)
        if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
--      const range = all.filter((msg) => msg.info.id >= rev.messageID)
+-      const index = all.findIndex((msg) => msg.info.id === rev.messageID)
+-      const range = index < 0 ? [] : all.slice(index)
 -      const diffs = yield* summary.computeDiff({ messages: range })
 +      const diffs = toolDiffs
        yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-       yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
+       yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
        yield* sessions.setRevert({
          sessionID: input.sessionID,
 -        revert: rev,
-+        revert: { ...rev, files: revertedFiles.length > 0 ? revertedFiles : undefined },
++        revert: { ...rev, revertedPaths: revertedFiles.length > 0 ? revertedFiles : undefined },
          summary: {
-           additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-           deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-@@ -96,7 +118,8 @@ export const layer = Layer.effect(
-       yield* state.assertNotBusy(input.sessionID)
-       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-       if (!session.revert) return session
--      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
-+      // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
-+      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
-       yield* sessions.clearRevert(input.sessionID)
-       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-     })
-diff --git a/packages/opencode/src/session/session.sql.ts b/packages/opencode/src/session/session.sql.ts
-index 610ca72c4696a7ef3f4ac024b7dd3d2e7595abc6..3ad18783d23d53e2ccbe655c73928fac1d377439 100644
---- a/packages/opencode/src/session/session.sql.ts
-+++ b/packages/opencode/src/session/session.sql.ts
-@@ -39,7 +39,7 @@ export const SessionTable = sqliteTable(
-     tokens_reasoning: integer().notNull().default(0),
-     tokens_cache_read: integer().notNull().default(0),
-     tokens_cache_write: integer().notNull().default(0),
--    revert: text({ mode: "json" }).$type<{ messageID: MessageID; partID?: PartID; snapshot?: string; diff?: string }>(),
-+    revert: text({ mode: "json" }).$type<{ messageID: MessageID; partID?: PartID; snapshot?: string; diff?: string; files?: string[] }>(),
-     permission: text({ mode: "json" }).$type<Permission.Ruleset>(),
-     agent: text(),
-     model: text({ mode: "json" }).$type<{
+diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
+--- a/packages/opencode/src/session/revert.ts
++++ b/packages/opencode/src/session/revert.ts
+@@ -121,1 +121,1 @@
+-            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
++            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.revertedPaths)
+diff --git a/packages/schema/src/revert.ts b/packages/schema/src/revert.ts
+--- a/packages/schema/src/revert.ts
++++ b/packages/schema/src/revert.ts
+@@ -21,2 +21,6 @@
+   files: Schema.Array(FileDiff).pipe(optional),
++  // V1 revert 的精确恢复路径列表（绝对路径，opencode 侧 session revert 使用）；
++  // 与 files（V2 FileDiff 语义）分键存储避免同键不同义。旧数据无此字段时
++  // restore 退回 -- . 恢复整个目录。
++  revertedPaths: Schema.Array(Schema.String).pipe(optional),
+ }).annotate({ identifier: "Revert.State" })
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 365629eed653948d09bc36d03bb69ab3ee14458d..3e584c8de4eb65b0b51028688fa2d8c3897fee4c 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -252,6 +252,10 @@ const Revert = Schema.Struct({
-   partID: optionalOmitUndefined(PartID),
-   snapshot: optionalOmitUndefined(Schema.String),
-   diff: optionalOmitUndefined(Schema.String),
-+  // 被 revert 的工具触碰文件列表（绝对路径），用于 restore 精确恢复，
-+  // 避免同目录多 session 场景下 restore 覆盖其他 session 的文件。
-+  // 旧数据无此字段，restore 退回 -- . 恢复整个目录。
-+  files: optionalOmitUndefined(Schema.Array(Schema.String)),
+@@ -211,2 +211,5 @@
+   diff: optional(Schema.String),
++  // 被 revert 的工具触碰文件列表（绝对路径），供 restore 精确恢复；
++  // 与 schema 包 Revert.State.revertedPaths 对应，旧数据缺省时整目录恢复。
++  revertedPaths: optional(Schema.Array(Schema.String)),
  })
- 
- const Model = Schema.Struct({
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -72,2 +72,4 @@
+         diff: row.revert.diff,
++        // schema 侧为 readonly 数组，session struct 期望可变数组——展开拷贝断开引用
++        revertedPaths: row.revert.revertedPaths ? [...row.revert.revertedPaths] : undefined,
+       }
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -147,2 +147,3 @@
+           diff: info.revert.diff,
++          revertedPaths: info.revert.revertedPaths,
+         }
 diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
-index 155423a0b1b635d450f724bbe60704db508537ee..7daffc4f8857e1d2d3fc29736ad5de70e0101791 100644
 --- a/packages/opencode/src/snapshot/index.ts
 +++ b/packages/opencode/src/snapshot/index.ts
-@@ -47,7 +47,7 @@ export interface Interface {
-   readonly cleanup: () => Effect.Effect<void>
-   readonly track: () => Effect.Effect<string | undefined>
-   readonly patch: (hash: string) => Effect.Effect<Patch>
+@@ -41,1 +41,1 @@
 -  readonly restore: (snapshot: string) => Effect.Effect<void>
 +  readonly restore: (snapshot: string, files?: string[]) => Effect.Effect<void>
-   readonly revert: (patches: Patch[]) => Effect.Effect<void>
-   readonly diff: (hash: string) => Effect.Effect<string>
-   readonly diffFull: (from: string, to: string) => Effect.Effect<FileDiff[]>
-@@ -342,27 +342,25 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
-             )
-           })
- 
--          const restore = Effect.fnUntraced(function* (snapshot: string) {
-+          const restore = Effect.fnUntraced(function* (snapshot: string, files?: string[]) {
-             return yield* locked(
-               Effect.gen(function* () {
-                 log.info("restore", { commit: snapshot })
--                const result = yield* git([...core, ...args(["read-tree", snapshot])], { cwd: state.worktree })
--                if (result.code === 0) {
--                  const checkout = yield* git([...core, ...args(["checkout-index", "-a", "-f"])], {
--                    cwd: state.worktree,
--                  })
--                  if (checkout.code === 0) return
--                  log.error("failed to restore snapshot", {
--                    snapshot,
--                    exitCode: checkout.code,
--                    stderr: checkout.stderr,
--                  })
--                  return
--                }
-+                // 目录限定的 restore：用 git checkout <snapshot> -- <pathspec> 替代
-+                // read-tree + checkout-index -a。旧实现的 checkout-index -a 无 pathspec，
-+                // 会把共享 snapshot index 中所有文件写入 worktree——包括其他 session
-+                // 目录下的文件（共享 gitdir 场景）以及同目录下其他 session 改动的文件。
-+                // 当 files 提供时（revert/unrevert 精确恢复），只 checkout 这些文件，
-+                // 避免覆盖同目录其他 session 的改动。无 files 时退回 -- . 恢复整个目录。
-+                const pathspec = files && files.length > 0 ? files : ["."]
-+                const checkout = yield* git([...core, ...args(["checkout", snapshot, "--", ...pathspec])], {
-+                  cwd: state.directory,
-+                })
-+                if (checkout.code === 0) return
-                 log.error("failed to restore snapshot", {
-                   snapshot,
--                  exitCode: result.code,
--                  stderr: result.stderr,
-+                  exitCode: checkout.code,
-+                  stderr: checkout.stderr,
-                 })
-               }),
-             )
-@@ -487,8 +485,12 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
-             return yield* locked(
-               Effect.gen(function* () {
-                 yield* add()
-+                // cwd 必须为 state.directory 而非 state.worktree，使 -- "." 限定到
-+                // 当前 session 目录。旧实现用 cwd: state.worktree 导致 pathspec "."
-+                // 匹配整个 worktree，diff 文本会包含其他目录（其他 session）的改动。
-+                // 与 patch() 和 diffFull() 的目录限定保持一致。
-                 const result = yield* git([...quote, ...args(["diff", "--cached", "--no-ext-diff", hash, "--", "."])], {
+diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
+--- a/packages/opencode/src/snapshot/index.ts
++++ b/packages/opencode/src/snapshot/index.ts
+@@ -394,24 +394,21 @@
+-        const restore = Effect.fnUntraced(function* (snapshot: string) {
++        const restore = Effect.fnUntraced(function* (snapshot: string, files?: string[]) {
+           return yield* locked(
+             Effect.gen(function* () {
+               yield* Effect.logInfo("restore", { commit: snapshot })
+-              const result = yield* git([...core, ...args(["read-tree", snapshot])], { cwd: state.worktree })
+-              if (result.code === 0) {
+-                const checkout = yield* git([...core, ...args(["checkout-index", "-a", "-f"])], {
 -                  cwd: state.worktree,
-+                  cwd: state.directory,
-                 })
-                 if (result.code !== 0) {
-                   log.warn("failed to get diff", {
-@@ -751,8 +753,8 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
-         patch: Effect.fn("Snapshot.patch")(function* (hash: string) {
-           return yield* InstanceState.useEffect(state, (s) => s.patch(hash))
-         }),
--        restore: Effect.fn("Snapshot.restore")(function* (snapshot: string) {
--          return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot))
-+        restore: Effect.fn("Snapshot.restore")(function* (snapshot: string, files?: string[]) {
-+          return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot, files))
-         }),
-         revert: Effect.fn("Snapshot.revert")(function* (patches: Patch[]) {
-           return yield* InstanceState.useEffect(state, (s) => s.revert(patches))
+-                })
+-                if (checkout.code === 0) return
+-                yield* Effect.logError("failed to restore snapshot", {
+-                  snapshot,
+-                  exitCode: checkout.code,
+-                  stderr: checkout.stderr,
+-                })
+-                return
+-              }
++              // 目录限定的 restore：git checkout <snapshot> -- <pathspec> 替代
++              // read-tree + checkout-index -a。旧实现无 pathspec 会把共享 index 中
++              // 所有文件写入 worktree（含其他 session 目录/其他 session 改动）。
++              // files 提供时（revert/unrevert 精确恢复）只 checkout 这些文件；
++              // 无 files 时退回 -- . 恢复整个目录（当前 session 的目录限定）。
++              const pathspec = files && files.length > 0 ? files : ["."]
++              const checkout = yield* git([...core, ...args(["checkout", snapshot, "--", ...pathspec])], {
++                cwd: state.directory,
++              })
++              if (checkout.code === 0) return
+               yield* Effect.logError("failed to restore snapshot", {
+                 snapshot,
+-                exitCode: result.code,
+-                stderr: result.stderr,
++                exitCode: checkout.code,
++                stderr: checkout.stderr,
+               })
+             }),
+           )
+diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
+--- a/packages/opencode/src/snapshot/index.ts
++++ b/packages/opencode/src/snapshot/index.ts
+@@ -553,4 +553,8 @@
+               yield* add()
++              // cwd 必须为 state.directory 而非 state.worktree，使 -- "." 限定到
++              // 当前 session 目录；旧实现整 worktree 匹配会把共享 index 中其他
++              // 目录（其他 session）的改动泄入 diff 文本。与 patch()/diffFull()
++              // 的目录限定保持一致。
+               const result = yield* git([...quote, ...args(["diff", "--cached", "--no-ext-diff", hash, "--", "."])], {
+-                cwd: state.worktree,
++                cwd: state.directory,
+               })
+diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
+--- a/packages/opencode/src/snapshot/index.ts
++++ b/packages/opencode/src/snapshot/index.ts
+@@ -814,3 +814,3 @@
+-      restore: Effect.fn("Snapshot.restore")(function* (snapshot: string) {
+-        return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot))
++      restore: Effect.fn("Snapshot.restore")(function* (snapshot: string, files?: string[]) {
++        return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot, files))
+       }),
 diff --git a/packages/opencode/test/snapshot/snapshot.test.ts b/packages/opencode/test/snapshot/snapshot.test.ts
-index b1eb20046b81d79c5df0ee2e6f826ec7b8a3554f..96778aa387ce67e979feaf06e03ac25b0588c56d 100644
 --- a/packages/opencode/test/snapshot/snapshot.test.ts
 +++ b/packages/opencode/test/snapshot/snapshot.test.ts
-@@ -1112,3 +1112,111 @@ it.instance(
+@@ -1216,3 +1216,111 @@
    }),
    { git: true },
  )

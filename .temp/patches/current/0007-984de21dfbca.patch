@@ -4,15 +4,15 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 @@ -1,6 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.17.20",
-+  "version": "1.17.20-smark",
+-  "version": "1.18.32",
++  "version": "1.18.32-smark",
    "name": "opencode",
    "type": "module",
    "license": "MIT",
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -1,5 +1,9 @@
+@@ -1,4 +1,8 @@
  #!/usr/bin/env bun
  
 +// 关键：必须在所有其他 import 之前加载 version-env，
@@ -20,7 +20,6 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 +import "./version-env"
 +
  import { $ } from "bun"
- import fs from "fs"
  import path from "path"
 diff --git a/packages/opencode/script/version-env.ts b/packages/opencode/script/version-env.ts
 new file mode 100644
@@ -29,8 +28,29 @@ new file mode 100644
 @@ -0,0 +1,7 @@
 +// 必须在所有其他 import 之前加载（尤其是 @opencode-ai/script），
 +// 确保 OPENCODE_VERSION 在模块求值时已设置。
-+// 用法: bun run build.ts --version=1.17.20-smark
++// 用法: bun run build.ts --version=1.18.32-smark
 +const versionArg = process.argv[2]
 +if (versionArg?.startsWith("--version=")) {
 +  process.env.OPENCODE_VERSION = versionArg.replace("--version=", "")
 +}
+
+
+
+
+
+diff --git a/bun.lock b/bun.lock
+index 7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c..49b3ab0f16ca59db4e89379c9ea64b31a44c0504 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -559,9 +559,10 @@
+         "@typescript/native-preview": "catalog:",
+       },
+     },
++    // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.18.32",
++      "version": "1.18.32-smark",
+       "bin": {
+         "opencode": "./bin/opencode",
+       },

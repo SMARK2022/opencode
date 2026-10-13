@@ -1365,18 +1365,19 @@ index 0000000000000000000000000000000000000000..c4e3e976751b651e6d0d043090756cb1
 +- Required `ceil(608 * 0.15) = 92`; ratio `18.4%`.
 +- Typecheck, scoped diff check, focused behavior suites, Goal/Tool/schema suites,
 +  and the complete Prompt suite passed.
+
 diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
-index e9ddc6b08702279c0c3e4a1704063afb82d5e864..e43d82218b73761a6d115a3fcfcbad9fa05ba655 100644
+index 9dbadc147..f60d89f93 100644
 --- a/packages/opencode/src/session/goal.ts
 +++ b/packages/opencode/src/session/goal.ts
-@@ -546,11 +546,51 @@ export const layer = Layer.effect(
+@@ -540,13 +540,53 @@ export const node = LayerNode.make({ service: Service, layer, deps: [EventV2Brid
  
- export const defaultLayer = layer.pipe(Layer.provide(Bus.layer))
+ export * as SessionGoal from "./goal"
  
-+// ordinary/replan 只切换 continuation 策略文案，不改变 Goal 持久化状态。
++// #517：ordinary/replan 只切换 continuation 策略文案，不改变 Goal 持久化状态。
 +export type ContinuationMode = "ordinary" | "replan"
 +
-+// strategy-switch 固定英文块：只在 replan 模式插入，且不得拼入 tool/path 等动态值。
++// #517：strategy-switch 固定英文块：只在 replan 模式插入，且不得拼入 tool/path 等动态值。
 +// 固定文本让模型看到稳定的行为边界；progress ledger 仍是唯一决定何时切换的 owner。
 +const STRATEGY_SWITCH_BLOCK = [
 +  '<strategy-switch mode="breadth-first-replan">',
@@ -1385,31 +1386,31 @@ index e9ddc6b08702279c0c3e4a1704063afb82d5e864..e43d82218b73761a6d115a3fcfcbad9f
 +  "Keep the Goal active. This mode changes the work strategy; it does not pause, narrow, complete, or block the Goal. Preserve the full objective and continue until the existing completion or blocked contract is genuinely satisfied.",
 +  "",
 +  "Evidence strength:",
-+  // exploration 与 advancement 必须在 prompt 中分层，避免模型把任意读取当作完成信号。
++  // #517：exploration 与 advancement 必须在 prompt 中分层，避免模型把任意读取当作完成信号。
 +  "- Exploration evidence shows that a new branch was inspected. It includes a new non-stub file version or line range, a new completed `grep` or `glob` request with a distinct normalized search scope, a first result from a verification command, or a distinct generic command result.",
 +  "- Advancement evidence shows a stronger state change. It includes an effective file diff, a newly completed Todo, or a changed result from a comparable verification command.",
-+  // 这两条固定说明对应 classifier 的两个布尔结果，防止 prompt 和代码各自发明边界。
++  // #517：这两条固定说明对应 classifier 的两个布尔结果，防止 prompt 和代码各自发明边界。
 +  "- Exploration evidence resets the raw no-activity count but does not leave this re-plan mode. Ordinary continuation resumes only after advancement evidence appears.",
 +  "- Text, reasoning, a rewritten plan, repeated tool input, an unchanged Todo snapshot, a no-op edit, or an identical command result is not qualifying evidence.",
 +  "- Do not manufacture a cosmetic edit, mark a Todo complete without completing it, or run an irrelevant command merely to leave this mode.",
 +  "",
 +  "Required breadth-first re-plan:",
-+  // BFS 只改变下一步选择顺序，不创建额外执行器，也不允许缩小用户 objective。
++  // #517：BFS 只改变下一步选择顺序，不创建额外执行器，也不允许缩小用户 objective。
 +  "1. Re-derive the complete requirements from the objective and authoritative referenced artifacts. Do not narrow the requested end state.",
 +  "2. Build a frontier of evidence nodes tied to the objective: interfaces, producers, consumers, callers, configuration, tests, documents, and external state.",
 +  "3. Mark which frontier nodes are already supported by current evidence and which remain unvisited or uncertain.",
 +  "4. Explore breadth-first. Inspect one shallow, unvisited node from each high-priority branch before deepening a branch that has already been explored.",
 +  "5. For each selected node, choose the smallest action that can distinguish competing explanations: a targeted read, a different search pattern, a focused command, a behavioral test, or a necessary edit.",
 +  "6. Record the result, update the frontier, and choose the next unvisited node from the same depth. Do not repeat the same file range, pattern, command, or unchanged edit unless external state has materially changed.",
-+  // 不要求模型为了满足 gate 制造改动；可达但无效的动作仍应保持 re-plan。
++  // #517：不要求模型为了满足 gate 制造改动；可达但无效的动作仍应保持 re-plan。
 +  "7. If exploration produces no advancement evidence, remain in breadth-first re-plan mode and move to another unvisited branch. Do not fall back to the previous repeated strategy.",
 +  "",
 +  "End-of-turn rule:",
-+  // 末尾规则把“有证据的探索”和“纯文字计划”区分开，防止 re-plan 自己成为停滞循环。
++  // #517：末尾规则把“有证据的探索”和“纯文字计划”区分开，防止 re-plan 自己成为停滞循环。
 +  "- State which frontier node was explored, what authoritative evidence was produced, and which node should be visited next.",
 +  "- A prose-only re-plan does not satisfy the progress gate; carry out at least one concrete evidence-producing action when a reachable action exists.",
 +  "- If current authoritative evidence already proves every requirement, perform the existing completion audit and mark the Goal complete. Do not create artificial work merely to satisfy the gate.",
-+  // blocked 仍由 GoalTool/SessionGoal 所有，strategy-switch 不能越权把停滞变成 terminal。
++  // #517：blocked 仍由 GoalTool/SessionGoal 所有，strategy-switch 不能越权把停滞变成 terminal。
 +  "- If a real blocker remains, follow the existing two-turn blocked audit exactly. Stagnation by itself is not a blocker.",
 +  "</strategy-switch>",
 +].join("\n")
@@ -1418,45 +1419,48 @@ index e9ddc6b08702279c0c3e4a1704063afb82d5e864..e43d82218b73761a6d115a3fcfcbad9f
 -// 以保持 provider prefix cache 稳定。文本对齐 Codex continuation.md，
 -// 仅做最小适配：thread goal → session goal，update_goal → the goal tool，
 -// 去掉 update_plan 段（OpenCode 无此工具）。
++// #517：replan 只在 Work from evidence 后插入 strategy-switch；ordinary 保持历史形状。
+ // [local-smark] 续跑 prompt 构造：纯函数，输出作为 synthetic user message 文本；
+ // 内容引用 objective 与剩余预算，使模型无需额外上下文即可自主决定下一步。
 -export function continuationPrompt(goal: Goal): string {
-+// 以保持 provider prefix cache 稳定。replan 只在 Work from evidence 后插入 strategy-switch。
 +export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinary"): string {
 +  // budget/remaining 每轮从当前 Goal 读取，避免 synthetic message 使用旧 usage 快照。
    const budget = goal.tokenBudget ?? "unbounded"
    const remaining = goal.tokenBudget != null ? Math.max(0, goal.tokenBudget - goal.tokensUsed) : "unbounded"
    return [
-@@ -573,6 +613,9 @@ export function continuationPrompt(goal: Goal): string {
-     "Work from evidence:",
+@@ -573,6 +613,8 @@ export function continuationPrompt(goal: Goal): string {
      "Use the current worktree and external state as authoritative. Previous conversation context can help locate relevant work, but inspect the current state before relying on it. Improve, replace, or remove existing work as needed to satisfy the actual objective.",
      "",
-+    // replan 模式才插入 BFS 策略块；ordinary 保持历史文案结构不变。
-+    // ordinary 保持既有 prompt 形状；只有 gate 明确设置 replan 才增加 BFS block。
+     // #364：保真度——每轮都朝请求的最终状态移动
++    // #517：replan 模式才插入 BFS 策略块；ordinary 保持历史文案结构不变。
 +    ...(mode === "replan" ? [STRATEGY_SWITCH_BLOCK, ""] : []),
      "Fidelity:",
      "- Optimize each turn for movement toward the requested end state, not for the smallest stable-looking subset or easiest passing change.",
      "- Do not substitute a narrower, safer, smaller, merely compatible, or easier-to-test solution because it is more likely to pass current tests.",
-@@ -592,9 +635,9 @@ export function continuationPrompt(goal: Goal): string {
-     'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
+@@ -594,9 +636,10 @@ export function continuationPrompt(goal: Goal): string {
      "",
+     // #364：受阻审计——同一阻塞条件连续三轮才允许标记 blocked
      "Blocked audit:",
 -    '- Call the goal tool with operate "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
 -    '- Before calling it again, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints.',
 -    '- If the same condition still prevents progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
++    // #517：首轮 blocked 指引改为 BFS 复核；two-turn 阈值与 exact reason 契约不变。
 +    '- The first blocked call starts the audit and keeps the Goal active; re-check the blocker breadth-first, inspect adjacent producers, consumers, tests, or configuration, and run a different focused check.',
 +    '- If any explored branch yields a viable path, continue working and do not call blocked again.',
 +    '- If the same blocker still prevents meaningful progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
      '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh audit with the same two-turn and exact-reason requirements.',
      '- Use operate "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
      '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',
+
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f37006cbd 100644
+index 9b44a0331..1bcf67bff 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -173,6 +173,266 @@ function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTu
+@@ -126,6 +126,267 @@ function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTu
    }
  }
  
-+// Goal progress gate：run-local 证据账本，不持久化、不写入 Goal 状态。
++// #517：Goal progress gate：run-local 证据账本，不持久化、不写入 Goal 状态。
 +// exploration 只证明活动；advancement（Todo 完成/有效 diff/验证结果变化）才能退出 replan。
 +type GoalProgressLedger = {
 +  // 每个集合都只属于一次 runLoop；Goal DB 不应被瞬时探索痕迹污染。
@@ -1485,9 +1489,9 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +  }
 +}
 +
++// #517：验证命令 allowlist——只识别仓库已有的验证入口，避免把任意带 check 字样的命令误判为测试。
 +function isVerificationShellCommand(command: string) {
 +  const cmd = command.trim().toLowerCase()
-+  // 只识别仓库已有的验证入口，避免把任意带“check”字样的命令误判为测试。
 +  // 不在此处扩展语义 evaluator；未知 command 保持 exploration-only。
 +  return (
 +    /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(cmd) ||
@@ -1497,21 +1501,21 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +  )
 +}
 +
++// #517：Shell tool 会在 metadata.output 尾部追加含 elapsed_ms/path 的运行时 notice，
++// 这些字段描述执行器而非验证结果，必须从 comparable signature 中移除。
 +function stableVerificationOutput(output: string) {
-+  // Shell tool 会在 metadata.output 尾部追加含 elapsed_ms/path 的运行时 notice，
-+  // 这些字段描述执行器而非验证结果，必须从 comparable signature 中移除。
 +  return output.replace(/<opencode_notice\b[^>]*\/>/g, "").trim()
 +}
 +
++// #517：去重必须发生在强度分类之前，否则重复证据会反复刷新停滞计数。
 +function recordIfNew(set: Set<string>, key: string) {
-+  // 去重必须发生在强度分类之前，否则重复证据会反复刷新停滞计数。
 +  if (set.has(key)) return false
 +  set.add(key)
 +  return true
 +}
 +
-+// 搜索 producer 会把相对路径解析到 instance directory；这里复现同一边界，
-+// 否则 `path` 缺省、`.` 和 `a/../.` 会被误判成不同搜索分支。
++// #517：搜索 producer 会把相对路径解析到 instance directory；这里复现同一边界，
++// 否则 path 缺省、`.` 和 `a/../.` 会被误判成不同搜索分支。
 +function normalizeSearchPatterns(value: unknown) {
 +  // producer 同时接受单个 glob 和数组；统一成排序后的列表才能识别等价输入。
 +  const patterns = Array.isArray(value) ? value : typeof value === "string" ? [value] : []
@@ -1519,19 +1523,20 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +}
 +
 +function normalizedSearchScope(input: Record<string, unknown>, directory: string) {
-+  // 缺省 path 与当前 instance 根目录等价，canonicalization 必须复用 search producer 的 realpath 边界。
++  // 缺省 path 与当前 instance 根目录等价，canonicalization 复用 search producer 的 realpath 边界。
 +  const requestedPath = typeof input.path === "string" && input.path !== "" ? input.path : "."
 +  const requested = path.isAbsolute(requestedPath) ? requestedPath : path.join(directory, requestedPath)
 +  return {
-+    path: AppFileSystem.resolve(requested),
++    // #517：目标无 AppFileSystem；与 grep.ts producer 同源使用 FSUtil.resolve。
++    path: FSUtil.resolve(requested),
 +    include: normalizeSearchPatterns(input.include),
 +    exclude: normalizeSearchPatterns(input.exclude),
 +  }
 +}
 +
++// #517：各文件 producer 的 diff metadata 形状不同，按既有 producer 顺序读取而不新增 fallback。
 +function effectiveDiffSignal(metadata: Record<string, unknown> | undefined) {
 +  if (!metadata) return false
-+  // 各文件 producer 的 diff metadata 形状不同，按既有 producer 顺序读取而不新增 fallback。
 +  const filediff = metadata.filediff
 +  if (filediff && typeof filediff === "object" && !Array.isArray(filediff)) {
 +    const additions = Number((filediff as { additions?: unknown }).additions ?? 0)
@@ -1558,7 +1563,7 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +  return typeof diff === "string" && /(?:^|\n)[+-](?![+-]{2})/.test(diff)
 +}
 +
-+// 扫描刚完成的 Goal turn 内 assistant tool/patch 结果，更新账本并返回证据强度。
++// #517：扫描刚完成的 Goal turn 内 assistant tool/patch 结果，更新账本并返回证据强度。
 +function absorbGoalTurnEvidence(
 +  messages: MessageV2.WithParts[],
 +  turnUserID: MessageID,
@@ -1639,7 +1644,7 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +            end?: unknown
 +          }
 +          // range 参与 identity，覆盖读取不能把不同未检查区间折叠成一个证据点。
-+          // size/mtime 不是完整版本身份；read producer 已提供 head-sample fp，
++          // size/mtime 不是完整版本身份；read producer 已提供 head-sample fp（#511），
 +          // 同尺寸且 mtime 精度不足时也必须允许新内容触发 exploration。
 +          const key = [r.canonicalPath, r.size, r.modifiedMs, r.fp, r.start, r.end].map(String).join("\0")
 +          if (recordIfNew(ledger.reads, key)) exploration = true
@@ -1693,7 +1698,7 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +  return { exploration, advancement }
 +}
 +
-+// 更新 no-progress 计数与 replan 模式：advancement 清零并退出；exploration 只清计数。
++// #517：更新 no-progress 计数与 replan 模式：advancement 清零并退出；exploration 只清计数。
 +// 这个优先级保证“读到了新分支”和“真正改变状态”不会被混成一个强度。
 +function updateGoalProgressGate(
 +  state: { noProgressTurns: number; replanRequired: boolean },
@@ -1719,25 +1724,25 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
  function truncateThinking(text: string) {
    if (text.length <= 400) return text
    return `${text.slice(0, 200)}...${text.slice(-200)}`
-@@ -2268,6 +2528,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         // [local-smark] goal 续跑计数器：独立于 step，
+@@ -1609,6 +1870,12 @@ const layer = Layer.effect(
+         // #364：goal 续跑计数器：独立于 step，
          // 防止 step++ 在 continue 路径被跳过导致无限循环
          let goalTurns = 0
-+        // run-local progress gate：跨 continuation 保持，但新 runLoop 从 ordinary 开始；
++        // #517：run-local progress gate：跨 continuation 保持，但新 runLoop 从 ordinary 开始；
 +        // 用户重新触发 session 时不能继承上一轮未完成任务的瞬时 frontier。
 +        const goalProgressLedger = createGoalProgressLedger()
 +        const goalProgressGate = { noProgressTurns: 0, replanRequired: false }
-+        // noProgressTurns 只统计没有任何合格 evidence 的 eligible turn，
++        // #517：noProgressTurns 只统计没有任何合格 evidence 的 eligible turn，
 +        // 不把 provider step、tool-call 数量或模型文字长度当作进度。
          // [local-smark] 一次性 terminal-error marker：只在 eligible 错误发生时设置，
-         // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于 provenance 校验。
-         // marker 消费后立即清空，防止历史错误在新 iteration 或新 runLoop 中残留。
-@@ -2373,7 +2639,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+         // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于
+         // provenance 校验。消费后立即清空，防止历史错误在新 iteration 或新
+@@ -1734,7 +2001,15 @@ const layer = Layer.effect(
                    (!errorCompletion || goal.continueOnError)
                  ) {
                    goalTurns++
 -                  // 注入 synthetic user message 作为续跑 prompt
-+                  // 先吸收本轮 structured tool/patch 证据，再决定 ordinary/replan 文案；
++                  // #517：先吸收本轮 structured tool/patch 证据，再决定 ordinary/replan 文案；
 +                  // 判断发生在 synthetic message 写入前，避免当前 continuation 反向污染自己。
 +                  const signal = absorbGoalTurnEvidence(msgs, lastUser.id, ctx.directory, goalProgressLedger)
 +                  updateGoalProgressGate(goalProgressGate, signal)
@@ -1748,8 +1753,8 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +                  // 注入 synthetic user message 作为续跑 prompt；ordinary/replan 只是同一操作的文本模式。
                    // noReply=true 避免递归触发 loop；source="system_continue" 供 request usage 追踪
                    // orDie 将 Image.Error 转为 defect，保持 runLoop 的 error 类型为 never
-                   // [local-smark] 注入续跑 prompt 作为 synthetic user message
-@@ -2394,10 +2668,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                   yield* prompt({
+@@ -1750,10 +2025,18 @@ const layer = Layer.effect(
                        // 为新的 eligible Goal turn，与 compaction/task technical user 区分。
                        // blocked streak 依赖此 marker 判断连续性。
                        metadata: { goal_continuation: true },
@@ -1757,8 +1762,8 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +                      text: SessionGoal.continuationPrompt(goal, continuationMode),
                      }],
                    }).pipe(Effect.orDie)
--                  yield* slog.info("goal continuation", { goalTurns, step })
-+                  yield* slog.info("goal continuation", {
+-                  yield* Effect.logInfo("goal continuation", { goalTurns, step })
++                  yield* Effect.logInfo("goal continuation", {
 +                    goalTurns,
 +                    step,
 +                    continuationMode,
@@ -1766,29 +1771,31 @@ index 6de51a65e0e47c5b6623253ab292ddb37b1da0c1..c1a14bd11ca325a258680b0618d2512f
 +                    exploration: signal.exploration,
 +                    advancement: signal.advancement,
 +                  })
-+                  // continue 直接回到同一 runLoop，保留 ledger、blocked context 与 usage accounting。
++                  // #517：continue 直接回到同一 runLoop，保留 ledger、blocked context 与 usage accounting。
                    continue
                  }
                }
+
 diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
-index 969fedfdbc1907b536aea51d0c789281abf7724a..231d184443eaabe773304e5b892862fa27bf2595 100644
+index 81fc29c42..2147d57e7 100644
 --- a/packages/opencode/src/tool/goal.ts
 +++ b/packages/opencode/src/tool/goal.ts
-@@ -24,7 +24,7 @@ export interface GoalTurnContext {
+@@ -24,7 +24,8 @@ export interface GoalTurnContext {
  export const Parameters = Schema.Struct({
    operate: Schema.Literals(["read", "complete", "blocked", "active"] as const).annotate({
      description:
 -      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Use `active` to resume a model-produced terminal goal in a later user turn.",
++      // #517：blocked 首轮指引改为 BFS 复核；two-turn 阈值与 exact reason 契约不变。
 +      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
    }),
    reason: Schema.optional(Schema.String).annotate({
      description:
-@@ -140,11 +140,19 @@ export const GoalTool = Tool.define(
+@@ -145,11 +146,19 @@ export const GoalTool = Tool.define<typeof Parameters, Record<string, never>, ne
            }
          }
  
 -        // blocked-pending：第一次 blocked 必须给出四类具体探索动作，并固定下一 turn 的 exact reason。
-+        // blocked-pending：第一次调用只启动 audit，必须明确保持 active、继续探索和 exact reason 边界。
++        // #517：blocked-pending：第一次调用只启动 audit，必须明确保持 active、继续探索和 exact reason 边界。
 +        // 文案只指导模型下一步，不改变 modelTransition 的持久化 ownership 或 two-turn threshold。
          return {
            title: "Goal blocked (pending)",
@@ -1805,8 +1812,9 @@ index 969fedfdbc1907b536aea51d0c789281abf7724a..231d184443eaabe773304e5b892862fa
          }
        }).pipe(Effect.orDie),
    }),
+
 diff --git a/packages/opencode/src/tool/goal.txt b/packages/opencode/src/tool/goal.txt
-index e71dee07e8334e7984db1729eff2e8d61d402b74..e6fc2eb003af05deed58ec79dd88465af8e881d1 100644
+index e71dee07e..e6fc2eb00 100644
 --- a/packages/opencode/src/tool/goal.txt
 +++ b/packages/opencode/src/tool/goal.txt
 @@ -4,7 +4,7 @@ Call with `operate: "read"` to get the current goal for this session, including
@@ -1818,11 +1826,12 @@ index e71dee07e8334e7984db1729eff2e8d61d402b74..e6fc2eb003af05deed58ec79dd88465a
  - Use `operate: "active"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.
  - If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least two consecutive resumed goal turns, mark as `blocked` again.
  - Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; use `operate: "blocked"`.
+
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
-index f60991f3e531bf2231376d64e4f677de8a8d210e..febbc55e21257a94044a3c3634449264b55aec51 100644
+index a08ec084e..be3de3c7f 100644
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -403,17 +403,46 @@ it.instance(
+@@ -388,17 +388,46 @@ it.instance(
          expect(prompt).toContain("two consecutive eligible Goal turns")
          expect(prompt).toContain("the same trimmed reason")
          // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
@@ -1830,14 +1839,14 @@ index f60991f3e531bf2231376d64e4f677de8a8d210e..febbc55e21257a94044a3c3634449264
 -        expect(prompt).toContain("search with different patterns")
 -        expect(prompt).toContain("smaller verifiable steps")
 -        expect(prompt).toContain("overlooked dependencies or constraints")
-+        // ordinary prompt 同时验证“不改变 blocked ownership”和“提供可执行 BFS 复核”两条边界。
++        // #517：ordinary prompt 同时验证“不改变 blocked ownership”和“提供可执行 BFS 复核”两条边界。
 +        expect(prompt).toContain("re-check the blocker breadth-first")
 +        expect(prompt).toContain("adjacent producers, consumers, tests, or configuration")
 +        expect(prompt).toContain("different focused check")
 +        expect(prompt).toContain("viable path")
          expect(prompt).not.toContain('status "blocked"')
          expect(prompt).not.toContain("three consecutive goal turns")
-+        // ordinary 模式不得插入 BFS strategy-switch。
++        // #517：ordinary 模式不得插入 BFS strategy-switch。
 +        expect(prompt).not.toContain("<strategy-switch")
 +        expect(prompt).not.toContain('mode="breadth-first-replan"')
        }
@@ -1845,6 +1854,7 @@ index f60991f3e531bf2231376d64e4f677de8a8d210e..febbc55e21257a94044a3c3634449264
    { git: true },
  )
  
++// #517：replan 模式只插入固定 strategy 块，objective/budget/audit 合同必须完整保留。
 +it.instance(
 +  "continuationPrompt replan mode inserts BFS strategy switch without narrowing objective",
 +  () =>
@@ -1855,7 +1865,6 @@ index f60991f3e531bf2231376d64e4f677de8a8d210e..febbc55e21257a94044a3c3634449264
 +
 +      const goal = yield* goalSvc.set(session.id, { objective: "build the feature", tokenBudget: 50000 })
 +      const prompt = SessionGoal.continuationPrompt(goal, "replan")
-+      // replan 只插入固定 strategy 块，objective/budget/audit 合同必须完整保留。
 +      expect(prompt).toContain("<session-goal-continuation>")
 +      expect(prompt).toContain("build the feature")
 +      expect(prompt).toContain('mode="breadth-first-replan"')
@@ -1870,28 +1879,29 @@ index f60991f3e531bf2231376d64e4f677de8a8d210e..febbc55e21257a94044a3c3634449264
 +  { git: true },
 +)
 +
+ // #364：XML 特殊字符必须转义，防止 prompt injection
  it.instance(
    "continuationPrompt escapes XML special characters in objective",
-   () =>
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffadb341d10 100644
+index b7fe7bb8c..12a61a3a0 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2,6 +2,7 @@ import { NodeFileSystem } from "@effect/platform-node"
- import { FetchHttpClient } from "effect/unstable/http"
+@@ -9,6 +9,8 @@ import { GlobalBus } from "@/bus/global"
  import { expect } from "bun:test"
  import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+ import { NodeFileSystem } from "@effect/platform-node"
++// #517：progress gate 等价目录探测用 symlink 构造 canonical 等价搜索路径
 +import { symlink } from "fs/promises"
+ import { Logging } from "@opencode-ai/core/observability/logging"
+ import { Logger, References } from "effect"
  import path from "path"
- import { fileURLToPath, pathToFileURL } from "url"
- import { NamedError } from "@opencode-ai/core/util/error"
-@@ -4272,3 +4273,387 @@ it.instance(
-   { git: true },
-   30_000,
+@@ -4857,3 +4859,385 @@ it.instance(
+   shortSessionTimeout,
  )
-+
+ 
++// #517：只提取持久化 synthetic user Part，避免把 provider 的普通 user/tool 文本误当续跑结果。
 +function continuationTexts(msgs: MessageV2.WithParts[]) {
-+  // 只提取持久化 synthetic user Part，避免把 provider 的普通 user/tool 文本误当续跑结果。
 +  return msgs.flatMap((m) =>
 +    m.info.role === "user"
 +      ? m.parts.flatMap((p) =>
@@ -1903,7 +1913,7 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +  )
 +}
 +
-+// progress gate：两轮无 structured 证据后，下一条 continuation 必须进入 BFS replan。
++// #517：progress gate——两轮无 structured 证据后，下一条 continuation 必须进入 BFS replan。
 +it.instance(
 +  "goal progress gate switches to replan after two no-evidence completions",
 +  () =>
@@ -1941,10 +1951,10 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +      yield* Fiber.interrupt(fiber)
 +    }),
 +  { git: true },
-+  30_000,
++  60_000,
 +)
 +
-+// replan 中 exploration（read）不能退出 replan；advancement（write）才能回到 ordinary。
++// #517：replan 中 exploration（read）不能退出 replan；advancement（write）才能回到 ordinary。
 +it.instance(
 +  "goal progress gate keeps replan on read exploration and clears on effective write",
 +  () =>
@@ -1993,7 +2003,7 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +  45_000,
 +)
 +
-+// read identity：新版本/range 必须能启动或重置 raw count，重复同一 read 不能伪造 exploration。
++// #517：read identity——新版本/range 必须能启动或重置 raw count，重复同一 read 不能伪造 exploration。
 +it.instance(
 +  "goal progress gate observes read identity and range boundaries",
 +  () =>
@@ -2039,7 +2049,7 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +  60_000,
 +)
 +
-+// normalized search/command signatures：重复输入不应伪造新探索；无效 edit 也不应成为 advancement。
++// #517：normalized search/command signatures——重复输入不应伪造新探索；无效 edit 也不应成为 advancement。
 +it.instance(
 +  "goal progress gate ignores duplicate normalized searches and no-op edits",
 +  () =>
@@ -2111,7 +2121,7 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +  60_000,
 +)
 +
-+// duplicate probes must be observed before a later write can reset the gate;
++// #517：duplicate probes must be observed before a later write can reset the gate;
 +// otherwise unconditional exploration counting would pass the same assertions.
 +it.instance(
 +  "goal progress gate suppresses duplicate normalized grep glob and command probes",
@@ -2139,7 +2149,6 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +      const command = `bun -e "process.stdout.write('stable')"`
 +
 +      // 每个 duplicate 后立即接 boundary idle；后续 write 只用于清除前一阶段的 re-plan。
-+      // grep 阶段检验缺省 path 与 `.` 的 canonical equivalence 以及数组顺序归一化。
 +      yield* llm.push(reply().text("idle").stop())
 +      yield* llm.push(reply().tool("grep", grep).item(), reply().text("grep").stop())
 +      yield* llm.push(reply().tool("grep", repeatedGrep).item(), reply().text("duplicate grep").stop())
@@ -2173,7 +2182,7 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +  90_000,
 +)
 +
-+// verification signature：首次结果只算 exploration，same result 不算新证据，结果改变才算 advancement。
++// #517：verification signature——首次结果只算 exploration，same result 不算新证据，结果改变才算 advancement。
 +it.instance(
 +  "goal progress gate distinguishes first and changed verification results",
 +  () =>
@@ -2199,11 +2208,10 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +          `test("status", async () => expect(await Bun.file(${JSON.stringify(statusPath)}).text()).toBe("one\\n"))`,
 +        ].join("\n"),
 +      )
-+      const verify = `bun test --timeout 30000 ${fixturePath} >/dev/null 2>&1`
-+      const change = `bun -e "await Bun.write('${statusPath}', 'two\\n')"`
++      const verify = `bun test --timeout 30000 ${fixturePath.replaceAll("\\", "/")} >/dev/null 2>&1`
++      const change = `bun -e "await Bun.write('${statusPath.replaceAll("\\", "/")}', 'two\\n')"`
 +
 +      // redirect stdout 使同一 verification 的 signature 只由 exit/result 改变，不受耗时噪声影响。
-+      // 第一次相同结果只启动 verification baseline，第二次相同结果必须保持旧 baseline。
 +      yield* llm.push(reply().text("idle 1").stop())
 +      yield* llm.push(reply().text("idle 2").stop())
 +      yield* llm.push(reply().tool("bash", { command: verify, description: "verification one" }).item(), reply().text("verified").stop())
@@ -2227,10 +2235,10 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +      expect(texts[5]).not.toContain("<strategy-switch")
 +    }),
 +  { git: true },
-+  60_000,
++  150_000,
 +)
 +
-+// Todo/no-op contract：新完成 Todo 才能推进，重复快照和 no-op edit 都不能推进。
++// #517：Todo/no-op contract——新完成 Todo 才能推进，重复快照和 no-op edit 都不能推进。
 +it.instance(
 +  "goal progress gate treats completed Todo as advancement and repeated no-op as stagnation",
 +  () =>
@@ -2273,11 +2281,13 @@ index eb703cba970830ede7e49ce3fc4e1b35495aaa0e..2017c44d4c779832de42762d5a3e9ffa
 +  { git: true },
 +  60_000,
 +)
++
+
 diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/tool/goal.test.ts
-index 996fc523190f84d399415dc4dee41773c30e20a9..723c8aeaea4ee5eaa5d044137946ea2bb6ef1516 100644
+index af13eb933..bf559518f 100644
 --- a/packages/opencode/test/tool/goal.test.ts
 +++ b/packages/opencode/test/tool/goal.test.ts
-@@ -214,18 +214,24 @@ it.instance(
+@@ -179,17 +179,23 @@ it.instance(
          makeCtx(session.id, goalSvc, turn1),
        )
        expect(r1.output).toContain("attempt 1")
@@ -2286,7 +2296,7 @@ index 996fc523190f84d399415dc4dee41773c30e20a9..723c8aeaea4ee5eaa5d044137946ea2b
 -      expect(r1.output).toContain("search with different patterns")
 -      expect(r1.output).toContain("smaller verifiable steps")
 -      expect(r1.output).toContain("overlooked dependencies or constraints")
-+      // 首轮必须明确保持 active、继续 BFS 探索和发现路径后继续，而不是只重复计数。
++      // #517：首轮必须明确保持 active、继续 BFS 探索和发现路径后继续，而不是只重复计数。
 +      expect(r1.output).toContain("The Goal stays active")
 +      expect(r1.output).toContain("breadth-first pass")
 +      expect(r1.output).toContain("adjacent producer, consumer, test, or configuration path")
@@ -2296,9 +2306,8 @@ index 996fc523190f84d399415dc4dee41773c30e20a9..723c8aeaea4ee5eaa5d044137946ea2b
        expect(r1.output).toContain("same trimmed reason")
 +      expect(r1.output).toContain("hard, uncertain, or incomplete")
 +      expect(r1.output.length).toBeLessThan(2000)
-+      // runtime result、wire description 和 continuation prompt 是三个独立 carrier，
++      // #517：runtime result、wire description 和 continuation prompt 是三个独立 carrier，
 +      // 测试必须同时保护，避免模型在不同可见面收到互相矛盾的 blocked contract。
-       // goal.txt 是模型调用工具前的另一可见面，不能与首次 Tool result 使用不同 contract。
        expect(def.description).toContain("two consecutive eligible Goal turns")
        expect(def.description).toContain("same trimmed reason")
 -      expect(def.description).toContain("re-read relevant files")
@@ -2309,14 +2318,16 @@ index 996fc523190f84d399415dc4dee41773c30e20a9..723c8aeaea4ee5eaa5d044137946ea2b
  
        // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
        const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
+
 diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
-index f5bed4eb0c1ac4754a54a47d68bc8d579a521142..9bbb47d488cb43297f41af216baabcac32dcb4e6 100644
+index 469b3def6..9378eea57 100644
 --- a/packages/opencode/test/tool/parameters.test.ts
 +++ b/packages/opencode/test/tool/parameters.test.ts
-@@ -55,6 +55,9 @@ describe("tool parameters", () => {
+@@ -55,6 +55,10 @@ describe("tool parameters", () => {
        expect(operate.enum).toEqual(["read", "complete", "blocked", "active"])
        expect(operate.description).toContain("two consecutive eligible Goal turns")
        expect(operate.description).toContain("same trimmed reason")
++      // #517：blocked 首轮 BFS 复核指引进入 wire description。
 +      expect(operate.description).toContain("re-check relevant evidence breadth-first")
 +      expect(operate.description).toContain("viable path")
 +      expect(operate.description).toContain("hard, uncertain, or incomplete")

@@ -32,7 +32,7 @@ diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/p
        // #199：precheck+reviewer 决定；ask 累积到 needsAsk 等待用户审批。三者优先级
        // #199：由 evaluate 的 last-match-wins 决定，此处只分流不复核规则语义。
 @@ -350,6 +361,29 @@
-   return Boolean(input && typeof input === "object" && !Array.isArray(input))
+   return value === "allow" || value === "deny" || value === "ask" || value === "auto"
  }
  
 +function rawDenyPatterns(metadata: Readonly<Record<string, unknown>>) {

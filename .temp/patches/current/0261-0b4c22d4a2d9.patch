@@ -1,4 +1,12 @@
 From 0b4c22d4a2d98339c49d155bac06d80b9f1c0d3a Mon Sep 17 00:00:00 2001
+   return ProviderTest.model({
+      // #250：Database 仅类型层需要——review 无 sessionID 时不触 transcript 查询
+      Layer.provide(Layer.mock(Database.Service)({ db: undefined as never })),
+From 0b4c22d4a2d98339c49d155bac06d80b9f1c0d3a Mon Sep 17 00:00:00 2001
+   return ProviderTest.model({
+    // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
+    const database = yield* Database.Service
+From 0b4c22d4a2d98339c49d155bac06d80b9f1c0d3a Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 29 May 2026 18:01:54 +0800
 Subject: [PATCH] fix(auto-review): reuse chat provider hook for Codex review requests
@@ -7,20 +15,24 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 index 3cb077223..64393fe8e 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -7,5 +7,6 @@
+@@ -7,7 +7,8 @@
  import { MessageV2 } from "@/session/message-v2"
  import { Auth } from "@/auth"
 +import { Plugin } from "@/plugin"
  import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
  import { SessionRetry } from "@/session/retry"
+ import { Database } from "@opencode-ai/core/database/database"
+ 
  import { MessageID, PartID, SessionID } from "@/session/schema"
-@@ -102,7 +103,8 @@
+@@ -104,9 +105,10 @@
    Effect.gen(function* () {
      const config = yield* Config.Service
      // #250：auth.get(providerID) 判定凭据类型——只有 openai+oauth 才走 instructions 提升
      const auth = yield* Auth.Service
 +    const plugin = yield* Plugin.Service
      const provider = yield* Provider.Service
+     // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
+     const database = yield* Database.Service
      // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
      const session = yield* Session.Service
 @@ -404,5 +406,31 @@
@@ -79,22 +91,24 @@ index 3cb077223..64393fe8e 100644
      Layer.provide(LayerNode.compile(Provider.node)),
    ),
  )
-@@ -900,5 +905,6 @@
+@@ -909,6 +914,7 @@
  // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
+ // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
  // #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
  // node deps 显式加入 Auth.node，LayerNode 依赖图在编译期保持完整
--export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node] })
+-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node] })
 +// #261：Plugin.Service 加入 layer 依赖——node deps 同步加 Plugin.node，保持 LayerNode 编译期依赖图完整
-+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Plugin.node] })
-
++export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node, Plugin.node] })
+ 
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
 index 28dae7388..b4dc052fd 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -4,6 +4,7 @@
+@@ -4,7 +4,8 @@
  import { ModelV2 } from "@opencode-ai/core/model"
  import { ProviderV2 } from "@opencode-ai/core/provider"
  import { Auth } from "../../src/auth"
+ import { Database } from "@opencode-ai/core/database/database"
  import { Config } from "../../src/config/config"
  import { PermissionReviewer } from "../../src/permission/reviewer/service"
 +import { Plugin } from "../../src/plugin"
@@ -203,7 +217,7 @@ index 28dae7388..b4dc052fd 100644
  
        return new Response(openAIReviewDecisionStream(), {
          status: 200,
-@@ -142,16 +190,43 @@
+@@ -144,18 +192,45 @@
  
    return {
      bodies,
@@ -218,6 +232,8 @@ index 28dae7388..b4dc052fd 100644
 +      // #261：提供 plugin 层——默认使用空 plugin，测试 fixture 可注入自定义 hook
 +      Layer.provide(options.plugin ?? pluginLayer()),
        Layer.provide(sessionLayer),
+       // #250：Database 仅类型层需要——review 无 sessionID 时不触 transcript 查询
+       Layer.provide(Layer.mock(Database.Service)({ db: undefined as never })),
      ),
    }
  }

@@ -8,13 +8,11 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-三处 goal-frame waitFor 谓词此前只要求 Goal+首处『检查log』，增量渲染的中间帧（缺 objective 后半段与第二个『查』）即可通过并交给 assertFrame 计数断言——Build run 33292110326 smoke-macos 腿实测闪红（捕获帧止于『请你自行独立完整完成相应』）。现谓词同时要求与 objective 同源的尾部标记『高压』（位于两个『查』之后，构造上保证全段已渲染），三处（initial/resized/restored）一致收紧；断言本体与渲染器不动。
+适配说明：纯谓词合取加强原样落地；常量插入点与三处 waitFor 谓词按目标行号重锚（目标在 objective 上方多一行 35-cell 边界注释，属 #565 适配成果，保留不动）。
 
-本机全新编译二进制 smoke ×2 全绿（160/150/160 三宽度），typecheck 通过；CI 三腿复跑待用户侧确认。daemon db-compress 一次性 flake（同提交重跑绿+本机 4 连绿）无复现信号，监控处置不投机修改。
 
 diff --git a/docs/plans/smoke-goal-frame-settle.md b/docs/plans/smoke-goal-frame-settle.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d56130324162cea44791b1292abffe1845fe6cb
 --- /dev/null
 +++ b/docs/plans/smoke-goal-frame-settle.md
 @@ -0,0 +1,335 @@
@@ -353,48 +351,45 @@ index 0000000000000000000000000000000000000000..6d56130324162cea44791b1292abffe1
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/script/smoke-opentui-artifact.ts b/packages/opencode/script/smoke-opentui-artifact.ts
-index b97e1726d8a2478c598c0a24b72c800643a96af3..2b73bc78d5921574bc224f3dd48ee1febe9d5205 100644
 --- a/packages/opencode/script/smoke-opentui-artifact.ts
 +++ b/packages/opencode/script/smoke-opentui-artifact.ts
-@@ -121,6 +121,9 @@ if (process.platform === "win32" && !rootReport) {
- }
+@@ -135,6 +135,8 @@ if (process.platform === "win32" && !rootReport) {
  
+ // objective 中的两个“查”跨越 35-cell 边界：任何一段被重复渲染都会使计数变为 3，断言可观测。
  const objective = "检查log，请你自行独立完整完成相应的调研与检查，并进行多轮的负载并发、高压"
-+// 尾部标记与 objective（上行）同源：三处 goal-frame waitFor 谓词必须同时要求该标记，
-+// 只等首个"检查log"会被增量渲染的中间帧满足（部分帧缺第二个"查"，assertFrame 必红）。
++// 593：尾部标记与 objective 同源常量；三处 waitFor 谓词合取它，确保捕获前全段已渲染。
 +const objectiveTail = "高压"
  const spinnerGlyphs = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⋯"]
  // objective直接复用Goal API的green literal，测试验证的是最终生产字符串而不是缩短后的样例。
  // 两个“查”必须在source和headless frame中数量一致，才能观察到wide glyph跨行重复。
-@@ -468,8 +471,9 @@ try {
-     () => {
+@@ -498,7 +500,8 @@ try {
        // 轮询cell frame而不是raw ANSI，因为同一glyph可能在增量diff中被多次擦写。
        // 只有最终viewport能回答用户观察到的重复、错位和replacement character问题。
-+      // settle：同时要求 objective 尾部标记，确保增量渲染已完成全段后再交给 assertFrame。
        const frame = capture(terminal)
 -      if (!frame.includes("Goal") || !frame.includes("检查log")) return
++      // 593：尾部未落盘前中间帧不应通过——settle-before-capture 防 CJK 断字闪红。
 +      if (!frame.includes("Goal") || !frame.includes("检查log") || !frame.includes(objectiveTail)) return
        return frame
      },
      "compiled TUI never rendered the Goal sidebar",
-@@ -488,8 +492,9 @@ try {
-   console.error(`[opentui-smoke] ${stage}`)
+@@ -518,7 +521,8 @@ try {
    const resized = await waitFor(() => {
      // resize完成条件仍要求完整Goal文字，单纯收到SIGWINCH或任意新frame都不足以通过。
-+    // settle：尾部标记防止resize后的部分重绘帧提前满足条件。
      const frame = capture(terminal)
 -    if (!frame.includes("Goal") || !frame.includes("检查log")) return
++    // 593：resize 后部分重绘帧同样必须等尾部标记，与 initial 谓词同界。
 +    if (!frame.includes("Goal") || !frame.includes("检查log") || !frame.includes(objectiveTail)) return
      return frame
    }, "compiled TUI did not render Goal after resize")
    assertFrame(resized, "resized")
-@@ -500,7 +505,8 @@ try {
+@@ -529,7 +533,8 @@ try {
    console.error(`[opentui-smoke] ${stage}`)
    const restored = await waitFor(() => {
      const frame = capture(terminal)
 -    if (!frame.includes("Goal") || !frame.includes("检查log")) return
-+    // settle：恢复尺寸同样要求尾部标记，三处谓词一致才不会在恢复阶段重放闪红。
++    // 593：恢复尺寸后的谓词与另两处一致，防止窄宽残留帧提前通过。
 +    if (!frame.includes("Goal") || !frame.includes("检查log") || !frame.includes(objectiveTail)) return
      return frame
    }, "compiled TUI did not render Goal after restoring size")

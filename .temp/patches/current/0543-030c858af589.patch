@@ -436,22 +436,22 @@ index 0000000000000000000000000000000000000000..e2a03384847ecf526675d527c2335c43
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd/db.ts
-index bef76e46af78c923c0f617440f6ef448e20b73c7..710c4e1092ac1606dfe06891f170af3789b6dc9e 100644
+index a4954ca6e..87b0251ac 100644
 --- a/packages/opencode/src/cli/cmd/db.ts
 +++ b/packages/opencode/src/cli/cmd/db.ts
-@@ -533,15 +533,16 @@ async function executeResume(taskID: string) {
-   }
- }
+@@ -585,7 +585,8 @@ const maintenanceDB = Effect.fn("Cli.db.maintenanceDB")(function* () {
+   return sync as ColdStorage.TxOrDb
+ })
  
 -// compress 默认只改变满足 30 天或 compact boundary 的白名单字段；--session 只是缩小 owner scope。
--// batch 默认值来自本机 2.2 GB 实测，不在 CLI 复制魔法数字，daemon JSON 缺省也使用同一常量。
 +// compress：completed compact head OR root idle（--older-than，默认 7d，session.time_updated）OR subagent idle（固定 24h last message）。
 +// --older-than 只调 root 阈值；subagent 24h 由 ColdStorage 常量固定，不在 CLI 复制第二套规则。
-+// batch 默认值来自本机 2.2 GB 实测，daemon JSON 缺省也使用同一常量。
- const CompressCommand = cmd({
+ // batch 默认值来自本机实测，不在 CLI 复制魔法数字，daemon JSON 缺省也使用同一常量。
+ const CompressCommand = effectCmd({
    command: "compress",
-   describe: "freeze eligible cold fields into the database cold store",
+@@ -594,7 +595,7 @@ const CompressCommand = effectCmd({
    builder: (yargs: Argv) =>
      yargs
        .option("session", { type: "string" })
@@ -460,14 +460,15 @@ index bef76e46af78c923c0f617440f6ef448e20b73c7..710c4e1092ac1606dfe06891f170af37
        .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE })
        .option("vacuum", { type: "boolean", default: false })
        .option("yes", { type: "boolean", default: false })
-diff --git a/packages/opencode/src/storage/cold.ts b/packages/opencode/src/storage/cold.ts
-index 00b7598884ddb6a1809e5790a4122e47fa3c2805..37b6660043fdf4d856ddfff461d75d94489a7523 100644
---- a/packages/opencode/src/storage/cold.ts
-+++ b/packages/opencode/src/storage/cold.ts
-@@ -13,8 +13,10 @@ import { CompactionBoundary } from "@/session/compaction-boundary"
- import { Snapshot } from "@/snapshot"
- import type { MessageV2 } from "@/session/message-v2"
+
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+index e492c1a8e..f99519d9f 100644
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -26,8 +26,10 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
+ export type TxOrDb = Db | Tx
  
+ // #0500：v2 pack 无 4KiB envelope 阈值——小 owner 打包共享，超大 entry 独立保留完整信息。
 -// 30 天 age 与 completed compaction boundary 是并列 eligibility，任一成立即可安全进入冷存储。
 -const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 +// root 7 天 session.time_updated、subagent 24 小时 last message、completed compact head 三者 OR；任一成立即可进冷存储。
@@ -477,7 +478,7 @@ index 00b7598884ddb6a1809e5790a4122e47fa3c2805..37b6660043fdf4d856ddfff461d75d94
  // 1 MiB 是普通 pack 的目标而非硬上限；单个超大 entry 必须独立保留完整信息而不能截断。
  const PACK_TARGET_BYTES = 1024 * 1024
  export const DEFAULT_BATCH_SIZE = 2000
-@@ -895,20 +897,38 @@ function restorePackedPart(data: (typeof PartTable.$inferSelect)["data"], fields
+@@ -908,20 +910,40 @@ function restorePackedPart(data: (typeof PartTable.$inferSelect)["data"], fields
    return restorePart(data, { version: 1, owner: "part", fields }, hash)
  }
  
@@ -492,6 +493,7 @@ index 00b7598884ddb6a1809e5790a4122e47fa3c2805..37b6660043fdf4d856ddfff461d75d94
 +// boundary 结果可按 session 缓存，但写入改变时间后必须重算，避免冻住新 tail。
 +function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
 +  // 空会话 max 为 null：无法证明 last-message idle，subagent age 分支必须为 false。
++  // 只投影 max(time_created) 一列；不读取消息 body，与 status 的 metadata-only 原则一致。
 +  return (
 +    db
 +      .select({ value: sql<number | null>`max(${MessageTable.time_created})` })
@@ -509,7 +511,8 @@ index 00b7598884ddb6a1809e5790a4122e47fa3c2805..37b6660043fdf4d856ddfff461d75d94
      .where(eq(SessionTable.id, sessionID))
      .get()
    if (!session) return
-   const boundary = CompactionBoundary.latest(sessionID)
++  // CompactionBoundary 保持目标 db-first 形态（#493），不回退 source 的无参调用。
+   const boundary = CompactionBoundary.latest(db, sessionID)
 +  // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
 +  const aged = session.parentID
 +    ? (() => {
@@ -523,30 +526,30 @@ index 00b7598884ddb6a1809e5790a4122e47fa3c2805..37b6660043fdf4d856ddfff461d75d94
      boundary: boundary ? (boundary.tailStartID ?? boundary.markerID) : undefined,
      markerID: boundary?.markerID,
      summaryID: boundary?.summaryID,
-@@ -2254,11 +2274,11 @@ function freeze(
+@@ -2268,11 +2290,11 @@ function freeze(
  }
  
  // 公开 freezeOwner 是测试、精确 session 操作和未来内部调用的最小 seam，不暴露 codec 或 projection 细节。
 -// olderThanMs 可由已规范化 maintenance request 传入，缺省保持产品合同的 30 天。
 +// olderThanMs 可由已规范化 maintenance request 传入，缺省 root 7 天；subagent 仍用固定 24h last-message。
- // 返回 skipped reason 便于 task 计数，但不会把 ineligible/no-fields 当作错误或改写 owner。
- export function freezeOwner(input: Owner & { now?: number; olderThanMs?: number }): FreezeResult {
+ // #0500：返回 skipped reason 便于 task 计数，但不会把 ineligible/no-fields 当作错误或改写 owner。
+ export function freezeOwner(db: TxOrDb, input: Owner & { now?: number; olderThanMs?: number }): FreezeResult {
    const now = input.now ?? Date.now()
--  return Database.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? THIRTY_DAYS_MS }), {
-+  return Database.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? SEVEN_DAYS_MS }), {
+-  return db.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? THIRTY_DAYS_MS }), {
++  return db.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? SEVEN_DAYS_MS }), {
      behavior: "immediate",
    })
  }
-@@ -2574,7 +2594,7 @@ function partCandidate() {
- export function isEligibleOwner(input: Owner & { now?: number; olderThanMs?: number }) {
-   return Database.use((db) => {
-     const now = input.now ?? Date.now()
--    const olderThanMs = input.olderThanMs ?? THIRTY_DAYS_MS
-+    const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
-     if (input.type === "message") {
-       const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
-       if (!row || row.cold_key) return false
-@@ -2922,7 +2942,7 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
+@@ -2594,7 +2616,7 @@ function partCandidate() {
+ // 该函数只读且不压缩；true 仅表示此刻可冻，真正 freeze 会在 immediate transaction 内再次确认。
+ export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; olderThanMs?: number }) {
+   const now = input.now ?? Date.now()
+-  const olderThanMs = input.olderThanMs ?? THIRTY_DAYS_MS
++  const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
+   if (input.type === "message") {
+     const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
+     // #0500：v2 判定只看 cold_key；v1 owner 经 messageV2Value 还原后重提，阈值已取消。
+@@ -2943,7 +2965,7 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
        return {
          operation: "compress",
          ...(sessionID ? { sessionID } : {}),
@@ -555,38 +558,39 @@ index 00b7598884ddb6a1809e5790a4122e47fa3c2805..37b6660043fdf4d856ddfff461d75d94
          batchSize,
        }
      case "expand":
-@@ -3499,9 +3519,9 @@ export function status(): StatusReport {
-       activeBytes: Math.max(0, pages - freelistPages) * pageSize,
-       // 物理门槛使用批准的 decimal 1.5 GB，避免与 GiB 换算混淆。
-       targetBytes: 1_500_000_000,
--      // 候选扫描不调用 freeze，也不更新 time_updated 或预先创建 payload。
--      // 频繁 TUI status 因此不会反过来改变 30 天 age eligibility。
--      eligibleOwners: eligibleOwnerCount(db, Date.now(), THIRTY_DAYS_MS),
-+      // 候选扫描不调用 freeze；status 使用与默认 compress 相同的 root 7d / subagent 24h 阈值。
-+      // 频繁 TUI status 因此不会反过来改变 root time_updated 或 last-message 时钟。
-+      eligibleOwners: eligibleOwnerCount(db, Date.now(), SEVEN_DAYS_MS),
-       coldOwners,
-       summaryOwners,
-       summaryPayloads: summaryPayloads.length,
+@@ -3527,9 +3549,9 @@ export function status(db: TxOrDb): StatusReport {
+     activeBytes: Math.max(0, pages - freelistPages) * pageSize,
+     // 物理门槛使用批准的 decimal 1.5 GB，避免与 GiB 换算混淆。
+     targetBytes: 1_500_000_000,
+-    // 候选扫描不调用 freeze，也不更新 time_updated 或预先创建 payload。
+-    // 频繁 TUI status 因此不会反过来改变 30 天 age eligibility。
+-    eligibleOwners: eligibleOwnerCount(db, Date.now(), THIRTY_DAYS_MS),
++    // 候选扫描不调用 freeze；status 使用与默认 compress 相同的 root 7d / subagent 24h 阈值。
++    // 频繁 TUI status 因此不会反过来改变 root time_updated 或 last-message 时钟。
++    eligibleOwners: eligibleOwnerCount(db, Date.now(), SEVEN_DAYS_MS),
+     coldOwners,
+     summaryOwners,
+     summaryPayloads: summaryPayloads.length,
+
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index c64cd692e4a5b7905703405da59af4197a94978c..4fe883f933df44604cd05ef158404507d3f21a2a 100644
+index 013f666f3..a97aaccf2 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -37,7 +37,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
- import { EventV2Bridge } from "@/event-v2-bridge"
- import { ColdStorage } from "@/storage/cold"
- import { Database } from "@/storage/db"
--import { SessionTable } from "@/session/session.sql"
-+import { MessageTable, SessionTable } from "@/session/session.sql"
- 
- void Log.init({ print: false })
- 
-@@ -2959,6 +2959,89 @@ describe("ColdStorage compact eligibility", () => {
+@@ -37,7 +37,7 @@ import { TestConfig } from "../fixture/config"
+ // #493：compact eligibility 直测 ColdStorage——四象限经由真实 compaction 结构验证双门禁；
+ // Database 沿用文件既有 import（L4），此处只补 ColdStorage/SessionTable/eq。
+ import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+-import { SessionTable } from "@opencode-ai/core/session/sql"
++import { MessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+ import { eq } from "drizzle-orm"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { LLMEvent, Usage } from "@opencode-ai/llm"
+@@ -3399,6 +3399,87 @@ describe("ColdStorage compact eligibility", () => {
        })
-       expect(ColdStorage.isEligibleOwner({ type: "part", id: recentPart.id })).toBe(false)
+       expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: recentPart.id })).toBe(false)
        yield* ssn.remove(recentSession.id)
 +
-+      // root 闲置默认 7 天：time_updated 8d 前 eligible，1d 前 ineligible（无 compact）。
++      // #543：root 闲置默认 7 天——time_updated 8d 前 eligible，1d 前 ineligible（无 compact boundary）。
 +      const rootAge = yield* ssn.create({ title: "root-7d-age" })
 +      const rootUser = yield* createUserMessage(rootAge.id, "root-age")
 +      const rootPart = yield* addCompletedToolPart({
@@ -595,37 +599,34 @@ index c64cd692e4a5b7905703405da59af4197a94978c..4fe883f933df44604cd05ef158404507
 +        tool: "read",
 +        output: "root-age-output-".repeat(512),
 +      })
-+      Database.use((db) =>
-+        db
-+          .update(SessionTable)
-+          .set({ time_updated: Date.now() - 8 * 24 * 60 * 60 * 1000 })
-+          .where(Database.eq(SessionTable.id, rootAge.id))
-+          .run(),
-+      )
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: rootPart.id })).toBe(true)
-+      Database.use((db) =>
-+        db
-+          .update(SessionTable)
-+          .set({ time_updated: Date.now() - 1 * 24 * 60 * 60 * 1000 })
-+          .where(Database.eq(SessionTable.id, rootAge.id))
-+          .run(),
-+      )
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: rootPart.id })).toBe(false)
++      // 时钟夹具直改 time_updated（#493 sync 直查形态），不复制 production 查询。
++      sync
++        .update(SessionTable)
++        .set({ time_updated: Date.now() - 8 * 24 * 60 * 60 * 1000 })
++        .where(eq(SessionTable.id, rootAge.id))
++        .run()
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(true)
++      sync
++        .update(SessionTable)
++        .set({ time_updated: Date.now() - 1 * 24 * 60 * 60 * 1000 })
++        .where(eq(SessionTable.id, rootAge.id))
++        .run()
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(false)
 +      // root 不得因 last message 变老而走 subagent 时钟：消息 25h 前但 session 仍热时必须 ineligible。
-+      Database.use((db) => {
-+        db.update(SessionTable)
-+          .set({ time_updated: Date.now() })
-+          .where(Database.eq(SessionTable.id, rootAge.id))
-+          .run()
-+        db.update(MessageTable)
-+          .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
-+          .where(Database.eq(MessageTable.session_id, rootAge.id))
-+          .run()
-+      })
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: rootPart.id })).toBe(false)
++      sync
++        .update(SessionTable)
++        .set({ time_updated: Date.now() })
++        .where(eq(SessionTable.id, rootAge.id))
++        .run()
++      sync
++        .update(MessageTable)
++        .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
++        .where(eq(MessageTable.session_id, rootAge.id))
++        .run()
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(false)
 +      yield* ssn.remove(rootAge.id)
 +
-+      // subagent：parent_id 非空时用 last message≥24h；session.time_updated 再新也不挡 age。
++      // #543：subagent（parent_id 非空）用 last message≥24h；session.time_updated 再新也不挡 age。
 +      const parent = yield* ssn.create({ title: "parent-for-subagent-idle" })
 +      const child = yield* ssn.create({ title: "subagent-idle-child", parentID: parent.id })
 +      const childUser = yield* createUserMessage(child.id, "child")
@@ -635,38 +636,39 @@ index c64cd692e4a5b7905703405da59af4197a94978c..4fe883f933df44604cd05ef158404507
 +        tool: "read",
 +        output: "child-idle-output-".repeat(512),
 +      })
-+      Database.use((db) => {
-+        db.update(SessionTable)
-+          .set({ time_updated: Date.now() })
-+          .where(Database.eq(SessionTable.id, child.id))
-+          .run()
-+        db.update(MessageTable)
-+          .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
-+          .where(Database.eq(MessageTable.session_id, child.id))
-+          .run()
-+      })
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: childPart.id })).toBe(true)
++      sync
++        .update(SessionTable)
++        .set({ time_updated: Date.now() })
++        .where(eq(SessionTable.id, child.id))
++        .run()
++      sync
++        .update(MessageTable)
++        .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
++        .where(eq(MessageTable.session_id, child.id))
++        .run()
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: childPart.id })).toBe(true)
 +      // last message 仍新时，即便 time_updated 很老也不得误冻 subagent。
-+      Database.use((db) => {
-+        db.update(SessionTable)
-+          .set({ time_updated: Date.now() - 30 * 24 * 60 * 60 * 1000 })
-+          .where(Database.eq(SessionTable.id, child.id))
-+          .run()
-+        db.update(MessageTable)
-+          .set({ time_created: Date.now() - 1 * 60 * 60 * 1000 })
-+          .where(Database.eq(MessageTable.session_id, child.id))
-+          .run()
-+      })
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: childPart.id })).toBe(false)
++      sync
++        .update(SessionTable)
++        .set({ time_updated: Date.now() - 30 * 24 * 60 * 60 * 1000 })
++        .where(eq(SessionTable.id, child.id))
++        .run()
++      sync
++        .update(MessageTable)
++        .set({ time_created: Date.now() - 1 * 60 * 60 * 1000 })
++        .where(eq(MessageTable.session_id, child.id))
++        .run()
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: childPart.id })).toBe(false)
 +      // olderThanMs:0 只强制 root age；subagent 仍看 last message，不能被 root 标志误伤。
 +      expect(
-+        ColdStorage.isEligibleOwner({
++        ColdStorage.isEligibleOwner(sync, {
 +          type: "part",
 +          id: childPart.id,
 +          olderThanMs: 0,
 +        }),
 +      ).toBe(false)
 +      yield* ssn.remove(child.id)
++      // #543：parent 夹具同样清理，保持与 source 逐行对应（无冷数据，纯卫生）。
 +      yield* ssn.remove(parent.id)
      }),
    )

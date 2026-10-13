@@ -12,6 +12,7 @@ Content-Transfer-Encoding: 8bit
 
 补齐 PI 归一化与 grapheme 原文边界，避免乱序失败、generated-text 依赖和外围文本误改。
 
+
 diff --git a/docs/plans/apply-patch-original-ordered-edits.md b/docs/plans/apply-patch-original-ordered-edits.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..182f7e6a4f92862d4e33ca5c847a28a1507571d6
@@ -714,20 +715,22 @@ index 0000000000000000000000000000000000000000..182f7e6a4f92862d4e33ca5c847a28a1
 +```
 +
 +Approval applies only to canonical plan revision R8, the six-file changed scope, and the exact frozen implementation diff audited in task `ses_074ddae5bffe3krjrjeZxHHL5c`.
+
 diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
-index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf8b80ace4 100644
+index efc004aae..0b93137e9 100644
 --- a/packages/opencode/src/patch/index.ts
 +++ b/packages/opencode/src/patch/index.ts
-@@ -4,7 +4,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import * as Log from "@opencode-ai/core/util/log"
+@@ -4,7 +4,8 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "../util/bom"
- import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
+ import { convertToLineEnding, detectLineEnding, splitLines } from "../util/line-ending"
+ // #131：patch 逻辑行匹配，写回保留原行尾
 -import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./match"
++// #533：locateContext 是 chunk 局部导航下界，与 old block 候选判定分离
 +import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./match"
  
- const log = Log.create({ service: "patch" })
- 
-@@ -342,83 +342,112 @@ export function deriveNewContentsFromChunks(
+ export const PatchSchema = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
+@@ -338,81 +339,119 @@ export function deriveNewContentsFromChunks(
  }
  
  function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFileChunk[], persistedText: string) {
@@ -736,25 +739,26 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 -  // terminal flag 只记录真实文件终止符，不能与最后一个空逻辑行合并成同一数组元素。
 -  let terminated = persistedText.endsWith("\n") || persistedText.endsWith("\r")
 -  let cursorOffset = 0
-+  // 集合式编辑：全部对 immutable original 定位，成功后再按位置 reverse apply。
++  // #533：集合式编辑：全部对 immutable original 定位，成功后再按位置 reverse apply。
 +  // 禁止 inter-chunk forward cursor 成功门闸，否则模型乱序唯一 chunk 会被误杀。
 +  const terminated = persistedText.endsWith("\n") || persistedText.endsWith("\r")
 +  const originalText = workingText(originalLines, terminated)
-+  // originalText 是本 proposal 唯一坐标系；任何中间 replacement 都不会重新进入 locator。
++  // #533：originalText 是本 proposal 唯一坐标系；任何中间 replacement 都不会重新进入 locator。
    const insertions: string[][] = []
 +  const replacements: Array<{ start: number; end: number; text: string }> = []
  
    for (const chunk of chunks) {
 -    // 每个 chunk 都先验证 context；pure insertion 只跳过 old block，不能跳过公开的 @@ 约束。
-+    // context 只约束本 chunk 的下界，不推进全局共享 cursor。
++    // #533：context 只约束本 chunk 的下界，不推进全局共享 cursor。
 +    let searchFrom = 0
      if (chunk.change_context) {
 -      const context = locateExact(lines, [chunk.change_context], cursorOffset, false, terminated)
-+      // searchFrom 是 chunk-local 值，后方 chunk 的 context 不会消费前方 chunk 的搜索范围。
++      // #533：searchFrom 是 chunk-local 值，后方 chunk 的 context 不会消费前方 chunk 的搜索范围。
 +      const context = locateContext(originalLines, [chunk.change_context], 0, terminated)
        if (context.type !== "found") {
 -        // context 的零匹配与多匹配都不能继续，否则同一公开 @@ 字段会出现两套成功语义。
--        // Tool input 保留完整 @@ context；owner 错误只报告失败与 actual 证据，避免再次回显请求文本。
++        // #533：context 的零匹配与多匹配都不能继续，否则同一公开 @@ 字段会出现两套成功语义。
+         // Tool input 保留完整 @@ context；owner 错误只报告失败与 actual 证据，避免再次回显请求文本。
          throw new Error(withCandidate(`Failed to find context in ${filePath}.`, persistedText, chunk.change_context))
        }
 -      const text = workingText(lines, terminated)
@@ -771,17 +775,18 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
      }
  
 -    // 插入文本延后到所有匹配成功后统一追加，既不暴露给后续搜索，也能与删除全部原文自然组合。
-+    // pure insertion 延后到所有 replacement 成功之后，避免成为后续 old 候选。
++    // #533：pure insertion 延后到所有 replacement 成功之后，避免成为后续 old 候选。
      if (chunk.old_lines.length === 0) {
-+      // insertion 不占 original span，因此不能参与 overlap，也不能为后续 old block 制造候选。
++      // #533：insertion 不占 original span，因此不能参与 overlap，也不能为后续 old block 制造候选。
        insertions.push(chunk.new_lines)
        continue
      }
- 
 -    const result = locateExact(lines, chunk.old_lines, cursorOffset, chunk.is_end_of_file, terminated)
++
 +    const result = locateExact(originalLines, chunk.old_lines, searchFrom, chunk.is_end_of_file, terminated)
      if (result.type === "ambiguous") {
 -      // ambiguity 的修正动作是补充 context；重复打印已在 Tool input 中的 old block 不增加决策信息。
++      // #533：ambiguity 的修正动作是补充 context；重复打印已在 Tool input 中的 old block 不增加决策信息。
        throw new Error(
          `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
        )
@@ -789,9 +794,9 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
      if (result.type === "not-found") {
        const expected = chunk.old_lines.join("\n")
 -      // Tool input 已携带完整 old block；错误正文只补充结果与 actual 证据，避免模型上下文出现第二份请求文本。
++      // #533：Tool input 已携带完整 old block；错误正文只补充结果与 actual 证据，避免模型上下文出现第二份请求文本。
        throw new Error(withCandidate(`Failed to find expected lines in ${filePath}.`, persistedText, expected))
      }
- 
 -    if (result.location.kind === "line") {
 -      // exact-line 保留 line splice，避免 generic content span 把整行删除退化为空行。
 -      const startLine = result.location.startLine
@@ -806,6 +811,7 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 -          ? lineOffset(lines, nextLine)
 -          : workingText(lines, terminated).length + 1
 -      continue
++
 +    const span =
 +      result.location.kind === "line"
 +        ? {
@@ -817,7 +823,7 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 +          }
 +        : { start: result.location.startOffset, end: result.location.endOffset }
 +
-+    // whole-line 与 substring 都收成 original 上的 [start,end) 字符窗，便于重叠检测与 reverse apply。
++    // #533：whole-line 与 substring 都收成 original 上的 [start,end) 字符窗，便于重叠检测与 reverse apply。
 +    // replacement 文本在定位期一并确定换行 ownership，apply 时不再重新解释 line kind。
 +    const text =
 +      result.location.kind === "line"
@@ -828,11 +834,12 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 +  }
 +
 +  replacements.sort((left, right) => left.start - right.start)
-+  // 只有所有定位都成功后才排序；任何 miss 都会在产生 working copy 之前终止整个文件 proposal。
++  // #533：只有所有定位都成功后才排序；任何 miss 都会在产生 working copy 之前终止整个文件 proposal。
++  // 排序后 overlap 检测只需比较相邻对——spans 已按 original 单调递增。
 +  for (let index = 1; index < replacements.length; index++) {
 +    const previous = replacements[index - 1]
 +    const current = replacements[index]
-+    // 同 span 或嵌套必须拒绝：两个 chunk 不能争用同一段 original。
++    // #533：同 span 或嵌套必须拒绝：两个 chunk 不能争用同一段 original。
 +    // 相邻半开区间不重叠，允许连续两行或同行相邻 substring 各自拥有自己的字符窗。
 +    if (previous.start < current.end && current.start < previous.end) {
 +      throw new Error(
@@ -852,7 +859,8 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 -    if (terminated) lines.pop()
 -    cursorOffset = result.location.startOffset + replacement.length
 +  let next = originalText
-+  // 从后向前应用可保持所有较小 original offset 有效，不需要位置增量修正或第二套 cursor。
++  // #533：从后向前应用可保持所有较小 original offset 有效，不需要位置增量修正或第二套 cursor。
++  // spread 复制避免 reverse 迭代期间误改 replacements 数组本身。
 +  for (const replacement of [...replacements].reverse()) {
 +    next = next.slice(0, replacement.start) + replacement.text + next.slice(replacement.end)
    }
@@ -860,10 +868,11 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 -  // 按 patch 顺序追加数组，让空文件、delete-all 和多 insertion 共用同一分隔符语义。
 -  // 最终文件尾换行仍由 deriveNewContentsFromChunks 的既有逻辑统一补齐，避免双重 owner。
 +  const nextTerminated = next.endsWith("\n")
++  // #533：reverse apply 后重分离 terminal 状态；后续 complete literal 才能继续区分 `foo` 与 `foo\n`。
 +  let lines = next === "" ? [] : next.split("\n")
 +  if (nextTerminated) lines.pop()
 +
-+  // 按 patch 顺序追加 pure insertion，与 delete-all + insert 组合共享 EOF 语义。
++  // #533：按 patch 顺序追加 pure insertion，与 delete-all + insert 组合共享 EOF 语义。
    for (const insertion of insertions) lines.push(...insertion)
    return lines
  }
@@ -874,7 +883,7 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 +  originalText: string,
 +  terminated: boolean,
 +) {
-+  // whole-line range 的 end 通常落在下一行起点（含旧行尾 LF）；空替换删除整行窗口。
++  // #533：whole-line range 的 end 通常落在下一行起点（含旧行尾 LF）；空替换删除整行窗口。
 +  if (newLines.length === 0) return ""
 +  const body = newLines.join("\n")
 +  if (span.end < originalText.length) return `${body}\n`
@@ -885,13 +894,13 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
  function workingText(lines: string[], terminated: boolean) {
    // canonical lines 与 terminal 状态分离，既能区分 `foo`/`foo\n`，也不会把终止符误当空逻辑行。
    return lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
-@@ -458,6 +487,43 @@ function generateUnifiedDiff(oldContent: string, newContent: string): string {
+@@ -453,6 +492,44 @@ function generateUnifiedDiff(oldContent: string, newContent: string): string {
    return hasChanges ? diff : ""
  }
  
++// #533：只聚合同 source 全为 update 的 proposal；mixed add/delete 维持既有操作顺序，不扩张本任务语义。
++// 第一遍先盘点 operation type，防止第二遍提前合并 update 后跨过中间 add/delete。
 +function groupUpdateHunks(hunks: Hunk[], resolvePath: (path: string) => string): Hunk[] {
-+  // 只聚合同 source 全为 update 的 proposal；mixed add/delete 维持既有操作顺序，不扩张本任务语义。
-+  // 第一遍先盘点 operation type，防止第二遍提前合并 update 后跨过中间 add/delete。
 +  const types = new Map<string, Set<Hunk["type"]>>()
 +  for (const hunk of hunks) {
 +    const key = resolvePath(hunk.path)
@@ -901,26 +910,27 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
 +  }
 +
 +  const updates = new Map<string, Extract<Hunk, { type: "update" }>>()
++  // #533：flatMap 保序返回——非 update 或 mixed-source hunk 原位通过，聚合只发生在纯 update 序列。
 +  return hunks.flatMap((hunk): Hunk[] => {
 +    if (hunk.type !== "update") return [hunk]
 +    const key = resolvePath(hunk.path)
 +    if (types.get(key)?.size !== 1) return [hunk]
 +    const existing = updates.get(key)
 +    if (!existing) {
-+      // clone chunks 避免 proposal grouping 改写 parser 产物，其他 consumer 仍可安全读取原 hunks。
++      // #533：clone chunks 避免 proposal grouping 改写 parser 产物，其他 consumer 仍可安全读取原 hunks。
 +      const grouped = { ...hunk, chunks: [...hunk.chunks] }
 +      updates.set(key, grouped)
 +      return [grouped]
 +    }
 +
 +    if (hunk.move_path) {
-+      // move destination 也按 consumer 提供的 canonical resolver 比较，alias 不应制造虚假冲突。
++      // #533：move destination 也按 consumer 提供的 canonical resolver 比较，alias 不应制造虚假冲突。
 +      if (existing.move_path && resolvePath(existing.move_path) !== resolvePath(hunk.move_path)) {
 +        throw new Error(`Conflicting move destinations for ${hunk.path}`)
 +      }
 +      existing.move_path ??= hunk.move_path
 +    }
-+    // 只合并 parser 已确认的 chunks；定位、唯一与重叠仍由唯一 Patch owner 负责。
++    // #533：只合并 parser 已确认的 chunks；定位、唯一与重叠仍由唯一 Patch owner 负责。
 +    existing.chunks.push(...hunk.chunks)
 +    return []
 +  })
@@ -929,23 +939,23 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
  // Apply hunks to filesystem
  export const applyHunksToFiles = Effect.fn("Patch.applyHunksToFiles")(function* (hunks: Hunk[]) {
    if (hunks.length === 0) {
-@@ -470,7 +536,8 @@ export const applyHunksToFiles = Effect.fn("Patch.applyHunksToFiles")(function*
+@@ -465,7 +542,7 @@ export const applyHunksToFiles = Effect.fn("Patch.applyHunksToFiles")(function*
    const modified: string[] = []
    const deleted: string[] = []
  
 -  for (const hunk of hunks) {
-+  // direct apply 与 verified preview 共用此 grouping 契约，避免相同 patch 在 consumer 间分叉。
-+  for (const hunk of groupUpdateHunks(hunks, AppFileSystem.resolve)) {
++  for (const hunk of groupUpdateHunks(hunks, FSUtil.resolve)) {
      switch (hunk.type) {
        case "add": {
          yield* fs.writeWithDirs(hunk.path, hunk.contents)
-@@ -545,8 +612,12 @@ export const maybeParseApplyPatchVerified = Effect.fn("Patch.maybeParseApplyPatc
+@@ -540,8 +617,13 @@ export const maybeParseApplyPatchVerified = Effect.fn("Patch.maybeParseApplyPatc
        const args = result.args
        const effectiveCwd = args.workdir ? path.resolve(cwd, args.workdir) : cwd
        const changes = new Map<string, ApplyPatchFileChange>()
++      // #533：direct apply 与 verified preview 共用此 grouping 契约，避免相同 patch 在 consumer 间分叉。
 +      const groupedHunks = groupUpdateHunks(
 +        args.hunks,
-+        (filePath) => AppFileSystem.resolve(path.resolve(effectiveCwd, filePath)),
++        (filePath) => FSUtil.resolve(path.resolve(effectiveCwd, filePath)),
 +      )
  
 -      for (const hunk of args.hunks) {
@@ -953,45 +963,48 @@ index 0fef11c8dbab6311282c0f01d0265e5879962352..c2ff8e55c4d96a1d9e78a62283dea0bf
          const resolvedPath = path.resolve(
            effectiveCwd,
            hunk.type === "update" && hunk.move_path ? hunk.move_path : hunk.path,
+
 diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
-index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f6f7dc704 100644
+index 2a86abc27..c56594aee 100644
 --- a/packages/opencode/src/patch/match.ts
 +++ b/packages/opencode/src/patch/match.ts
-@@ -1,4 +1,7 @@
+@@ -1,4 +1,9 @@
  import { diffChars } from "diff"
++// #533：Patch 与 Edit 共用同一 PI normalization contract（edit-apply 无反向依赖，无环）
 +import { normalizeForMatch } from "../tool/edit-apply"
 +
++// #533：normalized raw view 的逐 grapheme 分段器——模块级单例避免每次定位重建 Segmenter
 +const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
  
  export type ExactLocation =
    | { kind: "line"; startLine: number; endLine: number }
-@@ -24,8 +27,9 @@ export function nextLineOffset(text: string, offset: number) {
+@@ -24,8 +29,9 @@ export function nextLineOffset(text: string, offset: number) {
    return newline === -1 ? text.length : newline + 1
  }
  
 -// 成功域只有两层：完整整行窗口优先，其后才搜索完整旧块的唯一字面 occurrence。
 -// 诊断相似度绝不能进入这里，否则会把提示算法重新变成隐式 replacement fallback。
-+// old block 的成功域由一个候选清单决定：exact literal 与 PI-normalized whole-line 共同参与唯一性。
++// #533：old block 的成功域由一个候选清单决定：exact literal 与 PI-normalized whole-line 共同参与唯一性。
 +// exact 只决定替换精度，不能跳过 normalized-equivalent 第二候选；诊断相似度永远不进入写路径。
 +// fuzzy 只产生 whole-line 候选，避免规范化后用 substring 吞掉未由 old block 拥有的外围字符。
  export function locateExact(
    lines: string[],
    pattern: string[],
-@@ -34,10 +38,12 @@ export function locateExact(
+@@ -34,10 +40,12 @@ export function locateExact(
    terminated = false,
  ): ExactResult {
    if (pattern.length === 0) return { type: "not-found" }
-+  // EOF 只能在唯一候选已成立后表达位置偏好；全局唯一契约下无需另设提前成功分支。
++  // #533：EOF 只能在唯一候选已成立后表达位置偏好；全局唯一契约下无需另设提前成功分支。
 +  void eof
  
 -  // 单次累计全部行起点，避免大文件诊断前的 exact scan 因重复 slice/reduce 退化为二次复杂度。
    const starts: number[] = []
    let offset = 0
-+  // 所有 offset 都属于 immutable original；apply 阶段才能按这些坐标反向改副本。
++  // #533：所有 offset 都属于 immutable original；apply 阶段才能按这些坐标反向改副本。
    for (const line of lines) {
      starts.push(offset)
      offset += line.length + 1
-@@ -45,37 +51,202 @@ export function locateExact(
+@@ -45,37 +53,212 @@ export function locateExact(
    // cursor 落在一行内部时该行已被部分消费，whole-line 分支只能从下一个完整行起点继续。
    const firstEligibleLine = starts.findIndex((offset) => offset >= cursorOffset)
    const startLine = firstEligibleLine === -1 ? lines.length : firstEligibleLine
@@ -1007,7 +1020,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +  const text = lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
 +  const literal = pattern.join("\n")
 +  const exactLineByOffset = new Map<number, number>()
-+  // 此 Map 只给 literal occurrence 标注整行身份，不能另添一个重复候选影响唯一性计数。
++  // #533：此 Map 只给 literal occurrence 标注整行身份，不能另添一个重复候选影响唯一性计数。
 +  for (let index = startLine; index <= lines.length - pattern.length; index++) {
 +    if (pattern.every((line, patternIndex) => lines[index + patternIndex] === line)) {
 +      exactLineByOffset.set(starts[index], index)
@@ -1016,6 +1029,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +
 +  const normalizedPattern = pattern.map(normalizeLineForFuzzy)
 +  const lineCandidates: Array<{ location: ExactLocation; start: number; end: number }> = []
++  // #533：exact 命中先入 candidate 池并携带整行 span；后续 normalized 层只补不重复的等价行。
 +  for (const [start, index] of exactLineByOffset) {
 +    lineCandidates.push({
 +      location: { kind: "line", startLine: index, endLine: index + pattern.length },
@@ -1024,7 +1038,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +    })
 +  }
 +
-+  // exact whole-line 激活优先层；其它 normalized whole-line 仍须进入同层唯一性证明。
++  // #533：exact whole-line 激活优先层；其它 normalized whole-line 仍须进入同层唯一性证明。
 +  for (let index = startLine; index <= lines.length - pattern.length; index++) {
 +    if (!normalizedPattern.every((line, patternIndex) => normalizeLineForFuzzy(lines[index + patternIndex]) === line)) {
 +      continue
@@ -1039,15 +1053,16 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +    })
 +  }
 +
-+  // proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
++  // #533：proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
 +  if (exactLineByOffset.size > 0) {
 +    if (lineCandidates.length > 1) return { type: "ambiguous" }
 +    return { type: "found", location: lineCandidates[0].location }
 +  }
 +
 +  const candidates: Array<{ location: ExactLocation; start: number; end: number }> = []
++  // #533：fallback tier 的组装顺序：exact literal → whole-line → normalized，均参与同一唯一性计数。
 +  if (literal.length > 0) {
-+    // exact occurrence 从下一字符继续，重叠 occurrence 也必须参与 fallback tier 的全局唯一性。
++    // #533：exact occurrence 从下一字符继续，重叠 occurrence 也必须参与 fallback tier 的全局唯一性。
 +    for (let start = text.indexOf(literal, cursorOffset); start !== -1; start = text.indexOf(literal, start + 1)) {
 +      candidates.push({
 +        location: { kind: "substring", startOffset: start, endOffset: start + literal.length },
@@ -1057,7 +1072,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +    }
 +  }
 +  for (const candidate of lineCandidates) {
-+    // 同一 normalized 行窗内已有 exact occurrence 时保留精确 span，避免吞掉外围空白。
++    // #533：同一 normalized 行窗内已有 exact occurrence 时保留精确 span，避免吞掉外围空白。
 +    if (candidates.some((exact) => exact.start >= candidate.start && exact.end <= candidate.end)) continue
 +    candidates.push(candidate)
 +  }
@@ -1065,6 +1080,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +  const normalized = normalizedRawView(text)
 +  const normalizedLiteral = normalizeForMatch(literal)
 +  let unsafeNormalized = 0
++  // #533：normalized 域只补充 lower-tier 候选；raw boundary 可逆才可写，否则计入 unsafe 计数。
 +  if (normalized && normalizedLiteral.length > 0) {
 +    for (
 +      let start = normalized.text.indexOf(normalizedLiteral);
@@ -1074,14 +1090,14 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +      const end = start + normalizedLiteral.length
 +      const rawStart = normalized.starts.get(start)
 +      const rawEnd = normalized.ends.get(end)
-+      // NFKC expansion 内部和跨 trim gap 都没有一个由 old block 独占的连续 original span。
++      // #533：NFKC expansion 内部和跨 trim gap 都没有一个由 old block 独占的连续 original span。
 +      const ownerStart = rawStart ?? normalizedOwnerStart(normalized.owners, start)
 +      if (ownerStart < cursorOffset) continue
 +      if (rawStart === undefined || rawEnd === undefined || hasInternalGap(normalized.gaps, start, end)) {
 +        unsafeNormalized++
 +        continue
 +      }
-+      // whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
++      // #533：whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
 +      if (candidates.some((candidate) => candidate.start <= rawStart && candidate.end >= rawEnd)) continue
 +      candidates.push({
 +        location: { kind: "substring", startOffset: rawStart, endOffset: rawEnd },
@@ -1091,7 +1107,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +    }
 +  }
 +
-+  // unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
++  // #533：unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
 +  if (candidates.length + unsafeNormalized > 1) return { type: "ambiguous" }
 +  if (unsafeNormalized > 0) return { type: "not-found" }
 +  if (candidates.length > 1) return { type: "ambiguous" }
@@ -1099,11 +1115,13 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +  return { type: "found", location: candidates[0].location }
 +}
 +
++// #533：Patch 与 Edit 共用一个 PI normalization contract，避免标点、空格或 NFKC 集合静默分叉。
 +function normalizeLineForFuzzy(line: string) {
-+  // Patch 与 Edit 共用一个 PI normalization contract，避免标点、空格或 NFKC 集合静默分叉。
 +  return normalizeForMatch(line)
 +}
 +
++// #533：starts/ends 同时记录段首与段尾两个 normalized offset——命中端点落在段边界才可映回。
++// #533：normalized 域到 raw 域的可逆映射——逐 grapheme 归一化并记录 boundary/gap/owner。
 +function normalizedRawView(text: string) {
 +  const starts = new Map<number, number>([[0, 0]])
 +  const ends = new Map<number, number>([[0, 0]])
@@ -1122,7 +1140,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +    for (const segment of graphemes.segment(retained)) {
 +      const rawStart = lineStart + segment.index
 +      const rawEnd = rawStart + segment.segment.length
-+      // NUL 阻止单个 interior whitespace grapheme 被 normalizeForMatch 的 trimEnd 删除。
++      // #533：NUL 阻止单个 interior whitespace grapheme 被 normalizeForMatch 的 trimEnd 删除。
 +      const value = normalizeForMatch(`${segment.segment}\0`).slice(0, -1)
 +      starts.set(normalizedOffset, rawStart)
 +      ends.set(normalizedOffset, rawStart)
@@ -1149,11 +1167,12 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 -    if (matchesAt(index)) {
 +
 +  const normalized = parts.join("")
-+  // 不一致表示该输入不能建立可信 raw ownership；只禁用 normalized candidate，绝不改走第二 matcher。
++  // #533：不一致表示该输入不能建立可信 raw ownership；只禁用 normalized candidate，绝不改走第二 matcher。
 +  if (normalized !== normalizeForMatch(text)) return undefined
 +  return { text: normalized, starts, ends, gaps, owners }
 +}
 +
++// #533：二分查找 offset 所属 owner 的 raw 起点；无 owner 时返回 +∞（被 cursor 过滤淘汰）。
 +function normalizedOwnerStart(owners: Array<{ start: number; end: number; rawStart: number }>, offset: number) {
 +  let low = 0
 +  let high = owners.length
@@ -1165,6 +1184,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +  return owners[low]?.rawStart ?? Number.POSITIVE_INFINITY
 +}
 +
++// #533：normalized 命中 [start,end) 内部是否横跨 trim gap——gap 内字符不属于任何 old block。
 +function hasInternalGap(gaps: number[], start: number, end: number) {
 +  let low = 0
 +  let high = gaps.length
@@ -1176,7 +1196,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +  return low < gaps.length && gaps[low] < end
 +}
 +
-+// context 是导航下界，不是 old block 候选：保留 first eligible whole-line，后备唯一 literal substring。
++// #533：context 是导航下界，不是 old block 候选：保留 first eligible whole-line，后备唯一 literal substring。
 +// context 不做 PI normalize，否则仅用于导航的宽松文本会意外改变 old block 的匹配域。
 +export function locateContext(lines: string[], pattern: string[], cursorOffset: number, terminated = false): ExactResult {
 +  if (pattern.length === 0) return { type: "not-found" }
@@ -1188,7 +1208,7 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
 +  }
 +  const firstEligibleLine = starts.findIndex((start) => start >= cursorOffset)
 +  const startLine = firstEligibleLine === -1 ? lines.length : firstEligibleLine
-+  // 重复整行 context 有意选择 first eligible；真正的唯一性仍由随后 old block 证明。
++  // #533：重复整行 context 有意选择 first eligible；真正的唯一性仍由随后 old block 证明。
 +  for (let index = startLine; index <= lines.length - pattern.length; index++) {
 +    if (pattern.every((line, patternIndex) => lines[index + patternIndex] === line)) {
        return { type: "found", location: { kind: "line", startLine: index, endLine: index + pattern.length } }
@@ -1197,14 +1217,17 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
  
    const literal = pattern.join("\n")
 -  // 单个空逻辑行只能由 exact-line 分支定位；空字符串有无限位置，不能进入唯一 substring 判断。
++  // #533：单个空逻辑行只能由 exact-line 分支定位；空字符串有无限位置，不能进入唯一 substring 判断。
    if (literal.length === 0) return { type: "not-found" }
 -  // 行数组不保存文件终止符；substring 搜索必须把当前 terminal LF 恢复成真实字面文本。
 -  // 该 LF 只参与完整 literal，不会被 exact-line 分支误认为额外空白逻辑行。
++  // #533：行数组不保存文件终止符；substring 搜索必须把当前 terminal LF 恢复成真实字面文本。
    const text = lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
    const first = text.indexOf(literal, cursorOffset)
    if (first === -1) return { type: "not-found" }
 -
 -  // 从下一字符继续才能识别重叠 occurrence；任何第二个候选都必须拒绝而非猜第一个。
++  // #533：context 无歧义合同——第二 occurrence 直接拒绝，不猜第一个。
    if (text.indexOf(literal, first + 1) !== -1) return { type: "ambiguous" }
 -  return {
 -    type: "found",
@@ -1214,49 +1237,51 @@ index a976451035446c4722678aa83aced569e79b1fb5..efaeda50adf06bcc8e48311ec53c006f
  }
  
  export type ClosestWindow = {
+
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 7905a0bdd82ddd8449420068079b54ec6a667138..d938b67766388d67010dedb5afe47ef0e76c37e0 100644
+index da9f2ca36..00c90dba3 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -38,8 +38,8 @@ type FileChange = {
+@@ -41,8 +41,8 @@ type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[]
+ // #518：canonicalPath 是 coordinator 的锁键；filePath 保留 patchText 原始解析结果用于错误与 diff 展示。
+ // 两者分离后 symlink alias 不会生成第二个锁，展示路径也不被 realpath 改写。
  
- type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
- 
--// group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
+-// #518：group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
 -// 这样既能一次 commit，也能保留每个 entry 的 Patch owner 语义。
-+// group 代表一个 canonical source proposal；update entries 会合并 chunks，且只派生一个最终 FileChange。
++// #533：group 代表一个 canonical source proposal；update entries 会合并 chunks，且只派生一个最终 FileChange。
 +// add/delete 不合并，避免把同 source 的冲突操作猜成新语义。
  
  const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* (
    group: HunkGroup,
-@@ -64,22 +64,19 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -69,23 +69,20 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
      }
      case "update": {
-+      // canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
++      // #533：canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
        const snapshot = yield* Mutation.read(afs, group.filePath)
+       // #518：proposal 阶段就拒绝 missing/目录；不能等 commit recheck 才报错，否则错误会混入 Permission 后失败路径。
        if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
-       // update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
+       // #518：update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
        const source = Bom.split(Mutation.decode(snapshot))
--      // source BOM 随 working copy 传给 Patch owner，最终 BOM 仍由既有 Bom contract 决定。
        const oldContent = source.text
+-      // #518：working 是同 source 多 entry 的唯一共享状态；首个 entry 的输入必须来自锁外的同一次 proposal read。
 -      let working = Bom.join(source.text, source.bom)
        let movePath: string | undefined
        let moveCanonicalPath: string | undefined
 +      let fileUpdate: ReturnType<typeof Patch.deriveNewContentsFromChunks>
        try {
--        // 每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
+-        // #518：每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
 -        // 下一 entry 只接收上一 entry 的最终 content，entry 内部生成文本仍由 Patch owner 隔离。
 -        for (const hunk of group.hunks) {
-+        // canonical group 内全部 chunks 一次交给 Patch owner，entry2 不得读取 entry1 在本次 proposal 生成的文本。
++        // #533：canonical group 内全部 chunks 一次交给 Patch owner，entry2 不得读取 entry1 在本次 proposal 生成的文本。
 +        const chunks = group.hunks.flatMap((hunk) => {
            if (hunk.type !== "update") throw new Error(`Conflicting operations for ${group.filePath}`)
 -          const fileUpdate = Patch.deriveNewContentsFromChunks(group.filePath, hunk.chunks, working)
 -          working = Bom.join(fileUpdate.content, fileUpdate.bom)
            if (hunk.move_path) {
              const nextMovePath = path.resolve(instance.directory, hunk.move_path)
-             const nextMoveCanonicalPath = AppFileSystem.resolve(nextMovePath)
-@@ -89,14 +86,14 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+             const nextMoveCanonicalPath = FSUtil.resolve(nextMovePath)
+@@ -96,15 +93,16 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
              movePath = nextMovePath
              moveCanonicalPath = nextMoveCanonicalPath
            }
@@ -1265,17 +1290,20 @@ index 7905a0bdd82ddd8449420068079b54ec6a667138..d938b67766388d67010dedb5afe47ef0
 +        })
 +        fileUpdate = Patch.deriveNewContentsFromChunks(group.filePath, chunks, Bom.join(source.text, source.bom))
        } catch (error) {
--        // 每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
+-        // #518：每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
++        // #518：每个 parsed entry 保留 Patch owner 的定位边界；Tool 只丢弃 proposal，不运行第二套 matcher。
          return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
        }
+-      // #518：最终 BOM 以末 entry 的输出为准；diff 只展示文本部分，BOM 变化由 commit 写盘保留。
 -      const next = Bom.split(working)
        const diffOld = normalizeLineEndings(oldContent)
 -      const diffNew = normalizeLineEndings(next.text)
++      // #533：diff 与计数都来自单次派生的最终 content，与 commit 写盘观察同一份文本。
 +      const diffNew = normalizeLineEndings(fileUpdate.content)
        const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
        const { additions, deletions } = countDiff(diffOld, diffNew)
-       const expected = [snapshot]
-@@ -107,7 +104,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+       // #518：expected 只包含 source；update 未声明 move 时不锁任何 destination 路径。
+@@ -116,7 +114,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
          if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
          expected.push(destination)
        }
@@ -1283,20 +1311,21 @@ index 7905a0bdd82ddd8449420068079b54ec6a667138..d938b67766388d67010dedb5afe47ef0
 +      return { filePath: group.filePath, oldContent, newContent: fileUpdate.content, type: movePath ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom: fileUpdate.bom, expected }
      }
      case "delete": {
-       if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
-@@ -136,6 +133,7 @@ function countDiff(oldContent: string, newContent: string) {
+       // #518：delete 与 add 同理不聚合；重复 Delete entry 无法像 update 那样链式消费。
+@@ -148,6 +146,7 @@ function countDiff(oldContent: string, newContent: string) {
  }
  
  function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
-+  // Tool 只拥有 filesystem identity 与 mutation boundary；old block 语义继续下沉给 Patch owner。
++  // #533：Tool 只拥有 filesystem identity 与 mutation boundary；old block 语义继续下沉给 Patch owner。
+   // #518：分组先于 Permission 与 proposal；Map 保持首次出现顺序，fileChanges 顺序与 patchText 一致。
    const groups = new Map<string, HunkGroup>()
    for (const hunk of hunks) {
-     const filePath = path.resolve(instance.directory, hunk.path)
+
 diff --git a/packages/opencode/test/patch/patch.test.ts b/packages/opencode/test/patch/patch.test.ts
-index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3aafb9357d 100644
+index 651d42e3b..4d34397f4 100644
 --- a/packages/opencode/test/patch/patch.test.ts
 +++ b/packages/opencode/test/patch/patch.test.ts
-@@ -141,25 +141,16 @@ describe("Patch namespace", () => {
+@@ -142,25 +142,16 @@ describe("Patch namespace", () => {
        expect(result.content).toBe("before one\ntwo after\n")
      })
  
@@ -1319,7 +1348,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 -          ),
 -        ).toThrow("Failed to find expected lines")
 -      }
-+    // trailing-empty 缩短仍不是完整字面/ fuzzy whole-line 成功域：无终止符的 foo 不能匹配 ["foo",""]。
++    // #533：trailing-empty 缩短仍不是完整字面/fuzzy whole-line 成功域：无终止符的 foo 不能匹配 ["foo",""]。
 +    // 空白与 Unicode whole-line fuzzy 由独立正向用例锁定，这里只保留仍应失败的 shortened 形状。
 +    test("rejects shortened trailing-empty old blocks", () => {
 +      expect(() =>
@@ -1332,22 +1361,22 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
      })
  
      // 文件真实终止 LF 属于 current working text，完整 old block `foo\n` 应能唯一命中。
-@@ -176,6 +167,7 @@ describe("Patch namespace", () => {
+@@ -177,6 +168,7 @@ describe("Patch namespace", () => {
  
      // cursor 以第一次 replacement 后的 current text 为坐标，允许同一存活行继续向右匹配。
      // 两个修改必须同时保留；退回 whole-line tuple 会拒绝第二个或覆盖第一个。
-+    // 同行多个唯一 substring 按位置统一应用；顺序与乱序由其它用例分别锁定。
++    // #533：同行多个唯一 substring 按位置统一应用；顺序与乱序由其它用例分别锁定。
      test("composes ordered substring chunks on the same line", () => {
        const result = Patch.deriveNewContentsFromChunks(
          "fixture.txt",
-@@ -189,8 +181,254 @@ describe("Patch namespace", () => {
+@@ -190,8 +182,258 @@ describe("Patch namespace", () => {
        expect(result.content).toBe("abcXghiY\n")
      })
  
 -    // 后续 chunk 只能搜索前一 replacement 之后的存活原文，不能重新消费生成文本。
 -    // 整个 working copy 在失败时被丢弃，因此 owner 不会泄漏第一步的局部成功。
-+    // 多 chunk 对原始文件独立定位后按位置统一应用；patch 内顺序可以晚于文件顺序。
-+    // 这锁住 Session 里 “先改后面再改前面” 仍应一次成功的用户症状，而不是拆多次 tool 调用。
++    // #533：多 chunk 对原始文件独立定位后按位置统一应用；patch 内顺序可以晚于文件顺序。
++    // 这锁住 Session 里“先改后面再改前面”仍应一次成功的用户症状，而不是拆多次 tool 调用。
 +    test("applies unique out-of-order whole-line chunks against the original file", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
 +        "multi.txt",
@@ -1361,7 +1390,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("a\nB\nc\nd\nE\nf\n")
 +    })
 +
-+    // 每个 @@ context 都只约束自己的 chunk；后方 context 不能推进共享 cursor 并屏蔽前方目标。
++    // #533：每个 @@ context 都只约束自己的 chunk；后方 context 不能推进共享 cursor 并屏蔽前方目标。
 +    // 固定最终文本同时证明 context 行未被替换，两个 old block 也没有按 patch 顺序增量消费。
 +    test("applies out-of-order chunks with independent change contexts", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
@@ -1376,7 +1405,8 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("section-a\nFIRST\ngap\nsection-b\nLAST\n")
 +    })
 +
-+    // 同行两个唯一 substring 即使在 patch 中颠倒顺序，也必须落到同一最终字面结果。
++    // #533：同行两个唯一 substring 即使在 patch 中颠倒顺序，也必须落到同一最终字面结果。
++    // 固定字面值与正向用例完全一致——顺序不足以前后两次派生产生可观察差异。
 +    test("applies unique out-of-order substring chunks on the same line", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
 +        "fixture.txt",
@@ -1390,7 +1420,8 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("abcXghiY\n")
 +    })
 +
-+    // 整行命中也必须全局唯一；取第一处会掩盖模型漏掉的重复结构。
++    // #533：整行命中也必须全局唯一；取第一处会掩盖模型漏掉的重复结构。
++    // 该拒绝与 context first-eligible 用例互补：唯一性只属于 old block，不属于导航 context。
 +    test("rejects ambiguous whole-line matches", () => {
 +      expect(() =>
 +        Patch.deriveNewContentsFromChunks(
@@ -1401,7 +1432,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toThrow("Found multiple matches")
 +    })
 +
-+    // exact whole-line 是优先候选层；另一更长行内的同 literal 只属于低层 substring，不能造成旧成功域退化。
++    // #533：exact whole-line 是优先候选层；另一更长行内的同 literal 只属于低层 substring，不能造成旧成功域退化。
 +    // 固定结果同时证明外围行未被修改，Session 中 outer/inner while 的缩进形状不会再被误判。
 +    test("preserves a unique exact whole-line match when the literal is nested elsewhere", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
@@ -1413,8 +1444,9 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("prefix  target suffix\nfixed\n")
 +    })
 +
-+    // 两个 chunk 指向同一原文 span 时必须失败且不产生部分成功内容。
++    // #533：两个 chunk 指向同一原文 span 时必须失败且不产生部分成功内容。
 +    // 明确断言 overlap 文案，避免实现退回偶然的 cursor unavailable 或任取一个 replacement。
++    // overlap 是双 span 契约错误：任一 replacement 的采纳都无证据支撑。
 +    test("rejects overlapping replacements for the same original span", () => {
 +      expect(() =>
 +        Patch.deriveNewContentsFromChunks(
@@ -1428,7 +1460,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toThrow("Overlapping expected lines")
 +    })
 +
-+    // PI normalize 只移除行尾空白，并覆盖 NFKC、特殊空格与常见标点；不得忽略前导缩进。
++    // #533：PI normalize 只移除行尾空白，并覆盖 NFKC、特殊空格与常见标点；不得忽略前导缩进。
 +    // 固定字面矩阵防止实现只覆盖其中一种转换却声称与 PI 对齐。
 +    test("accepts PI-normalized whole-line matches after exact failure", () => {
 +      expect(
@@ -1475,7 +1507,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toBe("changed\t\n")
 +    })
 +
-+    // normalized proper substring 必须回到 original 连续 span；PI 等价引号只改变候选，不拥有行内前后缀。
++    // #533：normalized proper substring 必须回到 original 连续 span；PI 等价引号只改变候选，不拥有行内前后缀。
 +    // 断言保留 prefix/suffix，防止实现复制 PI 的 touched-line normalized writeback 而污染未提交字节。
 +    test("preserves surrounding text for a unique normalized proper substring", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
@@ -1487,7 +1519,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("prefix fixed suffix\n")
 +    })
 +
-+    // normalized start/end 只能落在 raw grapheme boundary；组合字符与完整 compatibility expansion 都应拥有完整原文。
++    // #533：normalized start/end 只能落在 raw grapheme boundary；组合字符与完整 compatibility expansion 都应拥有完整原文。
 +    // 这些固定结果会击穿按 normalized UTF-16 offset 直接切 raw text 的错误实现。
 +    // 完整 ligature 可映射而半个 expansion 不可映射，区分“可连续拥有”与“看起来相似”。
 +    test("maps normalized proper substrings to complete raw grapheme spans", () => {
@@ -1514,7 +1546,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toThrow("Failed to find expected lines")
 +    })
 +
-+    // 无法映回 raw boundary 的 normalized occurrence 仍参与全局唯一性；不能忽略它后误写另一处 exact span。
++    // #533：无法映回 raw boundary 的 normalized occurrence 仍参与全局唯一性；不能忽略它后误写另一处 exact span。
 +    // 该候选虽不能写回，但仍证明模型 old block 在 normalized 域并不唯一。
 +    test("rejects a safe match when another normalized occurrence cuts a grapheme expansion", () => {
 +      expect(() =>
@@ -1526,7 +1558,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toThrow("Found multiple matches")
 +    })
 +
-+    // normalized proper substring 仍遵守完整 old block 的全局唯一性，并能跨无 trim gap 的换行映回连续 raw span。
++    // #533：normalized proper substring 仍遵守完整 old block 的全局唯一性，并能跨无 trim gap 的换行映回连续 raw span。
 +    // multiline 固定结果证明首行前缀与末行后缀都不属于 normalized replacement ownership。
 +    test("enforces uniqueness and multiline boundaries for normalized substrings", () => {
 +      expect(() =>
@@ -1545,7 +1577,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toBe("before one\ntwo after\n")
 +    })
 +
-+    // 一个 exact 行与另一个 PI-normalized 等价行属于两个候选，exact 不能绕过全局唯一性。
++    // #533：一个 exact 行与另一个 PI-normalized 等价行属于两个候选，exact 不能绕过全局唯一性。
 +    // 两者同属 whole-line active tier，因此不能借 lower-tier 规则选中 ASCII 第一处。
 +    test("rejects exact matches with another normalized-equivalent candidate", () => {
 +      expect(() =>
@@ -1557,7 +1589,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toThrow("Found multiple matches")
 +    })
 +
-+    // context 保留 first eligible 整行契约；重复 context 不应继承 old-block 的全局唯一拒绝。
++    // #533：context 保留 first eligible 整行契约；重复 context 不应继承 old-block 的全局唯一拒绝。
 +    // context 只缩小当前 old block 的搜索域，本身不是 replacement candidate。
 +    test("preserves repeated whole-line context when the old block is unique", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
@@ -1569,7 +1601,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("section\nx\nsection\nfixed\n")
 +    })
 +
-+    // EOF 只能在全局唯一已证明后影响定位；末尾候选不能掩盖文件前方的第二个完整候选。
++    // #533：EOF 只能在全局唯一已证明后影响定位；末尾候选不能掩盖文件前方的第二个完整候选。
 +    // anchor 表达位置偏好而非歧义选择器，否则同一 old block 会因标记存在而静默猜测。
 +    test("rejects ambiguous complete blocks even when one occurrence is at EOF", () => {
 +      expect(() =>
@@ -1581,7 +1613,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      ).toThrow("Found multiple matches")
 +    })
 +
-+    // fuzzy 不得抢在 exact 字面子串之前，否则会吞掉调用方未提交的行内空格。
++    // #533：fuzzy 不得抢在 exact 字面子串之前，否则会吞掉调用方未提交的行内空格。
 +    test("prefers exact substring over fuzzy whole-line when both could apply", () => {
 +      const result = Patch.deriveNewContentsFromChunks(
 +        "fixture.txt",
@@ -1592,43 +1624,44 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      expect(result.content).toBe("  fixed  \n")
 +    })
 +
-+    // 全部对 original 定位，因此后续 chunk 不能消费前序生成文本。
++    // #533：全部对 original 定位，因此后续 chunk 不能消费前序生成文本。
 +    // 失败发生在统一 apply 前，保证第一块成功定位也不会泄漏成部分文件结果。
++    // 该边界与 repeated-entry Tool 用例共享同一 owner 语义，双处锁定防退化。
      test("does not rematch text introduced by an earlier chunk", () => {
        expect(() =>
          Patch.deriveNewContentsFromChunks(
-@@ -204,8 +442,7 @@ describe("Patch namespace", () => {
+@@ -205,8 +447,7 @@ describe("Patch namespace", () => {
        ).toThrow("Failed to find expected lines")
      })
  
 -    // 零长度内容仍会生成一个逻辑行，cursor 不能因 replacement 字符数为零而停在该行起点。
 -    // 第二个 chunk 若能匹配这个空行，就违反了与非空 generated text 相同的隔离契约。
-+    // 空行替换同样不得让第二 chunk 命中生成的空逻辑行。
++    // #533：空行替换同样不得让第二 chunk 命中生成的空逻辑行。
      test("does not rematch an empty line introduced by an earlier chunk", () => {
        expect(() =>
          Patch.deriveNewContentsFromChunks(
-@@ -221,6 +458,7 @@ describe("Patch namespace", () => {
+@@ -222,6 +463,7 @@ describe("Patch namespace", () => {
  
      // 整行删除继续使用 line splice，不能把被删行留下成一个空逻辑行。
      // 首、中、末、唯一及多行 block 覆盖所有相邻分隔符位置。
-+    // 这些位置共同锁住半开 span 对换行分隔符的 ownership，避免 reverse slice 留双换行。
++    // #533：这些位置共同锁住半开 span 对换行分隔符的 ownership，避免 reverse slice 留双换行。
      test("preserves exact-line deletion semantics", () => {
        const cases = [
          { content: "a\nb\nc\n", old: ["a"], expected: "b\nc\n" },
-@@ -242,6 +480,7 @@ describe("Patch namespace", () => {
+@@ -243,6 +485,7 @@ describe("Patch namespace", () => {
  
      // pure insertion 是 EOF 行操作：多个 block 保持 patch 顺序，且空文件没有前导空行。
      // 追加动作在匹配全部成功后发生，因此不会成为后续 chunk 的候选文本。
-+    // 空文件与非空文件共享同一数组追加契约，最终终止换行仍由 derive owner 统一补齐。
++    // #533：空文件与非空文件共享同一数组追加契约，最终终止换行仍由 derive owner 统一补齐。
      test("preserves pure insertion order for empty and nonempty files", () => {
        const chunks = [
          { old_lines: [], new_lines: ["beta"] },
-@@ -392,6 +631,70 @@ PATCH`
+@@ -393,6 +636,70 @@ PATCH`
          }
        }),
      )
 +
-+    // verified preview 必须把同一 canonical source 的 repeated entries 合成一个完整 new_content。
++    // #533：verified preview 必须把同一 canonical source 的 repeated entries 合成一个完整 new_content。
 +    // 后一个 Map.set 覆盖前一个完整文件结果会静默丢失修改，因此这里直接断言两个独立结果。
 +    // 单一 change key 与双修改内容一起证明 grouping 同时解决 identity 和 overwrite 两类分叉。
 +    it.live("combines repeated update entries against one original file", () =>
@@ -1649,7 +1682,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      }),
 +    )
 +
-+    // verified 只返回校验结果但仍须执行 original-only：entry2 依赖生成文本时必须是 CorrectnessError。
++    // #533：verified 只返回校验结果但仍须执行 original-only：entry2 依赖生成文本时必须是 CorrectnessError。
 +    // 此 seam 不写盘，故错误类型而非文件副作用是 consumer parity 的直接可观察结果。
 +    // CorrectnessError 还证明 preview 没有用前一 entry 的 new_content 合成第二次成功定位。
 +    it.live("rejects generated-text dependencies across repeated entries in verified preview", () =>
@@ -1667,7 +1700,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      }),
 +    )
 +
-+    // canonical identity 而非 lexical path 决定 proposal；symlink alias 不能生成第二个 full-file change。
++    // #533：canonical identity 而非 lexical path 决定 proposal；symlink alias 不能生成第二个 full-file change。
 +    // changes 长度锁住 identity 聚合，固定 new_content 锁住两个 entry 均未被 Map 覆盖丢失。
 +    // realpath 归并必须发生在读取与 changes.set 前，事后合并两个完整结果无法恢复丢失的修改。
 +    it.live("combines canonical-equivalent source aliases in verified preview", () =>
@@ -1694,11 +1727,11 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
    })
  
    describe("applyPatch", () => {
-@@ -459,6 +762,75 @@ PATCH`
+@@ -460,6 +767,75 @@ PATCH`
        }),
      )
  
-+    // direct consumer 先聚合同 source entries，再一次对 original 派生；文件顺序不再成为成功门闸。
++    // #533：direct consumer 先聚合同 source entries，再一次对 original 派生；文件顺序不再成为成功门闸。
 +    // modified 只出现一次也证明 direct apply 没有恢复逐 entry 写盘和重读的旧路径。
 +    // 固定最终文件同时验证 reverse apply 使用 original offsets，而非按 entry 顺序修正位置。
 +    it.live("applies repeated update entries out of file order", () =>
@@ -1714,7 +1747,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      }),
 +    )
 +
-+    // direct Patch consumer 与 Tool/verified 共用 original-only proposal；entry2 不得消费 entry1 生成文本。
++    // #533：direct Patch consumer 与 Tool/verified 共用 original-only proposal；entry2 不得消费 entry1 生成文本。
 +    // 文件未变断言把 locate failure 与 direct filesystem atomicity 绑定在同一公开 seam。
 +    it.live("rejects generated-text dependencies across repeated update entries", () =>
 +      Effect.gen(function* () {
@@ -1738,7 +1771,7 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
 +      }),
 +    )
 +
-+    // direct consumer 也必须按 realpath 聚合同一物理 source，不能让 symlink 拼写绕过 original-only。
++    // #533：direct consumer 也必须按 realpath 聚合同一物理 source，不能让 symlink 拼写绕过 original-only。
 +    // 文件保持原文证明失败发生在统一 derive 之前，第一 entry 没有先通过 alias 写盘。
 +    // alias entry 若被当成第二文件会错误消费 generated；该测试因此对 canonical grouping 敏感。
 +    it.live("rejects generated-text dependencies through a source alias", () =>
@@ -1770,24 +1803,25 @@ index 0d4c54079515b15acc78bbb2a65472441db2c2dd..ab133499cda86a16f65a4b249f15ca3a
      it.live("should move and update a file", () =>
        Effect.gen(function* () {
          const oldPath = path.join(tempDir, "old-name.txt")
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46fedaa4a6 100644
+index 5ae0685d6..8ff87bb35 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -299,9 +299,9 @@ describe("tool.apply_patch freeform", () => {
+@@ -315,9 +315,9 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
 -  // 第二个 chunk 的 exact 文本只存在于 forward cursor 之前；matcher 必须继续失败，诊断也不能回显该文本。
 -  // 位置提示来自 immutable 原文件，但不能把它误当成当前 working copy 中仍可替换的 actual。
 -  it.instance("does not repeat an exact candidate before the patch cursor", () =>
-+  // 乱序唯一 chunk 对 original 定位后应按位置统一成功，不再因 forward cursor 失败。
++  // #533：乱序唯一 chunk 对 original 定位后应按位置统一成功，不再因 forward cursor 失败。
 +  // 固定完整文件结果证明两处改动一次提交，而不是模型重试后只保留部分修改。
 +  it.instance("applies unique out-of-order chunks in one update", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -319,23 +319,14 @@ describe("tool.apply_patch freeform", () => {
+@@ -335,23 +335,15 @@ describe("tool.apply_patch freeform", () => {
          "*** End Patch",
        ].join("\n")
  
@@ -1806,17 +1840,18 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
      }),
    )
  
--  // CRLF 文件中的多行 candidate 与 Patch 的 LF expected 在 normalized 空间等价，不能再次回显 expected block。
+-  // #521：CRLF 文件中的多行 candidate 与 Patch 的 LF expected 在 normalized 空间等价，不能再次回显 expected block。
 -  // candidate 已位于 cursor 之前，测试同时锁定“原文件证据”与“当前步骤不可重用”的边界。
 -  // 断言组合 patch input 和 error output，确保用户上下文中不会出现第二份 requested block。
 -  it.instance("does not repeat a CRLF candidate before the patch cursor", () =>
-+  // CRLF 原文同样支持乱序唯一 chunk；写回必须保留原换行风格。
++  // #533：CRLF 原文同样支持乱序唯一 chunk；写回必须保留原换行风格。
 +  // 该断言把匹配坐标与持久化行尾分开，防止 reverse apply 偷偷规范化为 LF。
++  // 定位坐标永远在 LF 逻辑行域——行尾保留由 deriveNewContentsFromChunks 的既有归一契约承担。
 +  it.instance("applies unique out-of-order chunks on CRLF files", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -355,21 +346,13 @@ describe("tool.apply_patch freeform", () => {
+@@ -371,21 +363,14 @@ describe("tool.apply_patch freeform", () => {
          "*** End Patch",
        ].join("\n")
  
@@ -1830,6 +1865,7 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 -      }
 -      expect(yield* readText(target)).toBe("alpha\r\nbeta\r\nmiddle\r\nomega\r\n")
 +      yield* execute({ patchText }, ctx)
++      // #533：两处改动一次性落盘；MIDDLE 与 ALPHA 均来自 original 定位而非重试拼接。
 +      expect(yield* readText(target)).toBe("ALPHA\r\nBETA\r\nMIDDLE\r\nomega\r\n")
      }),
    )
@@ -1837,12 +1873,12 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 -  // 前序 replacement 已从 working copy 消费 alpha；persisted candidate 只能解释原文件位置，不能猜测 cursor 原因。
 -  // Tool input 有两个独立 `-alpha` 请求，result 不得制造第三份，且整个文件仍按单 hunk 原子失败。
 -  it.instance("does not repeat an exact candidate consumed by a prior chunk", () =>
-+  // 两个 chunk 争用同一 original span 必须原子失败；错误是 overlap，不是 cursor unavailable。
++  // #533：两个 chunk 争用同一 original span 必须原子失败；错误是 overlap，不是 cursor unavailable。
 +  it.instance("rejects overlapping chunks for the same original span", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -391,10 +374,8 @@ describe("tool.apply_patch freeform", () => {
+@@ -407,10 +392,8 @@ describe("tool.apply_patch freeform", () => {
        expect(Exit.isFailure(exit)).toBe(true)
        if (Exit.isFailure(exit)) {
          const error = Cause.squash(exit.cause) as Error
@@ -1855,11 +1891,11 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
        }
        expect(yield* readText(target)).toBe("alpha\nomega\n")
      }),
-@@ -633,6 +614,90 @@ describe("tool.apply_patch freeform", () => {
+@@ -677,6 +660,90 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
-+  // repeated Update File entries 也属于一个 proposal；先写后方 entry 不应阻断前方唯一 old block。
++  // #533：repeated Update File entries 也属于一个 proposal；先写后方 entry 不应阻断前方唯一 old block。
 +  // Tool seam 覆盖 permission/mutation adapter，补足 owner 单测无法发现的 entry grouping 分叉。
 +  // 一次 execute 的固定结果证明 permission 后仍只形成一个 FileChange 和一个 mutation commit。
 +  it.instance("applies repeated update entries out of file order", () =>
@@ -1886,7 +1922,7 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 +    }),
 +  )
 +
-+  // 同文件 repeated entries 属于一个 original proposal；entry2 不能消费 entry1 在本次调用生成的文本。
++  // #533：同文件 repeated entries 属于一个 original proposal；entry2 不能消费 entry1 在本次调用生成的文本。
 +  // 失败前不写盘，防止 Tool grouping 保留旧 incremental working 成功路径。
 +  // 错误必须来自 Patch locate owner，Tool 不能捕获后退回旧 entry-by-entry apply。
 +  it.instance("rejects generated-text dependencies across repeated update entries", () =>
@@ -1913,7 +1949,7 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 +    }),
 +  )
 +
-+  // real source 与 symlink alias 必须归入同一 proposal，alias 拼写不能恢复 incremental generated-text 成功。
++  // #533：real source 与 symlink alias 必须归入同一 proposal，alias 拼写不能恢复 incremental generated-text 成功。
 +  // 原文件不变同时证明 alias grouping 与单文件原子写入都在真实 Tool boundary 生效。
 +  it.instance("rejects generated-text dependencies through a source alias", () =>
 +    Effect.gen(function* () {
@@ -1943,22 +1979,22 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 +    }),
 +  )
 +
-   it.instance("accepts canonical-equivalent repeated move destinations", () =>
+   it.instance("moves file overwriting existing destination", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
-@@ -858,9 +923,8 @@ EOF`
+@@ -879,9 +946,8 @@ EOF`
      }),
    )
  
 -  // 空格与 Tab 仅在 trimEnd 后相等，完整旧块并不是文件中的字面 substring。
 -  // Patch 必须失败并保留文件，防止 rstrip compatibility pass 重新成为第三种 success。
 -  it.instance("rejects nonliteral trailing whitespace differences", () =>
-+  // PI normalize 在 exact miss 后统一 trimEnd；空格与 Tab 行尾差异应落到唯一 whole-line replacement。
++  // #533：PI normalize 在 exact miss 后统一 trimEnd；空格与 Tab 行尾差异应落到唯一 whole-line replacement。
 +  it.instance("applies a unique trailing-whitespace normalized match", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -869,12 +933,12 @@ EOF`
+@@ -890,12 +956,12 @@ EOF`
  
        const patchText = "*** Begin Patch\n*** Update File: trailing_ws.txt\n@@\n-line2 \n+changed\n*** End Patch"
  
@@ -1970,26 +2006,26 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
    )
  
 -  // 两种缩进 trim 后相同但逐字不同，不能让 whole-line trim pass 抢在 substring failure 前成功。
-+  // PI normalize 不 trimStart；两种前导缩进逐字不同，不能产生 whole-line success。
++  // #533：PI normalize 不 trimStart；两种前导缩进逐字不同，不能产生 whole-line success。
    // 真实 Tool 文件不变断言同时覆盖 owner error 到写入边界的原子性。
    it.instance("rejects nonliteral leading whitespace differences", () =>
      Effect.gen(function* () {
-@@ -890,9 +954,8 @@ EOF`
+@@ -911,9 +977,8 @@ EOF`
      }),
    )
  
 -  // Unicode punctuation normalization 改变了字面值，不能在 exact-only contract 中产生 replacement success。
 -  // 失败提示可以展示可靠候选，但磁盘必须保持原 Unicode 引号和破折号。
 -  it.instance("rejects Unicode-normalized matching", () =>
-+  // exact miss 后，唯一 Unicode punctuation 等价行由同一 locator 规范化并替换。
++  // #533：exact miss 后，唯一 Unicode punctuation 等价行由同一 locator 规范化并替换。
 +  it.instance("applies a unique Unicode-normalized whole-line match", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
-@@ -906,8 +969,23 @@ EOF`
+@@ -926,8 +991,23 @@ EOF`
+ 
        const patchText =
          '*** Begin Patch\n*** Update File: unicode.txt\n@@\n-He said "hello"\n+He said "hi"\n*** End Patch'
- 
 -      yield* expectFailure(execute({ patchText }, ctx), "Failed to find expected lines")
 -      expect(yield* readText(target)).toBe(`He said ${leftQuote}hello${rightQuote}\nsome${emDash}dash\nend\n`)
 +      yield* execute({ patchText }, ctx)
@@ -1997,7 +2033,7 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 +    }),
 +  )
 +
-+  // Tool 必须透传 Patch owner 的 normalized raw span；引号等价不能扩大为整行 replacement 或改写两侧文本。
++  // #533：Tool 必须透传 Patch owner 的 normalized raw span；引号等价不能扩大为整行 replacement 或改写两侧文本。
 +  it.instance("applies a unique Unicode-normalized proper substring", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -2011,4 +2047,4 @@ index f45996b041e594f02aff3d077e3051d3e65a5c48..3e916abbfa1b6928b3e8155d6c731f46
 +      expect(yield* readText(target)).toBe("prefix fixed suffix\n")
      }),
    )
- 
+   // #131：对 CRLF 文件 apply 后内容正确且 ask 元数据 diff 归一

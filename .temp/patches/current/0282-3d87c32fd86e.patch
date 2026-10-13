@@ -674,13 +674,12 @@ diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool
 index 2d98042bc..c00ae0e01 100644
 --- a/packages/opencode/src/tool/truncate.ts
 +++ b/packages/opencode/src/tool/truncate.ts
-@@ -4,11 +4,12 @@ import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effec
+@@ -4,10 +4,11 @@ import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effect"
  import path from "path"
  import type { Agent } from "../agent/agent"
  import { FSUtil } from "@opencode-ai/core/fs-util"
 -import { evaluate } from "@/permission/evaluate"
  import { Config } from "@/config/config"
- import { Identifier } from "../id/id"
  import { ToolID } from "./schema"
  import { TRUNCATION_DIR } from "./truncation-dir"
 +// #282：截断提示改用统一 notice，替代 hasTaskTool 分支的英文提示对

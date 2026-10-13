@@ -328,10 +328,9 @@ index c5d9253352..aa5dd1fe60 100644
      }),
  
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
-index 7af6e6361f..c54a6c10cf 100644
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
-@@ -1,25 +1,23 @@
+@@ -1,28 +1,26 @@
 -import { describe, expect, test } from "bun:test"
 +import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
  import type { ToolContext, PluginInput } from "@opencode-ai/plugin"
@@ -347,7 +346,11 @@ index 7af6e6361f..c54a6c10cf 100644
  // tool 定义和 execute 行为，因此传入最小 mock。
 -// #223：插件在模块加载时就初始化 tool map——V2 的 tool() 工厂返回静态定义，
 -// 不依赖 Effect runtime，所以顶层 await 安全
+-// #223：V2 Plugin.tool 为可选字段——测试依赖 tool map 存在，缺失即直接失败
  const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
++// #223：V2 Plugin.tool 为可选字段——测试依赖 tool map 存在，缺失即直接失败
+ const tools = plugin.tool
+ if (!tools) throw new Error("plugin did not register tools")
  
  describe("vscode bridge plugin", () => {
 -  // #223：验证三个 notebook 变更工具在调用 bridge 前都经过各自专属权限 key；
@@ -363,7 +366,7 @@ index 7af6e6361f..c54a6c10cf 100644
      const context = (): ToolContext => ({
        sessionID: "ses_test",
        messageID: "msg_test",
-@@ -40,11 +38,8 @@ describe("vscode bridge plugin", () => {
+@@ -43,9 +41,6 @@ describe("vscode bridge plugin", () => {
        },
      })
  
@@ -371,36 +374,27 @@ index 7af6e6361f..c54a6c10cf 100644
 -    // 测试中 ask 立即抛错，所以 execute 不会到达 call("/notebook/run", ...)
 -    // #223：timeoutMs 设为 1_000 确保即使 ask 意外放行，bridge 调用也快速超时
      await expect(
--      plugin.tool.vscode_notebook_run.execute(
-+      plugin.tool!.vscode_notebook_run.execute(
+       tools.vscode_notebook_run.execute(
          {
-           filePath,
-           cellId: "#VSC-12345678",
-@@ -54,10 +49,8 @@ describe("vscode bridge plugin", () => {
+@@ -57,8 +52,6 @@ describe("vscode bridge plugin", () => {
        ),
      ).rejects.toThrow(stop)
  
 -    // #223：edit 工具先经过 vscode_notebook_edit 专属权限，再经过通用 edit 权限；
 -    // 专属 ask 抛错后不会到达 edit ask，验证专属门禁的优先级
      await expect(
--      plugin.tool.vscode_notebook_edit.execute(
-+      plugin.tool!.vscode_notebook_edit.execute(
+       tools.vscode_notebook_edit.execute(
          {
-           filePath,
-           cellId: "#VSC-12345678",
-@@ -69,10 +62,8 @@ describe("vscode bridge plugin", () => {
+@@ -72,8 +65,6 @@ describe("vscode bridge plugin", () => {
        ),
      ).rejects.toThrow(stop)
  
 -    // #223：env 工具经过 vscode_notebook_env 专属权限——configure/restart/save
 -    // 都会改变 Jupyter/VS Code 状态，不能用通用 edit 覆盖
      await expect(
--      plugin.tool.vscode_notebook_env.execute(
-+      plugin.tool!.vscode_notebook_env.execute(
+       tools.vscode_notebook_env.execute(
          {
-           filePath,
-           operation: "restart",
-@@ -82,34 +73,25 @@ describe("vscode bridge plugin", () => {
+@@ -85,34 +76,25 @@ describe("vscode bridge plugin", () => {
        ),
      ).rejects.toThrow(stop)
  
@@ -431,12 +425,12 @@ index 7af6e6361f..c54a6c10cf 100644
 -    // #223：mock ask 只在 permission === "edit" 时抛错，vscode_notebook_edit 放行；
 -    // 这样可以验证两个 ask 都被调用，且顺序是先专属后通用
      await expect(
--      plugin.tool.vscode_notebook_edit.execute(
-+     plugin.tool!.vscode_notebook_edit.execute(
+-      tools.vscode_notebook_edit.execute(
++     tools.vscode_notebook_edit.execute(
          {
            filePath,
            cellId: "#VSC-12345678",
-@@ -125,7 +107,7 @@ describe("vscode bridge plugin", () => {
+@@ -128,7 +110,7 @@ describe("vscode bridge plugin", () => {
            worktree: "F:\\project with spaces",
            abort: new AbortController().signal,
            metadata: () => undefined,
@@ -445,7 +439,7 @@ index 7af6e6361f..c54a6c10cf 100644
              calls.push(input.permission)
              // #223：vscode_notebook_edit 通过后才在 edit 门禁拒绝，验证双层权限顺序
              if (input.permission === "edit") throw new Error(stop)
-@@ -134,8 +116,235 @@ describe("vscode bridge plugin", () => {
+@@ -137,8 +119,235 @@ describe("vscode bridge plugin", () => {
        ),
      ).rejects.toThrow(stop)
  
@@ -476,7 +470,7 @@ index 7af6e6361f..c54a6c10cf 100644
 +      },
 +    })
 +
-+    const result = await plugin.tool!.vscode_notebook_edit.execute(
++    const result = await tools.vscode_notebook_edit.execute(
 +      {
 +        filePath,
 +        cellId: "#VSC-12345678",
@@ -542,7 +536,7 @@ index 7af6e6361f..c54a6c10cf 100644
 +      },
 +    })
 +
-+    const result = await plugin.tool!.vscode_notebook_output.execute(
++    const result = await tools.vscode_notebook_output.execute(
 +      { filePath, cellId: "#VSC-12345678" },
 +      allowContext(filePath),
 +    )
@@ -593,7 +587,7 @@ index 7af6e6361f..c54a6c10cf 100644
 +      },
 +    })
 +
-+    const result = await plugin.tool!.vscode_notebook_edit.execute(
++    const result = await tools.vscode_notebook_edit.execute(
 +      { filePath, cellId: "#VSC-anchor", editType: "insert", newCode: "print('new cell')" },
 +      allowContext(filePath),
 +    )
@@ -637,7 +631,7 @@ index 7af6e6361f..c54a6c10cf 100644
 +      },
 +    })
 +
-+    const result = await plugin.tool!.vscode_notebook_edit.execute(
++    const result = await tools.vscode_notebook_edit.execute(
 +      { filePath, cellId: "#VSC-large", editType: "edit", newCode: "ignored in mock" },
 +      allowContext(filePath),
 +    )
@@ -687,15 +681,14 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 8a24e2adf5..4d4a6ebfdb 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -65,6 +65,8 @@ import {
+@@ -65,5 +65,7 @@ import {
    PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
    type PendingToolInputStats,
  } from "./pending-tool-input"
 +// #224：notebook 工具的 inline/block 视图 seam——把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的描述
 +import { useVscodeNotebookToolView } from "./notebook-tool"
- import {
-   hasStreamingAssistant,
-   pendingAssistantID,
+ // #154：pending/streaming 判定抽到 util，便于单测与去重
+ import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
 @@ -2107,6 +2109,11 @@ function previewText(input: string, maxLines: number) {
    return rows.slice(0, maxLines).join("\n") + "\n…"
  }
@@ -790,7 +783,7 @@ index 8a24e2adf5..4d4a6ebfdb 100644
 +      </Match>
 +      {/* #224：无 output 或关闭 generic 输出时回退到 inline 单行摘要 */}
 +      <Match when={true}>
-         <InlineTool icon="⚙" pending="Writing command..." complete={true} part={props.part}>
+         <InlineTool icon="⚙" pending="Writing command…" complete={true} part={props.part}>
            {props.tool} {input(props.input)}
          </InlineTool>
 -      }

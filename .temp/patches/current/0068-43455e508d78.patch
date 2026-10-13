@@ -1,8 +1,9 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1669,6 +1669,25 @@
+@@ -1684,7 +1699,26 @@
              duration={isDone() ? Locale.duration(duration()) : undefined}
+             encrypted={opaque()}
            />
          </box>
 +        {/* 折叠推理：保留 5 行预览，避免 hide 模式只剩标题不可窥 */}
@@ -24,6 +25,6 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +            </Show>
 +          </box>
 +        </Show>
-         <Show when={(!inMinimal() || expanded()) && summary().body}>
+         <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
            <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
              <code

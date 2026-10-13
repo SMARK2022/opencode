@@ -707,77 +707,77 @@ index 0000000000000000000000000000000000000000..85086c79fca201aa42fc1202a77e7592
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/cli/cmd/daemon.ts b/packages/opencode/src/cli/cmd/daemon.ts
-index 94ad123f65a9f5ad2cbd321cfdf4871c4a92be0f..7a62fbe3eeebe93f52be03d597a16db23a6fd0f4 100644
+index 226f7386d..efe79ab79 100644
 --- a/packages/opencode/src/cli/cmd/daemon.ts
 +++ b/packages/opencode/src/cli/cmd/daemon.ts
-@@ -3,9 +3,11 @@ import { UI } from "../ui"
- import { errorMessage } from "@/util/error"
- import { ServerLock, type ServerLock as ServerLockInfo } from "./tui/server-lock"
- 
--// stop 只等待 worker 既有 graceful shutdown 完成，不升级为 SIGKILL；
--// 10 秒足够覆盖实例 dispose、server close 和数据库 close，超时则保留现场让用户人工判断。
-+// graceful 预算保持 10 秒；超时后的 force 只针对重新确认的同一 lock owner。
-+// 重新读取 lock 是必要的，因为等待期间旧 PID 可能已经退出。
-+// 如果 lock token、PID 或 controlPort 改变，当前命令不能替新的 owner 做决定。
+@@ -8,6 +8,8 @@ import { ServerLock, type ServerLock as ServerLockInfo } from "@/cli/tui/server-
  const STOP_TIMEOUT_MS = 10_000
-+const FORCE_STOP_TIMEOUT_MS = 1_000
- // 100ms 是本命令的本地轮询间隔：足够快地反馈 CLI，同时避免对 lock 文件做忙等读取。
+ // #259：100ms 是本命令的本地轮询间隔——足够快地反馈 CLI，同时避免对 lock 文件做忙等读取
  const STOP_POLL_INTERVAL_MS = 100
++// #523：SIGKILL 后的短等待上限；force 只针对重新确认的同一 lock owner，不盲目延长总预算
++const FORCE_STOP_TIMEOUT_MS = 1_000
  
-@@ -18,15 +20,17 @@ export const DaemonCommand = cmd({
+ export const DaemonCommand = cmd({
+   // #259：这里只注册本机 TUI 共享 daemon 的管理入口；不复用 serve，避免把 headless server 生命周期混入
+@@ -18,9 +20,9 @@ export const DaemonCommand = cmd({
  })
  
  const DaemonStopCommand = cmd({
--  // `stop` 明确表示 graceful stop：请求 daemon 自己关闭，不提供 force kill 语义。
-+  // `stop` 先请求 graceful shutdown；超时后只对重新确认的同一 owner force stop。
+-  // #259：stop 明确表示 graceful stop——请求 daemon 自己关闭，不提供 force kill 语义
++  // #523：先请求 graceful shutdown；超时后只对重新确认的同一 owner force stop
    command: "stop",
 -  describe: "gracefully stop the shared opencode daemon",
 +  describe: "stop the shared opencode daemon",
    async handler() {
      await stopDaemon()
    },
- })
+@@ -51,8 +53,10 @@ async function stopDaemon() {
+     return
+   }
  
- async function stopDaemon() {
-+  // stop 的第一阶段仍然只发送现有 authenticated shutdown 请求。
-+  // 只有该请求成功且 owner 在窗口内没有退出，才允许进入第二阶段。
-   const lock = await ServerLock.read()
- 
-   if (!lock) {
-@@ -66,8 +70,29 @@ async function stopDaemon() {
++  // #523：先走 graceful；只有在同 owner 复核通过后才考虑 force 分支
+   const requestError = await requestStop(lock, controlPort)
+   if (requestError) {
++    // #523：控制面不可达时不能升级 force——无法证明目标仍是请求时的 owner
+     UI.error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError}`)
+     process.exitCode = 1
+     return
+@@ -67,9 +71,29 @@ async function stopDaemon() {
      return
    }
  
 -  UI.error(`Timed out waiting for opencode daemon pid=${lock.pid} to stop.`)
+-  // #259：超时非零退出——脚本调用方可以据此检测 stop 未完成并采取后续动作
 -  process.exitCode = 1
++  // #523：graceful 超时后必须重读 lock 再确认 owner；期间换代的新 daemon 不能被旧 stop 误杀
 +  const current = await ServerLock.read()
-+  if (!current || !sameOwner(lock, current)) {
-+    // lock 改变意味着当前命令的观察结果已经过期，宁可失败也不误杀新 owner。
++  if (!sameOwner(current, lock)) {
 +    UI.error(`Refused to force-stop opencode daemon pid=${lock.pid}: daemon owner changed.`)
 +    process.exitCode = 1
 +    return
 +  }
-+  if (!ServerLock.alive(current.pid)) {
-+    await ServerLock.clearIfOwner(current.token)
++  if (!ServerLock.alive(lock.pid)) {
++    // #523：等待窗口内 owner 自然退出——仍走同 token 清锁，避免误删换代后的新锁
++    await ServerLock.clearIfOwner(lock.token)
 +    UI.println("Stopped opencode daemon.")
 +    return
 +  }
 +
-+  UI.println(`Graceful stop timed out; force-stopping opencode daemon pid=${current.pid}...`)
-+  const forceError = await forceStop(current)
++  const forceError = await forceStop(lock)
 +  if (forceError) {
-+    UI.error(`Failed to force-stop opencode daemon pid=${current.pid}: ${forceError}`)
++    // #523：SIGKILL 后仍存活属异常态；锁保留给下次 stop 或 stale 清理，不在此处盲删
++    UI.error(`Failed to force-stop opencode daemon pid=${lock.pid}: ${forceError}`)
 +    process.exitCode = 1
 +    return
 +  }
-+  await ServerLock.clearIfOwner(current.token)
-+  // 只有确认 PID 已经消失后才清理同 token lock，保留其他 owner 的现场。
++  await ServerLock.clearIfOwner(lock.token)
 +  UI.println("Force-stopped opencode daemon.")
  }
  
  async function requestStop(lock: ServerLockInfo, controlPort: number) {
-@@ -85,8 +110,8 @@ async function requestStop(lock: ServerLockInfo, controlPort: number) {
+@@ -88,8 +112,8 @@ async function requestStop(lock: ServerLockInfo, controlPort: number) {
    }
  }
  
@@ -785,275 +785,292 @@ index 94ad123f65a9f5ad2cbd321cfdf4871c4a92be0f..7a62fbe3eeebe93f52be03d597a16db2
 -  const deadline = Date.now() + STOP_TIMEOUT_MS
 +async function waitForStop(lock: ServerLockInfo, timeoutMs = STOP_TIMEOUT_MS) {
 +  const deadline = Date.now() + timeoutMs
+   // #259：轮询简单粗暴——避免引入复杂的进程状态追踪，只看 alive
  
    while (Date.now() < deadline) {
-     if (!ServerLock.alive(lock.pid)) return true
-@@ -95,3 +120,22 @@ async function waitForStop(lock: ServerLockInfo) {
+@@ -99,3 +123,28 @@ async function waitForStop(lock: ServerLockInfo) {
  
    return false
  }
 +
-+function sameOwner(left: ServerLockInfo, right: ServerLockInfo) {
-+  return left.pid === right.pid && left.token === right.token && left.controlPort === right.controlPort
++function sameOwner(current: ServerLockInfo | undefined, expected: ServerLockInfo) {
++  // #523：pid+token+controlPort 三重一致才认定同一 owner；任一变化都意味着锁已被接管
++  // controlPort 参与比较是因为同 pid 复用端口时锁内容可能被新实例改写
++  return (
++    current !== undefined &&
++    current.pid === expected.pid &&
++    current.token === expected.token &&
++    current.controlPort === expected.controlPort
++  )
 +}
 +
 +async function forceStop(lock: ServerLockInfo) {
-+  // token/PID复核后才允许强制终止，避免旧 stop 命令误杀新 daemon。
-+  // SIGKILL 只作为 graceful teardown 超时后的最后手段。
-+  // kill 之后仍然轮询 PID，确认命令没有把“已发送信号”误报成“已停止”。
++  // #523：SIGKILL 是最后手段；kill 本身可能因权限失败，错误必须返回而不是被吞掉
++  // Windows 上 SIGKILL 映射为 TerminateProcess；waitForStop 复用同一轮询
 +  try {
 +    process.kill(lock.pid, "SIGKILL")
 +  } catch (error) {
++    // #525（R1 B-523-02）：kill 抛错但 pid 已死属成功——活锁预检与 kill 之间的退出竞态不应报错残留。
 +    if (!ServerLock.alive(lock.pid)) return
 +    return errorMessage(error)
 +  }
 +  if (await waitForStop(lock, FORCE_STOP_TIMEOUT_MS)) return
-+  // force 窗口也必须有界，否则 stop 命令会把 worker 的问题再次变成 CLI 挂起。
 +  return `daemon pid=${lock.pid} is still alive after force stop`
 +}
-diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
-index cc2219ce3167c6e2c882336aa5b8e6a6ca73d77b..340ebf4ef729ee7d1e2c39e5854cf30bad6f3b56 100644
---- a/packages/opencode/src/cli/cmd/tui/daemon.ts
-+++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
-@@ -2,7 +2,7 @@ export * as Daemon from "./daemon"
- 
- import { hasCliBooleanOption, hasCliOption, resolveNetworkOptionsNoConfig, type NetworkOptions } from "@/cli/network"
- import { Filesystem } from "@/util/filesystem"
--import { ServerLock } from "@/cli/cmd/tui/server-lock"
-+import { ServerLock, type ServerLock as ServerLockInfo } from "@/cli/cmd/tui/server-lock"
- import { ServerAuth } from "@/server/auth"
- import { Flock } from "@opencode-ai/core/util/flock"
- import { Global } from "@opencode-ai/core/global"
-@@ -234,6 +234,7 @@ function lockUrl(lock: ServerLock, external: boolean) {
- //   - { type: "dead", lock }     → pid is dead, lock is stale
- //   - { type: "responsive" | "unresponsive", url, lock }
- //                                → pid is alive; responsive=HTTP ping OK
-+//   - { type: "stopping", lock } → owner has entered graceful shutdown
- //
- // CRITICAL: "unresponsive" means the owner process is alive but its control
- // plane is temporarily blocked (e.g. during a long model call).  We must NOT
-@@ -248,6 +249,11 @@ async function existingOwnerUrl(external: boolean) {
- 
-   if (!ServerLock.alive(lock.pid)) return { type: "dead" as const, lock }
- 
-+  // stopping owner 仍可能通过 health；必须先看私有状态，不能把它当普通 unresponsive owner 复用。
-+  // 这样可以把正在释放资源的 owner 与长时间模型调用中的 owner 区分开。
-+  // 前者需要等待，后者仍然遵守原有的单 owner 复用规则。
-+  if (await ownerIsStopping(lock)) return { type: "stopping" as const, lock }
-+
-   // pid alive — whether or not HTTP ping succeeded, the owner still exists.
-   const responsive = await ServerLock.ping(lock.port, { headers: ServerAuth.headers() })
-   return {
-@@ -257,6 +263,33 @@ async function existingOwnerUrl(external: boolean) {
-   }
- }
- 
-+async function ownerIsStopping(lock: ServerLockInfo) {
-+  if (!lock.controlPort) return false
-+  // control status is the only owner-local signal that distinguishes shutdown from a long call.
-+  // 该请求必须带 lock token，避免普通 public health 请求伪造 stopping 状态。
-+  // 请求失败时保守地返回 false，保留既有 unresponsive owner 的复用语义。
-+  const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
-+    headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
-+    signal: AbortSignal.timeout(500),
-+  }).catch(() => undefined)
-+  if (!response?.ok) return false
-+  const body: unknown = await response.json().catch(() => undefined)
-+  if (!body || typeof body !== "object" || !("stopping" in body)) return false
-+  return body.stopping === true
-+}
-+
-+async function waitForOwnerExit(pid: number) {
-+  // 等待期间不另起 daemon，保持 SQLite 单 owner；退出后再回到既有选主路径。
-+  // worker 自己有 teardown deadline，因此这里不会无限期等待 disposer。
-+  // 超时仍然报错，而不是悄悄启动第二个进程覆盖原 owner。
-+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-+  while (Date.now() < deadline) {
-+    if (!ServerLock.alive(pid)) return
-+    await Bun.sleep(SERVER_POLL_INTERVAL_MS)
+
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+index 7c3f372e9..e9c7f8c9c 100644
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -248,6 +248,39 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
+ // 单服务器发现主路径：快速复用存活守护进程，或在选举锁下拉起新 daemon
+ // 单服务器发现主路径：健康锁复用或选举后 spawn，失败则 kill+抛错
+ // #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
++// #523：正在退出的 owner 不得被复用——先等它退出再回退选主路径
++// 探测复用 lock token 鉴权；失败保守 false，不把网络异常当成 stopping 证据
++async function ownerIsStopping(lock: Awaited<ReturnType<typeof ServerLock.read>>) {
++  // 无 controlPort 的旧锁无法证明 stopping 状态，保守视为仍在服务
++  if (!lock || !lock.controlPort) return false
++  try {
++    const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
++      headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
++      signal: AbortSignal.timeout(500),
++    })
++    if (!response.ok) return false
++    const body = (await response.json()) as { stopping?: boolean }
++    return body.stopping === true
++  } catch {
++    // 网络失败/超时保守返回 false——探测失败不能变成误杀存活 owner
++    return false
 +  }
-+  throw new Error(`opencode daemon pid=${pid} is still stopping`)
 +}
 +
- function wantsExternal(args: Args) {
-   const network = resolveNetworkOptionsNoConfig(args)
-   return {
-@@ -287,6 +320,7 @@ export async function ensure(args: Args) {
-   // Fast path: if an owner is alive (responsive OR unresponsive), reuse it.
-   const quick = await existingOwnerUrl(external)
-   if (quick.type === "responsive" || quick.type === "unresponsive") return quick.url
-+  if (quick.type === "stopping") await waitForOwnerExit(quick.lock.pid)
- 
++async function waitForOwnerExit(
++  lock: NonNullable<Awaited<ReturnType<typeof ServerLock.read>>>,
++  deps: DiscoverDaemonDeps,
++) {
++  // #523：等待预算复用 daemon 启动上限；超时说明 owner 卡死，交由上层报错而非永久自旋
++  const deadline = Date.now() + deps.waitMs
++  while (Date.now() < deadline) {
++    if (!deps.alive(lock.pid)) return
++    await deps.sleep(deps.pollMs)
++  }
++  throw new Error(`opencode daemon pid=${lock.pid} is still stopping`)
++}
++
++// #523：快速路径与选举锁内各调用一次探测；两处都必须在复用 URL 之前完成
+ export async function discoverOrSpawnDaemon(
+   networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
+   deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
+@@ -259,6 +292,13 @@ export async function discoverOrSpawnDaemon(
+   // #152：pid 存活即复用 URL；ping 失败视为 unresponsive，禁止第二 daemon
+   let existingUrl: string | null =
+     quickCheck && deps.alive(quickCheck.pid) ? `http://127.0.0.1:${quickCheck.port}` : null
++  // #523：stopping owner 期间既不接管也不双开——等它退出后走选主路径
++  if (existingUrl && quickCheck && (await ownerIsStopping(quickCheck))) {
++    // #523：等待期间不清锁——若 owner 卡死由 waitForOwnerExit 抛错，锁留给诊断
++    await waitForOwnerExit(quickCheck, deps)
++    await ServerLock.clearIfOwner(quickCheck.token)
++    existingUrl = null
++  }
    let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
-   try {
-@@ -302,6 +336,11 @@ export async function ensure(args: Args) {
-     // Re-check under lock: another TUI may have started a daemon while we waited.
-     const existing = await existingOwnerUrl(external)
-     if (existing.type === "responsive" || existing.type === "unresponsive") return existing.url
-+    if (existing.type === "stopping") {
-+      // owner 已经承诺退出；等待结束后只清理它自己的 token。
-+      await waitForOwnerExit(existing.lock.pid)
-+      await ServerLock.clearIfOwner(existing.lock.token)
-+    }
+   let fwdPid: number | undefined
  
-     // Only clear the lock if the owner is truly dead.
-     if (existing.type === "dead") await ServerLock.clear()
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 6843ce91d93b9b0dd5c5b20d893730d7b41c3318..a6f18342098f3b8d3db05731ceba177ca40a4210 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -108,6 +108,11 @@ if (externalPort !== undefined) {
- 
- // ── Graceful shutdown ──────────────────────────────────────────────────────
- let shutdownInProgress = false
-+// worker 自己的 5 秒上限短于 CLI 的 10 秒 stop 等待，确保 CLI force 路径不会遮蔽 worker deadline 回归。
-+// 这两个窗口分别保护 worker 生命周期和用户 stop 命令，不能合并成一个隐式超时。
-+// worker 先结束 cleanup，只有 disposer 卡住时才进入 deadline 分支。
-+const SHUTDOWN_TIMEOUT_MS = 5_000
-+let shutdownDeadlineTimer: ReturnType<typeof setTimeout> | undefined
- let lockToken = ""
- let controlServer: ReturnType<typeof Bun.serve> | undefined
- let activeMaintenance:
-@@ -247,6 +252,15 @@ async function recoverInterruptedMaintenance() {
- async function gracefulShutdown(reason = "unknown") {
-   if (shutdownInProgress) return
-   shutdownInProgress = true
-+  shutdownDeadlineTimer = setTimeout(() => {
-+    // deadline 到达时不能继续等待 disposer；进程退出后由下一次 owner 选举清理 stale lock。
-+    // 不在这里清理 lock，避免另一个进程误以为 SQLite 已经释放。
-+    // 进程退出后既有 stale-owner reconciliation 负责恢复现场。
-+    // 该分支故意不等待任何异步清理，避免 deadline 自身再次被阻塞。
-+    log.error("daemon shutdown deadline exceeded", { timeoutMs: SHUTDOWN_TIMEOUT_MS, reason })
-+    process.exit(1)
-+  }, SHUTDOWN_TIMEOUT_MS)
-+  shutdownDeadlineTimer.unref?.()
-   maintenanceShutdownRequested = true
-   cancelIdleTimer("shutdown")
-   cancelStartupIdleTimer("shutdown")
-@@ -275,6 +289,8 @@ async function gracefulShutdown(reason = "unknown") {
-   // Keep the lock until after disposers and Database.close() finish. Otherwise a
-   // reconnecting TUI can spawn a replacement daemon while this process still owns SQLite.
-   await ServerLock.clearIfOwner(lockToken)
-+  if (shutdownDeadlineTimer) clearTimeout(shutdownDeadlineTimer)
-+  shutdownDeadlineTimer = undefined
-   process.exit(0)
- }
- 
-@@ -400,7 +416,15 @@ controlServer = Bun.serve({
-         })
+@@ -276,7 +316,14 @@ export async function discoverOrSpawnDaemon(
+     const lock = await deps.read()
+     // #152：alive 即可复用；仅 dead/orphan 清锁
+     if (lock && deps.alive(lock.pid)) {
+-      existingUrl = `http://127.0.0.1:${lock.port}`
++      // #523：选举锁内同样拒绝 stopping owner；等待退出后清锁并 spawn 新实例
++      if (await ownerIsStopping(lock)) {
++        // #523：选举锁是唯一 spawn 授权点；stopping owner 在锁内等待后必须清锁再 spawn
++        await waitForOwnerExit(lock, deps)
++        await ServerLock.clearIfOwner(lock.token)
++      } else {
++        existingUrl = `http://127.0.0.1:${lock.port}`
++      }
+     } else if (lock) {
+       await deps.clear()
      }
-     if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH) {
--      return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
-+      // stopping 是 owner 生命周期信号，不改变 status 命令原有的 client/activity 数据。
-+      // 只有持有 control token 的本地调用者能观察到这个辅助状态。
-+      // 旧客户端忽略新增字段即可继续解析原有响应。
-+      // stopping 在 shutdown 入口立即可见，覆盖 disposer 开始后的整个等待窗口。
-+      return Response.json({
-+        tuiClients: sseClients,
-+        sessionActivity: SessionActivity.count(),
-+        stopping: shutdownInProgress,
-+      })
-     }
-     if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
-       return new Response("not found", { status: 404 })
+
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+index f492d1bbe..fb3585265 100644
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -132,6 +132,11 @@ if (isDaemon) {
+ 
+   // ── 优雅关闭 ───────────────────────────────────────────────────────────
+   let shutdownInProgress = false
++  // #523：worker 5s 总上限短于 CLI stop 的 10s——CLI 超时后还能重读 lock 复核 owner 再 force
++  const SHUTDOWN_TIMEOUT_MS = 5_000
++  // #523：deadline 触发时直接 exit(1)；不清锁，留给后续 stale-owner reconciliation
++  // exit(1) 与 exit(0) 路径互斥：deadline 只在正常清理未完成时触发
++  let shutdownDeadlineTimer: ReturnType<typeof setTimeout> | undefined
+   // #259：lockToken 延迟到 control server 创建后赋值——controlPort 需随 lock 一起写入
+   let lockToken = ""
+   let controlServer: ReturnType<typeof Bun.serve> | undefined
+@@ -255,10 +260,17 @@ if (isDaemon) {
+   async function gracefulShutdown(reason = "unknown") {
+     if (shutdownInProgress) return
+     shutdownInProgress = true
++    // #523：到点仍未完成说明某个清理阶段挂死；exit(1) 保留现场给上层 force 路径
++    shutdownDeadlineTimer = setTimeout(() => {
++      log.error("daemon shutdown deadline exceeded", { reason, pid: process.pid })
++      process.exit(1)
++    }, SHUTDOWN_TIMEOUT_MS)
++    shutdownDeadlineTimer.unref?.()
+     // #493：graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
+     // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
+     // Database.close 与 daemon lock 清理发生在 maintenance/instance/server 全部停止后，避免替代进程过早接管 SQLite。
+     maintenanceShutdownRequested = true
++    // #523：maintenance abort 也受总 deadline 保护——此前的双重 await 理论上可无限等待
+     if (activeMaintenance) {
+       activeMaintenance.controller.abort()
+       await activeMaintenance.promise.catch(() => undefined)
+@@ -278,14 +290,14 @@ if (isDaemon) {
+       sseClients,
+       sessionActivity: SessionActivity.count(),
+     })
++    // #523：stopping 标志从这一刻起为 true——并发 discover 会因此拒绝复用本 owner
++    // #525（R1 B-523-01）：控制面停机延后到有界 dispose 序列之后——stopping 可观测窗口必须覆盖 disposer 等待期。
+     // #273：daemon stop 时先广播事件，让 TUI 走正常退出路径
+     if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
+-    // #259：control server 随 daemon 一起关闭——避免端口残留
+-    // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
+-    controlServer?.stop(true)
+     // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
+     // #235：（Effect scope closeScopeOnce/实例清理等残留句柄）。
+     // #235：整个清理序列包在 3s 总超时内——不论哪步挂起，daemon 都能完成 exit(0)
++    // #523：3s race 只兑现场景化挂起；总 deadline 5s 兑现任意阶段（含 maintenance abort）
+     await Promise.race([
+       Promise.resolve().then(async () => {
+         await InstanceRuntime.disposeAllInstances()
+@@ -294,10 +306,15 @@ if (isDaemon) {
+       }),
+       Bun.sleep(3_000),
+     ])
++    // #259：control server 随 daemon 一起关闭——避免端口残留
++    // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
++    controlServer?.stop(true)
+     // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
+     Database.close()
+     // #273：lock 清理延后到 dispose/stop/Database.close 之后，避免新 daemon 过早接管
+     await ServerLock.clearIfOwner(lockToken)
++    // #523：正常完成时先取消 deadline，再以 0 退出——两个退出点互斥
++    clearTimeout(shutdownDeadlineTimer)
+     process.exit(0)
+   }
+ 
+@@ -440,7 +457,8 @@ if (isDaemon) {
+       }
+       if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH) {
+         // #259：SSE 客户数与会话活跃度来自 worker 既有状态——只读快照，不触发任何清理
+-        return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
++        // #523：stopping 让 launcher/TUI 识别正在退出的 owner；旧客户端忽略新字段
++        return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count(), stopping: shutdownInProgress })
+       }
+       if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+         return new Response("not found", { status: 404 })
+
 diff --git a/packages/opencode/src/project/instance-store.ts b/packages/opencode/src/project/instance-store.ts
-index faa56668a793d435349b4aeb314ea751b078c43d..f4d770659a8cc7818efcf8313c82ca459834b758 100644
+index 720549dda..90dd0a8a8 100644
 --- a/packages/opencode/src/project/instance-store.ts
 +++ b/packages/opencode/src/project/instance-store.ts
-@@ -26,6 +26,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
+@@ -32,6 +32,8 @@ export const use = serviceUse(Service)
  
  interface Entry {
    readonly deferred: Deferred.Deferred<InstanceContext>
-+  // cancel 只终止未完成的 bootstrap；已完成 entry 的 Deferred race 已经结束。
-+  // 每个 entry 都有自己的信号，避免一次目录的 disposal 误取消其他目录。
++  // #523：每 entry 独立取消信号——disposeAll 不必等待仍在进行的 bootstrap producer
 +  readonly cancel: Deferred.Deferred<void>
  }
  
- export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Service> = Layer.effect(
-@@ -65,7 +68,18 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
+ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Service> = Layer.effect(
+@@ -64,6 +66,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
+ 
+     const removeEntry = (directory: string, entry: Entry) =>
+       Effect.sync(() => {
++        // #523：entry 身份比较防止旧 boot 失败删除新 entry 的 cancel/deferred
+         if (cache.get(directory) !== entry) return false
+         cache.delete(directory)
+         return true
+@@ -71,7 +74,10 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
  
      const completeLoad = (directory: string, input: LoadInput, entry: Entry) =>
        Effect.gen(function* () {
 -        const exit = yield* Effect.exit(boot({ ...input, directory }))
++        // #523：pending bootstrap 与取消信号竞争；取消胜出时以 interrupt 收尾，不再等 boot 完成
 +        const exit = yield* Effect.exit(
-+          boot({ ...input, directory }).pipe(
-+            // disposal 先完成 cancel，raceFirst 会中断同一 scope 中尚未完成的 boot。
-+            // boot 失败时仍沿用原有 removeEntry 和 Deferred failure 传播。
-+            // 因此取消不会留下可被后续请求复用的失败缓存项。
-+            Effect.raceFirst(
-+              Deferred.await(entry.cancel).pipe(
-+                Effect.andThen(Effect.interrupt),
-+              ),
-+            ),
-+          ),
++          Effect.raceFirst(boot({ ...input, directory }), Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt))),
 +        )
          if (Exit.isFailure(exit)) yield* removeEntry(directory, entry)
          yield* Deferred.done(entry.deferred, exit).pipe(Effect.asVoid)
        })
-@@ -106,7 +120,10 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
+@@ -112,7 +118,8 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
            const existing = cache.get(directory)
            if (existing) return yield* restore(Deferred.await(existing.deferred))
  
 -          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
-+          const entry: Entry = {
-+            deferred: Deferred.makeUnsafe<InstanceContext>(),
-+            cancel: Deferred.makeUnsafe<void>(),
-+          }
++          // #523：cancel 与 deferred 同生命周期；load 失败/取消后 entry 被 remove，信号不跨 entry 泄漏
++          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>(), cancel: Deferred.makeUnsafe<void>() }
            cache.set(directory, entry)
            yield* Effect.gen(function* () {
-             yield* Effect.logInfo("creating instance").pipe(Effect.annotateLogs("directory", directory))
-@@ -122,7 +139,10 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
+             yield* Effect.logInfo("creating instance", { directory: directory })
+@@ -128,7 +135,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
        return Effect.uninterruptibleMask((restore) =>
          Effect.gen(function* () {
            const previous = cache.get(directory)
 -          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
-+          const entry: Entry = {
-+            deferred: Deferred.makeUnsafe<InstanceContext>(),
-+            cancel: Deferred.makeUnsafe<void>(),
-+          }
++          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>(), cancel: Deferred.makeUnsafe<void>() }
            cache.set(directory, entry)
            yield* Effect.gen(function* () {
-             yield* Effect.logInfo("reloading instance").pipe(Effect.annotateLogs("directory", directory))
-@@ -150,10 +170,17 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
+             yield* Effect.logInfo("reloading instance", { directory: directory })
+@@ -145,6 +152,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
+     }
+ 
+     const dispose = Effect.fn("InstanceStore.dispose")(function* (ctx: InstanceContext) {
++      // #523：单目录 dispose 不触发 cancel——只有 disposeAll 的批量退出才取消 pending producer
+       const entry = cache.get(ctx.directory)
+       if (!entry) return yield* disposeContext(ctx)
+ 
+@@ -165,6 +173,11 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
  
      const disposeAllOnce = Effect.fnUntraced(function* () {
        yield* Effect.logInfo("disposing all instances")
-+      const entries = [...cache.entries()]
-+      // 先取消仍在 bootstrap 的 producer，避免等待它完成后才有机会关闭同一 scope。
-+      // 先复制 entries，保证清理期间 cache 的变化不会改变本轮待处理集合。
-+      // 已完成 entry 的 cancel 是幂等 Deferred，不会改变正常 disposal 结果。
-+      // 因此普通 shutdown 仍会等待全部已完成实例释放，只有 pending producer 被中断。
-+      yield* Effect.forEach(entries, ([, entry]) => Deferred.succeed(entry.cancel, undefined), { discard: true })
++      // #523：先全量取消 pending producer——否则未完成的 bootstrap 会让 disposeAll 挂在 Deferred.await 上
++      // 取消只置信号；per-entry dispose 仍按原顺序执行，与既有清理语义一致
++      yield* Effect.forEach([...cache.entries()], (item) => Deferred.succeed(item[1].cancel, undefined), {
++        discard: true,
++      })
        yield* Effect.forEach(
--        [...cache.entries()],
-+        entries,
+         [...cache.entries()],
          (item) =>
-           Effect.gen(function* () {
-+            // 每个 disposer 继续按原顺序执行，新增 cancel 不改变已完成实例的资源释放。
-             const exit = yield* Deferred.await(item[1].deferred).pipe(Effect.exit)
-             if (Exit.isFailure(exit)) {
-               yield* Effect.logWarning("instance dispose failed").pipe(
+
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d1b3f7a09 100644
+index f5209a24f..6bacf5965 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -13,7 +13,7 @@
- import { afterEach, describe, expect, test } from "bun:test"
- import { mkdir, rename } from "fs/promises"
+@@ -14,9 +14,11 @@ import { mkdir, rename } from "fs/promises"
+ // #495：win32 spawn adapter 测试经 DaemonProcess/_spawn seam 注入（目标 cmd/tui owner）。
+ import { _spawn } from "../../../src/cli/cmd/tui"
  import path from "path"
 -import { fileURLToPath } from "url"
 +import { fileURLToPath, pathToFileURL } from "url"
  import { tmpdir } from "../../fixture/fixture"
- import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
- import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
-@@ -132,6 +132,47 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+ import * as ServerLockModule from "../../../src/cli/tui/server-lock"
++// #523：stopping-owner / launcher 用例直接消费目标的 daemon 发现 owner（源仓 Daemon.ensure 等价 seam）。
++import { discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
+ // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
+ import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
+ import * as Win32Module from "@opencode-ai/tui/terminal-win32"
+@@ -131,6 +133,99 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
    throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
  }
  
++// #523：registry 必须在 worker 子进程内注册；测试 runner 与 daemon 不共享进程内 Set。
++// wrapper 先加载 worker，再注册 disposer，确保测试使用真实启动和 shutdown 生命周期。
++// disposer 永不完成，用来稳定制造原始 teardown 卡点而不是依赖时间竞争。
++// 目标 worker 以模块 import 在 -e 子进程内启动，与 spawnDaemon 同一入口语义。
 +async function spawnHangingDisposerDaemon(lockPath: string) {
-+  // registry 必须在 worker 子进程内注册；测试 runner 与 daemon 不共享进程内 Set。
-+  // wrapper 先加载 worker，再注册 disposer，确保测试使用真实启动和 shutdown 生命周期。
-+  // disposer 永不完成，用来稳定制造原始 teardown 卡点而不是依赖时间竞争。
 +  const registry = pathToFileURL(fileURLToPath(new URL("../../../src/effect/instance-registry.ts", import.meta.url))).href
 +  const worker = pathToFileURL(WORKER_TS).href
 +  const wrapper = [
@@ -1062,6 +1079,7 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    `registerDisposer(async () => new Promise(() => {}))`,
 +    `process.stdout.write("disposer-ready\\n")`,
 +  ].join("\n")
++  // #523：wrapper 内的 \\n 必须保持双反斜杠——模板字面量消费一次，-e 解析再消费一次。
 +  const proc = Bun.spawn([process.execPath, "-e", wrapper], {
 +    env: {
 +      ...isolatedDaemonEnv(lockPath),
@@ -1071,7 +1089,7 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    stdout: "pipe",
 +    stderr: "ignore",
 +  })
-+  const { lock } = await (async () => {
++  const lock = await (async () => {
 +    const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
 +    while (Date.now() < deadline) {
 +      const lock = await Bun.file(lockPath)
@@ -1080,30 +1098,49 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +        .catch(() => undefined)
 +      if (lock && lock.pid === proc.pid && ServerLockModule.alive(lock.pid)) {
 +        const ok = await ServerLockModule.ping(lock.port)
-+        if (ok) return { lock }
++        if (ok) return lock
 +      }
 +      await Bun.sleep(POLL_INTERVAL_MS)
 +    }
 +    proc.kill()
 +    throw new Error(`Hanging disposer daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
 +  })()
-+  expect(await readFirstLine(proc.stdout)).toBe("disposer-ready")
++  await readLineMatching(proc.stdout, (line) => line === "disposer-ready")
 +  return { proc, lock }
 +}
 +
- async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
-   if (!stream) throw new Error("missing stdout stream")
-   const reader = stream.getReader()
-@@ -152,6 +193,30 @@ async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
-   throw new Error("timed out waiting for child pid")
- }
- 
++// #523：daemon 子进程自身会向 stdout 写 [daemon] 日志行；读取方必须按行匹配而不是假设首行即目标。
++async function readLineMatching(stream: ReadableStream<Uint8Array> | null, predicate: (line: string) => boolean) {
++  if (!stream) throw new Error("missing stdout stream")
++  const reader = stream.getReader()
++  const decoder = new TextDecoder()
++  let buffer = ""
++  try {
++    const deadline = Date.now() + 10_000
++    while (Date.now() < deadline) {
++      const next = await reader.read()
++      if (next.done) break
++      buffer += decoder.decode(next.value, { stream: true })
++      const lines = buffer.split("\n")
++      buffer = lines.pop() ?? ""
++      for (const line of lines) {
++        if (predicate(line.trim())) return line.trim()
++      }
++    }
++    throw new Error(`expected stdout line not found; buffer=${JSON.stringify(buffer.slice(0, 200))}`)
++  } finally {
++    reader.releaseLock()
++  }
++}
++
++// #523：launcher 子进程只发布 lock，不建立 SSE；这正是首个 TUI 事件前的真实边界。
++// detached worker 仍通过环境中的 launcher PID 观察该进程生命周期。
++// discover 调用必须在子进程内执行——lock/env 隔离按进程边界生效。
 +async function spawnEnsureLauncher(lockPath: string) {
-+  // launcher 子进程只发布 lock，不建立 SSE；这正是首个 TUI 事件前的真实边界。
-+  // detached worker 仍通过环境中的 launcher PID 观察该进程生命周期。
++  const tuiURL = pathToFileURL(fileURLToPath(new URL("../../../src/cli/cmd/tui.ts", import.meta.url))).href
 +  const launcherCode = `
-+    const { Daemon } = await import(${JSON.stringify(DAEMON_TS_URL)})
-+    await Daemon.ensure({})
++    const { discoverOrSpawnDaemon } = await import(${JSON.stringify(tuiURL)})
++    await discoverOrSpawnDaemon({ port: 0, hostname: "127.0.0.1", mdns: false, "mdns-domain": "opencode.local", cors: [] })
 +    const lock = await Bun.file(process.env.OPENCODE_LOCK_PATH).json()
 +    process.stdout.write(JSON.stringify(lock) + "\\n")
 +    setInterval(() => {}, 1_000)
@@ -1118,17 +1155,19 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    stderr: "pipe",
 +    detached: true,
 +  })
-+  const lock = JSON.parse(await readFirstLine(proc.stdout)) as ServerLockModule.ServerLock
++  const lock = JSON.parse(await readLineMatching(proc.stdout, (line) => line.startsWith("{"))) as ServerLockModule.ServerLock
 +  return { proc, lock }
 +}
 +
+ // #273：读取 SSE 流直到出现指定文本
  async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
    let seen = ""
-   while (!seen.includes(text)) {
-@@ -163,6 +228,255 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
+@@ -143,6 +238,269 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
  }
  
  describe("daemon lifecycle", () => {
++  // #523：worker 5s deadline 独立于 CLI force path——SIGTERM 直达 worker 验证自杀边界。
++  // 前置 /config 请求建立真实 Project context，避免空 worker 立即 idle-exit 干扰 deadline。
 +  test(
 +    "worker deadline terminates a hanging instance disposer",
 +    async () => {
@@ -1139,17 +1178,16 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +      try {
 +        const configURL = new URL(`http://127.0.0.1:${lock.port}/config`)
 +        configURL.searchParams.set("directory", tmp.path)
-+        // 该 route 经过 InstanceStore middleware，确保 hanging disposer 已拥有 Project context。
++        // #523：该 route 经过 InstanceStore middleware，确保 hanging disposer 已拥有 Project context。
 +        // 先建立真实 Project context，再发送信号，避免只测试一个空闲 worker。
 +        expect((await fetch(configURL)).ok).toBe(true)
-+        // 直接给 worker SIGTERM，刻意绕开 CLI force path，才能单独验证 worker deadline。
-+        // 如果进程只在 CLI 强杀时退出，这个断言会在 7 秒窗口内失败。
++        // #523：直接给 worker SIGTERM，刻意绕开 CLI force path，才能单独验证 worker deadline。
++        // 若 deadline 无效，进程会活到 20s 测试上限而不是 5s timer。
 +        process.kill(proc.pid, "SIGTERM")
 +        const exit = await Promise.race([proc.exited, Bun.sleep(7_000).then(() => "timeout" as const)])
 +        expect(exit).not.toBe("timeout")
 +        expect(ServerLockModule.alive(proc.pid)).toBe(false)
-+        // worker deadline 的成功条件是进程消失，而不是测试主动发送的信号返回。
-+        // 该断言也确认 hanging disposer 没有把测试 runner 一起拖入未完成状态。
++        // #523：成功条件是进程消失；hanging disposer 不得把 runner 一起拖入未完成状态。
 +      } finally {
 +        if (ServerLockModule.alive(proc.pid)) proc.kill()
 +        await proc.exited.catch(() => undefined)
@@ -1158,6 +1196,8 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    20_000,
 +  )
 +
++  // #523：fake owner 接受 graceful 请求但保持存活，迫使 stop 命令进入 force 分支。
++  // control /status 返回 stopping:true 与 force 语义独立——即使 owner 报 stopping 也能被 SIGKILL。
 +  test(
 +    "force stops an authenticated non-exiting owner",
 +    async () => {
@@ -1197,9 +1237,7 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +      })
 +
 +      try {
-+        // 该 owner 不属于 worker cleanup 测试，专门验证 CLI 的授权 force escalation。
-+        // fake owner 接受 graceful 请求但保持存活，迫使 stop 命令进入 force 分支。
-+        // lock 中的 token、PID 和 controlPort 都来自该同一 owner。
++        // #523：等待 fake owner 写出 lock——pid 匹配后才可发起 stop，避免误判未启动。
 +        const deadline = Date.now() + 5_000
 +        while (Date.now() < deadline) {
 +          const lock = await Bun.file(lockPath)
@@ -1211,11 +1249,11 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +        }
 +        const result = await runDaemonStop(lockPath)
 +        expect(result.exitCode).toBe(0)
++        // #523：Force-stopped 文案只在同 owner 复核+SIGKILL 成功路径出现。
 +        expect(result.stderr).toContain("Force-stopped opencode daemon.")
 +        expect(ServerLockModule.alive(proc.pid)).toBe(false)
++        // #523：lock 清理断言同时覆盖 force 后的 stale-owner recovery 边界。
 +        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
-+        // lock 清理断言同时覆盖 force 后的 stale-owner recovery 边界。
-+        // 复核失败或 PID 仍存活时，测试必须观察到非零退出而不是这个成功文案。
 +      } finally {
 +        if (ServerLockModule.alive(proc.pid)) proc.kill()
 +        await proc.exited.catch(() => undefined)
@@ -1224,6 +1262,8 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    30_000,
 +  )
 +
++  // #523：graceful 请求会启动 replacement；stop 随后必须基于新 lock 拒绝 SIGKILL。
++  // 这是 force 升级的安全闸：同 pid/token/port 任一变化都拒绝升级。
 +  test(
 +    "refuses force stop when the lock owner changes after graceful timeout",
 +    async () => {
@@ -1264,6 +1304,7 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +      })
 +
 +      try {
++        // #523：先等 original 写锁；后续 replacement 检测以 token 差异为准。
 +        const originalDeadline = Date.now() + 5_000
 +        while (Date.now() < originalDeadline) {
 +          const lock = await Bun.file(lockPath)
@@ -1274,9 +1315,9 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +          await Bun.sleep(POLL_INTERVAL_MS)
 +        }
 +
-+        // graceful 请求会启动 replacement；stop 随后必须基于新 lock 拒绝 SIGKILL。
 +        const resultPromise = runDaemonStop(lockPath)
 +        let replacementPid: number | undefined
++        // #523：10s graceful 窗口内 replacement 必须完成接管，否则测试退化为同 owner force。
 +        const replacementDeadline = Date.now() + 12_000
 +        while (Date.now() < replacementDeadline) {
 +          const lock = await Bun.file(lockPath)
@@ -1291,12 +1332,14 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +        }
 +        const result = await resultPromise
 +        expect(result.exitCode).toBe(1)
++        // #523：owner changed 与 Force-stopped 互斥——两者同时出现说明复核分支未生效。
 +        expect(result.stderr).toContain("owner changed")
 +        expect(result.stderr).not.toContain("Force-stopped")
 +        expect(replacementPid).toBeDefined()
++        // #523：replacement 存活是 changed-owner 安全断言的核心，而非仅检查错误文案。
 +        expect(ServerLockModule.alive(replacementPid!)).toBe(true)
-+        // replacement 存活是 changed-owner 安全断言的核心，而非仅检查错误文案。
 +      } finally {
++        // #523：replacement 不在本测试的直接句柄内——从 lock 反查 pid 再清理，避免残留进程。
 +        if (ServerLockModule.alive(original.pid)) original.kill()
 +        const replacement = await Bun.file(lockPath)
 +          .text()
@@ -1309,11 +1352,14 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    40_000,
 +  )
 +
++  // #523：stopping owner 必须等待退出后再进入选主，不能把旧 public URL 当作成功结果。
++  // 与源仓 Daemon.ensure 不同，目标的 discoverOrSpawnDaemon 通过 deps 注入便于确定性测试。
 +  test("does not reuse an owner that reports stopping", async () => {
 +    await using tmp = await tmpdir()
 +    const lockPath = path.join(tmp.path, "tui-server.json")
 +    ServerLockModule._setLockPath(lockPath)
-+    const token = "stopping-owner-token"
++    const token = "stopping-owner-reuse-token"
++    // #523：fake owner 在 300ms 后自杀——stopping 探测返回 true 后 discover 必须等它退出。
 +    const fakeOwner = `
 +      const token = ${JSON.stringify(token)}
 +      const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
@@ -1343,17 +1389,13 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +      stdout: "ignore",
 +      stderr: "ignore",
 +    })
-+    DaemonModule._setSpawn(() => ({
-+      pid: process.pid,
-+      exited: Promise.resolve(1),
-+      unref() {},
-+      kill() {},
-+    }))
 +
 +    try {
-+      // stopping owner 必须等待退出后再进入选主，不能把旧 public URL 当作成功结果。
++      // #523：owner 写锁后立即进入 stopping+300ms 自杀窗口；探测时序由短轮询 deps 控制。
 +      // fake owner 的 status 只通过 token-protected control endpoint 暴露 stopping。
-+      // ensure 若复用旧 URL，测试会在 owner 退出后返回不可用地址并失败。
++      // deps 全量注入短轮询与假 spawn；owner 退出后选举 spawn 假进程立即 exited，验证不复用旧 URL。
++      // 假 spawn 的 exited 立即兑现，等价于「新 daemon 启动即崩溃」；断言的是失败而不是复用旧 URL。
++      // 与源仓断言相同：失败信息匹配 /daemon exited before startup/（#179 文案）。
 +      const deadline = Date.now() + 5_000
 +      while (Date.now() < deadline) {
 +        const lock = await Bun.file(lockPath)
@@ -1363,14 +1405,23 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +        if (lock?.pid === owner.pid) break
 +        await Bun.sleep(25)
 +      }
++      const deps = {
++        // #523：acquire 提供 asyncDispose 空实现——测试不进入真实 flock 文件锁竞争。
++        read: () => Bun.file(lockPath).text().then((t) => JSON.parse(t)).catch(() => undefined),
++        alive: ServerLockModule.alive,
++        ping: ServerLockModule.ping,
++        clear: ServerLockModule.clear,
++        acquire: async () => ({ release: async () => {}, [Symbol.asyncDispose]: async () => {} }),
++        spawn: async () => ({ pid: process.pid, exited: Promise.resolve(1), unref() {}, kill() {} }),
++        sleep: (ms: number) => Bun.sleep(ms),
++        resolveDaemonFile: async () => WORKER_TS,
++        electionTimeoutMs: 1_000,
++        electionStaleMs: 500,
++        pollMs: 25,
++        waitMs: 5_000,
++      } as Parameters<typeof discoverOrSpawnDaemon>[1]
 +      await expect(
-+        DaemonModule.ensure({
-+          port: 0,
-+          hostname: "127.0.0.1",
-+          mdns: false,
-+          "mdns-domain": "opencode.local",
-+          cors: [],
-+        }),
++        discoverOrSpawnDaemon({ port: 0, hostname: "127.0.0.1", mdns: false, "mdns-domain": "opencode.local", cors: [] }, deps),
 +      ).rejects.toThrow(/daemon exited before startup/)
 +    } finally {
 +      if (ServerLockModule.alive(owner.pid)) owner.kill()
@@ -1378,13 +1429,16 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    }
 +  })
 +
+   // #259：daemon stop 命令测试——从真实 CLI 入口验证完整外部契约
    test(
      "daemon stop command gracefully stops daemon and clears the lock file",
-     async () => {
-@@ -888,6 +1202,39 @@ describe("daemon lifecycle", () => {
+@@ -399,7 +757,44 @@ describe("daemon lifecycle", () => {
      DAEMON_START_TIMEOUT_MS + 10_000,
    )
  
+-    test(
++  // #523：launcher Ctrl-C 测试——源仓用 Daemon.ensure；目标等价 seam 是 discoverOrSpawnDaemon。
++  // #523：真实 launcher 已完成 daemon 发现但未打开 SSE；启动期 Ctrl-C 后 worker 必须可被后续接管。
 +  test(
 +    "launcher Ctrl-C before first SSE releases the worker for subsequent acquisition",
 +    async () => {
@@ -1393,23 +1447,25 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +      const first = await spawnEnsureLauncher(lockPath)
 +
 +      try {
-+        // 真实 launcher 已完成 Daemon.ensure，但刻意没有打开 SSE，再模拟启动期 Ctrl-C。
++        // #523：模拟启动期 Ctrl-C——launcher 死亡后 detached worker 不应残留为永久 owner。
 +        first.proc.kill("SIGINT")
 +        const launcherExit = await Promise.race([first.proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
 +        expect(launcherExit).not.toBe("timeout")
 +
++        // #523：等待 worker PID 死亡，而不是 lock 文件偶然被删除。
 +        const cleanupDeadline = Date.now() + 8_000
 +        while (Date.now() < cleanupDeadline && ServerLockModule.alive(first.lock.pid)) await Bun.sleep(POLL_INTERVAL_MS)
++        // #523：8s 窗口覆盖 launcher-exit watcher 的默认检查间隔；超时即回归。
 +        expect(ServerLockModule.alive(first.lock.pid)).toBe(false)
-+        // 这里等待的是 worker PID 死亡，而不是 lock 文件偶然被删除。
 +
-+        // 清理完成后再次走公开 Daemon.ensure 路径，不能返回第一个已死亡 owner 的旧 URL。
++        // #523：清理完成后再次走公开发现路径，不能返回第一个已死亡 owner 的旧 URL。
 +        const second = await spawnEnsureLauncher(lockPath)
 +        expect(second.lock.pid).not.toBe(first.lock.pid)
 +        await runDaemonStop(lockPath)
 +        second.proc.kill("SIGINT")
 +        await second.proc.exited.catch(() => undefined)
 +      } finally {
++        // #523：first.lock.pid 可能已被二次接管——kill 前再验 alive，避免杀到新 owner。
 +        if (ServerLockModule.alive(first.proc.pid)) first.proc.kill()
 +        if (ServerLockModule.alive(first.lock.pid)) process.kill(first.lock.pid)
 +        await first.proc.exited.catch(() => undefined)
@@ -1418,25 +1474,39 @@ index 973d0eeb51f62d30dd02f77593e505df62019c64..a279216191d5eb48f427b99cacf4696d
 +    40_000,
 +  )
 +
-   test(
-     "compiled-binary path: spawning with OPENCODE_PROCESS_ROLE=worker env bypasses yargs and starts daemon",
++  test(
+     "daemon writes lock file and responds to HTTP health check",
      async () => {
+       await using tmp = await tmpdir()
+@@ -1025,6 +1420,8 @@ test(
+     DAEMON_START_TIMEOUT_MS + 20_000,
+   )
+ 
++
++
+   test(
+     "daemon startup resumes an interrupted maintenance task from its persisted record",
+     async () => {
+
 diff --git a/packages/opencode/test/project/instance.test.ts b/packages/opencode/test/project/instance.test.ts
-index 491cfe93d70ea73951928c84f916bb853397e09b..4f40e6bebc477f4d4c012aec8f6700d580ffb009 100644
+index f78b99ef7..1a67892de 100644
 --- a/packages/opencode/test/project/instance.test.ts
 +++ b/packages/opencode/test/project/instance.test.ts
-@@ -1,6 +1,6 @@
+@@ -1,7 +1,7 @@
  import { describe, expect } from "bun:test"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 -import { Deferred, Effect, Fiber, Layer } from "effect"
 +import { Deferred, Duration, Effect, Fiber, Layer } from "effect"
  import { InstanceRef } from "../../src/effect/instance-ref"
  import { registerDisposer } from "../../src/effect/instance-registry"
- import { InstanceBootstrap } from "../../src/project/bootstrap-service"
-@@ -118,6 +118,37 @@ describe("InstanceStore", () => {
+ import { InstanceBootstrap } from "../../src/project/bootstrap"
+@@ -121,6 +121,43 @@ describe("InstanceStore", () => {
      }),
    )
  
++  // #523：disposeAll 必须取消 pending bootstrap，而不是等待它自然完成。
++  // 契约面：dispose 的 500ms 预算在 release 之前就应完成——取消语义优先于等待。
 +  it.live("cancels pending bootstrap during disposeAll", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped({ git: true })
@@ -1444,6 +1514,7 @@ index 491cfe93d70ea73951928c84f916bb853397e09b..4f40e6bebc477f4d4c012aec8f6700d5
 +      const started = yield* Deferred.make<void>()
 +      const release = yield* Deferred.make<void>()
 +
++      // #523：bootstrap 停在 started 之后——load 已完成登记但 producer 未完成。
 +      yield* setBootstrap(
 +        Effect.gen(function* () {
 +          yield* Deferred.succeed(started, undefined)
@@ -1452,8 +1523,10 @@ index 491cfe93d70ea73951928c84f916bb853397e09b..4f40e6bebc477f4d4c012aec8f6700d5
 +      )
 +
 +      const loading = yield* store.load({ directory: dir }).pipe(Effect.forkScoped)
++      // #523：await started 保证 cancel 时 producer 确实在运行中。
 +      yield* Deferred.await(started)
 +
++      // #523：若不取消 producer，disposeAll 会挂在 Deferred.await(entry.deferred) 上直到 release。
 +      const disposal = yield* store.disposeAll().pipe(Effect.forkScoped)
 +      const finished = yield* Fiber.join(disposal).pipe(
 +        Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }),
@@ -1461,6 +1534,7 @@ index 491cfe93d70ea73951928c84f916bb853397e09b..4f40e6bebc477f4d4c012aec8f6700d5
 +      )
 +
 +      yield* Deferred.succeed(release, undefined)
++      // #523：loading 被 cancel 中断后 join 必须可完成——不能因中断遗留挂起 fiber。
 +      yield* Fiber.join(loading).pipe(Effect.exit)
 +
 +      // The disposal contract must cancel the producer instead of waiting for this release.

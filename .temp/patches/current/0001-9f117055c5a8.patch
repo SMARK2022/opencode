@@ -15,7 +15,7 @@ diff --git a/packages/opencode/src/effect/runtime-flags.ts b/packages/opencode/s
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -23,7 +23,12 @@
+@@ -24,10 +24,15 @@
  import { Reference } from "@opencode-ai/core/reference"
  import { MCP } from "@/mcp"
  import { PermissionV1 } from "@opencode-ai/core/v1/permission"
@@ -26,9 +26,12 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
 +const MAX_STATUS_CHARS = 2000
 +
  export function provider(model: Provider.Model) {
-   if (model.api.id.includes("muse-spark")) return [PROMPT_META]
+   if (model.api.id.includes("muse")) {
+     const name = model.api.id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
+     return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]
+   }
    if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-@@ -55,10 +60,77 @@
+@@ -64,10 +69,77 @@
      const skill = yield* Skill.Service
      const mcp = yield* MCP.Service
      const locations = yield* LocationServiceMap.Service
@@ -106,7 +109,7 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
          const references = yield* Effect.gen(function* () {
            return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
          }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-@@ -69,7 +141,8 @@
+@@ -78,7 +150,8 @@
              `<env>`,
              `  Working directory: ${ctx.directory}`,
              `  Workspace root folder: ${ctx.worktree}`,
@@ -116,7 +119,7 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
              `  Platform: ${process.platform}`,
              `  Today's date: ${new Date().toDateString()}`,
              `</env>`,
-@@ -139,7 +212,8 @@
+@@ -148,7 +220,8 @@
  export const node = LayerNode.make({
    service: Service,
    layer: layer,

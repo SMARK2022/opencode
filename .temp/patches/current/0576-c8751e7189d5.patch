@@ -10,9 +10,11 @@ Content-Transfer-Encoding: 8bit
 
 逐条 oldString===newString 不再整批拒绝：条目过 locate/唯一性校验后跳写（零字节写入），混合批次成功并在 output 末尾追加 no-op warning；成功 output 以 post-formatter 最终 diff 说明实际变化（含 create/overwrite），并按 truncation limits 做预算保护保证末尾 warning 恒可见。历史 _syncInput 保持提交形态，TUI/apply_patch/write 与通用截断层零改动，权限审批预览不回归。
 
+适配说明：目标 edit.ts 已含 #514/#518/#131 注释夹层、EventV2Bridge/FSUtil 服务名与 else 分支 +2 缩进漂移，七个 edit.ts hunks 中六个按真实锚点重写；edit-apply.ts 三 hunks 与测试 H2/H3 语义原样（H3 由 220 行 9 用例承载）；itTruncated 按目标 LayerNode.override 槽位风格重写（Bus.layer→EventV2Bridge.node）。批级内容等值门为目标既有（fork 早期），本补丁不重复引入。
+
+
 diff --git a/docs/plans/edit-identical-noop-tolerance.md b/docs/plans/edit-identical-noop-tolerance.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..6b8da0e6cb88ca4a338748f946436da29f03040e
 --- /dev/null
 +++ b/docs/plans/edit-identical-noop-tolerance.md
 @@ -0,0 +1,340 @@
@@ -357,8 +359,8 @@ index 0000000000000000000000000000000000000000..6b8da0e6cb88ca4a338748f946436da2
 +
 +Verdict 记录后按 policy 仅进行管理性字段更新：Status → verified、Approved revision → R5、Implementation allowed → no further changes without revision；无任何实质性设计修改。
 \ No newline at end of file
+
 diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
-index 778467522982d1998cfd541375739a419bd41c08..bc89786a3183dd6b529d276fac8f00099fe499c3 100644
 --- a/packages/opencode/src/tool/edit-apply.ts
 +++ b/packages/opencode/src/tool/edit-apply.ts
 @@ -50,7 +50,9 @@ type LineSpan = { start: number; end: number }
@@ -382,7 +384,7 @@ index 778467522982d1998cfd541375739a419bd41c08..bc89786a3183dd6b529d276fac8f0009
    }
  
    // 是否需要整批 elevation：任一条 exact 找不到、或归一化出现次数与字面次数分歧（hybrid dash 等）
-@@ -468,17 +467,26 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -469,17 +468,26 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        )
      }
  
@@ -417,27 +419,29 @@ index 778467522982d1998cfd541375739a419bd41c08..bc89786a3183dd6b529d276fac8f0009
        newString: edit.newString,
        ...(edit.replaceAll === true ? { replaceAll: true } : {}),
      })
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b27f3ea6f 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -17,6 +17,7 @@ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/u
- import { closestWindow } from "@/patch/match"
+@@ -20,6 +20,8 @@ import { closestWindow } from "@/patch/match"
  import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+ // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
  import * as Mutation from "./file-mutation-coordinator"
++// 0576：预算纪律消费 Truncate limits——与 wrapper 通用截断同源，确保末段 warning 不被外层截断丢弃。
 +import * as Truncate from "./truncate"
+ // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
  
  /**
-  * 兼容导出：单点替换 = applyEdits 单元素，保证测试与外部调用仍见 replace API。
-@@ -96,6 +97,7 @@ export const EditTool = Tool.define(
-     const afs = yield* AppFileSystem.Service
+@@ -100,6 +102,8 @@ export const EditTool = Tool.define(
+     const afs = yield* FSUtil.Service
      const format = yield* Format.Service
-     const bus = yield* Bus.Service
+     const events = yield* EventV2Bridge.Service
++    // 0576：edit 组装期预算需要 limits；注入一次避免执行期重复解析配置。
 +    const truncate = yield* Truncate.Service
  
      return {
        description: DESCRIPTION,
-@@ -124,11 +126,9 @@ export const EditTool = Tool.define(
+@@ -129,11 +133,9 @@ export const EditTool = Tool.define(
              throw new Error("edits[].oldString must not be empty except for a single create/overwrite edit.")
            }
  
@@ -452,24 +456,26 @@ index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b
            if (isCreate(edits) && edits[0].oldString === edits[0].newString) {
              throw new Error("No changes to apply: oldString and newString are identical.")
            }
-@@ -304,14 +304,6 @@ export const EditTool = Tool.define(
-               file: filePath,
-               event: "change",
-             })
--            diff = trimDiff(
--              createTwoFilesPatch(
--                filePath,
--                filePath,
--                normalizeLineEndings(contentOld),
--                normalizeLineEndings(contentNew),
--              ),
--            )
- 
-             // INV-16：成功后始终发完整参数面 { filePath, edits }，
-             // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-@@ -326,6 +318,17 @@ export const EditTool = Tool.define(
+@@ -321,16 +323,6 @@ export const EditTool = Tool.define(
+                 file: filePath,
+                 event: "change",
+               })
+-              // #518：成功后 diff 用锁内最终内容生成；与 write 一致，不展示 proposal 时的中间估计。
+-              diff = trimDiff(
+-                createTwoFilesPatch(
+-                  filePath,
+-                  filePath,
+-                  normalizeLineEndings(contentOld),
+-                  normalizeLineEndings(contentNew),
+-                ),
+-              )
+-
+               // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
+               // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
+               // actualOld 已在 applyEdits.syncEdits 中（历史 needle，非 preserve 整行块）；
+@@ -345,6 +337,17 @@ export const EditTool = Tool.define(
+               }
              }
-           }
  
 +          // 共享出口统一重算 diff：此刻两分支的 contentNew 均已同步 commit/formatter 后的
 +          // 最终磁盘内容，output 的 Changed 段与 metadata.diff 因此共用 post-formatter 真值；
@@ -484,10 +490,10 @@ index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b
 +          )
            const diffOld = normalizeLineEndings(contentOld)
            const diffNew = normalizeLineEndings(contentNew)
-           let additions = 0
-@@ -350,6 +353,47 @@ export const EditTool = Tool.define(
-           })
+           // #131：统计增删行时忽略行尾风格
+@@ -371,6 +374,49 @@ export const EditTool = Tool.define(
  
+           // #514：多块编辑成功回执标注块数，与单块形态区分
            let output = `Edit applied successfully${edits.length > 1 ? ` (${edits.length} blocks)` : ""}.`
 +          // [local-smark] 逐条 identical 统计在组装点从 edits 重算（与 applyEdits 收到的
 +          // LF 归一化判断一致），行尾等值也算 no-op。
@@ -503,9 +509,11 @@ index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b
 +          const reserveBytes = 2048
 +          const reserveLines = 10
 +          const diffBudgetBytes = Math.max(0, limitBytes - reserveBytes)
++          // 预算下限钳 0：limits 配置小于保留额时差分段整体放弃而不是负数比较失效。
 +          const diffBudgetLines = Math.max(0, limitLines - reserveLines)
 +          let consumedBytes = Buffer.byteLength(output, "utf-8")
 +          let consumedLines = output.split("\n").length
++          // 差分按行入账而非整体拼接：预算判定必须逐行，中途停止才可能保留 warning 空间。
 +          if (diff) {
 +            output += `\n\nChanged:`
 +            consumedBytes += Buffer.byteLength("\n\nChanged:", "utf-8")
@@ -530,13 +538,14 @@ index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b
 +            }
 +          }
 +
-           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
+           const normalizedFilePath = FSUtil.normalizePath(filePath)
+           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
            const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
-           yield* lsp.touchFile(filePath, "document")
-@@ -359,18 +403,34 @@ export const EditTool = Tool.define(
-           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
+@@ -383,21 +429,38 @@ export const EditTool = Tool.define(
            const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+           // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
            let diagnosticSummary: typeof delta | undefined = delta
++          // LSP 段先组装后预算检查：不再直接追加 output，超限时代之以纯事实降级标记。
 +          let lspSection = ""
            if (block) {
 -            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
@@ -544,12 +553,15 @@ index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b
 +            lspSection = `\n\nNew LSP errors introduced by this edit:\n${block}`
 +            lspSection += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
            } else {
+             // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时
+             // baseline 和 current 都为空，delta 必然为空
              const clients = yield* lsp.status()
              if (clients.length === 0) {
                diagnosticSummary = undefined
 -              output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
 +              lspSection = `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
              } else {
+               // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持反馈高信噪比
 -              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
 +              lspSection = `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
              }
@@ -572,34 +584,35 @@ index 44cccd35d6c2bfa39e9a836c01d5aa56468fc96a..acb821af9860b0b7240dcd823c5e568b
  
            return {
              metadata: {
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index de93ac931c8e1679096b84a493450a9700296d5e..0c628a0bde51579a3fb9f607c98b90ebb32f3e0a 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -67,6 +67,22 @@ const itFormatted = testEffect(
-   ),
+@@ -61,6 +61,23 @@ const itFormatted = testEffect(
+   ]),
  )
  
 +// [local-smark] 小 limits + pass-through 截断：隔离 wrapper 截断，迫使 edit 组装段自身
 +// 遵守 limits 预算（真实 wrapper 会按同一 limits 做 head 截断，丢末尾 warning）。
++// output 放行不截断：隔离 wrapper 层后，预算违规只能来自 edit 组装段自身。
 +const itTruncated = testEffect(
-+  Layer.mergeAll(
-+    LSP.defaultLayer,
-+    AppFileSystem.defaultLayer,
-+    Format.defaultLayer,
-+    Bus.layer,
-+    Layer.mock(Truncate.Service, {
-+      limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
-+      output: (text: string) => Effect.succeed({ content: text, truncated: false }),
-+    }),
-+    Agent.defaultLayer,
++  LayerNode.compile(
++    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]), [
++      [
++        Truncate.node,
++        Layer.mock(Truncate.Service, {
++          limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
++          output: (text: string) => Effect.succeed({ content: text, truncated: false }),
++        }),
++      ],
++    ],
 +  ),
 +)
 +
  const init = Effect.fn("EditToolTest.init")(function* () {
    const info = yield* EditTool
    return yield* info.init()
-@@ -347,7 +363,8 @@ describe("tool.edit", () => {
+@@ -346,7 +363,8 @@ describe("tool.edit", () => {
        Effect.gen(function* () {
          const test = yield* TestInstance
          const filepath = path.join(test.directory, "file.txt")
@@ -609,7 +622,7 @@ index de93ac931c8e1679096b84a493450a9700296d5e..0c628a0bde51579a3fb9f607c98b90eb
  
          expect((yield* fail({ filePath: filepath, oldString: "same", newString: "same" })).message).toContain(
            "identical",
-@@ -355,6 +372,226 @@ describe("tool.edit", () => {
+@@ -354,6 +372,231 @@ describe("tool.edit", () => {
        }),
      )
  
@@ -630,6 +643,7 @@ index de93ac931c8e1679096b84a493450a9700296d5e..0c628a0bde51579a3fb9f607c98b90eb
 +        })
 +
 +        expect(result.output).toContain("Edit applied successfully")
++        // warning 计数与文件终态同时断言，防只改文件不报或只报不改。
 +        expect(result.output).toContain("Warning: 1 of 3 edit(s) were no-ops")
 +        expect(yield* load(filepath)).toBe("x\ny\nc")
 +      }),
@@ -760,6 +774,7 @@ index de93ac931c8e1679096b84a493450a9700296d5e..0c628a0bde51579a3fb9f607c98b90eb
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "new.txt")
 +        const asked: Array<{ metadata?: Record<string, unknown> }> = []
++        // ask 捕获：权限预计算 diff 在 ask 请求 metadata 上断言，覆盖审批预览回归。
 +        const captureCtx: Tool.Context = {
 +          ...ctx,
 +          ask: (request) => {
@@ -797,6 +812,7 @@ index de93ac931c8e1679096b84a493450a9700296d5e..0c628a0bde51579a3fb9f607c98b90eb
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "big.txt")
++        // 2000 字节单行差分远超 1024B 预算，迫使差分段裁剪而 warning 必须存活。
 +        const long = "x".repeat(2000)
 +        yield* put(filepath, `${long}\nb\nc`)
 +
@@ -809,11 +825,13 @@ index de93ac931c8e1679096b84a493450a9700296d5e..0c628a0bde51579a3fb9f607c98b90eb
 +        })
 +
 +        expect(result.output).toContain("Warning: 1 of 2 edit(s) were no-ops")
++        // 双断言：warning 存活 + 总字节不超 mock limits，同时成立才证明预算自限生效。
 +        expect(Buffer.byteLength(result.output, "utf-8")).toBeLessThanOrEqual(1024)
 +      }),
 +    )
 +
 +    // [local-smark] identical 条目仍须通过 locate 校验：垃圾 oldString 不得因"无操作"而静默通过。
++    // 容忍不等于跳过校验：locate/唯一性语义对 identical 条目保持完整。
 +    it.instance("still validates oldString of identical edits", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance

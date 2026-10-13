@@ -198,7 +198,7 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
  
    // #261：验证 reviewer 路径经过 chat.params/chat.headers hook——max_output_tokens 被清理、header 被注入
    oauthHook.effect("applies chat provider hooks before sending OpenAI OAuth reviewer requests", () =>
-@@ -517,6 +588,88 @@ function staleParentModelFixture() {
+@@ -517,6 +588,91 @@ function staleParentModelFixture() {
    }
  }
  // [local-smark] staleParentModelFixture 结束
@@ -281,6 +281,9 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +      Layer.provide(authLayer(authInfo)),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // #261 谱系：PermissionReviewer.layer 依赖 Database（session 表读取），
++      // 空链 mock 闭合 R=Service（同 emptyReviewerDb 先例）。
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}

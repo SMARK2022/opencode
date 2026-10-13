@@ -30,7 +30,7 @@ index 7d05fa6ee..eea5c8ebd 100644
  import { Effect } from "effect"
  import { ACPSession } from "./session"
  import { ACPPermission } from "./permission"
-@@ -38,7 +40,9 @@ export function start(input: { sdk: OpencodeClient; connection: Connection; sess
+@@ -38,8 +40,10 @@
  
  export class Subscription {
    private readonly abort = new AbortController()
@@ -39,8 +39,9 @@ index 7d05fa6ee..eea5c8ebd 100644
 +  // 终态不能按短 timeout 驱逐，否则迟到的独立 transport 会重新打开 lifecycle。
 +  private readonly shellSnapshots = new Map<string, { hash?: string; version: number; terminal?: true }>()
    private readonly toolStarts = new Set<string>()
+   private readonly connectionWaiters = new Set<() => void>()
+   private readonly idleWaiters = new Map<string, Set<ReturnType<typeof signal>>>()
    private readonly permission: ACPPermission.Handler
-   private started = false
 @@ -71,6 +75,9 @@ export class Subscription {
          this.permission.handle(event)
          return
@@ -51,8 +52,7 @@ index 7d05fa6ee..eea5c8ebd 100644
          return this.handlePartUpdated(event)
        case "message.part.delta":
          return this.handlePartDelta(event)
-@@ -128,24 +135,27 @@ export class Subscription {
-     }
+@@ -189,23 +196,26 @@
    }
  
 -  private async handlePartUpdated(event: EventMessagePartUpdated) {
@@ -202,6 +202,16 @@ index 7d05fa6ee..eea5c8ebd 100644
    }
  }
  
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -135,4 +135,5 @@
+           },
+         }
++      // live 进度经 val.delivery 透传：ephemeral 只广播不落盘，durable 保持原路径。
+-      }),
++      }, val.delivery),
+     ask: (req) =>
 diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
 index b263e662b..e94ea46c8 100644
 --- a/packages/opencode/src/session/llm.ts
@@ -235,24 +245,74 @@ index b263e662b..e94ea46c8 100644
        })
  
        const [language, cfg, item, info] = yield* Effect.all(
-@@ -287,7 +288,7 @@ const live: Layer.Layer<
+@@ -309,5 +310,5 @@ const live: Layer.Layer<
        return {
          type: "ai-sdk" as const,
          result: streamText({
 -          onError(error) {
 +          onError(event) {
              bridge.fork(
+@@ -275,5 +276,6 @@ const live: Layer.Layer<
+           yield* Effect.logInfo("llm runtime selected", {
+             "llm.runtime": "native",
+-            "llm.provider": input.model.providerID,
+-            "llm.model": input.model.id,
++            // native 选路同样共用 byte 预算，实验开关路径不能成为绕过点。
++            "llm.provider": utf8Prefix(input.model.providerID, 128),
++            "llm.model": utf8Prefix(input.model.id, 256),
+           })
+@@ -285,22 +286,23 @@ const live: Layer.Layer<
+         yield* Effect.logInfo("llm runtime selected", {
+           "llm.runtime": "ai-sdk",
+-          "llm.provider": input.model.providerID,
+-          "llm.model": input.model.id,
+-          "llm.native_unsupported_reason": native.reason,
++          // 运行时选择诊断与 stream 站点共用同一组 byte 预算，避免选路日志成为绕过点。
++          "llm.provider": utf8Prefix(input.model.providerID, 128),
++          "llm.model": utf8Prefix(input.model.id, 256),
++          "llm.native_unsupported_reason": utf8Prefix(native.reason, 128),
+         })
+         yield* Effect.logInfo("native runtime unavailable; falling back to ai-sdk", {
+-          providerID: input.model.providerID,
+-          modelID: input.model.id,
+-          "session.id": input.sessionID,
+           small: (input.small ?? false).toString(),
+-          agent: input.agent.name,
+-          mode: input.agent.mode,
+-          reason: native.reason,
++          providerID: utf8Prefix(input.model.providerID, 128),
++          modelID: utf8Prefix(input.model.id, 256),
++          "session.id": utf8Prefix(input.sessionID, 128),
++          agent: utf8Prefix(input.agent.name, 128),
++          mode: utf8Prefix(input.agent.mode, 32),
++          reason: utf8Prefix(native.reason, 128),
+         })
+       }
+ 
+       yield* Effect.logInfo("llm runtime selected", {
+         "llm.runtime": "ai-sdk",
+-        "llm.provider": input.model.providerID,
+-        "llm.model": input.model.id,
++        "llm.provider": utf8Prefix(input.model.providerID, 128),
++        "llm.model": utf8Prefix(input.model.id, 256),
+       })
+@@ -314,8 +315,10 @@ const live: Layer.Layer<
++              // 错误路径标识同样没有 schema 上限；与 stream 站点共用同一组 byte 预算，
++              // 错误摘要只保留分类字段，不落盘 provider 控制的 message/URL/body。
                Effect.logError("stream error", {
-                 providerID: input.model.providerID,
-@@ -296,7 +297,7 @@ const live: Layer.Layer<
+-                providerID: input.model.providerID,
+-                modelID: input.model.id,
+-                "session.id": input.sessionID,
++                providerID: utf8Prefix(input.model.providerID, 128),
++                modelID: utf8Prefix(input.model.id, 256),
++                "session.id": utf8Prefix(input.sessionID, 128),
                  small: (input.small ?? false).toString(),
-                 agent: input.agent.name,
-                 mode: input.agent.mode,
+-                agent: input.agent.name,
+-                mode: input.agent.mode,
++                agent: utf8Prefix(input.agent.name, 128),
++                mode: utf8Prefix(input.agent.mode, 32),
 -                error,
 +                error: streamErrorSummary(event.error),
-               }),
-             )
-           },
 @@ -398,6 +399,27 @@ const live: Layer.Layer<
  
  export const hasToolCalls = LLMRequestPrep.hasToolCalls
@@ -418,7 +478,7 @@ index 95ed2df22..0b79d30e8 100644
      partID: PartID
    }) => Effect.Effect<SessionV1.Part | undefined>
    readonly updatePart: <T extends SessionV1.Part>(part: T) => Effect.Effect<T>
-+  readonly publishPartProgress: (part: SessionV1.Part) => Effect.Effect<void>
++  readonly publishPartProgress: (part: SessionV1.ToolPart) => Effect.Effect<void>
    readonly updatePartDelta: (input: {
      sessionID: SessionID
      messageID: MessageID
@@ -428,7 +488,7 @@ index 95ed2df22..0b79d30e8 100644
  
 +    // 进度快照只广播不落盘：PartProgress 事件未注册 durable manifest，
 +    // 发布端借此把工具输出推进的磁盘写入从每次 tick 降频到 1s 一写。
-+    const publishPartProgress = (part: SessionV1.Part): Effect.Effect<void> =>
++    const publishPartProgress = (part: SessionV1.ToolPart): Effect.Effect<void> =>
 +      Effect.gen(function* () {
 +        yield* events.publish(SessionV1.Event.PartProgress, {
 +          sessionID: part.sessionID,
@@ -748,7 +808,7 @@ index 8271b2826..4680ff686 100644
  
      expect(toolUpdates(harness.updates).filter((item) => item.update.sessionUpdate === "tool_call")).toHaveLength(1)
      expect(toolUpdates(harness.updates).map((item) => item.update.sessionUpdate)).toEqual([
-@@ -586,23 +605,27 @@ describe("acp event routing", () => {
+@@ -586,23 +605,77 @@ describe("acp event routing", () => {
      ])
    })
  
@@ -773,6 +833,56 @@ index 8271b2826..4680ff686 100644
 -    expect("content" in updates[2]!.update).toBe(false)
    })
  
++  it("streams live shell progress and rejects stale durable snapshots", async () => {
++    const harness = createHarness()
++    await Effect.runPromise(harness.session.create({ id: "ses_progress", cwd: "/workspace" }))
++
++    // live progress 通道：v1 内容 → v2 同 hash（展示去重）→ v3 新内容（最新 snapshot 穿过 live seam）。
++    for (const [output, version] of [
++      ["a", 1],
++      ["a", 2],
++      ["marker-7d1a", 3],
++    ] as const) {
++      await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", "call_progress", output, version)))
++    }
++    // durable PartUpdated 在较新 live 后到达：stale version 即使 output 不同也不能让 ACP 展示回退。
++    await harness.subscription.handle(toolUpdated(versionedRunning("ses_progress", "call_progress", "stale", 2)))
++
++    // v1 内容一次；v2 同 hash 只发 status-only 帧（无 content）；v3 新内容；stale v2 整体拒绝。
++    const contents = toolUpdates(harness.updates)
++      .map((item) => ("content" in item.update ? item.update.content : undefined))
++      .filter((content) => content !== undefined)
++    expect(contents).toEqual([
++      [{ type: "content", content: { type: "text", text: "a" } }],
++      [{ type: "content", content: { type: "text", text: "marker-7d1a" } }],
++    ])
++  })
++
++  it("isolates shared provider callIDs across sessions", async () => {
++    const harness = createHarness()
++    await Effect.runPromise(harness.session.create({ id: "ses_a", cwd: "/workspace" }))
++    await Effect.runPromise(harness.session.create({ id: "ses_b", cwd: "/workspace" }))
++
++    // provider callID 只在 Session 内唯一：A 的 v2 不能压掉 B 的同 callID v1，
++    // synthetic pending 也必须在两个 Session 中各自出现一次。
++    await harness.subscription.handle(progressEvent(versionedRunning("ses_a", "call_shared", "session-a", 2)))
++    await harness.subscription.handle(progressEvent(versionedRunning("ses_b", "call_shared", "session-b", 1)))
++
++    // 投影到 [kind, content] 元组：避开完整 ToolCall 形状匹配，聚焦 Session 隔离语义。
++    const bySession = (sessionID: string) =>
++      toolUpdates(harness.updates)
++        .filter((item) => item.sessionId === sessionID)
++        .map((item) => [item.update.sessionUpdate, "content" in item.update ? item.update.content : undefined])
++    expect(bySession("ses_a")).toEqual([
++      ["tool_call", undefined],
++      ["tool_call_update", [{ type: "content", content: { type: "text", text: "session-a" } }]],
++    ])
++    expect(bySession("ses_b")).toEqual([
++      ["tool_call", undefined],
++      ["tool_call_update", [{ type: "content", content: { type: "text", text: "session-b" } }]],
++    ])
++  })
++
 +  // 完整 terminal-lifecycle 观察（terminal 后 late progress 不重开 tool_call）依赖
 +  // toolStart 的 terminal 守卫，属于 #0445 语义；0443 阶段 terminal marker 只在
 +  // runningTool 内拒绝 stale snapshot。
@@ -807,7 +917,7 @@ index 6fc2dfda6..d32f6d31c 100644
  import z from "zod"
 -import { LLM } from "../../src/session/llm"
 +import { LLM, streamErrorSummary } from "../../src/session/llm"
-@@ -956,4 +956,113 @@ describe("session.llm.stream", () => {
+@@ -956,4 +956,122 @@ describe("session.llm.stream", () => {
        }),
      },
    )
@@ -829,9 +939,10 @@ index 6fc2dfda6..d32f6d31c 100644
 +          ProviderV2.ID.make("bounded-error-compatible"),
 +          ModelV2.ID.make("gpt-test"),
 +        )
-+        const sessionID = SessionID.make("session-bounded-stream-error")
++        // 超长合法标识走截断路径：agent/sessionID 无 schema 上限，provider/model 由注册表绑定只能短值。
++        const sessionID = SessionID.make("ses" + "s".repeat(3_000))
 +        const agent = {
-+          name: "test",
++          name: "a".repeat(3_000),
 +          mode: "primary",
 +          options: {},
 +          permission: [{ permission: "*", pattern: "*", action: "allow" }],
@@ -875,6 +986,14 @@ index 6fc2dfda6..d32f6d31c 100644
 +        expect(logged?.error).toEqual(expect.objectContaining({ name: "APICallError", statusCode: 500 }))
 +        expect(JSON.stringify(logged)).not.toContain(requestMarker)
 +        expect(JSON.stringify(logged)).not.toContain("requestBodyValues")
++
++        // 超长标识必须被 utf8Prefix 截断：任何日志条目内不允许出现 129+ 连续同字符 run，
++        // 移除 stream/onError 站点预算会让原始 3000 字符标识原样落盘而失败。
++        const streamEntry = logs.find((entry) => !("error" in entry))
++        expect(JSON.stringify(streamEntry)).not.toContain("a".repeat(129))
++        expect(JSON.stringify(streamEntry)).not.toContain("s".repeat(129))
++        expect(JSON.stringify(logged)).not.toContain("a".repeat(129))
++        expect(JSON.stringify(logged)).not.toContain("s".repeat(129))
 +
 +        // 日志侧净化合同：进入 Effect.logError 的唯一 error 形态是 streamErrorSummary；
 +        // provider-controlled message/URL/body 都不得出现在返回结构里，
@@ -1133,17 +1252,18 @@ diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.
 index da42a9c1a..94f77bec8 100644
 --- a/packages/schema/src/v1/session.ts
 +++ b/packages/schema/src/v1/session.ts
-@@ -760,6 +760,17 @@ const events = {
+@@ -760,6 +760,18 @@ const events = {
    }),
  }
  
 +// 进度快照走纯内存广播（不注册 durable manifest）：发布端按 1s 节流把
 +// PartUpdated 的磁盘写入降频，UI 仍可通过 SSE 实时看到工具输出推进。
++// live contract 只承载 ToolPart 快照：与 SDK gen 手写类型一致，防止再生成悄悄放宽。
 +export const PartProgress = define({
 +  type: "message.part.progress",
 +  schema: {
 +    sessionID: SessionID,
-+    part: Part,
++    part: ToolPart,
 +    time: NonNegativeInt,
 +  },
 +})

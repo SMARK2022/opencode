@@ -48,7 +48,7 @@ index 9bb688a..fef1719 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
 @@ -1660,3 +1660,107 @@ describe("session.message-v2.latest", () => {
-     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
+    expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
    })
  })
 +

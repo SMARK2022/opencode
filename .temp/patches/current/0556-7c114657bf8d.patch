@@ -10,6 +10,7 @@ Content-Transfer-Encoding: 8bit
 
 将 Clear-Content/Set-Content/Out-File 与 ri 纳入 token 删除/覆写审查，并让 ri -Recurse 保护根与 Remove-Item 同级 dangerous；powershell -Command 对齐 cmd 拼接全部剩余 token，env 剥赋值后递归内层命令，避免 auto 下 general 直过。
 
+
 diff --git a/docs/plans/precheck-ps-write-ri-env-pwsh-pierce.md b/docs/plans/precheck-ps-write-ri-env-pwsh-pierce.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..3b35bd2adda75d13f8c4586106d5b43fa72c005f
@@ -401,108 +402,96 @@ index 0000000000000000000000000000000000000000..3b35bd2adda75d13f8c4586106d5b43f
 +```
 +
 +Audited: plan R2 + precheck.ts / precheck.test.ts. Independent: precheck 107 pass, auto 22 pass.
+
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index e7075eb2f09a62b86ee9cd324f4487abfd792391..4461d868f5262f8ef3c88cff4b858b8e374be28d 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -69,8 +69,11 @@ const INTERPRETER_FLAGS = new Map([
- 
- // token 级文件删除/移动集合：与 raw 层的破坏性模式镜像，这样路径限定的
- // 二进制文件（如 /bin/rm）在 token 化成功后也无法绕过审查。
--const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "trash-put"])
-+// ri 是 Remove-Item 官方别名；必须与 remove-item 同级（含保护根 -Recurse dangerous）。
-+const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "ri", "trash-put"])
- const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
-+// PowerShell 工作树覆写/截断：与删除不同族，但同样不可 auto 直过。
-+const FILE_WRITE_COMMANDS = new Set(["clear-content", "set-content", "out-file"])
- 
- // 系统级破坏性命令：执行即造成不可逆损害，直接判定 dangerous。
- const SYSTEM_DESTRUCTIVE_COMMANDS = new Set([
-@@ -119,7 +122,7 @@ const SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_C
- // SSH/WSL 载荷、不支持的分隔符）中的可见文件变更。
+@@ -53,7 +53,7 @@ const SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_C
+ // #217：捕获不透明 shell（重定向、命令替换、SSH/WSL 载荷、不支持分隔符）中的可见文件变更
  const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
  const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
 -const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 +const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item|ri)\b\s+(?!--?(?:h|help|v|version)\b)\S`
  const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
  
- // ============================================================
-@@ -168,10 +171,11 @@ const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(
- )
- 
- // PowerShell 保护根目录递归删除。仅检查 -Recurse，不要求 -Force：
--// 与 token 层（classifyTokens 的 remove-item 分支）对齐，且确保被 sudo 等包装器
--// 短路时 raw 层仍能确定性拦截 Remove-Item -Recurse / （无 -Force）。
-+// 与 token 层（classifyTokens 的 remove-item/ri 分支）对齐，且确保被 sudo 等包装器
-+// 短路时 raw 层仍能确定性拦截 Remove-Item|ri -Recurse / （无 -Force）。
-+// ri 必须同级：若只写 Remove-Item，generic RAW_FILE_DELETE 会先把 ri 标成 cautious。
- const RE_D_PS_RECURSIVE_DELETE_ROOT = new RegExp(
--  String.raw`\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"` + "`" + String.raw`]|$))`,
-+  String.raw`\b(?:Remove-Item|ri)\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"` + "`" + String.raw`]|$))`,
-   "i",
- )
- 
-@@ -916,7 +920,13 @@ function unwrap(tokens: string[]): UnwrapResult {
-     }
+ // #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
+@@ -76,7 +76,8 @@ const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
+ const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
+ const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
+ const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,"i",)
+-const RE_D_PS_RECURSIVE_DELETE_ROOT = /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
++// #556：ri 必须与 Remove-Item 同级——若只写 Remove-Item，generic RAW_FILE_DELETE 会先把 ri 标成 cautious。
++const RE_D_PS_RECURSIVE_DELETE_ROOT = /\b(?:Remove-Item|ri)\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
+ const RE_D_PYTHON_RMTREE = /\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+ const RE_D_PYTHON_REMOVE = /\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+ const RE_D_NODE_REMOVE = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+@@ -106,8 +107,10 @@ const RE_C_SENSITIVE_READ = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|G
+ const RAW_FIND_OR_PYTHON_COMMAND_PATTERN = String.raw`${RAW_COMMAND_START}(${RAW_COMMAND_PATH}\b(?:find|python|python3|py)\b)`
+ const RE_C_PYTHON_FILE_REMOVE_CALL = /\bos\.(?:remove|unlink|rmdir)\(\s*["'][^"']+["']/
+ // #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
+-const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "trash-put"]) // #222：trash-put 是 trash-cli 的删除命令
++const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "ri", "trash-put"]) // #222：trash-put 是 trash-cli 的删除命令；#556：ri 是 Remove-Item 官方别名，须与 remove-item 同级（含保护根 -Recurse dangerous）
+ const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
++// #556：PowerShell 工作树覆写/截断（Clear-Content/Set-Content/Out-File）——与删除不同族，但同样不可 auto 直过。
++const FILE_WRITE_COMMANDS = new Set(["clear-content", "set-content", "out-file"])
+ // #220：系统级破坏性命令——执行即不可逆，直接 dangerous
+ const SYSTEM_DESTRUCTIVE_COMMANDS = new Set([
+   "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs",
+@@ -617,7 +620,8 @@ function unwrap(tokens: string[]): UnwrapResult {
      const index = tokens.findIndex((item, i) => i > 0 && ["-command", "-c"].includes(item.toLowerCase()))
      if (index >= 0 && tokens[index + 1]) {
+       // #197：提取 -Command 后的脚本用于递归检测——PowerShell 命令字符串可包含管道和别名
 -      return { action: "script", script: tokens[index + 1], reason: "PowerShell wrapper requires explicit approval" }
-+      // 与 cmd /c 对齐：-Command 后全部剩余 token 拼成载荷。
-+      // 旧逻辑只取 tokens[index+1]，会丢掉 `Remove-Item file.txt` 的路径参数 → general 直过。
-+      return {
-+        action: "script",
-+        script: tokens.slice(index + 1).join(" "),
-+        reason: "PowerShell wrapper requires explicit approval",
-+      }
++      // #556：与 cmd /c 对齐：-Command 后全部剩余 token 拼成载荷；旧单 token 取法会丢掉 `Remove-Item file.txt` 的路径参数。
++      return { action: "script", script: tokens.slice(index + 1).join(" "), reason: "PowerShell wrapper requires explicit approval" }
      }
+     // #197：无命令参数的 PowerShell wrapper 可能进入交互式会话——载荷不透明
      return { action: "ask", reason: "PowerShell wrapper without a plain script requires explicit approval" }
+@@ -644,7 +648,14 @@ function unwrap(tokens: string[]): UnwrapResult {
    }
-@@ -944,7 +954,14 @@ function unwrap(tokens: string[]): UnwrapResult {
-   if (["pythonw", "pyw", "pypy", "pypy3", "deno", "osascript"].includes(cmd)) {
-     return { action: "ask", reason: "script interpreter requires explicit approval" }
-   }
+   // #220：bun x 移至 classifyTokens 中处理为 cautious，不再在 unwrap 中损害为 ask
+   // #197：env 可修改环境变量后执行命令——修改后的环境可改变程序行为和安全边界
 -  if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
++  // #556：env 是包装器而非读 .env 文件——剥 KEY=val 与常见 flag 后对内层命令递归分类，
++  // 旧 always-ask 会让 `env rm` / `env git reset --hard` 在 auto 下 general 直过。
 +  if (cmd === "env") {
-+    // env 不是读 .env 文件，而是包装器：剥 KEY=val 与常见 flag 后对内层命令递归分类。
-+    // 旧 always-ask 会让 `env rm` / `env git reset --hard` 在 auto 下 general 直过。
 +    const rest = pierceEnvTokens(tokens.slice(1))
 +    if (rest.length > 0)
 +      return { action: "script", script: joinShellTokens(rest), reason: "env wrapper requires explicit approval" }
 +    return { action: "ask", reason: "env wrapper requires explicit approval" }
 +  }
+   // #197：提权 wrapper 放大命令影响范围——sudo/doas/su/pkexec 后的命令以更高权限执行
    if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
-     // 特权包装器：提取内层命令递归评估，而非短路为 general。
-     // sudo rm file 应至少 cautious，sudo rm -rf / 应 dangerous。
-@@ -1072,7 +1089,7 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+     // 特权包装器：提取内层命令递归评估，而非短路为 ask。
+@@ -939,7 +950,8 @@ function classifyTokens(tokens: string[]): Decision | undefined {
        return { level: "dangerous", reason: "critical recursive delete" }
      return { level: "cautious", reason: "recursive delete requires explicit approval" }
    }
 -  if (cmd === "remove-item" && tokens.some((item) => item.toLowerCase() === "-recurse")) {
++  // #556：ri 与 remove-item 共用递归保护根判定——别名不得稀释 dangerous 层级。
 +  if ((cmd === "remove-item" || cmd === "ri") && tokens.some((item) => item.toLowerCase() === "-recurse")) {
      if (tokens.slice(1).some(protectedDeleteTarget))
        return { level: "dangerous", reason: "critical PowerShell recursive delete" }
      return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
-@@ -1089,6 +1106,14 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+@@ -955,6 +967,12 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+   // #220: 文件移动/重命名
    if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
      return { level: "cautious", reason: "file move or rename requires explicit approval" }
- 
-+  // ---- PowerShell 内容覆写/截断 ----
-+  // Clear-Content/Set-Content/Out-File 可清空或覆盖工作树文件；help-only 不抬升。
++  // #556：PowerShell 内容覆写/截断——Clear-Content/Set-Content/Out-File 可清空或覆盖工作树文件；help-only 不抬升。
 +  if (FILE_WRITE_COMMANDS.has(cmd)) {
 +    const args = tokens.slice(1)
 +    if (args.some((item) => !["--help", "-h", "--version", "-v"].includes(item.toLowerCase())))
 +      return { level: "cautious", reason: "PowerShell file content write requires explicit approval" }
 +  }
-+
-   // ---- 原始磁盘写入 ----
+   // #220: 原始磁盘写入
    if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
      return { level: "dangerous", reason: "raw disk write" }
-@@ -1575,6 +1600,24 @@ function normalizeCommandName(input: string) {
-   return name.replace(/\.(?:exe|cmd|bat|com)$/i, "").toLowerCase()
+@@ -1178,6 +1196,24 @@ function readsSensitivePath(tokens: string[]) {
+   return hasSensitivePath(tokens)
  }
  
 +function pierceEnvTokens(args: string[]) {
-+  // 剥掉 env 的 KEY=value 与常见 flag，露出内层可执行命令 argv（token 语义，非正则扫全文）。
++  // #556：剥掉 env 的 KEY=value 与常见 flag，露出内层可执行命令 argv（token 语义，非正则扫全文）。
 +  const out: string[] = []
 +  for (let i = 0; i < args.length; i++) {
 +    const item = args[i]
@@ -520,19 +509,19 @@ index e7075eb2f09a62b86ee9cd324f4487abfd792391..4461d868f5262f8ef3c88cff4b858b8e
 +}
 +
  function joinShellTokens(tokens: string[]) {
-   // 重建 cmd/WSL 载荷用于递归 raw 扫描，不重用原始命令文本。引号保持空格
-   // 完整并避免发明新的分隔符，同时仍然向 dangerousRaw 暴露危险子字符串。
+   // #197：重组 cmd/WSL 载荷用于递归原始扫描——加引号保持空格完整，避免发明新分隔符，仍向 dangerousRaw 暴露危险子串
+   return tokens.map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`)).join(" ")
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index 4c384dcedb57bd31330e81da78599e669ecb3baf..e7178f042206e2a630f9c6b00b6c85d583fff610 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -1221,4 +1221,43 @@ describe("permission precheck bash classifier", () => {
+@@ -1207,4 +1207,45 @@ describe("permission precheck bash classifier", () => {
      expect(bash("git status | head -5").level).toBe("safe")
      expect(bash("git status | git checkout main")).toMatchObject({ level: "cautious" })
    })
 +
 +  // ============================================================
-+  // PS 覆写 / ri 删除同级 / pwsh -Command join / env 穿透
++  // #556：PS 覆写 / ri 删除同级 / pwsh -Command join / env 穿透
 +  // ============================================================
 +  test("marks PowerShell content write cmdlets cautious", () => {
 +    expect(bash("Clear-Content file.txt")).toMatchObject({ level: "cautious" })
@@ -555,12 +544,14 @@ index 4c384dcedb57bd31330e81da78599e669ecb3baf..e7178f042206e2a630f9c6b00b6c85d5
 +  })
 +
 +  test("joins PowerShell -Command remaining tokens like cmd /c", () => {
++    // #556：-Command 载荷是全部剩余 token 的拼接（join-all）——单参数提取会丢失路径等尾部 argv。
 +    expect(bash("pwsh -Command Remove-Item file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("powershell -Command Remove-Item -Force file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("pwsh -Command Clear-Content file.txt")).toMatchObject({ level: "cautious" })
 +  })
 +
 +  test("pierces env wrapper for inner delete move and git mutations", () => {
++    // #556：穿透语义与 sudo 同型——剥包装 flag 后按内层命令原级分类，剥空仍 ask。
 +    expect(bash("env rm file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("env FOO=1 rm file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("env git reset --hard")).toMatchObject({ level: "cautious" })

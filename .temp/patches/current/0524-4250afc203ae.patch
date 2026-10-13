@@ -493,20 +493,17 @@ index 0000000000000000000000000000000000000000..aee23a92f29757256a4ffee733e6fe06
 +- status completeness assertions only cover a subset of StatusReport fields
 +- no dedicated no-mutation status fixture was added beyond read-only path review
 +- commit must exclude unrelated `bun.lock` noise
+
 diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd/db.ts
-index bb26d778122271e88cdcd84b1eef2993f3b792f9..f63e9a5d6b735524f02a0ba4014c8e5b23746f25 100644
+index 1be17dfc8..fc0fdf7e7 100644
 --- a/packages/opencode/src/cli/cmd/db.ts
 +++ b/packages/opencode/src/cli/cmd/db.ts
-@@ -62,17 +62,19 @@ async function liveDaemon() {
-   return lock
- }
+@@ -63,17 +63,19 @@ async function liveDaemon() {
  
--// control request 总是携带当前 lock token，并用短 timeout 把本机 daemon 不可达明确反馈给 CLI。
-+// control request 总是携带当前 lock token；短 timeout 只约束快速 control acknowledgement。
-+// 完整 status 扫描随数据库增长，显式 false 避免把合法长计算误报为 daemon 不可达。
+ // control request 总是携带当前 lock token，并用短 timeout 把本机 daemon 不可达明确反馈给 CLI。
  // 非 2xx 响应保留 daemon 错误语义，调用方不得在失败后改走 offline 并伪造成功。
- // 该 helper 只传输 request/result，不包含 operation SQL、eligibility 或 cursor 推进逻辑。
 -async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit) {
++// #524：timeoutMs=false 取消 deadline——status 是唯一无 task 结果可轮询、必须同请求等到完整报告的操作。
 +async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit, timeoutMs: number | false = 2_000) {
    const response = await fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
      ...init,
@@ -515,44 +512,57 @@ index bb26d778122271e88cdcd84b1eef2993f3b792f9..f63e9a5d6b735524f02a0ba4014c8e5b
        ...(init?.headers ?? {}),
      },
 -    signal: AbortSignal.timeout(2_000),
-+    // false 表示调用方已确认本地 daemon 身份，不再用固定 deadline 截断合法长计算。
 +    signal: timeoutMs === false ? undefined : AbortSignal.timeout(timeoutMs),
    })
    const body: unknown = await response.json().catch(() => ({ error: `daemon returned ${response.status}` }))
    if (!response.ok) {
-@@ -222,12 +224,18 @@ const StatusCommand = cmd({
-       return
-     }
-     if (lock) {
-+      // status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
-       printMaintenance(
--        await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
--          method: "POST",
--          headers: { "content-type": "application/json" },
--          body: JSON.stringify({ operation: "status" }),
--        }),
-+        await daemonRequest(
-+          lock,
-+          ServerLock.CONTROL_MAINTENANCE_PATH,
-+          {
-+            method: "POST",
-+            headers: { "content-type": "application/json" },
-+            body: JSON.stringify({ operation: "status" }),
-+          },
-+          false,
-+        ),
-       )
-       return
-     }
-diff --git a/packages/opencode/src/storage/cold.ts b/packages/opencode/src/storage/cold.ts
-index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76ef5f8418e 100644
---- a/packages/opencode/src/storage/cold.ts
-+++ b/packages/opencode/src/storage/cold.ts
-@@ -1107,6 +1107,12 @@ type MessagePackItem = {
++    // #524：无 deadline 只影响等待上限；错误分类与 offline 回退禁止仍由调用方执行域决定。
+     const error = isRecord(body) && typeof body.error === "string" ? body.error : `daemon returned ${response.status}`
+     throw new MaintenanceUnavailableError(error)
+   }
+@@ -117,6 +119,7 @@ async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.Prepared
+ 
+ // 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
+ // 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
++// #524：status 的 deadline 豁免只在 CLI 侧；task 类 control 仍走 2s acknowledgement 合同。
+ async function executeMaintenance(db: ColdStorage.TxOrDb, request: ColdStorage.MaintenanceRequest) {
+   const lock = await liveDaemon()
+   if (lock) {
+@@ -234,12 +237,19 @@ const StatusCommand = effectCmd({
+         return
+       }
+       if (lock) {
++        // #524：status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
++        // 豁免 deadline 只此一处；新增 immediate 操作必须先证明有 task 结果可轮询才能复用 false。
+         printMaintenance(
+-          await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
+-            method: "POST",
+-            headers: { "content-type": "application/json" },
+-            body: JSON.stringify({ operation: "status" }),
+-          }),
++          await daemonRequest(
++            lock,
++            ServerLock.CONTROL_MAINTENANCE_PATH,
++            {
++              method: "POST",
++              headers: { "content-type": "application/json" },
++              body: JSON.stringify({ operation: "status" }),
++            },
++            false,
++          ),
+         )
+         return
+       }
+
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+index 5954d0443..d9653d0e5 100644
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -1120,6 +1120,12 @@ type MessagePackItem = {
    oldRef: string | null
  }
  
-+// status eligibility 只需要这些字段；完整 freeze/repack 调用方仍可传入整行。
++// #524：status eligibility 只需要这些字段；完整 freeze/repack 调用方仍可传入整行。
 +type MessageValueRow = Pick<
 +  typeof MessageTable.$inferSelect,
 +  "id" | "session_id" | "data" | "cold_ref" | "cold_key"
@@ -561,7 +571,7 @@ index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76e
  // canonical pack 的数组/entry 标点大小可精确增量计算；不能为每个 owner 重编码整个候选 pack，
  // 否则大 Session 会退化为 O(n²)。duplicate key 不增加 raw bytes，但 owner 仍留在当前 chunk 贡献 refcount。
  function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, items: T[]) {
-@@ -1161,7 +1167,7 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
+@@ -1174,7 +1180,7 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
    return value
  }
  
@@ -570,7 +580,7 @@ index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76e
    if (row.cold_key) throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
    const data = row.cold_ref ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref) : row.data
    const value = extractMessageV2(data)
-@@ -1171,7 +1177,7 @@ function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache
+@@ -1184,7 +1190,7 @@ function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache
      projection: value.projection,
      entry: { key: value.key, fields: value.fields },
      oldRef: row.cold_ref,
@@ -579,12 +589,12 @@ index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76e
  }
  
  // 单 owner freeze 也通过 Session/kind pack builder，保证 direct freeze 与 batch compress 产生相同 key/ref 语义。
-@@ -1262,7 +1268,13 @@ type PartPackItem = {
+@@ -1275,7 +1281,13 @@ type PartPackItem = {
    oldRef: string | null
  }
  
 -function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map<string, Envelope>) {
-+// cold_stats 保留是为了沿用 v1/hot 损坏门禁，而不是把 Stats 当作第二 eligibility 源。
++// #524：cold_stats 保留是为了沿用 v1/hot 损坏门禁，而不是把 Stats 当作第二 eligibility 源。
 +type PartValueRow = Pick<
 +  typeof PartTable.$inferSelect,
 +  "id" | "message_id" | "session_id" | "data" | "cold_ref" | "cold_key" | "cold_stats"
@@ -594,7 +604,7 @@ index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76e
    if (row.cold_key) throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
    if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot or v1 Part has an unexpected cold Stats projection", hash: row.cold_ref ?? undefined })
    const data = row.cold_ref ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref) : row.data
-@@ -1274,7 +1286,7 @@ function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map
+@@ -1287,7 +1299,7 @@ function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map
      stats: projectPartStats(data),
      entry: { key: value.key, fields: value.fields },
      oldRef: row.cold_ref,
@@ -603,11 +613,11 @@ index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76e
  }
  
  // Part direct freeze 与 Message 对称；现有同 Session v2 parts 会在需要时重打包，保证 key/ref 生命周期独立。
-@@ -2436,13 +2448,28 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
+@@ -2456,17 +2468,33 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
    const messageCondition = or(messageCandidate(), isNotNull(MessageTable.cold_ref))
    const partCondition = or(partCandidate(), isNotNull(PartTable.cold_ref))
    if (!messageCondition || !partCondition) return 0
-+  // 候选投影收窄到 extraction/eligibility 消费列；谓词与边界规则保持不变。
++  // #524：候选投影收窄到 extraction/eligibility 消费列；谓词与边界规则保持不变。
    const messages = db
 -    .select()
 +    .select({
@@ -634,41 +644,53 @@ index 781db4280b6140a6c191737d5e221498ada1f4ba..2ca73fb7909a28ed0537129d284bb76e
      .from(PartTable)
      .where(and(isNull(PartTable.cold_key), partCondition))
      .all()
-@@ -3360,7 +3387,17 @@ export function status(): StatusReport {
-     const pageSize = pragmaNumber("page_size")
-     const pages = pragmaNumber("page_count")
-     const freelistPages = pragmaNumber("freelist_count")
--    const payloads = db.select().from(ColdStorageTable).all()
-+    // status 只汇总同行 metadata；禁止 materialize 不参与报告的压缩 body。
-+    const payloads = db
-+      .select({
-+        hash: ColdStorageTable.hash,
-+        kind: ColdStorageTable.kind,
-+        raw_bytes: ColdStorageTable.raw_bytes,
-+        compressed_bytes: ColdStorageTable.compressed_bytes,
-+        ref_count: ColdStorageTable.ref_count,
-+      })
-+      .from(ColdStorageTable)
-+      .all()
-     // 所有共享与 mismatch 指标都由真实 owner 反算，stored counter 不能给自身背书。
-     const counts = ownerCounts(
-       db,
+   return (
++    // #524：泛型 messageV2Value/partV2Value 使 status 与 freeze 共享同一 extraction 主路径。
+     messages.filter((row) => {
+       const value = messageV2Value(db, row, legacyCache)
+       if (!value) return false
+@@ -3386,10 +3414,21 @@ export function status(db: TxOrDb): StatusReport {
+   const pageSize = pragmaNumber(db, "page_size")
+   const pages = pragmaNumber(db, "page_count")
+   const freelistPages = pragmaNumber(db, "freelist_count")
+-  const payloads = db.select().from(ColdStorageTable).all()
++  // #524：status 只汇总同行 metadata；禁止 materialize 不参与报告的压缩 body。
++  const payloads = db
++    .select({
++      hash: ColdStorageTable.hash,
++      kind: ColdStorageTable.kind,
++      raw_bytes: ColdStorageTable.raw_bytes,
++      compressed_bytes: ColdStorageTable.compressed_bytes,
++      ref_count: ColdStorageTable.ref_count,
++    })
++    .from(ColdStorageTable)
++    .all()
+   // 所有共享与 mismatch 指标都由真实 owner 反算，stored counter 不能给自身背书。
+   const counts = ownerCounts(
+     db,
++    // #524：投影行仍携带 hash；ownerCounts 只消费 hash，不读取 payload 列。
+     payloads.map((row) => row.hash),
+   )
+   const coldOwners =
+
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index a279216191d5eb48f427b99cacf4696d1b3f7a09..f1b99461908d1518bc1849bad66c1b96186acd42 100644
+index 6bacf5965..a0328f7c2 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -14,6 +14,7 @@ import { afterEach, describe, expect, test } from "bun:test"
- import { mkdir, rename } from "fs/promises"
+@@ -15,6 +15,8 @@ import { mkdir, rename } from "fs/promises"
+ import { _spawn } from "../../../src/cli/cmd/tui"
  import path from "path"
  import { fileURLToPath, pathToFileURL } from "url"
++// #524：db status 压力夹具直接用 bun:sqlite 写入 part 行（FK OFF）。
 +import { Database as SQLite } from "bun:sqlite"
  import { tmpdir } from "../../fixture/fixture"
- import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
- import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
-@@ -982,6 +983,73 @@ describe("daemon lifecycle", () => {
-     DAEMON_START_TIMEOUT_MS + 20_000,
-   )
+ import * as ServerLockModule from "../../../src/cli/tui/server-lock"
+ // #523：stopping-owner / launcher 用例直接消费目标的 daemon 发现 owner（源仓 Daemon.ensure 等价 seam）。
+@@ -1422,6 +1424,74 @@ test(
  
+ 
+ 
++  // #524：status 是唯一无 task 轮询的 immediate 操作；真实 CLI 必须等到完整 StatusReport。
 +  test(
 +    "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
 +    async () => {
@@ -678,7 +700,7 @@ index a279216191d5eb48f427b99cacf4696d1b3f7a09..f1b99461908d1518bc1849bad66c1b96
 +
 +      try {
 +        if (!lock.controlPort) throw new Error("missing control port")
-+        // worker 延迟打开数据库；先走同一 status seam 完成真实 migration，再写入压力夹具。
++        // #524：worker 延迟打开数据库；先走同一 status seam 完成真实 migration，再写入压力夹具。
 +        const initialized = await fetch(
 +          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_PATH}`,
 +          {
@@ -688,7 +710,7 @@ index a279216191d5eb48f427b99cacf4696d1b3f7a09..f1b99461908d1518bc1849bad66c1b96
 +          },
 +        )
 +        expect(initialized.status).toBe(200)
-+        // 该夹具只放大真实 eligibility 扫描，不伪造 worker 延迟或添加测试专用生产分支。
++        // #524：该夹具只放大真实 eligibility 扫描，不伪造 worker 延迟或添加测试专用生产分支。
 +        const db = new SQLite(lock.dbPath)
 +        // 关闭 FK 仅服务压力夹具插入速度，不改变 status 的 eligibility 语义。
 +        db.exec("PRAGMA foreign_keys = OFF")
@@ -703,7 +725,7 @@ index a279216191d5eb48f427b99cacf4696d1b3f7a09..f1b99461908d1518bc1849bad66c1b96
 +        })()
 +        db.close()
 +
-+        // 真实 CLI 读取同一 lock/token；旧两秒 deadline 会在 daemon 完成精确报告前退出。
++        // #524：真实 CLI 读取同一 lock/token；旧两秒 deadline 会在 daemon 完成精确报告前退出。
 +        const status = Bun.spawn([process.execPath, INDEX_TS, "db", "status"], {
 +          env: isolatedDaemonEnv(lockPath),
 +          stdin: "ignore",
@@ -739,77 +761,95 @@ index a279216191d5eb48f427b99cacf4696d1b3f7a09..f1b99461908d1518bc1849bad66c1b96
    test(
      "daemon startup resumes an interrupted maintenance task from its persisted record",
      async () => {
+
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
-index 8dcdd018130129d94899a8d12f2013479cf93b46..8688c71f09d684427eccc08f4a3dceeda32a6b99 100644
+index 24fd3b00f..f64075a52 100644
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
-@@ -21,6 +21,7 @@ import { aggregateStats } from "@/cli/cmd/stats/data"
+@@ -23,6 +23,8 @@ import { aggregateStats } from "@/cli/cmd/stats-data"
  import { TestInstance } from "../fixture/fixture"
  import type { SessionID } from "@/session/schema"
  import path from "path"
++// #524：metadata 投影子进程脚本需要 fileURL 对齐目标 core 模块路径。
 +import { fileURLToPath } from "url"
  
- const sessionLayer = SessionNs.layer.pipe(
-   Layer.provide(Bus.layer),
-@@ -1047,6 +1048,61 @@ describe.serial("ColdStorage", () => {
+ const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node]))
+ const it = testEffect(coldLayer)
+@@ -1019,6 +1021,77 @@ describe.serial("ColdStorage", () => {
    // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
    // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
    // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。
-+  it.instance("reports cold metadata without materializing payload bodies", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
-+      const bytes = 128 * 1024 * 1024
-+      const dbPath = path.join(test.directory, "status-projection.db")
-+      const script = `
-+        process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
-+        const { Database } = await import(${JSON.stringify(new URL("../../src/storage/db.ts", import.meta.url).href)})
-+        const { ColdStorage } = await import(${JSON.stringify(new URL("../../src/storage/cold.ts", import.meta.url).href)})
-+        const hash = "a5".repeat(32)
-+        const bytes = ${bytes}
-+        // 大 BLOB 是可观察的读取门禁；报告仍只依赖其同行 metadata 与真实 owner count。
-+        // zeroblob 避免在 JS 堆分配 128 MiB 缓冲区，只让 SQLite 持有可物化的大 body。
-+        Database.Client().$client.query(
-+          "INSERT INTO cold_storage (hash, kind, codec, payload, raw_bytes, compressed_bytes, ref_count, time_created, time_updated) VALUES (?, 'part-pack', 'zstd', zeroblob(?), ?, ?, 0, ?, ?)"
-+        ).run(hash, bytes, bytes, bytes, Date.now(), Date.now())
-+        Database.close()
-+        Bun.gc(true)
-+        const { Database: SQLite } = await import("bun:sqlite")
-+        const gate = new SQLite(${JSON.stringify(dbPath)})
-+        gate.query("PRAGMA hard_heap_limit = 67108864").get()
-+        gate.close()
-+        // 缩小页缓存后，heap 差异只来自被查询列，不由默认 64 MiB cache 上限主导。
-+        Database.Client().$client.exec("PRAGMA cache_size = -512")
-+        process.stdout.write(JSON.stringify(ColdStorage.status()))
-+      `
-+      const result = yield* Effect.promise(async () => {
-+        // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
-+        const proc = Bun.spawn([process.execPath, "-e", script], {
-+          cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
-+          env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
-+          stdin: "ignore",
-+          stdout: "pipe",
-+          stderr: "pipe",
++
++  // #524：status metadata 投影在子进程内用 64MiB heap 门禁证明不物化 payload BLOB。
++  it.instance(
++    "reports cold metadata without materializing payload bodies",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
++        const bytes = 128 * 1024 * 1024
++        const dbPath = path.join(test.directory, "status-projection.db")
++        // 目标 ColdStorage 位于 core（#493）；脚本按目标模块路径 import，status 接收 db 参数。
++        const script = `
++          process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
++          const { Effect, ManagedRuntime } = await import("effect")
++          const { Database } = await import(${JSON.stringify(new URL("../../../core/src/database/database.ts", import.meta.url).href)})
++          const { ColdStorage } = await import(${JSON.stringify(new URL("../../../core/src/storage/cold-storage.ts", import.meta.url).href)})
++          // 目标 Database 在 Effect layer 内初始化（#493）；ManagedRuntime 构建即完成 migration 与 syncRef。
++          const rt = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
++          await rt.runPromise(Effect.void)
++          const hash = "a5".repeat(32)
++          const bytes = ${bytes}
++          // 大 BLOB 是可观察的读取门禁；报告仍只依赖其同行 metadata 与真实 owner count。
++          // zeroblob 避免在 JS 堆分配 128 MiB 缓冲区，只让 SQLite 持有可物化的大 body。
++          // 目标 sync client 即 TxOrDb（#493）；插入用原生 bun:sqlite 绑定参数，避免 drizzle raw 参数语义差异。
++          const { Database: InsertConn } = await import("bun:sqlite")
++          const insertConn = new InsertConn(${JSON.stringify(dbPath)})
++          insertConn.query(
++            "INSERT INTO cold_storage (hash, kind, codec, payload, raw_bytes, compressed_bytes, ref_count, time_created, time_updated) VALUES (?, 'part-pack', 'zstd', zeroblob(?), ?, ?, 0, ?, ?)",
++          ).run(hash, bytes, bytes, bytes, Date.now(), Date.now())
++          insertConn.close()
++          await rt.dispose()
++          Bun.gc(true)
++          const { Database: SQLite } = await import("bun:sqlite")
++          const gate = new SQLite(${JSON.stringify(dbPath)})
++          gate.query("PRAGMA hard_heap_limit = 67108864").get()
++          gate.close()
++          // 重开 runtime 只复用连接（migration 已持久化）；缩小页缓存后 heap 差异只来自被查询列。
++          const rt2 = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
++          await rt2.runPromise(Effect.void)
++          Database.client().run("PRAGMA cache_size = -512")
++          process.stdout.write(JSON.stringify(ColdStorage.status(Database.client())))
++          await rt2.dispose()
++        `
++        const result = yield* Effect.promise(async () => {
++          // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
++          const proc = Bun.spawn([process.execPath, "-e", script], {
++            cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
++            env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
++            stdin: "ignore",
++            stdout: "pipe",
++            stderr: "pipe",
++          })
++          const [exitCode, stdout, stderr] = await Promise.all([
++            proc.exited,
++            new Response(proc.stdout).text(),
++            new Response(proc.stderr).text(),
++          ])
++          return { exitCode, stdout, stderr }
 +        })
-+        const [exitCode, stdout, stderr] = await Promise.all([
-+          proc.exited,
-+          new Response(proc.stdout).text(),
-+          new Response(proc.stderr).text(),
-+        ])
-+        return { exitCode, stdout, stderr }
-+      })
-+      // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
-+      expect(result.exitCode, result.stderr).toBe(0)
-+      expect(JSON.parse(result.stdout)).toMatchObject({
-+        payloads: 1,
-+        compressedBytes: bytes,
-+        orphans: 1,
-+        refCountMismatches: 0,
-+      })
-+    }),
++        // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
++        expect(result.exitCode, result.stderr).toBe(0)
++        expect(JSON.parse(result.stdout)).toMatchObject({
++          payloads: 1,
++          compressedBytes: bytes,
++          orphans: 1,
++          refCountMismatches: 0,
++        })
++      }),
 +    30_000,
 +  )
 +
    it.instance("verifies, repairs, expands, and classifies maintenance requests", () =>
      Effect.gen(function* () {
-       const sessions = yield* SessionNs.Service
+       // #493：直查与 ColdStorage 调用共用同一同步 client（与运行时同连接）。

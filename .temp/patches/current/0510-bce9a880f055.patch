@@ -623,174 +623,30 @@ index 0000000000000000000000000000000000000000..3e7e46f03c5cdf655c793bbcb5cd7c20
 +- Prior B-01 Promise.race orphan resolved by single-loop poll
 +- Residual: Windows required job post-push platform proof
 +```
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 764801a07e3b8e3f61e850f47c0021a1714ca638..eeab810e2083f6505e9c6b28021075bc56de0d14 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -10,7 +10,7 @@ import type {
-   Session as SessionInfo,
-   UserMessage as SDKUserMessage,
- } from "@opencode-ai/sdk/v2"
--import { onCleanup } from "solid-js"
-+import { createEffect, onCleanup } from "solid-js"
- import { tmpdir } from "../../../fixture/fixture"
- import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
- import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
-@@ -23,7 +23,7 @@ import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
- import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
- import { RouteProvider } from "../../../../src/cli/cmd/tui/context/route"
- import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
--import { SyncProvider } from "../../../../src/cli/cmd/tui/context/sync"
-+import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
- import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
- import { TuiConfigProvider } from "../../../../src/cli/cmd/tui/context/tui-config"
- import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
-@@ -2864,13 +2864,46 @@ async function withRenderedSession(
-   })
- 
-   const events = createEventSource()
--  const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
--    width: dimensions.width ?? 80,
--    height: dimensions.height ?? 16,
--    footerHeight: 0,
--  })
-+  // testRender 返回只表示根已挂载；Session 异步 session.get/sync 后才有 transcript。
-+  // SyncReadyProbe 观察公开 store，与 frame timeout 分离，避免空白帧被误判为 presentation 回归。
-+  let syncReady = false
-+  const messageIDs = messages.map((message) => message.id)
-+  const app = await testRender(
-+    () => (
-+      <SessionHarness
-+        fetch={calls.fetch}
-+        events={events.source}
-+        messageIDs={messageIDs}
-+        onSyncReady={() => {
-+          syncReady = true
-+        }}
-+      />
-+    ),
-+    {
-+      width: dimensions.width ?? 80,
-+      height: dimensions.height ?? 16,
-+      footerHeight: 0,
-+      // Windows 默认 threaded renderer；本文件反复 mount/destroy Session 根，
-+      // 关闭线程与 sync-fixture/session-v2-error 一致，避免 native 清理竞态。
-+      useThread: false,
-+    },
-+  )
- 
-   try {
-+    // 单循环 poll：ready 立即继续；超时才抛 missing-data。禁止 Promise.race loser
-+    // 在成功后继续 renderOnce（否则会污染 destroy 与后续测试的 event loop）。
-+    const syncDeadline = Date.now() + 10_000
-+    while (!syncReady) {
-+      if (Date.now() >= syncDeadline) {
-+        throw new Error(
-+          `timed out waiting for session sync data (session=${sessionID}, messages=${messageIDs.join(",")})`,
-+        )
-+      }
-+      await app.renderOnce()
-+      await Promise.resolve()
-+      await new Promise((resolve) => process.nextTick(resolve))
-+      await new Promise((resolve) => setTimeout(resolve, 0))
-+    }
-     await run(app, events.emit)
-   } finally {
-     app.renderer.destroy()
-@@ -2881,6 +2914,8 @@ async function withRenderedSession(
- function SessionHarness(props: {
-   fetch: typeof globalThis.fetch
-   events: ReturnType<typeof createEventSource>["source"]
-+  messageIDs: string[]
-+  onSyncReady: () => void
- }) {
-   const renderer = useRenderer()
-   // visibility 用例通过真实 binding 进入已注册 command，不给所有测试暴露 keymap 内部对象。
-@@ -2903,6 +2938,7 @@ function SessionHarness(props: {
-                   >
-                     <ProjectProvider>
-                       <SyncProvider>
-+                        <SyncReadyProbe messageIDs={props.messageIDs} onReady={props.onSyncReady} />
-                         <ThemeProvider mode="dark">
-                           <LocalProvider>
-                             <PromptStashProvider>
-@@ -2935,16 +2971,49 @@ function SessionHarness(props: {
-   )
- }
- 
-+// 观察 Sync 公开 store：session 存在、message 列表已装、每个 fixture message 有 part 数组。
-+// 不复制 Session 内部状态机；onReady 只触发一次。
-+function SyncReadyProbe(props: { messageIDs: string[]; onReady: () => void }) {
-+  const sync = useSync()
-+  let fired = false
-+  createEffect(() => {
-+    if (fired) return
-+    if (!sync.session.get(sessionID)) return
-+    const infos = sync.data.message[sessionID]
-+    if (!infos) return
-+    for (const id of props.messageIDs) {
-+      if (!infos.some((message) => message.id === id)) return
-+      if (sync.data.part[id] === undefined) return
-+    }
-+    fired = true
-+    props.onReady()
-+  })
-+  return <box />
-+}
-+
-+// Sync 已就绪后仅等待渲染进度。Reasoning 使用 drawUnstyledText=false + TreeSitter Worker，
-+// 每轮 renderOnce + microtask/nextTick/setTimeout(0) 让 ONESHOT_HIGHLIGHT_RESPONSE 落地；
-+// 5s 墙钟只作诊断上界，不是 Sync readiness，也不弱化四项可见断言。
-+const FRAME_WAIT_DEADLINE_MS = 5_000
-+
- async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (lines: string[]) => boolean) {
-   const start = Date.now()
-+  let frame: string[] = []
-+  let passes = 0
- 
--  for (;;) {
-+  while (Date.now() - start < FRAME_WAIT_DEADLINE_MS) {
-+    passes++
-     await app.renderOnce()
--    const frame = rows(app.captureCharFrame())
-+    frame = rows(app.captureCharFrame())
-     if (predicate(frame)) return frame
--    if (Date.now() - start > 2_000) throw new Error(`timed out waiting for frame:\n${frame.join("\n")}`)
--    await Bun.sleep(10)
-+    await Promise.resolve()
-+    await new Promise((resolve) => process.nextTick(resolve))
-+    await new Promise((resolve) => setTimeout(resolve, 0))
-   }
-+
-+  throw new Error(
-+    `timed out waiting for frame after ${Date.now() - start}ms (${passes} passes):\n${frame.join("\n")}`,
-+  )
- }
- 
- function rows(frame: string) {
+
 diff --git a/packages/opencode/test/util/process.test.ts b/packages/opencode/test/util/process.test.ts
-index 7ee371ff3df4e1e4b00ab2ad0fbd1bfc1430f075..e15636dd80d28ab0e0b3e28b7c1677c994c764ee 100644
+index 89487c00e..4da86e472 100644
 --- a/packages/opencode/test/util/process.test.ts
 +++ b/packages/opencode/test/util/process.test.ts
-@@ -61,8 +61,10 @@ describe("util.process", () => {
+@@ -60,8 +60,10 @@ describe("util.process", () => {
          node(`require("fs").writeFileSync(${JSON.stringify(marker)}, "1"); setInterval(() => {}, 1000)`),
          { abort: abort.signal, nothrow: true },
        )
 -      // 轮询 marker 文件直到子进程确认已启动；3s 超时仅防死锁，不作为性能契约。
 -      const deadline = Date.now() + 3_000
-+      // readiness 仅覆盖 marker 发布；8s 死锁诊断，不计入 abort 语义窗口。
++      // #510：readiness 仅覆盖 marker 发布；8s 死锁诊断，不计入 abort 语义窗口。
 +      // 外层 Bun timeout 15s ≥ readiness(8s) + abort 预算(2s) + cleanup/assert 余量(5s)，
 +      // 避免 Windows 慢启动把整个测试预算耗光后还没执行 abort 断言。
 +      const deadline = Date.now() + 8_000
        while (!(await Bun.file(marker).exists())) {
          if (Date.now() > deadline) throw new Error("child process did not signal readiness")
          await Bun.sleep(10)
-@@ -72,13 +74,13 @@ describe("util.process", () => {
+@@ -71,13 +73,13 @@ describe("util.process", () => {
        abort.abort()
        const out = await running
        expect(out.code).not.toBe(0)
 -      // 2000ms 仅保护 abort 语义正确性（进程树被杀），3000ms test timeout 是死锁保护。
-+      // 2000ms 是 abort 语义合同（进程树被杀），不是调度性能契约；外层 15s 只防死锁。
++      // #510：2000ms 是 abort 语义合同（进程树被杀），不是调度性能契约；外层 15s 只防死锁。
        expect(Date.now() - abortStart).toBeLessThan(2_000)
      } finally {
        abort.abort()
@@ -801,3 +657,36 @@ index 7ee371ff3df4e1e4b00ab2ad0fbd1bfc1430f075..e15636dd80d28ab0e0b3e28b7c1677c9
  
    test("aborts a Windows process tree before resolving", async () => {
      if (process.platform !== "win32") return
+
+diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+index df4578fa0..9ee7bd086 100644
+--- a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+@@ -497,14 +497,23 @@ test("keeps the constrained Prompt extension bar on one row across active states
+       () => undefined,
+       async (_prompt, _route, app, context) => {
+         // 断言最终字符帧而非复制 Yoga 算法，确保 flex 收缩和 renderer 换行都走生产路径。
++        // #510：renderOnce 后完整 drain（microtask/nextTick/setTimeout(0)）——Bun.sleep 会阻塞
++        // event loop，让 async 事件（如 worker 响应）在轮询间隙饿死；5s 墙钟只是诊断上界。
++        const FRAME_WAIT_DEADLINE_MS = 5_000
+         const waitForFrame = async (predicate: (frame: string) => boolean) => {
+-          for (let index = 0; index < 200; index++) {
++          const start = Date.now()
++          let frame = ""
++          let passes = 0
++          while (Date.now() - start < FRAME_WAIT_DEADLINE_MS) {
++            passes++
+             await app.renderOnce()
+-            const frame = app.captureCharFrame()
++            frame = app.captureCharFrame()
+             if (predicate(frame)) return frame
+-            await Bun.sleep(10)
++            await Promise.resolve()
++            await new Promise((resolve) => process.nextTick(resolve))
++            await new Promise((resolve) => setTimeout(resolve, 0))
+           }
+-          throw new Error("Prompt footer frame did not settle")
++          throw new Error(`Prompt footer frame did not settle after ${Date.now() - start}ms (${passes} passes)`)
+         }
+         // #491：行数统计基于 trim 后非空行——纯空白行是 renderer 留白，不构成“扩展栏”证据。
+         const extensionRows = (frame: string) => {

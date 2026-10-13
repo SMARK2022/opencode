@@ -16,7 +16,7 @@ diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/
 diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts
-@@ -613,6 +613,40 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
+@@ -613,6 +613,41 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
    ),
  )
  
@@ -41,6 +41,7 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
 +        },
 +      })
 +
++      // basename+toLowerCase 归一平台大小写与路径分隔差异：判定只看文件名，不关心安装目录前缀。
 +      const config = yield* getTuiConfig(test.directory)
 +      expect(config.voice?.transcriber?.command).toBe("node")
 +      expect(config.voice?.transcriber?.args).toEqual([

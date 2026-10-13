@@ -893,53 +893,146 @@ index 0000000000000000000000000000000000000000..90c7a6f271bba5a2258021ff3d86466b
 +of `No blocking findings` for the actual implementation of the exact approved
 +revision, all required tests and original feedback loop pass, the Chinese
 +comment gate passes, and no required work remains.
-diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
-index 45b92afb266282afcfaff1b2e8c29fc79e14920b..20a6ec15376bafcf19b0df6bc6cecdc410f016a7 100644
---- a/packages/opencode/src/cli/cmd/tui/daemon.ts
-+++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
-@@ -80,14 +80,34 @@ $ErrorActionPreference = 'Stop'
- $ProgressPreference = 'SilentlyContinue'
- $target = $env:OPENCODE_DAEMON_TARGET
- if ([string]::IsNullOrEmpty($target) -or $target.Contains([char]34)) { exit 87 }
--# Start-Process会把ArgumentList重新拼成native command line；显式保留双引号才能让空格路径仍是一个argv。
-+# ProcessStartInfo.Arguments接收native command line；显式保留双引号才能让空格路径仍是一个argv。
- $arguments = [char]34 + $target + [char]34
--$start = @{ FilePath = $env:OPENCODE_DAEMON_EXECUTABLE; ArgumentList = $arguments; PassThru = $true }
--if ($env:OPENCODE_PRINT_LOGS -eq '1') { $worker = Start-Process @start -NoNewWindow }
--else { $worker = Start-Process @start -WindowStyle Hidden }
-+$start = New-Object System.Diagnostics.ProcessStartInfo
-+$start.FileName = $env:OPENCODE_DAEMON_EXECUTABLE
-+$start.Arguments = $arguments
-+$start.UseShellExecute = $false
-+# worker必须继续加入现有console：默认模式随后FreeConsole，print-logs则保留当前Ctrl+C传播合同。
-+$start.CreateNoWindow = $false
-+# pipe在Bun启动前进入进程表，FreeConsole只解除console关联，不能再留下可复用的失效stdio HANDLE。
-+# stdout与stderr都可能被第三方直接写入；只修一条流仍保留同类HANDLE别名入口。
-+$start.RedirectStandardOutput = $true
-+$start.RedirectStandardError = $true
-+$worker = New-Object System.Diagnostics.Process
-+$worker.StartInfo = $start
-+# Start失败保持原错误出口，不回退旧Start-Process，否则primary path会再次分叉。
-+if (-not $worker.Start()) { exit 87 }
-+# PID行是wrapper协议边界；任何worker stdout都必须在它发布并flush之后才能进入同一输出流。
- [Console]::Out.WriteLine($worker.Id)
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -48,7 +48,0 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]): Promise<DaemonProcess> {
+-  await Bun.write(
+-    envFile,
+-    Object.entries(envRecord)
+-      .filter(([, v]) => v !== undefined)
+-      .map(([k, v]) => `${k}\t${b64u(v as string)}`)
+-      .join("\n"),
+-  )
+@@ -69,10 +62,58 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]): Promise<DaemonProcess> {
+-    "  $start = @{ FilePath = $exePath; ArgumentList = [char]34 + $targetPath + [char]34; PassThru = $true; WorkingDirectory = $cwdPath }",
+-    "  $worker = Start-Process @start -WindowStyle Hidden",
++    // WMI 不继承 wrapper 的输出；仅 print-logs 通过双命名管道跨越该边界，默认 drain 留在 job 外。
++    "  $stdout = [IO.Stream]::Null; $stderr = [IO.Stream]::Null",
++    "  if ($env:OPENCODE_PRINT_LOGS -eq '1') {",
++    // 显式关联 caller console；WMI parent 是服务进程，ATTACH_PARENT_PROCESS 会关联错误的 owner。
++    "    Add-Type 'using System; using System.Runtime.InteropServices; public static class DaemonConsole { [DllImport(\"kernel32.dll\")] public static extern bool FreeConsole(); [DllImport(\"kernel32.dll\")] public static extern bool AttachConsole(uint pid); }'",
++    "    [void][DaemonConsole]::FreeConsole()",
++    "    if (-not [DaemonConsole]::AttachConsole(__OPENCODE_CONSOLE_PID__)) { throw 'Cannot attach print-log console' }",
++    `    $stdout = [IO.Pipes.NamedPipeClientStream]::new('.', 'opencode-daemon-${nonce}-stdout', [IO.Pipes.PipeDirection]::Out)`,
++    `    $stderr = [IO.Pipes.NamedPipeClientStream]::new('.', 'opencode-daemon-${nonce}-stderr', [IO.Pipes.PipeDirection]::Out)`,
++    "    $stdout.Connect(60000); $stderr.Connect(60000)",
++    "  }",
++    "  $start = New-Object System.Diagnostics.ProcessStartInfo",
++    "  $start.FileName = $exePath",
++    // native command line 保留显式双引号，含空格的 worker 路径仍是单个参数。
++    "  $start.Arguments = [char]34 + $targetPath + [char]34",
++    "  $start.WorkingDirectory = $cwdPath",
++    "  $start.UseShellExecute = $false",
++    // pipe 替换标准句柄而不剥离 console 关联；print-logs 保留 Ctrl+C，默认仍由 worker detach。
++    "  $start.CreateNoWindow = $false; $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden",
++    // 两流都在 Bun 快照句柄前绑定；运行时直接 console.error 也不能写到后来复用的 SQLite HANDLE。
++    "  $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true",
++    "  $worker = New-Object System.Diagnostics.Process",
++    "  $worker.StartInfo = $start",
++    // Start 失败沿既有 error 握手发布；绝不重新调用继承 console stdio 的旧创建路径。
++    "  if (-not $worker.Start()) { throw 'Cannot start daemon worker' }",
++    // 在等待退出前并发消费两个 pipe；只消费 stdout 仍会被 stderr 背压阻塞。
++    "  $stdoutTask = $worker.StandardOutput.BaseStream.CopyToAsync($stdout)",
++    "  $stderrTask = $worker.StandardError.BaseStream.CopyToAsync($stderr)",
+     "  [IO.File]::WriteAllText($pidPath, [string]$worker.Id)",
+     "  Remove-Item -LiteralPath $envPath",
++    // relay 保有真实 Process，短命 worker 的退出码不能从稍后已不存在的 PID 重建。
++    "  $worker.WaitForExit()",
++    // EOF join 不设截尾 timeout；尾部输出未消费完时不能把进程退出伪装成 transport 完成。
++    "  [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))",
++    "  $stdout.Dispose(); $stderr.Dispose()",
++    // 原子发布完成码，避免 wrapper 在文件创建与内容写入之间读到空串并误报 exit 0。
++    "  [IO.File]::WriteAllText(($pidPath + '.exit.tmp'), [string]$worker.ExitCode); [IO.File]::Move(($pidPath + '.exit.tmp'), ($pidPath + '.exit'))",
+     "} catch {",
+     "  # relay 失败可观测：错误落盘在 pid 文件旁，供 launcher 诊断（relay 无 stdout 通道）",
+     "  [IO.File]::WriteAllText(($pidPath + '.err'), ($_ | Out-String))",
++    // 创建后的 transport 失败也不得留下无人 drain 的 worker；仅关闭本 relay 自己创建的 Process。
++    "  if ($worker -and -not $worker.HasExited) { $worker.Kill(); $worker.WaitForExit() }",
++    "} finally {",
++    "  if ($stdout) { $stdout.Dispose() }; if ($stderr) { $stderr.Dispose() }",
++    "  if ($worker) { $worker.Dispose() }",
++    "  [IO.File]::Delete($envPath)",
+     "}",
+   ].join("\n")
++  // 复用一次性 env 握手承载固定 relay source，避免双层 UTF-16 编码超过 Windows 命令行上限。
++  await Bun.write(
++    envFile,
++    // 首行无 tab，只是受控脚本数据；既有 env 恢复循环跳过它，不把代码注入 worker 环境。
++    [b64u(relayScript), ...Object.entries(envRecord)
++      .filter(([, v]) => v !== undefined)
++      .map(([k, v]) => `${k}\t${b64u(v as string)}`)
++    ].join("\n"),
++  )
+   const script = `
+@@ -83,21 +124,47 @@ if ([string]::IsNullOrEmpty($target) -or $target.Contains([char]34)) { exit 87 }
+-# relay 由 WMI 服务进程创建——脱离 CLI 的 job object；其 Start-Process 的 worker 因此在 job 外存活
+-$relayEncoded = '${Buffer.from(relayScript, "utf16le").toString("base64")}'
++# WMI placement 不变；非日志模式的双流消费不依赖短命 launcher 的生存期。
++$relaySource = '$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([IO.File]::ReadAllLines([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${b64u(envFile)}")))[0])); & ([scriptblock]::Create($source.Replace("__OPENCODE_CONSOLE_PID__", "__OPENCODE_WRAPPER_PID__")))'
++$relayEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($relaySource.Replace('__OPENCODE_WRAPPER_PID__', [string]$PID)))
+ $relayCmd = [char]34 + (Join-Path $PSHOME 'powershell.exe') + [char]34 + ' -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $relayEncoded
++# 双 server 必须在 WMI 创建前就绪，客户端 Connect 不会竞争尚未存在的 pipe。
++if ($env:OPENCODE_PRINT_LOGS -eq '1') {
++  $stdout = [IO.Pipes.NamedPipeServerStream]::new('opencode-daemon-${nonce}-stdout', [IO.Pipes.PipeDirection]::In, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
++  $stderr = [IO.Pipes.NamedPipeServerStream]::new('opencode-daemon-${nonce}-stderr', [IO.Pipes.PipeDirection]::In, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
++  $stdoutReady = $stdout.WaitForConnectionAsync(); $stderrReady = $stderr.WaitForConnectionAsync()
++}
++try {
+ $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
+ $startup.ShowWindow = 0
+ $result = ([wmiclass]'Win32_Process').Create($relayCmd, (Get-Location).Path, $startup)
+ if ($result.ReturnValue -ne 0) { exit 88 }
+ $deadline = (Get-Date).AddSeconds(60)
+ $workerPid = 0
+ while ((Get-Date) -lt $deadline -and $workerPid -le 0) {
++  if (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.err')) { throw [IO.File]::ReadAllText(($env:OPENCODE_DAEMON_PID_FILE + '.err')) }
+   if (Test-Path -LiteralPath $env:OPENCODE_DAEMON_PID_FILE) { $workerPid = [int](Get-Content -Raw -LiteralPath $env:OPENCODE_DAEMON_PID_FILE) }
+   else { Start-Sleep -Milliseconds 100 }
+ }
+ if ($workerPid -le 0) { exit 89 }
++# PID 首行及 flush 先于任何 worker 字节，保持现有 readWorkerPID/remainder 协议。
+ [Console]::Out.WriteLine($workerPid)
  [Console]::Out.Flush()
-+# Null只改变默认输出的可见性而不关闭pipe；print-logs仍按原stdout/stderr通道分别转发。
-+$stdout = if ($env:OPENCODE_PRINT_LOGS -eq '1') { [Console]::OpenStandardOutput() } else { [System.IO.Stream]::Null }
-+$stderr = if ($env:OPENCODE_PRINT_LOGS -eq '1') { [Console]::OpenStandardError() } else { [System.IO.Stream]::Null }
-+# 两条pipe必须在WaitForExit前并发drain；任一缓冲区写满都会反向阻塞worker退出。
-+$stdoutTask = $worker.StandardOutput.BaseStream.CopyToAsync($stdout)
-+$stderrTask = $worker.StandardError.BaseStream.CopyToAsync($stderr)
- $worker.WaitForExit()
-+# 进程退出不代表pipe尾部已消费；wrapper须等双流EOF后再发布同一个worker exit code。
-+[System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
- exit $worker.ExitCode
+-# worker 可能已自行退出（快速失败路径）：Wait-Process 对不存在的 pid 抛终止错误，
+-# 会把健康的 startup 失败误报成 wrapper 崩溃（#179 race 检测消费该退出码）
+-if (Get-Process -Id $workerPid -ErrorAction SilentlyContinue) { Wait-Process -Id $workerPid -ErrorAction SilentlyContinue }
+-exit 0
++if ($env:OPENCODE_PRINT_LOGS -eq '1') {
++  $stdoutReady.GetAwaiter().GetResult(); $stderrReady.GetAwaiter().GetResult()
++  # 独立 stderr 通道不经过 PID/stdout parser，依赖错误不能污染握手或变成普通输出。
++  $stdoutTask = $stdout.CopyToAsync([Console]::OpenStandardOutput())
++  $stderrTask = $stderr.CopyToAsync([Console]::OpenStandardError())
++}
++# completion 由 relay 在 Process.ExitCode 与两流 EOF 已确定后发布，不再固定返回成功。
++while (-not (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.exit'))) {
++  if (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.err')) { throw [IO.File]::ReadAllText(($env:OPENCODE_DAEMON_PID_FILE + '.err')) }
++  Start-Sleep -Milliseconds 25
++}
++if ($env:OPENCODE_PRINT_LOGS -eq '1') { [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)) }
++exit [int][IO.File]::ReadAllText(($env:OPENCODE_DAEMON_PID_FILE + '.exit'))
++} finally {
++  if ($stdout) { $stdout.Dispose() }; if ($stderr) { $stderr.Dispose() }
++  [IO.File]::Delete($env:OPENCODE_DAEMON_PID_FILE)
++  [IO.File]::Delete(($env:OPENCODE_DAEMON_PID_FILE + '.exit'))
++  [IO.File]::Delete(($env:OPENCODE_DAEMON_PID_FILE + '.exit.tmp'))
++  [IO.File]::Delete(($env:OPENCODE_DAEMON_PID_FILE + '.err'))
++}
  `
-   // absolute system wrapper避免Project cwd选择同名程序；encoded source保持动态路径只作为data进入脚本。
-diff --git a/packages/opencode/src/cli/cmd/tui/win32.ts b/packages/opencode/src/cli/cmd/tui/win32.ts
-index 5eac3013bbb82938b3d9a0362309d5856ac38538..297e8dadf6cb96d669f7a3c215d12ca28d476256 100644
---- a/packages/opencode/src/cli/cmd/tui/win32.ts
-+++ b/packages/opencode/src/cli/cmd/tui/win32.ts
+@@ -155,9 +222,6 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]): Promise<DaemonProcess> {
+     kill: (signal?: Parameters<DaemonProcess["kill"]>[0]) => {
+-      // 先终止真实 worker 再关闭 supervisor，避免 wrapper 消失后留下无 lock 生命周期观察者的孤儿 worker。
++      // 只终止真实 worker；wrapper 随 relay 的 EOF/退出码结束并清理握手，强杀会丢尾字节和完成文件。
+       try {
+         process.kill(worker.pid, signal)
+       } catch {}
+-      try {
+-        wrapper.kill()
+-      } catch {}
+     },
+diff --git a/packages/tui/src/terminal-win32.ts b/packages/tui/src/terminal-win32.ts
+--- a/packages/tui/src/terminal-win32.ts
++++ b/packages/tui/src/terminal-win32.ts
 @@ -81,10 +81,10 @@ export function win32FlushInputBuffer() {
   * exactly why Ctrl+C reaches it. SetConsoleMode depends on a stdin handle hence
   * checks isTTY; FreeConsole operates on the process attachment and does not.
@@ -955,37 +1048,24 @@ index 5eac3013bbb82938b3d9a0362309d5856ac38538..297e8dadf6cb96d669f7a3c215d12ca2
   */
  export function win32DetachConsole() {
    if (process.platform !== "win32") return
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 980168e87de48c73193e316a918863c1d625fa9a..a7a575434729fb411ae674db6b93c2cdb8536def 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -26,12 +26,9 @@ NetworkProxy.installGlobalFetch()
- 
- const log = Log.create({ service: "daemon" })
- 
--// printLogs 判定须与 daemon.ts launcher 端的 printLogs（argv 决定 stdio + env 透传）
--// 保持语义一致：launcher 只看 argv 设置 stdio（daemon.ts:187），同时把
--// OPENCODE_PRINT_LOGS="1" 透传到 worker env（daemon.ts:191），worker 端再看
--// argv||env（此处）。注意：若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
--// argv，launcher 的 stdio 仍为 ignore——此时 worker 不调 FreeConsole（保留 console）
--// 但日志无法输出到 stderr，是 pre-existing 死区，非本次引入。
-+// Windows launcher 在Bun启动前为两种模式都建立非console pipe；默认drain到Null，
-+// --print-logs才经wrapper转发。这里的argv||env只决定日志目标和是否保留console关联，
-+// 不能再承担修复失效stdio HANDLE的责任。
- const printLogs = process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1"
- 
- await Log.init({
-@@ -45,8 +42,8 @@ await Log.init({
- 
- // Windows: 让 daemon worker 脱离共享 console，使 Ctrl+C 的 CTRL_C_EVENT 不再
- // 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前、日志
--// 系统初始化后调用：默认模式日志写文件不受影响。--print-logs 调试模式保留
--// console 以便 stderr 日志输出，该模式下 daemon 不保证 Ctrl+C 免疫（有意降级）。
-+// 系统初始化后调用；launcher提供的非console pipe在detach后仍保持有效。
-+// --print-logs 调试模式保留console及既有Ctrl+C传播，并通过同一组pipe转发日志。
- if (!printLogs) win32DetachConsole()
- 
- Heap.start()
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -108,9 +108,9 @@ if (isDaemon) {
+-  // printLogs 判定与 daemon.ts launcher 端（argv 决定 stdio + env 透传）保持语义一致：
+-  // worker 端再看 argv||env。若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
+-  // argv，launcher 的 stdio 仍为 ignore——此时 worker 不调 FreeConsole（保留 console）
+-  // 但日志无法输出到 stderr，是 pre-existing 死区，非本次引入。
++  // Windows relay 在 Bun 启动前为两种模式都建立非 console pipe，默认双流连续排到 Null。
++  // print-logs 经双通道转发到 wrapper；argv||env 只决定日志可见性及是否保留 console 关联。
++  // 修复必须由创建 owner 完成，不能靠应用 logger 覆盖依赖直接写 console.error 的路径。
+   const printLogs = process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1"
+   // Windows: 让 daemon worker 脱离共享 console，使 Ctrl+C 的 CTRL_C_EVENT 不再
+   // 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前调用；
+-  // --print-logs 调试模式保留 console 以便 stderr 日志输出（有意降级）。
++  // relay 提供的双流 pipe 在 detach 后仍有效，不会暴露可被 SQLite 复用的失效句柄。
++  // print-logs 保留 console 及既有 Ctrl+C 传播，输出分别进入同一组 pipe 的转发通道。
+   if (!printLogs) win32DetachConsole()
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
 index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc6103b5cf24e 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
@@ -1025,7 +1105,7 @@ index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc610
 +        `,
 +      )
 +
-+      const proc = await DaemonModule._spawn([process.execPath, worker], {
++      const proc = await _spawn([process.execPath, worker], {
 +        env: { ...process.env, DAEMON_STDIO_MARKER: marker },
 +        stdin: "ignore",
 +        stdout: "ignore",
@@ -1095,8 +1175,8 @@ index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc610
 +          process.execPath,
 +          "-e",
 +          `
-+            const { Daemon } = await import(${JSON.stringify(DAEMON_TS_URL)})
-+            const proc = await Daemon._spawn([process.execPath, ${JSON.stringify(worker)}], {
++            const { _spawn } = await import(${JSON.stringify(new URL("../../../src/cli/cmd/tui.ts", import.meta.url).href)})
++            const proc = await _spawn([process.execPath, ${JSON.stringify(worker)}], {
 +              env: { ...process.env, OPENCODE_PRINT_LOGS: "1" },
 +              stdin: "ignore",
 +              stdout: "inherit",

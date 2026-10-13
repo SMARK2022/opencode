@@ -927,6 +927,18 @@ index b21e2e00c53cdeebef2b2b3a33bef01b1a47f2a2..2182fa57deecba2b36e0b891af67b9fc
    it.instance("marks omitted text when a reliable candidate is long", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
+@@ -425,6 +426,11 @@ describe("tool.apply_patch freeform", () => {
+         expect(error.message).toContain("Closest match at line 1")
+         expect(error.message).toContain("chars omitted")
+                 // 0441 起摘录改为有界窗口 char-diff：差异点 ±30 字符可见，其余以 omitted 标记；
++        // 完整长 expected 只能留在原始 patchText；错误正文只提供实际差异窗口与列号。
++        expect(error.message).toContain("line 1 actual")
++        expect(error.message).toContain("difference: requested columns 301-301 differ from actual columns 301-301")
++        expect((patchText + error.message).split(expected).length - 1).toBe(1)
++        expect(error.message).not.toContain(expected)
+         // 100 连字符不再整体出现，断言收敛到差异点局部 context 的可见性。
+         expect(error.message).toContain("b".repeat(20))
+       }
 @@ -747,6 +837,7 @@ EOF`
    )
  

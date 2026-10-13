@@ -84,7 +84,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
        })
  
        const finishReasoning = Effect.fn("SessionProcessor.finishReasoning")(function* (reasoningID: string) {
-@@ -869,23 +885,33 @@ const layer = Layer.effect(
+@@ -899,23 +915,33 @@ const layer = Layer.effect(
            // 合并未刷新的 raw 缓冲到 part，避免中断时丢失已累积输入
            const pendingRaw = ctx.toolInputBuffer[toolCallID]
            if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
@@ -96,10 +96,10 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 -                ? { raw: part.state.raw + pendingRaw }
 -                : {}),
 -              status: "error",
--              // #153：流正常结束未完成 vs 用户中断
+-              // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
+-              // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
 -              // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
 -              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
--              // #153：仅 cancel 路径标记 interrupted
 -              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
 -              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
 -              time: { start: "time" in part.state ? part.state.time.start : end, end },
@@ -121,10 +121,10 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 +                    ? { raw: current.part.state.raw + pendingRaw }
 +                    : {}),
 +                  status: "error",
-+                  // #153：流正常结束未完成 vs 用户中断
++                  // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
++                  // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
 +                  // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
 +                  error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
-+                  // #153：仅 cancel 路径标记 interrupted
 +                  // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
 +                  metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in current.part.state ? current.part.state.time.start : end)) : metadata,
 +                  time: { start: "time" in current.part.state ? current.part.state.time.start : end, end },
@@ -221,10 +221,10 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3952,3 +3952,86 @@ it.instance(
+@@ -4033,3 +4033,86 @@ it.instance(
+     }),
+   30_000,
  )
- 
- 
 +
 +// [local-smark] 验证重叠 cancel 共享同一个操作：第二个 cancel join 第一个的
 +// Deferred，不会在第一个完成后重新执行 state.cancel 误伤 replacement loop。

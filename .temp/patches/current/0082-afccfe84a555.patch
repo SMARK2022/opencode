@@ -509,7 +509,7 @@ diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugi
 index 8eec73edab..aefe54a4f1 100644
 --- a/packages/opencode/src/plugin/index.ts
 +++ b/packages/opencode/src/plugin/index.ts
-@@ -17,6 +17,8 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "opencode-gitlab-auth"
+@@ -17,7 +17,9 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "opencode-gitlab-auth"
  import { PoeAuthPlugin } from "opencode-poe-auth"
  import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cloudflare"
  import { AzureAuthPlugin } from "./azure"
@@ -517,8 +517,9 @@ index 8eec73edab..aefe54a4f1 100644
 +import { VscodeBridgePlugin } from "./vscode-bridge"
  import { DigitalOceanAuthPlugin } from "./digitalocean"
  import { XaiAuthPlugin } from "./xai"
+ import { CerebrasPlugin } from "./cerebras"
  import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
-@@ -75,6 +77,7 @@ function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
+@@ -75,7 +76,8 @@ function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[]
      CloudflareWorkersAuthPlugin,
      CloudflareAIGatewayAuthPlugin,
      AzureAuthPlugin,
@@ -526,6 +527,7 @@ index 8eec73edab..aefe54a4f1 100644
      DigitalOceanAuthPlugin,
      SnowflakeCortexAuthPlugin,
      XaiAuthPlugin,
+     CerebrasPlugin,
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 new file mode 100644
 index 0000000000..62df37ba73

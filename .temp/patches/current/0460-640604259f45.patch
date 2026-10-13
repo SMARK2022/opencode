@@ -8,99 +8,31 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=20InlineTool=20?=
  =?UTF-8?q?=E5=8A=9F=E8=83=BD?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-index 76d95c51547138533063d364496fd598480dfe3d..4920a0c0d32c7642f94bf2bb21fb121d728c988c 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-@@ -670,7 +670,7 @@ function InlineTool(props: {
-         if (!parent) return
-         const previous = parent.getChildren()[parent.getChildren().indexOf(el) - 1]
-         if (!previous) {
--          setMargin(0)
-+          setMargin(1)
-           return
-         }
-         if (previous.id.startsWith("text")) setMargin(1)
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 66e5e02c15c90870259598afb5411bb2768e10a8..62ad384c505757aeb74264b21c64f2e6d08cc9d1 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1555,10 +1555,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-       borderColor={theme.backgroundElement}
-       flexShrink={0}
-       renderAfter={function (this: BoxRenderable, buffer: OptimizedBuffer) {
--        const x = Math.max(0, this.screenX)
--        const y = Math.max(0, this.screenY)
--        if (x >= buffer.width || y >= buffer.height) return
--        buffer.fillRect(x, y, 1, 1, theme.background)
-+        if (this.screenX < 0 || this.screenY < 0) return
-+        if (this.screenX >= buffer.width || this.screenY >= buffer.height) return
-+        buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)
-       }}
-     >
-       <For each={props.parts}>
-@@ -1975,7 +1974,7 @@ function InlineTool(props: {
-         const index = children.indexOf(el)
-         const previous = children[index - 1]
-         if (!previous) {
--          setMargin(0)
-+          setMargin(1)
-           return
-         }
-         if (previous.height > 1 || previous.id.startsWith("text-")) {
-diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-index e2f6cdc06ad664c64ae06d852d2ff62e7b612857..ced84374e7789b151c0387cc7fb86970deb876d9 100644
---- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-@@ -26,11 +26,31 @@ const blockToolSource = sessionSource.slice(
-   sessionSource.indexOf("function Shell("),
- )
- 
-+const assistantMessageSource = sessionSource.slice(
-+  sessionSource.indexOf("function AssistantMessage("),
-+  sessionSource.indexOf("const PART_MAPPING"),
-+)
-+
-+const inlineToolSource = sessionSource.slice(
-+  sessionSource.indexOf("function InlineTool("),
-+  sessionSource.indexOf("function BlockTool("),
-+)
-+
- const shellSource = sessionSource.slice(
-   sessionSource.indexOf("function Shell("),
-   sessionSource.indexOf("function DiffView("),
- )
- 
-+const sessionV2Source = readFileSync(
-+  path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/feature-plugins/system/session-v2.tsx"),
-+  "utf-8",
-+)
-+
-+const sessionV2InlineToolSource = sessionV2Source.slice(
-+  sessionV2Source.indexOf("function InlineTool("),
-+  sessionV2Source.indexOf("function BlockTool("),
-+)
-+
- describe("Session route integration points", () => {
-   describe("scrollbar", () => {
-     test("imports drawSmoothScrollbar", () => {
-@@ -65,8 +85,14 @@ describe("Session route integration points", () => {
-     })
- 
-     test("AssistantMessage wraps parts in a bordered box with renderAfter", () => {
--      expect(sessionSource).toContain("renderAfter={function")
--      expect(sessionSource).toContain("buffer.fillRect(x, y, 1, 1, theme.background)")
-+      expect(assistantMessageSource).toContain("renderAfter={function")
-+      expect(assistantMessageSource).toContain("if (this.screenX < 0 || this.screenY < 0) return")
-+      expect(assistantMessageSource).toContain("buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)")
-+    })
-+
-+    test("InlineTool gives first tool part message-level top spacing", () => {
-+      expect(inlineToolSource).toMatch(/if \(!previous\) \{\s*setMargin\(1\)\s*return\s*\}/)
-+      expect(sessionV2InlineToolSource).toMatch(/if \(!previous\) \{\s*setMargin\(1\)\s*return\s*\}/)
-     })
+融合适配：源 session-v2 InlineTool 段与 AssistantMessage renderAfter 段在目标无宿主（v1.18.32 的
+AssistantMessage 无 renderAfter 像素清除、无 session-v2 视图）；InlineTool 首工具顶距落到 setPreLayoutSiblingMargin 回调。
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2658,3 +2658,5 @@
+         if (props.separate) alwaysSeparate.add(el)
+         setPreLayoutSiblingMargin(el, (previous) => {
++          // #460：无前驱兄弟时承接消息级顶距——首个工具 part 与文本气泡基线一致。
++          if (!previous) return 1
+           return props.separate ||
+diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+--- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
++++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+@@ -61,2 +61,12 @@
    })
- 
++
++  // #460：首个工具 part 需要消息级顶距——无前驱兄弟时 margin=1（与文本气泡基线一致）
++  test("InlineTool gives first tool part message-level top spacing", () => {
++    const start = sessionSource.indexOf("function InlineTool(")
++    const end = sessionSource.indexOf("function BlockTool(")
++    const inlineToolSource = sessionSource.slice(start, end)
++    expect(start).toBeGreaterThan(-1)
++    expect(end).toBeGreaterThan(start)
++    expect(inlineToolSource).toContain('if (!previous) return 1')
++  })
+ })
+\ No newline at end of file

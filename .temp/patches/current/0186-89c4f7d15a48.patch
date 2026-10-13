@@ -143,7 +143,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
          case "message.part.delta": {
 -          const parts = store.part[event.properties.messageID]
 -          if (!parts) break
--          const result = search(parts, event.properties.partID, (p) => p.id)
+-          const result = search(parts, event.properties.partID, (part) => part.id)
 -          if (!result.found) break
 -          touchPart(event.properties.sessionID, event.properties.partID)
 -          setStore(

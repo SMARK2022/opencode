@@ -3225,7 +3225,7 @@ diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
 +        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
 +        if (touched) return
 +      }
-+      log.info("touching file", { file: input })
++      yield* Effect.logInfo("touching file", { file: input })
        const clients = yield* getClients(input)
        yield* Effect.promise(() =>
          Promise.all(

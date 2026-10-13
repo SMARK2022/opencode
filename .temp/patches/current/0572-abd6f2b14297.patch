@@ -11,34 +11,27 @@ Content-Transfer-Encoding: 8bit
 
 避免旧 Project-only 正则把已验证的跨目录 Session 修复误报为控制流回归。
 
-diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-index adf05dff03face55649cf97debf0bed7c7223063..7be26eb1fc12cbbaf41622caedaba9bad08dd186 100644
---- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-@@ -177,14 +177,22 @@ describe("Session route integration points", () => {
+适配说明：目标的该门禁已从 opencode 源码正则迁移为 tui 包纯函数合同（#164/#165 建立，#570 扩 activeSessionID 第三参）；本补丁把 source 的 active Session admission 语义边界对齐到该纯函数门禁——project 匹配优先返回、跨 Project 兑底仅由活动会话严格相等构成、undefined 显式排除。
+
+diff --git a/packages/tui/test/cli/tui/event-single-delivery.test.ts b/packages/tui/test/cli/tui/event-single-delivery.test.ts
+--- a/packages/tui/test/cli/tui/event-single-delivery.test.ts
++++ b/packages/tui/test/cli/tui/event-single-delivery.test.ts
+@@ -18,5 +18,18 @@ describe("shouldDeliverScopedEvent", () => {
+   test("delivers unscoped events once (no double-path)", () => {
+     // #164：无 project 字段时放行一次
+     expect(shouldDeliverScopedEvent({ directory: "/workspace" }, "proj-a")).toBe(true)
    })
- 
-   describe("event dispatch", () => {
--    test("global and explicit project event matches return before workspace fallback", () => {
-+    test("global and explicit project event branches return before workspace fallback", () => {
-       const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
-       expect(eventSource).toMatch(
-         /if \(event\.directory === "global"\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
-       )
--      expect(eventSource).toMatch(
--        /if \(event\.project\) \{\s*if \(event\.project === project\.project\(\)\) handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
--      )
-+      const projectBranchStart = eventSource.indexOf("if (event.project) {")
-+      const workspaceFallbackStart = eventSource.indexOf("if (project.workspace.current())")
-+      expect(projectBranchStart).toBeGreaterThan(-1)
-+      expect(workspaceFallbackStart).toBeGreaterThan(projectBranchStart)
-+      const projectBranch = eventSource.slice(projectBranchStart, workspaceFallbackStart)
-+      // 源码门禁锁定Project分支的语义边界，不再把合法的active Session admission误判为控制流回归。
-+      expect(projectBranch).toContain('route.data.type === "session"')
-+      expect(projectBranch).toContain('"sessionID" in event.payload.properties')
-+      expect(projectBranch).toContain("event.project === project.project() ||")
-+      expect(projectBranch).toContain("activeSessionID !== undefined && eventSessionID === activeSessionID")
-+      expect(projectBranch).toMatch(/handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}\s*$/)
-     })
-   })
- 
++
++  // #572：对齐 #570 的 active Session admission 合同——project 分支是唯一跨 Project 兑底位置
++  test("admits mismatched-project events only through the active session branch", () => {
++    // #572：project 不匹配时唯一放行路径是活动会话 ID 与事件 sessionID 严格相等
++    expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b", sessionID: "sess-1" }, "proj-a", "sess-1")).toBe(true)
++    // #572：sessionID 不匹配或缺失时保持 Project 隔离，不因活动会话存在而放宽
++    expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b", sessionID: "sess-2" }, "proj-a", "sess-1")).toBe(false)
++    expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b" }, "proj-a", "sess-1")).toBe(false)
++    // #572：无活动会话时跨 Project 兑底必须关闭，防止 undefined === undefined 意外放行
++    expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b", sessionID: "sess-1" }, "proj-a")).toBe(false)
++    // #572：project 匹配的返回先于 Session 判定，保持 #165 的 Project 分支优先级
++    expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-a", sessionID: "sess-2" }, "proj-a", "sess-1")).toBe(true)
++  })
+ })

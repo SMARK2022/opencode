@@ -39,10 +39,9 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 index b0a866c90e..55bec3289f 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -122,10 +122,15 @@ export const TaskTool = Tool.define(
+@@ -136,6 +136,11 @@
          ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
          : undefined
-       const parent = yield* sessions.get(ctx.sessionID)
 -      const childPermission = deriveSubagentSessionPermission({
 -        parentSessionPermission: parent.permission ?? [],
 -        subagent: next,

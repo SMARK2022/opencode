@@ -194,14 +194,19 @@ diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/sess
 index 4139665bd2bde9201022806eac9932d596efc6ec..dec13f0f2e0e50ae10592aa10d5a7ed2158fff70 100644
 --- a/packages/opencode/src/session/retry.ts
 +++ b/packages/opencode/src/session/retry.ts
-@@ -72,7 +72,8 @@
+@@ -89,10 +89,12 @@
      const status = error.data.statusCode
      // 5xx errors are transient server failures and should always be retried,
      // even when the provider SDK doesn't explicitly mark them as retryable.
--    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
 +    // 网络异常（statusCode 为 undefined）也应重试，避免瞬时网络故障直接失败
-+    if (!error.data.isRetryable && !(status !== undefined && status >= 500) && status !== undefined) return undefined
-     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
+     if (
+       !error.data.isRetryable &&
+       !(status !== undefined && status >= 500) &&
++      status !== undefined &&
+       !matchesRetryableMessage(error.data.message) &&
+       !matchesRetryableMessage(error.data.responseBody)
+     )
+       return undefined
        return {
          message: GO_UPSELL_MESSAGE,
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts

@@ -311,7 +311,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
  // #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
  // #203：无全局配置时原生 auto agent 隐式启用 reviewer；否则选 auto 只会把 cautious 降级成普通 ask
  function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
-@@ -699,6 +792,84 @@
+@@ -699,7 +792,85 @@
  // #203：不能在本模块初始化期间被解引用
  export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))))
  
@@ -394,7 +394,8 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +}
 +
  // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
- export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node] })
+ // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
+ export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Database.node] })
  
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
@@ -700,9 +701,11 @@ diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.
 @@ -83,7 +83,7 @@
  export const Hidden = Schema.Struct({
    time: NonNegativeInt,
-   // #153：soft-hide 原因扩展 cancel 空 dangling
+   // repair-empty-dangling-assistant：cancel 产生的空体 assistant 专用隐藏原因，
+   // 与 undo 隐藏区分开，便于审计两类来源不同的隐藏消息
 -  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
 +  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
  })
  export type Hidden = Schema.Schema.Type<typeof Hidden>
+ 
  

@@ -464,11 +464,12 @@ index 0000000000000000000000000000000000000000..68d73850916081b926e3038f80ed3b5b
 +- Blocking findings: none
 +- Chinese comment gate: E=158, C=32, required 24, ratio ≈0.203 PASS
 +- Release claim: this exact working-tree implementation of R2 only
+
 diff --git a/packages/app/src/i18n/en.ts b/packages/app/src/i18n/en.ts
-index 6bb9d3fc447dd401ecbb9259d63904cd3554171f..9ed32159ce5a69b0146f2c8287dac745fcc324c5 100644
+index 62d4dc1ae..435e05972 100644
 --- a/packages/app/src/i18n/en.ts
 +++ b/packages/app/src/i18n/en.ts
-@@ -927,7 +927,7 @@ export const dict = {
+@@ -1115,7 +1115,7 @@ export const dict = {
    "settings.permissions.tool.external_directory.title": "External Directory",
    "settings.permissions.tool.external_directory.description": "Access files outside the project directory",
    "settings.permissions.tool.doom_loop.title": "Doom Loop",
@@ -477,11 +478,12 @@ index 6bb9d3fc447dd401ecbb9259d63904cd3554171f..9ed32159ce5a69b0146f2c8287dac745
  
    "session.delete.failed.title": "Failed to delete session",
    "session.delete.title": "Delete session",
+
 diff --git a/packages/app/src/i18n/zh.ts b/packages/app/src/i18n/zh.ts
-index 787f2b62272889aba9946bcd4afefd47a422d814..a89598ca80f2aaabf18000f8c2c39428e2e47474 100644
+index b0ba04534..4b1195ba3 100644
 --- a/packages/app/src/i18n/zh.ts
 +++ b/packages/app/src/i18n/zh.ts
-@@ -799,7 +799,7 @@ export const dict = {
+@@ -1094,7 +1094,7 @@ export const dict = {
    "settings.permissions.tool.external_directory.title": "外部目录",
    "settings.permissions.tool.external_directory.description": "访问项目目录之外的文件",
    "settings.permissions.tool.doom_loop.title": "死循环",
@@ -490,21 +492,18 @@ index 787f2b62272889aba9946bcd4afefd47a422d814..a89598ca80f2aaabf18000f8c2c39428
  
    "session.delete.failed.title": "删除会话失败",
    "session.delete.title": "删除会话",
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index dbd58c74f8441c854daaf9213f46f095d81e8461..24e84fe5e629f8ac2e8693a2984236aa4065e21e 100644
+index 0aaad66ca..ce90ef6e7 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1525,12 +1525,12 @@ export function stepFinishParts(messageID: MessageID) {
-   return rows.flatMap((row) => (row.data.type === "step-finish" ? [row.data] : []))
+@@ -920,8 +920,12 @@ export function stepFinishParts(messageID: MessageID) {
+   })
  }
  
--// doom-loop 只需要前一个 assistant 的非 pending tool tail，不能为此加载并 thaw 整个 session transcript。
--// cursor 以当前 persisted time/id 为准，调用方时间只作为 row 暂缺时的兼容边界。
--// Part 查询按 ID 倒序 limit 后再恢复正序，返回语义与旧 slice(-N) 保持一致。
--// 只对最终选中的少量 tool rows执行 thaw，历史中其他 cold output 不受检测副作用影响。
--// previous assistant 和其 Parts 都排除 hidden，保持旧全量 Session.messages 路径的可见性语义。
--// hidden row 在 SQL limit 前过滤，不能占用 tail 配额后让真正连续的 visible tool 被截掉。
-+// doom-loop AND 窗口需要 cursor 之前、跨多个 visible assistant 的有界非 pending tool tail。
+-// #493：doom-loop 只需要前一个 assistant 的非 pending tool tail，不能为此加载整个 session transcript。
+-// 只对最终选中的少量 tool rows 执行 thaw；hidden row 在 SQL limit 前过滤，不占 tail 配额。
++// #508：doom-loop AND 窗口需要 cursor 之前、跨多个 visible assistant 的有界非 pending tool tail。
 +// 不变量：1-tool-per-step × N 时 limit=3 必须能凑满 3 条，否则 AND 永远不可达（旧单 previous 深度不足）。
 +// 每 step 新建 assistant 且常 1 tool/turn 时，只读「单个 previous assistant」窗口长度永远 < 3。
 +// 因此按 session join 倒序取 limit 条 tool part；hidden message/part 在 LIMIT 前过滤以免占配额。
@@ -513,16 +512,23 @@ index dbd58c74f8441c854daaf9213f46f095d81e8461..24e84fe5e629f8ac2e8693a2984236aa
  export function previousAssistantToolTail(input: {
    sessionID: SessionID
    before: { id: MessageID; time: number }
-@@ -1543,29 +1543,32 @@ export function previousAssistantToolTail(input: {
+@@ -930,38 +934,38 @@ export function previousAssistantToolTail(input: {
+   return Effect.gen(function* () {
+     if (input.limit <= 0) return []
+     const { db, sync } = yield* Database.Service
+-    // cursor 以当前 persisted time/id 为准，调用方时间只作为 row 暂缺时的兼容边界。
+     const current = yield* db
+       .select({ time: MessageTable.time_created })
        .from(MessageTable)
        .where(eq(MessageTable.id, input.before.id))
        .get()
-+    // cursor 以 DB 已持久 time 为准；调用方 time 仅在 row 暂缺时兜底，避免与写入竞态错位。
-     const cursor = { id: input.before.id, time: current?.time ?? input.before.time }
--    const assistant = db
+       .pipe(Effect.orDie)
++    // cursor 以 DB 已持久 time 为准；调用方 time 仅在 row 暂缺时兑底，避免与写入竞态错位。
+     const cursorBound = { id: input.before.id, time: current?.time ?? input.before.time }
+-    const assistant = yield* db
 -      .select({ id: MessageTable.id })
 -      .from(MessageTable)
-+    return db
++    const rows = yield* db
 +      .select({
 +        id: PartTable.id,
 +        message_id: PartTable.message_id,
@@ -543,14 +549,16 @@ index dbd58c74f8441c854daaf9213f46f095d81e8461..24e84fe5e629f8ac2e8693a2984236aa
 +          // 仅 assistant transcript 参与 doom 窗口；user/system 文本不得挤占 LIMIT。
            sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
            sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-           older(cursor),
+           older(cursorBound),
 -        ),
 -      )
 -      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
 -      .limit(1)
 -      .get()
+-      .pipe(Effect.orDie)
 -    if (!assistant) return []
--    return db
+-    // Part 查询按 ID 倒序 limit 后再恢复正序，返回语义与旧 slice(-N) 保持一致。
+-    const rows = yield* db
 -      .select()
 -      .from(PartTable)
 -      .where(
@@ -561,19 +569,20 @@ index dbd58c74f8441c854daaf9213f46f095d81e8461..24e84fe5e629f8ac2e8693a2984236aa
            sql`json_extract(${PartTable.data}, '$.state.status') != 'pending'`,
            sql`json_type(${PartTable.data}, '$.hidden') is null`,
          ),
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 5055fe3537aac491c85f309ac8476208d046530c..4114cefaa3eb13b3bb4fd4e3ffd4a738ae0f175f 100644
+index 10ecf1ce2..11be770ce 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -30,6 +30,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
- import * as DateTime from "effect/DateTime"
- import { RuntimeFlags } from "@/effect/runtime-flags"
+@@ -34,6 +34,7 @@ import { Usage, type LLMEvent } from "@opencode-ai/llm"
+ // "unbounded"），不串行累加。
+ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
  
 +// 产品合同「最近三次脱扣」：同 tool + 同 input + 全 error 的窗口长度；与测试矩阵阈值绑定。
  const DOOM_LOOP_THRESHOLD = 3
- // bounded kill（shell.ts 的 timeoutOrElse 500ms）后，tool 最多 500ms kill + ~500ms
- // output drain = 1s。2s 给 ~100% 安全边际。settle 是 per-tool 并行（concurrency:
-@@ -135,13 +136,6 @@ export const layer = Layer.effect(
+ // #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
+ export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+@@ -136,13 +137,6 @@ const layer = Layer.effect(
      const status = yield* SessionStatus.Service
      const image = yield* Image.Service
  
@@ -585,32 +594,85 @@ index 5055fe3537aac491c85f309ac8476208d046530c..4114cefaa3eb13b3bb4fd4e3ffd4a738
 -    // 防止模型一次并行调用多个同工具（如 3 个 read 不同路径）全部失败时误触发。
 -    const consecutiveErrorMap = new Map<SessionID, Record<string, { count: number; lastMessageID: string }>>()
      const events = yield* EventV2Bridge.Service
-     const flags = yield* RuntimeFlags.Service
+     const database = yield* Database.Service
  
-@@ -516,51 +510,8 @@ export const layer = Layer.effect(
-                 ? { ...value.providerMetadata, providerExecuted: true }
+@@ -423,6 +417,52 @@ const layer = Layer.effect(
+         }
+       }
+ 
++      // #508：doom_loop AND（用户 OR→AND）：最近 THRESHOLD 条非 pending tool 必须同时满足：
++      // 同 tool 名、同 JSON.stringify(input)、status 全为 error；缺任一条件不 ask。
++      // 仅相同输入（含成功）或仅跨 turn 不同 input 的连续失败都不拦截。
++      // 窗口 = 跨多个前序 assistant 的有界 tail + 当前 message tool parts。
++      // transcript 是唯一权威：不维护跨 step 计数 Map，避免双源与 input 无关计数。
++      const askDoomLoopIfTripleFailure = (toolName: string, failedInput: unknown) =>
++        Effect.gen(function* () {
++          // 当前 message 只取 tool 终态，避免 step-finish/text 挤占 slice 尾部导致漏检。
++          const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
++            Effect.provideService(Database.Service, database),
++          )
++          const currentTools = parts.filter(
++            (part) => part.type === "tool" && part.state.status !== "pending",
++          )
++          const preceding = yield* MessageV2.previousAssistantToolTail({
++            sessionID: ctx.sessionID,
++            before: { id: ctx.assistantMessage.id, time: ctx.assistantMessage.time.created },
++            limit: DOOM_LOOP_THRESHOLD,
++          }).pipe(Effect.provideService(Database.Service, database))
++          const window = [...preceding, ...currentTools].slice(-DOOM_LOOP_THRESHOLD)
++          // 与历史 identical 路径同用 JSON.stringify：不额外规范化键序，保持可比合同。
++          const inputKey = JSON.stringify(failedInput)
++          if (
++            window.length !== DOOM_LOOP_THRESHOLD ||
++            !window.every(
++              (part) =>
++                part.type === "tool" &&
++                part.tool === toolName &&
++                part.state.status === "error" &&
++                JSON.stringify(part.state.input) === inputKey,
++            )
++          ) {
++            return
++          }
++          // THRESHOLD=3 与产品「三次脱扣」字面一致；改常量须同步测试矩阵。
++          const agent = yield* agents.get(ctx.assistantMessage.agent)
++          yield* permission.ask({
++            permission: "doom_loop",
++            patterns: [toolName],
++            sessionID: ctx.assistantMessage.sessionID,
++            metadata: { tool: toolName, input: failedInput, consecutiveErrors: DOOM_LOOP_THRESHOLD },
++            always: [toolName],
++            ruleset: agent.permission,
++          })
++        })
++
+       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+         switch (value.type) {
+           case "reasoning-start":
+@@ -533,51 +573,8 @@ const layer = Layer.effect(
                  : value.providerMetadata,
              }))
--
--            const parts = MessageV2.parts(ctx.assistantMessage.id)
+ 
+-            const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+-              Effect.provideService(Database.Service, database),
+-            )
 -            const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
 -
 -            // [local-smark] 跨消息 doom loop 检测：当前消息 parts 不足时，
--            // 从 session messages 中前一个 assistant message 的末尾 parts 补充，
+-            // 从 session 消息中前一个 assistant message 的末尾 tool parts 补充，
 -            // 防止跨消息的重复循环。
 -            // compaction 后旧 parts 可能被清空，此时跨消息检测自然失效——可接受，
 -            // 因为 compaction 本身打破了循环。
 -            let checkParts = recentParts
 -            if (recentParts.length < DOOM_LOOP_THRESHOLD) {
--              // 只取前一个 assistant 的 tool tail，避免 doom-loop 判断 thaw 整个 session。
+-              // #493：只取前一个 assistant 的 tool tail，避免 doom-loop 判断 thaw 整个 session。
 -              // helper 先热定位唯一前序 assistant，再按 limit 查询其末尾 tool rows；范围外 cold owner 不变。
--              // 当前 message parts 已由 processor 需要而读取，只有缺口数量才决定额外 thaw 的最大上限。
--              // 返回恢复为正序后再与 current tail 合并，连续重复判定与旧全 transcript slice 语义一致。
--              const prevToolParts = MessageV2.previousAssistantToolTail({
+-              // 返回恢复正序后与 current tail 合并，连续重复判定与旧全 transcript slice 语义一致。
+-              const prevToolParts = yield* MessageV2.previousAssistantToolTail({
 -                sessionID: ctx.sessionID,
 -                before: { id: ctx.assistantMessage.id, time: ctx.assistantMessage.time.created },
 -                limit: DOOM_LOOP_THRESHOLD,
--              })
+-              }).pipe(Effect.provideService(Database.Service, database))
 -              checkParts = [...prevToolParts, ...recentParts].slice(-DOOM_LOOP_THRESHOLD)
 -            }
 -
@@ -619,9 +681,9 @@ index 5055fe3537aac491c85f309ac8476208d046530c..4114cefaa3eb13b3bb4fd4e3ffd4a738
 -              !checkParts.every(
 -                (part) =>
 -                  part.type === "tool" &&
--                  part.tool === value.toolName &&
+-                  part.tool === value.name &&
 -                  part.state.status !== "pending" &&
--                  JSON.stringify(part.state.input) === JSON.stringify(value.input),
+-                  JSON.stringify(part.state.input) === JSON.stringify(input),
 -              )
 -            ) {
 -              return
@@ -630,21 +692,59 @@ index 5055fe3537aac491c85f309ac8476208d046530c..4114cefaa3eb13b3bb4fd4e3ffd4a738
 -            const agent = yield* agents.get(ctx.assistantMessage.agent)
 -            yield* permission.ask({
 -              permission: "doom_loop",
--              patterns: [value.toolName],
+-              patterns: [value.name],
 -              sessionID: ctx.assistantMessage.sessionID,
--              metadata: { tool: value.toolName, input: value.input },
--              always: [value.toolName],
+-              metadata: { tool: value.name, input },
+-              always: [value.name],
 -              ruleset: agent.permission,
 -            })
-+            // doom_loop 仅在 tool-error 上做「同 tool + 同 input + 全 error」AND 判定。
++            // #508：doom_loop 仅在 tool-error 上做「同 tool + 同 input + 全 error」AND 判定。
 +            // tool-call 阶段结果未知：相同输入的成功重试是合法行为，不得在此预拦截。
              return
            }
  
-@@ -618,17 +569,6 @@ export const layer = Layer.effect(
-               })
+@@ -586,36 +583,7 @@ const layer = Layer.effect(
+             if (!toolCall && value.result.type === "error") return
+             if (value.result.type === "error") {
+               yield* failToolCall(value.id, value.result.value)
+-              // [local-smark] consecutive-error breaker：同一工具跨 turn 连续 error 后
+-              // 注入 doom_loop permission ask，让模型意识到需要改变策略。
+-              // 消息边界感知：同一 assistant message 内的并行 error 只计 1 次——
+-              // 模型尚未看到错误结果，无法"改变策略"，此时触发是误报。
+-              // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
+-              const failToolName = toolCall?.part.tool ?? "unknown"
+-              const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
+-              const entry = errMap[failToolName] ?? { count: 0, lastMessageID: "" }
+-              // lastMessageID 不同 = 跨 turn 的新的失败 → 递增计数
+-              // lastMessageID 相同 = 同一 assistant message 的并行 error → 不递增
+-              if (entry.lastMessageID !== ctx.assistantMessage.id) {
+-                entry.count += 1
+-                entry.lastMessageID = ctx.assistantMessage.id
+-              }
+-              errMap[failToolName] = entry
+-              consecutiveErrorMap.set(ctx.sessionID, errMap)
+-              if (entry.count >= 3) {
+-                const agent = yield* agents.get(ctx.assistantMessage.agent)
+-                yield* permission.ask({
+-                  permission: "doom_loop",
+-                  patterns: [failToolName],
+-                  sessionID: ctx.assistantMessage.sessionID,
+-                  metadata: { tool: failToolName, input: toolCall?.part.state.input, consecutiveErrors: entry.count },
+-                  always: [failToolName],
+-                  ruleset: agent.permission,
+-                })
+-                // 重置计数器，避免每次 error 都触发
+-                entry.count = 0
+-                consecutiveErrorMap.set(ctx.sessionID, errMap)
+-              }
++              yield* askDoomLoopIfTripleFailure(toolCall?.part.tool ?? "unknown", toolCall?.part.state.input)
+               return
              }
-             yield* completeToolCall(value.toolCallId, output)
+             const rawOutput = toolResultOutput(value)
+@@ -636,17 +604,6 @@ const layer = Layer.effect(
+               attachments: attachments.length ? attachments : undefined,
+             }
+             yield* completeToolCall(value.id, output)
 -            // [local-smark] 工具成功时重置 consecutive-error 计数器。
 -            // delete 整个 entry：下次 error 会创建新 entry { count: 1, lastMessageID: currentMsgID }，
 -            // 正确表示"成功打断连续失败，重新开始计数"。
@@ -659,26 +759,14 @@ index 5055fe3537aac491c85f309ac8476208d046530c..4114cefaa3eb13b3bb4fd4e3ffd4a738
              return
            }
  
-@@ -650,36 +590,45 @@ export const layer = Layer.effect(
-               })
-             }
-             yield* failToolCall(value.toolCallId, value.error)
--            // [local-smark] consecutive-error breaker：同一工具跨 turn 连续 error 后
--            // 注入 doom_loop permission ask，让模型意识到需要改变策略。
--            // 消息边界感知：同一 assistant message 内的并行 error 只计 1 次——
--            // 模型尚未看到错误结果，无法"改变策略"，此时触发是误报。
--            // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
-+            // doom_loop AND（用户 OR→AND）：最近 THRESHOLD 条非 pending tool 必须同时满足：
-+            // 同 tool 名、同 JSON.stringify(input)、status 全为 error；缺任一条件不 ask。
-+            // 仅相同输入（含成功）或仅跨 turn 不同 input 的连续失败都不拦截。
-+            // 窗口 = 跨多个前序 assistant 的有界 tail + 当前 message tool parts。
-+            // transcript 是唯一权威：已删除 layer 内 consecutiveErrorMap，避免双源与 input 无关计数。
-+            // THRESHOLD=3 与产品「三次脱扣」字面一致；改常量须同步测试矩阵。
-             const toolName = toolCall?.part.tool ?? "unknown"
+@@ -656,30 +613,7 @@ const layer = Layer.effect(
+             const errToolCallExit = yield* readToolCall(value.id).pipe(Effect.exit)
+             const errToolCall = Exit.isSuccess(errToolCallExit) ? errToolCallExit.value : undefined
+             yield* failToolCall(value.id, value.error ?? new Error(value.message))
+-            const toolName = errToolCall?.part.tool ?? "unknown"
 -            const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
 -            const entry = errMap[toolName] ?? { count: 0, lastMessageID: "" }
--            // lastMessageID 不同 = 跨 turn 的新的失败 → 递增计数
--            // lastMessageID 相同 = 同一 assistant message 的并行 error → 不递增
+-            // 消息边界感知同 e2：同一 assistant message 的并行 error 只计 1 次
 -            if (entry.lastMessageID !== ctx.assistantMessage.id) {
 -              entry.count += 1
 -              entry.lastMessageID = ctx.assistantMessage.id
@@ -686,64 +774,46 @@ index 5055fe3537aac491c85f309ac8476208d046530c..4114cefaa3eb13b3bb4fd4e3ffd4a738
 -            errMap[toolName] = entry
 -            consecutiveErrorMap.set(ctx.sessionID, errMap)
 -            if (entry.count >= 3) {
-+            const failedInput = toolCall?.part.state.input
-+            // 当前 message 只取 tool 终态，避免 step-finish/text 挤占 slice 尾部导致漏检。
-+            const currentTools = MessageV2.parts(ctx.assistantMessage.id).filter(
-+              (part) => part.type === "tool" && part.state.status !== "pending",
-+            )
-+            const preceding = MessageV2.previousAssistantToolTail({
-+              sessionID: ctx.sessionID,
-+              before: { id: ctx.assistantMessage.id, time: ctx.assistantMessage.time.created },
-+              limit: DOOM_LOOP_THRESHOLD,
-+            })
-+            const window = [...preceding, ...currentTools].slice(-DOOM_LOOP_THRESHOLD)
-+            // 与历史 identical 路径同用 JSON.stringify：不额外规范化键序，保持可比合同。
-+            const inputKey = JSON.stringify(failedInput)
-+            if (
-+              window.length === DOOM_LOOP_THRESHOLD &&
-+              window.every(
-+                (part) =>
-+                  part.type === "tool" &&
-+                  part.tool === toolName &&
-+                  part.state.status === "error" &&
-+                  JSON.stringify(part.state.input) === inputKey,
-+              )
-+            ) {
-               const agent = yield* agents.get(ctx.assistantMessage.agent)
-               yield* permission.ask({
-                 permission: "doom_loop",
-                 patterns: [toolName],
-                 sessionID: ctx.assistantMessage.sessionID,
--                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: entry.count },
-+                metadata: { tool: toolName, input: failedInput, consecutiveErrors: DOOM_LOOP_THRESHOLD },
-                 always: [toolName],
-                 ruleset: agent.permission,
-               })
--              // 重置计数，避免同 message 后续 error 重复触发；
--              // lastMessageID 保留：同批次后续 error 不递增，下一 turn 才从 1 开始
+-              const agent = yield* agents.get(ctx.assistantMessage.agent)
+-              yield* permission.ask({
+-                permission: "doom_loop",
+-                patterns: [toolName],
+-                sessionID: ctx.assistantMessage.sessionID,
+-                metadata: { tool: toolName, input: errToolCall?.part.state.input, consecutiveErrors: entry.count },
+-                always: [toolName],
+-                ruleset: agent.permission,
+-              })
+-              // 重置计数器，避免每次 error 都触发
 -              entry.count = 0
 -              consecutiveErrorMap.set(ctx.sessionID, errMap)
-             }
+-            }
++            yield* askDoomLoopIfTripleFailure(errToolCall?.part.tool ?? "unknown", errToolCall?.part.state.input)
              return
            }
+ 
+
 diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
-index f254e9004364c0f8a5d71315cba6b60555810f67..a6f943729906f608eb9b4d774dbd6c62c40c59bf 100644
+index 58b8c1642..63ebbd429 100644
 --- a/packages/opencode/test/session/messages-pagination.test.ts
 +++ b/packages/opencode/test/session/messages-pagination.test.ts
-@@ -670,7 +670,7 @@ describe("Session.findMessage", () => {
+@@ -658,9 +658,9 @@ describe("Session.findMessage", () => {
      ),
    )
  
+-  // #493：doom-loop tail 只取前一个可见 assistant 的末尾 tool rows——hidden part/assistant 双向过滤，
+-  // 匹配的 3 条 thaw 回填（coldOwners 5→2），范围外 owner 不变。
 -  it.instance("bounds doom-loop history to the previous assistant tool tail", () =>
-+  it.instance("bounds doom-loop history to preceding multi-assistant tool tail", () =>
++  // #493/#508：doom-loop tail 跨多个可见 assistant 取末尾 tool rows——hidden part/assistant 双向过滤，
++  // 匹配 rows thaw 回填，范围外 owner 不变。
++  it.instance("bounds doom-loop history to the preceding multi-assistant tool tail", () =>
      withSession(({ session, sessionID }) =>
        Effect.gen(function* () {
-         const userID = yield* addUser(sessionID)
-@@ -736,6 +736,23 @@ describe("Session.findMessage", () => {
+         const { sync } = yield* Database.Service
+@@ -727,6 +727,23 @@ describe("Session.findMessage", () => {
              time: { start: 12, end: 13 },
            },
          })
-+        // 跨多个 visible assistant 各 1 tool：limit=2 必须返回 2 条（单 previous-assistant 只会得到 1）。
++        // #508：跨多个 visible assistant 各 1 tool：limit=2 必须返回 2 条（单 previous-assistant 只会得到 1）。
 +        const midAssistantID = yield* addAssistant(sessionID, userID)
 +        const midPartID = PartID.ascending()
 +        yield* session.updatePart({
@@ -761,28 +831,28 @@ index f254e9004364c0f8a5d71315cba6b60555810f67..a6f943729906f608eb9b4d774dbd6c62
 +          },
 +        })
          const currentAssistantID = yield* addAssistant(sessionID, userID)
-         Database.use((db) =>
-           db
-@@ -749,15 +766,24 @@ describe("Session.findMessage", () => {
+         sync
+           .update(SessionTable)
+@@ -738,15 +755,24 @@ describe("Session.findMessage", () => {
          }
  
          // 旧全量 Session.messages 默认排除 hidden Message/Part；bounded seam 必须保持同一可见性语义。
 -        // hidden assistant 更靠近 current、hidden part 位于 visible tail 之后，任一过滤缺失都会改变 expected IDs。
 +        // 最近 3 条 visible non-pending tools：previous 末尾 2 条 + mid 1 条（hidden 不占配额）。
-         const tail = MessageV2.previousAssistantToolTail({
+         const tail = yield* MessageV2.previousAssistantToolTail({
            sessionID,
            before: { id: currentAssistantID, time: Date.now() },
            limit: 3,
          })
 -        expect(tail.map((part) => part.id)).toEqual(partIDs.slice(-3))
 -        expect(tail.every((part) => part.type === "tool" && part.state.status === "completed")).toBe(true)
--        expect(ColdStorage.status().coldOwners).toBe(2)
+-        expect(ColdStorage.status(sync).coldOwners).toBe(2)
 +        expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
 +        expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
 +        // freeze 的 previous tools 仍在 cold 统计内；具体 pack 数随 cold layout 可变，至少保留有界 thaw 不爆表。
-+        expect(ColdStorage.status().coldOwners).toBeGreaterThanOrEqual(2)
++        expect(ColdStorage.status(sync).coldOwners).toBeGreaterThanOrEqual(2)
 +
-+        const two = MessageV2.previousAssistantToolTail({
++        const two = yield* MessageV2.previousAssistantToolTail({
 +          sessionID,
 +          before: { id: currentAssistantID, time: Date.now() },
 +          limit: 2,
@@ -792,11 +862,12 @@ index f254e9004364c0f8a5d71315cba6b60555810f67..a6f943729906f608eb9b4d774dbd6c62
        }),
      ),
    )
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d443235747da01 100644
+index 6a7b29cef..713cf726a 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -1069,10 +1069,9 @@ it.live("session.processor effect tests mark interruptions aborted without manua
+@@ -1314,10 +1314,9 @@ itProviderError.live("session.processor effect tests fail provider-executed erro
    ),
  )
  
@@ -804,13 +875,13 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
 -// 只应计 1 次失败事件。3 个并行 read 全部 fail 时不应触发 doom_loop permission ask。
 -// 当前实现（无消息边界感知）会在 count 达到 3 时误触发——本测试暴露此缺口。
 -it.live("consecutive-error breaker: same-batch parallel errors do not trigger doom_loop", () =>
-+// 保护：并行探索多个不同 path 时即使全部失败也不应 doom_loop（input 不等 → AND 失败）。
++// #508：保护：并行探索多个不同 path 时即使全部失败也不应 doom_loop（input 不等 → AND 失败）。
 +// 若误用「同 tool 名计数到 3」会在单 step 内误杀合法多文件读取。
 +it.live("doom_loop AND: same-batch parallel different-input errors do not trigger", () =>
    provideTmpdirServer(
      ({ dir, llm }) =>
        Effect.gen(function* () {
-@@ -1082,7 +1081,6 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
+@@ -1327,7 +1326,6 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
  
@@ -818,16 +889,17 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
          yield* llm.push(
            parallelToolCalls([
              { id: "call_1", name: "read", args: JSON.stringify({ path: "A" }) },
-@@ -1114,8 +1112,6 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
+@@ -1359,8 +1357,7 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
            tools: { read: failingRead },
          })
  
 -        // doom_loop 未触发：3 个并行 error 来自同一 assistant message，
 -        // 消息边界感知后只计 1 次失败事件，count 不足 3
++        // AND 判定下 input 互不相同，窗口永远不满足，不触发 ask
          expect(result).toBe("continue")
          expect(handle.message.error).toBeUndefined()
        }),
-@@ -1123,11 +1119,9 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
+@@ -1556,11 +1553,9 @@ it.live("session.processor empty stop (no content, finish=stop) does not throw",
    ),
  )
  
@@ -836,13 +908,13 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
 -// count 递增到 3 → 触发 permission.ask → DeniedError → halt → process 返回 "stop"。
 -// 此测试在修复前后均应通过（跨 turn 触发是既有正确行为），用作回归守卫。
 -it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
-+// 保护：跨 turn 换参重试（A/B/C 不同 path）是合理探索，仅连续失败不得拦截。
++// #508：保护：跨 turn 换参重试（A/B/C 不同 path）是合理探索，仅连续失败不得拦截。
 +// 这是用户明确否定的旧 consecutiveErrorMap 语义；期望全程 continue。
 +it.live("doom_loop AND: cross-turn different-input errors do not trigger", () =>
    provideTmpdirServer(
      ({ dir, llm }) =>
        Effect.gen(function* () {
-@@ -1135,14 +1129,12 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
+@@ -1568,14 +1563,12 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
          const chat = yield* session.create({})
          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
  
@@ -857,10 +929,11 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
          for (let turn = 0; turn < 3; turn++) {
            const parent = yield* user(chat.id, `turn ${turn}`)
            const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-@@ -1169,13 +1161,60 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
+@@ -1602,13 +1595,62 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
              tools: { read: failingRead },
            })
  
++          // 不同 input 的连续失败不满足 AND，全程 continue
 +          expect(result).toBe("continue")
 +          expect(handle.message.error).toBeUndefined()
 +        }
@@ -869,7 +942,7 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
 +  ),
 +)
 +
-+// 核心：生产默认每 step 新 assistant、每 turn 1 tool；同 path 三次 error 必须在第 3 次 stop。
++// #508：核心：生产默认每 step 新 assistant、每 turn 1 tool；同 path 三次 error 必须在第 3 次 stop。
 +// 覆盖 multi-assistant tail 深度；禁止用「单 assistant 堆 3 条 tool」冒充此形状。
 +it.live("doom_loop AND: cross-turn same-input errors trigger", () =>
 +  provideTmpdirServer(
@@ -902,7 +975,7 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
 +              time: parent.time,
 +              agent: parent.agent,
 +              model: { providerID: ref.providerID, modelID: ref.modelID },
-+            } satisfies MessageV2.User,
++            } satisfies SessionV1.User,
 +            sessionID: chat.id,
 +            model: mdl,
 +            agent: agent(),
@@ -918,14 +991,15 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
            } else {
 -            // 第 3 个 turn：count=3，doom_loop 触发
 -            // permission.ask 抛 DeniedError → halt → error 设置 → process 返回 "stop"
++            // 第 3 次同 input error：AND 满足 → ask → DeniedError → stop
              expect(result).toBe("stop")
              expect(handle.message.error).toBeDefined()
            }
-@@ -1185,6 +1224,62 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
+@@ -1618,6 +1660,62 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
    ),
  )
  
-+// 保护：相同 input 的成功重复调用（缓存/重读）不得再走旧 tool-call 相同输入预检。
++// #508：保护：相同 input 的成功重复调用（缓存/重读）不得再走旧 tool-call 相同输入预检。
 +// deny 配置下若仍 stop，说明错误地在 tool-call 或 completed 状态触发了 doom_loop。
 +const successRead = aiTool({
 +  description: "read",
@@ -964,7 +1038,7 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
 +              time: parent.time,
 +              agent: parent.agent,
 +              model: { providerID: ref.providerID, modelID: ref.modelID },
-+            } satisfies MessageV2.User,
++            } satisfies SessionV1.User,
 +            sessionID: chat.id,
 +            model: mdl,
 +            agent: agent(),
@@ -981,6 +1055,6 @@ index 5eaf274b2b2220b49a0636a53cb129221d87f0cb..35181392bb4bb96e66ea79ced0d44323
 +  ),
 +)
 +
- // ---------------------------------------------------------------------------
- // [local-smark] provider 空完成检测测试
- // ---------------------------------------------------------------------------
+ itFragmentFailure.live("session.processor effect tests retain partial legacy parts without v2 events", () =>
+   provideTmpdirInstance(
+     (dir) =>

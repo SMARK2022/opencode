@@ -44,7 +44,7 @@ index 1111111111..2222222222 100644
        ].join(" ")
      }
      if (shellName === "cmd" && name === "ls") {
-@@ -482,6 +491,30 @@
+@@ -482,6 +492,32 @@
  
  // 生成 per-shell 指引文本：Windows 下按 shell 类型提供 Unix 工具禁用和替代方案
  // powershell 5.1 不支持 && ||，需要用 A; if ($?) { B } 条件链
@@ -56,6 +56,7 @@ index 1111111111..2222222222 100644
 +    while (cur) {
 +      // #158：string/raw_string 等类型包含 string 即视为载荷边界
 +      if (cur.type.includes("string")) return false
++      // #158：root 自身 type 不含 string，向上遍历到 null 自然终止
 +      cur = cur.parent
 +    }
 +    return true
@@ -68,6 +69,7 @@ index 1111111111..2222222222 100644
 +  if (name === "tail") return "Prefer Get-Content -Tail N or Select-Object -Last N."
 +  if (name === "grep") return "Prefer Select-String for local content search."
 +  if (name === "sed" || name === "awk") return "Prefer PowerShell -replace / ForEach-Object, or run inside POSIX/ssh."
++  // #158：sed/awk 无单命令直接等价，避免给出误导性的直接映射
 +  // #158：默认回退到通用 PowerShell 工具提示
 +  return "Prefer PowerShell-native commands, or run the Unix utility inside ssh/wsl."
 +}
@@ -79,12 +81,11 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 index 1111111111..2222222222 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -346,7 +346,72 @@
+@@ -354,7 +354,72 @@
      )
    }
  
 -  each("asks for external_directory permission for wildcard external paths", () =>
-+  
 +  // #158：ssh 引号内 Unix 管道视为远程载荷，不触发本地兼容拦截
 +  for (const item of ps) {
 +    it.live(`does not reject Unix commands inside remote ssh string [${item.label}]`, () =>
@@ -118,6 +119,7 @@ index 1111111111..2222222222 100644
 +          Effect.gen(function* () {
 +            const err = new Error("stop after permission")
 +            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++            // #158：wsl 与 ssh 同判：引号载荷不构成本地管道
 +            expect(
 +              yield* fail(
 +                { command: `wsl bash -lc "grep foo /tmp/file | head -40"` },
@@ -149,7 +151,7 @@ index 1111111111..2222222222 100644
 +    )
 +  }
 +
-+each("asks for external_directory permission for wildcard external paths", () =>
++  each("asks for external_directory permission for wildcard external paths", () =>
      runIn(
        projectRoot,
        Effect.gen(function* () {

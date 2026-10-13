@@ -12,6 +12,7 @@ Content-Transfer-Encoding: 8bit
 session-open 滚动语义（同步完成与 sessionID 切换）到对应返回消息，
 替换原先一律贴底导致旧 review 不可见的行为。
 
+
 diff --git a/docs/plans/auto-review-deep-link-scroll.md b/docs/plans/auto-review-deep-link-scroll.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..44db91f38efd7e9f1a9c0b671135562ec53b3073
@@ -446,342 +447,264 @@ index 0000000000000000000000000000000000000000..44db91f38efd7e9f1a9c0b671135562e
 +- Full scope: **yes**
 +- Blocking findings: No blocking findings.
 +
-diff --git a/packages/opencode/src/cli/cmd/tui/context/route.tsx b/packages/opencode/src/cli/cmd/tui/context/route.tsx
-index 35be17801b1f5ec38bd21b41ae3ce21ebbfb4cf5..024c3252c15e2a277862d0b5b1635872a061d1c4 100644
---- a/packages/opencode/src/cli/cmd/tui/context/route.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/route.tsx
-@@ -11,6 +11,8 @@ export type SessionRoute = {
+
+diff --git a/packages/tui/src/context/route.tsx b/packages/tui/src/context/route.tsx
+--- a/packages/tui/src/context/route.tsx
++++ b/packages/tui/src/context/route.tsx
+@@ -12,6 +12,8 @@ export type SessionRoute = {
    type: "session"
    sessionID: string
    prompt?: PromptInfo
-+  // auto review 深链：父工具 autoReview.reviewID，进页后定位子会话对应返回区
++  // #551：auto review 深链锚点——随 route 携带，navigate reconcile 时无此字段即清除（INV-04）。
 +  reviewID?: string
  }
  
  export type PluginRoute = {
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 8e739b27d418d504b6b3b2e8de47a93de47f095d..58c7e37145c768a82b5ee011f7311fddf8377327 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -363,7 +363,8 @@ export function Session() {
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -487,7 +487,8 @@ export function Session() {
        }
        editor.reconnect(result.data.directory)
        await sync.session.sync(sessionID)
 -      if (route.sessionID === sessionID && scroll) scroll.scrollBy(100_000)
-+      // sync 后 parts 就绪：与 sessionID→toBottom 共用 applySessionOpenScroll，避免只修贴底路径 A
++      // #551：会话打开滚动统一入口——锚点优先，否则贴底。
 +      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
      })().catch((error) => {
        if (route.sessionID !== sessionID) return
        toast.show({
-@@ -543,6 +544,37 @@ export function Session() {
+@@ -621,6 +622,37 @@ export function Session() {
      }, 50)
    }
  
-+  // session-open 唯一滚动语义：有 reviewID 则锚到返回区，否则贴底（覆盖路径 A/B）。
-+  // INV-02：auto review 深链必须停在对应返回区；INV-03/04：无锚点或解析失败时保持今日贴底。
-+  // 禁止在此之外再挂无条件贴底成功路径，否则 50ms toBottom 会覆盖已完成的 anchor。
++  // #551：会话打开的唯一滚动语义——reviewID 锚点定位到对应 reviewer 返回消息，
++  // 无锚点才贴底；defer 50ms 与 toBottom 同拍，防止旧 toBottom 定时器覆盖锚点。
 +  function applySessionOpenScroll() {
 +    if (!scroll || scroll.isDestroyed) return
 +    const reviewID = route.reviewID
-+    if (reviewID) {
-+      const target = resolveReviewAnchorMessageID(
-+        sync.data.message[route.sessionID] ?? [],
-+        (messageID) => sync.data.part[messageID] ?? [],
-+        reviewID,
-+      )
-+      if (target) {
-+        // message 节点 id 即 scroll child id；与 timeline onMove 同一滚动 API
-+        const child = scroll.getChildren().find((item) => item.id === target)
-+        if (child) {
-+          scroll.scrollBy(child.y - scroll.y - 1)
-+          return
-+        }
-+      }
++    if (!reviewID) {
++      scroll.scrollTo(scroll.scrollHeight)
++      return
 +    }
-+    // residual / 普通打开：贴底（不是 try-anchor-then-other-algorithm 的 fallback）
-+    scroll.scrollTo(scroll.scrollHeight)
++    const target = resolveReviewAnchorMessageID(
++      sync.data.message[route.sessionID] ?? [],
++      (messageID) => sync.data.part[messageID] ?? [],
++      reviewID,
++    )
++    if (!target) {
++      // 锚点 miss（300 条窗口裁剪或消息尚未同步）退化为贴底，不阻断导航。
++      scroll.scrollTo(scroll.scrollHeight)
++      return
++    }
++    const child = scroll.getChildren().find((c) => c.id === target)
++    if (child) scroll.scrollBy(child.y - scroll.y - 1)
++    else scroll.scrollTo(scroll.scrollHeight)
 +  }
 +
-+  // 与历史 toBottom 同 50ms defer，对齐 OpenTUI layout；非轮询重试框架。
-+  // path A（sync 完成）与 path B（sessionID 变化）都只 schedule 本函数，语义单一。
 +  function scheduleSessionOpenScroll() {
-+    setTimeout(() => applySessionOpenScroll(), 50)
++    setTimeout(() => {
++      if (!scroll || scroll.isDestroyed) return
++      applySessionOpenScroll()
++    }, 50)
 +  }
 +
-   function moveFirstChild() {
-     if (children().length === 1) return
-     const next = children().find((x) => !!x.parentID)
-@@ -1227,8 +1259,13 @@ export function Session() {
-     }
+ 
+   function enterChild(sessionID: string) {
+     navigate({
+@@ -1382,7 +1414,8 @@ export function Session() {
    })
  
--  // snap to bottom when session changes
+   // snap to bottom when session changes
 -  createEffect(on(() => route.sessionID, toBottom))
-+  // session 切换贴底路径 B：有 reviewID 时不得无条件 toBottom，统一走 applySessionOpenScroll
-+  createEffect(
-+    on(
-+      () => ({ sessionID: route.sessionID, reviewID: route.reviewID }),
-+      () => scheduleSessionOpenScroll(),
-+    ),
-+  )
++  // #551：会话/reviewID 变化统一走 session-open 滚动——reviewID 存在时锚点优先于贴底。
++  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))
+ 
+   // #212：流式内容增长时，若视口原本贴底（一行容差），则跟随到新的底部
+   // #212：OpenTUI sticky scroll 仅从精确最大值跟随；一行偏差时不会自动追尾
+@@ -1879,7 +1912,9 @@ const footerVisible = createMemo(() => {
+   const backgroundShortcut = useCommandShortcut("session.background")
  
    return (
-     <PathFormatterProvider path={session()?.directory}>
-@@ -2477,10 +2514,49 @@ function openAutoReviewSession(
+-    <>
++    // #551：恢复 assistant 消息的滚动锚点 id（old tree 的 wrapper 在 OpenTUI Dynamic 重构中丢失）——
++    // reviewID 深链的 getChildren().find 依赖该 id 定位 reviewer 返回区；列方向 box 与 fragment 布局等价。
++    <box flexDirection="column" id={props.message.id}>
+       <For each={props.parts}>
+         {(part, index) => {
+           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
+@@ -1962,7 +1997,7 @@ const footerVisible = createMemo(() => {
+           </box>
+         </Match>
+       </Switch>
+-    </>
++    </box>
+   )
+ }
+ 
+@@ -2552,10 +2587,56 @@ function openAutoReviewSession(
    // review 行不是 transcript 正文，并且内部 text 已关闭 selection。前序 TUI
    // 测试或真实用户留下的旧 selection 不能让这次明确点击只消费事件不导航。
    renderer.clearSelection()
 -  navigate({ type: "session", sessionID: review.sessionID })
-+  // 携带 reviewID：子会话进页滚动定位到该次返回区，而非一律贴底
++  // #551：navigate 携带 reviewID——SessionRoute 深链锚点（无此字段的 navigate 会清除旧锚点）。
 +  navigate({ type: "session", sessionID: review.sessionID, reviewID: review.reviewID })
    return true
  }
  
-+// 用父工具 autoReview.reviewID 在子会话可见消息中解析滚动锚点（优先 assistant 返回区）。
-+// join 真相在 part metadata：request 用顶层 metadata，decision 用 tool state.metadata。
-+// 不引入后端 by-reviewID API；hidden 协议失败轮已由 Sync 删除，此处只见可见最终轮。
-+function resolveReviewAnchorMessageID(
-+  messages: ReadonlyArray<{ id: string; role: string; parentID?: string }>,
-+  partsOf: (messageID: string) => readonly Part[],
++// #551：resolve reviewID → 锚点消息 ID（纯函数，按 autoReviewMetadata 先例导出供测试）。
++// 主路径：request 顶层 part metadata（permissionReviewerRequest+reviewID）命中的 user 消息，
++// 其 parentID 即 reviewer assistant 决策消息（"返回区"）；多匹配取最后（最新 request）。
++// 次选：tool part state.metadata.reviewID 命中的 assistant（decision 所在消息）。
++// hidden 消息/part 已从 store 删除——"取最后可见匹配"天然成立。
++export function resolveReviewAnchorMessageID(
++  messages: Array<{ id: string; role: string; parentID?: string }>,
++  // SDK Part 的 metadata/state 是具名 schema union（tool state 仅部分分支带 metadata）——
++  // 签名用 unknown[] 承载，读取点经 metaOf 局部收窄，避免 any 且不复制 SDK 类型。
++  partsOf: (messageID: string) => ReadonlyArray<unknown>,
 +  reviewID: string,
-+) {
++): string | undefined {
++  const metaOf = (part: unknown) => {
++    const p = part as { type?: unknown; metadata?: unknown; state?: { metadata?: unknown } } | undefined
++    return {
++      type: p?.type,
++      request: p?.metadata as { permissionReviewerRequest?: unknown; reviewID?: unknown } | undefined,
++      tool: p?.state?.metadata as { reviewID?: unknown } | undefined,
++    }
++  }
++  // #551：request（text part + 顶层 metadata）与 decision（tool part 的 state.metadata）单趟同扫；
++  // 多匹配取最后——协议重试 hide 后可见的是最终 request 轮。
 +  let requestID: string | undefined
 +  let decisionMessageID: string | undefined
-+  for (const message of messages) {
-+    for (const part of partsOf(message.id)) {
-+      if (
-+        part.type === "text" &&
-+        part.metadata?.permissionReviewerRequest === true &&
-+        part.metadata?.reviewID === reviewID
-+      ) {
-+        // 多匹配取最后：协议重试 hide 后可见的是最终 request 轮
-+        requestID = message.id
++  for (const m of messages) {
++    for (const part of partsOf(m.id)) {
++      const meta = metaOf(part)
++      if (meta.type === "text" && meta.request?.permissionReviewerRequest === true && meta.request?.reviewID === reviewID) {
++        requestID = m.id
 +      }
-+      if (part.type === "tool") {
-+        // decision 的 reviewID 在 state.metadata，不是顶层 part.metadata
-+        const meta = part.state && "metadata" in part.state ? part.state.metadata : undefined
-+        if (meta && typeof meta === "object" && !Array.isArray(meta) && meta.reviewID === reviewID) {
-+          decisionMessageID = message.id
-+        }
++      if (meta.type === "tool" && meta.tool?.reviewID === reviewID) {
++        decisionMessageID = m.id
 +      }
 +    }
 +  }
 +  if (requestID) {
++    // #551：生产链方向是 reviewer assistant 壳挂 request 下（assistant.parentID === requestID），
++    // request 自身不写 parentID；reviewing 尚无决策时退到 request 本身，深链不得贴底。
 +    const answer = [...messages].reverse().find((message) => message.role === "assistant" && message.parentID === requestID)
-+    // 用户需求“返回区域”= assistant 决策消息；reviewing 尚无回答时退到 request（同 join）
 +    return answer?.id ?? requestID
 +  }
-+  // 次选：仅有 decision tool 元数据时的残缺 transcript
++  // 次选：仅有 decision tool 元数据时的残缺 transcript。
 +  return decisionMessageID
 +}
 +
+ // #292：openAutoReviewFromToolChrome——父工具卡兜底处理冒泡上来的 review 行 mouseup
  function openAutoReviewFromToolChrome(
    review: AutoReviewMetadata | undefined,
-   navigate: ReturnType<typeof useRoute>["navigate"],
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 8b0a967cf7a8f7c5be9952859ec7aa7b5159782e..7810d6cbd6521fb2b72789d70213f55e0d3d0dcf 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -257,6 +257,202 @@ test("subagent footer shows compact step flow without request cumulative parenth
-   )
- })
- 
-+test("auto review deep link scrolls to reviewing request when answer is missing", async () => {
-+  // reviewing 尚无 assistant：锚点应落到 request 文案，而不是贴到底部最新 filler。
-+  // INV-02 域内分支：父行 status=reviewing 时子会话只有 permissionReviewerRequest，无决策 tool。
-+  // height=14 + 长 filler 保证贴底路径看不到 requestMarker，防止假绿。
-+  const childID = "ses_reviewer_deep_link_pending"
-+  const requestMarker = "REVIEWING_REQUEST_MARKER_xyz"
-+  const filler = Array.from(
-+    { length: 16 },
-+    (_, index) => `PENDING_FILLER_LINE_${index}_LONG_ENOUGH_TO_HIDE_REQUEST_WHEN_STUCK_TO_BOTTOM`,
-+  )
-+  const req = { ...userMessage("msg_rev_pending_req", 10), sessionID: childID }
-+  const fillerMsgs = filler.map((text, index) => {
-+    const user = { ...userMessage(`msg_rev_pending_u_${index}`, 20 + index * 2), sessionID: childID }
-+    const asst = {
-+      ...assistantMessage(`msg_rev_pending_a_${index}`, 21 + index * 2, user.id),
-+      sessionID: childID,
-+      agent: "permission-reviewer",
-+      mode: "permission-reviewer",
-+    }
-+    return { user, asst, text }
-+  })
-+  const childMessages = [req, ...fillerMsgs.flatMap((item) => [item.user, item.asst])]
-+  const childParts: Record<string, Part[]> = {
-+    [req.id]: [
-+      textPart("part_rev_pending_req", req.id, requestMarker, {
-+        sessionID: childID,
-+        metadata: { permissionReviewerRequest: true, reviewID: "review_pending_deep" },
-+      }),
-+    ],
-+  }
-+  for (const item of fillerMsgs) {
-+    childParts[item.user.id] = [textPart(`part_${item.user.id}`, item.user.id, "filler request", { sessionID: childID })]
-+    childParts[item.asst.id] = [textPart(`part_${item.asst.id}`, item.asst.id, item.text, { sessionID: childID })]
-+  }
+
+diff --git a/packages/tui/test/routes/session/auto-review-deep-link.test.ts b/packages/tui/test/routes/session/auto-review-deep-link.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/auto-review-deep-link.test.ts
+@@ -0,0 +1,102 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import path from "node:path"
++import { resolveReviewAnchorMessageID } from "../../../src/routes/session/index"
 +
-+  await withRenderedSession(
-+    [assistantMessage("msg_read_review_pending", 1)],
-+    {
-+      msg_read_review_pending: [
-+        runningToolPart("part_read_review_pending", "msg_read_review_pending", "read", {
-+          filePath: "external folder/secret key.txt",
-+          metadata: {
-+            autoReview: {
-+              reviewID: "review_pending_deep",
-+              sessionID: childID,
-+              status: "reviewing",
-+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-+            },
-+          },
-+        }),
-+      ],
-+    },
-+    async (app) => {
-+      // reviewing 行文案含 precheck level；点击后 route 必须带 review_pending_deep。
-+      await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("◌ auto review · cautious · @permission-reviewer")),
-+      )
-+      await clickVisibleText(app, "◌ auto review · cautious · @permission-reviewer")
-+      // requestMarker 只出现在子会话 request part；父会话 frame 不含该字面量。
-+      // 若 resolve 只找 decision tool 会 miss，贴底后本断言 timeout。
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes(requestMarker)))
-+      expect(frame.some((line) => line.includes(requestMarker))).toBe(true)
-+    },
-+    {},
-+    { height: 14 },
-+    {
-+      [childID]: {
-+        info: sessionInfo({
-+          id: childID,
-+          parentID: sessionID,
-+          title: "Auto permission review (@permission-reviewer subagent)",
-+        }),
-+        // 子会话仅 request + filler：无 assistant 决策，锁定 reviewing 域分支
-+        messages: childMessages,
-+        parts: childParts,
-+      },
-+    },
-+  )
++// #551：reviewID 深链锚点解析——纯函数直测（autoReviewMetadata/isVisibleAssistantPart 先例）。
++// 生产链形状（permission/reviewer/service.ts recordReviewerRequest/runReviewerAgent）：
++// request 是合成 user 消息（text part 携顶层 permissionReviewerRequest+reviewID metadata，不写 parentID）；
++// reviewer assistant 决策壳的 parentID === request.id；reviewing 期决策 part 尚未落盘。
++// 主路径：request → 同 parent 的最新 assistant（返回区）；无决策（reviewing）退到 request 本身。
++// 次选：tool part 的 state.metadata.reviewID（decision 元数据不写顶层 part.metadata）。
++describe("resolveReviewAnchorMessageID", () => {
++  const msg = (id: string, role: string, parentID?: string) => ({ id, role, parentID })
++
++  test("completed review anchors the reviewer assistant whose parentID is the request", () => {
++    // 真实形状：R（request user，无 parentID）→ A（assistant 决策壳，parentID=R.id）。
++    const messages = [
++      msg("m_request", "user"),
++      msg("m_decision", "assistant", "m_request"),
++    ]
++    const partsOf = (messageID: string) =>
++      messageID === "m_request" ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_1" } }] : []
++    expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_1")).toBe("m_decision")
++  })
++
++  test("reviewing review falls back to the request message instead of missing", () => {
++    // reviewing 期：决策 part 未落盘、无 assistant 壳——answer missing 语义是锚定 request，不是贴底。
++    const messages = [msg("m_request", "user")]
++    const partsOf = (messageID: string) =>
++      messageID === "m_request" ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_2" } }] : []
++    expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_2")).toBe("m_request")
++  })
++
++  test("protocol retry takes the last visible request and its own assistant", () => {
++    // 协议重试：旧轮被 hide，可见的最后 request 是最终轮；assistant 挂在各自 request 下。
++    const messages = [
++      msg("m_request_1", "user"),
++      msg("m_decision_1", "assistant", "m_request_1"),
++      msg("m_request_2", "user"),
++      msg("m_decision_2", "assistant", "m_request_2"),
++    ]
++    const partsOf = (messageID: string) =>
++      messageID === "m_request_1" || messageID === "m_request_2"
++        ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_3" } }]
++        : []
++    expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_3")).toBe("m_decision_2")
++  })
++
++  test("residual transcript with only decision tool metadata anchors the tool message", () => {
++    // 次选：request part 丢失（残缺数据），decision 的 reviewID 在 tool state.metadata。
++    const messages = [msg("m_request", "user"), msg("m_tool", "assistant", "m_request")]
++    const partsOf = (messageID: string) => {
++      if (messageID === "m_tool") return [{ type: "tool", state: { metadata: { reviewID: "rev_4" } } }]
++      return []
++    }
++    expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_4")).toBe("m_tool")
++    expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_missing")).toBeUndefined()
++  })
++
++  test("non-request parts carrying metadata never satisfy the request predicate", () => {
++    // request 判定要求 text part——tool part 顶层 metadata 命中不得伪装成 request 主路径。
++    const messages = [msg("m_tool_only", "user")]
++    const partsOf = () => [{ type: "tool", metadata: { permissionReviewerRequest: true, reviewID: "rev_5" } }]
++    expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_5")).toBeUndefined()
++  })
 +})
 +
-+test("auto review deep link scrolls to the matching review return", async () => {
-+  // 多 turn reviewer 子会话：贴底只见最新返回；深链必须把视口带到旧 review 的返回文案。
-+  // 父工具 autoReview.reviewID=review_old_deep 必须 join 到子会话旧 assistant 正文，而非 session 底部。
-+  // 旧/新 marker 为独立字面量，禁止从 production helper 派生期望值。
-+  // 路径 A（sync 后滚动）与路径 B（sessionID→50ms）任一仍无条件贴底都会使本测 timeout。
-+  const childID = "ses_reviewer_deep_link"
-+  const oldReturn = "OLD_REVIEW_RETURN_MARKER_xyz"
-+  const newReturn = "NEW_REVIEW_RETURN_MARKER_xyz"
-+  const filler = Array.from(
-+    { length: 18 },
-+    (_, index) => `FILLER_PADDING_LINE_${index}_LONG_ENOUGH_TO_PUSH_OLD_REVIEW_OFF_VIEWPORT`,
++// #551：接线合同——目标无 withRenderedSession harness（#506/#550 先例），以源码合同断言兜底。
++describe("auto review deep link wiring contract", () => {
++  const source = readFileSync(
++    path.join(import.meta.dir, "..", "..", "..", "src", "routes", "session", "index.tsx"),
++    "utf8",
++  )
++  const routeSource = readFileSync(
++    path.join(import.meta.dir, "..", "..", "..", "src", "context", "route.tsx"),
++    "utf8",
 +  )
 +
-+  const reqOld = { ...userMessage("msg_rev_req_old", 10), sessionID: childID }
-+  const ansOld = {
-+    ...assistantMessage("msg_rev_ans_old", 11, reqOld.id),
-+    sessionID: childID,
-+    agent: "permission-reviewer",
-+    mode: "permission-reviewer",
-+  }
-+  const fillerMsgs = filler.map((text, index) => {
-+    const user = { ...userMessage(`msg_rev_fill_u_${index}`, 20 + index * 2), sessionID: childID }
-+    const asst = {
-+      ...assistantMessage(`msg_rev_fill_a_${index}`, 21 + index * 2, user.id),
-+      sessionID: childID,
-+      agent: "permission-reviewer",
-+      mode: "permission-reviewer",
-+    }
-+    return { user, asst, text }
++  test("SessionRoute carries an optional reviewID anchor", () => {
++    expect(routeSource).toContain("reviewID?: string")
 +  })
-+  const reqNew = { ...userMessage("msg_rev_req_new", 200), sessionID: childID }
-+  const ansNew = {
-+    ...assistantMessage("msg_rev_ans_new", 201, reqNew.id),
-+    sessionID: childID,
-+    agent: "permission-reviewer",
-+    mode: "permission-reviewer",
-+  }
 +
-+  const childMessages = [
-+    reqOld,
-+    ansOld,
-+    ...fillerMsgs.flatMap((item) => [item.user, item.asst]),
-+    reqNew,
-+    ansNew,
-+  ]
-+  // parts.metadata.reviewID 是生产 join 字段；fixture 必须与 recordReviewerRequest 合同一致。
-+  const childParts: Record<string, Part[]> = {
-+    [reqOld.id]: [
-+      textPart("part_rev_req_old", reqOld.id, "old review request body", {
-+        sessionID: childID,
-+        metadata: { permissionReviewerRequest: true, reviewID: "review_old_deep" },
-+      }),
-+    ],
-+    // 返回区正文：scroll 目标应是 ansOld 消息节点，使 oldReturn 进入视口
-+    [ansOld.id]: [textPart("part_rev_ans_old", ansOld.id, oldReturn, { sessionID: childID })],
-+    [reqNew.id]: [
-+      textPart("part_rev_req_new", reqNew.id, "new review request body", {
-+        sessionID: childID,
-+        metadata: { permissionReviewerRequest: true, reviewID: "review_new_deep" },
-+      }),
-+    ],
-+    // 最新返回：贴底时可见；深链成功时不应作为唯一可见 marker
-+    [ansNew.id]: [textPart("part_rev_ans_new", ansNew.id, newReturn, { sessionID: childID })],
-+  }
-+  for (const item of fillerMsgs) {
-+    childParts[item.user.id] = [textPart(`part_${item.user.id}`, item.user.id, "filler request", { sessionID: childID })]
-+    childParts[item.asst.id] = [textPart(`part_${item.asst.id}`, item.asst.id, item.text, { sessionID: childID })]
-+  }
++  test("navigate from review rows carries the reviewID", () => {
++    expect(source).toContain('navigate({ type: "session", sessionID: review.sessionID, reviewID: review.reviewID })')
++  })
 +
-+  await withRenderedSession(
-+    [assistantMessage("msg_read_review_deep", 1)],
-+    {
-+      msg_read_review_deep: [
-+        completedToolPart(
-+          "part_read_review_deep",
-+          "msg_read_review_deep",
-+          "read",
-+          { filePath: "external folder/secret key.txt" },
-+          {
-+            autoReview: {
-+              reviewID: "review_old_deep",
-+              sessionID: childID,
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-+      // 点击公开 auto review 状态行：与生产 AutoReviewLine 入口一致，不直接 navigate 绕过。
-+      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
++  test("session-open scroll is anchored before bottom snap", () => {
++    // 统一滚动入口：锚点存在→child.y 对位；miss/无锚点→贴底。
++    expect(source).toContain("function applySessionOpenScroll()")
++    expect(source).toContain("function scheduleSessionOpenScroll()")
++    expect(source).toContain("scrollBy(child.y - scroll.y - 1)")
++    // 两个贴底路径都改走统一入口；undo/prompt on_submit 的 toBottom 保持原语义。
++    expect(source).toContain("if (route.sessionID === sessionID) scheduleSessionOpenScroll()")
++    // useRouteData("session") 已收窄为 SessionRoute——effect 依赖直接读字段。
++    expect(source).toContain("createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))")
++  })
 +
-+      // 期望滚到旧返回区：独立字面量必须可见。贴底路径只会露出最新 NEW marker。
-+      // 若只修 path A 而 path B 仍 toBottom，50ms 后视口会被拉回底部导致本断言失败。
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes(oldReturn)))
-+      expect(frame.some((line) => line.includes(oldReturn))).toBe(true)
-+    },
-+    {},
-+    { height: 14 },
-+    {
-+      [childID]: {
-+        info: sessionInfo({
-+          id: childID,
-+          parentID: sessionID,
-+          title: "Auto permission review (@permission-reviewer subagent)",
-+        }),
-+        messages: childMessages,
-+        parts: childParts,
-+      },
-+    },
-+  )
++  test("assistant messages expose a scroll-child id for anchor lookup", () => {
++    // OpenTUI Dynamic 重构丢失了 assistant wrapper id——#551 恢复它使主路径可达。
++    expect(source).toContain('<box flexDirection="column" id={props.message.id}>')
++  })
 +})
-+
- // child 底部只有 SubagentFooter（无 Prompt）；retry 红字必须挂在同一行，并覆盖 auto reviewer 等所有 parentID 子会话。
- // 本测用 permission-reviewer title：既锁 task 入口，也锁 auto reviewer 共用 footer 路径。
- test("child subagent footer shows red retry summary before usage", async () => {

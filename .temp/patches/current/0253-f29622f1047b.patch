@@ -2,38 +2,38 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
 @@ -11,5 +11,5 @@
-         # #156：package.json 仍为默认版本单源
+         # #156：显式版本允许 v 前缀，脚本内统一去 v 后再拼接 tag
          # #161：示例版本随 tip 升号；默认仍读 package.json
--        # #231：source bump 1.15.3→1.15.4 按 0161 协同升号规则映射到目标版本线 1.17.26→1.17.27-smark
+-        # #231：source bump 1.15.3→1.15.4 按 0161 协同升号规则映射到目标版本线 1.18.38→1.18.39-smark
 -        # #231：README 的 SMARK 展示段在目标为纯上游未移植——版本展示语义由本文件与 package.json 承载
--        description: "Override version, for example 1.17.27-smark. Empty means packages/opencode/package.json version."
-+        # #253：source bump 1.15.4→1.15.5 按 0161 协同升号规则映射到目标版本线 1.17.27→1.17.28-smark
+-        description: "Override version, for example 1.18.39-smark. Empty means packages/opencode/package.json version."
++        # #253：source bump 1.15.3→1.15.4 按 0161 协同升号规则映射到目标版本线 1.18.39→1.18.40-smark
 +        # #253：README 的 SMARK 展示段在目标为纯上游未移植——版本展示语义由本文件与 package.json 承载
-+        description: "Override version, for example 1.17.28-smark. Empty means packages/opencode/package.json version."
++        description: "Override version, for example 1.18.40-smark. Empty means packages/opencode/package.json version."
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
 @@ -3,3 +3,3 @@
--  "version": "1.17.27-smark",
--  "//version-note": "#231 协同升号至 1.17.27-smark；禁止回写 1.14/1.15",
--  "#231-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.17.26→1.17.27-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
-+  "version": "1.17.28-smark",
-+  "//version-note": "#253 协同升号至 1.17.28-smark；禁止回写 1.14/1.15",
-+  "#253-release-note": "source bump 1.15.4→1.15.5 映射到目标版本线 1.17.27→1.17.28-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
+-  "version": "1.18.39-smark",
+-  "//version-note": "#231 协同升号至 1.18.39-smark；禁止回写 1.14/1.15",
+-  "#231-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.18.38→1.18.39-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
++  "version": "1.18.40-smark",
++  "//version-note": "#253 协同升号至 1.18.40-smark；禁止回写 1.14/1.15",
++  "#253-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.18.39→1.18.40-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
 diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
 @@ -5,2 +5,2 @@
--  "version": "1.17.26",
--  "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3，目标已为 1.17.26 无需修改",
-+  "version": "1.17.27",
-+  "//": "#253：协同升号 1.17.26→1.17.27——source 谱系 1.15.3→1.15.4→1.15.5 逐级映射，格式保持三段式",
+-  "version": "1.18.38",
+-  "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3，目标 1.18.38 已为规范三段格式无需改动",
++  "version": "1.18.39",
++  "//": "#253：协同升号 1.18.38→1.18.39——source 谱系 1.15.3→1.15.3→1.15.4 逐级映射，格式保持三段式",
 @@ -105,1 +105,1 @@
--    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.17.26.vsix",
-+    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.17.27.vsix",
+-    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.18.38.vsix",
++    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.18.39.vsix",
 diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
 @@ -97,1 +97,1 @@
--code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.17.26.vsix --force
-+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.17.27.vsix --force
+-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.18.38.vsix --force
++code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.18.39.vsix --force

@@ -12,8 +12,8 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
    const { theme } = useTheme()
    const ctx = use()
-@@ -1881,60 +1884,29 @@ const renderedContent = createMemo(() => displayContent() || content())
-             duration={isDone() ? Locale.duration(duration()) : undefined}
+@@ -1916,60 +1919,32 @@ const renderedContent = createMemo(() => displayContent() || content())
+             encrypted={opaque()}
            />
          </box>
 -        {/* 折叠推理：保留 5 行预览，避免 hide 模式只剩标题不可窥 */}
@@ -36,7 +36,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 -            </Show>
 -          </box>
 -        </Show>
--        <Show when={(!inMinimal() || expanded()) && summary().body}>
+-        <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
 -          <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
 -            <Switch>
 -              <Match when={!isDone()}>
@@ -72,27 +72,30 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 -        </Show>
 +        {/* [local-smark] 唯一正文树只改变布局约束（maxHeight/overflow/wrapMode），
 +            展开/折叠与 streaming→done 都不重挂已高亮正文，修复展开后正文消失
-+            和高度冲突；预览裁剪交给 maxHeight 而非重挂更短内容 */}
-+        <box
-+          paddingLeft={inMinimal() ? 2 : 0}
-+          marginTop={1}
-+          maxHeight={!inMinimal() || expanded() ? undefined : REASONING_PREVIEW_ROWS}
-+          overflow={!inMinimal() || expanded() ? "visible" : "hidden"}
-+        >
-+          <code
-+            filetype="markdown"
-+            drawUnstyledText={false}
-+            streaming={!isDone()}
-+            syntaxStyle={syntax()}
-+            content={renderedContent()}
-+            conceal={ctx.conceal()}
-+            fg={theme.textMuted}
-+            wrapMode={!inMinimal() || expanded() ? "word" : "char"}
-+          />
-+          <Show when={inMinimal() && !expanded()}>
-+            <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
-+          </Show>
-+        </box>
++            和高度冲突；预览裁剪交给 maxHeight 而非重挂更短内容。
++            content() 门合并旧预览/展开双门的可见语义：加密（opaque）part 只留 header */}
++        <Show when={content()}>
++          <box
++            paddingLeft={inMinimal() ? 2 : 0}
++            marginTop={1}
++            maxHeight={!inMinimal() || expanded() ? undefined : REASONING_PREVIEW_ROWS}
++            overflow={!inMinimal() || expanded() ? "visible" : "hidden"}
++          >
++            <code
++              filetype="markdown"
++              drawUnstyledText={false}
++              streaming={!isDone()}
++              syntaxStyle={syntax()}
++              content={renderedContent()}
++              conceal={ctx.conceal()}
++              fg={theme.textMuted}
++              wrapMode={!inMinimal() || expanded() ? "word" : "char"}
++            />
++            <Show when={inMinimal() && !expanded()}>
++              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
++            </Show>
++          </box>
++        </Show>
        </box>
      </Show>
    )

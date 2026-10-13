@@ -457,35 +457,59 @@ index 0000000000000000000000000000000000000000..190f0be53e01be1fb0f12b4ca6e04226
 +| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R2 | yes | No blocking findings. | N-01 INV-07 pure helper not full failToolCall e2e; N-02 no explicit non-task negative case; N-03 E arithmetic soft; N-04 file budget soft vs user ≤4 | APPROVE | task `ses_076e600e6ffejodIvgIC9XYwqu` |
+
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+index 39f61b437..7883bb4e0 100644
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -140,6 +140,23 @@ export function formatTaskIdNotice(input: { provided: string }) {
+   })
+ }
+ 
++// #528：task 中断/失败投影与成功路径共用同一 resume 行。
++// 放 util（而非 task.ts）：task 已 import message-v2，若投影再 import task 会形成加载环。
++// 措辞与 task 工具的 task_id 参数描述对齐：模型靠 `task_id: <SessionID>` 前缀做 resume，禁止第二套方言。
++export function formatTaskResumeLine(sessionID: string) {
++  return `task_id: ${sessionID} (for resuming to continue this task if needed)`
++}
++
++// #528：仅在缺失时 prepend 一行；已含同一 session 的 task_id 子串则原样返回。
++// 子串检测用裸 `task_id: <id>`：task.ts 的 non-abort 错误文案（Subagent failed (task_id: ...)）
++// 已携带裸前缀，此时不得再叠一份完整行。空 text 只返回 resume 行，避免多余空段落。
++export function ensureTaskResumeVisible(text: string, sessionID: string) {
++  const line = formatTaskResumeLine(sessionID)
++  if (text.includes(`task_id: ${sessionID}`)) return text
++  if (text.length === 0) return line
++  return `${line}\n\n${text}`
++}
++
+ function formatNotice(input: Notice) {
+   // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
+   return `<opencode_notice ${Object.entries(input)
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 24e84fe5e629f8ac2e8693a2984236aa4065e21e..6df0ca928489ac9dc8691f8813ef93bc2fea94ab 100644
+index ce90ef6e7..dae3efabd 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -23,7 +23,11 @@ import * as EffectLogger from "@opencode-ai/core/effect/logger"
- import { MessageError } from "./message-error"
- import { CompactionBoundary } from "./compaction-boundary"
- import { AuthError, OutputLengthError } from "./message-error"
+@@ -36,7 +36,7 @@ import { iife } from "@/util/iife"
+ import { errorMessage } from "@/util/error"
+ import { isMedia } from "@/util/media"
+ // #282：compaction 清理后改用统一 notice 信封，替代旧的硬编码英文标记
 -import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
-+import {
-+  ensureTaskResumeVisible,
-+  formatCompactionClearedNotice,
-+  formatExecutionNotice,
-+} from "@/util/output-notice"
- export { AuthError, OutputLengthError } from "./message-error"
- 
- /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
-@@ -1198,24 +1202,37 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
++import { ensureTaskResumeVisible, formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
+ import type { SystemError } from "bun"
+ import type { Provider } from "@/provider/provider"
+ import { Effect, Schema } from "effect"
+@@ -584,24 +584,33 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
                : undefined
              const partialOutput = interrupted ? part.state.metadata?.output : undefined
-+            // task 在 create 后把 child id 写入 metadata.sessionId；中断路径无 state.output。
++            // #528：task 在 create 后把 child id 写入 metadata.sessionId；中断路径无 state.output。
 +            // 投影必须 ensure resume 行，否则模型无法续跑（INV-01 投影 first divergence）。
 +            // 顺序：先 ensure 基文，再挂既有 abort notice，避免 notice 插在 task_id 之前。
 +            // 仅 tool===task 且 sessionId 为 string 时生效；其它工具保持原合同（INV-03）。
 +            const taskSessionId =
-+              part.tool === "task" && typeof part.state.metadata?.sessionId === "string"
-+                ? part.state.metadata.sessionId
-+                : undefined
++              part.tool === "task" && typeof part.state.metadata?.sessionId === "string" ? part.state.metadata.sessionId : undefined
              if (typeof partialOutput === "string") {
 +              const body = taskSessionId ? ensureTaskResumeVisible(partialOutput, taskSessionId) : partialOutput
                assistantMessage.parts.push({
@@ -500,10 +524,8 @@ index 24e84fe5e629f8ac2e8693a2984236aa4065e21e..6df0ca928489ac9dc8691f8813ef93bc
                  ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
                })
              } else {
-+              // 无 partial 时仍走 output-error，不把 abort 伪装成 completed（INV-04）
-+              const errorBody = taskSessionId
-+                ? ensureTaskResumeVisible(part.state.error, taskSessionId)
-+                : part.state.error
++              // #528：无 partial 时仍走 output-error，不把 abort 伪装成 completed（INV-04）
++              const errorBody = taskSessionId ? ensureTaskResumeVisible(part.state.error, taskSessionId) : part.state.error
                assistantMessage.parts.push({
                  type: ("tool-" + part.tool) as `tool-${string}`,
                  state: "output-error",
@@ -514,14 +536,14 @@ index 24e84fe5e629f8ac2e8693a2984236aa4065e21e..6df0ca928489ac9dc8691f8813ef93bc
                  ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                  ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
                })
-@@ -1223,16 +1240,25 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -609,16 +618,25 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
            }
            // Handle pending/running tool calls to prevent dangling tool_use blocks
            // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
 -          if (part.state.status === "pending" || part.state.status === "running")
 +          if (part.state.status === "pending" || part.state.status === "running") {
-+            // open task 在 running 态 metadata 里常已有 sessionId；投影 resume 行供后续 task 续跑。
-+            // pending 无 metadata 字段：无 sessionId 时保持原 interrupted 固定串。
++            // #528：open task 在 running 态 metadata 里常已有 sessionId；投影 resume 行供后续 task 续跑。
++            // pending 无 metadata 字段：无 sessionId 时保持原 interrupted 固定串（INV-03）。
 +            const openMeta = "metadata" in part.state ? part.state.metadata : undefined
 +            const openTaskSessionId =
 +              part.tool === "task" && typeof openMeta?.sessionId === "string" ? openMeta.sessionId : undefined
@@ -542,124 +564,25 @@ index 24e84fe5e629f8ac2e8693a2984236aa4065e21e..6df0ca928489ac9dc8691f8813ef93bc
          }
          if (part.type === "reasoning") {
            if (differentModel) {
-diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 27e5e8a0c083e300d44d18a54eb73932c23108e3..dce74f62e659a216af0e1160391e05373fe05f89 100644
---- a/packages/opencode/src/session/processor.ts
-+++ b/packages/opencode/src/session/processor.ts
-@@ -84,6 +84,20 @@ export function interruptedToolMetadata(metadata: Record<string, unknown> | unde
-   return result
- }
- 
-+// non-abort 终态不得抹掉 task 在 create 后写入的 sessionId：否则模型无法 resume。
-+// 这是 INV-07 的 first divergence 修复点：旧逻辑只留 autoReview，会丢掉 child id。
-+// 只保留 resume 所需字段 + 既有 autoReview，不把 running 进度 metadata 全量带入 error。
-+export function failedToolMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-+  if (!metadata) return undefined
-+  const next: Record<string, unknown> = {}
-+  // autoReview 合同保持：与历史 non-abort fail 行为一致
-+  if (isRecord(metadata.autoReview)) next.autoReview = metadata.autoReview
-+  // sessionId 即 task_id；parentSessionId 便于审计父子关系，投影只消费 sessionId
-+  if (typeof metadata.sessionId === "string") next.sessionId = metadata.sessionId
-+  if (typeof metadata.parentSessionId === "string") next.parentSessionId = metadata.parentSessionId
-+  return Object.keys(next).length > 0 ? next : undefined
-+}
-+
- export type Result = "compact" | "stop" | "continue"
- 
- export type Event = LLM.Event
-@@ -346,7 +360,8 @@ export const layer = Layer.effect(
-               const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
-               // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
-               // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
--              // 非 abort error 仅保留 autoReview envelope，保持既有行为
-+              // non-abort 经 failedToolMetadata 保留 sessionId，避免 task create 后失败丢掉 resume id。
-+              // 不在此把 abort 改写为 completed，error 语义与 interrupted marker 必须保持。
-               const failStart = match.part.state.time?.start ?? Date.now()
-               yield* session.updatePart({
-                 ...match.part,
-@@ -356,9 +371,7 @@ export const layer = Layer.effect(
-                   error: toolAborted ? TOOL_ABORTED_ERROR : reason,
-                   metadata: toolAborted
-                     ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
--                    : match.part.state.metadata?.autoReview
--                      ? { autoReview: match.part.state.metadata.autoReview }
--                      : undefined,
-+                    : failedToolMetadata(match.part.state.metadata),
-                   time: { start: failStart, end: Date.now() },
-                 },
-               })
-diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index e990bd0efad4d4b489392a5ca9bb40aca9fe6704..95d4bbbe2cca61d40df44cbf40a231ff6ebed523 100644
---- a/packages/opencode/src/tool/task.ts
-+++ b/packages/opencode/src/tool/task.ts
-@@ -19,7 +19,7 @@ import { Permission } from "@/permission"
- import path from "path"
- import { InstanceState } from "@/effect/instance-state"
- import { mergeRanges } from "@/util/range"
--import { formatTaskIdNotice } from "@/util/output-notice"
-+import { formatTaskIdNotice, formatTaskResumeLine } from "@/util/output-notice"
- 
- // SessionID 生成 body 固定 26（见 packages/core Identifier LENGTH / id.ts）；完整 ID = "ses_" + body。
- const SESSION_ID_BODY_LENGTH = 26
-@@ -141,10 +141,12 @@ export const Parameters = Schema.Struct({
-   }),
- })
- 
--// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析
-+// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析。
-+// resume 行与中断投影共用 formatTaskResumeLine（util），避免成功/失败两套措辞（INV-02）。
-+// 不在此导出 helper：message-v2 已依赖 util，禁止 message-v2 import task 形成环。
- function output(sessionID: SessionID, text: string, notice?: string) {
-   return [
--    `task_id: ${sessionID} (for resuming to continue this task if needed)`,
-+    formatTaskResumeLine(sessionID),
-     ...(notice ? [notice] : []),
-     "",
-     "<task_result>",
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
-index 355345d47d1158f90933c49b6b2e8bb57e92ca82..ae8890cd47e4a170bfd175c1251e8c38907a42d3 100644
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
-@@ -133,6 +133,24 @@ export function formatTaskIdNotice(input: { provided: string }) {
-   })
- }
- 
-+// task 成功路径与中断/失败投影共用同一 resume 行。
-+// 放 util（而非 task.ts）：task 已 import message-v2，若投影再 import task 会形成加载环。
-+// 措辞与历史成功 output 对齐：模型靠 `task_id: <SessionID>` 前缀做 resume，禁止第二套方言。
-+export function formatTaskResumeLine(sessionID: string) {
-+  return `task_id: ${sessionID} (for resuming to continue this task if needed)`
-+}
-+
-+// 仅在缺失时 prepend 一行；已含同一 session 的 task_id 子串则原样返回。
-+// 空 text 时只返回 resume 行，避免多余空段落进入模型上下文。
-+export function ensureTaskResumeVisible(text: string, sessionID: string) {
-+  const line = formatTaskResumeLine(sessionID)
-+  if (text.includes(`task_id: ${sessionID}`)) return text
-+  if (text.length === 0) return line
-+  return `${line}
-+
-+${text}`
-+}
-+
- function formatNotice(input: Notice) {
-   return `<opencode_notice ${Object.entries(input)
-     .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))
+
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index 041af95f98902e5dfb11ea7617d769f04b1e2b02..c186eca0f4ec847f644d252917461c0b356ebdc4 100644
+index 82a52c0ae..6822972f5 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -1460,6 +1460,171 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -190,6 +190,224 @@ describe("session.message-v2.toModelMessage", () => {
      expect(toolResult.output!.value).toContain('elapsed_ms="5000"')
    })
  
-+  // INV-01：task 中断后 metadata.sessionId 已在，但无 state.output。
++
++  // #528 INV-01：task 中断后 metadata.sessionId 已在，但无 state.output。
 +  // 模型侧必须仍见与成功路径同形的 resume 行，否则无法 task_id 续跑。
 +  // 本用例锁定投影层 first divergence（忽略 sessionId）。
 +  test("interrupted task without output still surfaces task_id for resume", async () => {
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +    const child = "ses_0123456789abcdef01234567"
++    // DB 真实形态：abort 时 failToolCall 经 interruptedToolMetadata 保留 sessionId，
++    // 但无 state.output——投影只能从 metadata 取 id（红色信号原始样本）。
 +
 +    const input: MessageV2.WithParts[] = [
 +      {
@@ -702,12 +625,14 @@ index 041af95f98902e5dfb11ea7617d769f04b1e2b02..c186eca0f4ec847f644d252917461c0b
 +    expect(toolResult.output!.value.split(`task_id: ${child}`).length - 1).toBe(1)
 +  })
 +
-+  // INV-01 open 分支：running/pending 被投影成 interrupted 时同样要带 task_id。
++  // #528 INV-01 open 分支：running/pending 被投影成 interrupted 时同样要带 task_id。
 +  // 覆盖 DB 中父 part 未终态化、子 sessionId 已写入的真实形态。
 +  test("running task with sessionId surfaces task_id when projected as interrupted", async () => {
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +    const child = "ses_abcdef0123456789abcdef01"
++    // running 态带 metadata（open part 已写入 child id）；pending 态无 metadata 字段，
++    // 两部都投影为 interrupted 固定串，但只有前者能恢复 resume 行。
 +
 +    const input: MessageV2.WithParts[] = [
 +      {
@@ -740,12 +665,16 @@ index 041af95f98902e5dfb11ea7617d769f04b1e2b02..c186eca0f4ec847f644d252917461c0b
 +    expect(toolResult.output!.value).toContain("[Tool execution was interrupted]")
 +  })
 +
-+  // INV-01 + INV-07 下游：create 后 non-abort 失败无 interrupted 标记，
++  // #528 INV-01 + INV-07 下游：create 后 non-abort 失败无 interrupted 标记，
 +  // 只要 sessionId 仍在 metadata，投影就必须给出 resume 行（与 abort 对称）。
++  // 目标 processor non-abort 保留全量 metadata（比源的 failedToolMetadata 更强），
++  // 故本用例直接锁定投影层合同。
 +  test("non-abort task error with sessionId surfaces task_id", async () => {
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
 +    const child = "ses_111111111111111111111111"
++    // already-running 是 create 后、metadata 写入后的真实 non-abort 失败路径：
++    // 目标 processor 保留全量 metadata，投影层必须把 id 变成模型可见文本。
 +
 +    const input: MessageV2.WithParts[] = [
 +      {
@@ -779,7 +708,7 @@ index 041af95f98902e5dfb11ea7617d769f04b1e2b02..c186eca0f4ec847f644d252917461c0b
 +    expect(toolResult.output!.value).toContain("already running")
 +  })
 +
-+  // INV-06：metadata.output 已含 resume 行时 ensure 必须 no-op，避免双前缀撑爆上下文。
++  // #528 INV-06：metadata.output 已含 resume 行时 ensure 必须 no-op，避免双前缀撑爆上下文。
 +  test("interrupted task partial that already has task_id is not double-prefixed", async () => {
 +    const userID = "m-user"
 +    const assistantID = "m-assistant"
@@ -813,52 +742,55 @@ index 041af95f98902e5dfb11ea7617d769f04b1e2b02..c186eca0f4ec847f644d252917461c0b
 +
 +    const result = await MessageV2.toModelMessages(input, model)
 +    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
++    // interrupted 且有 metadata.output 时走 output-available（type=text）而非 error-text
 +    expect(toolResult.output!.type).toBe("text")
 +    expect(toolResult.output!.value.split(`task_id: ${child}`).length - 1).toBe(1)
 +    expect(toolResult.output!.value).toContain("partial body")
 +  })
 +
++  // #528 INV-06 目标方言适配：task.ts 的 non-abort 错误文案内嵌裸 `task_id: <id>`
++  // （Subagent failed (task_id: ...): ...）。ensure 检测到裸前缀时必须 no-op，
++  // 不得叠第二份完整 resume 行（源 edit.test 的 failedToolMetadata 合同在目标
++  // 由全量 metadata 保留 + 本投影合同共同承载，此处锁定不双前缀边界）。
++  test("non-abort task error text that already embeds bare task_id is not double-prefixed", async () => {
++    const userID = "m-user"
++    const assistantID = "m-assistant"
++    const child = "ses_333333333333333333333333"
++
++    const input: MessageV2.WithParts[] = [
++      {
++        info: userInfo(userID),
++        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
++      },
++      {
++        info: assistantInfo(assistantID, userID),
++        parts: [
++          {
++            ...basePart(assistantID, "a1"),
++            type: "tool",
++            callID: "call-task-embed",
++            tool: "task",
++            state: {
++              status: "error",
++              input: { description: "x", prompt: "y", subagent_type: "explore" },
++              error: `Subagent failed (task_id: ${child}): child boom`,
++              metadata: { sessionId: child, parentSessionId: "ses_parentparentparentparentpa" },
++              time: { start: 0, end: 5 },
++            },
++          },
++        ] as MessageV2.Part[],
++      },
++    ]
++
++    const result = await MessageV2.toModelMessages(input, model)
++    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
++    expect(toolResult.output!.type).toBe("error-text")
++    // 裸前缀已可见：不再 prepend 完整行，全文只出现一次 task_id
++    expect(toolResult.output!.value.split(`task_id: ${child}`).length - 1).toBe(1)
++    expect(toolResult.output!.value).toContain("child boom")
++    expect(toolResult.output!.value).not.toContain("(for resuming to continue this task if needed)")
++  })
++
    // [local-smark] 旧记录无 executionElapsedMs：保持原样，不追溯伪造 elapsed
    test("old interrupted without marker stays unchanged", async () => {
      const userID = "m-user"
-diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 66ba8e2337ab93a86e1aac2b807b170439363a1e..de93ac931c8e1679096b84a493450a9700296d5e 100644
---- a/packages/opencode/test/tool/edit.test.ts
-+++ b/packages/opencode/test/tool/edit.test.ts
-@@ -1367,7 +1367,8 @@ describe("tool.edit", () => {
- })
- 
- // INV-16 processor 参数面替换：legacy 入参 + _syncInput → 仅 { filePath, edits }
--import { resolveCompletedToolInput, stripToolTruthMetadata } from "../../src/session/processor"
-+// INV-07 non-abort fail 保留 task sessionId
-+import { failedToolMetadata, resolveCompletedToolInput, stripToolTruthMetadata } from "../../src/session/processor"
- 
- describe("tool input truth sync (processor contract)", () => {
-   test("legacy top-level fields dropped when _syncInput present", () => {
-@@ -1405,4 +1406,26 @@ describe("tool input truth sync (processor contract)", () => {
-     })
-     expect(stripped).toEqual({ diff: "d" })
-   })
-+
-+  // INV-07：failToolCall non-abort 终态化的 metadata 合同。
-+  // create 后已写入的 sessionId/parentSessionId 必须保留，否则投影层无 resume 源；
-+  // title/model 等 running 进度字段必须丢弃，避免 error 态泄漏无关状态。
-+  test("failedToolMetadata keeps sessionId and drops progress-only fields", () => {
-+    const id = "ses_0123456789abcdef01234567"
-+    expect(
-+      failedToolMetadata({
-+        sessionId: id,
-+        parentSessionId: "ses_parentparentparentparentpa",
-+        title: "Audit runtime",
-+        model: { modelID: "x" },
-+        autoReview: { status: "pending" },
-+      }),
-+    ).toEqual({
-+      sessionId: id,
-+      parentSessionId: "ses_parentparentparentparentpa",
-+      autoReview: { status: "pending" },
-+    })
-+    expect(failedToolMetadata({ title: "only" })).toBeUndefined()
-+    expect(failedToolMetadata(undefined)).toBeUndefined()
-+  })
- })

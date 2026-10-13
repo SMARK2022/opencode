@@ -14,6 +14,7 @@ running 快照，导致参数已固定仍显示 Writing command...。
 在 PermissionReviewer 单次写入中优先 structured / metadata.command，并在 TUI
 equal-v0 仅补全 input/autoReview/title，不改 progress 单调合同。
 
+
 diff --git a/docs/plans/shell-auto-review-input-visibility.md b/docs/plans/shell-auto-review-input-visibility.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..8f4c0c554294a1df9285470c1b511f4d0cfcc3ca
@@ -365,15 +366,16 @@ index 0000000000000000000000000000000000000000..8f4c0c554294a1df9285470c1b511f4d
 +```
 +
 +Audited artifact: implementation diff of the four listed files against approved plan **R7**. Full original requirement and durable+TUI live interface covered. Chinese comment gate PASS (E=311, C=50, need≥47).
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index b5a99442d42ce4b18f081691cdda1438a5752c4b..1dbd687ed20fcd522cebb657c9a1fb898ce0714f 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -316,6 +316,52 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index 5265284e4..1091edb10 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -367,6 +367,51 @@ export const {
+     // 当 Session 首次加载、切换或 reconnect 时，HTTP snapshot 与 live BusEvent
      // 可以独立到达；不带 time.end 的短文本不能回退本地已拼接内容。
-     // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
      // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
-+    // equal-v0 字段补全：只合并 input/autoReview/title，不把 next.output 当更新的进度。
++    // #531 equal-v0 字段补全：只合并 input/autoReview/title，不把 next.output 当更新的进度。
 +    // 这是进度合同之外的生命周期 enrich，不是把 progress 比较改成 >=。
 +    // reviewing 窗内 shell 尚未 bump progressVersion，equal-v0 很常见。
 +    function enrichEqualVersionBashRunning(existing: Part, next: Part): Part {
@@ -387,11 +389,10 @@ index b5a99442d42ce4b18f081691cdda1438a5752c4b..1dbd687ed20fcd522cebb657c9a1fb89
 +        next.state.input && typeof next.state.input === "object" && !Array.isArray(next.state.input)
 +          ? (next.state.input as Record<string, unknown>)
 +          : {}
-+      // raw-only → structured 单向：有 command 后不得再被 raw 快照盖回。
++      // #531 raw-only → structured 单向：有 command 后不得再被 raw 快照盖回。
 +      // 已有 structured 时保留 existing.input，防止后到的残缺快照回退 command。
 +      const existingKeys = Object.keys(existingInput)
-+      const existingRawOnly =
-+        existingKeys.length === 1 && existingKeys[0] === "raw" && typeof existingInput.raw === "string"
++      const existingRawOnly = existingKeys.length === 1 && existingKeys[0] === "raw" && typeof existingInput.raw === "string"
 +      const nextStructured = Object.keys(nextInput).some((key) => key !== "raw")
 +      const input = existingRawOnly && nextStructured ? nextInput : existingInput
 +      const existingMeta =
@@ -402,7 +403,7 @@ index b5a99442d42ce4b18f081691cdda1438a5752c4b..1dbd687ed20fcd522cebb657c9a1fb89
 +        next.state.metadata && typeof next.state.metadata === "object" && !Array.isArray(next.state.metadata)
 +          ? next.state.metadata
 +          : {}
-+      // 保留 existingMeta 中的 output/progressVersion；只补 autoReview envelope。
++      // #531 保留 existingMeta 中的 output/progressVersion；只补 autoReview envelope。
 +      // time.start 保留先到 running 的开始时刻，避免审核写重置执行计时观感。
 +      return {
 +        ...existing,
@@ -422,7 +423,7 @@ index b5a99442d42ce4b18f081691cdda1438a5752c4b..1dbd687ed20fcd522cebb657c9a1fb89
      function mergeLivePart(existing: Part | undefined, next: Part) {
        if (!existing) return next
        if (next.type === "text") {
-@@ -351,7 +397,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -402,7 +447,14 @@ export const {
              if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return 0
              return value
            }
@@ -431,48 +432,49 @@ index b5a99442d42ce4b18f081691cdda1438a5752c4b..1dbd687ed20fcd522cebb657c9a1fb89
 +          const existingVersion = version(existing)
 +          if (nextVersion > existingVersion) return next
 +          if (nextVersion < existingVersion) return existing
-+          // equal-v0：进度不前进时仍允许 input/autoReview 生命周期字段一次补全，
++          // #531 equal-v0：进度不前进时仍允许 input/autoReview 生命周期字段一次补全，
 +          // 避免 reviewing 快照被更早的 raw-only 或无 envelope running 永久挡住。
 +          // 不得用 next 的 output/progress 回退 live 输出（不是 progress >=）。
 +          return enrichEqualVersionBashRunning(existing, next)
          }
          // tool 只在 pending 阶段保护 raw（delta 累积的参数 JSON）；
          // 非 shell running 状态仍保持既有 PartUpdated 语义。
+
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 60dfbf0c4701dfd945bd9cc72310dc0c2d1eb795..008fe4d720e867e6f7a2ce24408f4c5205fb4bc7 100644
+index 13e66bf19..48127c9c4 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -946,7 +946,7 @@ export const layer = Layer.effect(
-           (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
+@@ -999,7 +999,7 @@ export const layer = Layer.effect(
          )
          if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
+         // #209：保留现有 autoReview metadata——reviewing → allowed/denied 渐进更新不覆盖已写入的 reviewID/precheck
 -        const metadata = part.state.status === "running" ? part.state.metadata : {}
 +        const metadata = part.state.status === "running" ? (part.state.metadata ?? {}) : {}
          const current =
            metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
              ? metadata.autoReview
-@@ -954,11 +954,15 @@ export const layer = Layer.effect(
+@@ -1007,11 +1007,15 @@ export const layer = Layer.effect(
          // onInterrupt 可能在 handleReviewerFailure 写入终态后延迟触发；
          // "aborted" 不应覆盖更具体的终态（timed_out/failed/fallback_user/allowed/denied）。
          if (patch.status === "aborted" && current.status && current.status !== "reviewing") return
-+        // 审核展示写只做一次：优先保留已结构化 input，其次用 ask metadata 中已固定的
++        // #531 审核展示写只做一次：优先保留已结构化 input，其次用 ask metadata 中已固定的
 +        // command（Shell 在 Permission.ask 时已写入），避免 pending 仍写成 { raw }
 +        // 导致 TUI 整段 reviewing 窗显示 Writing command...。
 +        const toolInput = reviewDisplayToolInput(part, input.metadata)
-         yield* sessions.updatePart({
+         yield* session.updatePart({
            ...part,
            state: {
              status: "running",
 -            input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
 +            input: toolInput,
+             // #209：title 随状态变化——reviewing 显示 precheck level，其余显示具体状态供 UI 区分
              title:
                patch.status === "reviewing" ? `Auto review: ${input.precheck.level}` : `Auto review: ${patch.status}`,
-             metadata: {
-@@ -1202,4 +1206,37 @@ function recordJsonFallbackDecision(
+@@ -1257,6 +1261,39 @@ function recordJsonFallbackDecision(
    })
  }
  
-+// 仅 { raw } 是历史 pending 提升形状；任意其它自有键表示已有结构化工具参数。
++// #531：仅 { raw } 是历史 pending 提升形状；任意其它自有键表示已有结构化工具参数。
 +// 不得把空 {} 当成 structured，否则会挡住 metadata.command 回填。
 +// 判定只看自有键形状，不解析 raw JSON，避免第二套参数源。
 +// 与 TUI equal-v0 enrich 共用同一 raw-only 语义，防止 durable/live 对“有无 command”判断分叉。
@@ -481,16 +483,16 @@ index 60dfbf0c4701dfd945bd9cc72310dc0c2d1eb795..008fe4d720e867e6f7a2ce24408f4c52
 +  return keys.length === 1 && keys[0] === "raw" && typeof input.raw === "string"
 +}
 +
-+// structured = 非空且非 raw-only；tool-call 写入的 command/filePath 等均属此类。
++// #531：structured = 非空且非 raw-only；tool-call 写入的 command/filePath 等均属此类。
 +// 空对象不算 structured：pending 初值 {} 必须继续落到 metadata.command 分支。
 +function isStructuredToolInput(input: Record<string, unknown>) {
 +  return Object.keys(input).length > 0 && !isRawOnlyToolInput(input)
 +}
 +
-+// 审核展示用 input 的唯一决策函数：一次选择、一次写入。
++// #531：审核展示用 input 的唯一决策函数：一次选择、一次写入。
 +// 优先级：已有 structured → ask metadata.command → pending.raw → 原值。
 +// 该顺序保证“参数已固定仍 Writing command...”在 pending-at-review 路径上可被单一 owner 修复。
-+function reviewDisplayToolInput(part: MessageV2.ToolPart, askMetadata: Readonly<Record<string, unknown>>) {
++function reviewDisplayToolInput(part: ToolPart, askMetadata: Readonly<Record<string, unknown>>) {
 +  const current = part.state.input as Record<string, unknown>
 +  // tool-call 已写入的 structured input 优先，禁止用 { raw } 覆盖（INV-02）。
 +  if (isStructuredToolInput(current)) return current
@@ -505,26 +507,26 @@ index 60dfbf0c4701dfd945bd9cc72310dc0c2d1eb795..008fe4d720e867e6f7a2ce24408f4c52
 +  return current
 +}
 +
- export * as PermissionReviewer from "./service"
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index cc15d30b16f7de3b444ae600332f91d4b29e5d1d..12c0bdb655fe84356c43f3cb044fc2cd85681253 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -817,6 +817,130 @@ describe("tui sync", () => {
+ // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
+ // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
+ // #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+index 505372db6..f9d7f1c42 100644
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -854,6 +854,123 @@ describe("tui sync part delta coalesce (#186)", () => {
      }
    })
  
++  // #531 equal-v0 生命周期：先到 reviewing raw-only 不得永久挡住后到 structured command，
++  // 且 autoReview envelope 必须保留（否则会出现 Writing command... 或丢审核行）。
++  // progressVersion 均缺省 → legacy v0，触发字段 enrich 而非 progress 前进分支。
 +  test("enriches equal-v0 bash running from raw-only autoReview to structured command", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    const message = assistantMessage()
 +    const command = "git push origin dev"
-+    // equal-v0 生命周期：先到 reviewing raw-only 不得永久挡住后到 structured command，
-+    // 且 autoReview envelope 必须保留（否则会出现 Writing command... 或丢审核行）。
-+    // 旧 merge 整对象 keep first：command 永久缺失；本用例必须在修复前红、修复后绿。
-+    // progressVersion 均缺省 → legacy v0，触发字段 enrich 而非 progress 前进分支。
 +    const reviewingRaw = {
 +      ...runningShellPart(""),
 +      state: {
@@ -549,7 +551,7 @@ index cc15d30b16f7de3b444ae600332f91d4b29e5d1d..12c0bdb655fe84356c43f3cb044fc2cd
 +        time: { start: 2 },
 +      },
 +    } satisfies ToolPart
-+    const { app, emit, sync } = await mount()
++    const { app, emit, sync } = await mount(undefined, tmp.path)
 +
 +    try {
 +      emit(messageEvent(message))
@@ -573,19 +575,16 @@ index cc15d30b16f7de3b444ae600332f91d4b29e5d1d..12c0bdb655fe84356c43f3cb044fc2cd
 +      })
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
++  // #531 tool-call-first：先 structured running，再 reviewing envelope，equal-v0 须补 autoReview。
++  // 不得为了补 envelope 而丢掉已有 command，也不得要求 progressVersion 递增。
 +  test("enriches equal-v0 bash running autoReview without dropping structured command", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    const message = assistantMessage()
 +    const command = "cat id_rsa"
-+    // tool-call-first：先 structured running，再 reviewing envelope，equal-v0 须补 autoReview。
-+    // 不得为了补 envelope 而丢掉已有 command，也不得要求 progressVersion 递增。
 +    const structured = {
 +      ...runningShellPart(""),
 +      state: {
@@ -610,7 +609,7 @@ index cc15d30b16f7de3b444ae600332f91d4b29e5d1d..12c0bdb655fe84356c43f3cb044fc2cd
 +        time: { start: 1 },
 +      },
 +    } satisfies ToolPart
-+    const { app, emit, sync } = await mount()
++    const { app, emit, sync } = await mount(undefined, tmp.path)
 +
 +    try {
 +      emit(messageEvent(message))
@@ -634,168 +633,114 @@ index cc15d30b16f7de3b444ae600332f91d4b29e5d1d..12c0bdb655fe84356c43f3cb044fc2cd
 +      })
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
    // 复现核心竞态：daemon 的 message.part.updated 事件通过 fire-and-forget
    // 发送（void Effect.runPromise），而 message.part.delta 通过 yield* await
    // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta
+
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
-index 41607782df221e11425c22334d460530d84358bb..fd11d3fdfbeb67a2984bae637abd5adbbf31114b 100644
+index 6e53a7ae1..03f4b54df 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -9,11 +9,16 @@ import { Provider } from "../../src/provider/provider"
- import { ModelID, ProviderID } from "../../src/provider/schema"
- import { Session } from "../../src/session/session"
- import { MessageV2 } from "../../src/session/message-v2"
--import { SessionID } from "../../src/session/schema"
-+import { MessageID, PartID, SessionID } from "../../src/session/schema"
- import { ProjectID } from "../../src/project/schema"
- import { testEffect } from "../lib/effect"
- import { TestConfig } from "../fixture/config"
- import { ProviderTest } from "../fake/provider"
-+import { Bus } from "../../src/bus"
-+import { Storage } from "../../src/storage/storage"
-+import { SyncEvent } from "../../src/sync"
-+import { RuntimeFlags } from "../../src/effect/runtime-flags"
-+import { BackgroundJob } from "../../src/background/job"
- 
- // 这个命令覆盖 reviewer 证据里最容易被回归破坏的 shell 形态：空格路径、引号、
- // 环境变量、管道、重定向、子命令和危险删除意图都必须保留在 user evidence，
-@@ -362,8 +367,172 @@ describe("permission reviewer service", () => {
+@@ -399,6 +399,66 @@ describe("permission reviewer service", () => {
        expect(decisions.every((part) => part.state.status === "error")).toBe(true)
      }),
    )
 +
-+  // durable 必红夹具：MessageV2.get 读到仍为 pending 的父 ToolPart 时，promote 必须用
++  // #531：durable 必红夹具：session.messages 读到仍为 pending 的父 ToolPart 时，promote 必须用
 +  // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
 +  // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
 +  // 夹具强制 pending-at-review：不依赖 AI SDK 调度竞态，稳定复现 reviewing 窗 raw-only 缺陷。
-+  // tool 字段必须带 messageID/callID，否则 updateToolAutoReview 直接 no-op。
-+  const parentToolPartFixture = parentToolPartReviewFixture()
-+  const parentToolPart = testEffect(parentToolPartFixture.layer)
++  const pendingCommandFixture = parentToolPartReviewFixture(
++    parentToolPartSeedMessage("call_pending_command", "pending", "cat id_rsa"),
++  )
++  const structuredKeepFixture = parentToolPartReviewFixture(
++    parentToolPartSeedMessage("call_structured_keep", "running", "git push origin dev"),
++  )
++  const pendingCommand = testEffect(pendingCommandFixture.layer)
++  const structuredKeep = testEffect(structuredKeepFixture.layer)
 +
-+  parentToolPart.instance("promotes pending parent ToolPart using metadata.command as structured input", () =>
++  pendingCommand.effect("promotes pending parent ToolPart using metadata.command as structured input", () =>
 +    Effect.gen(function* () {
-+      const sessions = yield* Session.Service
 +      const reviewer = yield* PermissionReviewer.Service
-+      // 真实 Session + SQLite：MessageV2.get 与生产同路径，禁止只 mock updatePart。
-+      const chat = yield* sessions.create({ title: "pending-command-promote" })
-+      const messageID = MessageID.ascending()
-+      const callID = "call_pending_command"
-+      // 命令字符串是用户可见的独立期望值，不是从实现反推。
-+      const command = "cat id_rsa"
-+      yield* sessions.updateMessage({
-+        id: messageID,
-+        sessionID: chat.id,
-+        role: "assistant",
-+        parentID: MessageID.ascending(),
-+        mode: "build",
-+        agent: "build",
-+        path: { cwd: chat.directory, root: chat.directory },
-+        cost: 0,
-+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        modelID: ModelID.make("gpt-5"),
-+        providerID: OPENAI_PROVIDER_ID,
-+        time: { created: Date.now() },
++      // tool 字段必须带 messageID/callID，否则 updateToolAutoReview 直接 no-op。
++      const decision = yield* reviewer.review({
++        ...reviewInput("review_pending_command", { command: "cat id_rsa" }),
++        sessionID: SessionID.make("session_parent_tool"),
++        tool: { messageID: "msg_tool_seed", callID: "call_pending_command" },
 +      })
-+      // 故意保持 pending：模拟 stream tool-call 尚未把 structured input 落库。
-+      yield* sessions.updatePart({
-+        id: PartID.ascending(),
-+        messageID,
-+        sessionID: chat.id,
-+        type: "tool",
-+        tool: "bash",
-+        callID,
-+        state: { status: "pending", input: {}, raw: JSON.stringify({ command, description: "Read key" }) },
-+      })
-+
-+      // review 完成会先后 mark reviewing 与 allowed；两阶段都必须保住 command。
-+      yield* reviewer.review({
-+        reviewID: "review_pending_command",
-+        sessionID: chat.id,
-+        permission: "bash",
-+        patterns: [command],
-+        metadata: { command, cwd: chat.directory, shell: "bash" },
-+        precheck: { level: "cautious", reason: "private key path requires review" },
-+        tool: { messageID, callID },
-+      })
-+
-+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID })
-+      const part = stored.parts.find((item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID)
++      // decision allow 证明 reviewer 全链走通，提升写不是被静默跳过
++      expect(decision.action).toBe("allow")
++      // 捕获数组含 reviewing 与 allowed 两次 durable 写——终态断言必须取最后一次
++      const part = pendingCommandFixture.captured.findLast(
++        (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === "call_pending_command",
++      )
 +      expect(part?.state.status).toBe("running")
 +      if (part?.state.status !== "running") return
 +      // 用户可观察不变量：reviewing/allowed envelope 写入后 command 必须可渲染。
 +      // 旧实现会得到 input.raw 而无 command，TUI 显示 Writing command...
-+      expect(part.state.input.command).toBe(command)
++      expect((part.state.input as { command?: string }).command).toBe("cat id_rsa")
 +      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
 +    }),
 +  )
 +
-+  // regression：已 structured 的 running input 在 merge autoReview 时不得被 { raw } 覆盖。
++  // #531 regression：已 structured 的 running input 在 merge autoReview 时不得被 { raw } 覆盖。
 +  // 该序在旧代码上常已绿，仍锁定 INV-02，防止选择逻辑回退。
-+  parentToolPart.instance("keeps structured running input when merging autoReview status", () =>
++  structuredKeep.effect("keeps structured running input when merging autoReview status", () =>
 +    Effect.gen(function* () {
-+      const sessions = yield* Session.Service
 +      const reviewer = yield* PermissionReviewer.Service
-+      const chat = yield* sessions.create({ title: "structured-keep" })
-+      const messageID = MessageID.ascending()
-+      const callID = "call_structured_keep"
-+      const command = "git push origin dev"
-+      yield* sessions.updateMessage({
-+        id: messageID,
-+        sessionID: chat.id,
-+        role: "assistant",
-+        parentID: MessageID.ascending(),
-+        mode: "build",
-+        agent: "build",
-+        path: { cwd: chat.directory, root: chat.directory },
-+        cost: 0,
-+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        modelID: ModelID.make("gpt-5"),
-+        providerID: OPENAI_PROVIDER_ID,
-+        time: { created: Date.now() },
-+      })
-+      // 先写入 tool-call 形状的 structured running，再跑 review envelope。
-+      yield* sessions.updatePart({
-+        id: PartID.ascending(),
-+        messageID,
-+        sessionID: chat.id,
-+        type: "tool",
-+        tool: "bash",
-+        callID,
-+        state: {
-+          status: "running",
-+          input: { command, description: "Push branch" },
-+          time: { start: Date.now() },
-+        },
-+      })
-+
 +      yield* reviewer.review({
-+        reviewID: "review_structured_keep",
-+        sessionID: chat.id,
-+        permission: "bash",
-+        patterns: [command],
-+        metadata: { command, cwd: chat.directory, shell: "bash" },
-+        precheck: { level: "cautious", reason: "push requires review" },
-+        tool: { messageID, callID },
++        ...reviewInput("review_structured_keep", { command: "git push origin dev" }),
++        sessionID: SessionID.make("session_parent_tool"),
++        tool: { messageID: "msg_tool_seed", callID: "call_structured_keep" },
 +      })
-+
-+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID })
-+      const part = stored.parts.find((item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID)
++      // 捕获数组含 reviewing 与 allowed 两次 durable 写——终态断言必须取最后一次
++      const part = structuredKeepFixture.captured.findLast(
++        (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === "call_structured_keep",
++      )
 +      expect(part?.state.status).toBe("running")
 +      if (part?.state.status !== "running") return
 +      // description 来自既有 structured input，不得被仅含 command 的 metadata 提升抹掉。
-+      expect(part.state.input.command).toBe(command)
-+      expect(part.state.input.description).toBe("Push branch")
++      expect((part.state.input as { command?: string }).command).toBe("git push origin dev")
++      expect((part.state.input as { description?: string }).description).toBe("Push branch")
 +      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
 +    }),
 +  )
  })
  
-+function parentToolPartReviewFixture() {
+ // [local-smark] parentSessionModelFixture 开始
+@@ -1093,6 +1153,91 @@ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
+   }
+ }
+ 
++// #531：种子消息构造——messages mock 的返回形状与生产 session.messages 一致（info+parts），
++// info 只需满足 updateToolAutoReview 的 m.info.id 匹配，最小对象即可。
++function parentToolPartSeedMessage(callID: string, status: "pending" | "running", command: string) {
++  const seedPart = {
++    id: "part_tool_seed",
++    sessionID: SessionID.make("session_parent_tool"),
++    messageID: "msg_tool_seed",
++    type: "tool",
++    callID,
++    tool: "bash",
++    state:
++      status === "pending"
++        ? { status, input: {}, raw: JSON.stringify({ command, description: "Read key" }) }
++        : { status, input: { command, description: "Push branch" }, time: { start: 1 } },
++  } as MessageV2.ToolPart
++  return {
++    info: { id: "msg_tool_seed", sessionID: seedPart.sessionID, role: "assistant", time: { created: 1 } },
++    parts: [seedPart],
++  } as unknown as MessageV2.WithParts
++}
++
++// #531：durable 提升夹具——session.messages 种子父 ToolPart（pending 或 running），
++// updatePart 经 sessionPartStore 捕获；updateToolAutoReview 的真实选择逻辑全链可测。
++function parentToolPartReviewFixture(seed: MessageV2.WithParts) {
 +  const model = reviewerModel(OPENAI_PROVIDER_ID)
++  const captured: MessageV2.Part[] = []
 +  const fetch = Object.assign(
 +    async (_input: RequestInfo | URL, _init?: RequestInit) =>
 +      new Response(openAIReviewDecisionStream(), {
@@ -811,28 +756,50 @@ index 41607782df221e11425c22334d460530d84358bb..fd11d3fdfbeb67a2984bae637abd5adb
 +      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
 +    ),
 +  })
-+  const sessionLayer = Session.layer.pipe(
-+    Layer.provide(Bus.layer),
-+    Layer.provide(Storage.defaultLayer),
-+    Layer.provide(SyncEvent.defaultLayer),
-+    Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
-+    Layer.provide(BackgroundJob.defaultLayer),
-+  )
-+  // Session 既供给 PermissionReviewer，也暴露给测试体；MessageV2.get 读 SQLite 真路径。
++  const parentSession: Session.Info = {
++    id: SessionID.make("session_parent_tool"),
++    slug: "parent-tool",
++    projectID: ProjectV2.ID.make("project_reviewer_tool"),
++    directory: "/tmp",
++    title: "Parent tool part",
++    model: { id: model.id, providerID: model.providerID },
++    version: "test",
++    cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    time: { created: 1, updated: 1 },
++  }
++  const childSession: Session.Info = {
++    ...parentSession,
++    id: SessionID.make("session_reviewer_tool"),
++    parentID: parentSession.id,
++    agent: "permission-reviewer",
++    title: "Auto permission review",
++  }
++  const sessionLayer = Layer.mock(Session.Service)({
++    get: () => Effect.succeed(parentSession),
++    // #531：messages 必须真正返回种子消息——updateToolAutoReview 经 #208 的
++    // session.messages 读父 ToolPart；返回空数组会让提升 no-op，测试沦为双绿空洞。
++    messages: () => Effect.succeed([seed]),
++    children: () => Effect.succeed([]),
++    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
++    updateMessage: (message) => Effect.succeed(message),
++    findMessage: () => Effect.succeed(Option.none()),
++    ...sessionPartStore(captured),
++  })
 +  return {
-+    layer: Layer.mergeAll(
-+      sessionLayer,
-+      PermissionReviewer.layer.pipe(
-+        Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
-+        Layer.provide(provider.layer),
-+        Layer.provide(authLayer({ type: "api", key: "test-key" })),
-+        Layer.provide(pluginLayer()),
-+        Layer.provide(sessionLayer),
-+      ),
++    captured,
++    layer: PermissionReviewer.layer.pipe(
++      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
++      Layer.provide(provider.layer),
++      Layer.provide(authLayer({ type: "api", key: "test-key" })),
++      Layer.provide(pluginLayer()),
++      Layer.provide(sessionLayer),
++      // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}
 +
- function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
-   const parts = new Map<string, MessageV2.Part>()
-   const committed = Promise.withResolvers<void>()
+ // #497：既有 fixture 的 durable store 语义 retrofit——getPart 与 updatePart 共享同一 store，
+ // 保证旧测试也经过生产新增的权威读取边界；若仍只回显 update 参数，completed 测试会绕过
+ // 本次修复真正依赖的持久化语义。

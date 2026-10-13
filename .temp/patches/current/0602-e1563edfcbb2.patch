@@ -7,15 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(tool):=20diff=20=E9=97=A8=E6=8E=A7=E6=8C=89?=
  =?UTF-8?q?=EF=BC=8C=E6=A0=87=E8=AE=B0=E5=90=88=E6=B3=95=E5=8C=96?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-门B 判据从中段体积猜测改为 maxEditLength 预算探测 + patch 产物直测：小改大文件（变更跨度 >64KiB 但编辑距离小）恢复真实行级 diff 与真实计数，修复 Edit 卡片 whole-file rewrite 误标与 TUI Error parsing diff 红字事故。
+适配说明：file-diff.ts 六子 hunk 与 plan 文档原样落地（preimage blob 与 state 0600 精确匹配，0591 产物未被动过）；测试 import hunk 按目标 import 区重写（parsePatch 紧随 fs、file-diff import 在 ApplyPatchTool 前）；测试 describe 块插 toolDiffMessages 前（行号 ~+55）。语义零改写。
 
-rewrite/binary 标记正文行加空格前缀成为合法 context 行，任意 parsePatch 消费者零特判，计数重扫保持 0/0；真实大改（D>2000）与巨行产物（>64KiB）仍作文控处理；删除 MAX_DIFF_MIDDLE_CHARS 代理常量。计划 docs/plans/tool-diff-edit-budget-gate-repair.md（R2 双轮方案审计 + 实现审计通过）。
 
 diff --git a/docs/plans/tool-diff-edit-budget-gate-repair.md b/docs/plans/tool-diff-edit-budget-gate-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..a6a9884250fd0e3cd1ddff25dfcb9353a61c5200
 --- /dev/null
 +++ b/docs/plans/tool-diff-edit-budget-gate-repair.md
 @@ -0,0 +1,386 @@
@@ -405,8 +402,8 @@ index 0000000000000000000000000000000000000000..a6a9884250fd0e3cd1ddff25dfcb9353
 +| Round | Verdict | Findings | 处置 |
 +| --- | --- | --- |
 +| 1（R2 实现） | APPROVE | "No blocking findings." / "**APPROVE** — implementation audit round 1 of 3 for canonical plan `docs/plans/tool-diff-edit-budget-gate-repair.md` Revision R2. The actual working-tree diff (2 files + the plan) maps hunk-for-hunk to the approved R2 design with no material decision living only in chat, no unauthorized fallback, no weakened assertion, and every §18 verification command independently reproduced green. Approval covers only this exact diff against R2; any substantive change requires a fresh full-scope audit." 审计方独立复跑全部验证：66/0、87/0、25/0、6/0、tsgo clean；NB：①成功路径双跑（同被 D≤2000 界住，质量注记）；②产物界前向瞬时分配（计划轮已接受）；③短行域收窄（已披露风险+用户开放决策）；④§23 E/C 算术偏差（本版已按审计重算口径校正）；拒绝的推测：jsdiff 版本漂移/timeout 硬界/恶意 filePath/TUI 端到端需求 | 行政性记录：置 Status: verified；依 NB④ 校正 §23 E/C 数字（非实质性，不清空 verdict）；invocation ref: task ses_f9cbe88c4ffenT00bXmJTWyCd9 |
+
 diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
-index 1af9ab4b0e38a8fccd41303f4b9e24d027e8dc14..9e4fbd968da8f76bf2feeb965a8c6bb938402c0b 100644
 --- a/packages/opencode/src/tool/file-diff.ts
 +++ b/packages/opencode/src/tool/file-diff.ts
 @@ -1,5 +1,5 @@
@@ -529,24 +526,26 @@ index 1af9ab4b0e38a8fccd41303f4b9e24d027e8dc14..9e4fbd968da8f76bf2feeb965a8c6bb9
  export function countPatchStats(patch: string) {
    let additions = 0
    let deletions = 0
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index ca2b5481542c7716b226686ff72db18584289170..503349d09ef42dbc5c8d29d123f885f122c48349 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -1,7 +1,9 @@
+@@ -1,9 +1,11 @@
  import { describe, expect } from "bun:test"
  import path from "path"
  import * as fs from "fs/promises"
 +import { parsePatch } from "diff"
- import { Cause, Effect, Exit, Layer } from "effect"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Cause, Effect, Exit, Layer, Schema } from "effect"
 +import { countPatchStats, renderFileDiff } from "@/tool/file-diff"
  import { ApplyPatchTool } from "../../src/tool/apply_patch"
  import { WriteTool } from "../../src/tool/write"
  import { EditTool } from "../../src/tool/edit"
-@@ -1400,6 +1402,131 @@ describe("tool.edit metadata diff bounding (hosted per plan §15)", () => {
-   )
- })
+@@ -1455,6 +1457,132 @@ describe("tool.edit metadata diff bounding (hosted per plan §15)", () => {
  
+ // [local-smark] SummaryCache 摄入界切片：聚合端免疫已入库 legacy 巨型 metadata（216MB
+ // user message 行事故），且 write 显式计数优先于标记重扫描（plan B-02）。
 +// [local-smark] 门控按真实成本重定向切片（tool-diff-edit-budget-gate-repair R2 §16）：
 +// 判据 = 编辑距离预算 + 产物直测，取代中段体积猜测；标记为合法 unified 最小 hunk，
 +// 任意 parsePatch 消费者（TUI Diff renderable/权限预览）零特判。
@@ -672,6 +671,7 @@ index ca2b5481542c7716b226686ff72db18584289170..503349d09ef42dbc5c8d29d123f885f1
 +  )
 +})
 +
- // [local-smark] SummaryCache 摄入界切片：聚合端免疫已入库 legacy 巨型 metadata（216MB
- // user message 行事故），且 write 显式计数优先于标记重扫描（plan B-02）。
++
  const toolDiffMessages = (metadata: Record<string, unknown>) =>
+   [
+     {

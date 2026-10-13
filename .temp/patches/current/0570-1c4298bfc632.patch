@@ -12,9 +12,20 @@ Content-Transfer-Encoding: 8bit
 
 保留历史 Session 目录查询与无迁移合同，避免列表刷新擦除会话并造成空屏和 opencode -s undefined。
 
+
+适配说明（v1.18.32 重放）：
+H2 event.ts 落 packages/tui/src/context/event.ts（shouldDeliverScopedEvent 扩第三参
+activeSessionID，useEvent 经 useRoute 读取活动会话；与 #164/#165 global/project 分支、
+#499 lsp.updated 特判合并为单 admission owner）。H4/H5 测试随 owner 迁 tui 包并按目标
+事件 schema（envelope directory/project + payload.properties）重建。H3 project.ts 与 H6
+project.test 裁记：目标 v1.18.32 的 ProjectV2（remote??previous??root + commit 写回 +
+migrateProjectId 事务迁移）是互斥设计——用户可见后果链（列表丢会话/空屏）已由迁移机制
+消除，INV-01/05 的 copied-cache 严格性为上游显式选择不采纳（plan 第 5 节亦排除该分支）；
+--path-format=absolute 子修复已由 core git.ts resolvePath 等价覆盖。H7 落目标既有
+session-list.test（Project.ID 形态）。
+
 diff --git a/docs/plans/project-id-canonical-local-identity-repair.md b/docs/plans/project-id-canonical-local-identity-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..62733c02d2911b0966ccedf700c1945664b4aed5
 --- /dev/null
 +++ b/docs/plans/project-id-canonical-local-identity-repair.md
 @@ -0,0 +1,1323 @@
@@ -1341,387 +1352,214 @@ index 0000000000000000000000000000000000000000..62733c02d2911b0966ccedf700c19456
 +> No blocking findings.
 +>
 +> **APPROVE — exact approved R5 intended final implementation diff.**
-diff --git a/packages/opencode/src/cli/cmd/tui/context/event.ts b/packages/opencode/src/cli/cmd/tui/context/event.ts
-index e2427a458885b5f0efd1c1ff4a930a4b326ccf8f..d1537c17392e86e8eead986e13b630ec57c12b27 100644
---- a/packages/opencode/src/cli/cmd/tui/context/event.ts
-+++ b/packages/opencode/src/cli/cmd/tui/context/event.ts
-@@ -3,6 +3,7 @@ import { useProject } from "./project"
+
+diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
+--- a/packages/tui/src/context/event.ts
++++ b/packages/tui/src/context/event.ts
+@@ -1,6 +1,7 @@
+ import type { Event } from "@opencode-ai/sdk/v2"
  import { useSDK } from "./sdk"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import path from "path"
+ import { useProject } from "./project"
 +import { useRoute } from "./route"
+ import path from "path"
  
  const normalizedDirectory = new Map<string, string>()
+@@ -39,14 +40,23 @@ type EventMetadata = {
  
-@@ -41,6 +42,7 @@ type EventMetadata = {
- export function useEvent() {
-   const project = useProject()
+ // #164：全局 directory 事件始终投递（重连/跨实例广播）
+ // #164/#165：显式 project 字段必须匹配当前项目，防止共享 daemon SSE 跨项目泄漏
++// #570：活动 Session 是投递的第二权威 owner——project 不匹配但事件 sessionID 等于
++// route 活动会话时仍投递；无 Session ID 的 VCS/LSP 等事件继续保持 Project 隔离，
++// 禁止把全局流无条件放宽。该判定只管 admission，projection 仍由各自 owner 处理。
+ export function shouldDeliverScopedEvent(
+-  event: { directory?: string; project?: string },
++  event: { directory?: string; project?: string; sessionID?: string },
+   currentProject?: string,
++  activeSessionID?: string,
+ ) {
+   // #164：global 目录事件无条件放行
+   if (event.directory === "global") return true
+   // #165：有 project 时只匹配当前 project，不回退 workspace
+-  if (event.project) return event.project === currentProject
++  if (event.project) {
++    if (event.project === currentProject) return true
++    // #570：明确排除 undefined 相等，避免 home route 意外接收其他 Project 的非 Session 事件。
++    // 跨 Project 资格只由「活动会话 ID 与事件 sessionID 同时非空且相等」构成，无其它兑底分支。
++    return activeSessionID !== undefined && event.sessionID === activeSessionID
++  }
+   return true
+ }
+ 
+@@ -54,6 +64,8 @@ export function useEvent() {
    const sdk = useSDK()
+   // 插件可在异步回调中订阅；在 hook 创建时捕获 context，投递时仍读取当前项目。
+   const project = useProject()
++  // #570：Session route 是当前可见运行的权威 owner；启动 Project 不能吞掉跨路径打开的 Session 事实。
 +  const route = useRoute()
  
    function subscribe(handler: (event: Event, metadata: EventMetadata) => void) {
      return sdk.event.on("event", (event) => {
-@@ -67,7 +69,15 @@ export function useEvent() {
-       }
+@@ -69,6 +81,14 @@ export function useEvent() {
  
-       if (event.project) {
--        if (event.project === project.project()) handler(event.payload, { workspace: event.workspace })
-+        const activeSessionID = route.data.type === "session" ? route.data.sessionID : undefined
-+        const eventSessionID =
-+          "sessionID" in event.payload.properties ? event.payload.properties.sessionID : undefined
-+        // Session route 是当前可见运行的权威 owner；启动 Project 不能吞掉跨路径打开的 Session 事实。
-+        // 没有 Session ID 的 VCS/LSP 等事件继续保持原 Project 隔离，禁止把全局流无条件放宽。
-+        // 明确排除 undefined 相等，避免 home route 意外接收其他 Project 的非 Session 事件。
-+        // 该分支只负责 admission；消息、Part、Prompt 和 Revert 的实际状态仍由各自 projection owner处理。
-+        if (event.project === project.project() || (activeSessionID !== undefined && eventSessionID === activeSessionID))
-+          handler(event.payload, { workspace: event.workspace })
+       // #164/#165：单次投递前做 project/global 作用域判定
+       const currentProject = project.project()
++      // #570：活动会话与事件 sessionID 同时非空才构成跨 Project 投递资格。
++      const activeSessionID = route.data.type === "session" ? route.data.sessionID : undefined
++      const eventSessionID = "sessionID" in event.payload.properties
++        ? typeof event.payload.properties.sessionID === "string"
++          ? event.payload.properties.sessionID
++          : undefined
++        : undefined
++      // #570：sessionID 只接受 string 形态——非 string 的同名属性不构成投递资格。
+       // #499：lsp.updated 只表示"当前 route 需要重拉"，不携带可渲染状态；跨 Project
+       // 放行后仍由 SyncProvider 按 active Session 请求和过滤，不能在这里丢失通知。
+       if (event.payload.type === "lsp.updated") {
+@@ -77,8 +97,9 @@ export function useEvent() {
+       }
+       if (
+         !shouldDeliverScopedEvent(
+-          { directory: event.directory, project: (event as { project?: string }).project },
++          { directory: event.directory, project: (event as { project?: string }).project, sessionID: eventSessionID },
+           currentProject,
++          activeSessionID,
+         )
+       ) {
          return
-       }
- 
-diff --git a/packages/opencode/src/project/project.ts b/packages/opencode/src/project/project.ts
-index 399412cdce349560eb23074905465cef6bb70230..f0046cfd2b5ef1b928e76dad426776d792528de6 100644
---- a/packages/opencode/src/project/project.ts
-+++ b/packages/opencode/src/project/project.ts
-@@ -182,14 +182,6 @@ export const layer: Layer.Layer<
- 
-     const scope = yield* Scope.Scope
- 
--    const readCachedProjectId = Effect.fnUntraced(function* (dir: string) {
--      return yield* fs.readFileString(pathSvc.join(dir, "opencode")).pipe(
--        Effect.map((x) => x.trim()),
--        Effect.map((x) => ProjectID.make(x)),
--        Effect.catch(() => Effect.void),
--      )
--    })
--
-     const fromDirectory = Effect.fn("Project.fromDirectory")(function* (directory: string) {
-       log.info("fromDirectory", { directory })
- 
-@@ -211,21 +203,21 @@ export const layer: Layer.Layer<
- 
-         let sandbox = pathSvc.dirname(dotgit)
-         const gitBinary = yield* Effect.sync(() => which("git"))
--        let id = yield* readCachedProjectId(dotgit)
- 
-         if (!gitBinary) {
-           return {
--            id: id ?? ProjectID.global,
-+            id: ProjectID.global,
-             worktree: sandbox,
-             sandbox,
-             vcs: fakeVcs,
-           }
-         }
- 
--        const commonDir = yield* git(["rev-parse", "--git-common-dir"], { cwd: sandbox })
-+        // 绝对 common-dir 防止 linked worktree 的相对 .git 被解析回 sandbox 自身。
-+        const commonDir = yield* git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: sandbox })
-         if (commonDir.code !== 0) {
-           return {
--            id: id ?? ProjectID.global,
-+            id: ProjectID.global,
-             worktree: sandbox,
-             sandbox,
-             vcs: fakeVcs,
-@@ -234,26 +226,19 @@ export const layer: Layer.Layer<
-         const common = resolveGitPath(sandbox, commonDir.text.trim())
-         const bareCheck = yield* git(["config", "--bool", "core.bare"], { cwd: sandbox })
-         const isBareRepo = bareCheck.code === 0 && bareCheck.text.trim() === "true"
-+        // common-dir 的父目录是普通仓库 root；bare 仓库则直接以 common-dir 作为 worktree。
-         const worktree = common === sandbox ? sandbox : isBareRepo ? common : pathSvc.dirname(common)
- 
--        if (id == null) {
--          id = yield* readCachedProjectId(common)
--        }
--
--        if (!id) {
--          const revList = yield* git(["rev-list", "--max-parents=0", "HEAD"], { cwd: sandbox })
--          const roots = revList.text
--            .split("\n")
--            .filter(Boolean)
--            .map((x) => x.trim())
--            .toSorted()
--
--          id = roots[0] ? ProjectID.make(roots[0]) : undefined
--          if (id) {
--            yield* fs.writeFileString(pathSvc.join(common, "opencode"), id).pipe(Effect.ignore)
--          }
--        }
-+        // 当前 Git 历史是 Project identity 的唯一事实源；可复制 cache 不能覆盖目录实际所属仓库。
-+        const revList = yield* git(["rev-list", "--max-parents=0", "HEAD"], { cwd: sandbox })
-+        const roots = revList.text
-+          .split("\n")
-+          .filter(Boolean)
-+          .map((x) => x.trim())
-+          .toSorted()
-+        const id = roots[0] ? ProjectID.make(roots[0]) : undefined
- 
-+        // 无 root commit 继续沿用 global 合同，避免 cache removal 改变空仓库和 Git failure 语义。
-         if (!id) {
-           return { id: ProjectID.global, worktree: sandbox, sandbox, vcs: "git" as const }
-         }
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index 12c0bdb655fe84356c43f3cb044fc2cd85681253..c4f226f2eb2d0b7d4e87839750c2b642478769d0 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -231,6 +231,33 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
- }
- 
- describe("tui sync", () => {
-+  test("projects active Session Message and Part events across Projects", async () => {
-+    const previous = Global.Path.state
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -513,6 +513,37 @@ describe("tui sync", () => {
+       app.renderer.destroy()
+     }
+   })
++  // #570：daemon 事件携带 Session 实际 Project（proj_session_owner）、TUI route 固定 ses_1 时，
++  // message.updated/part.updated 必须穿过 useEvent admission 进入同一活动 Session 投影；
++  // 验证渲染数据源（sync.data）而非 callback 到达。route 固定使失败时可区分 admission 与 reducer 问题。
++  test("delivers cross-project session events into the active session projection", async () => {
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
-+    const message = assistantMessage()
-+    const part = textPart("part_cross_project", "streamed")
-+    const { app, emit, sync } = await mount(undefined, { type: "session", sessionID: "ses_1" })
-+
++    const { app, emit, sync } = await mount(
++      () => undefined,
++      tmp.path,
++      { type: "session", sessionID: "ses_1" },
++    )
 +    try {
-+      // daemon 事件携带 Session 实际 Project，而 TUI 可能从另一个启动 Project 打开该 Session。
-+      // 两类事件都必须穿过 useEvent 后进入同一个活动 Session projection，不能只验证 callback 到达。
-+      // message.updated 验证消息索引，part.updated 验证消息下的 part 索引；两者共同覆盖渲染数据源。
-+      // route 固定为 ses_1，故测试失败时可以区分 event admission 与 projection reducer 问题。
-+      emit({ ...messageEvent(message), project: "proj_session_owner" })
-+      emit({ ...partEvent(part), project: "proj_session_owner" })
-+      await wait(() => sync.data.message.ses_1?.some((item) => item.id === message.id))
-+      await wait(() => sync.data.part[message.id]?.some((item) => item.id === part.id))
-+
-+      expect(sync.data.message.ses_1).toContainEqual(message)
-+      expect(sync.data.part[message.id]).toContainEqual(part)
++      const foreignProject = "proj_session_owner"
++      const info = assistantMessage()
++      const part = textPart("part_cross", "cross")
++      emit({
++        directory: "/tmp/other",
++        project: foreignProject,
++        payload: { id: "evt_cross_message", type: "message.updated", properties: { sessionID: info.sessionID, info } },
++      })
++      await wait(() => sync.data.message.ses_1?.[0]?.id === info.id)
++      emit({
++        directory: "/tmp/other",
++        project: foreignProject,
++        payload: { id: "evt_cross_part", type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: 1 } },
++      })
++      await wait(() => sync.data.part[part.messageID]?.[0]?.id === part.id)
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
-+
-   test("projects LSP status through the active Session route and rejects a late response", async () => {
-     const [sessionA, sessionB] = [{ id: "ses_lsp_a", directory: "/workspace/a", workspaceID: "wrk_a", time: { created: 1, updated: 1 } }, { id: "ses_lsp_b", directory: "/workspace/b", workspaceID: "wrk_b", time: { created: 1, updated: 1 } }]
-     const requests: Array<{ directory: string | null; workspace: string | null }> = []
-diff --git a/packages/opencode/test/cli/tui/use-event.test.tsx b/packages/opencode/test/cli/tui/use-event.test.tsx
-index 62c21d00bf927ef167a9eb9f36efe5f96221ee13..a80043e0b0641474f96e61a2207b7e7f166c9488 100644
---- a/packages/opencode/test/cli/tui/use-event.test.tsx
-+++ b/packages/opencode/test/cli/tui/use-event.test.tsx
-@@ -6,6 +6,7 @@ import { onMount } from "solid-js"
- import { ProjectProvider, useProject } from "../../../src/cli/cmd/tui/context/project"
- import { SDKProvider } from "../../../src/cli/cmd/tui/context/sdk"
- import { useEvent } from "../../../src/cli/cmd/tui/context/event"
-+import { RouteProvider, type Route } from "../../../src/cli/cmd/tui/context/route"
+ })
  
- const projectID = "proj_test"
- 
-@@ -46,6 +47,14 @@ function update(version: string): Event {
-   }
- }
- 
-+function status(sessionID: string): Event {
-+  return {
-+    id: `evt_status_${sessionID}`,
-+    type: "session.status",
-+    properties: { sessionID, status: { type: "idle" } },
-+  }
-+}
-+
- function createSource() {
-   let fn: ((event: GlobalEvent) => void) | undefined
- 
-@@ -65,7 +74,7 @@ function createSource() {
+ function assistantMessage(): AssistantMessage {
+
+diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cli/tui/use-event.test.tsx
+--- a/packages/tui/test/cli/tui/use-event.test.tsx
++++ b/packages/tui/test/cli/tui/use-event.test.tsx
+@@ -6,6 +6,7 @@ import type { Event, GlobalEvent } from "@opencode-ai/sdk/v2"
+ import { onMount } from "solid-js"
+ import { ProjectProvider, useProject } from "../../../src/context/project"
+ import { SDKProvider } from "../../../src/context/sdk"
++import { RouteProvider, type Route } from "../../../src/context/route"
+ import { useEvent } from "../../../src/context/event"
+ import { createEventSource, createFetch, directory } from "../../fixture/tui-sdk"
+ import { TestTuiContexts } from "../../fixture/tui-environment"
+@@ -50,7 +51,7 @@ function update(version: string): Event {
    }
  }
  
 -async function mount() {
 +async function mount(initialRoute?: Route) {
-   const source = createSource()
+   const events = createEventSource()
+   const calls = createFetch()
    const seen: Event[] = []
-   const workspaces: Array<string | undefined> = []
-@@ -82,19 +91,21 @@ async function mount() {
-   })
- 
+@@ -64,17 +65,20 @@ async function mount() {
    const app = await testRender(() => (
--    <SDKProvider url="http://test" directory="/tmp/root" testTransport={{ events: source.source, fetch }}>
--      <ProjectProvider>
--        <Probe
--          onReady={async (ctx) => {
--            project = ctx.project
--            await project.sync()
--            done()
--          }}
--          seen={seen}
--          workspaces={workspaces}
--        />
--      </ProjectProvider>
--    </SDKProvider>
-+    <RouteProvider initialRoute={initialRoute}>
-+      <SDKProvider url="http://test" directory="/tmp/root" testTransport={{ events: source.source, fetch }}>
-+        <ProjectProvider>
-+          <Probe
-+            onReady={async (ctx) => {
-+              project = ctx.project
-+              await project.sync()
-+              done()
-+            }}
-+            seen={seen}
-+            workspaces={workspaces}
-+          />
-+        </ProjectProvider>
-+      </SDKProvider>
-+    </RouteProvider>
+     <TestTuiContexts>
+       <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+-        <ProjectProvider>
+-          <Probe
+-            onReady={async (ctx) => {
+-              project = ctx.project
+-              await project.sync()
+-              done()
+-            }}
+-            seen={seen}
+-            workspaces={workspaces}
+-          />
+-        </ProjectProvider>
++        {/* #570：RouteProvider 供 useEvent 读取活动 Session；包裹位置与 sync-fixture 同型。 */}
++        <RouteProvider initialRoute={initialRoute}>
++          <ProjectProvider>
++            <Probe
++              onReady={async (ctx) => {
++                project = ctx.project
++                await project.sync()
++                done()
++              }}
++              seen={seen}
++              workspaces={workspaces}
++            />
++          </ProjectProvider>
++        </RouteProvider>
+       </SDKProvider>
+     </TestTuiContexts>
    ))
- 
-   await ready
-@@ -149,6 +160,23 @@ describe("useEvent", () => {
+@@ -149,4 +153,33 @@ describe("useEvent", () => {
+       app.renderer.destroy()
      }
    })
- 
++
++  // #570：活动 Session 跨 Project 投递：session.status 只带必需 sessionID（刻意不用
++  // info.id 第二身份源），daemon owner 是 proj_other 时仍须送达；不带 sessionID 的
++  // 跨 Project 事件继续被拒——隔离对照只改 daemon owner，不改 Session owner。
 +  test("delivers events for the active Session across Projects", async () => {
-+    const sessionID = "ses_active"
-+    const { app, emit, seen } = await mount({ type: "session", sessionID })
++    const { app, emit, seen } = await mount({ type: "session", sessionID: "ses_1" })
 +
 +    try {
-+      // 活动 Session ID 是 route 的权威身份；Project 隔离不能吞掉其运行事实。
-+      // event.project 故意使用另一个值，隔离测试只改变 daemon owner，不改变 Session owner。
-+      // session.status 只携带 required sessionID，避免引入第二个 info.id 身份来源。
-+      emit(event(status(sessionID), { directory: "/tmp/session", project: "proj_other" }))
++      emit(
++        event(
++          {
++            id: "evt_status_cross",
++            type: "session.status",
++            properties: { sessionID: "ses_1" },
++          } as unknown as Event,
++          { directory: "/tmp/other", project: "proj_other" },
++        ),
++      )
++
 +      await wait(() => seen.length === 1)
 +
-+      expect(seen).toEqual([status(sessionID)])
++      // 无 sessionID 的跨 Project 事件仍被 admission 拒绝（seen 不再增长）。
++      emit(event(vcs("foreign"), { directory: "/tmp/other", project: "proj_other" }))
++      await Bun.sleep(50)
++      expect(seen.length).toBe(1)
 +    } finally {
 +      app.renderer.destroy()
 +    }
 +  })
-+
-   test("delivers current project events regardless of active workspace", async () => {
-     const { app, emit, project, seen } = await mount()
- 
-diff --git a/packages/opencode/test/project/project.test.ts b/packages/opencode/test/project/project.test.ts
-index 5688d13d1ad140a24ed5e76fb405ef638bf99b2a..d8de8a6f4f0ff60dff170c8871a387547e04e08b 100644
---- a/packages/opencode/test/project/project.test.ts
-+++ b/packages/opencode/test/project/project.test.ts
-@@ -130,8 +130,32 @@ describe("Project.fromDirectory", () => {
-       expect(project.worktree).toBe(tmp)
- 
-       const opencodeFile = path.join(tmp, ".git", "opencode")
--      expect(yield* Effect.promise(() => Bun.file(opencodeFile).exists())).toBe(true)
-+      expect(yield* Effect.promise(() => Bun.file(opencodeFile).exists())).toBe(false)
-+    }),
-+  )
-+
-+  it.live("ignores copied cache values when deriving committed Project IDs", () =>
-+    Effect.gen(function* () {
-+      const first = yield* tmpdirScoped({ git: true })
-+      const second = yield* tmpdirScoped({ git: true })
-+      const stale = "copied-cache-project-id"
-+      yield* Effect.promise(() => Bun.write(path.join(first, ".git", "opencode"), stale))
-+      yield* Effect.promise(() => Bun.write(path.join(second, ".git", "opencode"), stale))
-+
-+      const firstRoot = (yield* Effect.promise(() => $`git rev-list --max-parents=0 HEAD`.cwd(first).text())).trim()
-+      const secondRoot = (yield* Effect.promise(() => $`git rev-list --max-parents=0 HEAD`.cwd(second).text())).trim()
-+      const { project: firstProject } = yield* run((svc) => svc.fromDirectory(first))
-+      const { project: secondProject } = yield* run((svc) => svc.fromDirectory(second))
-+
-+      // Project identity 必须来自当前仓库历史；复制的 mutable cache 不能取得 owner 身份。
-+      // 两个仓库故意写入相同 cache，只有 root commit 能保持它们的 identity 独立。
-+      // 测试同时观察返回值和仓库间不相等，覆盖错误 owner 与 collision 两个后果。
-+      expect(firstProject.id).toBe(ProjectID.make(firstRoot))
-+      expect(secondProject.id).toBe(ProjectID.make(secondRoot))
-+      expect(firstProject.id).not.toBe(secondProject.id)
-     }),
-+    // 两个真实 Git fixture 共享同一 Effect layer，Windows 清理成本不能挤占行为断言时间。
-+    30_000,
-   )
- 
-   it.live("returns global for non-git directory", () =>
-@@ -222,6 +246,9 @@ describe("Project.fromDirectory with worktrees", () => {
-       expect(project.sandboxes).toContain(worktreePath)
-       expect(project.sandboxes).not.toContain(tmp)
-     }),
-+    // linked worktree setup/cleanup 使用真实 Git 子进程，需覆盖 Windows fixture 清理成本。
-+    // 这里的 timeout 只延长生命周期预算，不把路径或 identity 断言变成 eventual assertion。
-+    30_000,
-   )
- 
-   it.live("worktree should share project ID with main repo", () =>
-@@ -245,11 +272,14 @@ describe("Project.fromDirectory with worktrees", () => {
- 
-       expect(wt.id).toBe(main.id)
- 
--      // Cache should live in the common .git dir, not the worktree's .git file
-+      // cache 不再参与 identity；linked worktree 只能验证 root-commit 和公共 worktree 合同。
-+      // cache 文件不存在是删除竞争 identity source 的直接可观察结果。
-       const cache = path.join(tmp, ".git", "opencode")
-       const exists = yield* Effect.promise(() => Bun.file(cache).exists())
--      expect(exists).toBe(true)
-+      expect(exists).toBe(false)
-     }),
-+    // linked worktree 的建销使用真实 Git 子进程；延长预算只覆盖进程成本，不放宽确定性断言。
-+    30_000,
-   )
- 
-   it.live("separate clones of the same repo should share project ID", () =>
-@@ -270,6 +300,9 @@ describe("Project.fromDirectory with worktrees", () => {
- 
-       expect(b.id).toBe(a.id)
-     }),
-+    // clone identity 断言保持确定；Windows 子进程清理可能超过 Bun 的默认五秒预算。
-+    // clone 仍共享 root commit，而不是依赖任一目录中的可复制状态文件。
-+    30_000,
-   )
- 
-   it.live("should accumulate multiple worktrees in sandboxes", () =>
-@@ -305,6 +338,9 @@ describe("Project.fromDirectory with worktrees", () => {
-       expect(project.sandboxes).toContain(worktree2)
-       expect(project.sandboxes).not.toContain(tmp)
-     }),
-+    // 多个 linked worktree 使用真实 Git 子进程，预算需覆盖 setup/cleanup。
-+    // 两次 fromDirectory 必须汇聚到同一 Project row，并分别保留两个 sandbox。
-+    30_000,
-   )
  })
- 
-@@ -647,9 +683,10 @@ describe("Project.fromDirectory with bare repos", () => {
-       const correctCache = path.join(barePath, "opencode")
-       const wrongCache = path.join(parentDir, ".git", "opencode")
- 
--      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(true)
-+      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(false)
-       expect(yield* Effect.promise(() => Bun.file(wrongCache).exists())).toBe(false)
-     }),
-+    // bare repo 没有普通 worktree；identity 仍来自 HEAD 的 root commit，且不创建 cache。
-   )
- 
-   it.live("different bare repos under same parent should not share project ID", () =>
-@@ -682,10 +719,14 @@ describe("Project.fromDirectory with bare repos", () => {
-       const cacheB = path.join(bareB, "opencode")
-       const wrongCache = path.join(parentDir, ".git", "opencode")
- 
--      expect(yield* Effect.promise(() => Bun.file(cacheA).exists())).toBe(true)
--      expect(yield* Effect.promise(() => Bun.file(cacheB).exists())).toBe(true)
-+      expect(yield* Effect.promise(() => Bun.file(cacheA).exists())).toBe(false)
-+      expect(yield* Effect.promise(() => Bun.file(cacheB).exists())).toBe(false)
-       expect(yield* Effect.promise(() => Bun.file(wrongCache).exists())).toBe(false)
-     }),
-+    // 两个 bare repository 会启动多组真实 Git 子进程，预算必须覆盖 setup/cleanup 后再判定 identity。
-+    // 同父目录不能再通过共享 cache 产生错误的 Project owner。
-+    // 两个返回值必须由各自 HEAD 派生，不能由目录位置或父目录 cache 派生。
-+    30_000,
-   )
- 
-   it.live("bare repo without .git suffix is still detected via core.bare", () =>
-@@ -708,7 +749,7 @@ describe("Project.fromDirectory with bare repos", () => {
-       expect(project.worktree).toBe(barePath)
- 
-       const correctCache = path.join(barePath, "opencode")
--      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(true)
-+      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(false)
-     }),
-   )
- })
+
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
-index 1f0421cb51961f9dbba40cabb7a03f8de74a0dbd..51f349d6fcf60ca4e440ecaaf4578c363974a0f4 100644
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts
-@@ -543,6 +543,63 @@ describe("session.list", () => {
-       }),
+@@ -565,6 +565,63 @@ describe("session.list", () => {
+     { git: true },
    )
  
 +  it.instance(
@@ -1730,44 +1568,45 @@ index 1f0421cb51961f9dbba40cabb7a03f8de74a0dbd..51f349d6fcf60ca4e440ecaaf4578c36
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const instance = yield* InstanceRef
-+        const legacyProjectID = ProjectID.make("proj_stale_cache")
++        const legacyProjectID = Project.ID.make("proj_stale_cache")
 +        const target = yield* withSession({ title: "legacy-project-owner" })
 +
-+        // 模拟 Project identity 已由当前 Git root 纠正，但历史 Session 仍保存旧 cache Project ID。
++        // #570：模拟 Project identity 已由当前 Git root 纠正，但历史 Session 仍保存旧 cache Project ID。
 +        // 不迁移 Session row；公开 list 必须沿用现有 directory compatibility owner 找回目标。
 +        // path=null 代表升级前持久化形状，确保断言覆盖真实 legacy directory 分支而非当前 Project 命中。
 +        // 旧 Project row 只作为持久化历史存在，不应成为当前 Project identity 的第二来源。
 +        // 目标 row 保留真实目录，模拟用户从祖路径或孙路径重新打开历史 Session。
-+        // 断言通过 session.list，而不是直接读 SQL，确保验证的是 TUI/API 共享的 producer。
-+        // 这样可以证明现有数据库在不迁移 project_id 的条件下仍能兼容历史会话。
-+        yield* Effect.sync(() =>
-+          Database.use((db) => {
-+            db.insert(ProjectTable)
-+              .values({
-+                id: legacyProjectID,
-+                worktree: test.directory,
-+                vcs: "git",
-+                time_created: Date.now(),
-+                time_updated: Date.now(),
-+                sandboxes: [],
-+              })
-+              .run()
-+            db.update(SessionTable)
-+              .set({ project_id: legacyProjectID, directory: test.directory, path: null })
++        // 断言通过 session.list 而非直读 SQL，验证的是 TUI/API 共享 producer——证明不迁移
++        // project_id 的条件下现有数据库仍能兼容历史会话。
++        const { db } = yield* Database.Service
++        // #570：直接写历史行——旧 Project row 与 Session.project_id/path 都是运行时 API 无法构造的 legacy 形状。
++        yield* db
++          .insert(ProjectTable)
++          .values({
++            id: legacyProjectID,
++            worktree: AbsolutePath.make(test.directory),
++            vcs: "git",
++            time_created: Date.now(),
++            time_updated: Date.now(),
++            sandboxes: [],
++          })
++          .run()
++        yield* db
++          .update(SessionTable)
++          .set({ project_id: legacyProjectID, directory: test.directory, path: null })
++          .where(eq(SessionTable.id, target.id))
++          .run()
++        yield* Effect.addFinalizer(() =>
++          Effect.gen(function* () {
++            // #570：finalizer 与插入门进同 seam：恢复 project_id 并删除注入的 legacy Project 行。
++            yield* db
++              .update(SessionTable)
++              .set({ project_id: instance?.project.id ?? Project.ID.global })
 +              .where(eq(SessionTable.id, target.id))
 +              .run()
++              .pipe(Effect.orDie)
++            yield* db.delete(ProjectTable).where(eq(ProjectTable.id, legacyProjectID)).run().pipe(Effect.orDie)
 +          }),
-+        )
-+        yield* Effect.addFinalizer(() =>
-+          Effect.sync(() =>
-+            Database.use((db) => {
-+              db.update(SessionTable)
-+                .set({ project_id: instance?.project.id ?? ProjectID.global })
-+                .where(eq(SessionTable.id, target.id))
-+                .run()
-+              db.delete(ProjectTable).where(eq(ProjectTable.id, legacyProjectID)).run()
-+            }),
-+          ),
 +        )
 +
 +        const ids = (yield* SessionNs.Service.use((session) =>
@@ -1780,7 +1619,6 @@ index 1f0421cb51961f9dbba40cabb7a03f8de74a0dbd..51f349d6fcf60ca4e440ecaaf4578c36
 +    { git: true },
 +    30_000,
 +  )
-+
    it.instance(
      "falls back to directory when filtering legacy sessions without path",
      () =>

@@ -7,15 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(permission):=20reviewer=20=E5=BC=BA?=
  =?UTF-8?q?=E6=B7=B1?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-仿照 structured-output 先例（session/prompt.ts toolChoice required）在 reviewer 请求层强制决策工具提交；provider 400 显式拒绝该参数时同次评审去参兼容重发恰一次并按 provider 进程内记忆，消除模型漂移下不调用 permission_review_decision 的失败尾部。system 契约与 user 尾部指令双落点（judge 角色/禁止提问/信息不足→结构化 deny）；协议重试 nudge 升级为 avoid-xxx 防御纵深并显式给出裸 JSON 逃生口。
+适配说明：全量语义落地，机械重锚至目标形态——prompt.ts 契约段增强+DECISION_DIRECTIVE 尾指令（#206/#227/#198 注释融合保留）；service.ts 九 hunk（Set 记忆/协商入口/NF-1 error 传播/isToolChoiceRejection 窄匹配）按目标变量名（sessionInfo/Assistant/ProviderV2.ID）与 #206-#280 行内注释形态重锚；reviewer-service.test 的 persistResend fixture 补 Database mock（#261 谱系）+ProjectV2.Session.Info 目标形状，B/C/D 用例插 parentModelFixture 前；prompt.test 断言反转+nudge 断言按目标行号。Exit import 裁记（目标 L16 已有）。
 
-同时修复非 persist 消费分支吞 provider error 事件的缺陷：错误原被误归协议错误盲重试 3 次，现以原始形状进入 SessionRetry 分类，使 tool_choice 兼容重发在该 seam 可达且不与 fail-closed 语义冲突。
 
 diff --git a/docs/plans/permission-reviewer-toolchoice-prompt-hardening.md b/docs/plans/permission-reviewer-toolchoice-prompt-hardening.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..a1fea70f9dcd72dd27aa01c465362de3b24afbed
 --- /dev/null
 +++ b/docs/plans/permission-reviewer-toolchoice-prompt-hardening.md
 @@ -0,0 +1,362 @@
@@ -381,35 +378,36 @@ index 0000000000000000000000000000000000000000..a1fea70f9dcd72dd27aa01c465362de3
 +| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R5 | yes | 无 | N-01：测 G 无独立红运行（§23 已诚实披露，断言对改前代码可红，机制红态由 B 覆盖）；N-02：NF-1 关闭非 persist 路径「中途 error + 此前完整 JSON 文本」的 json_fallback 救回窗口（R5 已声明的行为对齐，persist 路径本就如此，非阻断）；N-03：新 nudge 文案仍含 "your previous reply was rejected" 而注释自证重试上下文为重建全新（措辞自洽性 nit，契约内容 avoid-xxx + JSON 逃生口已交付并经 wire 断言）；N-04：§23 E/C 仅按生产口径（31/38）计算，policy 口径含测试为 E=214/C=70=0.327，两种口径均过 0.10 阻断线与 0.15 目标 | APPROVE（独立复现：reviewer-service 22/0、reviewer-prompt 19/0、prompt.test 96 pass/14 skip/0 fail、typecheck clean） | task ses_fa25a46d3ffe0HRPzs3A4glO2u |
+
 diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
-index 5dd08f8224b1516cf345267b99edbbc7e17ac481..0fea16573930df92a53e7cab420168df3c2f2f22 100644
 --- a/packages/opencode/src/permission/reviewer/prompt.ts
 +++ b/packages/opencode/src/permission/reviewer/prompt.ts
-@@ -24,12 +24,14 @@ export interface UserPromptItem {
- 
+@@ -25,13 +25,14 @@ export interface UserPromptItem {
  export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
  
+ // #206：输出合约增加 transcript 用途限定——仅用于推断用户意图、范围、授权和本地证据，不作为策略指令
 -// The text contract names the decision tool and repeats its JSON-shaped input
+-// #227：协议文本同时声明工具与 JSON 形状输入——强制工具不被所有后端支持时仍可解析回退
 -// because provider tool forcing is intentionally not required for every backend.
 -// Runtime may accept strict JSON as a compatibility fallback, but the prompt must
 -// keep steering models toward the auditable permission_review_decision protocol.
-+// [local-smark] 输出契约双落点（R-REQ-3a/3b）：system 契约声明 judge 角色与
++// [local-smark] 596 输出契约双落点（R-REQ-3a/3b）：system 契约声明 judge 角色与
 +// 「信息不足→结构化 deny/unknown」映射，user 尾部指令（DECISION_DIRECTIVE）
-+// 在 planned action 之后抢占最高 recency 权重。历史取舍「不要求 provider 强制
-+// 工具调用」已由 runReviewerStream 的 toolChoice:"required"（含 400 兼容重发）
-+// 取代；runtime 的严格 JSON 文本兼容入口仍保留，但 prompt 始终优先引导模型
-+// 走可审计的 permission_review_decision 工具协议。
++// 在 planned action 之后抢占最高 recency 权重。#227 的「不要求 provider 强制
++// 工具调用」取舍已由 runReviewerStream 的 toolChoice:"required"（含 400 兼容
++// 重发）取代；runtime 的严格 JSON 文本兼容入口仍保留，但 prompt 始终优先引导
++// 模型走可审计的 permission_review_decision 工具协议。
  const OUTPUT_CONTRACT_PROMPT = `\
 -Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.
 +Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. You are the judge, not the executor: you are not being asked to run the action, hold a conversation, or answer questions — no human will reply. If you believe the evidence is insufficient, encode that in the decision itself (deny, or user_authorization "unknown", with rationale) instead of asking for clarification. Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.
  
  Use this tool input schema for every decision, including low-risk allows:
  {
-@@ -39,6 +41,14 @@ Use this tool input schema for every decision, including low-risk allows:
+@@ -41,6 +42,14 @@ Use this tool input schema for every decision, including low-risk allows:
    "rationale": string
  }`
  
-+// [local-smark] 决策入口尾指令（R-REQ-3b）：长混乱 transcript 会把小模型漂移成
++// [local-smark] 596 决策入口尾指令（R-REQ-3b）：长混乱 transcript 会把小模型漂移成
 +// 「反问/自认无法执行」（生产 DB 失败现场 6/6 attempt 同形）；planned action JSON
 +// 之后紧跟一条祈使指令，把漂移形态重新映射回结构化决策路径。
 +const DECISION_DIRECTIVE_USER_ITEM = {
@@ -417,97 +415,94 @@ index 5dd08f8224b1516cf345267b99edbbc7e17ac481..0fea16573930df92a53e7cab420168df
 +  text: "Decide now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
 +}
 +
+ // #198：模板替换而非拼接——保证策略在模板的正确位置，而非附加在末尾可能被忽略
  export function buildSystemPrompt(tenantPolicy: string) {
-   // Tenant policy is inserted into a fixed Guardian-style template; callers pass
-   // only policy text, not arbitrary prompt structure, so the evidence handling
-@@ -67,6 +77,9 @@ export function buildUserPromptItems(
+   return POLICY_TEMPLATE.replace("{tenant_policy_config}", tenantPolicy.trim()) + "\n\n" + OUTPUT_CONTRACT_PROMPT
+@@ -65,6 +74,9 @@ export function buildUserPromptItems(
        type: "text",
        text: "The agent has requested the following action:\n>>> APPROVAL REQUEST START\nAssess the exact planned action below. Use read-only evidence when local state matters.\nPlanned action JSON:\n" + planned + "\n>>> APPROVAL REQUEST END",
      },
-+    // [local-smark] 尾部决策指令（R-REQ-3b）：必须是最后一个 user item，
++    // [local-smark] 596 尾部决策指令（R-REQ-3b）：必须是最后一个 user item，
 +    // 使输出契约处于 recency 权重最高处而非 planned-action JSON blob。
 +    DECISION_DIRECTIVE_USER_ITEM,
    ]
  }
  
+
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 09e5cf2ee1661bcc3515bb0af1cfc1eb546f672a..70331c2d307d028764042e2522cb7e25339adebf 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -82,10 +82,12 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
- const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
+@@ -102,10 +102,12 @@ const MAX_REVIEWER_ATTEMPTS = 3
  const PROTOCOL_RETRY_USER_ITEM = {
+ // #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
    type: "text" as const,
 -  // The retry prompt deliberately asks only for the tool/function-call protocol.
 -  // JSON text fallback is a runtime compatibility layer, not behavior we should
 -  // advertise to the model after it already missed the preferred contract.
 -  text: "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.",
-+  // [local-smark] R-REQ-4 avoid-xxx 防御纵深 nudge：重试请求不含失败回合（重建
++  // [local-smark] 596 R-REQ-4 avoid-xxx 防御纵深 nudge：重试请求不含失败回合（重建
 +  // 全新 [system, user] 上下文），旧文案的 "the previous response" 对模型不可见，
 +  // 且未阻断实测漂移形态（反问、自认无法执行）。新文案自包含、逐项 avoid，
 +  // 并显式给出裸 JSON 逃生口——生产 DB 证据表明漂移场景下 json_fallback 是
 +  // 实测可救回路径，此设计取代旧「不宣传 JSON fallback」取舍。
 +  text: "Protocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {\"risk_level\",\"user_authorization\",\"outcome\",\"rationale\"} as your entire message.",
  }
- 
  const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
-@@ -103,6 +105,10 @@ export const layer = Layer.effect(
-     const provider = yield* Provider.Service
-     const sessions = yield* Session.Service
+   mergeDeep(target, source ?? {}) as Record<string, any>
+@@ -124,6 +126,10 @@ export const layer = Layer.effect(
+     const session = yield* Session.Service
+     // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
      const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
-+    // [local-smark] 已知拒绝 tool_choice 的 provider 集合（进程内记忆）：首次到达
++    // [local-smark] 596：已知拒绝 tool_choice 的 provider 集合（进程内记忆）：首次到达
 +    // 400 参数拒绝后记录，后续评审直接去参发送，避免每次评审都重复支付一次
 +    // 400 轮往返；不持久化——能力探测的授权粒度是「重发一次」，非跨进程契约。
-+    const toolChoiceRejectedProviders = new Set<ProviderID>()
++    const toolChoiceRejectedProviders = new Set<ProviderV2.ID>()
  
      const review: Interface["review"] = (input) =>
-       Effect.gen(function* () {
-@@ -413,7 +419,7 @@ export const layer = Layer.effect(
-     }) {
-       const session = input.session
+       // #209：streaming refactor——generateObject 替换为 streamText + permission_review_decision tool，让 reviewer 子会话留下可审计的推理与文本轨迹
+@@ -429,7 +435,7 @@ export const layer = Layer.effect(
+       const sessionInfo = input.session
        const parentID = input.parentID
--      if (!session || !parentID) return runReviewerStream(input.messages, input.model)
-+      if (!session || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model)
+       // #209：无子会话或无 parentID 时走纯流式提取——不持久化中间 part，仅从 tool-call 事件取出 assessment
+-      if (!sessionInfo || !parentID) return runReviewerStream(input.messages, input.model)
++      if (!sessionInfo || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model)
        return Effect.gen(function* () {
-         const message: MessageV2.Assistant = {
-           id: MessageID.ascending(),
-@@ -459,7 +465,7 @@ export const layer = Layer.effect(
-               ),
-             ),
+         // #209：先创建 assistant 消息壳——流式 part 挂载到该消息，错误时也能回填 error 字段
+         const message: Assistant = {
+@@ -460,7 +466,7 @@ export const layer = Layer.effect(
+             Effect.catch(() => Effect.logWarning("reviewer closeMessageTools failed")),
+             Effect.catchDefect(() => Effect.logWarning("reviewer closeMessageTools defect")),
            )
 -        const assessment = yield* runReviewerStream(input.messages, input.model, {
 +        const assessment = yield* runReviewerStreamWithToolChoice(input.messages, input.model, {
-           sessionID: session.id,
+           sessionID: sessionInfo.id,
            messageID: message.id,
-           reviewID: input.reviewID,
-@@ -500,6 +506,7 @@ export const layer = Layer.effect(
+           // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
+@@ -508,6 +514,7 @@ export const layer = Layer.effect(
        messages: readonly ModelMessage[],
        model: Provider.Model,
-       persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: MessageV2.Assistant },
+       persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: Assistant },
 +      forcedToolChoice?: boolean,
      ) {
        return Effect.acquireUseRelease(
-         Effect.sync(() => new AbortController()),
-@@ -637,9 +644,11 @@ export const layer = Layer.effect(
+         // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
+@@ -640,7 +647,10 @@ export const layer = Layer.effect(
                    }),
                  }),
                },
--              // Some OpenAI-compatible providers reject forced tool_choice even
--              // though they can emit tool calls. The reviewer prompt requires this
--              // tool, and absence of the call still fails closed below.
-+              // [local-smark] INV-02：仿照 session/prompt.ts:3194 的 structured-output
-+              // 先例，评审请求在 API 层强制决策工具提交，排除 prompt-only 强制在
-+              // 长 transcript 下观测到的 prose 漂移失败尾部；已知拒绝该参数的
-+              // provider 由 runReviewerStreamWithToolChoice 的兼容重发降级。
+-              // #209：Some OpenAI-compatible providers reject forced tool_choice——absence of the call still fails closed below
++              // [local-smark] 596 INV-02：仿 session/prompt.ts structured-output 先例，评审请求
++              // 在 API 层强制决策工具提交，排除 prompt-only 强制在长 transcript 下观测到的
++              // prose 漂移失败尾部；已知拒绝该参数的 provider 由协商入口兼容重发降级。
 +              toolChoice: forcedToolChoice ? ("required" as const) : undefined,
                maxRetries: 0,
+               // #261：providerOptions 和 maxOutputTokens 现由 plugin hook 修改后的 params 提供
                providerOptions: ProviderTransform.providerOptions(model, params.options),
-               maxOutputTokens: params.maxOutputTokens,
-@@ -705,6 +714,11 @@ export const layer = Layer.effect(
-                   if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+@@ -698,6 +708,11 @@ export const layer = Layer.effect(
+ // #227：tool-call 事件携带最终 input——此处提取 assessment 为唯一权威来源
                      assessment = assessmentFromUnknown(event.input)
                    }
-+                  // [local-smark] NF-1：非 persist 分支同样必须以原始 shape 传播
++                  // [local-smark] 596 NF-1：非 persist 分支同样必须以原始 shape 传播
 +                  // provider error 事件，否则 400 等错误被吞成「drain 无 assessment」
 +                  // 协议错误盲重试 3 次，且 tool_choice 兼容重发在该 seam 结构
 +                  // 不可达——与 persist 分支下方的同款处理语义对齐。
@@ -515,11 +510,11 @@ index 09e5cf2ee1661bcc3515bb0af1cfc1eb546f672a..70331c2d307d028764042e2522cb7e25
                    return
                  }
                  if (event.type === "reasoning-start") {
-@@ -949,6 +963,26 @@ export const layer = Layer.effect(
+@@ -953,6 +968,26 @@ export const layer = Layer.effect(
        )
      }
  
-+    // [local-smark] tool_choice 兼容协商入口（INV-03，用户原话授权：「如果拒绝
++    // [local-smark] 596 tool_choice 兼容协商入口（INV-03，用户原话授权：「如果拒绝
 +    // 该参数，则兼容性地重发一次」）：默认强制 required；provider 以 400 且报文
 +    // 指向 tool_choice 拒绝时，同次评审去参重发恰一次并记忆该 provider。该
 +    // catchIf 位于 runReviewerAgent 的 tapError/onInterrupt 管道之内，首次 400
@@ -539,39 +534,39 @@ index 09e5cf2ee1661bcc3515bb0af1cfc1eb546f672a..70331c2d307d028764042e2522cb7e25
 +      )
 +    }
 +
+     // #209：标记工具状态为 reviewing——附带 reviewer 子会话 ID 供 UI 导航
      function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
-       return updateToolAutoReview(input, {
-         status: "reviewing",
-@@ -1082,6 +1116,17 @@ function isReviewerRetryable(error: unknown): boolean {
+ // #227：reviewing 状态附带 reviewer 子会话 ID——UI 可跳转查看审查过程
+@@ -1091,6 +1126,17 @@ function isReviewerRetryable(error: unknown): boolean {
    return isReviewerDecisionProtocolError(error) || error instanceof ReviewerTimedOut
  }
  
-+// [local-smark] 仅当 provider 以 400 且报文明确指向 tool_choice 时才归类为
-+// 参数拒绝：其它 400（如 Codex 的 instructions/max_output_tokens 拒绝）必须
-+// 原样失败（INV-06），不得被去参重发掩盖。窄匹配的残余场景（报文不含该词）
-+// 走既有 3-attempt/fail-closed，不加宽匹配。statusCode/responseBody 来自
-+// AI SDK APICallError 的原始 shape（与 errorMessage 提取的 responseBody 同源）。
++// [local-smark] 596：仅当 provider 以 400 且报文明确指向 tool_choice 时才归类为
++// 参数拒绝：其它 400（如 instructions/max_output_tokens 拒绝）必须原样失败
++// （INV-06），不得被去参重发掩盖。窄匹配的残余场景（报文不含该词）走既有
++// 3-attempt/fail-closed，不加宽匹配。statusCode/responseBody 来自 AI SDK
++// APICallError 的原始 shape（与 errorMessage 提取的 responseBody 同源）。
 +function isToolChoiceRejection(error: unknown): boolean {
 +  if (!error || typeof error !== "object") return false
 +  const withStatus = error as { statusCode?: unknown; responseBody?: unknown }
 +  return withStatus.statusCode === 400 && /tool[_ ]?choice/i.test(String(withStatus.responseBody ?? ""))
 +}
 +
- function reviewerEnabled(permission: Config.Info["permission"], _metadata: Readonly<Record<string, unknown>>) {
-   // reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
-   // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
+ // #203：reviewer 启用判定——显式 user 配置优先保留人工审批
+ // #280：reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
+ // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
+
 diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
-index 15d73cb104898b8ff9568718266ef31dc9ee34bf..7b058443dfb75bf4c598f487043b18100dd81918 100644
 --- a/packages/opencode/test/permission/reviewer-prompt.test.ts
 +++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
-@@ -105,6 +105,35 @@ describe("permission reviewer prompt", () => {
+@@ -116,6 +116,35 @@ describe("permission reviewer prompt", () => {
      expect(items.map((item) => item.text).join("\n")).toContain(">>> APPROVAL REQUEST END")
    })
  
++  // 596 R-REQ-3 双落点：user 尾部（planned action 之后）的决策入口指令是
++  // 小模型权重最高处；system 契约同步声明 judge 角色与「信息不足→结构化
++  // deny/unknown」，把实测漂移形态（反问、自认无法执行）映射为合法决策。
 +  test("appends a decision directive after the planned action and hardens the system contract", () => {
-+    // R-REQ-3 双落点：user message 尾部（planned action 之后）的决策入口指令是
-+    // 小模型权重最高处；system 契约同步声明 judge 角色与“信息不足→结构化
-+    // deny/unknown”，把实测漂移形态（反问、自认无法执行）映射为合法决策。
 +    const items = PermissionReviewerPrompt.buildUserPromptItems(
 +      {
 +        entries: [{ role: "user", text: "Please inspect the repo." }],
@@ -597,44 +592,38 @@ index 15d73cb104898b8ff9568718266ef31dc9ee34bf..7b058443dfb75bf4c598f487043b1810
 +    expect(system).toContain("no human will reply")
 +  })
 +
+   // #206：验证 transcript 保留可见对话和工具证据，过滤内部推理和合成文本
    test("transcript keeps visible conversation and tool evidence without internal reasoning", () => {
      const transcript = PermissionReviewerTranscript.fromMessages([
-       {
+
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
-index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe0252c86f44 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -1,5 +1,5 @@
- import { describe, expect } from "bun:test"
--import { Effect, Fiber, Layer } from "effect"
-+import { Effect, Exit, Fiber, Layer } from "effect"
- import { createOpenAI } from "@ai-sdk/openai"
- import { Auth } from "../../src/auth"
- import { Config } from "../../src/config/config"
-@@ -38,6 +38,7 @@ const REVIEWER_ASSESSMENT = {
- type ReviewerRequestBody = {
+@@ -39,6 +39,8 @@ type ReviewerRequestBody = {
    instructions?: unknown
+   // #261：捕获 max_output_tokens——验证 plugin hook 清理后该字段为 undefined
    max_output_tokens?: unknown
++  // 596：捕获 tool_choice——验证强制决策工具与兼容重发去参
 +  tool_choice?: unknown
    input: Array<{ role?: unknown; content?: unknown }>
  }
  
-@@ -126,6 +127,10 @@ describe("permission reviewer service", () => {
-       expect(decision.action).toBe("allow")
+@@ -174,6 +176,10 @@ describe("permission reviewer service", () => {
+       // #250：非 OAuth 路径 instructions 必须缺席——写入会改变普通 Responses 的语义
        expect(body.instructions).toBeUndefined()
        expect(hasSystemLikeInput(body)).toBe(true)
-+      // [local-smark] INV-02：reviewer 请求必须在 API 层强制决策工具（先例
-+      // session/prompt.ts:3194 的 structured-output toolChoice:"required"）；
-+      // prompt-only 强制在生产 DB 有 6/6 prose 漂移失败尾部。
++      // [local-smark] 596 INV-02：reviewer 请求必须在 API 层强制决策工具（先例
++      // session/prompt.ts structured-output toolChoice:"required"）；prompt-only
++      // 强制在生产 DB 有 6/6 prose 漂移失败尾部。
 +      expect(body.tool_choice).toBe("required")
        expectPreservedShellEvidence(inputText(body))
      }),
    )
-@@ -173,6 +178,93 @@ describe("permission reviewer service", () => {
+@@ -191,6 +197,93 @@ describe("permission reviewer service", () => {
      }),
    )
  
-+  // [local-smark] INV-03 兼容重发：provider 显式拒绝 tool_choice 时同次评审去参
++  // [local-smark] 596 INV-03 兼容重发：provider 显式拒绝 tool_choice 时同次评审去参
 +  // 重发恰一次；Set 记忆使同 provider 后续评审不再付费 400。三个用例使用互不
 +  // 共享的 fixture 实例（Set 存活于层闭包，跨 it 共享会造成顺序耦合）。
 +  const toolChoiceResendFixture = reviewerFixture(
@@ -651,7 +640,7 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +      expect(decision.action).toBe("allow")
 +      expect(toolChoiceResendFixture.bodies.length).toBe(2)
 +      expect(toolChoiceResendFixture.bodies[0]!.tool_choice).toBe("required")
-+      // 重发不强制：SDK 未强制时默认 tool_choice:"auto"，语义断言锁定“不再 required”
++      // 重发不强制：SDK 未强制时默认 tool_choice:"auto"，语义断言锁定「不再 required」
 +      expect(toolChoiceResendFixture.bodies[1]!.tool_choice).not.toBe("required")
 +    }),
 +  )
@@ -691,11 +680,11 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +    }),
 +  )
 +
-+  // [local-smark] INV-03 persist 生产常规路径：带 sessionID 的评审走 runReviewerAgent
++  // [local-smark] 596 INV-03 persist 生产常规路径：带 sessionID 的评审走 runReviewerAgent
 +  // 的 persist 分支（child message 行先建、tapError/onInterrupt 在协商入口之外）。
-+  // fixture 复用 reviewerClosureFixture 已验证的 session mock 形态（closure 组绿灯
-+  // 证明足以走通 persist 分支），fetch 复现 provider 对强制 tool_choice 的 400 拒绝；
-+  // 断言重发成功且复用的 message 行无伪 error 终态（首次 400 无事件落库）。
++  // fixture 复用 parentSessionModelFixture 已验证的 session mock 形态（persist 组
++  // 绿灯证明足以走通 persist 分支），fetch 复现 provider 对强制 tool_choice 的 400
++  // 拒绝；断言重发成功且复用的 message 行无伪 error 终态（首次 400 无事件落库）。
 +  const persistResendFixture = reviewerPersistResendFixture()
 +  const persistResend = testEffect(persistResendFixture.layer)
 +
@@ -721,19 +710,19 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +    }),
 +  )
 +
-   // [local-smark] reviewer 默认模型来源回归开始
+ 
    // 以下测试验证：未配置 permission.auto_review.model 时，hidden reviewer 应当
    // 跟随父会话当前模型，而不是受全局 state/model.json recent 漂移到另一个 provider。
-@@ -779,12 +871,97 @@ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
+@@ -911,6 +1004,90 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
    }
  }
  
-+// [local-smark] persist 路径重发夹具：session mock 形态复用 reviewerClosureFixture
-+// （get/children/create/updateMessage/getPart/updatePart），updateMessage 额外捕获
++// [local-smark] 596 persist 路径重发夹具：session mock 形态复用 parentSessionModelFixture
++// （get/children/create/updateMessage + sessionPartStore），updateMessage 额外捕获
 +// child assistant 终态供「重发复用同一 message 行且无伪 error 终态」断言。
 +function reviewerPersistResendFixture() {
 +  const bodies: ReviewerRequestBody[] = []
-+  const messages = new Map<string, MessageV2.Info>()
++  const messages = new Map<string, MessageV2.Assistant | MessageV2.User>()
 +  const parts = new Map<string, MessageV2.Part>()
 +  const model = reviewerModel(OPENAI_PROVIDER_ID)
 +  const fetch = Object.assign(
@@ -763,7 +752,7 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +  const parentSession: Session.Info = {
 +    id: SessionID.make("session_parent_persist"),
 +    slug: "parent-persist",
-+    projectID: ProjectID.make("project_reviewer_persist"),
++    projectID: ProjectV2.ID.make("project_reviewer_persist"),
 +    directory: "/tmp",
 +    title: "Parent persist",
 +    model: { id: model.id, providerID: model.providerID },
@@ -781,8 +770,9 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +  }
 +  const sessionLayer = Layer.mock(Session.Service)({
 +    get: () => Effect.succeed(parentSession),
++    messages: () => Effect.succeed([]),
 +    children: () => Effect.succeed([]),
-+    create: (input) => Effect.succeed({ ...childSession, ...input }),
++    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (message) =>
 +      Effect.sync(() => {
 +        messages.set(message.id, structuredClone(message))
@@ -794,6 +784,7 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +        parts.set(part.id, structuredClone(part))
 +        return part
 +      }),
++    findMessage: () => Effect.succeed(Option.none()),
 +  })
 +  return {
 +    bodies,
@@ -804,29 +795,32 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
 +      Layer.provide(authLayer({ type: "api", key: "test-key" })),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // 596：reviewer layer 依赖 Database（#206 谱系）——空 mock 闭合，persist 路径不触真实库
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}
 +
  function reviewerFixture(
    authInfo: Auth.Info | undefined,
-   options: {
+   // #261：扩展 options 支持 plugin 层和 rejectMaxOutputTokens
+@@ -918,6 +1095,11 @@ function reviewerFixture(
      requireInstructions: boolean
-     providerID?: ProviderID
+     providerID?: ProviderV2.ID
      rejectMaxOutputTokens?: boolean
-+    // [local-smark] rejectToolChoice 复现生产 provider 拒绝 tool_choice 的 400 形态
-+    // （报文含 "tool_choice"）；rejectToolChoiceUnrelated 复现报文不含该词的无关
-+    // 400，验证窄匹配不会把其它参数错误误解成需要去参重发（INV-06）。
++    // [local-smark] 596：rejectToolChoice 复现生产 provider 拒绝 tool_choice 的 400
++    // 形态（报文含 "tool_choice"）；rejectToolChoiceUnrelated 复现报文不含该词的
++    // 无关 400，验证窄匹配不会把其它参数错误误解成需要去参重发（INV-06）。
 +    rejectToolChoice?: boolean
 +    rejectToolChoiceUnrelated?: boolean
      plugin?: Layer.Layer<Plugin.Service>
-     permission?: Config.Info["permission"]
-   } = { requireInstructions: false },
-@@ -818,6 +995,18 @@ function reviewerFixture(
+     // #280：注入自定义 permission 块（如无 approvals_reviewer 的隐式 auto 场景）
+     permission?: ConfigInfo["permission"]
+@@ -952,6 +1134,18 @@ function reviewerFixture(
            headers: { "content-type": "application/json" },
          })
        }
-+      // [local-smark] 两种 400 形态只在请求携带强制 tool_choice==="required" 时触发；
++      // [local-smark] 596：两种 400 形态只在请求携带强制 tool_choice==="required" 时触发；
 +      // SDK 在未强制时默认发 tool_choice:"auto"（今日生产请求同形且被 provider 接受），
 +      // 与生产一致，400 发生在任何 stream 事件之前。
 +      if ((options.rejectToolChoice || options.rejectToolChoiceUnrelated) && body.tool_choice === "required") {
@@ -841,27 +835,28 @@ index 941bc15771a3f249a534f0db640329bf314d14b1..d4a09a7f951d3ea7f5ea9a56a328fe02
  
        return new Response(openAIReviewDecisionStream(), {
          status: 200,
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 64c80af9c45ba982c31100e1510ef5e5e7b10d35..4d5cf2b7843a4d1ea50ecce0a1f7e6f3835a811f 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1732,7 +1732,10 @@ it.instance(
- 
+@@ -2094,8 +2094,10 @@ it.instance(
        const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
+       // #209：inputs 捕获发送给 provider 的请求——验证 tool_choice、tools、max_tokens 等 streamText 参数
        const inputs = yield* llm.inputs
+-      // #209：streamText 不强制 tool_choice=required——部分 provider 拒绝 forced tool_choice
 -      expect(inputs[0].tool_choice).not.toBe("required")
-+      // [local-smark] INV-02 反转：reviewer 请求现在必须在 API 层强制决策工具
++      // [local-smark] 596 INV-02 反转：reviewer 请求现在必须在 API 层强制决策工具
 +      // （toolChoice:"required"），与 reviewer-service 的 wire 断言同源；该测试
 +      // 单 push 即 reviewer 请求，inputs[0] 就是 reviewer 的 wire body。
 +      expect(inputs[0].tool_choice).toBe("required")
        expect(JSON.stringify(inputs[0].tools)).toContain("permission_review_decision")
        expect(inputs[0].tools).toEqual(
          expect.arrayContaining([
-@@ -1863,6 +1866,14 @@ it.instance(
+@@ -2239,6 +2241,14 @@ it.instance(
        })
  
        expect(yield* llm.calls).toBe(2)
-+      // [local-smark] R-REQ-4：第 2 次请求携带 avoid-xxx 防御纵深 nudge（阻断
++      // [local-smark] 596 R-REQ-4：第 2 次请求携带 avoid-xxx 防御纵深 nudge（阻断
 +      // 反问/自认无能力形态），并显式给出裸 JSON 逃生口（生产 DB 证据：漂移场景
 +      // 下 json_fallback 是实测可救回路径）。
 +      const retryInputs = yield* llm.inputs

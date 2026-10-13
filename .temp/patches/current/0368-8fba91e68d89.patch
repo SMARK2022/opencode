@@ -101,7 +101,7 @@ index e4094e07c..b7db009b9 100644
 +      // 测试 cwd 需要向上两级再进入 tui 包（source 路径已迁移）
 +      const content = yield* Effect.promise(() =>
 +        fs.readFile(
-+          path.join(process.cwd(), "../../tui/src/component/dialog-goal.tsx"),
++          path.join(process.cwd(), "../tui/src/component/dialog-goal.tsx"),
 +          "utf-8",
 +        ),
 +      )
@@ -116,7 +116,7 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
 index f3b93ff25..04df7f208 100644
 --- a/packages/tui/src/component/dialog-goal.tsx
 +++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -7,20 +7,71 @@ import { useToast } from "../ui/toast"
+@@ -7,20 +7,73 @@ import { useToast } from "../ui/toast"
  import { createMemo } from "solid-js"
  
  // [local-smark] goal 管理 dialog
@@ -133,6 +133,8 @@ index f3b93ff25..04df7f208 100644
  }
  
 +// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭
++// #368：goal 生命周期走 sdk.fetch 而非 as-any SDK 方法——生成物没有 goalSet/goalClear，
++// as-any 调用在运行时是 undefined(...) 同步 TypeError；显式 fetch 保证类型与运行时一致。
 +function useGoalApi(sessionID: string) {
 +  const sdk = useSDK()
 +  const sync = useSync()

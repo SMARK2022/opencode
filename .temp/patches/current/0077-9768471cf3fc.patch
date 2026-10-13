@@ -46,8 +46,11 @@ index 82ceadb99c..4397fbee8b 100644
  
        const autoload = Boolean(apiKey)
        if (!autoload) return { autoload: false }
-@@ -1485,7 +1505,7 @@ const layer = Layer.effect(
+@@ -1533,11 +1553,11 @@ const layer = Layer.effect(
                existingModel?.api.npm ??
+               // Config-defined gateway models bypass fromModelsDevModel, so resolve the
+               // native passthrough npm here before falling back to the catalog default.
+               cloudflareGatewayNpm(providerID, apiID) ??
                modelsDev[baseType ?? providerID]?.npm ??
                // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
 -              (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
@@ -55,6 +58,7 @@ index 82ceadb99c..4397fbee8b 100644
              const name = iife(() => {
                if (model.name) return model.name
                if (model.id && model.id !== modelID) return modelID
+               return existingModel?.name ?? modelID
 @@ -1503,7 +1523,12 @@ const layer = Layer.effect(
                providerID: ProviderV2.ID.make(providerID),
                capabilities: {
@@ -193,7 +197,7 @@ index af87480770..b1025b4f5c 100644
  import { Locale } from "../../util/locale"
 +import { createThrottledSignal } from "../../util/signal"
  import { webSearchProviderLabel } from "../../util/tool-display"
- import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+ import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
  import { useSDK } from "../../context/sdk"
 @@ -1518,6 +1519,25 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
    const final = createMemo(() => {
@@ -230,10 +234,11 @@ index af87480770..b1025b4f5c 100644
            <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
              <text marginTop={1}>
                <span
-@@ -1635,6 +1655,12 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+@@ -1648,7 +1668,13 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
      // OpenRouter encrypts some reasoning blocks; drop the placeholder.
      return props.part.text.replace("[REDACTED]", "").trim()
    })
+   const opaque = createMemo(() => !content() && Boolean(props.part.metadata))
 +  // 50ms 节流：推理流式刷新过密时降低 markdown 重排开销
 +  // 50ms 节流推理流，降低 markdown 重排频率
 +const [displayContent, setDisplayContent] = createThrottledSignal("", 50)

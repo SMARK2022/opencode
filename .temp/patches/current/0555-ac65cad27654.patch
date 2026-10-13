@@ -10,6 +10,7 @@ Content-Transfer-Encoding: 8bit
 
 修复 splitCommands 对美元展开的 taint-restart 与 2>/dev/null 误 bail，避免 token 可见的 git 变更在 auto 下被 general 直过；补齐 filter-repo 与系统 patch 的 token 语义审查，且不削弱远程下载管道执行的 dangerous 规则。
 
+
 diff --git a/docs/plans/precheck-opaque-git-mutation-cautious.md b/docs/plans/precheck-opaque-git-mutation-cautious.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..5c8b4fddafde73df595f158e233a5f20d7aa15e0
@@ -473,43 +474,43 @@ index 0000000000000000000000000000000000000000..5c8b4fddafde73df595f158e233a5f20
 +```
 +
 +Applies only to plan R1 and the production/test diff of `precheck.ts` + `precheck.test.ts`. Auditor independent verification: precheck+auto tests 125 pass / 0 fail.
+
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 94e7d0d286bc5a000ab3b767f9a492326137bade..e7075eb2f09a62b86ee9cd324f4487abfd792391 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -777,12 +777,9 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
+@@ -481,12 +481,9 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
      }
      if (quote) {
        if (char === quote) quote = ""
--      // 双引号内 $/` 仍可能展开/替换——当前段 opaque 且 tainted，从下一字符起重开
+-      // #355：双引号内 $/` 仍可能展开/替换——当前段 opaque 且 tainted，从下一字符起重开
 -      else if (quote !== "'" && (char === "$" || char === "`")) {
 -        opaque = true
 -        tainted = true
 -        start = i + 1
 -      }
-+      // 双引号内 $/` 仍可能展开：整条不得升 safe（opaque→general），但不可 taint-restart。
-+      // taint-restart 会丢掉前缀 `git …` argv，使 classifyGit 不可达，auto 把 general 直过 allow。
++      // #555：双引号内 $/` 仍可能展开：整条不得升 safe（opaque→general），但不可 taint-restart。
++      // #555：taint-restart 会丢掉前缀 `git …` argv，使 classifyGit 不可达，auto 把 general 直过 allow。
 +      else if (quote !== "'" && (char === "$" || char === "`")) opaque = true
        continue
      }
      if (char === "'" || char === '"') {
-@@ -803,6 +800,10 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
+@@ -507,6 +504,10 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
        continue
      }
  
-+    // 空重定向到 /dev/null（含 2>/dev/null）：丢弃流、不写普通文件，与 fd-merge 同属良性。
-+    // 若按普通 `>` bail，会 taint 掉 `git reset … 2>/dev/null` 的前缀 token 分类。
++    // #555：空重定向到 /dev/null（含 2>/dev/null）：丢弃流、不写普通文件，与 fd-merge 同属良性。
++    // #555：若按普通 `>` bail，会 taint 掉 `git reset … 2>/dev/null` 的前缀 token 分类。
 +    if ((char === ">" || char === "<") && command.startsWith("/dev/null", i + 1)) continue
 +
      const two = command.slice(i, i + 2)
      if (two === "&&" || two === "||") {
        pushSegment(i)
-@@ -820,8 +821,14 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
-     // 不再 return 整条，避免一个 bail 字符毒化已切出的干净 cautious 段。
-     // 单 `&`（后台）与换行在此 opaque 而非切分——保 `git status & rg`/`git status\nrg`
-     // 为 general（:69/:70），不能 split 否则会变 safe。
-+    // `$`/`：只标 opaque、不 taint-restart，保留前缀 argv 给 classifyTokens/classifyGit；
-+    // max(safe, general)=general，max(cautious, general)=cautious，堵住 auto 直过洞。
+@@ -524,8 +525,14 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
+     // #355：不再 return 整条，避免一个 bail 字符毒化已切出的干净 cautious 段。
+     // #355：单 `&`（后台）与换行在此 opaque 而非切分——保 `git status & rg`/`git status\nrg`
+     // #355：为 general，不能 split 否则会变 safe。
++    // #555：`$`/反引号只标 opaque、不 taint-restart，保留前缀 argv 给 classifyTokens/classifyGit；
++    // #555：max(safe, general)=general，max(cautious, general)=cautious，堵住 auto 直过洞。
 +    if (char === "$" || char === "`") {
 +      opaque = true
 +      continue
@@ -520,29 +521,24 @@ index 94e7d0d286bc5a000ab3b767f9a492326137bade..e7075eb2f09a62b86ee9cd324f4487ab
        char === "{" || char === "}" || char === "*" || char === "?" || char === "[" ||
        char === ">" || char === "<" || char === "&" || char === "\n" || char === "\r"
      ) {
-@@ -1094,6 +1101,14 @@ function classifyTokens(tokens: string[]): Decision | undefined {
-   // Git 子命令的分类较复杂，委托给专项分类器
+@@ -956,6 +963,12 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+     return { level: "dangerous", reason: "system destructive command" }
+   // #220: Git 操作委托专项分类器
    if (cmd === "git") return classifyGit(tokens)
- 
-+  // ---- 系统 patch 应用 ----
-+  // GNU/BSD patch 改工作树；仅 help/version/裸命令保持 general，避免无载荷噪声。
++  // #555: GNU/BSD patch 改工作树；仅 help/version/裸命令保持 general，避免无载荷噪声。
 +  if (cmd === "patch") {
 +    const args = tokens.slice(1)
 +    if (args.some((item) => !["--help", "-h", "--version", "-v"].includes(item)))
 +      return { level: "cautious", reason: "patch apply modifies working tree" }
 +  }
-+
-   // ---- 权限变更 ----
+   // #220: 权限变更——setuid/setgid dangerous，777/-R cautious
    if (cmd === "chmod") {
-     // setuid/setgid 位创建特权升级面，必须 dangerous
-@@ -1275,13 +1290,14 @@ function classifyGit(tokens: string[]): Decision | undefined {
- 
-   // 通用状态变更命令：修改索引、历史、引用、工作树或远端状态，需要审批。
-   // checkout/switch/restore 可丢弃未提交修改;apply/am 修改工作树;
--  // filter-branch 重写历史;update-ref 直接改引用;bisect checkout 不同提交;
-+  // filter-branch/filter-repo 重写历史;update-ref 直接改引用;bisect checkout 不同提交;
-   // symbolic-ref 改符号引用;worktree 创建/删除工作树;submodule 可克隆+执行 hooks。
-+  // filter-repo 与 filter-branch 同属历史重写；仅列 filter-branch 时 filter-repo 会 general 直过 auto。
+     if (tokens.some((item) => /[ug]\+s/.test(item)))
+@@ -1119,11 +1132,12 @@ function classifyGit(tokens: string[]): Decision | undefined {
+   // #365：补充 checkout/switch/restore/apply/am/filter-branch/update-ref/
+   // bisect/symbolic-ref/worktree/submodule 等遗漏子命令——它们修改索引、
+   // 历史、引用、工作树或远端状态，落入 general 会被自动放行。
++  // #555：filter-repo 与 filter-branch 同属历史重写；仅列 filter-branch 时 filter-repo 会 general 直过 auto。
    if (
      ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull",
       "reset", "clean", "mv", "rm",
@@ -552,17 +548,17 @@ index 94e7d0d286bc5a000ab3b767f9a492326137bade..e7075eb2f09a62b86ee9cd324f4487ab
       "worktree", "submodule"].includes(sub)
    )
      return { level: "cautious", reason: "git state-changing command requires explicit approval" }
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index f0d4d64165633749a7b21f3e54bba06be3163f6a..4c384dcedb57bd31330e81da78599e669ecb3baf 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -1182,4 +1182,43 @@ describe("permission precheck bash classifier", () => {
-     // $ 展开整段 opaque → general（回归守卫，:205 不退化）
+@@ -1168,4 +1168,43 @@ describe("permission precheck bash classifier", () => {
+     // $ 展开整段 opaque → general（回归守卫，不退化）
      expect(bash("echo $HOME")).toMatchObject({ level: "general" })
    })
 +
 +  // ============================================================
-+  // opaque salvage：空重定向 / 双引号 $var 不得抹掉 token 可见的 git 变更
++  // #555：opaque salvage：空重定向 / 双引号 $var 不得抹掉 token 可见的 git 变更
 +  // （general 在 auto 下是直过 allow，不是 ask）
 +  // ============================================================
 +  test("keeps git mutations cautious through benign null redirects", () => {

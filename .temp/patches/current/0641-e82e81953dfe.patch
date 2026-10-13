@@ -12,9 +12,20 @@ Content-Transfer-Encoding: 8bit
 
 将单引号说明限定为 PowerShell 本层求值，补齐原生执行回归及模型对照证据。按 R9 完成独立全范围实现审计，保持单一 bash 工具与既有参数接口。
 
+适配说明（0641，目标 v1.18.32）：
+1. Shell 模块 owner 已迁移至 packages/core/src/shell.ts：原 src/shell/shell.ts 的 zsh/bash 位置参数修复与原 test/shell/shell.test.ts 的初始化行为测试分别落到 packages/core/src/shell.ts 与 packages/core/test/shell.test.ts（tmpdir 改用 core 的 test/fixture/tmpdir）。
+2. precheck.ts 按 0631 语法迁移后的结构重锚：bashEffect/externalDirectoryEffect 直接 evaluateShell 原 command，删除 shellEvidenceRisk；evaluateCommand 的 pythonSource 插入点、content 前移与 consumesInput(tokens, literal) 语义逐字移植；bind 值池等 0631 机制原样保留。
+3. session/system.ts：getEnvExtras 为模块级 Effect.fn，接收 layer 构造时捕获的 Config.Service 并按每轮 config.get() 的 cfg.shell 调 Shell.acceptable；原 defaultLayer hunk 以 LayerNode 形态承接（node deps 增加 Config.node）。
+4. tool/shell.ts：删除 INLINE_PYTHON 规范化与 inline_scripts 双证据、psUtf8 块内终态汇聚、删除 shellGuidance、执行/元数据去 executeCommand/adaptation/commandAdaptation、notice 增加 shell 名称；目标独有的 listCmd 与 Dedicated tools 组装段保留，仅移除 shellGuidance 段。
+5. tool/shell/prompt.ts：parameterSchema 增 name 参数、PowerShell 引用合同、chainGuidance/三处 multiline 行、cmd 2 行、intro 与 bash Windows 追加行逐字移植；目标以参数插值渲染 timeout 文案。目标 PowerShell 基线比 source 时代精简约 0.5KB，授权引用文案全额加入会超出 R5 的 600 字节硬预算，故同步移除与引用保真无关的别名/数组表达式两行旧文案，预算测试按目标冻结基线（记录见 records/0641）。
+6. 上游已移除 shell 工具的 description 入参（目标 wire 合同为 command/timeout/workdir/compress_output 四字段）：source 测试与评测脚本中的 description 实参按目标合同省略，shell-prompt 测试的 wire shape/required 断言按目标四字段合同适配，不重新引入已退役字段。
+7. eval-shell-intent.ts 按目标 API 重写装配：Provider 经 LayerNode.compile(Provider.node)+makeRuntime；模型 ID 用 ProviderV2/ModelV2；harness 层按 test/tool/shell.test.ts 的 LayerNode 组合并 mock Skill/MCP/Git/Config/Plugin/Agent/RuntimeFlags(disableGit)；SystemPrompt.environment(model, ["bash"]) 无 session 维度，原 ProjectTable/SessionTable 预置在目标无活路径（source-era 设计，随会话架构退役，不重建）；日期冻结改为对 Today's date 行归一化后 freeze，保持跨日可比不变量。
+8. session/system.test.ts 以 LayerNode.compile + Config mock 提供配置边界；新增 environment follows configured shell changes 用例，目标 environment 返回 string[]（无 updates 字段），以行级过滤承接"只允许能力段变化"不变量并保留 git 快照断言。
+9. parse.ts、parse.test.ts、fixture/shell-intent.ts、plans 文档与快照 hunk 逐字保留；precheck.test.ts 与 shell.test.ts 的替换体按目标既有注释/类型（PermissionV1.Request）重锚，语义与断言逐字。
+
 diff --git a/docs/plans/shell-native-script-fidelity-and-model-success.md b/docs/plans/shell-native-script-fidelity-and-model-success.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..993e8ff311c868f1379ffe3ef118d605c8ef35e0
+index 0000000..993e8ff
 --- /dev/null
 +++ b/docs/plans/shell-native-script-fidelity-and-model-success.md
 @@ -0,0 +1,658 @@
@@ -677,7 +688,7 @@ index 0000000000000000000000000000000000000000..993e8ff311c868f1379ffe3ef118d605
 +
 +原始路径结论：生产执行保持唯一主路径；Python猜测改写及专属附加证据已移除；评测修正和基线归因保持在测试入口；其他工具及共享spawner保持。完整实现达到verified-implementation，放行限于本任务归属diff。审计外部模型调用0，源码/快照/原始评测证据修改0；本任务commit/push均0。
 diff --git a/docs/powershell-inline-python-normalization-plan.md b/docs/powershell-inline-python-normalization-plan.md
-index d911f1637ac20469405f2009ce4aa0c48547673e..e01ad85f7f6f4e8ef05b687d867ce1675adf7731 100644
+index d911f16..e01ad85 100644
 --- a/docs/powershell-inline-python-normalization-plan.md
 +++ b/docs/powershell-inline-python-normalization-plan.md
 @@ -4,7 +4,7 @@
@@ -689,11 +700,120 @@ index d911f1637ac20469405f2009ce4aa0c48547673e..e01ad85f7f6f4e8ef05b687d867ce167
  
  ## 1. 目标与硬约束
  
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+index 2908910..8bb2afa 100644
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -167,6 +167,7 @@ export function args(file: string, command: string, cwd: string) {
+   const n = name(file)
+   if (n === "nu" || n === "fish") return ["-c", command]
+   if (n === "zsh") {
++    // 正文通过位置参数跨过初始化解析；双引号只保护参数，不提前展开正文中的变量。
+     return [
+       "-l",
+       "-c",
+@@ -174,13 +175,15 @@ export function args(file: string, command: string, cwd: string) {
+         [[ -f ~/.zshenv ]] && source ~/.zshenv >/dev/null 2>&1 || true
+         [[ -f "\${ZDOTDIR:-$HOME}/.zshrc" ]] && source "\${ZDOTDIR:-$HOME}/.zshrc" >/dev/null 2>&1 || true
+         cd -- "$1"
+-        eval ${JSON.stringify(command)}
++        eval "$2"
+       `,
+       "opencode",
+       cwd,
++      command,
+     ]
+   }
+   if (n === "bash") {
++    // 保留 Bash 的别名与 rc 初始化；cwd 仍是 $1，原命令独占 $2。
+     return [
+       "-l",
+       "-c",
+@@ -188,10 +191,11 @@ export function args(file: string, command: string, cwd: string) {
+         shopt -s expand_aliases
+         [[ -f ~/.bashrc ]] && source ~/.bashrc >/dev/null 2>&1 || true
+         cd -- "$1"
+-        eval ${JSON.stringify(command)}
++        eval "$2"
+       `,
+       "opencode",
+       cwd,
++      command,
+     ]
+   }
+   if (n === "cmd") return ["/c", command]
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+index b20df20..5f6cadf 100644
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -3,6 +3,7 @@ import path from "path"
+ import { Shell } from "@opencode-ai/core/shell"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { which } from "@opencode-ai/core/util/which"
++import { tmpdir } from "./fixture/tmpdir"
+ 
+ const withShell = async (shell: string | undefined, fn: () => void | Promise<void>) => {
+   const prev = process.env.SHELL
+@@ -21,6 +22,43 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
+ }
+ 
+ describe("shell", () => {
++  for (const name of ["bash", "zsh"]) {
++    const file = name === "bash" && process.platform === "win32" ? Shell.gitbash() : which(name)
++    test.skipIf(!file)(`${name} preserves native script and startup behavior`, async () => {
++      if (!file) throw new Error(`Missing ${name}`)
++      await using home = await tmpdir()
++      await using cwd = await tmpdir()
++      // 独立 HOME 避免用户 rc 干扰；login 和手动 rc 各自提供可观察标记。
++      await Bun.write(path.join(home.path, name === "bash" ? ".bash_profile" : ".zprofile"), "export LOGIN_MARK=login\n")
++      await Bun.write(path.join(home.path, `.${name}rc`), "export VALUE=outer\nalias fidelity_alias='printf alias'\ncd /\n")
++      // Zsh 的 env 与 rc 查找语义不同于 Bash，不能合并初始化脚本。
++      await Bun.write(path.join(home.path, ".zshenv"), "export ENV_MARK=zshenv\n")
++      await Bun.write(path.join(cwd.path, "cwd-marker"), "")
++      // rc 故意离开工作目录；命令开始前必须恢复 cwd，且别名仍可用。
++      const command = String.raw`VALUE=inner
++printf '%s\n' "$VALUE" '$VALUE' 'C:\Temp\x'
++printf '%s\n' \
++  'continued'
++printf '%s\n' "$LOGIN_MARK" "$0"
++fidelity_alias
++[[ -f cwd-marker ]] && printf ':cwd'
++[[ -n "$ENV_MARK" ]] && printf ':zshenv'
++true`
++      // 先锁定输入中的反斜杠换行，防止测试源码先把目标字符吃掉。
++      expect(command).toContain(String.fromCharCode(92, 10))
++      const proc = Bun.spawn([file, ...Shell.args(file, command, cwd.path)], {
++        cwd: home.path,
++        env: { ...process.env, HOME: home.path, ZDOTDIR: home.path, ENV_MARK: "" },
++        stdout: "pipe", stderr: "pipe",
++      })
++      const [output, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
++      expect(error).toBe("")
++      expect(code).toBe(0)
++      // 预期值由语言合同独立给出：赋值后才展开，单引号中的字符原样输出。
++      expect(output).toBe("inner\n$VALUE\nC:\\Temp\\x\ncontinued\nlogin\nopencode\nalias:cwd" + (name === "zsh" ? ":zshenv" : ""))
++    })
++  }
++
+   test("normalizes shell names", () => {
+     expect(Shell.name("/bin/bash")).toBe("bash")
+     if (process.platform === "win32") {
+@@ -60,7 +98,9 @@ describe("shell", () => {
+     const zsh = Shell.args("/bin/zsh", "echo hi", "/tmp")
+     expect(zsh[0]).toBe("-l")
+     expect(zsh[1]).toBe("-c")
+-    expect(zsh.at(-1)).toBe("/tmp")
++    // 正文占最后一个位置参数：初始化脚本 eval "$2"，cwd 仍是 $1。
++    expect(zsh.at(-2)).toBe("/tmp")
++    expect(zsh.at(-1)).toBe("echo hi")
+   })
+ 
+   if (process.platform === "win32") {
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53200b0a1b 100644
+index c8504f6..7f58b6e 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -254,10 +254,8 @@ async function bashEffect(input: {
+@@ -278,28 +278,13 @@ async function bashEffect(input: {
    const patternCommand = input.patterns.join(" && ")
    if (!command) return evaluateShell(patternCommand, 0, cwd, shellDialect(input.metadata.shell))
  
@@ -704,9 +824,6 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
 +  // 执行原文承载外层命令与源码，模式键提供额外匹配信息并参与风险取高。
 +  const raw = await evaluateShell(command, 0, cwd, shellDialect(input.metadata.shell))
    if (!patternCommand.trim() || patternCommand === command) return raw
- 
-   // Shell metadata is the raw audit/reviewer evidence, while permission patterns
-@@ -268,18 +266,7 @@ async function bashEffect(input: {
    return maxRisk(raw, await evaluateShell(patternCommand, 0, cwd, shellDialect(input.metadata.shell)))
  }
  
@@ -722,18 +839,22 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
 -  return risk
 -}
 -
+-// 严重度取大：LEVELS 数组顺序即序。reason 不在此合并——聚合层负责去重拼接，
+-// 保证『检出全部 cautious 再附加 reason』的 R1 合同不变。
 +// inline_scripts 随 Python 命令改写移除，两道门禁改为直接分析实际执行的 command。
  function maxRisk(left: Decision, right: Decision) {
    return LEVELS.indexOf(right.level) > LEVELS.indexOf(left.level) ? right : left
  }
-@@ -438,11 +425,12 @@ async function externalDirectoryEffect(input: {
+@@ -471,13 +456,14 @@ async function externalDirectoryEffect(input: {
    if (input.permission !== "external_directory") return
  
    if (input.metadata.action_kind === "shell") {
 -    // external_directory 是第一道权限门禁；使用与 bashEffect 相同的 shellEvidenceRisk，
 -    // 确保 dangerous inline source 在此就被 deterministic deny，而非等到后续 bash gate。
--    const shell = await shellEvidenceRisk(
 +    // 两道门禁共享原command、方言与cwd；外部目录的cautious下限不覆盖更高源码风险。
+     // shell 证据与 bash gate 同源：dangerous/forbidden 载荷在第一道门禁
+     // 即确定性拒绝，防止跨外部路径边界反而把 rm -rf / 降成可审批 cautious。
+-    const shell = await shellEvidenceRisk(
 +    const shell = await evaluateShell(
        typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
 -      input.metadata,
@@ -741,9 +862,9 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
 +      typeof input.metadata.cwd === "string" ? input.metadata.cwd : undefined,
 +      shellDialect(input.metadata.shell),
      )
-     // external_directory access is normally reviewable, but an already-critical
-     // shell payload must remain deterministic deny (forbidden) or keep its stronger
-@@ -590,6 +578,11 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
+     // #232：已经确定性的危险 shell 载荷必须在 external_directory 门禁保持原有层级：
+     // #232：forbidden（终审 deny）或 dangerous（携带更强信号进 reviewer）——
+@@ -630,6 +616,11 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
      // 包装器不升级safe，其实际载荷的已有风险完整保留。
      return inner.level === "safe" ? { level: "general", reason: "privilege wrapper requires explicit approval" } : inner
    }
@@ -753,9 +874,9 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
 +  const python = dialect === "powershell" ? pythonSource(command.words, content) : undefined
 +  if (python !== undefined) return sourceRisk(python, "python")
    const evalFlags = INTERPRETER_FLAGS.get(name) ?? (SHELL_WRAPPERS.has(name) ? new Set(["-c", "-lc"]) : POWERSHELL_WRAPPERS.has(name) ? new Set(["-command", "-c", "-encodedcommand", "-enc"]) : undefined)
-   let evalIndex = -1
-   for (let index = 1; evalFlags && index < tokens.length; index++) {
-@@ -604,10 +597,8 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
+   // 入口扫描：解释器/包装器的选项区在首个脚本实参处结束（python script.py
+   // 之后的 -c 属于脚本参数）。取值选项（-W/-o/-ExecutionPolicy 等）各消费
+@@ -647,10 +638,8 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
    }
    if (evalIndex > 0 && tokens[evalIndex + 1] && ["python", "python3", "py", "node"].includes(name))
      return sourceRisk(tokens[evalIndex + 1], name === "node" ? "javascript" : "python")
@@ -767,7 +888,7 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
      return SHELL_WRAPPERS.has(name) ? evaluateShell(content, depth + 1, cwd, "bash") : sourceRisk(content, name === "node" ? "javascript" : "python")
    if (["curl", "wget"].includes(name)) {
      const upload = bind(tokens.slice(1), CURL_VALUES)
-@@ -722,10 +713,71 @@ function printfOutput(words: ShellParse.Word[]) {
+@@ -814,13 +803,74 @@ function printfOutput(words: ShellParse.Word[]) {
      format.replace(/%%|%[sb]/g, (slot) => slot === "%%" ? "%" : slot === "%s" ? (words[index++]?.value ?? "") : (words[index++]?.value ?? "").replace(/\\([nrt\\])/g, (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "\\": "\\" })[char] ?? char))).join("")
  }
  
@@ -817,6 +938,9 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
 +}
 +
  // 只有stdin入口消费字面输入；eval、模块和脚本文件参数分别指定其他源码来源。
+ // 判定管道右侧命令是否真实消费 stdin：解释器裸入口（python/sh 等）消费，
+ // 带 -c/-e 的入口已把源码显式化、stdin 只是数据。避免把 echo 的文字
+ // 错误升级成对端源码再解析一遍。
 -function consumesInput(tokens: string[]) {
 -  const bound = bind(tokens.slice(1), ["-c", "-e", "-m", "-command", "-file", "-encodedcommand", "-W", "-X", "-r", "--require", "--import", "--loader", "--preload"])
 -  return !["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag)) && bound.operands.every((path) => path === "-")
@@ -843,41 +967,63 @@ index b08a6e87e8d60357fdf312946ebfa581a3115538..6b2186f612e1cf2ee1025a3c91223f53
  
  // 返回已知包装器链后第一个可执行名的索引；调用者据此切片，原Token数组保持不变。
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index 76776d0a7ac0f42a2f3e6b771c882cebd381349a..cfb11f568866f75fe3b8501a821f6da7291f5cc6 100644
+index 87ba215..22ab998 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -26,6 +26,7 @@ import { Skill } from "@/skill"
- import { Git } from "@/git"
- import { Flag } from "@opencode-ai/core/flag/flag"
- import { Shell } from "@/shell/shell"
+@@ -30,6 +30,7 @@ import { Git } from "@/git"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { type as osType, release as osRelease } from "os"
+ import { Shell } from "@opencode-ai/core/shell"
 +import { Config } from "@/config/config"
+ // Flag 模块已在上游重构中迁移为 RuntimeFlags，导入路径已更新
+ // 原始 SMARK patch 31 的 Flag→@opencode-ai/core/flag 迁移已由上游完成
  
- // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
- const MAX_STATUS_CHARS = 2000
-@@ -202,9 +203,12 @@ export const layer = Layer.effect(
-   Effect.gen(function* () {
-     const skill = yield* Skill.Service
+@@ -74,8 +75,11 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Sy
+ 
+ 
+ // 获取环境额外信息：检测 shell 类型并生成 Windows 兼容提示
+-const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
+-  const actualShell = Shell.acceptable()
++// 配置服务在 layer 构造时捕获；get 每轮读取，保持与工具选择规则一致。
++const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* (config: Config.Interface) {
++  // Shell 属于当前执行能力而非会话快照；每轮读取配置，保持与工具选择规则一致。
++  const cfg = yield* config.get()
++  const actualShell = Shell.acceptable(cfg.shell)
+   const shellName = Shell.name(actualShell)
+   const shellNotes =
+     process.platform !== "win32"
+@@ -177,6 +181,8 @@ const layer = Layer.effect(
+     const locations = yield* LocationServiceMap.Service
      const git = yield* Git.Service
+     const flags = yield* RuntimeFlags.Service
++    // Shell 属于当前执行能力而非会话快照；这里只捕获服务，值由 getEnvExtras 每轮读取。
 +    const config = yield* Config.Service
  
-     const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
--      const actualShell = Shell.acceptable()
-+      // Shell 属于当前执行能力而非会话快照；每轮读取配置，保持与工具选择规则一致。
-+      const cfg = yield* config.get()
-+      const actualShell = Shell.acceptable(cfg.shell)
-       const shellName = Shell.name(actualShell)
-       const shellNotes =
-         process.platform !== "win32"
-@@ -361,6 +365,7 @@ export const layer = Layer.effect(
- export const defaultLayer = layer.pipe(
-   Layer.provide(Skill.defaultLayer),
-   Layer.provide(Git.defaultLayer),
-+  Layer.provide(Config.defaultLayer),
- )
+     // 该缓存是会话级快照，按 cwd 作为键。
+     // 为保持“快照语义”，会话内不主动失效。
+@@ -251,7 +257,7 @@ const layer = Layer.effect(
+         const gitContext = yield* getGitContext()
+         // 获取环境额外信息：shell 类型和 OS 版本，用于系统提示词
+         // 获取环境额外信息：shell 和 OS 版本
+-        const { shellNotes, osVersion } = yield* getEnvExtras()
++        const { shellNotes, osVersion } = yield* getEnvExtras(config)
+         // 根据模型估算知识截止日期
+         const isWorktree = ctx.worktree !== ctx.directory
+         const cutoff = getKnowledgeCutoff(model.api.id)
+@@ -354,8 +360,9 @@ const locationServiceMapNode = LayerNode.make({
+ export const node = LayerNode.make({
+   service: Service,
+   layer: layer,
+-  // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关
+-  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
++  // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关；
++  // Config 提供 shell 能力段的每轮配置来源，与 ShellTool 的选择规则同源。
++  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node],
+ })
  
  export * as SystemPrompt from "./system"
 diff --git a/packages/opencode/src/shell/parse.ts b/packages/opencode/src/shell/parse.ts
-index 9cdea696dba20b14f423b5ac7ca5f77338c0f3b8..e4d2ced016fb6878b19d5bdc8ca8906d1ffd9765 100644
+index 9cdea69..e4d2ced 100644
 --- a/packages/opencode/src/shell/parse.ts
 +++ b/packages/opencode/src/shell/parse.ts
 @@ -8,7 +8,7 @@ import { lazy } from "@/util/lazy"
@@ -1053,53 +1199,11 @@ index 9cdea696dba20b14f423b5ac7ca5f77338c0f3b8..e4d2ced016fb6878b19d5bdc8ca8906d
      return { commands, incomplete: tree.rootNode.hasError, opaque, environment: tree.rootNode.descendantsOfType("variable_assignment").length > 0 }
    } finally {
      // 导出的记录与树分离，异常退出时也及时释放WASM分配。
-diff --git a/packages/opencode/src/shell/shell.ts b/packages/opencode/src/shell/shell.ts
-index 516a5bf23ff96ea3d505e75db60c5bb5d7e62bb7..18d7d72ab8eb50d52133c097fba31dbaf42581e7 100644
---- a/packages/opencode/src/shell/shell.ts
-+++ b/packages/opencode/src/shell/shell.ts
-@@ -160,6 +160,7 @@ export function args(file: string, command: string, cwd: string) {
-   const n = name(file)
-   if (n === "nu" || n === "fish") return ["-c", command]
-   if (n === "zsh") {
-+    // 正文通过位置参数跨过初始化解析；双引号只保护参数，不提前展开正文中的变量。
-     return [
-       "-l",
-       "-c",
-@@ -167,13 +168,15 @@ export function args(file: string, command: string, cwd: string) {
-         [[ -f ~/.zshenv ]] && source ~/.zshenv >/dev/null 2>&1 || true
-         [[ -f "\${ZDOTDIR:-$HOME}/.zshrc" ]] && source "\${ZDOTDIR:-$HOME}/.zshrc" >/dev/null 2>&1 || true
-         cd -- "$1"
--        eval ${JSON.stringify(command)}
-+        eval "$2"
-       `,
-       "opencode",
-       cwd,
-+      command,
-     ]
-   }
-   if (n === "bash") {
-+    // 保留 Bash 的别名与 rc 初始化；cwd 仍是 $1，原命令独占 $2。
-     return [
-       "-l",
-       "-c",
-@@ -181,10 +184,11 @@ export function args(file: string, command: string, cwd: string) {
-         shopt -s expand_aliases
-         [[ -f ~/.bashrc ]] && source ~/.bashrc >/dev/null 2>&1 || true
-         cd -- "$1"
--        eval ${JSON.stringify(command)}
-+        eval "$2"
-       `,
-       "opencode",
-       cwd,
-+      command,
-     ]
-   }
-   if (n === "cmd") return ["/c", command]
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb7855011c106 100644
+index d067730..2e4c3bc 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -368,207 +368,13 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, dialect:
+@@ -375,204 +375,10 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, dialect:
    return tree
  })
  
@@ -1141,7 +1245,8 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
 -function inlinePythonStaticValue(value: string) {
 -  return value.length > 0 && !/[\s"'`$@;&|<>(){}]/.test(value)
 -}
--
++// Python 专项改写会改变反斜杠和引号含义，已移除；原生 shell 负责解释命令正文。
+ 
 -function normalizePowerShellInlinePython(command: string): InlinePythonNormalization | undefined {
 -  let pos = 0
 -  let callOperator = false
@@ -1296,55 +1401,59 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
 -  return { command: normalizedCommand, source: normalizedSource, audit }
 -}
 -
-+// Python 专项改写会改变反斜杠和引号含义，已移除；原生 shell 负责解释命令正文。
- const ask = Effect.fn("ShellTool.ask")(function* (
-   ctx: Tool.Context,
-   scan: Scan,
--  metadata: { command: string; cwd: string; shell: string; inline_scripts?: string[] },
-+  metadata: { command: string; cwd: string; shell: string },
- ) {
--  // shared evidence：两个 permission request 必须从同一对象展开，
+-
+-const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string; inline_scripts?: string[] }) {
+-  // [local-smark] shared evidence：两个 permission request 必须从同一对象展开，
 -  // 确保 inline_scripts 附加证据同时到达 external_directory 和 bash gate
--  const sharedEvidence = metadata.inline_scripts ? { inline_scripts: metadata.inline_scripts } : {}
+-  const sharedEvidence = input.inline_scripts ? { inline_scripts: input.inline_scripts } : {}
++const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string }) {
 +  // 两个门禁使用同一原命令；源码与stdin角色由共享分析层识别，执行正文始终保持原样。
    if (scan.dirs.size > 0) {
-     const globs = Array.from(scan.dirs).map((dir) => {
-       if (process.platform === "win32") return AppFileSystem.normalizePathPattern(path.join(dir, "*"))
-@@ -587,7 +393,6 @@ const ask = Effect.fn("ShellTool.ask")(function* (
-         cwd: metadata.cwd,
-         shell: metadata.shell,
+     const directories = Array.from(scan.dirs)
+     const globs = directories.map((dir) => {
+@@ -594,10 +400,6 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
          agent: ctx.agent,
+         directories,
+         patterns: globs,
+-        // [local-smark] 第一道权限门禁同样携带 inline_scripts（源 :819 sharedEvidence
+-        // 展开）：dangerous inline source 必须在 external_directory 就 deterministic
+-        // deny，不能只给后发生的 bash request 加源码证据
 -        ...sharedEvidence,
        },
      })
    }
-@@ -612,7 +417,6 @@ const ask = Effect.fn("ShellTool.ask")(function* (
-       cwd: metadata.cwd,
-       shell: metadata.shell,
+@@ -620,7 +422,6 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+       cwd: input.cwd,
+       shell: input.shell,
        agent: ctx.agent,
 -      ...sharedEvidence,
      },
    })
  })
-@@ -672,57 +476,18 @@ function psEncoded(command: string) {
-       "$DebugPreference = 'SilentlyContinue'",
-       "& {",
-       command,
-+      // 在用户脚本同一作用域观察最终状态，成功恢复优先于此前native程序的残留码。
-+      "if ($?) { exit 0 }",
-+      // 失败保留本脚本已有的精确native非零码，纯cmdlet失败使用PowerShell失败码1。
-+      "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-+      "exit 1",
-       "} 3>&1 4>&1 5>&1 6>&1",
--      "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-     ].join("\n"),
-     "utf16le",
-   ).toString("base64")
+@@ -645,10 +446,14 @@ function psUtf8(command: string) {
+     "$DebugPreference = 'SilentlyContinue'",
+     "& {",
+     command,
++    // 在用户脚本同一作用域观察最终状态，成功恢复优先于此前native程序的残留码。
++    "if ($?) { exit 0 }",
++    // 失败保留本脚本已有的精确native非零码，纯cmdlet失败使用PowerShell失败码1。
++    "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
++    "exit 1",
+     // #129：*&1 合并全部流到 stdout（#130 将收窄 stderr）
+     // #130：stderr 保持原生，避免 PS 先按错误代码页解码
+     "} 3>&1 4>&1 5>&1 6>&1",
+-    "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+   ].join(String.fromCharCode(10))
+ }
+ 
+@@ -909,53 +714,7 @@ function powershellUnixAlternative(name: string) {
+   return "Prefer PowerShell-native commands, or run the Unix utility inside ssh/wsl."
  }
  
 -function shellGuidance(name: string) {
 -  if (process.platform !== "win32") return ""
 -
+-  // Windows PowerShell 5.1：禁止 Unix 工具，提供 PowerShell 等价命令
 -  if (name === "powershell") {
 -    return [
 -      "PowerShell notes:",
@@ -1358,6 +1467,7 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
 -    ].join("\n")
 -  }
 -
+-  // PowerShell 7+：支持 && || 但 Unix 工具可能不存在
 -  if (name === "pwsh") {
 -    return [
 -      "PowerShell notes:",
@@ -1369,6 +1479,7 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
 -    ].join("\n")
 -  }
 -
+-  // cmd.exe：使用 Windows cmd 语法，禁止 Unix 工具
 -  if (name === "cmd") {
 -    return [
 -      "Windows cmd notes:",
@@ -1380,26 +1491,28 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
 -    ].join("\n")
 -  }
 -
+-  // 未知 Windows shell：提供通用建议
 -  return [
--    "Windows shell notes:",
 -    "- This shell may not support Unix utilities. Prefer dedicated OpenCode tools for file operations.",
 -  ].join("\n")
 -}
 -
 +// 原 shellGuidance 已合入 ShellPrompt 的对应 shell 分支，版本与引用规则统一生成。
+ // 返回当前 shell 的目录列表命令，用于提示词中的目录验证指引
+ // 非 Windows 返回 ls，PowerShell 返回 Get-ChildItem，cmd 返回 dir
  function listCommand(name: string) {
-   if (process.platform !== "win32") return "`ls`"
-   if (name === "powershell" || name === "pwsh") return "`Get-ChildItem`"
-@@ -1024,8 +789,6 @@ export const ShellTool = Tool.define(
+@@ -1097,10 +856,6 @@ export const ShellTool = Tool.define(
        input: {
          shell: string
          command: string
+-        // [local-smark] PowerShell inline Python 规范化后的实际执行命令
 -        executeCommand?: string
+-        // 规范化 tag，进 result metadata 便于数据库度量
 -        adaptation?: string
          cwd: string
          env: NodeJS.ProcessEnv
          timeout: number
-@@ -1140,7 +903,8 @@ export const ShellTool = Tool.define(
+@@ -1217,7 +972,8 @@ export const ShellTool = Tool.define(
            }
  
            yield* Effect.addFinalizer(closeSink)
@@ -1407,53 +1520,54 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
 +          // 传输编码保持正文字符，变量展开和引用处理由选定 shell 执行。
 +          const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
  
-           const output = yield* Effect.forkScoped(
-             Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
-@@ -1272,6 +1036,7 @@ export const ShellTool = Tool.define(
-       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
-       // outcome policy 在 emptyOutput 确定后统一处理 timeout/abort/exit/long-completed
+           // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
+           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
+@@ -1358,6 +1114,7 @@ export const ShellTool = Tool.define(
+       // [local-smark] outcome policy 在 emptyOutput 确定后统一处理
+       // timeout/abort/exit/long-completed，优先级固定不叠加
        const shellNotice = formatShellExecutionNotice({
 +        shell: Shell.name(input.shell),
          aborted,
          expired,
          exitCode: code,
-@@ -1314,8 +1079,6 @@ export const ShellTool = Tool.define(
-           hasErrors,
-           ...(compressed.stats ? bashCompressionMetadata(compressed.stats) : {}),
-           ...(cut && file ? { outputPath: file } : {}),
--          // 规范化生效时记录 adaptation tag，便于数据库度量和后续诊断
+@@ -1398,8 +1155,6 @@ export const ShellTool = Tool.define(
+           exit: code,
+           truncated: cut,
+           ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
+-          // [local-smark] 规范化生效时记录 adaptation tag，便于数据库度量和后续诊断
 -          ...(input.adaptation ? { commandAdaptation: input.adaptation } : {}),
-         },
-         output,
-       }
-@@ -1341,10 +1104,7 @@ export const ShellTool = Tool.define(
-             ].join("\n")
+           // 包含压缩统计信息：applied、removedLines 等
+           ...bashCompressionMetadata(compressed.stats),
+           // 诊断元数据：暴露执行时长和错误/警告行数
+@@ -1432,10 +1187,9 @@ export const ShellTool = Tool.define(
+               "Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate.",
+             ].join(" ")
            : ""
- 
--        const wsGuidance = shellGuidance(name)
--        let description = prompt.description
--        if (wsGuidance) description += "\n" + wsGuidance + "\n"
--        if (compressionGuidance) description += "\n" + compressionGuidance + "\n"
-+        const description = prompt.description + (compressionGuidance ? "\n" + compressionGuidance + "\n" : "")
+-        // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
+-        const shellGuidanceText = shellGuidance(name)
++        // 追加目录列表命令和专用工具列表到提示词描述；per-shell 版本与引用规则已由 ShellPrompt 生成
+         const listCmd = listCommand(name)
+-        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + (compressionGuidance ? "\n\n" + compressionGuidance : "") + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
++        const enhancedDescription = prompt.description + "\nDirectory listing command: " + listCmd + (compressionGuidance ? "\n\n" + compressionGuidance : "") + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
+         yield* Effect.logInfo("shell tool using shell", { shell })
  
          return {
-           description,
-@@ -1362,10 +1122,6 @@ export const ShellTool = Tool.define(
+@@ -1454,10 +1208,6 @@ export const ShellTool = Tool.define(
                }
-               const timeout = params.timeout ?? defaultTimeout
+               const timeout = params.timeout ?? defaultTimeoutMs
                const ps = Shell.ps(shell)
 -              // [local-smark] PowerShell inline Python 规范化：只在 Windows PowerShell
--              // 下对高置信的单一 python -c "..." 命令做引号修复。不命中则返回 undefined，
--              // 原命令原样执行，不产生 compatibility error 或 adaptation metadata。
+-              // 下对高置信的单一 python -c "..." 命令做引号修复。不命中返回 undefined，
+-              // 原命令原样执行，不产生 compatibility error 或 adaptation metadata
 -              const normalization = ps ? normalizePowerShellInlinePython(params.command) : undefined
-               // [local-smark] 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
+               // [local-smark] 600 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
                // 与 audit 元数据保持 params.command 原文；ps 分支限定因 bash grammar
-               // 对 `--` 天然免疫（探针实证），不改无缺陷路径。
-@@ -1380,15 +1136,10 @@ export const ShellTool = Tool.define(
-                   if (compatibility) throw new Error(compatibility)
-                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx, parseInput)
+               // 对 `--` 天然免疫，不改无缺陷路径。
+@@ -1474,15 +1224,10 @@ export const ShellTool = Tool.define(
+               if (compatibility) throw new Error(compatibility)
+               const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx, parseInput)
                    if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
--                  // 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
+-                  // [local-smark] 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
 -                  if (normalization) scan.raw.add(normalization.audit)
                    yield* ask(ctx, scan, {
                      command: params.command,
@@ -1465,17 +1579,16 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
                    })
                  }),
                )
-@@ -1401,17 +1152,12 @@ export const ShellTool = Tool.define(
+@@ -1493,16 +1238,11 @@ export const ShellTool = Tool.define(
                  {
                    shell,
                    command: params.command,
--                  // 规范化后的实际执行命令；原始 params.command 继续用于 UI、
--                  // 压缩、分类、日志和 ToolPart input
+-                  // [local-smark] 规范化后的实际执行命令；原始 params.command 继续用于
+-                  // UI、压缩、分类、日志和 ToolPart input
 -                  ...(normalization ? { executeCommand: normalization.command } : {}),
                    cwd,
                    env: yield* shellEnv(ctx, cwd),
                    timeout,
-                   description: params.description,
                    compressOutput,
                    encoding,
 -                  // 规范化生效时在 result metadata 中记录 adaptation tag，便于数据库度量
@@ -1484,16 +1597,16 @@ index 03e721af7b0500bbff513f17b663376a578ef65b..538cd8a6bc9f0c5d1d7e15e8962fb785
                  ctx,
                )
 diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
-index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f5939c693 100644
+index 5cf84f5..a4e252b 100644
 --- a/packages/opencode/src/tool/shell/prompt.ts
 +++ b/packages/opencode/src/tool/shell/prompt.ts
-@@ -19,9 +19,12 @@ export type Limits = {
+@@ -12,9 +12,12 @@ export type Limits = {
    maxBytes: number
  }
  
--export function parameterSchema(description: string) {
+-export function parameterSchema() {
 +// SDK 完成 JSON 解码后，command 就是目标 shell 接收的原生脚本。
-+export function parameterSchema(description: string, name = "the configured shell") {
++export function parameterSchema(name = "the configured shell") {
    return Schema.Struct({
 -    command: Schema.String.annotate({ description: "The command to execute" }),
 +    command: Schema.String.annotate({
@@ -1502,7 +1615,7 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
      timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
      workdir: Schema.optional(Schema.String).annotate({
        description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
-@@ -53,35 +56,27 @@ function shellDisplayName(name: string) {
+@@ -47,35 +50,27 @@ function shellDisplayName(name: string) {
  }
  
  function powershellNotes(name: string) {
@@ -1513,15 +1626,15 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
 -- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
 -- Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
 +  // PowerShell 两个版本共享字符串规则，链式运算和 native 参数传递分别说明。
++  // 目标基线的 PowerShell 段比 source 时代更精简：授权引用文案全额加入会超出
++  // R5 的 600 字节硬预算，故不再保留与引用保真无关的别名与数组表达式两行。
 +  return `# ${shellDisplayName(name)} shell notes
 +- PowerShell expands $name and evaluates $(...) inside double quotes; use "..." when you want those local values.
 +- In single-quoted strings, PowerShell leaves $name and $(...) unevaluated; backslash is ordinary. Write '' for a single quote.
 +- Inside double quotes, \`$name keeps $name as text and \`" inserts a double quote; \\$name still expands $name, and \\" does not escape a quote.
 +- For multiline text without variable substitution, start with @' followed by a newline; close with '@ at the start of a new line.
 +- To run a Linux program through WSL, use wsl --exec <program> ...; for Bash use wsl --exec bash -lc 'echo "$HOME"'. wsl -- bash -lc adds another shell that can expand variables first.
-+${name === "powershell" ? "- Windows PowerShell 5.1 rebuilds native arguments as a command line, consuming embedded double quotes; use a program's stdin interface for quoted code.\n" : ""}- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
-+- Use \`@(...)\` for array expressions.
-+- Read environment variables with \`$env:NAME\`, not \`export NAME=...\`; use \`$null\`, not \`/dev/null\`.
++${name === "powershell" ? "- Windows PowerShell 5.1 rebuilds native arguments as a command line, consuming embedded double quotes; use a program's stdin interface for quoted code.\n" : ""}- Read environment variables with \`$env:NAME\`, not \`export NAME=...\`; use \`$null\`, not \`/dev/null\`.
  - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
 -- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
 -- Escape special characters with the PowerShell backtick character.`
@@ -1543,7 +1656,7 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
  function chainGuidance(name: string) {
 +  // 版本差异集中在实际使用位置，避免 notes 与 usage 两处给出重复的链式规则。
    if (name === "powershell") {
--    return "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell (5.1) does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
+-    return "If the commands depend on each other and must run sequentially, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
 +    return "Windows PowerShell (5.1) does not support && or ||; use `cmd1; if ($?) { cmd2 }` for dependent commands."
    }
    if (PS.has(name)) {
@@ -1552,7 +1665,7 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
    }
    if (CMD.has(name)) {
      return "If the commands depend on each other and must run sequentially, use a single bash tool call with `&&` to chain them together (e.g., `mkdir out && dir out`). For instance, if one operation must complete before another starts, run these operations sequentially instead."
-@@ -123,7 +118,7 @@ Usage notes:
+@@ -116,7 +111,7 @@ Usage notes:
      - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
      - ${chain}
      - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
@@ -1561,8 +1674,8 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
    - AVOID using \`cd <directory> && <command>\`. Use the \`workdir\` parameter to change directories instead.
      <good-example>
      Use workdir="/foo/bar" with command: pytest tests
-@@ -158,7 +153,7 @@ Usage notes:
-   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
+@@ -156,7 +151,7 @@ Usage notes:
+   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms.
    - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`Select-Object -First\`, \`Select-Object -Last\`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
  
 -  - Avoid using Shell with PowerShell file/content cmdlets unless explicitly instructed or when these cmdlets are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
@@ -1570,7 +1683,7 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
      - File search: Use Glob (NOT Get-ChildItem)
      - Content search: Use Grep (NOT Select-String)
      - Read files: Use Read (NOT Get-Content)
-@@ -169,7 +164,7 @@ Usage notes:
+@@ -167,7 +162,7 @@ Usage notes:
      - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
      - ${chain}
      - Use \`;\` only when you need to run commands sequentially but don't care if earlier commands fail
@@ -1579,16 +1692,16 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
    - AVOID changing directories inside the command. Use the \`workdir\` parameter to change directories instead.
      <good-example>
      Use workdir="project${pathSep}subdir" with command: pytest tests
-@@ -181,6 +176,8 @@ Usage notes:
+@@ -179,6 +174,8 @@ Usage notes:
  
- function cmdCommandSection(chain: string, limits: Limits) {
+ function cmdCommandSection(chain: string, limits: Limits, defaultTimeoutMs: number) {
    return `# cmd.exe shell notes
 +- Use cmd.exe syntax, not Bash or PowerShell; use \`NUL\`, not \`/dev/null\`.
 +- If shell file operations are necessary, use \`dir\` and \`type\`, not Unix utilities (ls/tail/head/sed/awk/grep).
  - Use double quotes for paths with spaces.
  - Use %VAR% for environment variables.
  - Use \`if exist\` for existence checks.
-@@ -219,7 +216,7 @@ Usage notes:
+@@ -216,7 +213,7 @@ Usage notes:
      - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "dir" and "where cmd", send a single message with two bash tool calls in parallel.
      - ${chain}
      - Use \`&\` only when you need to run commands sequentially but don't care if earlier commands fail
@@ -1597,8 +1710,8 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
    - AVOID changing directories inside the command. Use the \`workdir\` parameter to change directories instead.
      <good-example>
      Use workdir="project\\subdir" with command: dir
-@@ -232,9 +229,11 @@ Usage notes:
- function profile(name: string, platform: NodeJS.Platform, limits: Limits) {
+@@ -229,9 +226,11 @@ Usage notes:
+ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
    const isPowerShell = PS.has(name)
    const chain = chainGuidance(name)
 +  // 首行绑定实际配置名称；POSIX 家族不再被固定称为 bash 或持久会话。
@@ -1609,8 +1722,8 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
 +      intro,
        workdirSection:
          "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID changing directories inside the command - use `workdir` instead.",
-       commandSection: cmdCommandSection(chain, limits),
-@@ -247,7 +246,7 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits) {
+       commandSection: cmdCommandSection(chain, limits, defaultTimeoutMs),
+@@ -243,7 +242,7 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
    }
    if (isPowerShell) {
      return {
@@ -1618,8 +1731,8 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
 +      intro,
        workdirSection:
          "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID changing directories inside the command - use `workdir` instead.",
-       commandSection: powershellCommandSection(name, chain, platform === "win32" ? "\\" : "/", limits),
-@@ -262,11 +261,13 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits) {
+       commandSection: powershellCommandSection(
+@@ -263,11 +262,13 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
      }
    }
    return {
@@ -1628,54 +1741,54 @@ index 9f560e74870c2bc7db8f54b14205ffd17173074f..fa4cd024e0bdde6b5f4dd624e405164f
 +    intro,
      workdirSection:
        "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.",
--    commandSection: bashCommandSection(chain, limits),
+-    commandSection: bashCommandSection(chain, limits, defaultTimeoutMs),
 +    // Windows 工具可用性来自旧附加指导；只合并到 Windows 的同一渲染路径。
 +    commandSection:
-+      bashCommandSection(chain, limits) +
++      bashCommandSection(chain, limits, defaultTimeoutMs) +
 +      (platform === "win32" ? "\n- Unix utilities may be unavailable; prefer dedicated OpenCode file tools." : ""),
      gitCommands: "bash commands",
      gitCommandRestriction: "git bash commands",
      createPrInstruction:
-@@ -294,7 +295,7 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits)
+@@ -294,7 +295,7 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits,
        createPrInstruction: selected.createPrInstruction,
        createPrExample: selected.createPrExample,
      }),
--    parameters: parameterSchema(selected.parameterDescription),
-+    parameters: parameterSchema(selected.parameterDescription, name),
+-    parameters: parameterSchema(),
++    parameters: parameterSchema(name),
    }
  }
  
 diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
-index ae8890cd47e4a170bfd175c1251e8c38907a42d3..6052fc78b64cd4dafabe61ed5c6fe8001fbc73a3 100644
+index 7883bb4..81b0b04 100644
 --- a/packages/opencode/src/util/output-notice.ts
 +++ b/packages/opencode/src/util/output-notice.ts
-@@ -12,7 +12,7 @@ type OutputTruncatedNotice = {
+@@ -16,7 +16,7 @@ type OutputTruncatedNotice = {
  
  type ExecutionNotice = {
-   // execution notice 是 shell/tool 输出里给模型看的执行状态，不是完整 metadata 回放。
+   // #289：execution notice 是 shell/tool 输出里给模型看的执行状态，不是完整 metadata 回放。
 -  // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
-+  // timeout/user_abort 继续用 warning；exit 暴露退出码与shell名称，避免把命令、环境变量或原始 metadata 放进模型上下文。
++  // timeout/user_abort 继续用 warning；exit 暴露退出码与 shell 名称，避免把命令、环境变量或原始 metadata 放进模型上下文。
    // source 缺省为 shell，generic tool 传 "tool" 以区分来源
    source?: "shell" | "tool"
    severity: "info" | "warning" | "error"
-@@ -20,6 +20,8 @@ type ExecutionNotice = {
-   reason: "timeout" | "user_abort" | "exit" | "completed"
+@@ -25,6 +25,8 @@ type ExecutionNotice = {
    timeout_ms?: number
+   // #289：exit_code 在 reason 为 exit 时必填，携带原始进程退出码供审计
    exit_code?: number
 +  // 仅提供方言名称供失败修正使用，保持命令与环境内容留在原有安全边界内。
 +  shell?: string
-   // 实际墙钟耗时（毫秒），由 server 在终态时写入；不从旧 state.time 追溯
+   // [local-smark] 实际墙钟耗时（毫秒），由 server 在终态时写入；不从旧 state.time 追溯
    elapsed_ms?: number
  }
-@@ -83,6 +85,7 @@ export function formatLongExecutionNotice(source: "shell" | "tool", elapsedMs: n
- // timeout > user_abort > exit(non-zero/empty) > long completed > none
- // 保证一个 Bash 结果不会同时出现两种系统 outcome（如 abort + completed）
+@@ -89,6 +91,7 @@ export function formatLongExecutionNotice(source: "shell" | "tool", elapsedMs: n
+ // [local-smark] Bash 终态 outcome policy：固定优先级 timeout > user_abort >
+ // exit(non-zero/empty) > long completed > none，保证一个 Bash 结果只出现一种系统 outcome
  export function formatShellExecutionNotice(input: {
 +  shell?: string
    aborted: boolean
    expired: boolean
    exitCode: number | null
-@@ -93,15 +96,15 @@ export function formatShellExecutionNotice(input: {
+@@ -99,15 +102,15 @@ export function formatShellExecutionNotice(input: {
    const elapsed = normalizeElapsed(input.elapsedMs)
    // timeout 优先：即使后续 exitCode 有值，也是 kill 后的残留，不是真实退出
    if (input.expired) {
@@ -1696,10 +1809,10 @@ index ae8890cd47e4a170bfd175c1251e8c38907a42d3..6052fc78b64cd4dafabe61ed5c6fe800
      if (input.emptyOutput) {
 diff --git a/packages/opencode/test/eval-shell-intent.ts b/packages/opencode/test/eval-shell-intent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a54127873
+index 0000000..6a55bea
 --- /dev/null
 +++ b/packages/opencode/test/eval-shell-intent.ts
-@@ -0,0 +1,795 @@
+@@ -0,0 +1,806 @@
 +#!/usr/bin/env bun
 +
 +import { createHash } from "node:crypto"
@@ -1708,11 +1821,13 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +import { parseArgs } from "node:util"
 +import { Database } from "bun:sqlite"
 +import { streamText, jsonSchema, tool, type ModelMessage } from "ai"
-+import { Clock, Effect, Layer, Schema } from "effect"
++import { Effect, Layer, Schema } from "effect"
 +import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-+import { AppFileSystem } from "@opencode-ai/core/filesystem"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Project } from "@opencode-ai/schema/project"
 +import { shellConditions, shellIntentFixtures, type ShellCondition, type ShellIntent } from "./fixture/shell-intent"
-+import type * as Project from "../src/project/project"
++import type { InstanceContext } from "../src/project/instance-context"
 +import type * as ProviderModule from "../src/provider/provider"
 +import type * as Tool from "../src/tool/tool"
 +
@@ -1723,6 +1838,7 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +const revision = "R8"
 +// 冻结环境提示的日期，跨日执行 candidate 时仍只比较批准的提示修改。
 +const evaluationTime = Date.parse("2026-09-19T00:00:00Z")
++const frozenDate = new Date(evaluationTime).toDateString()
 +const perModelConditionBudget = 72
 +// 用户追加87次授权；同一总账中的231次既有调用保留，剩余144次覆盖两模型及单次修正。
 +const globalBudget = 375
@@ -1763,25 +1879,22 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +process.env.OPENCODE_DISABLE_MODELS_FETCH = "true"
 +const { Config } = await import("../src/config/config")
 +const { Provider } = await import("../src/provider/provider")
-+const { ProviderID, ModelID } = await import("../src/provider/schema")
++const { ProviderV2 } = await import("@opencode-ai/core/provider")
++const { ModelV2 } = await import("@opencode-ai/core/model")
 +const { InstanceRef } = await import("../src/effect/instance-ref")
-+const { InstanceState } = await import("../src/effect/instance-state")
 +const { makeRuntime } = await import("../src/effect/run-service")
-+const { ProjectID } = await import("../src/project/schema")
 +const { Plugin } = await import("../src/plugin")
 +const { RuntimeFlags } = await import("../src/effect/runtime-flags")
 +const { Truncate } = await import("../src/tool/truncate")
 +const { ShellTool } = await import("../src/tool/shell")
-+const { Shell } = await import("../src/shell/shell")
++const { Shell } = await import("@opencode-ai/core/shell")
 +const { SessionID, MessageID } = await import("../src/session/schema")
 +const { ToolJsonSchema } = await import("../src/tool/json-schema")
 +const { Agent } = await import("../src/agent/agent")
 +const { SystemPrompt } = await import("../src/session/system")
 +const { Skill } = await import("../src/skill")
 +const { Git } = await import("../src/git")
-+const { Database: ApplicationDatabase } = await import("../src/storage/db")
-+const { ProjectTable } = await import("../src/project/project.sql")
-+const { SessionTable } = await import("../src/session/session.sql")
++const { MCP } = await import("../src/mcp")
 +const artifactRoot = path.resolve(args.values.artifacts ?? defaultArtifacts)
 +if (!artifactRoot.toLowerCase().startsWith(path.resolve(tempRoot).toLowerCase() + path.sep)) throw new Error("artifacts must be under D:/Temp/opencode")
 +await stat(tempRoot)
@@ -1798,7 +1911,8 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +if (!args.values["list-models"] && !args.values["check-fixtures"] && phase !== "report" && !modelRef) throw new Error("--model is required")
 +if (!args.values["list-models"] && modelRef && !authorizedModels.has(modelRef.split("/").at(-1) ?? "")) throw new Error("model must be gpt-6-astra or kimi-k3")
 +if (!args.values["list-models"] && !args.values["check-fixtures"] && phase !== "report" && !condition) throw new Error("--condition is required")
-+const providerRuntime = makeRuntime(Provider.Service, Provider.defaultLayer)
++// 目标没有 Provider.defaultLayer；LayerNode 图按 node deps 展开真实依赖链。
++const providerRuntime = makeRuntime(Provider.Service, LayerNode.compile(Provider.node))
 +const providerInstance = makeInstance(process.cwd())
 +const providerRun = <A, E>(fn: (service: ProviderModule.Interface) => Effect.Effect<A, E>) =>
 +  providerRuntime.runPromise((service) => fn(service).pipe(Effect.provideService(InstanceRef, providerInstance)))
@@ -1832,14 +1946,14 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +      [shell === "bash" ? "bash -c 'printf 42'" : `${shell === "pwsh-7" ? "pwsh" : "powershell"} -NoProfile -Command 'Write-Output 42'`, "42"],
 +    ]
 +    for (const [command, expected] of probes) {
-+      const result = await harness.execute({ command, description: "Verify isolated shell evaluation" }, `probe-${shell}`)
++      const result = await harness.execute({ command }, `probe-${shell}`)
 +      if (result.metadata.exit !== 0 || !exact(result.output, expected)) throw new Error(`Shell probe failed: ${shell}: ${command}: ${result.output}`)
 +    }
 +    // 版本来自实际子进程，避免仅靠可执行文件路径声称环境一致。
 +    const versions: Record<string, string> = {}
 +    for (const program of ["shell", "python", "node"]) {
 +      const command = program === "python" ? "python --version" : program === "node" ? "node --version" : shell === "bash" ? 'printf "%s" "$BASH_VERSION"' : "$PSVersionTable.PSVersion.ToString()"
-+      const result = await harness.execute({ command, description: "Read isolated interpreter version" }, `version-${shell}-${program}`)
++      const result = await harness.execute({ command }, `version-${shell}-${program}`)
 +      if (result.metadata.exit !== 0 || !/\d+\.\d+\.\d+/.test(result.output)) throw new Error(`Version probe failed: ${shell}/${program}`)
 +      versions[program] = result.output.trim()
 +    }
@@ -2015,21 +2129,9 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +  const description = def.description
 +  // 系统段走真实渲染器，避免在评测器里手写正确shell而掩盖生产配置分裂。
 +  const system = model ? await runtime.runPromise((prompt) => Effect.gen(function* () {
-+    const sessionID = SessionID.make(`ses_gateq_${hashJson({ fixture: fixture.id, model: model.id }).slice(0, 16)}`)
-+    ApplicationDatabase.use((db) => {
-+      db.insert(ProjectTable).values({ id: ProjectID.global, worktree: cwd, sandboxes: [] }).onConflictDoNothing().run()
-+      db.insert(SessionTable).values({ id: sessionID, project_id: ProjectID.global, slug: sessionID, directory: cwd, title: "Isolated shell evaluation", version: "test" }).onConflictDoNothing().run()
-+    })
-+    const clock = yield* Clock.Clock
-+    const rendered = yield* prompt.environment({ sessionID, model, registeredTools: ["bash"], history: { boundary: "null", messageIDs: [] } }).pipe(Effect.provideService(Clock.Clock, {
-+      currentTimeMillisUnsafe: () => evaluationTime,
-+      currentTimeMillis: Effect.succeed(evaluationTime),
-+      currentTimeNanosUnsafe: () => BigInt(evaluationTime) * 1_000_000n,
-+      currentTimeNanos: Effect.succeed(BigInt(evaluationTime) * 1_000_000n),
-+      // 只冻结提示中的日期；异步等待使用真实时钟，超时和进程生命周期仍按实际时间推进。
-+      sleep: (duration) => clock.sleep(duration),
-+    }))
-+    return ["Produce one bash tool call for this offline task. Stay inside the supplied working directory; use only local shell/Python/Node computation, with no network, credentials, or file changes.", ...rendered.system].join("\n\n")
++    const rendered = yield* prompt.environment(model, ["bash"])
++    // 目标 environment 直接读系统时钟；归一化日期行后冻结，跨日执行仍只比较批准的提示修改。
++    return ["Produce one bash tool call for this offline task. Stay inside the supplied working directory; use only local shell/Python/Node computation, with no network, credentials, or file changes.", ...rendered.map((line) => line.replace(/^(  Today's date: ).*$/, "$1" + frozenDate))].join("\n\n")
 +  }).pipe(Effect.provideService(InstanceRef, makeInstance(cwd)))) : "Preflight only; no model request."
 +  return { shell, cwd, env, parameters, schema, description, system, execute: async (value: Tool.InferParameters<typeof ShellTool>, id: string) => {
 +    // 同一入口覆盖预检与模型命令，防止预检继承宿主环境而掩盖正式执行故障。
@@ -2053,7 +2155,8 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +function shellLayer() {
 +  // memoMap会复用服务，配置值跟随当前实例读取，保持每个夹具各自的shell身份。
 +  const config = Layer.mock(Config.Service, { get: () => Effect.gen(function* () {
-+    const instance = yield* InstanceState.context
++    const instance = yield* InstanceRef
++    if (!instance) throw new Error("shell evaluation requires an instance directory")
 +    const fixture = shellIntentFixtures.find((item) => item.id === path.basename(instance.directory))
 +    if (!fixture) throw new Error(`Unknown shell evaluation directory: ${instance.directory}`)
 +    return { shell: shellPath(fixture.shell) }
@@ -2061,8 +2164,28 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +  // 评测固定禁用用户 shell.env 扩展，避免插件把凭据重新加入最小子进程环境。
 +  const plugin = Layer.mock(Plugin.Service, { trigger: (_name, _input, output) => Effect.succeed(output) })
 +  // 隔离项目没有git和skills数据；真实环境渲染仅使用这些服务的公开身份与Config。
-+  const system = SystemPrompt.layer.pipe(Layer.provide(Layer.mergeAll(Layer.mock(Skill.Service, {}), Layer.mock(Git.Service, {}), config)))
-+  return Layer.mergeAll(system, CrossSpawnSpawner.defaultLayer, AppFileSystem.defaultLayer, config, plugin, Truncate.defaultLayer, RuntimeFlags.defaultLayer, Agent.defaultLayer)
++  const system = LayerNode.compile(SystemPrompt.node, [
++    [Skill.node, Layer.mock(Skill.Service, {})],
++    [MCP.node, Layer.mock(MCP.Service, { instructions: () => Effect.succeed([]) })],
++    [Git.node, Layer.mock(Git.Service, {})],
++    [Config.node, config],
++    [RuntimeFlags.node, RuntimeFlags.layer({ disableGit: true })],
++  ])
++  return Layer.mergeAll(
++    system,
++    // 工具组镜像 test/tool/shell.test.ts 的 LayerNode 组合；替换 Config/Plugin/Agent 避免
++    // 评测进程拉起真实 Provider/Auth 与用户插件链，Agent 死缺陷只在缺 truncated 标记时暴露。
++    LayerNode.compile(
++      LayerNode.group([CrossSpawnSpawner.node, FSUtil.node, Plugin.node, Truncate.node, Config.node, Agent.node, RuntimeFlags.node]),
++      [
++        [Config.node, config],
++        [Plugin.node, plugin],
++        // Agent仅在工具结果缺truncated标记时介入；Shell始终写入该标记，评测路径保持缺陷信号。
++        [Agent.node, Layer.mock(Agent.Service, {})],
++        [RuntimeFlags.node, RuntimeFlags.layer({ disableGit: true })],
++      ],
++    ),
++  )
 +}
 +
 +function context(id: string, command: string): Tool.Context {
@@ -2485,8 +2608,9 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +// 输出比较统一CRLF/LF并允许一个打印终止换行；其余空白参与精确匹配。
 +function exact(actual: string, expected: string) { return actual.replaceAll("\r\n", "\n").replace(/\n$/, "") === expected.replaceAll("\r\n", "\n").replace(/\n$/, "") }
 +function hashJson(value: unknown) { return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex") }
-+function parseModel(value: string) { const slash = value.indexOf("/"); if (slash < 1 || slash === value.length - 1) throw new Error("model must be provider/model"); return { providerID: ProviderID.make(value.slice(0, slash)), modelID: ModelID.make(value.slice(slash + 1)) } }
-+function makeInstance(directory: string): { directory: string; worktree: string; project: Project.Info } { return { directory, worktree: directory, project: { id: ProjectID.global, worktree: directory, time: { created: 0, updated: 0 }, sandboxes: [] } } }
++// 目标模型 ID 是 branded schema：旧 provider/schema 的 ProviderID/ModelID 已由 core 的 ProviderV2/ModelV2 取代。
++function parseModel(value: string) { const slash = value.indexOf("/"); if (slash < 1 || slash === value.length - 1) throw new Error("model must be provider/model"); return { providerID: ProviderV2.ID.make(value.slice(0, slash)), modelID: ModelV2.ID.make(value.slice(slash + 1)) } }
++function makeInstance(directory: string): InstanceContext { return { directory, worktree: directory, project: { id: Project.ID.global, worktree: directory, time: { created: 0, updated: 0 }, sandboxes: [] } } }
 +function requireValue<T>(value: T | undefined, name: string): T { if (value === undefined) throw new Error(`${name} is required`); return value }
 +function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null }
 +function isSaved(value: unknown): value is Saved { return isRecord(value) && isRecord(value.args) && typeof value.hash === "string" && (typeof value.tokens === "number" || value.tokens === null) && typeof value.milliseconds === "number" }
@@ -2497,7 +2621,7 @@ index 0000000000000000000000000000000000000000..73f3ffcc113326435431f29cf4f72d3a
 +}
 diff --git a/packages/opencode/test/fixture/shell-intent.ts b/packages/opencode/test/fixture/shell-intent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..74305a46c909aa7815d1776ed66f7441038c7325
+index 0000000..74305a4
 --- /dev/null
 +++ b/packages/opencode/test/fixture/shell-intent.ts
 @@ -0,0 +1,77 @@
@@ -2579,10 +2703,10 @@ index 0000000000000000000000000000000000000000..74305a46c909aa7815d1776ed66f7441
 +  return shellIntentFixtures.find((fixture) => fixture.id === id)
 +}
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index 9692284c6a10c59cdaa4b8ced780ee44e5f2e709..477321e0b02a062d7a4019846af1d076cde6865b 100644
+index 8b4ac7f..b93332c 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -10,6 +10,74 @@ const bash = async (command: string, shell = "bash") =>
+@@ -13,6 +13,74 @@ const bash = async (command: string, shell = "bash") =>
    }))
  
  describe("permission precheck bash classifier", () => {
@@ -2621,7 +2745,7 @@ index 9692284c6a10c59cdaa4b8ced780ee44e5f2e709..477321e0b02a062d7a4019846af1d076
 +    const source = "@'\nimport os; os.remove('example.tmp')\n'@"
 +    // 横线选定stdin源码后，其后的argv不再改变源码入口；告警配置先消费自己的值。
 +    for (const entry of ["python - extra", "python - -c data", "python -B -W ignore -X utf8 - extra", "python -Werror -Xdev -", "python -- - extra", "py -3.12 - extra", "node - extra", "node -rmodule -"]) {
-+      const payload = entry.startsWith("node") ? "'require(\"fs\").unlinkSync(\"example.tmp\")'" : source
++      const payload = entry.startsWith("node") ? `'require("fs").unlinkSync("example.tmp")'` : source
 +      expect(await bash(`${payload} | ${entry}`, "pwsh")).toMatchObject({ level: "cautious" })
 +    }
 +    // 源码来自-c、模块或文件时，stdin中的同名危险文字只能作为数据。
@@ -2657,7 +2781,7 @@ index 9692284c6a10c59cdaa4b8ced780ee44e5f2e709..477321e0b02a062d7a4019846af1d076
    test("separates redirected input from recursive deletion targets", async () => {
      // 同一路径分别作为输入源和删除目标，直接验证原始误报的参数归属。
      expect(await bash("rm -r --one-file-system --preserve-root=all -- ./output < /dev/null")).toMatchObject({ level: "cautious" })
-@@ -409,86 +477,40 @@ describe("permission precheck bash classifier", () => {
+@@ -437,87 +505,40 @@ describe("permission precheck bash classifier", () => {
      expect((await bash("node -e 'require(\"fs\").rmSync(\"/\", {recursive:true, force:true})'"))).toMatchObject({ level: "forbidden" })
    })
  
@@ -2671,6 +2795,7 @@ index 9692284c6a10c59cdaa4b8ced780ee44e5f2e709..477321e0b02a062d7a4019846af1d076
 -      metadata: { command, inline_scripts: scripts },
 -    }))
 -
+-    // 语法迁移不变量：inline 源码升级路径保留。
 -  test("upgrades risk when inline_scripts contains dangerous Python payloads", async () => {
 -    // 原命令看起来无害（print），但规范化后实际执行的源码含 rmtree('/')
 -    expect((await bashWithScripts('python -c "print(1)"', ['import shutil; shutil.rmtree("/")']))).toMatchObject({ level: "forbidden" })
@@ -2775,12 +2900,12 @@ index 9692284c6a10c59cdaa4b8ced780ee44e5f2e709..477321e0b02a062d7a4019846af1d076
 +    expect(await PermissionPrecheck.evaluate({ permission: "bash", patterns: ["git status"], metadata: { shell: "pwsh", command: "'os.remove(\"/etc/passwd\")' | python -" } })).toMatchObject({ level: "forbidden" })
    })
  
-   test("marks credential reads piped to network transfer dangerous", async () => {
+     // 语法迁移不变量：读取到网络管道的升级路径保留。
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index c6de125dba3a7b47bfc286355e042a6bc5673832..f4cdbc01eb1cef19991778d1e17ab939af4e3744 100644
+index c4dd887..a934b16 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -4033,6 +4033,32 @@ unix(
+@@ -3669,6 +3669,32 @@ unixNoLLMServer(
    30_000,
  )
  
@@ -2810,67 +2935,95 @@ index c6de125dba3a7b47bfc286355e042a6bc5673832..f4cdbc01eb1cef19991778d1e17ab939
 +  30_000,
 +)
 +
- unix(
+ unixNoLLMServer(
    "shell commands can change directory after startup",
    () =>
 diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
-index 57c6878de71fd9696ca0f99c5cb7da10898317c1..76fabbaee31673eee9740b3aa23c147d5e5515d8 100644
+index 39018da..73da807 100644
 --- a/packages/opencode/test/session/system.test.ts
 +++ b/packages/opencode/test/session/system.test.ts
-@@ -18,6 +18,7 @@ import { ProjectID } from "../../src/project/schema"
- import { MessageID, SessionID } from "../../src/session/schema"
- import { InstanceRef } from "../../src/effect/instance-ref"
- import { SessionContextEpoch } from "../../src/session/context-epoch"
+@@ -8,6 +8,11 @@ import { Permission } from "../../src/permission"
+ import type { Provider } from "../../src/provider/provider"
+ import { SystemPrompt } from "../../src/session/system"
+ import { MCP } from "../../src/mcp"
++import { Git } from "../../src/git"
 +import { Config } from "../../src/config/config"
- import type { InstanceContext } from "../../src/project/instance-context"
++import { InstanceRef } from "../../src/effect/instance-ref"
++import type { InstanceContext } from "../../src/project/instance-context"
++import { Project } from "@opencode-ai/schema/project"
+ import { testEffect } from "../lib/effect"
+ // Astra 路由表测试直接比对模板实例（identity）——与源仓同构，采用目标既有的松转型惯用法。
  import PROMPT_ASTRA from "../../src/session/prompt/gpt-astra.txt"
- import PROMPT_GPT from "../../src/session/prompt/gpt.txt"
-@@ -60,6 +61,7 @@ const build: Agent.Info = {
+@@ -51,6 +56,11 @@ const build: Agent.Info = {
  
  const it = testEffect(
-   SystemPrompt.layer.pipe(
-+    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.succeed({}) })),
-     Layer.provide(
-       Layer.mergeAll(
-         Layer.succeed(
-@@ -159,8 +161,10 @@ const contextGit = (file: () => string): Git.Interface =>
-     applyPatch: () => Effect.die("unused"),
-   })
- 
--const contextLayer = (git: Git.Interface) =>
-+const contextLayer = (git: Git.Interface, shell: () => string | undefined = () => undefined) =>
-   SystemPrompt.layer.pipe(
-+    // epoch 用例使用虚构目录；显式提供配置边界，避免提示回归测试读取宿主配置。
-+    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.sync(() => ({ shell: shell() })) })),
-     Layer.provide(
-       Layer.mergeAll(
-         Layer.succeed(
-@@ -233,6 +237,30 @@ const renderEnvironment = (
-   }).pipe(Effect.provide(contextLayer(git)), Effect.provideService(InstanceRef, contextInstance(directory)))
+   LayerNode.compile(SystemPrompt.node, [
++    [
++      Config.node,
++      // 提示回归测试不读取宿主配置；shell 能力段由专门用例覆盖。
++      Layer.mock(Config.Service, { get: () => Effect.succeed({}) }),
++    ],
+     [
+       MCP.node,
+       Layer.mock(MCP.Service, {
+@@ -90,6 +100,62 @@ const it = testEffect(
+ )
  
  describe("session.system", () => {
-+  baseIt.effect("environment follows configured shell changes", () => {
-+    // 同一个服务连续渲染，防止把配置值冻结在 layer 构造或首次调用时。
-+    const cfg = { shell: process.platform === "win32" ? "cmd" : "sh" }
-+    const directory = "F:/tmp/opencode-configured-shell"
-+    const sessionID = SessionID.make("session-configured-shell")
++  // 同一服务连续渲染，防止把配置值冻结在 layer 构造或首次调用时；Git 用固定快照隔离宿主状态。
++  const shellCfg: { shell: string | undefined } = { shell: process.platform === "win32" ? "cmd" : "sh" }
++  const configShellIt = testEffect(
++    LayerNode.compile(SystemPrompt.node, [
++      [
++        Config.node,
++        // epoch 用例使用虚构目录；显式提供配置边界，避免提示回归测试读取宿主配置。
++        Layer.mock(Config.Service, { get: () => Effect.sync(() => ({ shell: shellCfg.shell })) }),
++      ],
++      [
++        Git.node,
++        Layer.mock(Git.Service, {
++          branch: () => Effect.succeed("feature"),
++          defaultBranch: () => Effect.succeed({ name: "dev", ref: "refs/heads/dev" }),
++          status: () => Effect.succeed([{ file: "before.ts", code: "M", status: "modified" as const }]),
++          run: () => Effect.succeed({ exitCode: 0, text: () => "SMARK", stdout: Buffer.from(""), stderr: Buffer.from(""), truncated: false }),
++        }),
++      ],
++      [MCP.node, Layer.mock(MCP.Service, { instructions: () => Effect.succeed([]) })],
++      [
++        Skill.node,
++        Layer.mock(Skill.Service, { available: () => Effect.succeed([]) }),
++      ],
++    ]),
++  )
++  configShellIt.effect("environment follows configured shell changes", () => {
++    // realPath 需要真实目录；git 事实来自 mock，目录本身仅承载快照键与展示路径。
++    const directory = process.cwd()
++    // 虚构实例只承载快照键与展示路径；Git 事实来自上方 mock。
++    const instance: InstanceContext = {
++      directory,
++      worktree: directory,
++      project: { id: Project.ID.global, worktree: directory, vcs: "git", time: { created: 0, updated: 0 }, sandboxes: [] },
++    }
 +    return Effect.gen(function* () {
-+      seedContextSession(sessionID, directory)
 +      const prompt = yield* SystemPrompt.Service
-+      const input = { sessionID, model: contextModel, registeredTools: [], history: contextHistory }
-+      const first = yield* prompt.environment(input)
++      const input = { api: { id: "test" } } as Provider.Model
++      const first = yield* prompt.environment(input, []).pipe(Effect.provideService(InstanceRef, instance))
 +      // 独立 shell 名称来自显式配置，而非复制生产 shell 解析算法。
-+      expect(first.system.join("\n")).toContain(process.platform === "win32" ? "Shell: cmd.exe" : "Shell: sh")
-+      cfg.shell = "bash"
-+      const second = yield* prompt.environment(input)
-+      expect(second.system.join("\n")).toContain("Shell: bash")
-+      // 只允许当前能力段变化，日期和 Git 的会话快照仍由原 epoch 合同保护。
-+      expect(second.updates).toEqual(first.updates)
-+      expect(second.system.join("\n")).toContain("before.ts")
-+    }).pipe(
-+      Effect.provide(contextLayer(contextGit(() => "before.ts"), () => cfg.shell)),
-+      Effect.provideService(InstanceRef, contextInstance(directory)),
-+    )
++      expect(first.join("\n")).toContain(process.platform === "win32" ? "Shell: cmd.exe" : "Shell: sh")
++      shellCfg.shell = "bash"
++      const second = yield* prompt.environment(input, []).pipe(Effect.provideService(InstanceRef, instance))
++      expect(second.join("\n")).toContain("Shell: bash")
++      // 目标 environment 返回 string[]（无 updates 字段）；env 块是单元素多行字符串，展平后以 Shell 能力段到 OS Version 之间的整段承接“只允许能力段变化”不变量。
++      const stripShell = (lines: string[]) => {
++        const all = lines.join("\n").split("\n")
++        const start = all.findIndex((line) => line.startsWith("  Shell"))
++        const end = all.findIndex((line) => line.startsWith("  OS Version:"))
++        return [...all.slice(0, start === -1 ? all.length : start), ...all.slice(end === -1 ? all.length : end)]
++      }
++      expect(stripShell(second)).toEqual(stripShell(first))
++      // git 的会话快照仍由原缓存合同保护。
++      expect(second.join("\n")).toContain("before.ts")
++    })
 +  })
 +
    test("Astra autonomy infers intent before choosing work", () => {
@@ -2878,7 +3031,7 @@ index 57c6878de71fd9696ca0f99c5cb7da10898317c1..76fabbaee31673eee9740b3aa23c147d
      expect(PROMPT_ASTRA).toContain("Infer the user's intent and your task scope from their instructions and the prior conversation context.")
 diff --git a/packages/opencode/test/shell/parse.test.ts b/packages/opencode/test/shell/parse.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc1121f7d0d6dd73c13aecf56822e24fed8c89f0
+index 0000000..fc1121f
 --- /dev/null
 +++ b/packages/opencode/test/shell/parse.test.ts
 @@ -0,0 +1,102 @@
@@ -2984,64 +3137,8 @@ index 0000000000000000000000000000000000000000..fc1121f7d0d6dd73c13aecf56822e24f
 +    expect(await ShellParse.analyze("git diff -- --\ngit status", "powershell")).toMatchObject({ opaque: true })
 +  })
 +})
-diff --git a/packages/opencode/test/shell/shell.test.ts b/packages/opencode/test/shell/shell.test.ts
-index 33fe3964e341af720ba00ff8ed04ba861e0ed7a4..272086e16d85c46dc05caec605769bab92574efa 100644
---- a/packages/opencode/test/shell/shell.test.ts
-+++ b/packages/opencode/test/shell/shell.test.ts
-@@ -3,6 +3,7 @@ import path from "path"
- import { Shell } from "../../src/shell/shell"
- import { Filesystem } from "@/util/filesystem"
- import { which } from "../../src/util/which"
-+import { tmpdir } from "../fixture/fixture"
- 
- const withShell = async (shell: string | undefined, fn: () => void | Promise<void>) => {
-   const prev = process.env.SHELL
-@@ -21,6 +22,43 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
- }
- 
- describe("shell", () => {
-+  for (const name of ["bash", "zsh"]) {
-+    const file = name === "bash" && process.platform === "win32" ? Shell.gitbash() : which(name)
-+    test.skipIf(!file)(`${name} preserves native script and startup behavior`, async () => {
-+      if (!file) throw new Error(`Missing ${name}`)
-+      await using home = await tmpdir()
-+      await using cwd = await tmpdir()
-+      // 独立 HOME 避免用户 rc 干扰；login 和手动 rc 各自提供可观察标记。
-+      await Bun.write(path.join(home.path, name === "bash" ? ".bash_profile" : ".zprofile"), "export LOGIN_MARK=login\n")
-+      await Bun.write(path.join(home.path, `.${name}rc`), "export VALUE=outer\nalias fidelity_alias='printf alias'\ncd /\n")
-+      // Zsh 的 env 与 rc 查找语义不同于 Bash，不能合并初始化脚本。
-+      await Bun.write(path.join(home.path, ".zshenv"), "export ENV_MARK=zshenv\n")
-+      await Bun.write(path.join(cwd.path, "cwd-marker"), "")
-+      // rc 故意离开工作目录；命令开始前必须恢复 cwd，且别名仍可用。
-+      const command = String.raw`VALUE=inner
-+printf '%s\n' "$VALUE" '$VALUE' 'C:\Temp\x'
-+printf '%s\n' \
-+  'continued'
-+printf '%s\n' "$LOGIN_MARK" "$0"
-+fidelity_alias
-+[[ -f cwd-marker ]] && printf ':cwd'
-+[[ -n "$ENV_MARK" ]] && printf ':zshenv'
-+true`
-+      // 先锁定输入中的反斜杠换行，防止测试源码先把目标字符吃掉。
-+      expect(command).toContain(String.fromCharCode(92, 10))
-+      const proc = Bun.spawn([file, ...Shell.args(file, command, cwd.path)], {
-+        cwd: home.path,
-+        env: { ...process.env, HOME: home.path, ZDOTDIR: home.path, ENV_MARK: "" },
-+        stdout: "pipe", stderr: "pipe",
-+      })
-+      const [output, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-+      expect(error).toBe("")
-+      expect(code).toBe(0)
-+      // 预期值由语言合同独立给出：赋值后才展开，单引号中的字符原样输出。
-+      expect(output).toBe("inner\n$VALUE\nC:\\Temp\\x\ncontinued\nlogin\nopencode\nalias:cwd" + (name === "zsh" ? ":zshenv" : ""))
-+    })
-+  }
-+
-   test("normalizes shell names", () => {
-     expect(Shell.name("/bin/bash")).toBe("bash")
-     if (process.platform === "win32") {
 diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-index 42f8eb4db11a4a4d802af7e02aad2081591c6133..115baacc510a0d8ad1e3cbbbd2b64e0f42821e9f 100644
+index 923a0c5..645e4ff 100644
 --- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
 +++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
 @@ -21,7 +21,7 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
@@ -3055,7 +3152,7 @@ index 42f8eb4db11a4a4d802af7e02aad2081591c6133..115baacc510a0d8ad1e3cbbbd2b64e0f
      "compress_output": {
 diff --git a/packages/opencode/test/tool/shell-prompt.test.ts b/packages/opencode/test/tool/shell-prompt.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d66671ac5a
+index 0000000..55dd005
 --- /dev/null
 +++ b/packages/opencode/test/tool/shell-prompt.test.ts
 @@ -0,0 +1,139 @@
@@ -3083,7 +3180,8 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +  expect(quoting[2]).toContain(String.fromCharCode(96, 34))
 +  for (const platform of ["win32", "linux"] as const) {
 +    for (const name of ["pwsh", "powershell"]) {
-+      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 })
++      // 目标 render 需要显式 defaultTimeoutMs；120000 与生产默认一致，以下各处同。
++      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 }, 120000)
 +      // 只观察真实调用者取得的文本；连续五行同时锁定优先级与 here-string 换行说明。
 +      expect(prompt.description).toContain(quoting.join("\n"))
 +    }
@@ -3092,10 +3190,10 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +
 +test("render explains Windows PowerShell native argument quoting", () => {
 +  // 5.1把native参数重建成命令行，嵌入引号会在后续拆分时被消费；该说明对应已复现的版本差异。
-+  const legacy = ShellPrompt.render("powershell", "win32", { maxLines: 1000, maxBytes: 16384 })
++  const legacy = ShellPrompt.render("powershell", "win32", { maxLines: 1000, maxBytes: 16384 }, 120000)
 +  expect(legacy.description).toContain("Windows PowerShell 5.1 rebuilds native arguments as a command line")
 +  expect(legacy.description).toContain("stdin interface for quoted code")
-+  const modern = ShellPrompt.render("pwsh", "win32", { maxLines: 1000, maxBytes: 16384 })
++  const modern = ShellPrompt.render("pwsh", "win32", { maxLines: 1000, maxBytes: 16384 }, 120000)
 +  expect(modern.description).not.toContain("Windows PowerShell 5.1 rebuilds native arguments")
 +})
 +
@@ -3103,20 +3201,18 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +for (const name of ["pwsh", "powershell", "cmd", "bash", "zsh", "sh", "dash", "ksh"]) {
 +  for (const platform of ["win32", "linux"] as const) {
 +    test(`render exposes native script and unchanged parameters: ${platform}/${name}`, () => {
-+      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 })
++      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 }, 120000)
 +      const schema = ToolJsonSchema.fromSchema(prompt.parameters)
-+      // 字段描述随真实 shell 变化，但 wire shape 必须仍是原来的五字段合同。
++      // 字段描述随真实 shell 变化，但 wire shape 必须仍是目标既有四字段合同（上游已移除 description 入参）。
 +      expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
 +        "command",
 +        "compress_output",
-+        "description",
 +        "timeout",
 +        "workdir",
 +      ])
-+      expect(schema.required).toEqual(["command", "description"])
++      expect(schema.required).toEqual(["command"])
 +      expect(schema.properties).toMatchObject({
 +        command: { type: "string" },
-+        description: { type: "string" },
 +        timeout: { type: "integer", exclusiveMinimum: 0 },
 +        workdir: { type: "string" },
 +        compress_output: { type: "boolean" },
@@ -3136,7 +3232,6 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +      // JSON 换行、字面反斜杠 n 与 CRLF 均可作为普通字符串进入 schema，不能被修复。
 +      const input = {
 +        command: "first\nsecond\r\n" + String.raw`$HOME \n \" C:\Temp`,
-+        description: "Inspect literal script parameters",
 +      }
 +      expect(Schema.decodeUnknownSync(prompt.parameters)(input)).toEqual(input)
 +      // 缺省值由原 runner 决定；schema 不应新填 timeout/workdir/compress_output。
@@ -3144,20 +3239,19 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +        Schema.decodeUnknownSync(prompt.parameters)({ ...input, timeout: 1, workdir: ".", compress_output: false }),
 +      ).toEqual({ ...input, timeout: 1, workdir: ".", compress_output: false })
 +      for (const invalid of [
-+        { description: "x" },
-+        { command: "x" },
++        {},
++        { timeout: 1 },
 +        { ...input, command: 1 },
 +        { ...input, timeout: 0 },
 +        { ...input, timeout: 1.5 },
 +        { ...input, timeout: "1" },
 +        { ...input, workdir: 1 },
-+        { ...input, description: 1 },
 +        { ...input, compress_output: "false" },
 +      ]) {
 +        expect(() => Schema.decodeUnknownSync(prompt.parameters)(invalid)).toThrow()
 +      }
 +      // 原 timeout 文案与专用文件工具要求不靠 schema 默认值实现，需在公开文本中继续存在。
-+      expect(prompt.description).toContain("120000ms (2 minutes)")
++      expect(prompt.description).toContain("time out after 120000ms")
 +      expect(prompt.description).toContain("File search: Use Glob")
 +      expect(prompt.description).toContain("Read files: Use Read")
 +      if (name === "pwsh" || name === "powershell") {
@@ -3173,17 +3267,19 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +  }
 +}
 +
-+// 数字来自修改前冻结的 render(1000,16384)，不从当前实现重新生成预期。
++// 数字来自目标修改前冻结的 render(1000,16384,120000)，不从当前实现重新生成预期。
++// 目标 PowerShell 基线比 source 时代更精简：引用文案全额加入会超出 600 字节硬预算，
++// 已在 prompt.ts 同步移除与引用保真无关的别名/数组表达式两行后冻结本基线（0641 record）。
 +for (const [name, lines, bytes] of [
-+  ["pwsh", 109, 8547],
-+  ["powershell", 109, 8421],
-+  ["cmd", 106, 7713],
-+  ["bash", 100, 7754],
-+  ["zsh", 100, 7753],
++  ["pwsh", 108, 8172],
++  ["powershell", 108, 7909],
++  ["cmd", 105, 7354],
++  ["bash", 99, 7351],
++  ["zsh", 99, 7350],
 +] as const) {
 +  for (const platform of ["win32", "linux"] as const) {
 +    test(`render and command description stay within R6 budget: ${platform}/${name}`, () => {
-+      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 })
++      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 }, 120000)
 +      // 路径属于机器环境，不是提示改动；替换成冻结时路径以免 CI 用户名改变预算。
 +      const text = prompt.description.replaceAll(Global.Path.tmp, String.raw`D:\Temp\opencode`)
 +      const command = ToolJsonSchema.fromSchema(prompt.parameters).properties?.command
@@ -3198,23 +3294,23 @@ index 0000000000000000000000000000000000000000..c545dc47b8b31d9609785b62689858d6
 +    })
 +  }
 +}
++
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa694d7fc29 100644
+index a60dccf..ac1ea2d 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -24,6 +24,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
- import { PermissionReviewer } from "@/permission/reviewer/service"
- import { Permission as PermissionService } from "@/permission"
+@@ -29,6 +29,7 @@ import { Tool } from "@/tool/tool"
  import { ToolProgress } from "@/tool/progress"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { InstanceStore } from "@/project/instance-store"
 +import { PermissionPrecheck } from "../../src/permission/precheck"
  
  const shellLayer = Layer.mergeAll(
-   CrossSpawnSpawner.defaultLayer,
-@@ -2655,40 +2656,82 @@ describe("tool.shell truncation", () => {
+   LayerNode.compile(
+@@ -3140,41 +3141,83 @@ describe("tool.shell execution notice policy", () => {
    })
  })
  
--// [local-smark] PowerShell inline Python 命令规范化：PowerShell 对 python -c "..."
 -// 内双引号源码做二次解析，导致 Bash 风格的 \" 转义被剥离、$() 被展开。
 -// 规范化把源码移入 PowerShell 单引号 literal，使 Python 收到原始源码。
 -// 仅在 Windows PowerShell 下生效；非 Windows 或无 PowerShell 时跳过。
@@ -3239,7 +3335,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
 +          { command: "Write-Information 'probe'", exit: 0 },
 +        ]
 +        for (const entry of cases) {
-+          const result = yield* run({ command: entry.command, description: "Verify final PowerShell execution status" })
++          const result = yield* run({ command: entry.command })
 +          expect(result.metadata.exit).toBe(entry.exit)
 +          // 模型收到同一准确退出码和真实shell名称，便于按正确方言修正错误。
 +          if (entry.exit !== 0) {
@@ -3256,7 +3352,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
 +        // String.raw保留测试需要的真实反斜杠，避免JS先消耗转义而测成另一条命令。
 +        const command = String.raw`python -B -c "x=[ord(c) for c in r'\""']; print(x)"`
 +        expect([...command].filter((char) => char === "\\")).toHaveLength(1)
-+        const result = yield* run({ command, description: "Verify native Python quote codepoints" })
++        const result = yield* run({ command })
 +        // 92和34分别是反斜杠、双引号；直接调用两版PowerShell的独立探针给出原生预期。
 +        // 5.1的Legacy binder消费反斜杠，7保持该字符；Harness忠实保留各自语言语义。
 +        expect(result.metadata.exit).toBe(0)
@@ -3279,7 +3375,6 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
              const result = yield* run({
 -              command: `python -c "print('{\"key\":1}')"`,
 +              command: `@'\nprint('{"key":1}')\n'@ | python -`,
-               description: "Print JSON with escaped quotes",
              })
              expect(result.metadata.exit).toBe(0)
 -            // Python 应输出 {"key":1}，而非 SyntaxError: unterminated string literal
@@ -3297,7 +3392,6 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
              const pathResult = yield* run({
 -              command: `& "${interpreter}" -c "import sys; print(sys.executable); print('{\"path\":1}')"`,
 +              command: `@'\nimport sys; print(sys.executable); print('{"path":1}')\n'@ | & '${interpreter.replaceAll("'", "''")}' -`,
-               description: "Print JSON with an explicit Python path",
              })
              expect(pathResult.metadata.exit).toBe(0)
              expect(pathResult.output).toContain('{"path":1}')
@@ -3309,13 +3403,16 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
            }),
          ),
        ),
-@@ -2704,13 +2747,13 @@ describe("tool.shell inline python normalization", () => {
+-      30_000,
+     )
+   }
+ 
+@@ -3186,12 +3229,12 @@ describe("tool.shell inline python normalization", () => {
            projectRoot,
            Effect.gen(function* () {
              const result = yield* run({
 -              command: `python -c "print('{\"key\":1}'); print(2)"`,
 +              command: `@'\nprint('{"key":1}'); print(2)\n'@ | python -`,
-               description: "Print two Python statements",
              })
              expect(result.metadata.exit).toBe(0)
              expect(result.output).toContain('{"key":1}')
@@ -3325,7 +3422,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
            }),
          ),
        ),
-@@ -2718,9 +2761,9 @@ describe("tool.shell inline python normalization", () => {
+@@ -3199,9 +3242,9 @@ describe("tool.shell inline python normalization", () => {
      )
    }
  
@@ -3337,12 +3434,8 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
        withShell(
          item,
          runIn(
-@@ -2728,12 +2771,10 @@ describe("tool.shell inline python normalization", () => {
-           Effect.gen(function* () {
-             const result = yield* run({
+@@ -3211,9 +3254,7 @@ describe("tool.shell inline python normalization", () => {
                command: `python -c "s='$(Write-Output EXPANDED)'; print(s)"`,
--              description: "Print literal dollar-paren",
-+              description: "Expand the local PowerShell subexpression",
              })
              expect(result.metadata.exit).toBe(0)
 -            // 源码中的 $(...) 应原样到达 Python，不被 PowerShell 求值
@@ -3352,7 +3445,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
            }),
          ),
        ),
-@@ -2749,9 +2790,9 @@ describe("tool.shell inline python normalization", () => {
+@@ -3229,9 +3270,9 @@ describe("tool.shell inline python normalization", () => {
          runIn(
            projectRoot,
            Effect.gen(function* () {
@@ -3361,19 +3454,19 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
              const result = yield* run({
 -              command: `python -c "print('{\"k\":\"v\"} 汉字')"`,
 +              command: `@'\nprint('{"k":"v"} 汉字')\n'@ | python -`,
-               description: "Print unicode with escaped quotes",
              })
              expect(result.metadata.exit).toBe(0)
-@@ -2799,7 +2840,7 @@ describe("tool.shell inline python normalization", () => {
+             // Python 应输出原始源码中的 JSON 和 Unicode
+@@ -3276,7 +3317,7 @@ describe("tool.shell inline python normalization", () => {
+             const result = yield* run({
                command: `python -c "print(1)"; Write-Output "done"`,
-               description: "Compound command",
              })
 -            // 复合命令不命中规范化，原样执行
 +            // 复合命令交给shell原生顺序执行，保持原始命令身份。
              expect(result.metadata).not.toHaveProperty("commandAdaptation")
              expect(result.output).toContain("1")
              expect(result.output).toContain("done")
-@@ -2810,10 +2851,9 @@ describe("tool.shell inline python normalization", () => {
+@@ -3287,10 +3328,9 @@ describe("tool.shell inline python normalization", () => {
      )
    }
  
@@ -3386,7 +3479,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
        withShell(
          item,
          runIn(
-@@ -2830,102 +2870,9 @@ describe("tool.shell inline python normalization", () => {
+@@ -3306,101 +3346,9 @@ describe("tool.shell inline python normalization", () => {
                  capture(requests, stop),
                ),
              ).toMatchObject({ message: stop.message })
@@ -3427,13 +3520,12 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
 -              { option: "--unknown value", normalized: false },
 -            ]
 -            for (const entry of cases) {
--              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+-              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 -              const stop = new Error(`stop before conda ${entry.option}`)
 -              expect(
 -                yield* fail(
 -                  {
 -                    command: `conda run ${entry.option} --live-stream python -c "print(1)"`,
--                    description: "Conda option boundary",
 -                  },
 -                  capture(requests, stop),
 -                ),
@@ -3476,11 +3568,11 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
 -              { prefix: "python -X @xoptions", normalized: false },
 -            ]
 -            for (const entry of cases) {
--              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+-              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 -              const stop = new Error(`stop before ${entry.prefix}`)
 -              expect(
 -                yield* fail(
--                  { command: `${entry.prefix} -c "print(1)"`, description: "Python flag boundary" },
+-                  { command: `${entry.prefix} -c "print(1)"` },
 -                  capture(requests, stop),
 -                ),
 -              ).toMatchObject({ message: stop.message })
@@ -3492,7 +3584,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
            }),
          ),
        ),
-@@ -3006,26 +2953,34 @@ describe("tool.shell inline python normalization", () => {
+@@ -3479,25 +3427,34 @@ describe("tool.shell inline python normalization", () => {
      )
    }
  
@@ -3506,11 +3598,10 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
          runIn(
            projectRoot,
            Effect.gen(function* () {
-             const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+             const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 -            yield* run(
 -              {
 -                command: `python -c "print(1)"`,
--                description: "Permission evidence",
 -              },
 -              capture(requests),
 -            )
@@ -3521,7 +3612,7 @@ index f181cf16bddddeb080fe1d566de784cd1e2d856f..2ccc03f52f9e81b4343d0c9e423a4fa6
 +            const outside = yield* tmpdirScoped()
 +            const command = "@'\nimport os; os.remove('example.tmp')\n'@ | python -"
 +            const stop = new Error("stop before source execution")
-+            const result = yield* fail({ command, workdir: outside, description: "Classify original source at both gates" }, {
++            const result = yield* fail({ command, workdir: outside }, {
 +              ...ctx,
 +              ask: (request) => Effect.gen(function* () {
 +                requests.push(request)

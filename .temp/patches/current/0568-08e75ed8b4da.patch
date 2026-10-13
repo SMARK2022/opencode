@@ -11,9 +11,16 @@ Content-Transfer-Encoding: 8bit
 
 增加显式 db verify --repair-tool-input 修复历史坏行，保留 corruption hard-fail，并记录 R4 审计与验证证据。
 
+
+适配说明（v1.18.32 重放）：
+owner 迁移：cold.ts→packages/core/src/storage/cold-storage.ts（verify 签名 (db,input)、
+db.transaction 事务）；resolveTools→session/llm/request.ts；db.ts VerifyCommand 按 effectCmd
+形态。H4（processor normalizeToolInput）裁记：目标上游已在 tool-call case 原生实现
+isRecord(value.input) ? value.input : { value: value.input }（语义更强：包装保留原值而非
+丢弃），H7-T6 两断言按上游 {value:...} 契约适配；storedRecord hard-fail（INV-04）逐字保留。
+
 diff --git a/docs/plans/db-compress-tool-input-schema-repair.md b/docs/plans/db-compress-tool-input-schema-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e9fbacd3e1ca329eae87937aa4f091175e7721c
 --- /dev/null
 +++ b/docs/plans/db-compress-tool-input-schema-repair.md
 @@ -0,0 +1,488 @@
@@ -505,55 +512,59 @@ index 0000000000000000000000000000000000000000..1e9fbacd3e1ca329eae87937aa4f0911
 +```
 +
 +审计后动作：按双方 N-01 追加 15 行合格中文注释（C≈53，ratio≈0.155），纯注释无行为变化；`db-maintenance.test.ts` 整跑 14/15（1 个预存 compress-vacuum 时序 flake，隔离运行通过，与本 diff 无关）。
+
 diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd/db.ts
-index e3b03bc3712db7e11ee681768175e99c48d3de0d..a2f755b367c7cc76768299b4c786ce53ed419ffc 100644
 --- a/packages/opencode/src/cli/cmd/db.ts
 +++ b/packages/opencode/src/cli/cmd/db.ts
-@@ -206,7 +206,7 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
-           ? "!"
-           : "●"
+@@ -220,7 +220,8 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
+           : UI.Style.TEXT_HIGHLIGHT_BOLD
+   const symbol = task.status === "completed" ? "✓" : task.status === "failed" ? "×" : task.status === "interrupted" ? "!" : "●"
    const detail =
 -    task.args.operation === "verify" && task.args.repair
++    // #568：tool-input 修复也是写事务，task view 必须与 refcount repair 同样显式标记。
 +    task.args.operation === "verify" && (task.args.repair || task.args.repairToolInput === true)
        ? "verify (repair)"
        : task.args.operation === "cleanup" && task.args.delete
          ? "cleanup (delete)"
-@@ -717,12 +717,22 @@ const ResumeCommand = cmd({
+@@ -790,14 +791,26 @@ const ResumeCommand = effectCmd({
  })
  
  // verify 默认只读完整性报告；--repair 才生成可恢复 task，并且只修正可证明的 ref_count。
-+// --repair-tool-input 独立授权热 Tool 行的 input 形状修复，同样进入 task-backed 写事务。
- const VerifyCommand = cmd({
++// #568：--repair-tool-input 独立授权热 Tool 行的 input 形状修复，同样进入 task-backed 写事务。
+ const VerifyCommand = effectCmd({
    command: "verify",
    describe: "verify cold payload hashes and reference counts",
+   instance: false,
 -  builder: (yargs: Argv) => yargs.option("repair", { type: "boolean", default: false }).option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
--  handler: async (args: { repair: boolean; batchSize: number }) => {
--    await executeMaintenance({ operation: "verify", repair: args.repair, batchSize: args.batchSize })
 +  builder: (yargs: Argv) =>
 +    yargs
 +      .option("repair", { type: "boolean", default: false })
 +      .option("repair-tool-input", { type: "boolean", default: false })
 +      .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
-+  handler: async (args: { repair: boolean; repairToolInput: boolean; batchSize: number }) => {
-+    await executeMaintenance({
-+      operation: "verify",
-+      repair: args.repair,
-+      repairToolInput: args.repairToolInput,
-+      batchSize: args.batchSize,
-+    })
-   },
+   handler: Effect.fn("Cli.db.verify")(function* (args) {
+     const db = yield* maintenanceDB()
+-    yield* Effect.promise(() => executeMaintenance(db, { operation: "verify", repair: args.repair, batchSize: args["batch-size"] }))
++    yield* Effect.promise(() =>
++      executeMaintenance(db, {
++        operation: "verify",
++        repair: args.repair,
++        repairToolInput: args["repair-tool-input"],
++        batchSize: args["batch-size"],
++      }),
++    )
+   }),
  })
  
-diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
-index 0282602429b09edd5b3d45e1dfc7a7cf6fa7a61b..2ffb734d44102b49d8c1b4510d0b7c85ad008814 100644
---- a/packages/opencode/src/session/llm.ts
-+++ b/packages/opencode/src/session/llm.ts
-@@ -500,7 +500,11 @@ function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission"
-   )
-   return Record.filter(
+
+diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
+--- a/packages/opencode/src/session/llm/request.ts
++++ b/packages/opencode/src/session/llm/request.ts
+@@ -222,7 +222,11 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
      input.tools,
+     // ToolSelection.enabled 过滤被 UI 禁用的工具，控制模型可见性
+     // 三层过滤：用户显式禁用、权限分组禁用、UI 工具选择禁用，任一命中即排除
 -    (_, k) => input.user.tools?.[k] !== false && !disabled.has(k) && ToolSelection.enabled(k, input.permission),
-+    // 内部 Tool 必须绕过 user.tools 与 Permission.disabled 两个用户禁用源，供
++    // #568：内部 Tool 必须绕过 user.tools 与 Permission.disabled 两个用户禁用源，供
 +    // experimental_repairToolCall 保留注册；用户可配置 Tool 仍执行原有三项权限条件。
 +    (_, k) =>
 +      !ToolSelection.isUserConfigurable(k) ||
@@ -561,47 +572,20 @@ index 0282602429b09edd5b3d45e1dfc7a7cf6fa7a61b..2ffb734d44102b49d8c1b4510d0b7c85
    )
  }
  
-diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 2d56652dc3c259b8cd57ca99e94a2ac184344df3..cccbdf186121191faa7440fa165c852e0625cff1 100644
---- a/packages/opencode/src/session/processor.ts
-+++ b/packages/opencode/src/session/processor.ts
-@@ -39,6 +39,13 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
- export const TOOL_ABORTED_ERROR = "Tool execution aborted"
- const log = Log.create({ service: "session.processor" })
- 
-+// AI SDK 对解析失败的调用会在 invalid dynamic tool-call 上保留原始字符串 input；
-+// ToolState 契约要求 object，非 object 值统一归一化为空对象——该调用已被 SDK 判 invalid
-+// 并伴随 tool-error，不会执行，因此空对象不构成成功路径。
-+function normalizeToolInput(input: unknown): Record<string, unknown> {
-+  return isRecord(input) ? input : {}
-+}
-+
- /**
-  * 工具完成时的 input 真值回写（INV-16 / write format 同构）。
-  * - `_syncInput`：整参数面替换为 { filePath, edits }，丢弃 legacy 顶层替换字段
-@@ -619,7 +626,7 @@ export const layer = Layer.effect(
-               state: {
-                 ...match.state,
-                 status: "running",
--                input: value.input,
-+                input: normalizeToolInput(value.input),
-                 time: { start: Date.now() },
-               },
-               metadata: {
-diff --git a/packages/opencode/src/storage/cold.ts b/packages/opencode/src/storage/cold.ts
-index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b 100644
---- a/packages/opencode/src/storage/cold.ts
-+++ b/packages/opencode/src/storage/cold.ts
-@@ -127,6 +127,8 @@ export type VerifyReport = {
+
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -140,6 +140,8 @@ export type VerifyReport = {
    missingPayloads: number
    corruptPayloads: number
    repaired: number
-+  // toolInputFixed 独立计数 Tool input 形状修复，与 refcount repair 互不混淆。
++  // #568：toolInputFixed 独立计数 Tool input 形状修复，与 refcount repair 互不混淆。
 +  toolInputFixed: number
  }
  
  // CleanupReport 的 candidate 与 deleted 分开，保证 dry-run 输出不能被误读为已经释放磁盘内容。
-@@ -144,7 +146,7 @@ export type MaintenanceRequest =
+@@ -157,7 +159,7 @@ export type MaintenanceRequest =
    | { operation: "compress"; sessionID?: SessionID; olderThanMs: number; batchSize: number }
    | { operation: "expand"; sessionID?: SessionID; all: boolean; batchSize: number }
    | { operation: "status" }
@@ -610,16 +594,15 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
    | { operation: "cleanup"; delete: boolean; batchSize: number }
    | { operation: "vacuum"; confirm: boolean }
  
-@@ -2610,11 +2612,56 @@ export function isEligibleOwner(input: Owner & { now?: number; olderThanMs?: num
-   })
+@@ -2633,11 +2635,57 @@ export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; older
+   return eligible(eligibility(db, row.session_id, now, olderThanMs), row.message_id, row.data.type === "compaction")
  }
  
-+// 工具 input 形状修复只针对热 Tool owner：v1/v2 冻结路径在写入前已验证 input，坏行只可能来自 hot row。
-+// 谓词与 partCandidate 保持同源，避免维护命令与候选扫描对“坏 input”给出不同判定。
-+// 状态谓词限定 completed/error：这是 partCandidate 中唯一可冻结的 tool 状态，
-+// 修复范围严格覆盖 corruption 检测实际能看到的历史行。
++// #568：工具 input 形状修复只针对热 Tool owner：v1/v2 冻结路径在写入前已验证 input，坏行只可能来自 hot row。
++// 谓词与 partCandidate 保持同源（tool + completed/error + input 非 object），避免维护命令与候选扫描对
++// “坏 input”给出不同判定；completed/error 是 partCandidate 中唯一可冻结的 tool 状态。
 +// 可解析的 JSON 字符串恢复为 object，其余非 object 值统一置空——原始值本身违反 ToolState
-+// 契约，无法重建为合法 Tool input，且对应调用从未成功执行。
++// 契约，无法重建为合法 Tool input，且对应调用从未成功执行。仅改 data 保留 time_updated。
 +function repairToolInputShape(db: TxOrDb) {
 +  const rows = db
 +    .select({ id: PartTable.id, data: PartTable.data, time_updated: PartTable.time_updated })
@@ -636,17 +619,19 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
 +  for (const row of rows) {
 +    // SQL 谓词已保证 tool + completed/error；此分支只收窄 union 类型，不复制第二套判定。
 +    if (row.data.type !== "tool" || (row.data.state.status !== "completed" && row.data.state.status !== "error")) continue
++    // 字符串才尝试恢复：其余非 object 形态无第二解析路径，统一空对象占位。
 +    const normalized = typeof row.data.state.input === "string" ? parseToolInputObject(row.data.state.input) : {}
 +    db.update(PartTable)
 +      .set({ data: { ...row.data, state: { ...row.data.state, input: normalized } }, time_updated: row.time_updated })
 +      .where(eq(PartTable.id, row.id))
 +      .run()
++    // time_updated 原样回写：形状修复不是内容变更，不得扰动 compaction 年龄判定。
 +    fixed++
 +  }
 +  return fixed
 +}
 +
-+// 修复函数专用的容错解析：解析失败或结果不是 object 都回退空对象，绝不把非对象值写回。
++// #568：修复函数专用的容错解析：解析失败或结果不是 object 都回退空对象，绝不把非对象值写回。
 +function parseToolInputObject(input: string): Record<string, unknown> {
 +  try {
 +    const value = JSON.parse(input)
@@ -658,26 +643,27 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
 +
  // verifyWith 把 owner 引用一次性 GROUP BY 反算，并逐 payload 校验 codec、size、hash 与 canonical envelope。
  // repair 只修正可证明的 ref_count，不伪造 missing/corrupt payload，也不清除任何 owner cold_ref。
-+// repairToolInput 独立修复热 Tool 行的 input 形状，二者在同一事务内执行。
++// #568：repairToolInput 独立修复热 Tool 行的 input 形状，与 refcount repair 在同一事务内执行。
  // report 同时记录 checked owner/payload，使空库成功与未执行扫描在用户输出中可区分。
  // 所有 repair 写入位于 immediate transaction；只读 verify 不获取 maintenance lease 或改变数据库。
 -function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
 +function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boolean }): VerifyReport {
-+  // toolInputFixed 先于 payload 校验统计，修复后的行不会影响后续 integrity 判定。
++  // #568：toolInputFixed 先于 payload 校验统计，修复后的行不会影响后续 integrity 判定。
 +  const toolInputFixed = input.repairToolInput ? repairToolInputShape(db) : 0
    // verify 同时扫描 ref/key/stats，key-only、stats-only 与半 summary cache 都计入 corruptOwners。
    // repair 仅纠正可证明的 ref_count；坏 key/frame/stats 和 orphan 仍由各自显式操作处理。
    const payloads = db.select().from(ColdStorageTable).all()
-@@ -2667,7 +2714,7 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
+@@ -2690,7 +2738,8 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
      const actual = counts.get(payload.hash) ?? 0
      if (payload.ref_count !== actual) {
        refCountMismatches++
 -      if (repair) {
++      // #568：repair 仅指 refcount 修复；input 形状修复已在前置 repairToolInputShape 完成。
 +      if (input.repair) {
          db.update(ColdStorageTable)
            .set({ ref_count: actual, time_updated: Date.now() })
            .where(eq(ColdStorageTable.hash, payload.hash))
-@@ -2763,15 +2810,22 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
+@@ -2786,15 +2835,19 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
      missingPayloads,
      corruptPayloads,
      repaired,
@@ -687,24 +673,21 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
  
 -// verify 的 repair flag 决定事务写权限，调用层不能用“verify 后另行 update”复制修复 SQL。
 +// verify 的 repair/repairToolInput flag 决定事务写权限，调用层不能用“verify 后另行 update”复制修复 SQL。
-+// 两类修复共享同一 immediate 事务边界：避免崩溃点在半修复状态留下不一致组合。
  // corruption 计入 report 而非在首个坏 blob 终止，便于用户一次看到完整损坏范围。
  // normal delete/fork/thaw 仍 hard-fail；宽容扫描只属于显式维护诊断命令。
--export function verify(input: { repair: boolean }) {
--  if (!input.repair) return Database.use((db) => verifyWith(db, false))
--  return Database.transaction((db) => verifyWith(db, true), { behavior: "immediate" })
-+export function verify(input: { repair: boolean; repairToolInput?: boolean }) {
+-export function verify(db: TxOrDb, input: { repair: boolean }) {
+-  if (!input.repair) return verifyWith(db, false)
+-  return db.transaction((db) => verifyWith(db, true), { behavior: "immediate" })
++export function verify(db: TxOrDb, input: { repair: boolean; repairToolInput?: boolean }) {
++  // #568：两类修复共享同一 immediate 事务边界：避免崩溃点在半修复状态留下不一致组合。
 +  if (!input.repair && !input.repairToolInput) {
-+    return Database.use((db) => verifyWith(db, { repair: false, repairToolInput: false }))
++    return verifyWith(db, { repair: false, repairToolInput: false })
 +  }
-+  return Database.transaction(
-+    (db) => verifyWith(db, { repair: input.repair, repairToolInput: input.repairToolInput === true }),
-+    { behavior: "immediate" },
-+  )
++  return db.transaction((db) => verifyWith(db, { repair: input.repair, repairToolInput: input.repairToolInput === true }), { behavior: "immediate" })
  }
  
  // expand 必须有明确 session scope 或 all=true，防止缺省命令意外把整个历史数据库全量回热。
-@@ -2874,7 +2928,7 @@ export function prepareMaintenance(request: MaintenanceRequest): PreparedMainten
+@@ -2897,7 +2950,7 @@ export function prepareMaintenance(request: MaintenanceRequest): PreparedMainten
    const taskBacked =
      request.operation === "compress" ||
      request.operation === "expand" ||
@@ -713,7 +696,7 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
      (request.operation === "cleanup" && request.delete)
    if (!taskBacked) return { type: "immediate", request }
  
-@@ -2950,7 +3004,12 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
+@@ -2973,7 +3026,12 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
      case "status":
        return { operation: "status" }
      case "verify":
@@ -727,7 +710,7 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
      case "cleanup":
        return { operation: "cleanup", delete: input.delete === true, batchSize }
      case "vacuum":
-@@ -3033,7 +3092,7 @@ export function parseMaintenanceTask(input: unknown): MaintenanceTask {
+@@ -3056,7 +3114,7 @@ export function parseMaintenanceTask(input: unknown): MaintenanceTask {
    const taskBacked =
      args.operation === "compress" ||
      args.operation === "expand" ||
@@ -736,29 +719,30 @@ index 37b6660043fdf4d856ddfff461d75d94489a7523..2a54c4ee3bd56e7e5eebaa54187d0e2f
      (args.operation === "cleanup" && args.delete)
    if (!taskBacked) throw new ValidationError({ message: "Maintenance task contains an immediate operation" })
    if (
-@@ -3239,7 +3298,10 @@ export async function maintain(
+@@ -3270,7 +3328,10 @@ export async function maintain(
    try {
      if (request.operation === "verify") {
        // repair task 复用同步 verify 的完整 owner/payload/state 快照，禁止维护第二套 payload-only verdict。
--      const report = Database.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" })
-+      const report = Database.transaction(
+-      const report = db.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" })
++      const report = db.transaction(
 +        (db) => verifyWith(db, { repair: request.repair, repairToolInput: request.repairToolInput === true }),
 +        { behavior: "immediate" },
 +      )
        // repaired mismatch 不算失败；无法修复的 owner/missing/frame 类别才进入 task.failed。
        const failed = report.corruptOwners + report.missingPayloads + report.corruptPayloads
        task.processed = report.checkedOwners + report.checkedPayloads
+
 diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
-index 027041e64a9bce66a22cb30b468a682f94e8dfe6..c085569989ddf387a8545f5a5dd6488e9922ee59 100644
 --- a/packages/opencode/test/cli/db-maintenance.test.ts
 +++ b/packages/opencode/test/cli/db-maintenance.test.ts
-@@ -60,6 +60,29 @@ function inflateFreelist(root: string, targetBytes = 20_000_000) {
-   db.close()
+@@ -101,6 +101,30 @@ async function waitForExit(proc: IPty, exited: Promise<number>) {
+   proc.kill()
+   throw new Error("database maintenance PTY exceeded 20 seconds")
  }
- 
-+// 插入一条热 Tool 坏行（state.input 为字符串），模拟 AI SDK invalid dynamic 兜底入库形态。
++// #568：插入一条热 Tool 坏行（state.input 为字符串），模拟 AI SDK invalid dynamic 兜底入库形态。
 +// 必须直接 SQL 播种：任何经过 processor/import 的写入都会被归一化或校验，
 +// 无法制造出历史遗留形态的坏行。
++// foreign_keys 关闭是播种前置：fixture 只写三张表，不维护真实外键图。
 +async function seedMalformedToolInput(root: string) {
 +  await markMigrated(root)
 +  await runCli(root, ["db", "status", "--json"])
@@ -779,15 +763,15 @@ index 027041e64a9bce66a22cb30b468a682f94e8dfe6..c085569989ddf387a8545f5a5dd6488e
 +  db.close()
 +}
 +
- async function seedColdParts(root: string, count = 40) {
-   await markMigrated(root)
-   await runCli(root, ["db", "status", "--json"])
-@@ -558,4 +581,25 @@ describe("database maintenance CLI", () => {
+ // 非 PTY helper 分开读取 stdout/stderr，确保 machine JSON 不被人类提示污染。
+ async function runCli(root: string, args: string[]) {
+   // 后台 CLI 子进程在 Windows 上隐藏 console，避免维护命令验证时弹出 conhost。
+@@ -580,4 +604,25 @@ describe("database maintenance CLI", () => {
      const invalid = await runCli(tmp.path, ["db", "compress", "--yes", "--json"])
      expect([invalid.exitCode === 0, invalid.stderr.includes("compress --yes requires --vacuum")]).toEqual([false, true])
    }, 30_000)
 +
-+  // CLI 层覆盖 --repair-tool-input 的完整往返：yargs flag → task args 持久化 →
++  // #568：CLI 层覆盖 --repair-tool-input 的完整往返：yargs flag → task args 持久化 →
 +  // daemon maintain 执行 immediate 写事务；只测同步 verify 会漏掉 task-backed 边界。
 +  // 行断言直接用 SQL json_type 检查持久化形状，不依赖 task JSON 里的计数。
 +  test("db verify --repair-tool-input fixes malformed tool input so status succeeds", async () => {
@@ -808,40 +792,36 @@ index 027041e64a9bce66a22cb30b468a682f94e8dfe6..c085569989ddf387a8545f5a5dd6488e
 +    expect(after.exitCode).toBe(0)
 +  }, 30_000)
  })
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36644ba430 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -212,8 +212,20 @@ const unavailableEnv = Layer.mergeAll(
-   ),
+@@ -201,6 +201,16 @@ const unavailableEnv = LayerNode.compile(
+   [...replacements, [Image.node, failingImageLayer]],
  )
- 
-+// 生产默认是 v1 projector 路径（experimentalEventSystem 关闭时坏行曾真实入库）；
-+// 工具 input 形状测试必须在 v1-only env 下观察持久化边界，不能依赖 v2 decoder 拦截。
-+const v1Env = Layer.mergeAll(
-+  TestLLMServer.layer,
-+  SessionProcessor.layer.pipe(
-+    Layer.provide(summary),
-+    Layer.provide(Image.defaultLayer),
-+    Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: false })),
-+    Layer.provideMerge(deps),
-+  ),
-+)
- const it = testEffect(env)
  const unavailable = testEffect(unavailableEnv)
++// #568：生产默认是 v1 projector 路径（experimentalEventSystem 关闭时坏行曾真实入库）；
++// 工具 input 形状测试必须在 v1-only env 下观察持久化边界，不能依赖 v2 decoder 拦截。
++const v1Env = LayerNode.compile(
++  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
++  [
++    [SessionSummary.node, summary],
++    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: false })],
++  ] as const,
++)
 +const v1It = testEffect(v1Env)
  
- const boot = Effect.fn("test.boot")(function* () {
-   const processors = yield* SessionProcessor.Service
-@@ -265,6 +277,192 @@ unavailable.live("omits an image attachment when normalization is unavailable",
-   ),
- )
+ const providerErrorLLM = Layer.succeed(
+   LLM.Service,
+@@ -340,6 +350,196 @@ function denyDoomLoopConfig(url: string) {
+ // Tests
+ // ---------------------------------------------------------------------------
  
-+// 工具 input 形状守卫：agent 权限 `* deny` + 白名单，AI SDK 对非法 JSON 参数
++// #568：工具 input 形状守卫：agent 权限 `* deny` + 白名单，AI SDK 对非法 JSON 参数
 +// 的解析失败会走 invalid dynamic tool-call 兜底，input 可能是原始字符串。
 +// tools 中不注册 invalid 时 repair 必然失败，processor 必须把非 object input
-+// 归一化为空对象，否则坏 schema 会进入持久化并在冷存储扫描时抛 corruption。
-+// 该测试只断言持久化 Part 的公开状态，不检查内部 helper。
++// 归一化（目标上游实现为 {value: 原始值} 包装），否则坏 schema 会进入持久化并在
++// 冷存储扫描时抛 corruption。该测试只断言持久化 Part 的公开状态，不检查内部 helper。
 +const denyAgent = (): Agent.Info => ({
 +  name: "build",
 +  mode: "primary",
@@ -855,13 +835,14 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +  ],
 +})
 +
++// execute 不抛错：本组用例关注 input 形状而非执行失败，错误必须来自 SDK 解析路径。
 +const bashTool = aiTool({
 +  description: "bash",
 +  inputSchema: z.object({ command: z.string() }),
 +  execute: async (): Promise<{ output: string }> => ({ output: "" }),
 +})
 +
-+// 镜像 src/tool/invalid.ts 的 repair 目标：schema 只接受 {tool, error}。
++// #568：镜像 src/tool/invalid.ts 的 repair 目标：schema 只接受 {tool, error}。
 +const invalidRepairTool = aiTool({
 +  description: "Do not use",
 +  inputSchema: z.object({ tool: z.string(), error: z.string() }),
@@ -869,10 +850,12 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +    output: "The arguments provided to the tool are invalid",
 +  }),
 +})
++// output 文案与生产 invalid 工具一致：修复后的调用对模型呈现相同回执语义。
 +
-+// 非法 JSON arguments 必须用 raw SSE 手工构造：reply().tool() 会 stringify 成合法 JSON，
++// #568：非法 JSON arguments 必须用 raw SSE 手工构造：reply().tool() 会 stringify 成合法 JSON，
 +// 无法触发 AI SDK 的 InvalidToolInputError 修复路径。
 +function malformedToolCall(id: string, name: string, args: string) {
++  // head 三帧：role → tool_calls 开帧（空 args）→ 参数帧；args 原样透传不 validate。
 +  return raw({
 +    head: [
 +      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
@@ -899,8 +882,8 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +  })
 +}
 +
-+// 修复目标缺失（repair 工具未注册）时，非法调用必须以 error 落库且 input 归一化，
-+// 证明 Fix B 的归一化不依赖 invalid 注册这一可选前置。
++// #568：修复目标缺失（repair 工具未注册）时，非法调用必须以 error 落库且 input 归一化，
++// 证明归一化不依赖 invalid 注册这一可选前置；目标上游把原始值包为 {value:...} 保留原值。
 +v1It.live("normalizes raw-string tool input when the repair tool is unavailable", () =>
 +  provideTmpdirServer(
 +    ({ dir, llm }) =>
@@ -920,7 +903,7 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: denyAgent(),
@@ -928,18 +911,18 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +          messages: [{ role: "user", content: "run bash" }],
 +          tools: { bash: bashTool },
 +        })
-+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
++        const part = (yield* MessageV2.parts(msg.id)).find((item): item is MessageV2.ToolPart => item.type === "tool")
 +        expect(result).toBe("continue")
 +        expect(part?.state.status).toBe("error")
-+        // 原始非法参数字符串不得进入持久化 ToolState.input。
-+        expect(part?.state.input).toEqual({})
++        // #568：原始非法参数字符串不得裸进持久化 ToolState.input——目标上游契约为 {value: 原始串} 包装。
++        expect(part?.state.input).toEqual({ value: '{"command": "ls"' })
 +      }),
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
 +)
 +
-+// valid JSON array 会被 AI SDK 解析成非 object input；仍需在 processor 持久化边界归一化，
-+// 证明 Fix B 保护的是 ToolState schema，而不只是 malformed string 的特殊形态。
++// #568：valid JSON array 会被 AI SDK 解析成非 object input；仍需在 processor 持久化边界归一化，
++// 证明保护的是 ToolState schema，而不只是 malformed string 的特殊形态。
 +v1It.live("normalizes parsed array tool input when the repair tool is unavailable", () =>
 +  provideTmpdirServer(
 +    ({ dir, llm }) =>
@@ -961,7 +944,7 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: denyAgent(),
@@ -969,17 +952,17 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +          messages: [{ role: "user", content: "run bash" }],
 +          tools: { bash: bashTool },
 +        })
-+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
++        const part = (yield* MessageV2.parts(msg.id)).find((item): item is MessageV2.ToolPart => item.type === "tool")
 +        expect(result).toBe("continue")
 +        expect(part?.state.status).toBe("error")
-+        // 只断言公开 Part 契约，不依赖 normalizeToolInput helper 的实现细节。
-+        expect(part?.state.input).toEqual({})
++        // #568：array 同样被上游包装为 {value: []}——非法形状不裸入，但原值可追溯。
++        expect(part?.state.input).toEqual({ value: [] })
 +      }),
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
 +)
 +
-+// 与上一用例对照：即使 user.tools 显式禁用 invalid，内部 repair 路径仍可达，
++// #568：与上一用例对照：即使 user.tools 显式禁用 invalid，内部 repair 路径仍可达，
 +// 调用被修复为合法的 invalid 工具调用并执行，落库 status=completed、input 为 {tool, error} 对象。
 +// 修复前（任一用户禁用边界过滤 invalid）该场景只会得到 error 状态，因此是 Fix A 的回归哨兵。
 +v1It.live("repairs an unavailable tool call into the invalid tool with object input", () =>
@@ -1001,8 +984,9 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
++            // user.tools 显式禁用 invalid：Fix A 必须绕过该禁用保留 repair 注册。
 +            tools: { invalid: false },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: denyAgent(),
@@ -1010,9 +994,9 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +          messages: [{ role: "user", content: "run bash" }],
 +          tools: { bash: bashTool, invalid: invalidRepairTool },
 +        })
-+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
++        const part = (yield* MessageV2.parts(msg.id)).find((item): item is MessageV2.ToolPart => item.type === "tool")
 +        expect(result).toBe("continue")
-+        // invalid repair 目标保留注册时，AI SDK 把非法调用修复为合法 invalid 调用并执行。
++        // #568：invalid repair 目标保留注册时，AI SDK 把非法调用修复为合法 invalid 调用并执行。
 +        expect(part?.state.status).toBe("completed")
 +        if (part?.state.status === "completed") {
 +          expect(part.state.input).toMatchObject({ tool: "bash" })
@@ -1023,20 +1007,21 @@ index 433562573211da71976291257a51538b2f208b3b..ffd1408caed58042ab7af7408d0cdf36
 +  ),
 +)
 +
- // ---------------------------------------------------------------------------
- // consecutive-error breaker 测试工具
- // ---------------------------------------------------------------------------
+ it.live("session.processor effect tests capture llm input cleanly", () =>
+   provideTmpdirServer(
+     ({ dir, llm }) =>
+
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
-index 846577fae8bfb238b28109576489ccc9118158a1..d00e01a615c274babdcc23aeb5ac3bb1a8699cc7 100644
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
-@@ -140,6 +140,53 @@ function addCompletedSummaryEdit(
-   })
+@@ -95,6 +95,54 @@ function useDb<T>(db: ColdStorage.TxOrDb, fn: (db: ColdStorage.TxOrDb) => T): T
+   return fn(db)
  }
  
-+// 三个 input 形状用例共用同一装配：真实 session + assistant message + 直接插入的热坏 Part 行。
++// #493：cold owner/payload 计数 helper——与生产 ColdStorage 共用 TxOrDb 形态直查投影表。
++// #568：三个 input 形状用例共用同一装配：真实 session + assistant message + 直接插入的热坏 Part 行。
 +// 直接插入 PartTable 而非 sessions.updatePart：Schema 校验会拒绝非 object input，
-+// 只有绕过校验层才能构造与真实损坏行同构的持久化形态。
++// 只有绕过校验层才能构造与真实损坏行同构的持久化形态（与生产坏行同源的 #568 修复对象）。
 +function seedMalformedToolPart(
 +  sessions: SessionNs.Interface,
 +  session: { id: SessionID; directory: string },
@@ -1049,8 +1034,8 @@ index 846577fae8bfb238b28109576489ccc9118158a1..d00e01a615c274babdcc23aeb5ac3bb1
 +      sessionID: session.id,
 +      role: "assistant",
 +      parentID: MessageID.ascending(),
-+      modelID: ModelID.make("test-model"),
-+      providerID: ProviderID.make("test-provider"),
++      modelID: ModelV2.ID.make("test-model"),
++      providerID: ProviderV2.ID.make("test-provider"),
 +      mode: "build",
 +      agent: "build",
 +      path: { cwd: session.directory, root: session.directory },
@@ -1059,7 +1044,8 @@ index 846577fae8bfb238b28109576489ccc9118158a1..d00e01a615c274babdcc23aeb5ac3bb1
 +      time: { created: Date.now() },
 +    })
 +    const partID = PartID.ascending()
-+    Database.use((db) =>
++    const { sync } = yield* Database.Service
++    useDb(sync, (db) =>
 +      db
 +        .insert(PartTable)
 +        .values({
@@ -1080,59 +1066,61 @@ index 846577fae8bfb238b28109576489ccc9118158a1..d00e01a615c274babdcc23aeb5ac3bb1
 +    return partID
 +  })
 +}
-+
- function coldOwnerCount(sessionIDs: string[]) {
+ // #493：cold owner/payload 计数 helper——与生产 ColdStorage 共用 TxOrDb 形态直查投影表。
+ function coldOwnerCount(sync: ColdStorage.TxOrDb, sessionIDs: string[]) {
    const allowed = new Set(sessionIDs)
-   return Database.use(
-@@ -663,6 +710,55 @@ describe.serial("ColdStorage", () => {
+@@ -625,6 +673,58 @@ describe.serial("ColdStorage", () => {
      }),
    )
  
-+  // 工具 input 形状修复用例直接插入 hot Tool 坏行（state.input 为字符串），模拟
++  // #568：工具 input 形状修复用例直接插入 hot Tool 坏行（state.input 为字符串），模拟
 +  // AI SDK invalid dynamic tool-call 兜底把原始参数串写入持久化的真实形态。
-+  // status() 候选扫描必须仍抛 corruption（证明只读路径不隐藏损坏），
-+  // verify --repair-tool-input 后行被归一化为 object，status 才能继续运行。
++  // status() 候选扫描必须仍抛 corruption（只读路径不隐藏损坏），verify --repair-tool-input
++  // 后行被归一化为 object，status 才能继续运行。
 +  it.instance("repairs malformed tool input shape and status stops throwing", () =>
 +    Effect.gen(function* () {
++      const { sync } = yield* Database.Service
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "tool input shape" })
 +      const partID = yield* seedMalformedToolPart(sessions, session, "{bad json")
-+      expect(() => ColdStorage.status()).toThrow("Stored tool input is invalid")
-+      const report = ColdStorage.verify({ repair: false, repairToolInput: true })
++      expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
++      const report = ColdStorage.verify(sync, { repair: false, repairToolInput: true })
 +      expect(report.toolInputFixed).toBe(1)
 +      // 归一化结果是契约占位 {}：SDK 已判 invalid 的调用没有可重建参数，
 +      // 空对象保证 status()/compress 扫描可继续，同时不伪造任何执行参数。
-+      const row = Database.use((db) => db.select().from(PartTable).where(Database.eq(PartTable.id, partID)).get())
++      const row = useDb(sync, (db) => db.select().from(PartTable).where(eq(PartTable.id, partID)).get())
 +      expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({})
-+      expect(() => ColdStorage.status()).not.toThrow()
++      expect(() => ColdStorage.status(sync)).not.toThrow()
 +      yield* sessions.remove(session.id)
 +    }),
 +  )
 +
-+  // 字符串恰好是合法 JSON object 时，修复必须恢复解析后的对象而不是统一置空，
++  // #568：字符串恰好是合法 JSON object 时，修复必须恢复解析后的对象而不是统一置空，
 +  // 使可重建的 Tool input 不因维护命令丢失。
 +  it.instance("restores parseable JSON object input instead of emptying it", () =>
 +    Effect.gen(function* () {
++      const { sync } = yield* Database.Service
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "tool input parse" })
 +      const partID = yield* seedMalformedToolPart(sessions, session, '{"command":"ls"}')
-+      ColdStorage.verify({ repair: false, repairToolInput: true })
-+      const row = Database.use((db) => db.select().from(PartTable).where(Database.eq(PartTable.id, partID)).get())
++      ColdStorage.verify(sync, { repair: false, repairToolInput: true })
++      const row = useDb(sync, (db) => db.select().from(PartTable).where(eq(PartTable.id, partID)).get())
 +      expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({ command: "ls" })
 +      yield* sessions.remove(session.id)
 +    }),
 +  )
 +
-+  // 只读 verify 不得触碰坏行：toolInputFixed 必须为 0，行保持原状，
++  // #568：只读 verify 不得触碰坏行：toolInputFixed 必须为 0，行保持原状，
 +  // status 继续抛 corruption——损坏证据不能被只读报告吞掉。
 +  it.instance("read-only verify never rewrites malformed tool input", () =>
 +    Effect.gen(function* () {
++      const { sync } = yield* Database.Service
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "tool input readonly" })
-+      const partID = yield* seedMalformedToolPart(sessions, session, "{bad json")
-+      const report = ColdStorage.verify({ repair: false })
++      yield* seedMalformedToolPart(sessions, session, "{bad json")
++      const report = ColdStorage.verify(sync, { repair: false })
 +      expect(report.toolInputFixed).toBe(0)
-+      expect(() => ColdStorage.status()).toThrow("Stored tool input is invalid")
++      expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
 +      yield* sessions.remove(session.id)
 +    }),
 +  )

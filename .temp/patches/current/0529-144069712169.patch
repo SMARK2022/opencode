@@ -451,132 +451,59 @@ index 0000000000000000000000000000000000000000..d14db3724a83775ad2e4f4c38bc5cd21
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-index 1c9613d142168e3cd159d724915e2eb7ce9a6e29..402dda8b529d48feb84657cf9f8566a7ce638e70 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-@@ -18,6 +18,12 @@ import { errorMessage } from "@/util/error"
- import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
- import { WorkspaceLabel } from "./workspace-label"
- import { useCommandShortcut } from "../keymap"
-+import {
-+  resolveSessionListSource,
-+  sessionListEmptyLabel,
-+  SESSION_LIST_LOOKBACK_MS,
-+  SESSION_LIST_SEARCH_LIMIT,
-+} from "@tui/util/session-list-params"
+
+diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
+index 33d758b9a..976ca155b 100644
+--- a/packages/core/src/session/search.ts
++++ b/packages/core/src/session/search.ts
+@@ -7,13 +7,27 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sq
+ // thinking/reasoning、tool result、shell output、metadata、token/snapshot 等字段不是 session 搜索的契约。
+ // 使用 instr(lower(...)) 做大小写不敏感的精确子串匹配，避免 SQLite LIKE 把 % / _ 当作通配符。
+ // 空白搜索返回 undefined，避免 instr(text, "") 把所有行都当作命中。
++// #529：多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
++// token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
+ export function searchCondition(search: string): SQL | undefined {
+-  const needle = search.trim().toLowerCase()
+-  // #265：三路 union——标题、v1 part 白名单、v2 session_message 白名单；hidden 门仅存在于 v1 part 侧 exists，
+-  // #265：v2 侧由 sessionMessageMatches 的类型等值判定承担同等排除（等值不命中即不可搜索）
++  const tokens = search
++    .trim()
++    .toLowerCase()
++    .split(/\s+/)
++    .filter((token) => token.length > 0)
+   // #265：返回 undefined 而非恒真 SQL——上层跳过整个搜索分支，避免空串全表命中
+-  if (!needle) return undefined
++  if (tokens.length === 0) return undefined
++
++  // #529：单 token 与历史语义逐字一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
++  // #529：每个 token 的三路 union 自带括号，AND 拼接不会漏进 union 内部的 or 链
++  const parts = tokens.map((needle) => tokenCondition(needle))
++  if (parts.length === 1) return parts[0]
++  return sql`(${sql.join(parts, sql` and `)})`
++}
  
- type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
- 
-@@ -96,8 +102,8 @@ export function DialogSessionList() {
-       if (!input.query) return undefined
-       const result = await sdk.client.session.list({
-         search: input.query,
--        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
--        limit: 100,
-+        start: Date.now() - SESSION_LIST_LOOKBACK_MS,
-+        limit: SESSION_LIST_SEARCH_LIMIT,
-         ...input.filter,
-       })
-       return result.data ?? []
-@@ -105,7 +111,15 @@ export function DialogSessionList() {
-   )
- 
-   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
--  const sessions = createMemo(() => searchResults() ?? sync.data.session)
-+  // 以 debounced query 门闩合流：空串回 Path A；活跃搜索只用 searchResults（含 []）
-+  const listSource = createMemo(() =>
-+    resolveSessionListSource({
-+      query: search(),
-+      searchResults: searchResults(),
-+      browse: sync.data.session,
-+    }),
-+  )
-+  const sessions = createMemo(() => listSource().sessions)
- 
-   function recover(session: NonNullable<ReturnType<typeof sessions>[number]>) {
-     const workspace = project.workspace.get(session.workspaceID!)
-@@ -212,8 +226,8 @@ export function DialogSessionList() {
-         .map((x) => [x.id, x]),
-     )
- 
--    const searchResult = searchResults()
--    const displayOrder = searchResult ? orderByRecency(searchResult) : browseOrder()
-+    // 展示顺序与数据源同源：搜索中不用 stale searchResults 真值误判
-+    const displayOrder = listSource().source === "search" ? orderByRecency(sessions()) : browseOrder()
- 
-     const pinned = local.session.pinned().filter((id) => sessionMap.has(id))
-     const pinnedSet = new Set(pinned)
-@@ -284,6 +298,7 @@ export function DialogSessionList() {
-       title="Sessions"
-       options={options()}
-       skipFilter={true}
-+      empty={sessionListEmptyLabel(search())}
-       current={currentSessionID()}
-       onFilter={setSearch}
-       onMove={() => {
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index ee36cc601647997668aac12e1460432c20b656ee..b5a99442d42ce4b18f081691cdda1438a5752c4b 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -35,6 +35,7 @@ import { useKV } from "./kv"
- import { useRoute } from "./route"
- // [local-smark] SessionPath for daemon multi-instance path management
- import { SessionPath } from "@/session/path"
-+import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "@tui/util/session-list-params"
- import { aggregateFailures } from "./aggregate-failures"
- import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
- import { DisposedReason } from "@/server/event"
-@@ -401,7 +402,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
- 
-     function listSessions() {
-       return sdk.client.session
--        .list({ start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() })
-+        .list({
-+          start: Date.now() - SESSION_LIST_LOOKBACK_MS,
-+          limit: SESSION_LIST_BROWSE_LIMIT,
-+          ...sessionListQuery(),
-+        })
-         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
-     }
- 
-diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-index 6c49b1364d25873e33780ee7854ba50999c208e0..f8ea7c20f66d48578c57fd7af4fe93e80536d8a8 100644
---- a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-@@ -31,6 +31,8 @@ export interface DialogSelectProps<T> {
-   onSelect?: (option: DialogSelectOption<T>) => void
-   skipFilter?: boolean
-   renderFilter?: boolean
-+  /** 列表为空时的文案；默认 No results found（Session list 搜索无命中可注入 Not Found …） */
-+  empty?: string
-   actions?: {
-     command: string
-     title: string
-@@ -455,7 +457,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
-         when={grouped().length > 0}
-         fallback={
-           <box paddingLeft={4} paddingRight={4} paddingTop={1}>
--            <text fg={theme.textMuted}>No results found</text>
-+            <text fg={theme.textMuted}>{props.empty ?? "No results found"}</text>
-           </box>
-         }
-       >
-diff --git a/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts b/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts
++function tokenCondition(needle: string) {
++  // #265：三路 union——标题、v1 part 白名单、v2 session_message 白名单；hidden 门仅存在于 v1 part 侧 exists，
++  // #265：v2 侧由 sessionMessageMatches 的类型等值判定承担同等排除（等值不命中即不可搜索）
+   return sql`(
+     ${textMatches(sql`${SessionTable.title}`, needle)}
+     or exists (
+
+diff --git a/packages/tui/src/util/session-list-params.ts b/packages/tui/src/util/session-list-params.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c3d0738490be30e2fa32433664caf89c6b5bb42b
+index e69de29bb..eb237fb32 100644
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts
++++ b/packages/tui/src/util/session-list-params.ts
 @@ -0,0 +1,27 @@
-+// Path A/B 共用半年 lookback，避免浏览与搜索时间窗再次分叉
++// #529：Path A/B 共用半年 lookback，避免浏览与搜索时间窗再次分叉
 +export const SESSION_LIST_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000
-+// 浏览缓存上限：默认打开 Sessions 列表时的 session.list limit
++// #529：浏览缓存上限：默认打开 Sessions 列表时的 session.list limit
 +export const SESSION_LIST_BROWSE_LIMIT = 1600
-+// 搜索结果上限：内容或标题命中后只保留最近更新的 N 条
++// #529：搜索结果上限：内容或标题命中后只保留最近更新的 N 条
 +export const SESSION_LIST_SEARCH_LIMIT = 400
 +
 +/**
-+ * Path A/B 数据源合流。
++ * #529：Path A/B 数据源合流。
 + * - 空 query：强制 Path A（browse），忽略 createResource 残留的 searchResults
 + * - 非空 query：只消费 search 源；loading 时 undefined 视为 []，不得 ?? 回 browse
 + *   （否则无命中/加载中会短暂展示「其他会话」，违反搜索空结果语义）
@@ -590,130 +517,175 @@ index 0000000000000000000000000000000000000000..c3d0738490be30e2fa32433664caf89c
 +  return { source: "search", sessions: input.searchResults ?? [] }
 +}
 +
-+/** 仅搜索路径展示 Not Found；浏览路径沿用 DialogSelect 默认 empty */
++/** #529：仅搜索路径展示 Not Found；浏览路径返回 undefined 沿用 DialogSelect 默认 empty */
 +export function sessionListEmptyLabel(query: string) {
 +  if (!query) return undefined
 +  return `Not Found ${query}`
 +}
-diff --git a/packages/opencode/src/session/search.ts b/packages/opencode/src/session/search.ts
-index 7c4a461cbed3d97a717224573322c8f401c087b5..a83e2590f6b29a7073be31498aa7022495449cc9 100644
---- a/packages/opencode/src/session/search.ts
-+++ b/packages/opencode/src/session/search.ts
-@@ -15,11 +15,25 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./se
-  * LIKE 把用户输入里的 % / _ 当作通配符。
-  *
-  * 空白搜索返回 undefined，避免 `instr(text, "")` 把所有行都当作命中。
-+ *
-+ * 多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
-+ * token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
-  */
- export function searchCondition(search: string): SQL | undefined {
--  const needle = search.trim().toLowerCase()
--  if (!needle) return undefined
-+  const tokens = search
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index ff76d1f4c..5265284e4 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -38,6 +38,8 @@ import { SessionPath } from "@opencode-ai/core/session/path"
+ import { useKV } from "./kv"
+ import { usePermission } from "./permission"
+ import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
++// #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
++import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "../util/session-list-params"
+ 
+ // #364：goal 类型定义（SDK 未重新生成前使用内联类型）
+ // 字段与 src/session/goal.ts 的 Goal schema 对齐
+@@ -465,7 +467,12 @@ export const {
+ 
+     function listSessions() {
+       return sdk.client.session
+-        .list({ start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() })
++        .list({
++          // #529：半年 lookback + browse 1600（与 util/session-list-params 常量同源）
++          start: Date.now() - SESSION_LIST_LOOKBACK_MS,
++          limit: SESSION_LIST_BROWSE_LIMIT,
++          ...sessionListQuery(),
++        })
+         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+     }
+ 
+
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+index 3c41109bd..bae4467f2 100644
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
+@@ -18,6 +18,12 @@ import { errorMessage } from "../util/error"
+ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
+ import { useCommandShortcut } from "../keymap"
+ import { useEvent } from "../context/event"
++import {
++  resolveSessionListSource,
++  sessionListEmptyLabel,
++  SESSION_LIST_LOOKBACK_MS,
++  SESSION_LIST_SEARCH_LIMIT,
++} from "../util/session-list-params"
+ 
+ type SessionListFilter = { scope?: "project"; path?: string }
+ 
+@@ -25,9 +31,11 @@ export function createDialogSessionListQuery(input: { search?: string; filter: S
+   const search = input.search?.trim()
+   return {
+     roots: true,
+-    // #306：仅搜索限制 90 天；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
+-    ...(search ? { start: Date.now() - 90 * 24 * 60 * 60 * 1000 } : {}),
+-        limit: 100,
++    // #306：仅搜索限制时间窗；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
++    // #529：搜索窗口 90d→半年、limit 100→400，与 sync 后台缓存同源（util/session-list-params）。
++    ...(search
++      ? { start: Date.now() - SESSION_LIST_LOOKBACK_MS, limit: SESSION_LIST_SEARCH_LIMIT }
++      : { limit: 100 }),
+     ...(search ? { search } : {}),
+     ...input.filter,
+   }
+@@ -46,6 +54,28 @@ export function loadDialogSessionList<T>(input: {
+ 
+ // #115：会话列表预览默认 2 行
+ const SESSION_LIST_PREVIEW_LINES = 2
++
++// #529：服务端搜索是唯一判定权威，客户端不二次过滤服务端返回集（源 plan 禁重复过滤）；
++// token 过滤只作用于本地注入的 extra 行（当前会话+置顶），保留上游对注入行的 title 收窄行为。
++// 跨字段命中（title 含 alpha、content 含 beta）必须直接可见——否则多词交集在显示面退化为 title 内 AND。
++export function visibleSessions<T extends { id: string; title: string }>(input: {
++  result: T[]
++  extra: T[]
++  deleted: Set<string>
++  query: string
++}): T[] {
++  const tokens = input.query
 +    .trim()
 +    .toLowerCase()
 +    .split(/\s+/)
 +    .filter((token) => token.length > 0)
-+  if (tokens.length === 0) return undefined
-+
-+  // 单 token 与历史语义一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
-+  const parts = tokens.map((needle) => tokenCondition(needle))
-+  if (parts.length === 1) return parts[0]
-+  return sql`(${sql.join(parts, sql` and `)})`
++  // extra 与服务端同词法（分词 + AND）：注入行与返回集的命中口径不因来源不同而分叉
++  return [
++    ...input.result,
++    ...input.extra.filter((session) => tokens.every((token) => session.title.toLowerCase().includes(token))),
++  ].filter((session) => !input.deleted.has(session.id))
++  // 注：deleted 排除对两源一致生效——会话删除后服务端缓存与本地注入都不再出现
 +}
+ // #120：同时预加载预览的会话数上限
+ // #306：预览上限从 50 提到 400，预览覆盖更完整，避免滚动时再触发补拉。
+ // #366：预览内容由批量端点一次性返回，本文件不再分页拉取/解析消息 parts。
+@@ -138,8 +168,17 @@ export function DialogSessionList() {
+   )
  
-+function tokenCondition(needle: string) {
-   return sql`(
-     ${textMatches(sql`${SessionTable.title}`, needle)}
-     or exists (
-diff --git a/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts b/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..d421a1e4f078ddf0346fc1739a89c36b27eff173
---- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
-@@ -0,0 +1,48 @@
-+import { describe, expect, test } from "bun:test"
-+import {
-+  resolveSessionListSource,
-+  sessionListEmptyLabel,
-+  SESSION_LIST_BROWSE_LIMIT,
-+  SESSION_LIST_LOOKBACK_MS,
-+  SESSION_LIST_SEARCH_LIMIT,
-+} from "../../../../src/cli/cmd/tui/util/session-list-params"
-+
-+describe("session list params", () => {
-+  // 半年 lookback / 浏览 1600 / 搜索 400：产品阈值，防止 A/B 再漂移
-+  test("exports Path A/B lookback and limits", () => {
-+    expect(SESSION_LIST_LOOKBACK_MS).toBe(180 * 24 * 60 * 60 * 1000)
-+    expect(SESSION_LIST_BROWSE_LIMIT).toBe(1600)
-+    expect(SESSION_LIST_SEARCH_LIMIT).toBe(400)
-+  })
-+
-+  test("empty query forces browse even when searchResults are stale", () => {
-+    const browse = [{ id: "a" }]
-+    const stale = [{ id: "search-hit" }]
-+    expect(resolveSessionListSource({ query: "", searchResults: stale, browse })).toEqual({
-+      source: "browse",
-+      sessions: browse,
+   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
++  // #529：以 debounced query 门闩合流：空串回 browse；活跃搜索只消费 searchResults（含 []），
++  // 修复 createResource loading（undefined）短暂回退浏览列表的 stale 竞态。
++  const listSource = createMemo(() =>
++    resolveSessionListSource({
++      query: search(),
++      searchResults: searchResults(),
++      browse: browseResults() ?? sync.data.session,
++    }),
++  )
+   const sessions = createMemo(() => {
+-    const result = searchResults() ?? browseResults() ?? sync.data.session
++    const result = listSource().sessions
+     const synced = new Map(sync.data.session.map((session) => [session.id, session]))
+     const ids = new Set(result.map((session) => session.id))
+     const extra = [currentSessionID(), ...local.session.pinned()].flatMap((id) => {
+@@ -148,10 +187,13 @@ export function DialogSessionList() {
+       if (session) ids.add(id)
+       return session ? [session] : []
+     })
+-    const query = search().trim().toLowerCase()
+-    return [...result.map((session) => synced.get(session.id) ?? session), ...extra]
+-      .filter((session) => !deleted().has(session.id))
+-      .filter((session) => !query || session.title.toLowerCase().includes(query))
++    // #529：服务端结果直通；extra（当前会话+置顶）经 visibleSessions 按 token 过滤注入
++    return visibleSessions({
++      result: result.map((session) => synced.get(session.id) ?? session),
++      extra,
++      deleted: deleted(),
++      query: search(),
 +    })
-+  })
-+
-+  // 活跃搜索 loading（undefined）不得 ?? 回 browse，避免「无命中前闪现其他会话」
-+  test("active search uses empty list while searchResults are loading", () => {
-+    const browse = [{ id: "a" }]
-+    expect(resolveSessionListSource({ query: "needle", searchResults: undefined, browse })).toEqual({
-+      source: "search",
-+      sessions: [],
-+    })
-+  })
-+
-+  test("active search with empty hits stays on search source", () => {
-+    const browse = [{ id: "a" }]
-+    expect(resolveSessionListSource({ query: "needle", searchResults: [], browse })).toEqual({
-+      source: "search",
-+      sessions: [],
-+    })
-+  })
-+
-+  test("empty label is Not Found only for non-empty query", () => {
-+    expect(sessionListEmptyLabel("")).toBeUndefined()
-+    expect(sessionListEmptyLabel("lsp fix")).toBe("Not Found lsp fix")
-+  })
-+})
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index 6cb0ebe3eeed6b96fd24b54c3ca411fee8b66640..cc15d30b16f7de3b444ae600332f91d4b29e5d1d 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -567,12 +567,19 @@ describe("tui sync", () => {
-       expect(kv.get("session_directory_filter_enabled", true)).toBe(true)
-       expect(session.at(-1)?.searchParams.get("scope")).toBeNull()
-       expect(session.at(-1)?.searchParams.get("path")).toBe("packages/opencode")
-+      // Path A：半年 lookback + browse limit 1600（与 session-list-params 对齐）
-+      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
-+      const start = Number(session.at(-1)?.searchParams.get("start"))
-+      const lookback = 180 * 24 * 60 * 60 * 1000
-+      expect(start).toBeGreaterThan(Date.now() - lookback - 60_000)
-+      expect(start).toBeLessThanOrEqual(Date.now() - lookback + 60_000)
+   })
  
-       kv.set("session_directory_filter_enabled", false)
-       await sync.session.refresh()
+   onCleanup(
+@@ -275,8 +317,8 @@ export function DialogSessionList() {
+         .map((x) => [x.id, x]),
+     )
  
-       expect(session.at(-1)?.searchParams.get("scope")).toBe("project")
-       expect(session.at(-1)?.searchParams.get("path")).toBeNull()
-+      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
-     } finally {
-       app.renderer.destroy()
-       Global.Path.state = previous
+-    const searchResult = searchResults()
+-    const order = searchResult ? orderByRecency(sessions()) : browseOrder()
++    // #529：展示顺序与数据源同源：搜索中不用 stale searchResults 真值误判
++    const order = listSource().source === "search" ? orderByRecency(sessions()) : browseOrder()
+     const current = currentSessionID()
+     const displayOrder = current && sessionMap.has(current) && !order.includes(current) ? [...order, current] : order
+ 
+@@ -339,6 +381,14 @@ export function DialogSessionList() {
+       options={options()}
+       skipFilter={true}
+       preserveSelection={true}
++      // #529：搜索空命中时展示 Not Found <query>，不回退浏览列表也不误用默认文案
++      emptyView={
++        sessionListEmptyLabel(search()) ? (
++          <box paddingLeft={4} paddingRight={4} paddingTop={1}>
++            <text fg={theme.textMuted}>{sessionListEmptyLabel(search())}</text>
++          </box>
++        ) : undefined
++      }
+       current={currentSessionID()}
+       onFilter={setSearch}
+       onMove={() => {
+
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
-index 676cf6c14c83652bbecd0ea6633f783cf7460659..22d1e480912b420d048fc70358901c381d0f566b 100644
+index 774e72a3f..e01a842ba 100644
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts
-@@ -626,6 +626,47 @@ describe("session.list", () => {
+@@ -792,6 +792,48 @@ describe("session.list", () => {
      { git: true },
    )
  
-+  // 多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串
++  // #529：多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串。
++  // 跨字段命中（title 含 alpha、body 含 beta）也必须保留——AND 是 token 级不是字段级。
 +  it.instance(
 +    "intersects whitespace-separated search tokens across title and content",
 +    () =>
@@ -754,6 +726,154 @@ index 676cf6c14c83652bbecd0ea6633f783cf7460659..22d1e480912b420d048fc70358901c38
 +    { git: true },
 +  )
 +
+   // #265：标题命中走 searchCondition 的第一路——锚定 textMatches 改造后标题语义不回退
    it.instance(
-     "searches v1 visible text and tool input without indexing thinking or tool results",
-     () =>
+     "searches session title",
+
+diff --git a/packages/tui/test/component/dialog-session-list.test.ts b/packages/tui/test/component/dialog-session-list.test.ts
+index 4422e43c5..216e113f0 100644
+--- a/packages/tui/test/component/dialog-session-list.test.ts
++++ b/packages/tui/test/component/dialog-session-list.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, test } from "bun:test"
+-import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/component/dialog-session-list"
++import { createDialogSessionListQuery, loadDialogSessionList, visibleSessions } from "../../src/component/dialog-session-list"
+ 
+ describe("dialog session list", () => {
+   test("requests root sessions for the default browse list", () => {
+@@ -15,8 +15,8 @@ describe("dialog session list", () => {
+     expect(createDialogSessionListQuery({ search: " deploy ", filter: { scope: "project" } })).toEqual({
+       roots: true,
+       start: expect.any(Number),
+-      // #306：原始需求扩大搜索上限，不能沿用迁移前的 30 项断言。
+-      limit: 100,
++      // #529：搜索窗口扩到半年、limit 100→400（与 util/session-list-params 同源）。
++      limit: 400,
+       search: "deploy",
+       scope: "project",
+     })
+@@ -46,4 +46,39 @@ describe("dialog session list", () => {
+       }),
+     ).toBeUndefined()
+   })
++
++  // #529：服务端搜索是唯一判定权威——跨字段命中（title 含 alpha、content 含 beta）
++  // 的返回集必须直通显示，客户端不得二次过滤；token 过滤只约束本地注入的 extra。
++  // 本用例锁定 R1 审计 B-0529-01 修复后的显示面合同（服务端直通 + extra token 收窄）。
++  test("keeps cross-field server hits visible while filtering locally injected extras by title tokens", () => {
++    const serverHit = { id: "s1", title: "alpha-holder" }
++    const extraUnrelated = { id: "p1", title: "totally unrelated" }
++    const extraMatched = { id: "p2", title: "alpha and beta title" }
++    expect(
++      visibleSessions({
++        result: [serverHit],
++        extra: [extraUnrelated, extraMatched],
++        deleted: new Set(),
++        query: "alpha beta",
++      }),
++    ).toEqual([serverHit, extraMatched])
++    // 浏览态（空 query）：extra 全量注入，服务端结果同样不过滤
++    expect(
++      visibleSessions({
++        result: [serverHit],
++        extra: [extraUnrelated],
++        deleted: new Set(),
++        query: "   ",
++      }),
++    ).toEqual([serverHit, extraUnrelated])
++    // 已删除会话在两源中都被排除
++    expect(
++      visibleSessions({
++        result: [serverHit],
++        extra: [extraMatched],
++        deleted: new Set(["s1"]),
++        query: "alpha beta",
++      }),
++    ).toEqual([extraMatched])
++  })
+ })
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+index c58a458c9..505372db6 100644
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -401,6 +401,12 @@ describe("tui sync", () => {
+       expect(session.at(-1)?.searchParams.get("roots")).toBeNull()
+       expect(session.at(-1)?.searchParams.get("scope")).toBeNull()
+       expect(session.at(-1)?.searchParams.get("path")).toBe("packages/tui")
++      // #529：Path A 半年 lookback + browse limit 1600（与 session-list-params 常量对齐）
++      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
++      const start = Number(session.at(-1)?.searchParams.get("start"))
++      const lookback = 180 * 24 * 60 * 60 * 1000
++      expect(start).toBeGreaterThan(Date.now() - lookback - 60_000)
++      expect(start).toBeLessThanOrEqual(Date.now() - lookback + 60_000)
+ 
+       kv.set("session_directory_filter_enabled", false)
+       await sync.session.refresh()
+@@ -408,6 +414,8 @@ describe("tui sync", () => {
+       expect(session.at(-1)?.searchParams.get("scope")).toBe("project")
+       expect(session.at(-1)?.searchParams.get("path")).toBeNull()
+       expect(session.at(-1)?.searchParams.get("roots")).toBeNull()
++      // #529：目录过滤关闭后仅换 scope，窗口/上限不变
++      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
+     } finally {
+       app.renderer.destroy()
+     }
+
+diff --git a/packages/tui/test/util/session-list-params.test.ts b/packages/tui/test/util/session-list-params.test.ts
+new file mode 100644
+index e69de29bb..75e079d3c 100644
+--- /dev/null
++++ b/packages/tui/test/util/session-list-params.test.ts
+@@ -0,0 +1,51 @@
++import { describe, expect, test } from "bun:test"
++import {
++  resolveSessionListSource,
++  sessionListEmptyLabel,
++  SESSION_LIST_BROWSE_LIMIT,
++  SESSION_LIST_LOOKBACK_MS,
++  SESSION_LIST_SEARCH_LIMIT,
++} from "../../src/util/session-list-params"
++
++describe("session list params", () => {
++  // #529：半年 lookback / 浏览 1600 / 搜索 400：产品阈值，防止 A/B 再漂移
++  test("exports Path A/B lookback and limits", () => {
++    expect(SESSION_LIST_LOOKBACK_MS).toBe(180 * 24 * 60 * 60 * 1000)
++    expect(SESSION_LIST_BROWSE_LIMIT).toBe(1600)
++    expect(SESSION_LIST_SEARCH_LIMIT).toBe(400)
++  })
++
++  // #529：query 清空后 createResource 的 stale searchResults 不得再参与合流
++  test("empty query forces browse even when searchResults are stale", () => {
++    const browse = [{ id: "a" }]
++    const stale = [{ id: "search-hit" }]
++    expect(resolveSessionListSource({ query: "", searchResults: stale, browse })).toEqual({
++      source: "browse",
++      sessions: browse,
++    })
++  })
++
++  // #529：活跃搜索 loading（undefined）不得 ?? 回 browse，避免「无命中前闪现其他会话」
++  test("active search uses empty list while searchResults are loading", () => {
++    const browse = [{ id: "a" }]
++    expect(resolveSessionListSource({ query: "needle", searchResults: undefined, browse })).toEqual({
++      source: "search",
++      sessions: [],
++    })
++  })
++
++  // #529：搜索 0 命中必须停在 search 源（Not Found 语义），不能静默回退浏览
++  test("active search with empty hits stays on search source", () => {
++    const browse = [{ id: "a" }]
++    expect(resolveSessionListSource({ query: "needle", searchResults: [], browse })).toEqual({
++      source: "search",
++      sessions: [],
++    })
++  })
++
++  // #529：仅搜索路径展示 Not Found；浏览路径返回 undefined 沿用 DialogSelect 默认文案
++  test("empty label is Not Found only for non-empty query", () => {
++    expect(sessionListEmptyLabel("")).toBeUndefined()
++    expect(sessionListEmptyLabel("lsp fix")).toBe("Not Found lsp fix")
++  })
++})

@@ -13,7 +13,7 @@ diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session
  const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
  <template>
  ## Objective
-@@ -35,14 +38,21 @@
+@@ -35,13 +38,20 @@
  1. [immediate concrete action, or "(none)"]
  2. [next action if known, or "(none)"]
  
@@ -36,51 +36,55 @@ diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session
 +- Errors entries must include the fix or current status so the next model does not repeat dead ends.
 +- No long file contents or large command outputs — reference them, do not reproduce them.
  - Do not mention the summary process or that context was compacted.`
- 
- type Entry = {
-@@ -158,10 +168,11 @@
+ const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
+@@ -157,4 +164,5 @@
    }
  }
  
 +// 构建摘要提示词：合并前次摘要、模板和上下文，确保恢复快照的完整性
- export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) =>
-   [
-     input.previousSummary
--      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
-+      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale **or resolved** details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
-       : "Create a new anchored summary from the conversation history.",
-     SUMMARY_TEMPLATE,
-     ...input.context,
+ export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) => {
+@@ -49,7 +55,7 @@
+ When combining:
+-- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
++- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished, resolved, or no longer needed.
+ - The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
+ - Add new progress, decisions, constraints, and context from the conversation.
+ - Move completed work from "Active" to "Completed".
+ - If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
+ - Update "Objective" and "Next Move" to reflect the current work state.`
 diff --git a/packages/opencode/src/agent/prompt/compaction.txt b/packages/opencode/src/agent/prompt/compaction.txt
 --- a/packages/opencode/src/agent/prompt/compaction.txt
 +++ b/packages/opencode/src/agent/prompt/compaction.txt
-@@ -1,9 +1,20 @@
+@@ -1,5 +1,20 @@
+-You are a context summarization agent. You are given a conversation between a user and an agent. Your goal is to produce a structured summary matching the format specified so another coding agent can continue the work.
+-
+-Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
+-
+-Do not continue the conversation. Do not respond to any questions in the conversation. Only output the structured summary in the exact format requested by the user prompt. Respond in the same language as the conversation.
 +CRITICAL: Respond with TEXT ONLY. Do NOT call tools.
 +
- You are an anchored context summarization assistant for coding sessions.
- 
- Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
- 
--If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
++You are an anchored context summarization assistant for coding sessions.
++
++Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
++
 +If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale **or resolved** details, and merging in new facts.
- 
--Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
++
 +Produce a recovery snapshot, not a transcript. Capture:
 +- Unfinished work and where it stopped
 +- Constraints, feedback, and decisions
 +- Files, code, and symbols that matter
 +- Errors and their fixes
 +- Next steps tied to the latest user request
- 
++
 +Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths, commands, error strings, symbols, API names, identifiers, and line numbers when known, and prefer terse bullets over paragraphs.
 +
 +Avoid noise: no raw long file contents, no command output dumps, no tool chatter, no generic advice.
 +
- Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
++Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
 diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
 --- a/packages/core/test/session-compaction.test.ts
 +++ b/packages/core/test/session-compaction.test.ts
-@@ -7,7 +7,8 @@
+@@ -12,7 +12,8 @@
    expect(prompt).toContain("## Work State\n### Completed")
    expect(prompt).toContain("### Active")
    expect(prompt).toContain("### Blocked")
@@ -89,4 +93,4 @@ diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/
 +  expect(prompt).toContain("## Errors & Fixes")
  })
  
- test("compaction describes tool media without embedding base64", () => {
+ test("compaction prompt gives update instructions for a prior summary", () => {

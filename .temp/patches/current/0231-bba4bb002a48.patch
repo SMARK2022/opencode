@@ -6,14 +6,14 @@ Subject: [PATCH] chore(release): bump smark version to 1.17.27
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -10,5 +10,7 @@
+@@ -11,6 +11,8 @@
        version:
-         # #156：package.json 仍为默认版本单源
+        # #156：显式版本允许 v 前缀，脚本内统一去 v 后再拼接 tag
          # #161：示例版本随 tip 升号；默认仍读 package.json
--        description: "Override version, for example 1.17.26-smark. Empty means packages/opencode/package.json version."
-+        # #231：source bump 1.15.3→1.15.4 按 0161 协同升号规则映射到目标版本线 1.17.26→1.17.27-smark
+-        description: "Override version, for example 1.18.38-smark. Empty means packages/opencode/package.json version."
++        # #231：source bump 1.15.3→1.15.4 按 0161 协同升号规则映射到目标版本线 1.18.38→1.18.39-smark
 +        # #231：README 的 SMARK 展示段在目标为纯上游未移植——版本展示语义由本文件与 package.json 承载
-+        description: "Override version, for example 1.17.27-smark. Empty means packages/opencode/package.json version."
++        description: "Override version, for example 1.18.39-smark. Empty means packages/opencode/package.json version."
          required: false
          type: string
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
@@ -22,11 +22,11 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 @@ -1,6 +1,7 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.17.26-smark",
--  "//version-note": "#161 协同升号至 1.17.26-smark；禁止回写 1.14/1.15",
-+  "version": "1.17.27-smark",
-+  "//version-note": "#231 协同升号至 1.17.27-smark；禁止回写 1.14/1.15",
-+  "#231-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.17.26→1.17.27-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
+-  "version": "1.18.38-smark",
+-  "//version-note": "#161 协同升号至 1.18.38-smark；禁止回写 1.14/1.15",
++  "version": "1.18.39-smark",
++  "//version-note": "#231 协同升号至 1.18.39-smark；禁止回写 1.14/1.15",
++  "#231-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.18.38→1.18.39-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
    "name": "opencode",
    "type": "module",
    "license": "MIT",

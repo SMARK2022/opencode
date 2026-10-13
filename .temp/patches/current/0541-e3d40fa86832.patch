@@ -407,17 +407,19 @@ index 0000000000000000000000000000000000000000..d4fb98f04aa33c7363ac2793b2be9a5b
 +APPROVE — implementation diff against docs/plans/cold-status-raw-f4-pack-logical.md revision R1 only.
 +No blocking findings.
 +```
-diff --git a/packages/opencode/src/storage/cold.ts b/packages/opencode/src/storage/cold.ts
-index 2ca73fb7909a28ed0537129d284bb76ef5f8418e..00b7598884ddb6a1809e5790a4122e47fa3c2805 100644
---- a/packages/opencode/src/storage/cold.ts
-+++ b/packages/opencode/src/storage/cold.ts
-@@ -985,6 +985,41 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
+
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+index d9653d0e5..e492c1a8e 100644
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -998,6 +998,41 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
    return result
  }
  
 +// status 的 F4 raw 需要每个 pack 的 distinct cold_key 数；owners/keys 才是 entry 共享倍率。
 +// 只扫 message/part：session-summary 无 entry key，仍用 ownerCounts 的 raw×owners。
 +// 返回值只含 keys：owner 数继续由 ownerCounts 反算，避免两套计数口径分叉。
++// 与 ownerCounts 同走 DEFAULT_BATCH_SIZE 分批，遵守 SQLite 变量上限的约束在此处同样成立。
 +function packKeyStats(db: TxOrDb, hashes: string[]) {
 +  const result = new Map<string, number>()
 +  if (hashes.length === 0) return result
@@ -449,71 +451,80 @@ index 2ca73fb7909a28ed0537129d284bb76ef5f8418e..00b7598884ddb6a1809e5790a4122e47
 +  }
 +  return result
 +}
-+
  function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: "part-pack" | "session-summary") {
    // unique hash 去重只减少 SQL 工作量，不改变每个真实 owner 对 ref_count 的贡献。
    const unique = [...new Set(hashes)]
-@@ -3425,8 +3460,29 @@ export function status(): StatusReport {
-     // logical raw 使用 owner 反算数；当 persisted ref_count 损坏时，status 仍给出真实共享量并单独报告 mismatch。
-     // orphan payload 计入物理 compressedBytes，但不参与 referencedRaw/sharedBytes，避免无 owner blob 扭曲去重收益。
-     // verify/cleanup 才拥有修复或删除权限，status 的真实计数不能顺带改写 persisted ref_count。
--    // raw 按真实 owner 展开，compressed 按 unique payload；二者差额不是已释放的文件 bytes。
--    const rawBytes = payloads.reduce((total, row) => total + row.raw_bytes * (counts.get(row.hash) ?? 0), 0)
-+    // v2 pack 的 raw_bytes 是整包 envelope：F0=raw×owners 会把同一 entry 集合重复计 N 次。
-+    // F4=raw×(owners/keys) 在等分 entry 近似下表示「每个 owner 各持一份字段」的逻辑 raw；pure pack 退化为 unique raw。
-+    // session-summary 无 cold_key，整 blob 仍按 raw×owners 展开。禁止为算 F4 去 materialize payload body。
-+    // packKeyStats 与 ownerCounts 分查：前者只补 distinct key，后者继续服务 mismatch/orphan。
-+    const keyCounts = packKeyStats(
-+      db,
-+      payloads.map((row) => row.hash),
-+    )
-+    const rawBytes = payloads.reduce((total, row) => {
-+      const owners = counts.get(row.hash) ?? 0
-+      // orphan 的 unique raw 只进 referencedRaw/compressed，不进逻辑 Raw 展开。
-+      if (owners === 0) return total
-+      if (row.kind === "message-pack" || row.kind === "part-pack") {
-+        const distinctKeys = keyCounts.get(row.hash) ?? 0
-+        // keys==0 的 v2 损坏行不回退 F0，避免再次把整包按 owner 连乘放大。
-+        if (distinctKeys <= 0) return total
-+        // owners 用全表反算 n；keys 只服务 entry 共享倍率（等分 entry 近似）。
-+        // 除法保持 number：StatusReport 与 CLI 十进制展示均按浮点字节计数。
-+        return total + (row.raw_bytes * owners) / distinctKeys
-+      }
-+      // session-summary 等整 blob kind：一份 payload 即完整逻辑内容，仍 raw×owners。
-+      return total + row.raw_bytes * owners
-+    }, 0)
-     // unique compressed 包含 orphan 的真实占用，cleanup 前仍须显示可回收空间。
-     const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
-     const referencedRawBytes = payloads.reduce(
-@@ -3454,7 +3510,7 @@ export function status(): StatusReport {
-       payloads: payloads.length,
-       rawBytes,
-       compressedBytes,
--      // sharedBytes 是内容寻址的逻辑收益，不能被误读为 SQLite 文件已释放空间。
-+      // sharedBytes 在 F4 下是真 entry 共享溢价（F4−unique），不能被误读为 SQLite 已释放空间。
-       sharedBytes: Math.max(0, rawBytes - referencedRawBytes),
-       refCountMismatches,
-       orphans,
+@@ -3453,8 +3488,29 @@ export function status(db: TxOrDb): StatusReport {
+   // logical raw 使用 owner 反算数；当 persisted ref_count 损坏时，status 仍给出真实共享量并单独报告 mismatch。
+   // orphan payload 计入物理 compressedBytes，但不参与 referencedRaw/sharedBytes，避免无 owner blob 扭曲去重收益。
+   // verify/cleanup 才拥有修复或删除权限，status 的真实计数不能顺带改写 persisted ref_count。
+-  // raw 按真实 owner 展开，compressed 按 unique payload；二者差额不是已释放的文件 bytes。
+-  const rawBytes = payloads.reduce((total, row) => total + row.raw_bytes * (counts.get(row.hash) ?? 0), 0)
++  // v2 pack 的 raw_bytes 是整包 envelope：F0=raw×owners 会把同一 entry 集合重复计 N 次。
++  // F4=raw×(owners/keys) 在等分 entry 近似下表示「每个 owner 各持一份字段」的逻辑 raw；pure pack 退化为 unique raw。
++  // session-summary 无 cold_key，整 blob 仍按 raw×owners 展开。禁止为算 F4 去 materialize payload body。
++  // packKeyStats 与 ownerCounts 分查：前者只补 distinct key，后者继续服务 mismatch/orphan。
++  const keyCounts = packKeyStats(
++    db,
++    payloads.map((row) => row.hash),
++  )
++  const rawBytes = payloads.reduce((total, row) => {
++    const owners = counts.get(row.hash) ?? 0
++    // orphan 的 unique raw 只进 referencedRaw/compressed，不进逻辑 Raw 展开。
++    if (owners === 0) return total
++    if (row.kind === "message-pack" || row.kind === "part-pack") {
++      const distinctKeys = keyCounts.get(row.hash) ?? 0
++      // keys==0 的 v2 损坏行不回退 F0，避免再次把整包按 owner 连乘放大。
++      if (distinctKeys <= 0) return total
++      // owners 用全表反算 n；keys 只服务 entry 共享倍率（等分 entry 近似）。
++      // 除法保持 number：StatusReport 与 CLI 十进制展示均按浮点字节计数。
++      return total + (row.raw_bytes * owners) / distinctKeys
++    }
++    // session-summary 等整 blob kind：一份 payload 即完整逻辑内容，仍 raw×owners。
++    return total + row.raw_bytes * owners
++  }, 0)
+   // unique compressed 包含 orphan 的真实占用，cleanup 前仍须显示可回收空间。
+   const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
+   const referencedRawBytes = payloads.reduce(
+@@ -3482,7 +3538,7 @@ export function status(db: TxOrDb): StatusReport {
+     payloads: payloads.length,
+     rawBytes,
+     compressedBytes,
+-    // sharedBytes 是内容寻址的逻辑收益，不能被误读为 SQLite 文件已释放空间。
++    // sharedBytes 在 F4 下是真 entry 共享溢价（F4−unique），不能被误读为 SQLite 已释放空间。
+     sharedBytes: Math.max(0, rawBytes - referencedRawBytes),
+     refCountMismatches,
+     orphans,
+
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
-index 8688c71f09d684427eccc08f4a3dceeda32a6b99..846577fae8bfb238b28109576489ccc9118158a1 100644
+index f64075a52..f75d05a71 100644
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
-@@ -1077,12 +1077,14 @@ describe.serial("ColdStorage", () => {
-       `
-       const result = yield* Effect.promise(async () => {
-         // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
-+        // 隔离 heap 的子进程在 Windows 上隐藏 console，避免 status 投影验证弹窗。
-         const proc = Bun.spawn([process.execPath, "-e", script], {
-           cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
-           env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
-           stdin: "ignore",
-           stdout: "pipe",
-           stderr: "pipe",
-+          windowsHide: process.platform === "win32",
-         })
-         const [exitCode, stdout, stderr] = await Promise.all([
-           proc.exited,
-@@ -1637,6 +1639,100 @@ describe.serial("Packed ColdStorage V2", () => {
+@@ -7,7 +7,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
+ import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+ import { Database } from "@opencode-ai/core/database/database"
+ import { ColdStorageTable, MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+-import { eq, inArray, sql } from "drizzle-orm"
++import { eq, inArray, isNotNull, sql } from "drizzle-orm"
+ import { Session as SessionNs } from "@/session/session"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { MessageV2 } from "@/session/message-v2"
+@@ -1066,12 +1066,14 @@ describe.serial("ColdStorage", () => {
+         `
+         const result = yield* Effect.promise(async () => {
+           // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
++          // 隔离 heap 的子进程在 Windows 上隐藏 console，避免 status 投影验证弹窗。
+           const proc = Bun.spawn([process.execPath, "-e", script], {
+             cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
+             env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
+             stdin: "ignore",
+             stdout: "pipe",
+             stderr: "pipe",
++            windowsHide: process.platform === "win32",
+           })
+           const [exitCode, stdout, stderr] = await Promise.all([
+             proc.exited,
+@@ -1634,6 +1636,106 @@ describe.serial("Packed ColdStorage V2", () => {
      }),
    )
  
@@ -522,6 +533,8 @@ index 8688c71f09d684427eccc08f4a3dceeda32a6b99..846577fae8bfb238b28109576489ccc9
 +  // 这锁住用户可见症状：db status 的 Raw 不得因一包多 owner 膨胀到 N 倍整包体积。
 +  it.instance("reports pack-logical status rawBytes for multi-key packs", () =>
 +    Effect.gen(function* () {
++      // #493：目标 ColdStorage 位于 core；db 句柄来自 Database.Service 的同步 client。
++      const { sync } = yield* Database.Service
 +      const test = yield* TestInstance
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "status raw F4 pack" })
@@ -538,8 +551,10 @@ index 8688c71f09d684427eccc08f4a3dceeda32a6b99..846577fae8bfb238b28109576489ccc9
 +        file: "src/status-b.ts",
 +        patch: "+status-b\n",
 +      })
++      // 目标 maintain 为 db-first 三参形态（#493）；lease/checkpoint 合同与 pack 用例一致。
 +      const result = yield* Effect.promise(() =>
 +        ColdStorage.maintain(
++          sync,
 +          ColdStorage.prepareMaintenance({
 +            operation: "compress",
 +            olderThanMs: 0,
@@ -551,7 +566,7 @@ index 8688c71f09d684427eccc08f4a3dceeda32a6b99..846577fae8bfb238b28109576489ccc9
 +      expect(result.type === "task" ? result.task.status : undefined).toBe("completed")
 +
 +      // 期望值只来自 cold_storage 元数据列，不解码 payload，也不复制 status 内部分支。
-+      const payloads = Database.use((db) =>
++      const payloads = useDb(sync, (db) =>
 +        db
 +          .select({
 +            hash: ColdStorageTable.hash,
@@ -567,27 +582,28 @@ index 8688c71f09d684427eccc08f4a3dceeda32a6b99..846577fae8bfb238b28109576489ccc9
 +      // 至少有一个多 owner 的 pack，否则无法证明 F0 与 F4 分叉。
 +      expect(payloads.some((row) => row.refs > 1)).toBe(true)
 +
-+      const partKeys = Database.use((db) =>
++      // owners/keys 分组走 drizzle 直导（目标无 Database.sql 命名空间），与生产 packKeyStats 同表口径。
++      const partKeys = useDb(sync, (db) =>
 +        db
 +          .select({
 +            hash: PartTable.cold_ref,
-+            owners: Database.sql<number>`count(*)`,
-+            keys: Database.sql<number>`count(distinct ${PartTable.cold_key})`,
++            owners: sql<number>`count(*)`,
++            keys: sql<number>`count(distinct ${PartTable.cold_key})`,
 +          })
 +          .from(PartTable)
-+          .where(Database.isNotNull(PartTable.cold_ref))
++          .where(isNotNull(PartTable.cold_ref))
 +          .groupBy(PartTable.cold_ref)
 +          .all(),
 +      )
-+      const messageKeys = Database.use((db) =>
++      const messageKeys = useDb(sync, (db) =>
 +        db
 +          .select({
 +            hash: MessageTable.cold_ref,
-+            owners: Database.sql<number>`count(*)`,
-+            keys: Database.sql<number>`count(distinct ${MessageTable.cold_key})`,
++            owners: sql<number>`count(*)`,
++            keys: sql<number>`count(distinct ${MessageTable.cold_key})`,
 +          })
 +          .from(MessageTable)
-+          .where(Database.isNotNull(MessageTable.cold_ref))
++          .where(isNotNull(MessageTable.cold_ref))
 +          .groupBy(MessageTable.cold_ref)
 +          .all(),
 +      )
@@ -602,7 +618,8 @@ index 8688c71f09d684427eccc08f4a3dceeda32a6b99..846577fae8bfb238b28109576489ccc9
 +      const ownerInflatedRaw = payloads.reduce((total, row) => total + row.raw * row.refs, 0)
 +      expect(ownerInflatedRaw).toBeGreaterThan(uniqueRaw)
 +
-+      const report = ColdStorage.status()
++      // status 为 db-first（#493）：同一 sync 句柄保证期望与被测读到同一份持久状态。
++      const report = ColdStorage.status(sync)
 +      // F4 在 pure pack 上等于 unique raw；F0 会等于 ownerInflatedRaw。
 +      // sharedBytes 在 pure pack 上应为 0：真共享溢价只来自 owners>keys。
 +      expect(report.rawBytes).toBe(uniqueRaw)

@@ -1,31 +1,24 @@
-From eb439379e2b3cba28fe3d6b85c4593dbbfb3dfc2 Mon Sep 17 00:00:00 2001
+From eb439379e2b3ff53f6ba3b8374472b4a89cc1bd5 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 5 Jul 2026 14:33:36 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui,shell):=20=E5=A2=9E=E5=A4=A7=20DialogPr?=
- =?UTF-8?q?ompt=20textarea=20=E9=AB=98=E5=BA=A6=20+=20=E4=BF=AE=E5=A4=8D?=
- =?UTF-8?q?=20macOS=20CI=20shell=20stdout=20=E7=AB=9E=E6=80=81?=
+Date: Mon, 6 Jul 2026 14:36:12 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui,shell):=20=E5=A2=9E=E5=A4=A7=20Dialog?=
+ =?UTF-8?q?50=72=6F=6D=70=74=20=74=65=78=74=61=72=65=61=20=E9=AB=98=E5=BA=?=
+ =?UTF-8?q?A=20=2B=20=E4=BF=AE=E5=A4=8D=20macOS=20CI=20shell=20stdout?=
+ =?UTF-8?q?=20=E7=AB=9E=E6=80=81?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-shell.ts: detached 从 process.platform !== "win32" 改为 === "linux"。
-macOS CI 上 detached:true 仍可能导致 stdout 管道竞态（调度抖动使管道
-未及时建立），echo test 退出码 0 但输出为空。仅 Linux 保留 detached:true。
-
-dialog-prompt.tsx: textarea maxHeight 从 9 增至 15。编辑 4000 字符的
-goal objective 时原 9 行只能显示一小段，15 行在 24 行终端中
-title(1)+gap(1)+textarea(15)+footer(2)+padding(2)=21 行仍 fits。
-
-diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-index f6529ca373f887f854ad21af3d95230ed7706dad..408722b01a9ae83feeaf7649fe6ad11dd1ab6914 100644
---- a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-@@ -129,11 +129,12 @@ export function DialogPrompt(props: DialogPromptProps) {
-             if (voiceInputBusy()) return
-             props.onConfirm?.(textarea.plainText)
-           }}
--          // minHeight=3 保证空态有足够视觉空间；maxHeight=9 让长文本（如 4000 字符的 goal objective）
-+          // minHeight=3 保证空态有足够视觉空间；maxHeight=15 让长文本（如 4000 字符的 goal objective）
+适配：dialog-prompt owner 迁移至 packages/tui/src/ui/dialog-prompt.tsx（注释中字符上限保留目标
+6400 形态）；shell.ts 同路径，hunk 重锚至 703（前导含 [local-smark] 注释行）。V2 侧
+core/src/tool/bash.ts:162 保留同款 `!== "win32"` 表达式——canonical V2 工具的 spawn 语义
+变更需独立验证，登记为后续观察项不并入本 patch（源 patch 亦未触碰）。
+diff --git a/packages/tui/src/ui/dialog-prompt.tsx b/packages/tui/src/ui/dialog-prompt.tsx
+--- a/packages/tui/src/ui/dialog-prompt.tsx
++++ b/packages/tui/src/ui/dialog-prompt.tsx
+@@ -150,7 +150,8 @@
+         <textarea
+-          // minHeight=3 保证空态有足够视觉空间；maxHeight=9 让长文本（如 6400 字符的 goal objective）
++          // minHeight=3 保证空态有足够视觉空间；maxHeight=15 让长文本（如 6400 字符的 goal objective）
            // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
            // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
 +          // maxHeight=15 在 24 行终端中 title(1)+gap(1)+textarea(15)+footer(2)+padding(2)=21 行仍 fits。
@@ -33,13 +26,11 @@ index f6529ca373f887f854ad21af3d95230ed7706dad..408722b01a9ae83feeaf7649fe6ad11d
 -          maxHeight={9}
 +          maxHeight={15}
            ref={(val: TextareaRenderable) => {
-             textarea = val
-           }}
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 820a466c0379c9c33e6deccb9e958978c349acab..a0c30f28baa08b39983c4ca8b2874ac2c3a2d379 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -451,13 +451,15 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
+@@ -703,13 +704,15 @@
+   // [local-smark] 不使用 spawn 的 shell 选项；改为显式传递 shell 路径和 -c 参数。
    // Bun macOS 上 shell 选项 + detached 组合存在 stdout 管道未建立的 bug，
    // 导致 echo test 退出码 0 但输出为空。显式 -c 在所有平台行为等价且避免该 bug。
    // cmd.exe 需保留 /d（禁用 AutoRun 注册表命令）和 /s（规范引号剥离）标志。
@@ -55,4 +46,16 @@ index 820a466c0379c9c33e6deccb9e958978c349acab..a0c30f28baa08b39983c4ca8b2874ac2
 +    detached: process.platform === "linux",
    })
  }
- 
+
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -160,3 +161,6 @@
+                shell,
+                stdin: "ignore",
+-                detached: process.platform !== "win32",
++                // V2 canonical bash 与 V1 shell.ts 同一产品职责：macOS detached:true 的 stdout
++                // 管道竞态两侧同步收敛为仅 Linux detach；kill 降级由 spawner 既有
++                // killGroup→killOne 回退承载，与 V1 接受的权衡同构。
++                detached: process.platform === "linux",
+                forceKillAfter: Duration.seconds(3),

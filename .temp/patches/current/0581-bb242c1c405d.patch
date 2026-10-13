@@ -1,20 +1,18 @@
 From bb242c1c405d26baeb458efa0d1a461786cdbcda Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Wed, 19 Aug 2026 00:11:04 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tool):=20=E4=BF=9D=E6=8C=81=E7=BC=96?=
- =?UTF-8?q?=E8=BE=91=E5=86=99=E7=9B=98=E8=A1=8C=E5=B0=BE=E4=B8=8E=E7=9C=9F?=
- =?UTF-8?q?=E5=AE=9E=E5=B1=95=E7=A4=BA?=
+Date: Tue, 18 Aug 2026 15:11:48 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tool):=20=E4=BF=9D=E6=8C=81=E7=BC=96=E8=BE?=  =?UTF-8?q?=91=E5=86=99=E7=9B=98=E8=A1=8C=E5=B0=BE=E4=B8=8E=E7=9C=9F?=  =?UTF-8?q?=E5=AE=9E=E5=B1=95=E7=A4=BA?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-统一 write、edit 与 apply_patch 在已有文件上的行尾继承，并在 formatter 后恢复物理行尾，同时保留格式化文本。
+write/edit-create/apply_patch Add-overwrite 对 existing 文件继承磁盘行尾（missing 逐字保留）；formatter 只拥有文本变化，commit lock 内恢复 proposal EOL 并回读最终真值；applyEdits 返回 normalizedMismatchIndices，edit 产出 public metadata inputProvenance.rewrites（UTF-8 byteLength + SHA-256 指纹，取模型提交的 LF oldString）+ 预算内 warning 尾段；_syncInput 保持 LF logical form 不再回写物理行尾；trimDiff 恒等保留公共缩进；output 预算重构为 warning 尾段预算（bytes/lines 同串计算、fingerprint 完整行或省略标记、LSP 段按剩余预算）。
 
-仅在 normalized 真值覆写时记录长度与 SHA-256，限制模型可见取证输出，并停止剥离 diff 公共缩进。
+适配说明：目标 edit.ts create 分支保留上游拒绝门（existing 文件禁止空 oldString 覆写，0514 裁定）——source 的 create-overwrite 行尾继承两个切片与对应两测试裁记（分支不可达），保留 missing-file LF 防回退用例与 syncInput LF 化；其余全部 hunk 按目标真实锚点落地（#518/#514/#521/#533 注释夹层同步、edit else 分支 +2 缩进、AppFileSystem→FSUtil、测试 layer 改 LayerNode.compile/group 形态、write formatter 块按目标花括号形态重写为 restore+early-return+exists 兜底）。
+
 
 diff --git a/docs/plans/tool-edit-write-line-ending-and-provenance-repair.md b/docs/plans/tool-edit-write-line-ending-and-provenance-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..27e50afb42db7dec8d402bc79b998c0db483bb0c
 --- /dev/null
 +++ b/docs/plans/tool-edit-write-line-ending-and-provenance-repair.md
 @@ -0,0 +1,531 @@
@@ -549,19 +547,19 @@ index 0000000000000000000000000000000000000000..27e50afb42db7dec8d402bc79b998c0d
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 408047ad90d4931977e98ca908d5e3ed163d7982..2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -17,7 +17,7 @@ import DESCRIPTION from "./apply_patch.txt"
- import { File } from "../file"
+ import { FileSystem } from "@opencode-ai/core/filesystem"
  import { Format } from "../format"
  import * as Bom from "@/util/bom"
 -import { normalizeLineEndings } from "@/util/line-ending"
 +import { convertToLineEnding, detectLineEnding, normalizeLineEndings, type LineEnding } from "@/util/line-ending"
+ // #518：apply_patch 加入共享 file-mutation coordinator（多文件一次性 commit + 提交前全量 recheck）
  import * as Mutation from "./file-mutation-coordinator"
- 
- // [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
+ // #131：diff 展示归一行尾，隐藏纯换行变更
 @@ -33,6 +33,8 @@ type FileChange = {
    additions: number
    deletions: number
@@ -571,22 +569,21 @@ index 408047ad90d4931977e98ca908d5e3ed163d7982..2a6dc56a535dcfd97d75c64991c59c3e
    expected: Mutation.MutationRead[]
  }
  
-@@ -53,6 +55,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -57,6 +59,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        const snapshot = yield* Mutation.read(afs, group.filePath)
-       // add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
+       // #518：add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
        if (snapshot.version.state === "other") throw new Error(`Path is not a file: ${group.filePath}`)
 +      // Add File 对 existing path 是完整 overwrite；snapshot 同时提供 conflict version 与物理行尾事实。
 +      const ending =
 +        snapshot.version.state === "file" ? detectLineEnding(Bom.split(Mutation.decode(snapshot)).text) : undefined
 +      // 不读取 Project 配置或邻近文件推断 EOL，missing Add 因此继续严格服从 patch 内容。
        const oldContent = ""
+       // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
        const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
-       const next = Bom.split(newContent)
-@@ -60,8 +66,19 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
-       const diffNew = normalizeLineEndings(next.text)
+@@ -66,7 +72,19 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
        const { additions, deletions } = countDiff(diffOld, diffNew)
--      // add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
+       // #518：add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
 -      return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
 +      // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
 +      return {
@@ -603,8 +600,8 @@ index 408047ad90d4931977e98ca908d5e3ed163d7982..2a6dc56a535dcfd97d75c64991c59c3e
 +      }
      }
      case "update": {
-       // canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
-@@ -104,7 +121,21 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+       // #533：canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
+@@ -114,7 +132,21 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
          if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
          expected.push(destination)
        }
@@ -626,10 +623,10 @@ index 408047ad90d4931977e98ca908d5e3ed163d7982..2a6dc56a535dcfd97d75c64991c59c3e
 +      }
      }
      case "delete": {
-       if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
-@@ -331,7 +362,16 @@ export const ApplyPatchTool = Tool.define(
- 
+       // #518：delete 与 add 同理不聚合；重复 Delete entry 无法像 update 那样链式消费。
+@@ -360,7 +392,16 @@ export const ApplyPatchTool = Tool.define(
              if (edited) {
+               // #518：formatter 与 BOM 回写留在 commit critical section 内，避免另一 mutation 在格式化中途读盘。
                if (yield* format.file(edited)) {
 -                yield* Bom.syncFile(afs, edited, change.bom)
 +                const formattedText = yield* Bom.syncFile(afs, edited, change.bom)
@@ -645,8 +642,8 @@ index 408047ad90d4931977e98ca908d5e3ed163d7982..2a6dc56a535dcfd97d75c64991c59c3e
                }
                editedFiles.push(edited)
              }
+
 diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
-index bc89786a3183dd6b529d276fac8f00099fe499c3..27aa70736998cfb87a9da9d22b2e65b0ec382030 100644
 --- a/packages/opencode/src/tool/edit-apply.ts
 +++ b/packages/opencode/src/tool/edit-apply.ts
 @@ -26,6 +26,8 @@ export type ApplyEditsResult = {
@@ -691,9 +688,9 @@ index bc89786a3183dd6b529d276fac8f00099fe499c3..27aa70736998cfb87a9da9d22b2e65b0
 +  const normalizedMismatchIndices: number[] = []
 +  // mismatch 索引与 syncEdits 同源生成，调用方无需重新执行 normalize matcher 或猜测 actual slice。
  
-   // 整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
+   // #521：整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
    // 诊断因此可以精确绑定单条 edit，同时维持原有 reverse apply 和原子失败边界。
-@@ -480,13 +487,18 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -481,13 +488,18 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        }
      }
  
@@ -716,7 +713,7 @@ index bc89786a3183dd6b529d276fac8f00099fe499c3..27aa70736998cfb87a9da9d22b2e65b0
        newString: edit.newString,
        ...(edit.replaceAll === true ? { replaceAll: true } : {}),
      })
-@@ -518,7 +530,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -519,7 +531,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
      )
    }
  
@@ -725,19 +722,19 @@ index bc89786a3183dd6b529d276fac8f00099fe499c3..27aa70736998cfb87a9da9d22b2e65b0
  }
  
  /**
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index acb821af9860b0b7240dcd823c5e568b27f3ea6f..82a78ff51be554ce29b77d80cead1e0c42b0b35f 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
 @@ -1,4 +1,5 @@
  import * as path from "path"
 +import { createHash } from "crypto"
+ // #518：私有 Semaphore 锁移除——edit/write/apply_patch 共享 file-mutation-coordinator
  import { Effect, Schema } from "effect"
  import * as Tool from "./tool"
- import { LSP } from "@/lsp/lsp"
-@@ -172,6 +173,11 @@ export const EditTool = Tool.define(
-           let contentOld = ""
+@@ -183,6 +184,11 @@ export const EditTool = Tool.define(
            let contentNew = ""
+           // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
            let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
 +          const provenanceRewrites: Array<{
 +            editIndex: number
@@ -745,125 +742,100 @@ index acb821af9860b0b7240dcd823c5e568b27f3ea6f..82a78ff51be554ce29b77d80cead1e0c
 +          }> = []
 +          // 该数组只承载本次 Tool 调用的异常覆写事实，不进入参数 Schema，也不改变 edit 成功语义。
  
-           // 先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
-           const proposal = yield* Mutation.read(afs, filePath)
-@@ -188,7 +194,10 @@ export const EditTool = Tool.define(
-             const existed = proposal.version.state === "file"
-             // create/overwrite 继续允许覆盖 unchanged existing file；只有 Permission 后的变化产生 conflict。
-             contentOld = source.text
--            contentNew = next.text
-+            const ending = existed ? detectLineEnding(contentOld) : undefined
-+            // oldString="" 仅在文件缺失时是纯 create；已有 proposal 上它仍是 overwrite，须继承磁盘行尾。
-+            // 新文件没有 EOL 属性，继续保留模型提交字节，避免 create 被隐式规范化。
-+            contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
-             diff = trimDiff(
-               createTwoFilesPatch(
-                 filePath,
-@@ -212,13 +221,30 @@ export const EditTool = Tool.define(
-               expected: [proposal],
-               execute: Effect.gen(function* () {
-                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
--                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
-+                if (yield* format.file(filePath)) {
-+                  const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
-+                  // missing create 允许 formatter 决定行尾；只有 existing overwrite 才有 proposal 属性可恢复。
-+                  const restoredText = ending
-+                    ? convertToLineEnding(normalizeLineEndings(formattedText), ending)
-+                    : formattedText
-+                  if (restoredText !== formattedText) {
-+                    yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
-+                  }
-+                  // 回读统一 create/overwrite 的 post-formatter truth，供 diff 与临时 history sync 共用。
-+                  contentNew = (yield* Bom.readFile(afs, filePath)).text
-+                }
-                 // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
-                 const finalLF = normalizeLineEndings(contentNew)
-                 const wroteLF = normalizeLineEndings(next.text)
-                 syncInput = {
-                   filePath,
--                  edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
-+                  // Message history 使用逻辑 LF；物理 CRLF 已由文件 owner 保留，不能泄回模型参数面。
-+                  edits: [
-+                    {
-+                      oldString: "",
-+                      newString: finalLF !== wroteLF ? finalLF : normalizeLineEndings(edits[0].newString),
-+                    },
-+                  ],
-                 }
-               }),
-             }).pipe(Effect.orDie)
-@@ -234,6 +260,7 @@ export const EditTool = Tool.define(
- 
-             // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
-             const ending = detectLineEnding(contentOld)
-+            // ending 只影响 proposal 的物理写回；下面的 editsLF 和 history sync 始终保持逻辑 LF。
-             const baseLF = normalizeLineEndings(contentOld)
-             // normalize 只属于 edit-apply owner 的 proposal 阶段，commit 不会重新解释模型输入。
-             const editsLF = edits.map((edit) => ({
-@@ -268,6 +295,7 @@ export const EditTool = Tool.define(
-             }
- 
-             contentNew = convertToLineEnding(applied.contentNew, ending)
-+            // 该转换只服务磁盘写回；diff 与 history 随后再次归一化，避免物理 EOL重复进入模型视图。
-             const desiredBom = source.bom || Bom.split(contentNew).bom
-             contentNew = Bom.split(contentNew).text
- 
-@@ -295,7 +323,16 @@ export const EditTool = Tool.define(
-               expected: [proposal],
-               execute: Effect.gen(function* () {
-                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
--                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
-+                if (yield* format.file(filePath)) {
-+                  const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
-+                  // formatter 的文本变化有效，但 existing edit 的物理行尾仍由 proposal ending 约束。
-+                  // 恢复和最终读取都留在 commit lock 内，保证 diff、事件与后续 mutation 只见最终文件。
-+                  const restoredText = convertToLineEnding(normalizeLineEndings(formattedText), ending)
-+                  if (restoredText !== formattedText) {
-+                    yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
-+                  }
-+                  contentNew = (yield* Bom.readFile(afs, filePath)).text
-+                }
-               }),
-             }).pipe(Effect.orDie)
-             // diagnostics 在 commit 后执行，LSP 观察到的是已经完成 formatter 的磁盘内容。
-@@ -305,14 +342,33 @@ export const EditTool = Tool.define(
-               event: "change",
-             })
- 
-+            provenanceRewrites.push(
-+              ...applied.normalizedMismatchIndices.flatMap((editIndex) => {
-+                const original = editsLF[editIndex]
-+                if (!original) return []
-+                // 只披露模型提交 LF oldString 的 UTF-8 fingerprint，不把磁盘实际切片复制进上下文。
-+                // editIndex 保留原始参数顺序，避免多 edit 场景把 fingerprint 错归给相邻条目。
-+                return [
-+                  {
-+                    editIndex,
-+                    original: {
-+                      byteLength: Buffer.byteLength(original.oldString, "utf-8"),
-+                      sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
-+                    },
-+                  },
-+                ]
-+              }),
-+            )
-+
-             // INV-16：成功后始终发完整参数面 { filePath, edits }，
-             // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
--            // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
-+            // actualOld 已在 applyEdits.syncEdits 中，history 继续保留模型可回放的 LF logical form。
+           // #518：先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
+           // #518：锁不覆盖 ask：同文件第二个 proposal 仍可完成审批，冲突在 commit recheck 显式化。
+@@ -233,9 +239,16 @@ export const EditTool = Tool.define(
+             // #514 create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
+             const finalLF = normalizeLineEndings(contentNew)
+             const wroteLF = normalizeLineEndings(next.text)
++            // create 分支 ending 恒 undefined（existing 覆写在上方被拒），历史只保留 LF 化差异。
              syncInput = {
                filePath,
-+              // normalize 已在 matcher 前完成，因此这里不再把物理 CRLF 写回 Message 参数。
-               edits: applied.syncEdits.map((edit) => ({
--                oldString: convertToLineEnding(edit.oldString, ending),
--                newString: convertToLineEnding(edit.newString, ending),
-+                oldString: edit.oldString,
-+                newString: edit.newString,
-                 ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
-               })),
+-              edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
++              // Message history 使用逻辑 LF；物理 CRLF 已由文件 owner 保留，不能泄回模型参数面。
++              edits: [
++                {
++                  oldString: "",
++                  newString: finalLF !== wroteLF ? finalLF : normalizeLineEndings(edits[0].newString),
++                },
++              ],
              }
-@@ -394,6 +450,60 @@ export const EditTool = Tool.define(
+             // commit 成功后才发布 Edited/Updated；Permission reject 或 version conflict 不产生成功事件。
+             yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+@@ -250,6 +263,7 @@ export const EditTool = Tool.define(
+ 
+               // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
+               const ending = detectLineEnding(contentOld)
++              // ending 只影响 proposal 的物理写回；下面的 editsLF 和 history sync 始终保持逻辑 LF。
+               const baseLF = normalizeLineEndings(contentOld)
+               const editsLF = edits.map((edit) => ({
+                 oldString: normalizeLineEndings(edit.oldString),
+@@ -284,6 +298,7 @@ export const EditTool = Tool.define(
+               }
+ 
+               contentNew = convertToLineEnding(applied.contentNew, ending)
++              // 该转换只服务磁盘写回；diff 与 history 随后再次归一化，避免物理 EOL 重复进入模型视图。
+               const desiredBom = source.bom || Bom.split(contentNew).bom
+               contentNew = Bom.split(contentNew).text
+ 
+@@ -314,7 +329,16 @@ export const EditTool = Tool.define(
+                 execute: Effect.gen(function* () {
+                   // #518：写盘沿用既有顺序（内容→format→BOM 回写）；锁内完成才发布 change 事件。
+                   yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-                  if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
++                  if (yield* format.file(filePath)) {
++                    const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
++                    // formatter 的文本变化有效，但 existing edit 的物理行尾仍由 proposal ending 约束。
++                    // 恢复和最终读取都留在 commit lock 内，保证 diff、事件与后续 mutation 只见最终文件。
++                    const restoredText = convertToLineEnding(normalizeLineEndings(formattedText), ending)
++                    if (restoredText !== formattedText) {
++                      yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
++                    }
++                    contentNew = (yield* Bom.readFile(afs, filePath)).text
++                  }
+                 }),
+               }).pipe(Effect.orDie)
+               // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
+@@ -323,15 +347,34 @@ export const EditTool = Tool.define(
+                 file: filePath,
+                 event: "change",
+               })
++
++              provenanceRewrites.push(
++                ...applied.normalizedMismatchIndices.flatMap((editIndex) => {
++                  const original = editsLF[editIndex]
++                  if (!original) return []
++                  // 只披露模型提交 LF oldString 的 UTF-8 fingerprint，不把磁盘实际切片复制进上下文。
++                  // editIndex 保留原始参数顺序，避免多 edit 场景把 fingerprint 错归给相邻条目。
++                  return [
++                    {
++                      editIndex,
++                      original: {
++                        byteLength: Buffer.byteLength(original.oldString, "utf-8"),
++                        sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
++                      },
++                    },
++                  ]
++                }),
++              )
++
+               // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
+               // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
+-              // actualOld 已在 applyEdits.syncEdits 中（历史 needle，非 preserve 整行块）；
+-              // 此处只做行尾风格还原便于回放。
++              // actualOld 已在 applyEdits.syncEdits 中，history 继续保留模型可回放的 LF logical form。
+               syncInput = {
+                 filePath,
++                // normalize 已在 matcher 前完成，因此这里不再把物理 CRLF 写回 Message 参数。
+                 edits: applied.syncEdits.map((edit) => ({
+-                  oldString: convertToLineEnding(edit.oldString, ending),
+-                  newString: convertToLineEnding(edit.newString, ending),
++                  oldString: edit.oldString,
++                  newString: edit.newString,
+                   ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
+                 })),
+               }
+@@ -417,6 +460,60 @@ export const EditTool = Tool.define(
              }
            }
  
@@ -921,10 +893,10 @@ index acb821af9860b0b7240dcd823c5e568b27f3ea6f..82a78ff51be554ce29b77d80cead1e0c
 +          const warningBytes = Buffer.byteLength(warningTail, "utf-8")
 +          const warningLinesCount = warningTail ? warningTail.split("\n").length - 1 : 0
 +
-           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
+           const normalizedFilePath = FSUtil.normalizePath(filePath)
+           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
            const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
-           yield* lsp.touchFile(filePath, "document")
-@@ -418,19 +528,25 @@ export const EditTool = Tool.define(
+@@ -448,19 +545,25 @@ export const EditTool = Tool.define(
            }
            // LSP 段按剩余预算检查（预留 warning 与标记），宁断示标也不消费 warning 预算。
            if (
@@ -958,17 +930,17 @@ index acb821af9860b0b7240dcd823c5e568b27f3ea6f..82a78ff51be554ce29b77d80cead1e0c
  
            return {
              metadata: {
-@@ -440,6 +556,8 @@ export const EditTool = Tool.define(
+@@ -472,6 +575,8 @@ export const EditTool = Tool.define(
                filediff,
-               // processor 消费后 strip；覆盖 state.input 为 ground-truth edits
+               // #514：processor 消费后 strip；覆盖 state.input 为 ground-truth edits
                ...(syncInput ? { _syncInput: syncInput } : {}),
 +              // public metadata 在 processor strip 后保留；正常 exact/identical 路径不制造空 provenance。
 +              ...(provenanceRewrites.length > 0 ? { inputProvenance: { rewrites: provenanceRewrites } } : {}),
              },
              title: `${path.relative(instance.worktree, filePath)}`,
              output,
-@@ -450,37 +568,6 @@ export const EditTool = Tool.define(
- )
+@@ -485,37 +590,6 @@ export const EditTool = Tool.define(
+ 
  
  export function trimDiff(diff: string): string {
 -  const lines = diff.split("\n")
@@ -1007,20 +979,19 @@ index acb821af9860b0b7240dcd823c5e568b27f3ea6f..82a78ff51be554ce29b77d80cead1e0c
 +  // 保留 diff 原始前导空白；公共缩进属于模型需要理解的文件语义，不是可丢弃的装饰。
 +  return diff
  }
+
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 519e9c8ce514b3f6f69d854db239f57cad7bda57..4ad6f02a423136a5aa01c8f94adb3b44fcbbced4 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -14,7 +14,7 @@ import { InstanceState } from "@/effect/instance-state"
- import { trimDiff } from "./edit"
+@@ -15,6 +15,7 @@ import { trimDiff } from "./edit"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import * as Bom from "@/util/bom"
--import { normalizeLineEndings } from "@/util/line-ending"
-+import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+ import { normalizeLineEndings } from "@/util/line-ending"
++import { convertToLineEnding, detectLineEnding } from "@/util/line-ending"
+ // #518：write 参与共享 file-mutation coordinator——proposal 版本耦合 + Permission 后持锁 + 提交前 recheck
  import * as Mutation from "./file-mutation-coordinator"
- 
- export const Parameters = Schema.Struct({
-@@ -61,7 +61,12 @@ export const WriteTool = Tool.define(
+ // #131：write 元数据 diff 归一行尾
+@@ -63,7 +64,12 @@ export const WriteTool = Tool.define(
            const next = Bom.split(params.content)
            const desiredBom = source.bom || next.bom
            const contentOld = source.text
@@ -1031,16 +1002,14 @@ index 519e9c8ce514b3f6f69d854db239f57cad7bda57..4ad6f02a423136a5aa01c8f94adb3b44
 +          // 模型提交的是逻辑行；已有文件的行尾属于 proposal 磁盘属性，不能被 overwrite 参数偶然翻转。
 +          // 新文件没有可继承属性，继续逐字采用提交内容，避免 write 对创建行为施加全局 EOL 策略。
 +          const contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
-           // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
  
            const diff = trimDiff(
-@@ -87,8 +92,22 @@ export const WriteTool = Tool.define(
-               yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
+             // #131：permission 元数据忽略纯行尾 diff
+@@ -93,10 +99,21 @@ export const WriteTool = Tool.define(
                // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
                formatted = yield* format.file(filepath)
--              if (formatted) yield* Bom.syncFile(fs, filepath, desiredBom)
--              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
-+              if (formatted) {
+               if (formatted) {
+-                yield* Bom.syncFile(fs, filepath, desiredBom)
 +                const formattedText = yield* Bom.syncFile(fs, filepath, desiredBom)
 +                // formatter 拥有文本格式化结果，但已有文件的行尾仍由 proposal 决定；两者在此合成唯一磁盘真值。
 +                // 还原留在 commit lock 内，避免事件、diff 或另一个 mutation 观察到 formatter 的临时 LF 文件。
@@ -1054,16 +1023,18 @@ index 519e9c8ce514b3f6f69d854db239f57cad7bda57..4ad6f02a423136a5aa01c8f94adb3b44
 +                // metadata 必须来自还原后的实际文件，不能沿用 formatter 读取或内存推导的中间视图。
 +                finalSource = yield* Bom.readFile(fs, filepath)
 +                return
-+              }
+               }
+-              // #518：finalSource 在锁内读取，metadata 不会引用另一个 mutation 的中间内容。
+-              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
 +              if (exists) finalSource = yield* Bom.readFile(fs, filepath)
              }),
            }).pipe(Effect.orDie)
            // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 3e916abbfa1b6928b3e8155d6c731f46fedaa4a6..f888ea7a9517bdb6804577e57a956ef6112a99a2 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -24,6 +24,30 @@ const it = testEffect(
+@@ -21,6 +21,25 @@ const it = testEffect(
    ),
  )
  
@@ -1081,75 +1052,15 @@ index 3e916abbfa1b6928b3e8155d6c731f46fedaa4a6..f888ea7a9517bdb6804577e57a956ef6
 +})
 +
 +const itLineEndingFormatted = testEffect(
-+  Layer.mergeAll(
-+    LSP.defaultLayer,
-+    AppFileSystem.defaultLayer,
-+    lineEndingFormatLayer,
-+    Bus.layer,
-+    Truncate.defaultLayer,
-+    Agent.defaultLayer,
-+  ),
++  LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]), [
++    [Format.node, lineEndingFormatLayer],
++  ]),
 +)
 +
  const baseCtx = {
    sessionID: SessionID.make("ses_test"),
    messageID: MessageID.make("msg_test"),
-@@ -351,6 +375,24 @@ describe("tool.apply_patch freeform", () => {
-     }),
-   )
- 
-+  itLineEndingFormatted.instance("restores source CRLF after formatting an update", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const { ctx } = makeCtx()
-+      const target = path.join(test.directory, "formatted-update.txt")
-+      yield* writeText(target, "before\r\ncontent\r\n")
-+
-+      yield* execute(
-+        { patchText: "*** Begin Patch\n*** Update File: formatted-update.txt\n@@\n-before\n+new\n*** End Patch" },
-+        ctx,
-+      )
-+
-+      // update 的 ending 必须来自 source snapshot；formatter 文本变化不能把它降为 LF。
-+      // update 没有 move target，因而该测试直接锁定 shared loop 的普通 edited 路径。
-+      expect(yield* readText(target)).toBe("formatted\r\ncontent\r\n")
-+    }),
-+  )
-+
-   // 两个 chunk 争用同一 original span 必须原子失败；错误是 overlap，不是 cursor unavailable。
-   it.instance("rejects overlapping chunks for the same original span", () =>
-     Effect.gen(function* () {
-@@ -741,17 +783,62 @@ describe("tool.apply_patch freeform", () => {
-     }),
-   )
- 
-+  itLineEndingFormatted.instance("restores source CRLF at the formatted move destination", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const { ctx } = makeCtx()
-+      const source = path.join(test.directory, "move-source.txt")
-+      const destination = path.join(test.directory, "move-destination.txt")
-+      yield* writeText(source, "before\r\ncontent\r\n")
-+      yield* writeText(destination, "destination\n")
-+
-+      yield* execute(
-+        {
-+          patchText:
-+            "*** Begin Patch\n*** Update File: move-source.txt\n*** Move to: move-destination.txt\n@@\n-before\n+new\n*** End Patch",
-+        },
-+        ctx,
-+      )
-+
-+      // move 的内容属性来自 source；恢复必须落在 destination，同时原 source 仍按既有语义删除。
-+      // destination 预先存在但其 LF 不参与 ownership，测试锁定 source ending 的优先级。
-+      // source 删除断言确保恢复逻辑没有通过复制而非 move 来绕开原有 mutation 语义。
-+      expect(yield* readText(destination)).toBe("formatted\r\ncontent\r\n")
-+      yield* expectReadFailure(source)
-+    }),
-+  )
-+
-   it.instance("adds file overwriting existing file", () =>
-     Effect.gen(function* () {
+@@ -770,12 +789,75 @@ describe("tool.apply_patch freeform", () => {
        const test = yield* TestInstance
        const { ctx } = makeCtx()
        const target = path.join(test.directory, "duplicate.txt")
@@ -1182,24 +1093,67 @@ index 3e916abbfa1b6928b3e8155d6c731f46fedaa4a6..f888ea7a9517bdb6804577e57a956ef6
 +      // add 的初次转换与 formatter 后恢复是两个边界；最终文本和原 CRLF 必须同时成立。
 +      // Add File 覆写的目标仍是原路径，不能只用 update 测试覆盖 shared loop。
 +      expect(yield* readText(target)).toBe("formatted\r\ncontent\r\n")
++    }),
++  )
++
++  itLineEndingFormatted.instance("restores source CRLF at the formatted move destination", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const source = path.join(test.directory, "move-source.txt")
++      const destination = path.join(test.directory, "move-destination.txt")
++      yield* writeText(source, "before\r\ncontent\r\n")
++      yield* writeText(destination, "destination\n")
++
++      yield* execute(
++        {
++          patchText:
++            "*** Begin Patch\n*** Update File: move-source.txt\n*** Move to: move-destination.txt\n@@\n-before\n+new\n*** End Patch",
++        },
++        ctx,
++      )
++
++      // move 的内容属性来自 source；恢复必须落在 destination，同时原 source 仍按既有语义删除。
++      // destination 预先存在但其 LF 不参与 ownership，测试锁定 source ending 的优先级。
++      // source 删除断言确保恢复逻辑没有通过复制而非 move 来绕开原有 mutation 语义。
++      expect(yield* readText(destination)).toBe("formatted\r\ncontent\r\n")
++      yield* expectReadFailure(source)
++    }),
++  )
++
++  itLineEndingFormatted.instance("restores source CRLF after formatting an update", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "formatted-update.txt")
++      yield* writeText(target, "before\r\ncontent\r\n")
++
++      yield* execute(
++        { patchText: "*** Begin Patch\n*** Update File: formatted-update.txt\n@@\n-before\n+new\n*** End Patch" },
++        ctx,
++      )
++
++      // update 的 ending 必须来自 source snapshot；formatter 文本变化不能把它降为 LF。
++      // update 没有 move target，因而该测试直接锁定 shared loop 的普通 edited 路径。
++      expect(yield* readText(target)).toBe("formatted\r\ncontent\r\n")
      }),
    )
  
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc18c2d00d 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test"
- import path from "path"
+@@ -3,7 +3,7 @@ import path from "path"
  import fs from "fs/promises"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
--import { EditTool } from "../../src/tool/edit"
-+import { EditTool, trimDiff } from "../../src/tool/edit"
+-import { EditTool, prepareEditArguments } from "../../src/tool/edit"
++import { EditTool, prepareEditArguments, trimDiff } from "../../src/tool/edit"
  import { disposeAllInstances, TestInstance } from "../fixture/fixture"
  import { LSP } from "@/lsp/lsp"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
-@@ -67,6 +67,30 @@ const itFormatted = testEffect(
-   ),
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -61,6 +61,25 @@ const itFormatted = testEffect(
+   ]),
  )
  
 +// 同时改文本并强制 LF，确保测试能区分 formatter authority 与 existing-file EOL authority。
@@ -1216,63 +1170,22 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
 +})
 +
 +const itLineEndingFormatted = testEffect(
-+  Layer.mergeAll(
-+    LSP.defaultLayer,
-+    AppFileSystem.defaultLayer,
-+    Bus.layer,
-+    lineEndingFormatLayer,
-+    Truncate.defaultLayer,
-+    Agent.defaultLayer,
-+  ),
++  LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]), [
++    [Format.node, lineEndingFormatLayer],
++  ]),
 +)
 +
  // [local-smark] 小 limits + pass-through 截断：隔离 wrapper 截断，迫使 edit 组装段自身
  // 遵守 limits 预算（真实 wrapper 会按同一 limits 做 head 截断，丢末尾 warning）。
- const itTruncated = testEffect(
-@@ -264,6 +288,13 @@ test("closestWindow agrees with an exhaustive scalar span oracle", () => {
- })
- 
- describe("tool.edit", () => {
-+  test("trimDiff preserves source indentation", () => {
-+    const diff = "@@ -1 +1 @@\n-        return 1\n+        return 2"
-+
-+    // diff 是模型重构文件状态的字节证据；公共缩进不可为展示紧凑而被删除。
-+    expect(trimDiff(diff)).toBe(diff)
-+  })
-+
-   describe("creating new files", () => {
-     it.instance("creates new file when oldString is empty", () =>
-       Effect.gen(function* () {
-@@ -294,6 +325,44 @@ describe("tool.edit", () => {
+ // output 放行不截断：隔离 wrapper 层后，预算违规只能来自 edit 组装段自身。
+@@ -277,6 +296,22 @@ describe("tool.edit", () => {
        }),
      )
  
-+    it.instance("preserves existing CRLF when oldString is empty", () =>
-+      Effect.gen(function* () {
-+        const test = yield* TestInstance
-+        const filepath = path.join(test.directory, "existing-crlf.txt")
-+        yield* put(filepath, "old\r\ncontent\r\n")
-+
-+        yield* run({ filePath: filepath, oldString: "", newString: "new\ncontent\n" })
-+
-+        // oldString="" 兼有 create/overwrite 语义；proposal 已存在时仍须尊重磁盘 CRLF 属性。
-+        expect(yield* loadRaw(filepath)).toBe("new\r\ncontent\r\n")
-+      }),
-+    )
-+
-+    itLineEndingFormatted.instance("restores existing CRLF after formatting a create-overwrite", () =>
-+      Effect.gen(function* () {
-+        const test = yield* TestInstance
-+        const filepath = path.join(test.directory, "formatted-create-overwrite.txt")
-+        yield* put(filepath, "old\r\ncontent\r\n")
-+
-+        yield* run({ filePath: filepath, oldString: "", newString: "new\ncontent\n" })
-+
-+        // create 与 overwrite 共用参数形态但不是同一磁盘属性域；existing proposal 必须在 formatter 后还原。
-+        expect(yield* loadRaw(filepath)).toBe("formatted\r\ncontent\r\n")
-+      }),
-+    )
-+
++    // 裁记说明：source 的 "preserves existing CRLF when oldString is empty" 与
++    // "restores existing CRLF after formatting a create-overwrite" 两用例在目标不可达——
++    // port #0514 已裁定保留上游拒绝门（existing 文件禁止空 oldString 覆写），
++    // 该分支在生产中被 L200-204 拒绝；仅保留 missing-file 防回退用例。
 +    it.instance("keeps submitted LF when creating a missing file", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -1285,23 +1198,24 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
 +      }),
 +    )
 +
-     it.instance("creates new file with nested directories", () =>
+     it.instance("rejects empty oldString on existing files and leaves content unchanged", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -454,6 +523,9 @@ describe("tool.edit", () => {
+@@ -455,6 +490,10 @@ describe("tool.edit", () => {
              { oldString: "foo - bar", newString: "foo - bar" },
            ],
          })
++        // 该批另一条真实修改也是字面命中：x 不产生 mismatch，整批无 truth rewrite 可披露。
 +        // located slice 是 en-dash 但该条目跳写且 history 不覆写；不能误报为 normalized truth rewrite。
 +        expect(result.metadata.inputProvenance).toBeUndefined()
 +        expect(result.output).not.toContain("normalized oldString truth rewrites")
          // processor 消费面：公开回写契约直接验证，不重复 edit.ts 内部拼装逻辑。
          const resolved = resolveCompletedToolInput(
            { filePath: filepath, edits: [] as unknown[] },
-@@ -572,6 +644,32 @@ describe("tool.edit", () => {
-       }),
-     )
+@@ -578,6 +617,32 @@ describe("tool.edit", () => {
  
+     // [local-smark] identical 条目仍须通过 locate 校验：垃圾 oldString 不得因"无操作"而静默通过。
+     // 容忍不等于跳过校验：locate/唯一性语义对 identical 条目保持完整。
 +    itTruncated.instance("bounds many rewrite fingerprints while preserving full provenance metadata", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -1310,7 +1224,7 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
 +          oldString: `"v${index}"`,
 +          newString: `"n${index}"`,
 +        }))
-+        yield* put(filepath, `${rewrites.map((_, index) => `say “v${index}”`).join("\n")}\nstable\n`)
++        yield* put(filepath, `${rewrites.map((_, index) => `say \u201Cv${index}\u201D`).join("\n")}\nstable\n`)
 +
 +        const result = yield* run({
 +          filePath: filepath,
@@ -1328,12 +1242,12 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
 +      }),
 +    )
 +
-     // [local-smark] identical 条目仍须通过 locate 校验：垃圾 oldString 不得因"无操作"而静默通过。
      it.instance("still validates oldString of identical edits", () =>
        Effect.gen(function* () {
-@@ -1160,6 +1258,19 @@ describe("tool.edit", () => {
-       expect(counts.crlf).toBeGreaterThan(0)
-     }
+         const test = yield* TestInstance
+@@ -1338,6 +1403,19 @@ describe("tool.edit", () => {
+       }),
+     )
  
 +    itLineEndingFormatted.instance("restores existing CRLF after formatting a normal edit", () =>
 +      Effect.gen(function* () {
@@ -1348,10 +1262,10 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
 +      }),
 +    )
 +
-     type Input = {
-       content: string
-       oldString: string
-@@ -1482,8 +1593,41 @@ describe("tool.edit", () => {
+     it.instance("replaceAll preserves LF for multi-line blocks", () =>
+       Effect.gen(function* () {
+         const blockOld = "alpha\nbeta"
+@@ -1575,8 +1653,41 @@ describe("tool.edit", () => {
            edits: [{ oldString: '"hello"', newString: '"hi"' }],
          })
          expect(yield* load(filepath)).toBe('say "hi" end')
@@ -1395,7 +1309,7 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
        }),
      )
  
-@@ -1549,11 +1693,23 @@ describe("tool.edit", () => {
+@@ -1642,11 +1753,23 @@ describe("tool.edit", () => {
          const test = yield* TestInstance
          const filepath = path.join(test.directory, "hybrid-all.txt")
          yield* put(filepath, "x-y and x\u2013y")
@@ -1420,7 +1334,7 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
        }),
      )
  
-@@ -1636,12 +1792,17 @@ describe("tool input truth sync (processor contract)", () => {
+@@ -1728,11 +1851,23 @@ describe("tool input truth sync (processor contract)", () => {
    })
  
    test("strip removes temporary truth keys", () => {
@@ -1436,64 +1350,75 @@ index 0c628a0bde51579a3fb9f607c98b90ebb32f3e0a..2edb7461c0a88b78c0761e6799cfefbc
 -    expect(stripped).toEqual({ diff: "d" })
 +    // underscore keys 是短生命周期 truth transport；公开 provenance 是 completed Message 的取证记录。
 +    expect(stripped).toEqual({ diff: "d", inputProvenance })
++  })
++
++  test("trimDiff preserves source indentation", () => {
++    const diff = "@@ -1 +1 @@\n-        return 1\n+        return 2"
++
++    // diff 是模型重构文件状态的字节证据；公共缩进不可为展示紧凑而被删除。
++    expect(trimDiff(diff)).toBe(diff)
    })
- 
-   // INV-07：failToolCall non-abort 终态化的 metadata 合同。
+ })
+
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index d5973fa38aaa09b21a16063d5d61608b8eac7979..a8781fac5e3373de3b102f13f972645644e3847e 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
-@@ -71,6 +71,30 @@ const itFormatted = testEffect(
+@@ -80,6 +80,36 @@ const itFormatted = testEffect(
    ),
  )
  
 +// 该 formatter 同时改变语义内容并强制 LF，区分“保留格式化结果”与“恢复文件行尾属性”。
-+const lineEndingFormatLayer = Layer.succeed(Format.Service, {
-+  init: () => Effect.void,
-+  status: () => Effect.succeed([]),
-+  file: (filepath: string) =>
-+    Effect.promise(async () => {
-+      const content = await fs.readFile(filepath, "utf-8")
-+      await fs.writeFile(filepath, content.replace("before", "formatted").replace(/\r\n?/g, "\n"))
-+      return true
-+    }),
++const lineEndingFormatNode = LayerNode.make({
++  service: Format.Service,
++  layer: Layer.succeed(Format.Service, {
++    init: () => Effect.void,
++    status: () => Effect.succeed([]),
++    file: (filepath: string) =>
++      Effect.promise(async () => {
++        const content = await fs.readFile(filepath, "utf-8")
++        await fs.writeFile(filepath, content.replace("before", "formatted").replace(/\r\n?/g, "\n"))
++        return true
++      }),
++  }),
++  deps: [],
 +})
 +
 +const itLineEndingFormatted = testEffect(
-+  Layer.mergeAll(
-+    LSP.defaultLayer,
-+    AppFileSystem.defaultLayer,
-+    Bus.layer,
-+    lineEndingFormatLayer,
-+    CrossSpawnSpawner.defaultLayer,
-+    Truncate.defaultLayer,
-+    Agent.defaultLayer,
++  LayerNode.compile(
++    LayerNode.group([
++      LSP.node,
++      FSUtil.node,
++      EventV2Bridge.node,
++      lineEndingFormatNode,
++      CrossSpawnSpawner.node,
++      Truncate.node,
++      Agent.node,
++    ]),
 +  ),
 +)
 +
  const init = Effect.fn("WriteToolTest.init")(function* () {
    const info = yield* WriteTool
    return yield* info.init()
-@@ -212,7 +236,8 @@ describe("tool.write", () => {
+@@ -347,6 +377,8 @@ describe("tool.write", () => {
+         const diff = result.metadata?.diff ?? ""
+         expect(diff).not.toContain("-Line 1")
          expect(diff).not.toContain("+Line 1")
-         expect(diff).not.toContain("-Line 2")
-         expect(diff).not.toContain("+Line 2")
--        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content)
 +        // 覆写参数表示逻辑行，已有文件的 CRLF 是磁盘属性；断言磁盘字节而非归一化 diff。
-+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content.replaceAll("\n", "\r\n"))
++        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical.replaceAll("\n", "\r\n"))
        }),
      )
  
-@@ -231,6 +256,8 @@ describe("tool.write", () => {
+@@ -361,6 +393,8 @@ describe("tool.write", () => {
+         const diff = result.metadata?.diff ?? ""
+         expect(diff).not.toContain("-Line 1")
          expect(diff).not.toContain("+Line 1")
-         expect(diff).not.toContain("-Line 2")
-         expect(diff).not.toContain("+Line 2")
 +        // CR-only 也属于已有文件的物理属性，不能因模型统一提交 LF 而被静默清洗。
-+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content.replaceAll("\n", "\r"))
++        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical.replaceAll("\n", "\r"))
        }),
      )
    })
-@@ -368,6 +395,21 @@ describe("tool.write", () => {
+@@ -371,6 +405,21 @@ describe("tool.write", () => {
    // _formattedContent 由 processor 的 completeToolCall 消费，用于覆盖 state.input.content，
    // 使 DB 中持久化的 input 与磁盘实际内容一致。
    describe("auto-format _formattedContent", () => {

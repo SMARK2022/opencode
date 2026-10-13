@@ -573,7 +573,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b30af690f 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -1528,6 +1528,103 @@ describe("tool.edit", () => {
+@@ -1528,6 +1528,107 @@ describe("tool.edit", () => {
        }),
      )
  
@@ -641,6 +641,8 @@ index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b
 +            { oldString: "two HEAD", newString: "two REPLACED LONGER" },
 +          ],
 +        })
++        // 用户顺序不变量原文：先 A 再 B 再 C 与先 B 再 A 再 C 必须同结果——
++        // 逆序提交同一 edits 集合后两文件字节级相等是排序不变量的直接验证。
 +        expect(yield* load(backward)).toBe(yield* load(forward))
 +        expect(yield* load(forward)).toBe(
 +          "one\ntwo REPLACED LONGER\nthree\nmid R\nfour\nfive REPLACED MUCH LONGER\nsix\n",
@@ -670,6 +672,8 @@ index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b
 +          filePath: normalized,
 +          edits: [{ oldString: '        say "x"', newString: '            say "x"' }],
 +        })
++        // 归一化分支只重写匹配段本身：缩进增量严格按 newString 字面计算，
++        // 不携带旧段缩进叠加——这是“缩进段未变则结果不变”的反向锁定。
 +        expect(yield* load(normalized)).toBe('            say "x"\n')
 +      }),
 +    )

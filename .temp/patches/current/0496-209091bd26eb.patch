@@ -1,22 +1,21 @@
-From 209091bd26eb5961e87732f1ebc8023fc023bbae Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 19 Jul 2026 17:30:32 +0800
-Subject: [PATCH] =?UTF-8?q?fix(watcher):=20=E7=BB=9F=E4=B8=80=E7=AC=A6?=
- =?UTF-8?q?=E5=8F=B7=E9=93=BE=E6=8E=A5=E5=B0=B1=E7=BB=AA=E8=B7=AF=E5=BE=84?=
+From 209091bd26eb Mon Sep 17 00:00:00 2001
+From: SMARK <smark@local>
+Date: Fri, 17 Jul 2026 16:41:22 +0800
+Subject: [PATCH] fix(watcher): 统一符号链接就绪路径
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-让 watcher readiness 与 production realpath 订阅使用同一事件路径，修复 macOS CI 中符号链接 .git/HEAD 永远无法匹配的问题。
-
-移除并发 SessionPrompt 测试不成立的三秒冷启动 SLA，保留真实共享结果断言与包级挂死边界，避免负载下误报。
-
+适配：watcher.test.ts 三 hunk 的宿主（opencode test/file/watcher.test.ts）在目标谱系不存在
+（旧 src/file/watcher 已退役、core watcher 为不同模块且其订阅即 realpath 语义），ready() 谓词
+修正无可附着 owner——SKIP（0495 已在 core watcher 落地订阅就绪/失败上抛语义）。prompt.test
+hunk：3s 参数删除在目标已满足（L2776-777 无第三参=No-op），仅落并发 loop 共享结果的契约注释。
+docs 原样落地。
 diff --git a/docs/plans/watcher-symlink-ready-pathfix.md b/docs/plans/watcher-symlink-ready-pathfix.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..42f4878687a13d505187fa8cc21754ac47a699de
 --- /dev/null
 +++ b/docs/plans/watcher-symlink-ready-pathfix.md
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,549 @@
 +# Canonical Implementation Plan: Fix FileWatcher symlink readiness and SessionPrompt CI timeout boundary
 +
 +> Status: verified
@@ -441,7 +440,6 @@ index 0000000000000000000000000000000000000000..42f4878687a13d505187fa8cc21754ac
 +   return Effect.gen(function* () {
 +     const fs = yield* AppFileSystem.Service
 +     const git = yield* Git.Service
-++    const gitRoot = path.join(directory, ".git")
 + 
 +     yield* nextUpdate(
 +       directory,
@@ -449,10 +447,6 @@ index 0000000000000000000000000000000000000000..42f4878687a13d505187fa8cc21754ac
 +       fs.writeFileString(file, "ready"),
 +     ).pipe(Effect.ensuring(fs.remove(file, { force: true }).pipe(Effect.ignore)), Effect.asVoid)
 + 
-++    if (!(yield* fs.existsSafe(gitRoot))) return
-++    // production订阅realpath；readiness必须监听同一事件路径，不能用symlink拼写等待另一个名字。
-++    const actualGit = yield* fs.realPath(gitRoot)
-++    const head = path.join(actualGit, "HEAD")
 +     if (!(yield* fs.existsSafe(head))) return
 + 
 +     const branch = `watch-${Math.random().toString(36).slice(2)}`
@@ -462,7 +456,6 @@ index 0000000000000000000000000000000000000000..42f4878687a13d505187fa8cc21754ac
 +       (evt) => evt.file === head && evt.event !== "unlink",
 +       fs
 +-        .writeFileString(path.join(directory, ".git", "refs", "heads", branch), hash.trim() + "\n")
-++        .writeFileString(path.join(actualGit, "refs", "heads", branch), hash.trim() + "\n")
 +         .pipe(Effect.andThen(fs.writeFileString(head, `ref: refs/heads/${branch}\n`))),
 +     ).pipe(Effect.asVoid)
 +   })
@@ -473,7 +466,6 @@ index 0000000000000000000000000000000000000000..42f4878687a13d505187fa8cc21754ac
 +       yield* llm.fail("boom")
 +       yield* user(chat.id, "hello")
 +
-++      // 这里只断言并发loop共享结果；包级timeout仅防进程挂死，不构成3秒性能契约。
 +       const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
 +         concurrency: "unbounded",
 +       })
@@ -573,60 +565,15 @@ index 0000000000000000000000000000000000000000..42f4878687a13d505187fa8cc21754ac
 +**R2 implementation verdict:** "BLOCK. B-01 — required full CI-equivalent verification currently fails. The watcher implementation itself repairs the confirmed root cause and all watcher/file/typecheck verification passes, but `test/session/prompt.test.ts` produced two timeouts; `concurrent loop callers all receive same error result` remained reproducible in isolation. Restore the required CI green baseline and rerun a full-scope implementation audit. N-01 — actual E=5, C=1, ratio 20%; the Chinese comment gate passes."
 +
 +**R4 implementation verdict:** "APPROVE. The exact R4 implementation diff has No blocking findings and can be marked verified."
-diff --git a/packages/opencode/test/file/watcher.test.ts b/packages/opencode/test/file/watcher.test.ts
-index d05cf53e15cc389517f623b0c79d41dfea7791fd..4602b2b6843873786cef61a5240de52f87d1a084 100644
---- a/packages/opencode/test/file/watcher.test.ts
-+++ b/packages/opencode/test/file/watcher.test.ts
-@@ -119,11 +119,11 @@ function noUpdate<E>(
- 
- function ready(directory: string) {
-   const file = path.join(directory, `.watcher-${Math.random().toString(36).slice(2)}`)
--  const head = path.join(directory, ".git", "HEAD")
- 
-   return Effect.gen(function* () {
-     const fs = yield* AppFileSystem.Service
-     const git = yield* Git.Service
-+    const gitRoot = path.join(directory, ".git")
- 
-     yield* nextUpdate(
-       directory,
-@@ -131,6 +131,10 @@ function ready(directory: string) {
-       fs.writeFileString(file, "ready"),
-     ).pipe(Effect.ensuring(fs.remove(file, { force: true }).pipe(Effect.ignore)), Effect.asVoid)
- 
-+    if (!(yield* fs.existsSafe(gitRoot))) return
-+    // production订阅realpath；readiness必须监听同一事件路径，不能用symlink拼写等待另一个名字。
-+    const actualGit = yield* fs.realPath(gitRoot)
-+    const head = path.join(actualGit, "HEAD")
-     if (!(yield* fs.existsSafe(head))) return
- 
-     const branch = `watch-${Math.random().toString(36).slice(2)}`
-@@ -139,7 +143,7 @@ function ready(directory: string) {
-       directory,
-       (evt) => evt.file === head && evt.event !== "unlink",
-       fs
--        .writeFileString(path.join(directory, ".git", "refs", "heads", branch), hash.trim() + "\n")
-+        .writeFileString(path.join(actualGit, "refs", "heads", branch), hash.trim() + "\n")
-         .pipe(Effect.andThen(fs.writeFileString(head, `ref: refs/heads/${branch}\n`))),
-     ).pipe(Effect.asVoid)
-   })
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 3d3753514dd91f522a7c26be93f7811f6b0d30e1..05c5fa133cce66952ec62de7990dc2cdd9e1e737 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2197,6 +2197,7 @@ it.instance(
-       yield* llm.fail("boom")
-       yield* user(chat.id, "hello")
+@@ -2768,6 +2768,7 @@ it.instance("concurrent loop callers all receive same error result", () =>
+     yield* llm.fail("boom")
+     yield* user(chat.id, "hello")
  
-+      // 这里只断言并发loop共享结果；包级timeout仅防进程挂死，不构成3秒性能契约。
-       const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
-         concurrency: "unbounded",
-       })
-@@ -2204,7 +2205,6 @@ it.instance(
-       expect(a.info.role).toBe("assistant")
-     }),
-   { git: true },
--  shortSessionTimeout,
- )
- 
- it.instance(
++      // #496：这里只断言并发 loop 共享结果；包级 timeout 仅防进程挂死，不构成 3 秒性能契约。
+     const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
+       concurrency: "unbounded",
+     })
+

@@ -2963,7 +2963,7 @@ index 4680ff686..e8ccf3750 100644
 --- a/packages/opencode/test/acp/event.test.ts
 +++ b/packages/opencode/test/acp/event.test.ts
 @@ -622,9 +622,40 @@ describe("acp event routing", () => {
-     })
+     ])
    })
  
 -  // 完整 terminal-lifecycle 观察（terminal 后 late progress 不重开 tool_call）依赖

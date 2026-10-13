@@ -7,15 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(tool):=20shell=20=E6=9D=83=E9=99=90?=
  =?UTF-8?q?+=E9=9B=B6=E8=8A=82=E7=82=B9=E5=85=9C=E5=BA=95=EF=BC=89?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-tree-sitter-powershell 0.25.10 无法归类引号外独立 -- token：单语句形态 command 规则断裂导致 patterns 为空、命令零权限 ask 直接执行（生产事故：3 次零审查 git commit；近 7 天 222 条同类命令全部静默绕过）；紧邻分隔符形态丢弃所在命令段（审批证据缺段）。新增 normalizeBareDoubleDash 仅对权限解析输入把独立 -- 引号化（引号状态机 + 分隔符边界 + --%/引号内/--flag 豁免），执行命令保持原文；collect 以零 command 节点为条件追加原文兜底 pattern，分级仍由 precheck 手写 tokenizer 精确完成（git commit -- paths 恢复 cautious、git log -- paths 保持 safe），无粗暴 cautious 通道，cd-only 等有意零 pattern 类契约不变。
+适配说明：五生产 hunk 全量落地——normalizeBareDoubleDash/isTokenChar 插 listCommand 与 ShellTool 之间（目标函数顺序重排，shellCompatibilityError 已移 :756，纯位置适配函数体零改动）；collect 签名+parseInput/locals 提升/零节点兜底原样（#207 注释保留）；execute parseInput 声明插 compressOutput 后（目标 0590 增插行），parse/collect 两调用点改用 parseInput，执行与 audit 保持原文。测试 16 用例插 each("matches redirects") 前；Permission.Request→PermissionV1.Request、fail() 入参移除目标已不存在的 description 字段（目标 shell 参数面无该字段，属源时代字段）——其余断言逐字保留。
 
-16 个新行为测试（事故原形/缺段锁/零节点兜底/三类豁免锁×pwsh 矩阵）；shell 全量 202/0、permission 278/0、reviewer 8/0、typecheck clean；与音频/opentui 模块零交集。
 
 diff --git a/docs/plans/shell-bare-dash-permission-parse-repair.md b/docs/plans/shell-bare-dash-permission-parse-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..5011722156248889dbe3cfc39a261492b69cf0db
 --- /dev/null
 +++ b/docs/plans/shell-bare-dash-permission-parse-repair.md
 @@ -0,0 +1,329 @@
@@ -348,26 +345,22 @@ index 0000000000000000000000000000000000000000..5011722156248889dbe3cfc39a261492
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R2 | yes | B-01：INV-05 豁免锁（C1 引号内 `--`、C2 `--%`）为 approved R2 §13/§16 承诺的测试但未实现，全仓无任何等价覆盖（套件对引号状态分支删除不敏感），§23 "由既有 pattern 组回归覆盖"声明失实；实现本身经探针证实正确 | N-01 §23 省略 §18 tool-group 行（审计已补证：仅 shell/parameters 引用 shell.ts，四 seam 全绿）；N-02 L2 对零节点非空输入扩审批面（已批准边界，维持）；N-03 E 测试仅 `;` 变体（谓词与探针覆盖 `--&`/`--|`）；N-04 E/C 记录笔误（重算 E=40/C=25 生产，0.63）；N-05 quoted `"--"` 入 raw 证据（已记录边界） | BLOCK（补齐 C1/C2/C3 公开 seam 用例 + 更正 §23 覆盖声明与行数；shell 全量 202/0） | task ses_fa13b514bffeMOowUyqkcIKI8s |
 +| 2 | R2 | yes | 无（No blocking findings） | N-01 §23 记录过时（测试 +241/16 新测/202 pass；已随本 verdict 同步更正）；N-02 raw 证据含引号化 `--`（维持）；N-03 E 仅 `;` 变体（维持）；N-04 §10 边界措辞未含 `;&|`（R1 残留，已更正；§22/§16/实现一致）；N-05 全 diff 口径 C/E≈0.13（≥0.10 下限，<15% 目标） | APPROVE（仅限 R2 + 当前 diff：shell.ts +68/-3、shell.test.ts +241；独立复现 202/0、278/0、8/0、typecheck clean） | task ses_fa1262b6dffedgCrrVFx79pCpm |
+
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 0b9bb641748343e01904d0bb938ec8935b8b5e2a..b37469786f5de63b4330661660367703cad5ee81 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -763,6 +763,56 @@ function listCommand(name: string) {
+@@ -997,6 +997,52 @@ function listCommand(name: string) {
    return "the shell-native directory listing command"
  }
  
-+// [local-smark] 裸 `--` 词法盲区归一化开始
-+// tree-sitter-powershell 0.25.10（package.json 钉版）对引号外的独立 `--` token 没有
-+// 词法归类（`--` 前缀预留给自减运算符模式），command 规则在其后断裂：单语句形态
-+// 丢失全部 command 节点（生产事故：3 次零权限 ask 的 git commit），紧邻分隔符
-+// 形态丢弃所在命令段（审批证据缺段）。引号化为 `"--"` 后两种形态均完整解析
-+// （探针实证），且对 bash grammar 无害（其天然接受 `--`）。仅用于权限解析输入，
-+// 实际执行命令保持原文（INV-03，先例 :1399 inline-python 的解析/执行分离）。
-+// token 边界 = 空白/串首/串尾/分隔符 `;` `&` `|`：分隔符是 shell 的 token 终止符，
-+// `--;`/`--&` 形态探针实证裸形丢段、引号化全恢复（R1 审计 B-02）。
-+// 豁免：`--%`（PowerShell stop-parsing 保留字）与一切带 sequel 字符的 `--x`
-+// 形态（不满足独立 token 判定，天然豁免）；引号内 `--` 是数据，状态机内不触碰。
++// [local-smark] 600 裸 `--` 词法盲区归一化：tree-sitter-powershell 0.25.10 对引号外的
++// 独立 `--` token 没有词法归类，command 规则在其后断裂：单语句形态丢失全部
++// command 节点（生产事故：3 次零权限 ask 的 git commit），紧邻分隔符形态丢弃
++// 所在命令段（审批证据缺段）。引号化为 `"--"` 后两种形态均完整解析，且对
++// bash grammar 无害。仅用于权限解析输入，实际执行命令保持原文（INV-03）。
++// token 边界 = 空白/串首/串尾/分隔符 `;` `&` `|`；豁免 `--%` 与一切 `--x` sequel 形态。
 +function normalizeBareDoubleDash(command: string) {
++  // 快路径：无 -- 时零拷贝返回，绝大多数命令不进入状态机。
 +  if (!command.includes("--")) return command
 +  let out = ""
 +  let quote: "" | "'" | '"' | "`" = ""
@@ -389,7 +382,9 @@ index 0b9bb641748343e01904d0bb938ec8935b8b5e2a..b37469786f5de63b4330661660367703
 +    const after = command[i + 2]
 +    const before = command[i - 1]
 +    // 独立 `--` token：两侧均非 token 字符且非 `--%` 保留字（sequel 为 % 直接豁免）
++    // `--flag` 因 sequel 是字母（token 字符）被左侧否定排除，天然不改写。
 +    if (ch === "-" && command[i + 1] === "-" && after !== "%" && !isTokenChar(after) && !isTokenChar(before)) {
++      // i++ 跳过第二个 -，避免第二字符重复进入独立 token 判定。
 +      out += '"--"'
 +      i++
 +      continue
@@ -400,16 +395,14 @@ index 0b9bb641748343e01904d0bb938ec8935b8b5e2a..b37469786f5de63b4330661660367703
 +}
 +
 +// token 字符 = 非空白/非分隔符的可见字符；`--` 两侧均非 token 字符即独立 token
-+// （`--flag`、`--%`、`-->` 等带 sequel 字符形态不满足，天然豁免）
 +function isTokenChar(ch: string | undefined) {
 +  return ch !== undefined && !/\s/.test(ch) && ch !== ";" && ch !== "&" && ch !== "|"
 +}
-+// [local-smark] 裸 `--` 词法盲区归一化结束
 +
- function shellCompatibilityError(root: Node, shellName: string): string | undefined {
-   if (process.platform !== "win32") return
-   if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
-@@ -986,6 +1036,7 @@ export const ShellTool = Tool.define(
+ export const ShellTool = Tool.define(
+   ShellID.ToolID,
+   Effect.gen(function* () {
+@@ -1049,6 +1095,7 @@ export const ShellTool = Tool.define(
        ps: boolean,
        shell: string,
        instance: InstanceContext,
@@ -417,24 +410,25 @@ index 0b9bb641748343e01904d0bb938ec8935b8b5e2a..b37469786f5de63b4330661660367703
      ) {
        const scan: Scan = {
          dirs: new Set<string>(),
-@@ -994,8 +1045,9 @@ export const ShellTool = Tool.define(
+@@ -1057,9 +1104,10 @@ export const ShellTool = Tool.define(
          always: new Set<string>(),
        }
        const shellKind = ShellID.toKind(Shell.name(shell))
 +      const locals = localCommands(root)
  
+       // #207：collect 循环改用 localCommands——过滤远程载荷范围后的命令节点进行 external_directory 扫描
 -      for (const node of localCommands(root)) {
 +      for (const node of locals) {
          const command = parts(node)
          const tokens = command.map((item) => item.text)
          const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
-@@ -1025,6 +1077,15 @@ export const ShellTool = Tool.define(
+@@ -1087,6 +1135,15 @@ export const ShellTool = Tool.define(
          }
        }
  
-+      // [local-smark] 零 command 节点兜底（INV-01）：grammar 归一化后仍解析不出任何
-+      // command 节点的非空命令，以解析输入 trim 原文作为 pattern 进入 ask——分级由
-+      // precheck 手写 tokenizer 精确完成（进入分类的入口，非 cautious 通道）。
++      // [local-smark] 600 零 command 节点兜底（INV-01）：grammar 归一化后仍解析不出
++      // 任何 command 节点的非空命令，以解析输入 trim 原文作为 pattern 进入 ask——
++      // 分级由 precheck 手写 tokenizer 精确完成（进入分类的入口，非 cautious 通道）。
 +      // 条件限定零节点而非 patterns 空集：CWD 类命令解析正常但有意零 pattern
 +      // （cd-only 契约测试锁定），不属于解析失败，不得扩审批面。
 +      if (scan.patterns.size === 0 && locals.length === 0 && parseInput.trim()) {
@@ -444,39 +438,42 @@ index 0b9bb641748343e01904d0bb938ec8935b8b5e2a..b37469786f5de63b4330661660367703
        return scan
      })
  
-@@ -1397,15 +1458,19 @@ export const ShellTool = Tool.define(
-               // 下对高置信的单一 python -c "..." 命令做引号修复。不命中则返回 undefined，
-               // 原命令原样执行，不产生 compatibility error 或 adaptation metadata。
+@@ -1487,17 +1544,21 @@ export const ShellTool = Tool.define(
+               // 下对高置信的单一 python -c "..." 命令做引号修复。不命中返回 undefined，
+               // 原命令原样执行，不产生 compatibility error 或 adaptation metadata
                const normalization = ps ? normalizePowerShellInlinePython(params.command) : undefined
-+              // [local-smark] 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
++              // [local-smark] 600 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
 +              // 与 audit 元数据保持 params.command 原文；ps 分支限定因 bash grammar
-+              // 对 `--` 天然免疫（探针实证），不改无缺陷路径。
++              // 对 `--` 天然免疫，不改无缺陷路径。
 +              const parseInput = ps ? normalizeBareDoubleDash(params.command) : params.command
+               // 从配置和参数决定是否启用输出压缩，默认启用
+               const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
                yield* Effect.scoped(
                  Effect.gen(function* () {
 -                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
 +                  const tree = yield* Effect.acquireRelease(parse(parseInput, ps), (tree) =>
                      Effect.sync(() => tree.delete()),
                    )
-                   // [local-smark] shell compatibility check
-                   const compatibility = shellCompatibilityError(tree.rootNode, name)
-                   if (compatibility) throw new Error(compatibility)
--                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
-+                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx, parseInput)
+                                 // parse 后检测 Unix 工具误用，不兼容时抛出错误阻止执行
+               const compatibility = shellCompatibilityError(tree.rootNode, name)
+               if (compatibility) throw new Error(compatibility)
+-              const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
++              const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx, parseInput)
                    if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
-                   // 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
+                   // [local-smark] 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
                    if (normalization) scan.raw.add(normalization.audit)
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64a7682acd 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1734,6 +1734,247 @@ describe("tool.shell permissions", () => {
+@@ -1580,6 +1580,261 @@ it.live("uses Git Bash /tmp semantics for external workdir", () =>
      }),
    )
  
 +  // [local-smark] 裸 `--` 解析修复（R2 计划）：tree-sitter-powershell 0.25.10 无法归类
 +  // 引号外独立 `--` token → command 规则断裂/丢段 → patterns 空或缺失段。
 +  // 以下红测复现生产事故形态（2026-09-01 三次零 ask commit），修复后转绿。
++  // 事故主形态：单语句裸 -- 使 command 规则断裂，零节点兑底前的第一层验证。
 +  for (const item of ps) {
 +    it.live(`asks for bash permission when bare -- separates git command arguments [${item.label}]`, () =>
 +      withShell(
@@ -486,16 +483,18 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：修复前裸 -- 使 grammar 断裂，patterns 空集触发零 ask 直通。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
-+                  { command: `git commit -m "x" -- a.ts`, description: "Commit with dash separator" },
++                  { command: `git commit -m "x" -- a.ts` },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
++              // 600：引号化后 command 节点恢复，git commit 进入审批 pattern。
 +              expect(bashReq!.patterns.some((p) => p.startsWith("git commit"))).toBe(true)
 +            }),
 +          )
@@ -513,19 +512,20 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：生产事故逐字原形（多 -m+多路径+裸 --）——事故当日三次零 ask 的命令。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
 +                  {
 +                    command: `git commit --only -m "a" -m "b" -- p1.txt p2.txt`,
-+                    description: "Incident commit shape",
 +                  },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
++              // 600：事故原形（双 -m+多路径）完整解析后前缀恢复，非零节点兜底通道。
 +              expect(bashReq!.patterns.some((p) => p.startsWith("git commit"))).toBe(true)
 +            }),
 +          )
@@ -544,18 +544,19 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：git log 属只读安全类——修复不得借机把它升为 cautious 粗断言。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
-+                  { command: `git log --oneline -2 -- path`, description: "Log with dash separator" },
++                  { command: `git log --oneline -2 -- path` },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
 +              expect(bashReq!.patterns.some((p) => p.startsWith("git log"))).toBe(true)
-+              // 分级断言交 precheck 既有测试；此处锁 ask 形态与前缀精度
++              // 600：分级断言交 precheck 既有测试；此处锁 ask 形态与前缀精度不变。
 +            }),
 +          )
 +        }),
@@ -573,19 +574,20 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：分隔符 `;` 紧贴 -- 是最小丢段形态（token 边界含分隔符的原因）。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
 +                  {
 +                    command: `git checkout --;git reset --hard`,
-+                    description: "Separator-adjacent dash",
 +                  },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
++              // 600：`;` 前裸 -- 修复前丢弃 git checkout 段——两段前缀都在才证明无丢段。
 +              expect(bashReq!.patterns.some((p) => p.startsWith("git checkout"))).toBe(true)
 +              expect(bashReq!.patterns.some((p) => p.startsWith("git reset"))).toBe(true)
 +            }),
@@ -605,19 +607,20 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：未闭合引号是归一化后仍零节点的残余形态——兜底必须仍然 ask。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
 +                  {
 +                    command: `git commit -m "unclosed`,
-+                    description: "Unclosed quote fallback",
 +                  },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
++              // 600：零节点兜底注入解析输入 trim 原文——非空 pattern 即非零 ask。
 +              expect(bashReq!.patterns.some((p) => p.trim().length > 0)).toBe(true)
 +            }),
 +          )
@@ -638,16 +641,18 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：引号状态机验证——引号内 token 属数据域，越过引号即破坏语义。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
-+                  { command: `echo "a -- b"`, description: "In-quote dash stays data" },
++                  { command: `echo "a -- b"` },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
++              // 600：引号内 -- 是数据；出现引号化痕迹即状态机越界改写。
 +              expect(bashReq!.patterns.some((p) => p.includes("a -- b"))).toBe(true)
 +              expect(bashReq!.patterns.some((p) => p.includes('"--"'))).toBe(false)
 +            }),
@@ -666,16 +671,18 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：--% 后续 token 不经 PowerShell 解析——引号化会改变其语义。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
-+                  { command: `git push --% --force`, description: "Stop-parsing sequence stays verbatim" },
++                  { command: `git push --% --force` },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
++              // 600：--% 是 PowerShell stop-parsing 保留字，sequel 豁免不改写。
 +              expect(bashReq!.patterns.some((p) => p.includes("--%"))).toBe(true)
 +              expect(bashReq!.patterns.some((p) => p.includes('"--%"'))).toBe(false)
 +              expect(bashReq!.patterns.some((p) => p.includes('"--"'))).toBe(false)
@@ -695,17 +702,19 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +          yield* runIn(
 +            tmp,
 +            Effect.gen(function* () {
++              // 600：同命令内 flag 与裸 -- 共存——只有独立 token 被引号化。
 +              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
 +              expect(
 +                yield* fail(
-+                  { command: `git log --oneline -2 -- path`, description: "Flag dashes stay verbatim" },
++                  { command: `git log --oneline -2 -- path` },
 +                  capture(requests, err),
 +                ),
 +              ).toMatchObject({ message: err.message })
 +              const bashReq = requests.find((r) => r.permission === "bash")
 +              expect(bashReq).toBeDefined()
-+              // flag 形态 `--oneline` 原样保留；只有独立 `--` 被引号化
++              // 600：flag 形态 `--oneline` 原样保留；只有独立 `--` 被引号化，
++              // 防止改写器扩大到带参形态（INV-05 第三类豁免）。
 +              expect(bashReq!.patterns.some((p) => p.includes("--oneline"))).toBe(true)
 +              expect(bashReq!.patterns.some((p) => p.includes('"--oneline"'))).toBe(false)
 +            }),
@@ -714,6 +723,7 @@ index 851c5cbcb7e4787adef4af65d3b67cb21ad05715..5ee1e88d233e112269a2c1b162fbfb64
 +      ),
 +    )
 +  }
++
 +
    each("matches redirects in permission pattern", () =>
      Effect.gen(function* () {

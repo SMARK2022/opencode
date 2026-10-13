@@ -18,7 +18,7 @@ diff --git a/.husky/pre-push b/.husky/pre-push
 index 3642652fbd9273f6ea65905680a57a36e443963e..4c241170877d09a4ddb06b332aafb6b8f218b345 100755
 --- a/.husky/pre-push
 +++ b/.husky/pre-push
-@@ -32,3 +32,36 @@ if (process.versions.bun !== expectedBunVersion) {
+@@ -32,3 +32,38 @@ if (process.versions.bun !== expectedBunVersion) {
  }
  '
  bun typecheck
@@ -36,6 +36,8 @@ index 3642652fbd9273f6ea65905680a57a36e443963e..4c241170877d09a4ddb06b332aafb6b8
 +  submodule_pointer=$(git ls-tree HEAD -- "$submodule_path" | awk '{print $3}')
 +  [ -n "$submodule_pointer" ] || continue
 +  submodule_tip=$(git ls-remote "$submodule_url" "refs/heads/$submodule_branch" 2>/dev/null | awk '{print $1}')
++  # tip 为空是 fail-closed：网络失败与分支缺失在此不可区分，拒绝推送是唯一安全方向
++  # （2>/dev/null 隐藏了真实原因，文案保守地指向分支不存在）。
 +  if [ -z "$submodule_tip" ]; then
 +    echo "submodule-check FAILED: $submodule_path 的跟踪分支 $submodule_branch 在 $submodule_url 上不存在" >&2
 +    submodule_status=1

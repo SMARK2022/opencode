@@ -195,9 +195,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="شعار OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="شعار OpenCode">
 +    </picture>
 +  </a>
 +</p>
@@ -465,9 +465,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -735,9 +735,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo do OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo do OpenCode">
 +    </picture>
 +  </a>
 +</p>
@@ -1005,9 +1005,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -1275,9 +1275,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -1545,9 +1545,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -1815,9 +1815,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -2085,9 +2085,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
 +    </picture>
 +  </a>
 +</p>
@@ -2355,9 +2355,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -2625,9 +2625,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
 +    </picture>
 +  </a>
 +</p>
@@ -2895,9 +2895,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -3165,9 +3165,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -3435,9 +3435,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -3705,9 +3705,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -3975,9 +3975,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -4245,9 +4245,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -4515,9 +4515,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -4786,9 +4786,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -5057,9 +5057,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -5356,9 +5356,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -5669,9 +5669,9 @@ new file mode 100644
 +<p align="center">
 +  <a href="https://opencode.ai">
 +    <picture>
-+      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-+      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-+      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
 +    </picture>
 +  </a>
 +</p>
@@ -5836,37 +5836,47 @@ diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test
 diff --git a/packages/app/src/context/file/path.test.ts b/packages/app/src/context/file/path.test.ts
 --- a/packages/app/src/context/file/path.test.ts
 +++ b/packages/app/src/context/file/path.test.ts
-@@ -116,17 +116,17 @@ describe("encodeFilePath", () => {
-       const url = new URL(fileUrl)
-       expect(url.protocol).toBe("file:")
-       expect(url.pathname).toContain("README.bs.md")
+@@ -130,14 +130,15 @@ describe("encodeFilePath", () => {
+    describe("Windows paths", () => {
+      test("should handle Windows absolute path with backslashes", () => {
+-      const windowsPath = "D:\\dev\\projects\\opencode\\README.bs.md"
++      // #319：输入必须与断言同步迁移 docs/readme——encodeFilePath 是纯路径变换，输入留旧路径必红
++      const windowsPath = "D:\\dev\\projects\\opencode\\docs\\readme\\README.bs.md"
+        const result = encodeFilePath(windowsPath)
+        const fileUrl = `file://${result}`
+ 
+        // Should create a valid, parseable URL
+        expect(() => new URL(fileUrl)).not.toThrow()
+ 
+        const url = new URL(fileUrl)
+        expect(url.protocol).toBe("file:")
+        expect(url.pathname).toContain("README.bs.md")
 -      expect(result).toBe("/D:/dev/projects/opencode/README.bs.md")
 +      expect(result).toBe("/D:/dev/projects/opencode/docs/readme/README.bs.md")
-     })
- 
-     test("should handle mixed separator path (Windows + Unix)", () => {
-       // This is what happens in build-request-parts.ts when concatenating paths
+      })
+@@ -145,9 +146,9 @@ describe("encodeFilePath", () => {
+    test("should handle mixed separator path (Windows + Unix)", () => {
+      // This is what happens in build-request-parts.ts when concatenating paths
 -      const mixedPath = "D:\\dev\\projects\\opencode/README.bs.md"
 +      const mixedPath = "D:\\dev\\projects\\opencode/docs/readme/README.bs.md"
-       const result = encodeFilePath(mixedPath)
-       const fileUrl = `file://${result}`
+      const result = encodeFilePath(mixedPath)
+      const fileUrl = `file://${result}`
  
-       expect(() => new URL(fileUrl)).not.toThrow()
+      expect(() => new URL(fileUrl)).not.toThrow()
 -      expect(result).toBe("/D:/dev/projects/opencode/README.bs.md")
 +      expect(result).toBe("/D:/dev/projects/opencode/docs/readme/README.bs.md")
-     })
- 
-     test("should handle Windows path with spaces", () => {
-@@ -171,9 +171,9 @@ describe("encodeFilePath", () => {
-       const result = encodeFilePath(windowsPath)
-       const fileUrl = `file://${result}`
+    })
+@@ -191,9 +192,10 @@ describe("encodeFilePath", () => {
+    test("should NOT create invalid URL like the bug report", () => {
+      // This is the exact scenario from bug report by @alexyaroshuk
+-      const windowsPath = "D:\\dev\\projects\\opencode\\README.bs.md"
++      // #319：bug-report 场景输入同步迁移，not.toBe 负向锚与新路径保持一致
++      const windowsPath = "D:\\dev\\projects\\opencode\\docs\\readme\\README.bs.md"
+      const result = encodeFilePath(windowsPath)
+      const fileUrl = `file://${result}`
  
 -      // The bug was creating: file://D%3A%5Cdev%5Cprojects%5Copencode/README.bs.md
 +      // The bug was creating: file://D%3A%5Cdev%5Cprojects%5Copencode/docs/readme/README.bs.md
-       expect(result).not.toContain("%5C") // Should not have encoded backslashes
+      expect(result).not.toContain("%5C") // Should not have encoded backslashes
 -      expect(result).not.toBe("D%3A%5Cdev%5Cprojects%5Copencode/README.bs.md")
 +      expect(result).not.toBe("D%3A%5Cdev%5Cprojects%5Copencode/docs/readme/README.bs.md")
- 
-       // Should be valid
-       expect(() => new URL(fileUrl)).not.toThrow()
-

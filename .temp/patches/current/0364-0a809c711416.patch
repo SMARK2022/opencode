@@ -238,8 +238,14 @@ index 1dd29e7d8..179ef3630 100644
  import { Instruction } from "@/session/instruction"
  import { LLM } from "@/session/llm"
  import { SessionProcessor } from "@/session/processor"
-@@ -233,6 +234,7 @@
+@@ -238,12 +239,13 @@
    Permission.node,
+   // #199：LayerNode.compile 仅 provide deps 而不注入成员；生产 server runtime
+   // #199：必须把 reviewer/cache/circuit 并列入组，否则 Auto agent 在生产
+   // #199：恒 fail-closed（AutoDeniedError），用户 bash:auto 也退化为普通 ask。
+   PermissionReviewer.node,
+   PermissionSessionCache.node,
+   PermissionCircuitBreaker.node,
    PermissionSaved.node,
    Todo.node,
 +  SessionGoal.node,
@@ -650,10 +656,11 @@ index 8a4231da6..52841ca60 100644
            break
          }
          case "session.updated": {
-@@ -964,6 +995,17 @@
-               sdk.client.session.diff({ sessionID }),
-               sdk.client.session.status({ workspace: project.workspace.current() }),
-             ])
+@@ -971,6 +1002,17 @@
+              sdk.client.session.diff({ sessionID }),
+              // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
+              sdk.client.session.status({ workspace: project.workspace.current() }),
+            ])
 +            // #364：goal fetch：非致命，失败不影响 session sync
 +            // SDK 未重新生成，使用 as any 绕过方法不存在检查
 +            try {
@@ -666,8 +673,7 @@ index 8a4231da6..52841ca60 100644
 +              // goal 端点不可用时不阻塞 session sync
 +            }
              setStore(
-               produce((draft) => {
-                 const match = search(draft.session, sessionID, (s) => s.id)
+              produce((draft) => {
 diff --git a/packages/tui/src/feature-plugins/builtins.ts b/packages/tui/src/feature-plugins/builtins.ts
 index b67923f3c..d9345bf8e 100644
 --- a/packages/tui/src/feature-plugins/builtins.ts
@@ -1828,3 +1834,16 @@ index 3afdf03a0..1d28b547b 100644
      })
    },
  } satisfies Omit<DatabaseMigration.Migration, "id">
+
+diff --git a/packages/opencode/test/session/tools.test.ts b/packages/opencode/test/session/tools.test.ts
+--- a/packages/opencode/test/session/tools.test.ts
++++ b/packages/opencode/test/session/tools.test.ts
+@@ -142,5 +142,8 @@
+      processor,
+      bypassAgentCheck: false,
+      messages: [],
++      // #364：SessionTools.resolve 新增必填 goalSvc——本测试不触达 goal tool，
++      // 以最小 stub 满足 Interface（方法均返回空值 Effect）。
++      goalSvc: { get: () => Effect.succeed(null), set: () => Effect.succeed(null), clear: () => Effect.succeed(false), accountUsage: () => Effect.void } as never,
+      promptOps: {} as never,
+    })

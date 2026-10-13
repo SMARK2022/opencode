@@ -13,104 +13,8 @@ Content-Transfer-Encoding: 8bit
 
 修复：(1) exit 快照改退出时惰计算——删除 eager memo 与随-delta createEffect，改为一次性注册惰性 producer，exit.message 支持 lazy 取值；token 计数数值口径不变。(2) 采纳 OpenTUI 0.4.3-smark.12：reconciler 待销毁积压加 MAX_PENDING_DESTROY 阈值、超阈值同步 drain（defer 与 move/reuse 语义不变）。
 
-diff --git a/bun.lock b/bun.lock
-index 51175b466bc7b7435b7eab95fcf4eb1fd0c1275a..b28e66ab0589029c2744866f4dd6dcb12708acd7 100644
---- a/bun.lock
-+++ b/bun.lock
-@@ -541,9 +541,9 @@
-         "typescript": "catalog:",
-       },
-       "peerDependencies": {
--        "@opentui/core": ">=0.4.3-smark.1",
--        "@opentui/keymap": ">=0.4.3-smark.1",
--        "@opentui/solid": ">=0.4.3-smark.1",
-+        "@opentui/core": ">=0.4.3-smark.12",
-+        "@opentui/keymap": ">=0.4.3-smark.12",
-+        "@opentui/solid": ">=0.4.3-smark.12",
-       },
-       "optionalPeers": [
-         "@opentui/core",
-@@ -709,17 +709,17 @@
-     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
-   },
-   "overrides": {
--    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-0.4.3-smark.11.tgz",
--    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-arm64-0.4.3-smark.11.tgz",
--    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-x64-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-musl-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-musl-0.4.3-smark.11.tgz",
--    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-arm64-0.4.3-smark.11.tgz",
--    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-x64-0.4.3-smark.11.tgz",
--    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-keymap-0.4.3-smark.11.tgz",
--    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-solid-0.4.3-smark.11.tgz",
-+    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz",
-+    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
-+    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
-     "@types/bun": "catalog:",
-     "@types/node": "catalog:",
-     "poe-oauth": "0.0.6",
-@@ -735,9 +735,9 @@
-     "@npmcli/arborist": "9.4.0",
-     "@octokit/rest": "22.0.0",
-     "@openauthjs/openauth": "0.0.0-20250322224806",
--    "@opentui/core": "0.4.3-smark.11",
--    "@opentui/keymap": "0.4.3-smark.11",
--    "@opentui/solid": "0.4.3-smark.11",
-+    "@opentui/core": "0.4.3-smark.12",
-+    "@opentui/keymap": "0.4.3-smark.12",
-+    "@opentui/solid": "0.4.3-smark.12",
-     "@pierre/diffs": "1.1.0-beta.18",
-     "@playwright/test": "1.60.0",
-     "@sentry/solid": "10.36.0",
-@@ -1616,27 +1616,27 @@
- 
-     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.40.0", "https://registry.npmmirror.com/@opentelemetry/semantic-conventions/-/semantic-conventions-1.40.0.tgz", {}, "sha512-cifvXDhcqMwwTlTK04GBNeIe7yyo28Mfby85QXFe1Yk8nmi36Ab/5UQwptOx84SsoGNRg+EVSjwzfSZMy6pmlw=="],
- 
--    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-0.4.3-smark.11.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.11", "@opentui/core-darwin-x64": "0.4.3-smark.11", "@opentui/core-linux-arm64": "0.4.3-smark.11", "@opentui/core-linux-arm64-musl": "0.4.3-smark.11", "@opentui/core-linux-x64": "0.4.3-smark.11", "@opentui/core-linux-x64-musl": "0.4.3-smark.11", "@opentui/core-win32-arm64": "0.4.3-smark.11", "@opentui/core-win32-x64": "0.4.3-smark.11" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-q+RjcrMA6vXz46h8/SupE/Gl9QtgcyGlIOAO3VZlV7HwLUvJAPPGEh4gWdFjGclP5SquMQ9B3TatiYHXJ4D66g=="],
-+    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.12", "@opentui/core-darwin-x64": "0.4.3-smark.12", "@opentui/core-linux-arm64": "0.4.3-smark.12", "@opentui/core-linux-arm64-musl": "0.4.3-smark.12", "@opentui/core-linux-x64": "0.4.3-smark.12", "@opentui/core-linux-x64-musl": "0.4.3-smark.12", "@opentui/core-win32-arm64": "0.4.3-smark.12", "@opentui/core-win32-x64": "0.4.3-smark.12" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-LGVJWpnCkK+DZaHzctBZSjsGdzLkqKTlGLb+PiCReE8072xIRotb6QrxoFOSnH99RdrCHD0PTMikUtwQ5yJnDg=="],
- 
--    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-arm64-0.4.3-smark.11.tgz", {}, "sha512-X4W32M7v9JeiFNWoMDto2bJ6kOhAb2p6eJxes6R52/gpd7vl/JiG8q0mdfo1AG0QTWE8/0wPCE18Ea1h4bDuHQ=="],
-+    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz", {}, "sha512-X7Ti59iiAqiS+MctJKSaxNdq1upFa4uVqPixzZpi5e0vN6DvJETpxyNchyAYOblhXbRotPreZII/s6SPm1VH3A=="],
- 
--    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-x64-0.4.3-smark.11.tgz", {}, "sha512-2EOWKeptxnzWk2PKbxMhRah901zSHPPYzMs0y3ZvduKxGBd4cLezwig4hm1wNIh3fd0H/fHF5sjCIHVWbkFmOA=="],
-+    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz", {}, "sha512-LnvsOGyIgb+sEq4VYnAUzPrL6rGGYNVpKQGX9j3X3to8gIKxLPpcO032gA5TeX7Q97cVbgbHiG374KpOFdjwkw=="],
- 
--    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-0.4.3-smark.11.tgz", {}, "sha512-kykF5DruTIImlgMfCzfOMvwdFG1HkDMVsoVfJGWqoMX3p6XrvAB0d/kDuIYk8D+NmgECD80fGk+MxfuPr6uiyg=="],
-+    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz", {}, "sha512-64N3xqov96lN/XoV9tnzKlSjJXPxrT95eppr4P8NYkaeWPFbtNbThutgAAXPmmd5hBee4EB0Rdq+nMTODGVBRQ=="],
- 
--    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-musl-0.4.3-smark.11.tgz", {}, "sha512-pqk8hviu1JkN2XoLj5/zvFBKp8HCQ8VJjzfjwd4xUq8NEq8wEBu6FjLk5Xcfdrjf8KSFcpNQ8MTxK/Hy8T5Nfw=="],
-+    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz", {}, "sha512-dx51XRvLjQc0Wt73tDK5uj8j8ndJzz1iqP6oIcphDRpNE3+9pRhgrtGmgebKArol6yvKQxY1vAqI+fr+tvK59A=="],
- 
--    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-0.4.3-smark.11.tgz", {}, "sha512-6axCmJUZjjh3zBoajQS5rwWYfeIV8vnqrwCFcFgiPfYHKcCBi2yOLZ+voWCCFnbcdmLpEzVgY75EPtes4M64Zg=="],
-+    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz", {}, "sha512-Abw1EmvKh0lA2zSuMnPrqD0pi6nmFooYpjH/wyyxefsSS9SYBVq5we7IFev3hUM6P38oibFTuRMpBAq06oKN6Q=="],
- 
--    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-musl-0.4.3-smark.11.tgz", {}, "sha512-+E4H1gZMHO4Ra2SVN7n4aki7WYEMwUgTPPV7pfbaIj/kn31qfeSkueNBhq+iJSkk36otbx5dEn+h/B3HdnupkA=="],
-+    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz", {}, "sha512-nr1E67xJ3taU0YLN6xW/mzD4eHiRToJnTAhdfckI21ues9iSolKbQpe/lo/IMX+3k4ebAKakwkDZIYS25cbHJg=="],
- 
--    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-arm64-0.4.3-smark.11.tgz", {}, "sha512-yfjvV/IWrkKNaLyRQcR1yiuPLEpf8vUtBZ9vOYEZ+dhwXd/7uOsDkgLecs6+qgTCtdOEsOYUHqqmvD8ACOq+Yg=="],
-+    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz", {}, "sha512-5y7/E56F7FObVZdLvDmd/n7Lyp2twkSkhvTNhvRQrwb3iASXuiK2xlct6YgT+t35TthpVGmrgJip6dALMce3jw=="],
- 
--    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-x64-0.4.3-smark.11.tgz", {}, "sha512-S7MsEGR5HIV1Cg/kGg/pkOQeKS0ly5SRLAJWniS3/U2Tk1jgKQkVNq7q9SY4WvfEGg91aowx8iBaIvzGdSEGzA=="],
-+    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz", {}, "sha512-xs38fltR0unoSYoRveMgwOy9A1+PZzLQRHVRwIFR71gYE/ojUJ1y6RVJ0B8RXJ950Qmu++jkDxT1tPeW9sd5Yg=="],
- 
--    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-keymap-0.4.3-smark.11.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.11" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.11", "@opentui/solid": "0.4.3-smark.11", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-W2bAc1eflIkLqw0e9zclGZLZPx4Z7cqkLv5lrJerYfw/pQy15TgsouL1yawmIpbi6+vzkcrf9Kwps0qgKXTXNg=="],
-+    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.12" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.12", "@opentui/solid": "0.4.3-smark.12", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-J1KFnA8c1nmBTbI3i56zzpmdo/rbS03zUNTOexS5CeB5oUs2mNhIhrsodK5jamhOosRI00S6IcRUWvA7ACpr4Q=="],
- 
--    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-solid-0.4.3-smark.11.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.11", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-ZGyluDqWjNG/ogChzHKjfX7b/gM8UNBIlyP/aDcRYVpHBF3W4BwG8Ngkg1zZqXzbb7mTGm4cS4klIQ2Yd13J9Q=="],
-+    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.12", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-eMJSLeZnHB/6bAMGs6PwcIvxMG+s2b3DRO+PjM+7YwGV2pT/BDrqdFo8cCifAw+ub/s90HZL9N74ummC9b4G3A=="],
- 
-     "@oslojs/asn1": ["@oslojs/asn1@1.0.0", "https://registry.npmmirror.com/@oslojs/asn1/-/asn1-1.0.0.tgz", { "dependencies": { "@oslojs/binary": "1.0.0" } }, "sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA=="],
- 
+适配说明：承载 source 的 exit 快照惰性计算语义与 smark.12 采纳中目标谱系可达部分。语义移植映射：source 的 packages/opencode/src/cli/cmd/tui/context/exit.tsx（ExitMessage = string | (() => string|undefined) + message.set 放宽 + get 惰性求值）在目标无对应 message store——等价 owner 是 epilogue seam：epilogue.tsx set 签名放宽为 string | producer；app.tsx 的 exit.epilogue 类型放宽并在 Tui.run 返回边界（Deferred.await(shutdown) 之后）求值 producer；session/index.tsx 删除 sessionUsage 急 memo（卡死根因：per-delta tokenAccounting ~15ms 饿死 nextTick）与 per-delta epilogue effect + onCleanup 还原，改为一次性 onMount 注册 producer（数字语义 output+reasoning 合并/cache 排除不变；不还原 onCleanup 为 source 同款决策）。新测试 session-exit-lazy.test.tsx 以 fail-capable 契约断言锁惰性形态（onMount producer 存在/急 memo 与 effect 缺席/退出边界求值/set 签名），沿 #491 call-site 契约测试先例。丢弃段（SUPERSEDED_BY_REGISTRY）：bun.lock 四段、根/core/opencode package.json overrides、plugin peer——目标谱系 registry 0.4.5 catalog 形态无 smark tarball URL/版本字符串，文本重放不可收敛且与交付策略冲突。gitlink 0f64a76e→2145b934 承载 reconciler bounded-destroy 修复的源指针追踪（preimage 与 0613 postimage 精确衔接）。
+
 diff --git a/docs/plans/tui-token-accounting-and-destroy-backlog-repair.md b/docs/plans/tui-token-accounting-and-destroy-backlog-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..68352a88b60014a59f5ff3ed3e2a5b6087a1b413
@@ -420,310 +324,6 @@ index 0000000000000000000000000000000000000000..68352a88b60014a59f5ff3ed3e2a5b60
 +**未验证项**：OpenTUI reconciler 改动进入生产二进制需另走 OpenTUI 版本发布（见 §20 开放决定）；本地 solid 套件已验证行为。
 +
 +---
-diff --git a/package.json b/package.json
-index ccaa182ac5a8a48b51f95fb547c042c755d1d43f..a02a7e45e77b587bf7cf3cd916f978c7599560dd 100644
---- a/package.json
-+++ b/package.json
-@@ -36,9 +36,9 @@
-       "@types/cross-spawn": "6.0.6",
-       "@octokit/rest": "22.0.0",
-       "@hono/zod-validator": "0.4.2",
--      "@opentui/core": "0.4.3-smark.11",
--      "@opentui/keymap": "0.4.3-smark.11",
--      "@opentui/solid": "0.4.3-smark.11",
-+      "@opentui/core": "0.4.3-smark.12",
-+      "@opentui/keymap": "0.4.3-smark.12",
-+      "@opentui/solid": "0.4.3-smark.12",
-       "ulid": "3.0.1",
-       "@kobalte/core": "0.13.11",
-       "@types/luxon": "3.7.1",
-@@ -128,17 +128,17 @@
-     "electron"
-   ],
-   "overrides": {
--    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-0.4.3-smark.11.tgz",
--    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-keymap-0.4.3-smark.11.tgz",
--    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-solid-0.4.3-smark.11.tgz",
--    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-arm64-0.4.3-smark.11.tgz",
--    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-darwin-x64-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-arm64-musl-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-0.4.3-smark.11.tgz",
--    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-linux-x64-musl-0.4.3-smark.11.tgz",
--    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-arm64-0.4.3-smark.11.tgz",
--    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.11/opentui-core-win32-x64-0.4.3-smark.11.tgz",
-+    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
-+    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
-+    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz",
-     "solid-js": "catalog:",
-     "@types/bun": "catalog:",
-     "@types/node": "catalog:",
-diff --git a/packages/core/package.json b/packages/core/package.json
-index edf3ce8ba33ab741cb97df533f0cfc664a05a28d..a4394482a167342e54762a6ae92a97810343a0d5 100644
---- a/packages/core/package.json
-+++ b/packages/core/package.json
-@@ -72,6 +72,17 @@
-     "zod": "catalog:"
-   },
-   "overrides": {
--    "drizzle-orm": "catalog:"
-+    "drizzle-orm": "catalog:",
-+    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
-+    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
-+    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz"
-   }
- }
-diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index e24edab07bfbaacc9c69fa6573845cf74a6c96ee..885a689c41c234251bd37d850430f7e2eceaa3ea 100644
---- a/packages/opencode/package.json
-+++ b/packages/opencode/package.json
-@@ -165,7 +165,18 @@
-     "zod": "catalog:"
-   },
-   "overrides": {
--    "drizzle-orm": "catalog:"
-+    "drizzle-orm": "catalog:",
-+    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-0.4.3-smark.12.tgz",
-+    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-keymap-0.4.3-smark.12.tgz",
-+    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-solid-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-darwin-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-arm64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-0.4.3-smark.12.tgz",
-+    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-linux-x64-musl-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-arm64-0.4.3-smark.12.tgz",
-+    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.12/opentui-core-win32-x64-0.4.3-smark.12.tgz"
-   },
-   "optionalDependencies": {
-     "@picovoice/pvrecorder-node": "1.2.9",
-diff --git a/packages/opencode/src/cli/cmd/tui/context/exit.tsx b/packages/opencode/src/cli/cmd/tui/context/exit.tsx
-index d75fcf04a35b16d0e2a53ba895a66f945e32d7b5..e0495f0cc07b9dfa28c9dc081632fcd7174cec05 100644
---- a/packages/opencode/src/cli/cmd/tui/context/exit.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/exit.tsx
-@@ -8,9 +8,13 @@ import { onCleanup } from "solid-js"
- const log = Log.create({ service: "tui" })
- export const ExitSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
- 
-+// 退出消息允许惰性 producer：退出快照只需退出这一刻的最终态，不该随每个 part delta 全量重算。
-+// 字符串与函数两种形态并存，兼容既有 `set("...")` 调用（sync.tsx 的 daemon stopped 等）。
-+type ExitMessage = string | (() => string | undefined)
-+
- type Exit = ((reason?: unknown) => Promise<void>) & {
-   message: {
--    set: (value?: string) => () => void
-+    set: (value?: ExitMessage) => () => void
-     clear: () => void
-     get: () => string | undefined
-   }
-@@ -20,10 +24,10 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
-   name: "Exit",
-   init: (input: { onBeforeExit?: () => Promise<void>; onExit?: () => Promise<void> }) => {
-     const renderer = useRenderer()
--    let message: string | undefined
-+    let message: ExitMessage | undefined
-     let task: Promise<void> | undefined
-     const store = {
--      set: (value?: string) => {
-+      set: (value?: ExitMessage) => {
-         const prev = message
-         message = value
-         return () => {
-@@ -33,7 +37,8 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
-       clear: () => {
-         message = undefined
-       },
--      get: () => message,
-+      // get 在退出路径被调用；惰性 producer 此刻才求值，保证读到的是退出时的最终快照。
-+      get: () => (typeof message === "function" ? message() : message),
-     }
-     const exit: Exit = Object.assign(
-       (reason?: unknown) => {
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 1328520ea9f976a8ce63f0d67815f906a2f254f2..16225f11d0eb84bad33bc7ad042f8afbbaf91955 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -231,9 +231,6 @@ export function Session() {
-   // Sync 数组已是 chronology 投影：路由决策统一用位置索引 + exact ID，
-   // 不再用 Message ID 字典序猜测时间顺序。
-   const messagePositions = createMemo(() => new Map(messages().map((message, index) => [message.id, index] as const)))
--  // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
--  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
--  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
-   const permissions = createMemo(() => {
-     if (session()?.parentID) return []
-     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
-@@ -483,19 +480,21 @@ export function Session() {
- 
-   const exit = useExit()
- 
--  createEffect(() => {
--    const usage = sessionUsage().session
--    // ExitProvider 只负责销毁 renderer 和发射已存文本；Session route 在这里保留最终统计快照。
--    // effect 依赖 messages/parts 的 accounting memo，确保用户退出前 stored message 已反映最新快照。
--    // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
--    // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
--    return exit.message.set(
--      formatSessionExitMessage({
-+  // exit 快照只在退出那一刻被 exit() 读取，所以挂载时注册一个惰性 producer 即可：
-+  // 不在每个 part delta 上让 tokenAccounting 对全部消息做 O(总数) 重算（eager memo 会订阅 part store 随 delta 重算）。
-+  // 数值口径与现状一致——退出时由同一 tokenAccounting 对最终 messages/parts 求值。
-+  // 不加 onCleanup restore：现状 message 在 route 卸载后仍保留，离开会话回 home 再退出仍打印该会话统计。
-+  onMount(() => {
-+    exit.message.set(() => {
-+      // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
-+      // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
-+      const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? []).session
-+      return formatSessionExitMessage({
-         title: session()?.title ?? "",
-         sessionID: session()?.id,
-         usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
--      }),
--    )
-+      })
-+    })
-   })
- 
-   // Helper: Find next visible message boundary in direction
-diff --git a/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx b/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
-index 4b8772de05ac56e4d3c1d475eb648cffdfe4f08b..14b21ce1976402b5ade00744ec2f3841c055d7cc 100644
---- a/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
-@@ -75,6 +75,63 @@ test("keeps empty Session stdout free of a zero Stats row", async () => {
-   expect(output).toContain("Continue")
- })
- 
-+test("exit snapshot is lazy: part deltas do not re-register the exit message", async () => {
-+  const previous = Global.Path.state
-+  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
-+  await Bun.write(`${tmp.path}/kv.json`, "{}")
-+
-+  const user = userMessage("msg_user")
-+  const assistant = assistantMessage("msg_assistant", user.id)
-+  const calls = createFetch((url) => {
-+    if (url.pathname === "/session") return json([sessionInfo({})])
-+    if (url.pathname === `/session/${sessionID}`) return json(sessionInfo({}))
-+    if (url.pathname === `/session/${sessionID}/message`)
-+      return json([
-+        { info: user, parts: [] },
-+        {
-+          info: assistant,
-+          parts: [textPart("part_text", assistant.id, "hello"), stepFinishPart("part_finish", assistant.id)],
-+        },
-+      ])
-+    return undefined
-+  })
-+  const events = createEventSource()
-+  let exitRef: ReturnType<typeof useExit> | undefined
-+  // 探测 exit.message.set 的注册次数：eager 重算会在每个 part delta 重新 set，lazy 只在挂载时 set 一次。
-+  let setCount = 0
-+  const app = await testRender(
-+    () => <SessionHarness fetch={calls.fetch} events={events.source} bindExit={(e) => (exitRef = e)} onSetRegister={() => setCount++} />,
-+    { width: 80, height: 16, footerHeight: 0 },
-+  )
-+  try {
-+    await waitForExitMessage(app, () => exitRef, "Fix parser bug")
-+    // 加载稳定后记录基线注册次数。
-+    const baseline = setCount
-+    for (let i = 0; i < 5; i++) {
-+      // 每个 delta 改变 step-finish 的 token 数 => sessionUsage 的计算值必变，eager memo 必重算
-+      const finish = stepFinishPart("part_finish", assistant.id)
-+      events.emit({
-+        directory,
-+        project: "proj_test",
-+        payload: {
-+          id: `evt_${i}`,
-+          type: "message.part.updated",
-+          properties: { part: { ...finish, tokens: { ...finish.tokens, output: 970 + i + 1 } } },
-+        },
-+      } as any)
-+      await app.renderOnce()
-+      // 让出微任务/时任务确保 Solid effect 队列冲刷，避免多个 delta 的 effect 重算被批在一起而低估 eager 重算次数。
-+      await Bun.sleep(0)
-+    }
-+    // INV-02：lazy 快照下 delta 不应再触发 exit message 的重注册（重算 tokenAccounting）。
-+    expect(setCount).toBe(baseline)
-+  } finally {
-+    app.renderer.destroy()
-+    Global.Path.state = previous
-+  }
-+})
-+
- async function captureExitOutput(
-   messages: Array<AssistantMessage | SDKUserMessage>,
-   parts: Record<string, Part[]>,
-@@ -128,6 +185,7 @@ function SessionHarness(props: {
-   fetch: typeof globalThis.fetch
-   events: ReturnType<typeof createEventSource>["source"]
-   bindExit: (exit: ReturnType<typeof useExit>) => void
-+  onSetRegister?: () => void
- }) {
-   const renderer = useRenderer()
-   const config = createTuiResolvedConfig()
-@@ -138,7 +196,7 @@ function SessionHarness(props: {
-     <OpencodeKeymapProvider keymap={keymap}>
-       <ArgsProvider>
-         <ExitProvider>
--          <ExitCapture bind={props.bindExit}>
-+          <ExitCapture bind={props.bindExit} onSetRegister={props.onSetRegister}>
-             <KVProvider>
-               <ToastProvider>
-                 <RouteProvider initialRoute={{ type: "session", sessionID }}>
-@@ -183,8 +241,18 @@ function SessionHarness(props: {
-   )
- }
- 
--function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; children: JSX.Element }) {
--  props.bind(useExit())
-+function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; onSetRegister?: () => void; children: JSX.Element }) {
-+  const exit = useExit()
-+  props.bind(exit)
-+  // 探测 exit.message.set 注册次数：在 Session 挂载前包住 set，且只包一次（ExitCapture 随挂载渲染一次）。
-+  if (props.onSetRegister) {
-+    const onSetRegister = props.onSetRegister
-+    const orig = exit.message.set
-+    exit.message.set = (value: any) => {
-+      onSetRegister()
-+      return orig(value)
-+    }
-+  }
-   return props.children
- }
- 
-diff --git a/packages/plugin/package.json b/packages/plugin/package.json
-index 889bc5790ea04adf9b56f96fa205c1362fe1d52e..5d11f744ea5f9cf412fac30640ec38c0c795c210 100644
---- a/packages/plugin/package.json
-+++ b/packages/plugin/package.json
-@@ -22,9 +22,9 @@
-     "zod": "catalog:"
-   },
-   "peerDependencies": {
--    "@opentui/core": ">=0.4.3-smark.1",
--    "@opentui/keymap": ">=0.4.3-smark.1",
--    "@opentui/solid": ">=0.4.3-smark.1"
-+    "@opentui/core": ">=0.4.3-smark.12",
-+    "@opentui/keymap": ">=0.4.3-smark.12",
-+    "@opentui/solid": ">=0.4.3-smark.12"
-   },
-   "peerDependenciesMeta": {
-     "@opentui/core": {
 diff --git a/thirdparty/opentui b/thirdparty/opentui
 index 0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2..2145b934ea8ef9da3faf63a6cb362879eaadb82d 160000
 --- a/thirdparty/opentui
@@ -731,3 +331,119 @@ index 0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2..2145b934ea8ef9da3faf63a6cb362879
 @@ -1 +1 @@
 -Subproject commit 0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2
 +Subproject commit 2145b934ea8ef9da3faf63a6cb362879eaadb82d
+
+diff --git a/packages/tui/src/context/epilogue.tsx b/packages/tui/src/context/epilogue.tsx
+--- a/packages/tui/src/context/epilogue.tsx
++++ b/packages/tui/src/context/epilogue.tsx
+@@ -1,6 +1,8 @@
+ import { createSimpleContext } from "./helper"
+ 
++// R19 惰性退出快照：set 接受字符串或 producer——producer 存储而不求值，
++// 在退出边界（Tui.run 返回处）才调用，消除 per-part-delta 的 tokenAccounting 热路径。
+ export const { use: useEpilogue, provider: EpilogueProvider } = createSimpleContext({
+   name: "Epilogue",
+-  init: (props: { set(value?: string): void }) => props.set,
++  init: (props: { set(value?: string | (() => string | undefined)): void }) => props.set,
+ })
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -272,28 +272,28 @@ export function Session() {
+       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+   })
+   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+-  // #490：Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 epilogue 接触 Message/Part。
+-  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
+-  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
+   // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
+   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+   // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
+   const viewportCulling = createMemo(() =>
+     shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+   )
+-  // #490：epilogue effect 依赖 messages/parts 的 accounting memo，确保退出前已反映最新统计快照。
+-  createEffect(() => {
+-    const title = Locale.truncate(session()?.title ?? "", 50)
+-    const usage = sessionUsage().session
+-    setEpilogue(
+-      sessionEpilogue({
+-        title,
++  // R19 惰性退出快照：不建 sessionUsage 急 memo——每个 part delta 重算 tokenAccounting
++  // （300 消息时 ~15ms/delta）会饿死 process.nextTick，reconciler 的 deferred-destroy
++  // 积压直到 native 句柄耗尽（Failed to create TextBuffer 卡死根因）。改为一次性
++  // 注册 producer，退出时才对最终 messages/parts 快照求值；数字语义与旧实现一致
++  // （output+reasoning 合并、cache 排除）。刻意不 onCleanup 还原：路由卸载≠进程退出，
++  // 清空会让最后路由的退出统计丢失（source 同款决策）。
++  onMount(() =>
++    setEpilogue(() => {
++      const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? []).session
++      return sessionEpilogue({
++        title: Locale.truncate(session()?.title ?? "", 50),
+         sessionID: session()?.id,
+         usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
+-      }),
+-    )
+-  })
+-  onCleanup(() => setEpilogue())
++      })
++    }),
++  )
+ 
+   const messagesBeforeRevert = () => {
+     const messageID = session()?.revert?.messageID
+
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -250,7 +250,7 @@ function isVersionGreater(left: string, right: string) {
+ 
+ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+   const global = yield* Global.Service
+-  const exit = { epilogue: undefined as string | undefined, reason: undefined as unknown }
++  const exit = { epilogue: undefined as string | (() => string | undefined) | undefined, reason: undefined as unknown }
+   const result = yield* Effect.scoped(
+     Effect.gen(function* () {
+       const renderer = yield* Effect.acquireRelease(
+@@ -449,7 +449,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+         }, renderer)
+       })
+       yield* Deferred.await(shutdown)
+-      return { epilogue: exit.epilogue, reason: exit.reason }
++      // R19 惰性求值边界：producer 只在此处（退出时）调用——流式 part delta 期间零 tokenAccounting 重算。
++      return { epilogue: typeof exit.epilogue === "function" ? exit.epilogue() : exit.epilogue, reason: exit.reason }
+     }),
+   )
+   yield* Effect.sync(() => {
+
+diff --git a/packages/tui/test/routes/session/session-exit-lazy.test.tsx b/packages/tui/test/routes/session/session-exit-lazy.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/session-exit-lazy.test.tsx
+@@ -0,0 +1,26 @@
++import { expect, test } from "bun:test"
++import path from "node:path"
++
++// R19 INV-02 契约锁：退出快照必须惰性注册——session 路由不得为 epilogue 维持
++// per-delta 的 tokenAccounting 急 memo（300 消息 ~15ms/delta 饿死 nextTick、
++// reconciler deferred-destroy 积压至句柄耗尽的卡死根因），退出文本在 Tui.run
++// 返回边界才求值。挂载完整 session harness 成本过高，对生产 call-site 源码做
++// fail-capable 契约断言（#491 compact-profile call-site 测试同款模式）。
++test("session exit snapshot registers a lazy epilogue producer instead of an eager memo", async () => {
++  const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/routes/session/index.tsx")).text()
++  // 惰性 producer：一次性 onMount 注册，退出时才对最终快照求值
++  expect(source).toMatch(/onMount\(\(\) =>\s*\n?\s*setEpilogue\(\(\) =>/)
++  // 急路径已移除：不再有 sessionUsage 急 memo
++  expect(source).not.toMatch(/sessionUsage\s*=\s*createMemo/)
++  // 急路径已移除：不再有 per-delta 把 setEpilogue 写成字符串的 effect
++  expect(source).not.toMatch(/createEffect\(\(\) => \{[\s\S]{0,400}?setEpilogue\(/)
++})
++
++test("Tui.run evaluates the epilogue producer only at the exit boundary", async () => {
++  const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/app.tsx")).text()
++  // 退出边界求值：function producer 在 shutdown 之后调用，字符串原样透传
++  expect(source).toMatch(/typeof exit\.epilogue === "function" \? exit\.epilogue\(\) : exit\.epilogue/)
++  // epilogue context 的 set 签名承载 producer 形态（惰性合同的存在前提）
++  const epilogue = await Bun.file(path.resolve(import.meta.dir, "../../../src/context/epilogue.tsx")).text()
++  expect(epilogue).toMatch(/set\(value\?: string \| \(\(\) => string \| undefined\)\): void/)
++})

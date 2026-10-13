@@ -12,6 +12,8 @@ Content-Transfer-Encoding: 8bit
 
 补充错配场景回归测试与已验证的 R10 修复记录。
 
+适配说明：目标生产 owner 已由 #143 前瞻实现为 InstanceState.context.worktree 传入 list/searchScan/listUniverseConditions（目标 session.ts:581-594、1063、1228 逐处验证），source 八个生产 hunks 属同一修复语义、不重复落地；本补丁保留 1417 行 plan 原样，并把错配场景回归测试适配到目标 session-list.test.ts 的 Effect db/AbsolutePath/InstanceRef 形态。
+
 diff --git a/docs/plans/tui-daemon-disconnect-session-exit-id-repair.md b/docs/plans/tui-daemon-disconnect-session-exit-id-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..3396e08e9ead1c5550a74af68e66e00f5021a206
@@ -1435,202 +1437,97 @@ index 0000000000000000000000000000000000000000..3396e08e9ead1c5550a74af68e66e00f
 +
 +Not applicable. No implementation is authorized.
 +-->
-diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index f55904c854abc040f45d0263f4d5b550cdbd5494..0e817082667c0c4a2c4e25369b2a1ca0cab55bb6 100644
---- a/packages/opencode/src/session/session.ts
-+++ b/packages/opencode/src/session/session.ts
-@@ -203,13 +203,11 @@ function isHomeDirectory(directory: string | undefined) {
-   return comparableDirectoryValue(directory) === comparableDirectoryValue(Global.Path.home)
- }
- 
--function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
-+function directoryMatchesPath(input: { directory?: string; path: string; worktree: string }) {
-   if (!input.directory) return false
--  const project = Database.use((db) =>
--    db.select({ worktree: ProjectTable.worktree }).from(ProjectTable).where(eq(ProjectTable.id, input.projectID)).get(),
--  )
--  if (!project) return false
--  const left = SessionPath.relative(project.worktree, input.directory)
-+  // 同一 root commit 的多个 clone 共享 Project ID，但请求 Instance 各自拥有真实 worktree。
-+  // ProjectTable 只能保存一个 worktree；路径兼容必须使用当前请求上下文，不能从共享 ID 反查。
-+  const left = SessionPath.relative(input.worktree, input.directory)
-   const right = input.path.replaceAll("\\", "/")
-   return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
- }
-@@ -679,7 +677,12 @@ export const layer: Layer.Layer<
-     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
-       const ctx = yield* InstanceState.context
-       return Array.from(
--        listByProject({ projectID: ctx.project.id, experimentalWorkspaces: flags.experimentalWorkspaces, ...input }),
-+        listByProject({
-+          projectID: ctx.project.id,
-+          worktree: ctx.worktree,
-+          experimentalWorkspaces: flags.experimentalWorkspaces,
-+          ...input,
-+        }),
-       )
-     })
- 
-@@ -688,6 +691,7 @@ export const layer: Layer.Layer<
-       const ctx = yield* InstanceState.context
-       return searchScanByProject({
-         projectID: ctx.project.id,
-+        worktree: ctx.worktree,
-         experimentalWorkspaces: flags.experimentalWorkspaces,
-         ...input,
-       })
-@@ -997,6 +1001,7 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
- function* listByProject(
-   input: ListInput & {
-     projectID: ProjectID
-+    worktree: string
-     experimentalWorkspaces: boolean
-   },
- ) {
-@@ -1036,6 +1041,7 @@ function* listByProject(
- function searchScanByProject(
-   input: SearchScanInput & {
-     projectID: ProjectID
-+    worktree: string
-     experimentalWorkspaces: boolean
-   },
- ): SearchScanResult {
-@@ -1044,6 +1050,7 @@ function searchScanByProject(
-   // 候选页：与 list 同 scope/start，故意不含 search，保证每批固定扫 N 行
-   const universe = listUniverseConditions({
-     projectID: input.projectID,
-+    worktree: input.worktree,
-     experimentalWorkspaces: input.experimentalWorkspaces,
-     directory: input.directory,
-     scope: input.scope,
-@@ -1108,6 +1115,7 @@ function searchScanByProject(
- function listUniverseConditions(
-   input: ListInput & {
-     projectID: ProjectID
-+    worktree: string
-     experimentalWorkspaces: boolean
-   },
- ): SQL[] {
-@@ -1133,7 +1141,7 @@ function listUniverseConditions(
-       const useDirectoryFallback = directoryMatchesPath({
-         directory: input.directory,
-         path: input.path,
--        projectID: input.projectID,
-+        worktree: input.worktree,
-       })
-       const globalPath =
-         useDirectoryFallback && input.directory
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
-index 51f349d6fcf60ca4e440ecaaf4578c363974a0f4..c0b29e1a990d5fd217a837947cec2c9fd313bfb2 100644
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts
-@@ -94,6 +94,49 @@ const searchIDs = Effect.fn("SessionListTest.searchIDs")(function* (search: stri
-   return (yield* SessionNs.Service.use((session) => session.list({ search }))).map((session) => session.id)
- })
- 
-+// 该helper专门建立“持久Project worktree A / 请求Instance worktree B”的错配边界。
-+// 直接数据库写入与反向清理保持在同一fixture owner，测试主体只观察公开Session service。
-+const persistSessionWithMismatchedProjectWorktree = Effect.fn(
-+  "SessionListTest.persistSessionWithMismatchedProjectWorktree",
-+)(function* (input: {
-+  sessionID: SessionID
-+  persistedProjectID: ProjectID
-+  persistedWorktree: string
-+  runtimeProjectID: ProjectID
-+}) {
-+  yield* Effect.sync(() =>
-+    Database.use((db) => {
-+      db.insert(ProjectTable)
-+        .values({
-+          id: input.persistedProjectID,
-+          worktree: input.persistedWorktree,
-+          vcs: "git",
-+          time_created: Date.now(),
-+          time_updated: Date.now(),
-+          sandboxes: [],
-+        })
-+        .run()
-+      // path=null模拟升级前历史行，确保测试命中directory compatibility而非现代path谓词。
-+      db.update(SessionTable)
-+        .set({ project_id: input.persistedProjectID, directory: input.persistedWorktree, path: null })
-+        .where(eq(SessionTable.id, input.sessionID))
-+        .run()
-+    }),
-+  )
-+  yield* Effect.addFinalizer(() =>
-+    Effect.sync(() =>
-+      Database.use((db) => {
-+        // 先恢复Session外键再删除fake Project，避免测试清理制造悬空引用。
-+        db.update(SessionTable)
-+          .set({ project_id: input.runtimeProjectID })
-+          .where(eq(SessionTable.id, input.sessionID))
-+          .run()
-+        db.delete(ProjectTable).where(eq(ProjectTable.id, input.persistedProjectID)).run()
-+      }),
-+    ),
-+  )
-+})
-+
- const initGitRepo = (directory: string) =>
-   Effect.gen(function* () {
-     yield* Effect.promise(() => $`git init`.cwd(directory).quiet())
-@@ -600,6 +643,66 @@ describe("session.list", () => {
+@@ -621,7 +621,97 @@ describe("session.list", () => {
+       }),
+     { git: true },
      30_000,
    )
- 
 +  it.instance(
 +    "uses the current Instance worktree when one Project ID has multiple worktrees",
 +    () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const instance = yield* InstanceRef
++        // InstanceRef 缺失说明测试拓扑损坏而非产品缺陷，直接 die 暴露而不是静默跳过。
 +        if (!instance) return yield* Effect.die("InstanceRef was not provided")
++        // nested 目录模拟同 root commit 的第二个 clone；不 init git，directory 兼容分支不依赖其 VCS 元数据。
 +        const nested = path.join(test.directory, "nested-clone")
-+        const legacyProjectID = ProjectID.make("proj_shared_worktree_legacy")
++        // 伪造共享 root commit 的 Project 身份：ID 与运行时不同，worktree 指向祖先 A。
++        const legacyProjectID = Project.ID.make("proj_shared_worktree_legacy")
 +        yield* Effect.promise(() => mkdir(nested, { recursive: true }))
++        // 目标 Session 先按运行时 A 创建，再被改写成 legacy 形状，断言前状态真实可回滚。
 +        const target = yield* withSession({ title: "ancestor-from-legacy-project" })
 +
-+        // 同一 root commit 的 clone 共享 Project ID，但每个请求仍有独立 Instance worktree。
-+        // ProjectTable 只能保存其中一个 worktree；故意让表中保留祖先 A，请求上下文使用嵌套 B。
++        // #574：同一 root commit 的 clone 共享 Project ID，但每个请求有独立 Instance worktree。
++        // ProjectTable 只能保存其中一个 worktree；表中保留祖先 A，请求上下文使用嵌套 B。
 +        // 历史 Session 保留旧 project_id/path=null，只有既有 directory compatibility 能找回它。
-+        // B 的 path="" 必须相对 B 自身解释；若错误相对表中的 A 解释，兼容分支会被关闭。
-+        // 两个断言只经过 Session service 公共 seam，避免用 SQL 结果替代真实生产查询合同。
-+        yield* persistSessionWithMismatchedProjectWorktree({
-+          sessionID: target.id,
-+          persistedProjectID: legacyProjectID,
-+          persistedWorktree: test.directory,
-+          runtimeProjectID: instance.project.id,
-+        })
++        // B 的 path 必须相对 B 自身解释；若错误相对表中的 A 解释，兼容分支会被错误关闭。
++        const { db } = yield* Database.Service
++        yield* db
++          .insert(ProjectTable)
++          .values({
++            id: legacyProjectID,
++            worktree: AbsolutePath.make(test.directory),
++            vcs: "git",
++            time_created: Date.now(),
++            time_updated: Date.now(),
++            sandboxes: [],
++          })
++          .run()
++        // path=null 模拟升级前历史行，确保测试命中 directory compatibility 而非现代 path 谓词。
++        yield* db
++          .update(SessionTable)
++          .set({ project_id: legacyProjectID, directory: test.directory, path: null })
++          .where(eq(SessionTable.id, target.id))
++          .run()
++        yield* Effect.addFinalizer(() =>
++          Effect.gen(function* () {
++            // #574：finalizer 与插入同 seam——先恢复 project_id 再删注入的 legacy Project 行，避免悬空引用。
++            yield* db
++              .update(SessionTable)
++              .set({ project_id: instance.project.id })
++              .where(eq(SessionTable.id, target.id))
++              .run()
++              .pipe(Effect.orDie)
++            yield* db.delete(ProjectTable).where(eq(ProjectTable.id, legacyProjectID)).run().pipe(Effect.orDie)
++          }),
++        )
 +
++        // #574：断言只经 Session service 公共 seam；InstanceRef 覆写为 B 的请求上下文。
 +        const ids = yield* SessionNs.Service.use((session) =>
 +          session.list({ directory: nested, path: SessionPath.relative(nested, nested) }),
 +        ).pipe(
 +          Effect.provideService(InstanceRef, {
 +            directory: nested,
 +            worktree: nested,
-+            project: { ...instance.project, worktree: nested },
++            project: instance.project,
 +          }),
 +          Effect.map((sessions) => sessions.map((session) => session.id)),
 +        )
-+        // progressive搜索必须复用同一请求worktree；只锁定list会允许搜索路径继续遗漏同一历史Session。
++        // #574：progressive 搜索必须复用同一请求 worktree；只锁 list 会允许搜索继续遗漏同一历史 Session。
 +        const scanIDs = yield* SessionNs.Service.use((session) =>
 +          session.searchScan({
++            // title 关键字即搜索词，避免与其它 fixture 会话标题前缀撞车造成假阳性。
 +            search: "ancestor-from-legacy-project",
 +            directory: nested,
 +            path: SessionPath.relative(nested, nested),
-+            // 单页覆盖本fixture全部候选，失败只能来自路径宇宙而非keyset分页。
++            // 单页覆盖本 fixture 全部候选，失败只能来自路径宇宙而非 keyset 分页。
 +            batch: 50,
 +          }),
 +        ).pipe(
 +          Effect.provideService(InstanceRef, {
 +            directory: nested,
 +            worktree: nested,
-+            project: { ...instance.project, worktree: nested },
++            project: instance.project,
 +          }),
 +          Effect.map((result) => result.sessions.map((session) => session.id)),
 +        )
 +
-+        expect(instance.project.worktree).toBe(test.directory)
++        // #574：运行时 Instance 仍是 A——证明兼容判定消费的是请求上下文而非持久 Project 行。
++        expect(instance.worktree).toBe(test.directory)
 +        expect(scanIDs).toContain(target.id)
 +        expect(ids).toContain(target.id)
 +      }),

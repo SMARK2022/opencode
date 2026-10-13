@@ -1,19 +1,19 @@
 From 570692cf95d0359ecaacfb98286790a0369499e4 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Fri, 14 Aug 2026 02:58:44 +0800
-Subject: [PATCH] =?UTF-8?q?fix(voice):=20=E5=AE=8C=E6=88=90=E8=BD=AC?=
- =?UTF-8?q?=E5=BD=95=E7=94=9F=E5=91=BD=E5=91=A8=E6=9C=9F=E8=87=AA=E7=BB=B4?=
- =?UTF-8?q?=E6=8A=A4?=
+Date: Sat, 15 Aug 2026 01:16:42 +0800
+Subject: [PATCH] =?UTF-8?q?fix(voice):=20=E5=AE=8C=E6=88=90=E8=BD=AC=E5=BD=?=
+ =?UTF-8?q?95=E7=94=9F=E5=91=BD=E5=91=A8=E6=9C=9F=E8=87=AA=E7=BB=B4=E6=8A?=
+ =?UTF-8?q?A4?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-延长 TUI 完整事务预算并避免取消时递归终止 daemon/browser，同时记录经独立审计验证的 R63 生命周期修复。
+VOICE_TRANSCRIBE_TIMEOUT_MS 扩至 1,237,000ms（四次完整 daemon/HTTP 预算 + 1/2/4s 退避 + 30s 清理），用户取消经 killTree:false 只终止 transcriber CLI 父进程、不递归强杀 daemon/browser 后代；新增预算公式断言与 grandchild 存活测试；submodule 指向携带 R63 实现的 commit。
 
-更新 browser-agent gitlink，覆盖孤儿 profile 恢复、错误分类、重试与隔离 E2E。
+适配说明：目标 voice owner 已迁至 packages/tui/src/prompt-voice-input.ts（tui 包私有 runProcess 以 signal 杀父，无 Process.run/taskkill 面）——killTree:false 一行裁记（parent-only kill 已是目标现状，注释按源语义更新；跨包引 opencode util 违反 tui 依赖方向）；process.ts 三 hunks 原样落地（后续 0605/0638 系列的依赖面）；测试两用例落地到 packages/tui/test/prompt/（tmpdir 相对路径即目标形态）；gitlink preimage 按端口链现值 b3e79c5d 改写（0467/0471 先例），postimage 498f6c7e 不变。
+
 
 diff --git a/docs/plans/voice-transcription-lifecycle-reliability.md b/docs/plans/voice-transcription-lifecycle-reliability.md
-index f7ef41c314b86608a6d24bb4e85ace79f7a4a727..96f988cb52882709b5a8e49cfb0476f71ecbabc4 100644
 --- a/docs/plans/voice-transcription-lifecycle-reliability.md
 +++ b/docs/plans/voice-transcription-lifecycle-reliability.md
 @@ -2,20 +2,22 @@
@@ -1061,39 +1061,11 @@ index f7ef41c314b86608a6d24bb4e85ace79f7a4a727..96f988cb52882709b5a8e49cfb0476f7
 +**APPROVE — canonical plan R63 与本次审计列出的实际 implementation diff 可以发布。**
 +
 +该结论仅适用于本次审计的精确 R63 和实际 diff；不覆盖工作树中的其它修改。
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-index 4b750e9a82307f13ace34bb0ffeeffac6f4b2e4a..409623b9e78b63f9505fa79f7e519a2863dd1445 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-@@ -3,8 +3,8 @@ import { which } from "@/util/which"
- import path from "path"
- 
- export const VOICE_FILE_PLACEHOLDER = "{file}"
--// 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
--export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
-+// 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
-+export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
- // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
- // 比 usage 显示阈值(>90，见 Prompt 组件 showSplitFlow)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
- // 阈值由 140 下调至 120：usage 阈值由 100 降至 90 后，voice 仍需晚于 usage 出现，但 140 过晚导致中宽终端长期无 voice 引导。
-@@ -172,10 +172,11 @@ export async function transcribeVoiceFile(input: {
- 
-   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
-   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
--  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
-+  // 用户取消只终止transcriber CLI；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
-   const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
-   const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
-     abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
-+    killTree: false,
-     nothrow: true,
-     timeout: 1_000,
-   })
+
 diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/process.ts
-index 2d4437c311033fcab06f04caf85838193bffd031..e7a458f5da300678383687245276e790cccd67d6 100644
 --- a/packages/opencode/src/util/process.ts
 +++ b/packages/opencode/src/util/process.ts
-@@ -15,6 +15,7 @@ export interface Options {
+@@ -16,6 +16,7 @@ export interface Options {
    shell?: Shell
    abort?: AbortSignal
    kill?: NodeJS.Signals | number
@@ -1101,7 +1073,7 @@ index 2d4437c311033fcab06f04caf85838193bffd031..e7a458f5da300678383687245276e790
    timeout?: number
  }
  
-@@ -79,7 +80,7 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
+@@ -80,7 +81,7 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
      // 必须先同步完成 taskkill /T /F：如果异步启动 taskkill 后立刻 proc.kill()，
      // 父进程可能先退出，taskkill 来不及沿父子关系清理 detached 浏览器/daemon 子进程。
      // 控制台进程忽略 WM_CLOSE，必须带 /F 强杀；与下方 Process.stop 的既有模式对齐。
@@ -1110,7 +1082,7 @@ index 2d4437c311033fcab06f04caf85838193bffd031..e7a458f5da300678383687245276e790
        launch.sync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
      }
      // proc.kill 在所有平台上都必须调用：触发 Node.js 的 exit 事件并关闭 pipe，
-@@ -127,6 +128,7 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<Result>
+@@ -128,6 +129,7 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<Result>
      shell: opts.shell,
      abort: opts.abort,
      kill: opts.kill,
@@ -1118,11 +1090,36 @@ index 2d4437c311033fcab06f04caf85838193bffd031..e7a458f5da300678383687245276e790
      timeout: opts.timeout,
      stdout: "pipe",
      stderr: "pipe",
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-index 4506384def1489008f9d2f13b07dd536f53895b8..9a7a8c6d67f750cd1bac0582c9f03585e075eec2 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-@@ -6,6 +6,7 @@ import { tmpdir } from "../../fixture/fixture"
+
+diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
+--- a/packages/tui/src/prompt-voice-input.ts
++++ b/packages/tui/src/prompt-voice-input.ts
+@@ -3,8 +3,8 @@ import { which } from "@opencode-ai/core/util/which"
+ import path from "path"
+ 
+ export const VOICE_FILE_PLACEHOLDER = "{file}"
+-// 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
+-export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
++// 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
++export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
+ // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
+ // 阈值由 140 下调至 120：usage 分拆阈值降至 90 后，voice 提示相应提前，保持露出梯度。
+ // 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
+@@ -172,7 +172,8 @@ export async function transcribeVoiceFile(input: {
+ 
+   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
+   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
+-  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
++  // AbortSignal.any 合并外部取消信号和兜底超时；任一触发都终止 transcriber CLI。
++  // 用户取消只终止transcriber父进程（tui 私有 runProcess 仅以 signal 杀父）；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
+   const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
+   const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
+     abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
+
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
+@@ -7,6 +7,7 @@ import { tmpdir } from "../fixture/fixture"
  import {
    createVoiceInputController,
    transcribeVoiceFile,
@@ -1130,7 +1127,7 @@ index 4506384def1489008f9d2f13b07dd536f53895b8..9a7a8c6d67f750cd1bac0582c9f03585
    voiceInputStatusText,
    voiceHintVisible,
    type VoiceRecorderHandle,
-@@ -50,6 +51,35 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
+@@ -52,6 +53,35 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
  }
  
  describe("prompt voice input", () => {
@@ -1166,10 +1163,10 @@ index 4506384def1489008f9d2f13b07dd536f53895b8..9a7a8c6d67f750cd1bac0582c9f03585
    // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
    // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
    // 这里不检查实现函数名，只观察转写器实际收到的参数值，避免测试和实现耦合。
+
 diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
-index 11f9c519390907741a4e4c0576d421378b6ba770..498f6c7e2189ec7e608ae39027e18698cf9b6c5d 160000
 --- a/thirdparty/chatgpt-browser-agent
 +++ b/thirdparty/chatgpt-browser-agent
 @@ -1 +1 @@
--Subproject commit 11f9c519390907741a4e4c0576d421378b6ba770
+-Subproject commit b3e79c5d1846da0b4dc604f4864e90d071c443e7
 +Subproject commit 498f6c7e2189ec7e608ae39027e18698cf9b6c5d

@@ -895,8 +895,9 @@ index 0000000000000000000000000000000000000000..613952ffea20d8a5bbc1da3dafe040d1
 +The independent audit's behavioral findings for the approved matcher scope are
 +resolved; the sole residual package-wide finding is recorded above with the
 +user's explicit disposition.
+
 diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
-index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4697e3c73 100644
+index 586d91963..e41385a31 100644
 --- a/packages/opencode/src/patch/match.ts
 +++ b/packages/opencode/src/patch/match.ts
 @@ -84,30 +84,54 @@ export type ClosestWindow = {
@@ -975,16 +976,17 @@ index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4
  }
  
  function truncateExcerpt(text: string, limit: number) {
-@@ -123,6 +147,8 @@ function truncateExcerpt(text: string, limit: number) {
+@@ -123,6 +147,9 @@ function truncateExcerpt(text: string, limit: number) {
  
  // Edit 与 Patch 共用此 renderer，避免同一 candidate 在两个 Tool result 中重新形成相互漂移的 expected 副本。
  function formatClosestDifference(expected: string[], candidate: string[], startLine: number) {
++  // #521：变长候选不能进入逐行配对 renderer；列号语义只在等行数时成立。
 +  if (expected.length !== candidate.length) return ""
 +
    const output: string[] = []
    for (const [index, actual] of candidate.entries()) {
      const requested = expected[index]
-@@ -175,44 +201,115 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
+@@ -175,44 +202,120 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
    return output.join("\n")
  }
  
@@ -1006,6 +1008,7 @@ index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4
 +  const pattern = normalizeText(expected).points
 +  if (pattern.length === 0 || text.points.length === 0) return undefined
 +
++  // #521：滚动数组只保留上一 pattern 行；空前缀路径由 undefined 单元表达，避免占用哨兵状态。
 +  let previous: Array<MatchState | undefined> = Array.from({ length: text.points.length + 1 }, () => undefined)
 +
 +  for (let patternIndex = 1; patternIndex <= pattern.length; patternIndex++) {
@@ -1052,6 +1055,7 @@ index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4
 +      current.push(state)
 +    }
 +
++    // #521：行交换后 current 丢弃重建；不保留跨行缓存，内存始终为 O(n)。
 +    previous = current
 +  }
 +
@@ -1068,6 +1072,7 @@ index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4
 -      bestIndex = index
 -      bestScore = score
 -      tied = false
++  // #521：末行聚合只看终态；每个终态携带自己的 span 集合，不再回溯中间行。
 +  for (const state of previous) {
 +    if (!state?.span) continue
 +    if (state.distance < bestDistance) {
@@ -1108,8 +1113,10 @@ index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4
 +  const nextLF = content.indexOf("\n", rawEnd)
 +  const nextCR = content.indexOf("\r", rawEnd)
 +  const lineEnd = [nextLF, nextCR].filter((index) => index !== -1).reduce((min, index) => Math.min(min, index), content.length)
++  // #521：渲染窗口扩展到包含 raw span 的整行；CRLF 在展示层折叠，不影响上述 DP 坐标。
 +  const renderedText = content.slice(renderStart, lineEnd).replaceAll("\r\n", "\n").replaceAll("\r", "\n")
 +  const candidate = renderedText.split("\n")
++  // #521：行号由 raw 行首推导；renderStart 之前的 CR/LF 序列完整计入行数，与编辑器 1-based 行号一致。
 +  const line = content.slice(0, renderStart).split(/\r\n|\r|\n/).length
 +  // 展示扩展只改变上下文范围，不改变 score、line 起点或 raw 边界，因此提示与选择始终来自同一候选。
 +  // 变长分支直接截取 DP raw span，完整行只服务等行数列差异，避免长前后缀遮蔽已证明的 actual。
@@ -1130,8 +1137,9 @@ index 586d9196390df41f1bf41f00f71b29b5ad6027c5..419d6830c91c726a3a62b2b02b5ca6a4
 +
 +  return { line, excerpt: truncateExcerpt(excerpt, 500), score }
  }
+
 diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
-index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a419bd41c08 100644
+index f004fdc4c..459818cd4 100644
 --- a/packages/opencode/src/tool/edit-apply.ts
 +++ b/packages/opencode/src/tool/edit-apply.ts
 @@ -13,6 +13,14 @@ export type EditReplacement = {
@@ -1139,7 +1147,7 @@ index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a41
  }
  
 +export class EditApplyError extends Error {
-+  // 失败索引只在 owner 内传递，用于 multi-edit 诊断，不进入 Schema、metadata 或用户可见文案。
++  // #521：失败索引只在 owner 内传递，用于 multi-edit 诊断，不进入 Schema、metadata 或用户可见文案。
 +  // 继承 Error 的既有 message，使调用方获得身份而不改变原有错误渲染契约。
 +  constructor(message: string, readonly editIndex: number) {
 +    super(message)
@@ -1153,7 +1161,7 @@ index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a41
    const allRanges: TextReplacement[] = []
    const syncEdits: EditReplacement[] = []
  
-+  // 整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
++  // #521：整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
 +  // 诊断因此可以精确绑定单条 edit，同时维持原有 reverse apply 和原子失败边界。
    for (let i = 0; i < edits.length; i++) {
      const edit = edits[i]
@@ -1161,7 +1169,7 @@ index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a41
      const match = findMatch(replacementBase, edit.oldString)
      if (!match.found) {
 -      throw new Error(
-+      // 记录 locate 的真实索引；closest 调用方必须使用它，不能回退到 edits[0] 猜测。
++      // #521：记录 locate 的真实索引；closest 调用方必须使用它，不能回退到 edits[0] 猜测。
 +      throw new EditApplyError(
          edits.length === 1
            ? `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.`
@@ -1170,11 +1178,12 @@ index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a41
        )
      }
  
-@@ -434,10 +446,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -434,10 +446,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        ? countOccurrences(replacementBase, edit.oldString)
        : exactLiteralCount(replacementBase, edit.oldString)
      if (occurrences > 1 && edit.replaceAll !== true) {
 -      throw new Error(
++      // #521：歧义失败同样携带 editIndex；唯一性证据属于当前 edit，不能借邻近 edit 的定位解释。
 +      throw new EditApplyError(
          edits.length === 1
            ? `Found multiple matches for oldString. Provide more surrounding context to make the match unique.`
@@ -1183,12 +1192,12 @@ index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a41
        )
      }
  
-@@ -446,10 +459,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -446,10 +460,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        : enumerateExactRanges(replacementBase, edit.oldString, edit.replaceAll === true)
  
      if (ranges.length === 0) {
 -      throw new Error(
-+      // 该失败属于当前 edit 的成功域检查，只有当前 oldString 可以成为诊断 probe。
++      // #521：该失败属于当前 edit 的成功域检查，只有当前 oldString 可以成为诊断 probe。
 +      throw new EditApplyError(
          edits.length === 1
            ? `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.`
@@ -1197,51 +1206,54 @@ index f004fdc4c3e07b307e470c8f23fe3dc0aa29651f..778467522982d1998cfd541375739a41
        )
      }
  
-@@ -482,6 +497,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -482,6 +498,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
    }
  
    // exact：原文 reverse 切串（旧 replace 的推广）；normalized：preserve 触碰行
-+  // closest 从未参与这里的 range 生成，任何相似文本都不能越过 exact/closed-normalization 成功域。
++  // #521：closest 从未参与这里的 range 生成，任何相似文本都不能越过 exact/closed-normalization 成功域。
    const contentNew = usedNormalized
      ? applyReplacementsPreservingUnchangedLines(content, replacementBase, allRanges)
      : applyReplacements(replacementBase, allRanges)
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index ba3113e13071bc90de54e6c3b9a369fd5c15df7c..48ed0288681c6494ecca897fd4438627957172b6 100644
+index 1cd72f9e9..3e77f7870 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -15,7 +15,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import * as Bom from "@/util/bom"
+@@ -17,7 +17,7 @@ import * as Bom from "@/util/bom"
  import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
  import { closestWindow } from "@/patch/match"
+ // #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
 -import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
 +import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+ // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
  import * as Mutation from "./file-mutation-coordinator"
- 
- /**
-@@ -247,7 +247,13 @@ export const EditTool = Tool.define(
-             } catch (error) {
-               const message = error instanceof Error ? error.message : String(error)
-               if (message.includes("Could not find") || message.includes("Could not find oldString")) {
--                const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
-+                if (!(error instanceof EditApplyError)) throw error
-+                const probe = editsLF[error.editIndex]
-+                // owner 已确定失败 edit；缺失内部索引时必须原样失败，不能用首条 edit 猜测。
-+                if (!probe) throw error
-+                // closest 只解释这条失败 oldString，不参与 replacement success，也不启动第二 matcher。
-+                // normalized batch 中前一条 edit 可能已经成功定位，但它不是本次失败的诊断证据。
-+                // 保持既有 message 前缀不变，新增信息只来自同一主路径返回的 actual candidate。
-                 const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
-                 throw new Error(
-                   message +
+ // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
+@@ -260,7 +260,14 @@ export const EditTool = Tool.define(
+               } catch (error) {
+                 const message = error instanceof Error ? error.message : String(error)
+                 if (message.includes("Could not find") || message.includes("Could not find oldString")) {
+-                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
++                  // #521：owner 已确定失败 edit；非 EditApplyError 不能进入诊断猜测，必须原样抛出。
++                  if (!(error instanceof EditApplyError)) throw error
++                  const probe = editsLF[error.editIndex]
++                  // 缺失内部索引时必须原样失败，不能用首条 edit 猜测。
++                  if (!probe) throw error
++                  // #521：closest 只解释这条失败 oldString，不参与 replacement success，也不启动第二 matcher。
++                  // normalized batch 中前一条 edit 可能已经成功定位，但它不是本次失败的诊断证据。
++                  // 保持既有 message 前缀不变，新增信息只来自同一主路径返回的 actual candidate。
+                   const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
+                   throw new Error(
+                     message +
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 218754c05e4db34577a31934eacb7f0efa77ea4e..846b73576e95cb5ba5e182393a812d839e12153f 100644
+index 67bdb7fb1..b051cd094 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -332,6 +332,41 @@ describe("tool.apply_patch freeform", () => {
+@@ -348,6 +348,41 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
-+  // CRLF 文件中的多行 candidate 与 Patch 的 LF expected 在 normalized 空间等价，不能再次回显 expected block。
++  // #521：CRLF 文件中的多行 candidate 与 Patch 的 LF expected 在 normalized 空间等价，不能再次回显 expected block。
 +  // candidate 已位于 cursor 之前，测试同时锁定“原文件证据”与“当前步骤不可重用”的边界。
 +  // 断言组合 patch input 和 error output，确保用户上下文中不会出现第二份 requested block。
 +  it.instance("does not repeat a CRLF candidate before the patch cursor", () =>
@@ -1279,11 +1291,11 @@ index 218754c05e4db34577a31934eacb7f0efa77ea4e..846b73576e95cb5ba5e182393a812d83
    // 前序 replacement 已从 working copy 消费 alpha；persisted candidate 只能解释原文件位置，不能猜测 cursor 原因。
    // Tool input 有两个独立 `-alpha` 请求，result 不得制造第三份，且整个文件仍按单 hunk 原子失败。
    it.instance("does not repeat an exact candidate consumed by a prior chunk", () =>
-@@ -904,15 +939,17 @@ EOF`
+@@ -959,15 +994,17 @@ EOF`
      )
  
    // Tool wrapper 不能在 owner 丢失身份后重扫第一个 chunk；提示必须绑定真正失败的第二个 chunk。
-+  // 失败身份由 Patch owner 的主路径确定，wrapper 只负责组合既有错误文案和 actual 证据。
++  // #521：失败身份由 Patch owner 的主路径确定，wrapper 只负责组合既有错误文案和 actual 证据。
    // 长字符集 decoy 同时证明 bounded window 选择第 4 行候选，而不是重复旧的无界 scorer。
    // 失败 chunk 的 requested 只留在 patchText，result 用 actual 与列区间提供增量证据。
 +  // 断言因此同时锁定失败归因、去重约束和列差异 renderer，避免测试只验证“有错误”。
@@ -1298,7 +1310,7 @@ index 218754c05e4db34577a31934eacb7f0efa77ea4e..846b73576e95cb5ba5e182393a812d83
        yield* writeText(target, `first\n${decoy}\nfiller\n${candidate}\n`)
  
        const patchText = [
-@@ -955,7 +992,8 @@ EOF`
+@@ -1009,7 +1046,8 @@ EOF`
        yield* writeText(goodFile, "hello\n")
        yield* writeText(badFile, "world\n")
  
@@ -1308,11 +1320,12 @@ index 218754c05e4db34577a31934eacb7f0efa77ea4e..846b73576e95cb5ba5e182393a812d83
        const patchText = [
          "*** Begin Patch",
          "*** Update File: good.txt",
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7 100644
+index 7b2c5ec99..35c8d4c25 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -305,12 +305,12 @@ describe("tool.edit", () => {
+@@ -345,12 +345,12 @@ describe("tool.edit", () => {
        Effect.gen(function* () {
          const test = yield* TestInstance
          const filepath = path.join(test.directory, "file.txt")
@@ -1327,7 +1340,7 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
            newString: "replacement",
          })
  
-@@ -327,7 +327,7 @@ describe("tool.edit", () => {
+@@ -367,7 +367,7 @@ describe("tool.edit", () => {
          const test = yield* TestInstance
          const filepath = path.join(test.directory, "decoy.txt")
          const decoy = "a".repeat(180) + "t".repeat(180) + "e".repeat(180)
@@ -1336,7 +1349,7 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
          yield* put(filepath, `${decoy}\nfiller one\nfiller two\n${candidate}\n`)
  
          const error = yield* fail({
-@@ -345,6 +345,111 @@ describe("tool.edit", () => {
+@@ -385,6 +385,113 @@ describe("tool.edit", () => {
      // 两行窗口只有一个字符不同，bounded score 应可靠选择真实候选并报告其起始行。
      // requested 全文已存在于 Tool input；错误只展示 actual 局部和一基差异列，避免再次复制 oldString。
      // 独立列号断言同时证明长公共前缀不会掩盖真正变化字符。
@@ -1345,6 +1358,7 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "ordered-distance.txt")
 +        const candidate = "prefix target sequence alpha beta gamxa suffix"
++        // #521：第 1 行是低编辑距离的短窗口，第 2 行是长上下文变体；DP 必须选距离更近者而不是行数更接近者。
 +        yield* put(filepath, `target sequence alpha beta deltta\n${candidate}\n`)
 +
 +        const error = yield* fail({
@@ -1359,12 +1373,12 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
 +      }),
 +    )
 +
++    // #521：astral 字符占两个 UTF-16 单元，CRLF 又会在比较空间折叠成一个 point。
++    // 用户最终看到的行号和 actual 片段仍必须来自原始边界，而不是 code-point index。
 +    it.instance("closest match preserves raw offsets across CRLF and astral text", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "raw-offsets.txt")
-+        // astral 字符占两个 UTF-16 单元，CRLF 又会在比较空间折叠成一个 point。
-+        // 用户最终看到的行号和 actual 片段仍必须来自原始边界，而不是 code-point index。
 +        yield* put(filepath, "😀 prefix\r\nactual content\r\n")
 +
 +        const error = yield* fail({
@@ -1378,12 +1392,12 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
 +      }),
 +    )
 +
++    // #521：DP 返回的候选跨过一个空行，renderer 只能展示同一 raw span，不能重选等长行窗口。
++    // 这个断言保护变长候选的证据完整性，并让模型看到实际插入的空行。
 +    it.instance("closest match renders the DP span when a line is inserted", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "variable-span.txt")
-+        // DP 返回的候选跨过一个空行，renderer 只能展示同一 raw span，不能重选等长行窗口。
-+        // 这个断言保护变长候选的证据完整性，并让模型看到实际插入的空行。
 +        yield* put(filepath, "alpha\n\nbeta\n")
 +
 +        const error = yield* fail({
@@ -1397,15 +1411,15 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
 +      }),
 +    )
 +
++    // #521：完整行上下文会把 DP 选中的中间 span 推入 omission marker，测试必须锁定 span 本身仍可见。
++    // 预期值是手写的 raw candidate，不从 matcher 反向生成，避免测试与实现共享错误。
++    // 这条断言只验证诊断证据保留，不允许相似文本进入成功替换路径。
 +    it.instance("keeps a long variable candidate span visible", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "long-variable-span.txt")
 +        const prefix = "p".repeat(400)
 +        const suffix = "s".repeat(400)
-+        // 完整行上下文会把 DP 选中的中间 span 推入 omission marker，测试必须锁定 span 本身仍可见。
-+        // 预期值是手写的 raw candidate，不从 matcher 反向生成，避免测试与实现共享错误。
-+        // 这条断言只验证诊断证据保留，不允许相似文本进入成功替换路径。
 +        yield* put(filepath, `${prefix}alpha\n\nbeta${suffix}\n`)
 +
 +        const error = yield* fail({
@@ -1433,6 +1447,7 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
 +        expect(error.message).toContain("Closest match at line 1")
 +        expect(error.message).toContain('line 1 actual: "ab"')
 +
++        // #521：边界另一半：分母取 max 后 3/4 距离低于 0.5，必须与结构失配一样抑制。
 +        yield* put(filepath, "a")
 +        const below = yield* fail({
 +          filePath: filepath,
@@ -1448,7 +1463,7 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
      it.instance("closest match shows actual candidate for a single-char mismatch", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -368,6 +473,7 @@ describe("tool.edit", () => {
+@@ -408,6 +515,7 @@ describe("tool.edit", () => {
  
      // oldString 与文件结构完全无关时没有可信位置，任何 excerpt 都会制造 false precision。
      // 低于阈值的候选必须被抑制，并明确要求重新读取文件。
@@ -1456,7 +1471,7 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
      it.instance("suppresses candidates when oldString structure mismatches file", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -388,6 +494,7 @@ describe("tool.edit", () => {
+@@ -428,6 +536,7 @@ describe("tool.edit", () => {
  
      // 两个窗口与 expected 只有最后一个字符不同且得分完全相同，任何择一都会制造假精度。
      // tie gate 必须省略两处文本并明确要求重新 read，而不是依赖文件顺序。
@@ -1464,11 +1479,11 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
      it.instance("suppresses tied closest candidates", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -409,6 +516,25 @@ describe("tool.edit", () => {
+@@ -449,6 +558,25 @@ describe("tool.edit", () => {
        }),
      )
  
-+    // 候选可以从更长窗口的内部起点开始；等距时不能因为 DP 转移顺序丢掉内部候选。
++    // #521：候选可以从更长窗口的内部起点开始；等距时不能因为 DP 转移顺序丢掉内部候选。
 +    // 该最小反例专门覆盖 empty predecessor，否则较长窗口会错误覆盖内部子串。
 +    // 失败信息必须要求重新读取，而不是选择其中一个同距位置制造假精度。
 +    it.instance("suppresses a tied inner candidate", () =>
@@ -1490,11 +1505,11 @@ index 75bb86eaa867f999657bc884c5fae3d8239f1b32..fa7045ad1b8465e0a83610bdce70ff8a
      // [local-smark] 当文件在当前 session 中从未被 read 或 write 过时，
      // edit 应拒绝执行并提示先 read，避免 oldString 基于过期/假设内容匹配失败。
      // 显式使用 ctx（messages 为空）模拟"从未读过"的场景。
-@@ -908,6 +1034,28 @@ describe("tool.edit", () => {
+@@ -987,6 +1115,28 @@ describe("tool.edit", () => {
        }),
      )
  
-+    // 前一条 normalized edit 可以成功定位，但失败报告必须只携带真正缺失条目的 actual 证据。
++    // #521：前一条 normalized edit 可以成功定位，但失败报告必须只携带真正缺失条目的 actual 证据。
 +    // 该断言同时保护 editIndex 传播和错误正文去重，防止 wrapper 回退到第一条 oldString。
 +    it.instance("diagnoses only the missing normalized edit", () =>
 +      Effect.gen(function* () {

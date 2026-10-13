@@ -192,10 +192,11 @@ index 2cf85e358..a83c51e7e 100644
  
  // 格式化 token 数为人类可读的 k/m 简写
  function formatTokens(tokens: number) {
-@@ -269,8 +422,10 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+@@ -269,9 +422,11 @@
    useRenderer()
  
    // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
+   // #157：inputRaw 的响应式依赖由深快照建立，后续 produce 内的 raw 增量可精确触发重算
 -  const inputRaw = createMemo(() => {
 -    // #157：messages/parts 都 deep snapshot，嵌套 raw 增量才能触发 memo
 +  // #279：inputRaw 改为纯函数 buildInput：快照构建不再被 memo 直接订阅，

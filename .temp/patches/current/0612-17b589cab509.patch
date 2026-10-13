@@ -12,6 +12,8 @@ ThemeProvider 的 syntax/subtleSyntax memo 在替换与卸载后于 renderer idl
 
 verify-opentui-closure 的 OpenTUI 与 solid-js 版本改从 root package.json catalog 读取（单一信源），upgrade-opentui 的版本白名单改为 smark release 形状校验；升级测试改为 fixture 声明版本驱动并补形状拒绝负例，避免硬编码版本与信源漂移。CI 全量等价预检通过（core 5040 用例 0 fail）。
 
+适配说明：承载 source 的 TUI 主题样式退休语义（createSyntaxStyleMemo 简化为无 Set 的 idle 边界销毁 + 生命周期测试）。丢弃段（SUPERSEDED_BY_REGISTRY 谱系）：verify-opentui-closure.ts 两 hunk 与 upgrade-opentui.test.ts——发布闭包脚手架链自 0512 起在目标整体剥除（0586/0587/0598 连续裁定，等价质量面为 smoke 脚本+CI job），文件无 base；theme 调用点转换 hunk——目标基线已调用 createSyntaxStyleMemo（已满足）；根 script/upgrade-opentui.ts 形状门——目标基线无 smark 版本门（registry 0.4.5 谱系以 lockfile 一致性校验替代），插入 -smark 正则门会拒绝 registry 版本与目标交付策略冲突。重锚：theme.tsx 归一化到 packages/tui/src/context/theme.tsx:306（保留 export——目标基线导出该函数且删除会破坏潜在消费面；简化体逐字承载 source 形态，idle() 不 reject 合同由新测试在目标 registry 运行时验证）；测试迁 packages/tui/test/cli/tui/dialog-prompt.test.tsx（动态 import useTheme + TestTuiContexts/KVProvider 约定，断言语义逐字保留）。
+
 diff --git a/docs/plans/opentui-tui-native-liveness-root-cause-repair.md b/docs/plans/opentui-tui-native-liveness-root-cause-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..ecf78ab3b50aa9df96d9e548e7e1b1d059baeee8
@@ -318,126 +320,102 @@ index 0000000000000000000000000000000000000000..ecf78ab3b50aa9df96d9e548e7e1b1d0
 +R18 实现审计 verdict（原样记录）：`Release verdict: APPROVE — 仅适用于本次审计的实际 diff 对照 Approved revision R18。复跑验证：Diff.regression 8/0/47、Code+EditBuffer 94 pass、全量 renderables 1330/0、dialog-prompt 3/0/16、upgrade+provenance 5/0/21、resize 1 pass、bun typecheck（packages/opencode）通过、2000 次退休循环 leak=0。诚实的未验证项：installed runtime 压力 harness 需 §6.7 artifact adoption（发布 + push 授权）后重跑，当前保持源码侧 green / installed 侧 red 的如实状态——与禁 push 约束一致，不构成阻塞。` 审计独立重算 E≈303、C=46、C/E≈0.152，剔除迁移注释后仍高于 0.10 阻塞线；E/C 门槛通过。Rejected speculation：use-after-destroy（无可达 producer）、形状校验接受不存在 release（脚本为可选维护入口，负例守住畸形输入）、idle() 悬挂（destroy 时 flush pending idle）。
 +
 +提交边界：commit 只允许本任务路径（OpenTUI core Diff/Renderable/TextBuffer/EditBuffer、theme.tsx、dialog-prompt.test.tsx、verify-opentui-closure.ts、upgrade-opentui.ts、upgrade-opentui.test.ts、opentui-provenance.test.ts、本文档及交付阶段声明路径）。worktree 中 permission/precheck、其他 docs/plans、`thirdparty/opencode-11720/` 等无关修改一律保持原样，不 stage、不还原、不纳入。
-diff --git a/packages/opencode/script/verify-opentui-closure.ts b/packages/opencode/script/verify-opentui-closure.ts
-index 0eb302c6ec541636d386b9ab65118c7d48a0f56b..929f01e610d807139628e4424f31191ba95cdddb 100644
---- a/packages/opencode/script/verify-opentui-closure.ts
-+++ b/packages/opencode/script/verify-opentui-closure.ts
-@@ -5,7 +5,21 @@ import path from "node:path"
- import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
+diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme.tsx
+--- a/packages/tui/src/context/theme.tsx
++++ b/packages/tui/src/context/theme.tsx
+@@ -305,28 +305,22 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
  
- const root = path.resolve(import.meta.dir, "../../..")
--const version = "0.4.3-smark.10"
-+// 版本唯一信源是 root package.json catalog；验证器不得维护第二份版本常量，避免升级时信源漂移。
-+const catalog = ((await Bun.file(path.join(root, "package.json")).json()) as {
-+  workspaces?: { catalog?: Record<string, string> }
-+}).workspaces?.catalog
-+const opentuiVersions = ["@opentui/core", "@opentui/keymap", "@opentui/solid"].map((name) => catalog?.[name])
-+// 三个 framework 包必须共享同一版本；catalog 分裂意味着 lock 与 installed 已无法形成单一 ABI 闭包。
-+if (!catalog || opentuiVersions.some((item) => typeof item !== "string") || new Set(opentuiVersions).size !== 1) {
-+  throw new Error(`root package.json catalog does not declare a single OpenTUI version: ${opentuiVersions.join(", ")}`)
-+}
-+const version = opentuiVersions[0] as string
-+// solid-js 期望版本同样从 catalog 读取，与 OpenTUI 版本共用同一升级信源。
-+const solidVersion = catalog["solid-js"]
-+if (typeof solidVersion !== "string") {
-+  throw new Error("root package.json catalog does not declare solid-js")
-+}
- const tag = `v${version}`
- const repository = "https://github.com/SMARK2022/opentui"
- const release = `${repository}/releases/download/${tag}`
-@@ -87,8 +101,8 @@ const solidVersions = new Map(
-   ),
- )
- // realpath唯一和version唯一是两个独立条件；相同版本的两份Solid仍会分裂响应式owner。
--// OpenTUI Solid/keymap精确要求1.9.12；任意嵌套1.9.10都会让响应式owner和renderer运行在不同runtime。
--if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) => item !== "1.9.12")) {
-+// Solid 版本与 OpenTUI 版本同属 catalog 声明；嵌套旧版会让响应式owner和renderer运行在不同runtime。
-+if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) => item !== solidVersion)) {
-   throw new Error(
-     `solid-js closure mismatch: ${solidRoots.map((item) => `${item}@${solidVersions.get(item)}`).join(", ")}`,
-   )
-diff --git a/packages/opencode/src/cli/cmd/tui/context/theme.tsx b/packages/opencode/src/cli/cmd/tui/context/theme.tsx
-index 24d122162a55c470316bde7cb4964215c3691738..2e5b9058c7d77799765efcc2c6c9de8c687e8978 100644
---- a/packages/opencode/src/cli/cmd/tui/context/theme.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/theme.tsx
-@@ -435,8 +435,8 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
-       renderer.setBackgroundColor(values().background)
-     })
+ export function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
+   const renderer = useRenderer()
+-  const retained = new Set<SyntaxStyle>()
+   let current: SyntaxStyle | undefined
  
--    const syntax = createMemo(() => generateSyntax(values()))
--    const subtleSyntax = createMemo(() => generateSubtleSyntax(values()))
-+    const syntax = createSyntaxStyleMemo(() => generateSyntax(values()))
-+    const subtleSyntax = createSyntaxStyleMemo(() => generateSubtleSyntax(values()))
- 
-     return {
-       theme: new Proxy(values(), {
-@@ -484,6 +484,28 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
-   },
- })
- 
-+function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
-+  const renderer = useRenderer()
-+  let current: SyntaxStyle | undefined
-+
-+  onCleanup(() => {
+-  const release = (style: SyntaxStyle) => {
+-    retained.add(style)
+-    void renderer
+-      .idle()
+-      .catch(() => {})
+-      .finally(() => {
+-        if (!retained.delete(style)) return
+-        style.destroy()
+-      })
+-  }
+-
+   onCleanup(() => {
+-    if (current) release(current)
 +    const style = current
 +    current = undefined
 +    // 最后一份样式不经 replacement；idle 边界避免销毁仍被当前帧使用的共享 owner。
 +    // CliRenderer.idle() 在 renderer destroy 时 resolve 且不 reject，销毁安排不会悬挂。
 +    if (style) void renderer.idle().then(() => style.destroy())
-+  })
-+
-+  return createMemo(() => {
-+    const previous = current
-+    current = factory()
+   })
+ 
+   return createMemo(() => {
+     const previous = current
+     current = factory()
+-    if (previous) release(previous)
 +    // factory 成功后才替换 current，失败时旧 style 仍是唯一有效 owner。
 +    // previous 与 cleanup 处理的对象不相交，无需幂等 Set：每次 replacement 销毁上一份旧值，cleanup 只销毁最后一份。
 +    if (previous) void renderer.idle().then(() => previous.destroy())
-+    return current
-+  })
-+}
-+
- async function getCustomThemes() {
-   const directories = [
-     Global.Path.config,
-diff --git a/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx b/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx
-index 22d451724f57c7d8c4b66eeba556836a4e58cdc6..18f895649c80afaa37c042b6eea83256b76f694a 100644
---- a/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx
-@@ -6,7 +6,7 @@ import { testRender, useRenderer } from "@opentui/solid"
- import { onCleanup, onMount } from "solid-js"
- import { DialogPrompt } from "@/cli/cmd/tui/ui/dialog-prompt"
- import { TuiConfigProvider } from "@/cli/cmd/tui/context/tui-config"
--import { ThemeProvider } from "@/cli/cmd/tui/context/theme"
-+import { ThemeProvider, useTheme } from "@/cli/cmd/tui/context/theme"
- import { KVProvider } from "@/cli/cmd/tui/context/kv"
- import { ToastProvider } from "@/cli/cmd/tui/ui/toast"
- import { DialogProvider } from "@/cli/cmd/tui/ui/dialog"
-@@ -72,6 +72,61 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
-   }
+     return current
+   })
+ }
+
+diff --git a/packages/tui/test/cli/tui/dialog-prompt.test.tsx b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+--- a/packages/tui/test/cli/tui/dialog-prompt.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+@@ -241,3 +241,84 @@ test("DialogPrompt voice status call site selects compact profile", async () =>
+   const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/ui/dialog-prompt.tsx")).text()
+   expect(source).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
  })
- 
++
++// 主题样式退休（R18）：ThemeProvider 切换主题时旧 syntax pair 必须在 idle 边界销毁，
++// 当前 pair 保持可读；renderer 销毁时最后一对也必须释放，防止 native registry 句柄泄漏。
++// 适配目标：动态 import 取 useTheme，TestTuiContexts+KVProvider 提供主题初始化依赖。
 +test("ThemeProvider releases superseded and current syntax styles", async () => {
++  await using tmp = await tmpdir()
++  const state = path.join(tmp.path, "state")
++  await mkdir(state, { recursive: true })
++  await Bun.write(path.join(state, "kv.json"), "{}")
++
++  const [{ ThemeProvider, useTheme }, { TuiConfigProvider }, { KVProvider }] = await Promise.all([
++    import("../../../src/context/theme"),
++    import("../../../src/config"),
++    import("../../../src/context/kv"),
++  ])
++
++  // Provider 的 ready 门禁包含异步 KV/主题初始化；子组件挂载才是就绪信号。
 +  const mounted = Promise.withResolvers<ReturnType<typeof useTheme>>()
 +  function Probe() {
 +    mounted.resolve(useTheme())
 +    return null
 +  }
-+  const app = await testRender(() => (
-+    <box width={80} height={24}>
-+      <TuiConfigProvider config={createTuiResolvedConfig()}>
-+        <KVProvider>
-+          <ThemeProvider mode="dark">
-+            <Probe />
-+          </ThemeProvider>
-+        </KVProvider>
-+      </TuiConfigProvider>
-+    </box>
-+  ), { width: 80, height: 24 })
++
++  function Harness() {
++    return (
++      <TestTuiContexts
++        directory={tmp.path}
++        paths={{
++          home: tmp.path,
++          state,
++          worktree: tmp.path,
++        }}
++      >
++        <TuiConfigProvider config={createTuiResolvedConfig()}>
++          <KVProvider>
++            <ThemeProvider mode="dark">
++              <Probe />
++            </ThemeProvider>
++          </KVProvider>
++        </TuiConfigProvider>
++      </TestTuiContexts>
++    )
++  }
++
++  const app = await testRender(() => <Harness />, { width: 80, height: 24 })
 +  try {
-+    // Provider 的 ready 门禁包含异步 KV/主题初始化；子组件挂载才是就绪信号。
-+    const theme = await mounted.promise
 +    // readiness signal 来自真实 Provider child，而不是固定 sleep，避免测试与异步初始化竞态。
++    const theme = await mounted.promise
 +    theme.setMode("dark")
 +    await app.renderOnce()
 +    await app.renderer.idle()
@@ -471,238 +449,3 @@ index 22d451724f57c7d8c4b66eeba556836a4e58cdc6..18f895649c80afaa37c042b6eea83256
 +    app.renderer.destroy()
 +  }
 +})
-+
- // INV-01：Dialog 必须显式选择 compact；formatter 单测无法覆盖该 call site。
- test("DialogPrompt voice status call site selects compact profile", async () => {
-   const source = await Bun.file(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/ui/dialog-prompt.tsx")).text()
-diff --git a/packages/opencode/test/script/upgrade-opentui.test.ts b/packages/opencode/test/script/upgrade-opentui.test.ts
-index 9a14769f13743e7b58a52149b898579b3a812193..74596be84d8257ec9b49e192b9a41c771402b8f0 100644
---- a/packages/opencode/test/script/upgrade-opentui.test.ts
-+++ b/packages/opencode/test/script/upgrade-opentui.test.ts
-@@ -3,108 +3,119 @@ import fs from "node:fs/promises"
- import path from "node:path"
- import { tmpdir } from "../fixture/fixture"
- 
--test("upgrade-opentui updates the immutable release family without entering thirdparty", async () => {
--  // 临时fixture同时包含root、plugin和submodule，验证扫描边界而非只验证单个package.json。
--  // nested manifest是独立expected value，不能由升级脚本重新计算后再自证。
--  await using tmp = await tmpdir()
--  await Promise.all(
--    ["script", "packages/plugin", "thirdparty/opentui"].map((directory) =>
--      fs.mkdir(path.join(tmp.path, directory), { recursive: true }),
--    ),
--  )
--  await Bun.write(
--    path.join(tmp.path, "package.json"),
--    JSON.stringify(
--      {
--        workspaces: {
--          catalog: {
--            "@opentui/core": "0.3.4",
--            "@opentui/keymap": "0.3.4",
--            "@opentui/solid": "0.3.4",
-+// fixture 声明版本是断言的唯一预期来源；测试不得从生产 asset 表反推 URL，否则生产常量漂移时测试无法失败。
-+// 参数化两个 smark 版本是为证明脚本不依赖固定白名单：任何符合形状的 release 都必须被接受。
-+const cases = ["0.4.3-smark.1", "0.4.3-smark.10"] as const
-+
-+for (const version of cases) {
-+  test(`upgrade-opentui updates the immutable release family without entering thirdparty (${version})`, async () => {
-+    // 临时fixture同时包含root、plugin和submodule，验证扫描边界而非只验证单个package.json。
-+    // nested manifest是独立expected value，不能由升级脚本重新计算后再自证。
-+    await using tmp = await tmpdir()
-+    await Promise.all(
-+      ["script", "packages/plugin", "thirdparty/opentui"].map((directory) =>
-+        fs.mkdir(path.join(tmp.path, directory), { recursive: true }),
-+      ),
-+    )
-+    await Bun.write(
-+      path.join(tmp.path, "package.json"),
-+      JSON.stringify(
-+        {
-+          workspaces: {
-+            catalog: {
-+              "@opentui/core": "0.3.4",
-+              "@opentui/keymap": "0.3.4",
-+              "@opentui/solid": "0.3.4",
-+            },
-+          },
-+          overrides: {
-+            "@opentui/core": "catalog:",
-+            "@opentui/keymap": "catalog:",
-+            "@opentui/solid": "catalog:",
-           },
-         },
--        overrides: {
--          "@opentui/core": "catalog:",
--          "@opentui/keymap": "catalog:",
--          "@opentui/solid": "catalog:",
--        },
--      },
--      null,
--      2,
--    ) + "\n",
--  )
--  // root catalog保留可读semantic version，实际artifact URL由11项override唯一拥有。
--  await Bun.write(
--    path.join(tmp.path, "packages/plugin/package.json"),
--    JSON.stringify(
--      {
--        peerDependencies: {
--          "@opentui/core": ">=0.3.4",
--          "@opentui/keymap": ">=0.3.4",
--          "@opentui/solid": ">=0.3.4",
-+        null,
-+        2,
-+      ) + "\n",
-+    )
-+    // root catalog保留可读semantic version，实际artifact URL由11项override唯一拥有。
-+    await Bun.write(
-+      path.join(tmp.path, "packages/plugin/package.json"),
-+      JSON.stringify(
-+        {
-+          peerDependencies: {
-+            "@opentui/core": ">=0.3.4",
-+            "@opentui/keymap": ">=0.3.4",
-+            "@opentui/solid": ">=0.3.4",
-+          },
-         },
--      },
--      null,
--      2,
--    ) + "\n",
--  )
--  const nested = '{"name":"@opentui/core","version":"0.4.3-smark.1"}\n'
--  await Bun.write(path.join(tmp.path, "thirdparty/opentui/package.json"), nested)
-+        null,
-+        2,
-+      ) + "\n",
-+    )
-+    // nested 固定声明旧版本：fixture 版本与其不一致时，升级脚本仍不得改写独立 Git 边界内的 manifest。
-+    const nested = '{"name":"@opentui/core","version":"0.4.3-smark.1"}\n'
-+    await Bun.write(path.join(tmp.path, "thirdparty/opentui/package.json"), nested)
-+    await Bun.write(
-+      path.join(tmp.path, "script/upgrade-opentui.ts"),
-+      await Bun.file(path.join(import.meta.dir, "../../../../script/upgrade-opentui.ts")).text(),
-+    )
-+
-+    const proc = Bun.spawn(["bun", "run", "script/upgrade-opentui.ts", version], {
-+      cwd: tmp.path,
-+      stdout: "pipe",
-+      stderr: "pipe",
-+    })
-+    // 子进程运行真实CLI入口，避免直接import函数绕过文件扫描、序列化和退出码行为。
-+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
-+    expect(stderr).toBe("")
-+    expect(code).toBe(0)
-+
-+    const root = await Bun.file(path.join(tmp.path, "package.json")).json()
-+    // catalog断言来自fixture声明版本，不调用production asset表生成expected。
-+    expect(root.workspaces.catalog).toEqual({
-+      "@opentui/core": version,
-+      "@opentui/keymap": version,
-+      "@opentui/solid": version,
-+    })
-+    // 三个framework包和八个native包必须来自同一tag；缺一项都会重新形成mixed ABI graph。
-+    const release = `https://github.com/SMARK2022/opentui/releases/download/v${version}`
-+    expect(root.overrides).toEqual({
-+      "@opentui/core": `${release}/opentui-core-${version}.tgz`,
-+      "@opentui/keymap": `${release}/opentui-keymap-${version}.tgz`,
-+      "@opentui/solid": `${release}/opentui-solid-${version}.tgz`,
-+      "@opentui/core-darwin-arm64": `${release}/opentui-core-darwin-arm64-${version}.tgz`,
-+      "@opentui/core-darwin-x64": `${release}/opentui-core-darwin-x64-${version}.tgz`,
-+      "@opentui/core-linux-arm64": `${release}/opentui-core-linux-arm64-${version}.tgz`,
-+      "@opentui/core-linux-arm64-musl": `${release}/opentui-core-linux-arm64-musl-${version}.tgz`,
-+      "@opentui/core-linux-x64": `${release}/opentui-core-linux-x64-${version}.tgz`,
-+      "@opentui/core-linux-x64-musl": `${release}/opentui-core-linux-x64-musl-${version}.tgz`,
-+      "@opentui/core-win32-arm64": `${release}/opentui-core-win32-arm64-${version}.tgz`,
-+      "@opentui/core-win32-x64": `${release}/opentui-core-win32-x64-${version}.tgz`,
-+    })
-+    const plugin = await Bun.file(path.join(tmp.path, "packages/plugin/package.json")).json()
-+    // 三个peer分别保留，防止实现只更新core而遗漏Solid/keymap公开surface。
-+    expect(Object.values(plugin.peerDependencies)).toEqual([`>=${version}`, `>=${version}`, `>=${version}`])
-+    // peer floor和URL closure必须同时升级，否则source能安装但plugin生态仍拒绝同一release。
-+    // thirdparty是独立Git边界；升级root consumer不得改写fork中的package manifests。
-+    expect(await Bun.file(path.join(tmp.path, "thirdparty/opentui/package.json")).text()).toBe(nested)
-+  })
-+}
-+
-+test("upgrade-opentui rejects versions outside the smark release shape", async () => {
-+  // 形状校验是唯一前置门槛；白名单已移除，非 smark 形状的任意拼接仍必须被拒绝。
-+  await using tmp = await tmpdir()
-   await Bun.write(
-     path.join(tmp.path, "script/upgrade-opentui.ts"),
-     await Bun.file(path.join(import.meta.dir, "../../../../script/upgrade-opentui.ts")).text(),
-   )
- 
--  const proc = Bun.spawn(["bun", "run", "script/upgrade-opentui.ts", "0.4.3-smark.1"], {
-+  const proc = Bun.spawn(["bun", "run", "script/upgrade-opentui.ts", "0.4.3"], {
-     cwd: tmp.path,
-     stdout: "pipe",
-     stderr: "pipe",
-   })
--  // 子进程运行真实CLI入口，避免直接import函数绕过文件扫描、序列化和退出码行为。
-   const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
--  expect(stderr).toBe("")
--  expect(code).toBe(0)
--
--  const root = await Bun.file(path.join(tmp.path, "package.json")).json()
--  // catalog断言使用固定literal，不调用production asset表生成expected。
--  expect(root.workspaces.catalog).toEqual({
--    "@opentui/core": "0.4.3-smark.1",
--    "@opentui/keymap": "0.4.3-smark.1",
--    "@opentui/solid": "0.4.3-smark.1",
--  })
--  // 三个framework包和八个native包必须来自同一tag；缺一项都会重新形成mixed ABI graph。
--  expect(root.overrides).toEqual({
--    "@opentui/core":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz",
--    "@opentui/keymap":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz",
--    "@opentui/solid":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz",
--    "@opentui/core-darwin-arm64":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz",
--    "@opentui/core-darwin-x64":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz",
--    "@opentui/core-linux-arm64":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz",
--    "@opentui/core-linux-arm64-musl":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz",
--    "@opentui/core-linux-x64":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz",
--    "@opentui/core-linux-x64-musl":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz",
--    "@opentui/core-win32-arm64":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz",
--    "@opentui/core-win32-x64":
--      "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz",
--  })
--  const plugin = await Bun.file(path.join(tmp.path, "packages/plugin/package.json")).json()
--  // 三个peer分别保留，防止实现只更新core而遗漏Solid/keymap公开surface。
--  expect(Object.values(plugin.peerDependencies)).toEqual([
--    ">=0.4.3-smark.1",
--    ">=0.4.3-smark.1",
--    ">=0.4.3-smark.1",
--  ])
--  // peer floor和URL closure必须同时升级，否则source能安装但plugin生态仍拒绝同一release。
--  // thirdparty是独立Git边界；升级root consumer不得改写fork中的package manifests。
--  expect(await Bun.file(path.join(tmp.path, "thirdparty/opentui/package.json")).text()).toBe(nested)
-+  expect(code).toBe(1)
-+  expect(stderr).toContain("Unsupported OpenTUI release: 0.4.3")
- })
-diff --git a/script/upgrade-opentui.ts b/script/upgrade-opentui.ts
-index 90dc63ac4b9615d5a6d982cf88fdd37795347ab4..b4ca2ec770d2db491c94129a0dcb4fb6f646695d 100644
---- a/script/upgrade-opentui.ts
-+++ b/script/upgrade-opentui.ts
-@@ -9,8 +9,9 @@ if (!raw) {
- }
- 
- const ver = raw.replace(/^v/, "")
--// 只有已经发布并完成attestation的版本才能进入映射；拒绝任意拼接URL，避免写出不可安装lockfile。
--if (ver !== "0.4.3-smark.1") {
-+// 维护入口只校验 smark release 形状；版本真相是 root package.json catalog 与已发布 release，不是本脚本的白名单。
-+// 形状校验仍拒绝任意拼接 URL，避免写出不可安装 lockfile。
-+if (!/^\d+\.\d+\.\d+-smark\.\d+$/.test(ver)) {
-   console.error(`Unsupported OpenTUI release: ${ver}`)
-   process.exit(1)
- }

@@ -1,20 +1,20 @@
-From 07b7fed1515ef5211118c429fc324918cdf8dc03 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Mon, 20 Jul 2026 04:36:51 +0800
-Subject: [PATCH] =?UTF-8?q?fix(lsp):=20=E9=9A=94=E7=A6=BB=E4=BC=9A?=
- =?UTF-8?q?=E8=AF=9D=E5=AE=A2=E6=88=B7=E7=AB=AF=E7=94=9F=E5=91=BD=E5=91=A8?=
- =?UTF-8?q?=E6=9C=9F?=
+From 07b7fed1515e Mon Sep 17 00:00:00 2001
+From: SMARK <smark@local>
+Date: Sat, 18 Jul 2026 14:22:37 +0800
+Subject: [PATCH] fix(lsp): 隔离会话客户端生命周期
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-按 Session owner 和真实 Runner admission 维护共享 LSP client，统一 root、child、删除和 State 终态清理。
-
-TUI 仅投影当前 Session，并在路由切换时清除旧快照和拒绝迟到响应。
-
+适配：owner 迁移（tui context → packages/tui/src/context；lsp/run-state EventV2Bridge/
+FSUtil/LayerNode 形态）。落地：ClientEntry per-Session claim registry、withSession/
+CurrentOwner、init 原子退休（Semaphore 1）、pruneMissingRoots/removeExitedClient/
+GlobalBus session.deleted listener、detach 先于 shutdown、run-state daemon-wide runners +
+ensureRunning LSP admission + attachWith(refs)、tui event.ts lsp.updated 跨 Project 放行、
+sync.tsx route 作用域 refreshLsp（版本 token + sessionIDs 过滤）、sdk LspStatus.sessionIDs、
+lsp lifecycle 两用例、prompt.test admission 断言、sync-fixture route 支持 + sync.test 用例。
 diff --git a/docs/plans/lsp-client-lifecycle-session-isolation.md b/docs/plans/lsp-client-lifecycle-session-isolation.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..24a4a85ea2a8e1eea483f41603415912354b8132
 --- /dev/null
 +++ b/docs/plans/lsp-client-lifecycle-session-isolation.md
 @@ -0,0 +1,622 @@
@@ -640,240 +640,139 @@ index 0000000000000000000000000000000000000000..24a4a85ea2a8e1eea483f41603415912
 +before the controlled startup boundary. With that faithful ordering, child exit
 +and startup missing-root cleanup both pass through their intended terminal
 +paths. The full verification matrix and hard gates were re-run again.
-diff --git a/packages/opencode/src/cli/cmd/tui/context/event.ts b/packages/opencode/src/cli/cmd/tui/context/event.ts
-index 0e90a1dc18f0fd9d6a4610c37fa0d881a3c83a02..e2427a458885b5f0efd1c1ff4a930a4b326ccf8f 100644
---- a/packages/opencode/src/cli/cmd/tui/context/event.ts
-+++ b/packages/opencode/src/cli/cmd/tui/context/event.ts
-@@ -59,6 +59,13 @@ export function useEvent() {
-         return
-       }
- 
-+      // lsp.updated 只表示“当前 route 需要重拉”，不携带可渲染状态；跨 Project
-+      // 放行后仍由 SyncProvider 按 active Session 请求和过滤，不能在这里丢失通知。
-+      if (event.payload.type === "lsp.updated") {
-+        handler(event.payload, { workspace: event.workspace })
-+        return
-+      }
-+
-       if (event.project) {
-         if (event.project === project.project()) handler(event.payload, { workspace: event.workspace })
-         return
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 1e951ab6c3d8b73d9001bd5f050bb138121eea54..ee36cc601647997668aac12e1460432c20b656ee 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -28,10 +28,11 @@ import { createSimpleContext } from "./helper"
- import type { Snapshot } from "@/snapshot"
- import { useExit } from "./exit"
- import { useArgs } from "./args"
--import { batch, onCleanup, onMount } from "solid-js"
-+import { batch, createEffect, onCleanup, onMount } from "solid-js"
- import * as Log from "@opencode-ai/core/util/log"
- import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
- import { useKV } from "./kv"
-+import { useRoute } from "./route"
- // [local-smark] SessionPath for daemon multi-instance path management
- import { SessionPath } from "@/session/path"
- import { aggregateFailures } from "./aggregate-failures"
-@@ -140,6 +141,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     const project = useProject()
-     const sdk = useSDK()
-     const kv = useKV()
-+    const route = useRoute()
- 
-     const fullSyncedSessions = new Set<string>()
-     // [local-smark] daemon multi-instance workspace tracking
-@@ -153,6 +155,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     let questionRefreshes = 0
-     let permissionRefreshVersion = 0
-     let questionRefreshVersion = 0
-+    let lspRefreshVersion = 0
-+    let lspRoute: string | undefined
-     const permissionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
-     const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
-     let pendingPartDeltas: EventMessagePartDelta[] = []
-@@ -165,6 +169,33 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
-     const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
- 
-+    function clearLsp(owner?: string) {
-+      lspRoute = owner
-+      setStore("lsp", reconcile([]))
-+    }
-+
-+    async function refreshLsp() {
-+      const version = ++lspRefreshVersion
-+      const current = route.data
-+      if (current.type !== "session") return clearLsp()
-+      const match = Binary.search(store.session, current.sessionID, (session) => session.id)
-+      if (!match.found) return clearLsp(current.sessionID)
-+      const session = store.session[match.index]
-+      const owner = `${current.sessionID}\0${session.directory}\0${session.workspaceID ?? ""}`
-+      // snapshot owner 在请求前切换；同步清空才能保证 B 的网络请求挂起或失败时，
-+      // sidebar/footer 也绝不会继续渲染已经属于 A 的 rows。
-+      if (lspRoute !== owner) clearLsp(owner)
-+      const response = await sdk.client.lsp.status({ directory: session.directory, workspace: session.workspaceID })
-+      // route A 的请求可能在切到 B 后才返回；只有最新 token 能提交，
-+      // 否则一次网络乱序就会把 B 的右侧列表重新污染成 A。
-+      if (version !== lspRefreshVersion) return
-+      setStore("lsp", reconcile((response.data ?? []).filter((item) => item.sessionIDs?.includes(current.sessionID))))
-+    }
-+
-+    // route 与 Session snapshot 都是 reactive 输入。Session 列表在 bootstrap 后到达时，
-+    // 当前 route 会自动补做一次正确目录/Workspace 的 LSP 请求。
-+    createEffect(() => void refreshLsp())
-+
-     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
-       // Only adjacent deltas for the same Solid store cell are safe to merge.
-       // The public SDK/useEvent stream still receives every event individually;
-@@ -812,8 +843,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-         }
- 
-         case "lsp.updated": {
--          const workspace = project.workspace.current()
--          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
-+          void refreshLsp()
-           break
-         }
- 
-@@ -908,7 +938,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
-             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
--            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
-             sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
-             sdk.client.experimental.resource
-               .list({ workspace })
 diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
-index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee535f0bdc 100644
 --- a/packages/opencode/src/lsp/lsp.ts
 +++ b/packages/opencode/src/lsp/lsp.ts
-@@ -8,19 +8,19 @@ import * as LSPServer from "./server"
+@@ -1,6 +1,10 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { EventV2Bridge } from "@/event-v2-bridge"
++// #499：per-Session 所有权需要 SessionID、EffectBridge 与跨进程删除事件。
++import { SessionID } from "@/session/schema"
++import { EffectBridge } from "@/effect/bridge"
++import { GlobalBus, type GlobalEvent } from "@/bus/global"
+ import * as LSPClient from "./client"
+ import path from "path"
+ import { pathToFileURL, fileURLToPath } from "url"
+@@ -8,7 +12,7 @@ import * as LSPServer from "./server"
  import { Config } from "@/config/config"
  import { Process } from "@/util/process"
  import { spawn as lspspawn } from "./launch"
 -import { Effect, Layer, Context, Schema } from "effect"
-+import { Effect, Layer, Context, Option, Schema, Semaphore } from "effect"
++import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect"
  import { InstanceState } from "@/effect/instance-state"
  import { containsPath } from "@/project/instance-context"
  import { NonNegativeInt } from "@opencode-ai/core/schema"
- import { RuntimeFlags } from "@/effect/runtime-flags"
--import { InstanceRef } from "@/effect/instance-ref"
--import { makeRuntime } from "@/effect/run-service"
-+import { SessionID } from "@/session/schema"
-+import { EffectBridge } from "@/effect/bridge"
-+import { GlobalBus, type GlobalEvent } from "@/bus/global"
- // [local-smark] VSCode Bridge LSP backend：优先通过 bridge 获取 VSCode 的 LSP 能力
- import * as VscodeBridge from "@/ide/vscode-bridge"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+@@ -50,6 +54,8 @@ export const DocumentSymbol = Schema.Struct({
+ export type DocumentSymbol = typeof DocumentSymbol.Type
  
- const log = Log.create({ service: "lsp" })
--const busRuntime = makeRuntime(Bus.Service, Bus.layer)
- 
- export const Event = {
-   Updated: BusEvent.define("lsp.updated", Schema.Struct({})),
-@@ -61,6 +61,7 @@ export const Status = Schema.Struct({
+ export const Status = Schema.Struct({
++  // #499：claim 该 client 的 Session 集合——TUI 按 active Session 过滤投影。
++  sessionIDs: Schema.optional(Schema.Array(SessionID)),
+   id: Schema.String,
    name: Schema.String,
    root: Schema.String,
-   status: Schema.Literals(["connected", "error"]),
-+  sessionIDs: Schema.optional(Schema.Array(SessionID)),
- }).annotate({ identifier: "LSPStatus" })
- export type Status = typeof Status.Type
- 
-@@ -119,11 +120,22 @@ const filterExperimentalServers = (servers: Record<string, LSPServer.Info>, flag
+@@ -111,11 +117,22 @@ const filterExperimentalServers = (servers: Record<string, LSPServer.Info>, flag
  
  type LocInput = { file: string; line: number; character: number }
  
++// #499：registry 条目 = client + 各 Session 的独立 claim；并发 Session 复用进程但互不隶属。
 +interface ClientEntry {
 +  client: LSPClient.Info
 +  owners: Map<SessionID, object>
 +  unscoped: boolean
 +}
 +type PendingClient = { promise: Promise<ClientEntry | undefined>; owners: Set<object | undefined> }
-+
  interface State {
 -  clients: LSPClient.Info[]
-+  updated: Effect.Effect<void>
 +  clients: ClientEntry[]
++  tokens: Map<SessionID, object>
++  bridgeOwners: Map<SessionID, object>
++  closed: boolean
++  updated: Effect.Effect<void>
    servers: Record<string, LSPServer.Info>
    broken: Set<string>
 -  spawning: Map<string, Promise<LSPClient.Info | undefined>>
 +  spawning: Map<string, PendingClient>
-+  tokens: Map<SessionID, object>
-+  bridgeOwners: Map<SessionID, object>
-+  closed: boolean
-   // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报。
+   // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报
    bridgeDiagnostics?: "ok" | "failed"
    // 保存最近一次 strong touch 的同请求快照，后续 diagnostics() 只读缓存，不再产生第二段等待。
-@@ -149,11 +161,23 @@ export interface Interface {
+@@ -126,6 +143,7 @@ export interface Interface {
+   readonly init: () => Effect.Effect<void>
+   readonly status: () => Effect.Effect<Status[]>
+   readonly hasClients: (file: string) => Effect.Effect<boolean>
++  // #499：diagnostics 参数是 bridge 强触诊入口——非 warm 路径不得静默回落到内置 client。
+   readonly touchFile: (input: string, diagnostics?: "document" | "full") => Effect.Effect<void>
+   readonly diagnostics: () => Effect.Effect<Record<string, LSPClient.Diagnostic[]>>
+   readonly hover: (input: LocInput) => Effect.Effect<any>
+@@ -141,12 +159,27 @@ export interface Interface {
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/LSP") {}
  
++// #499：owner token 由 withSession 注入；init 在 owner 上下文里原子退休旧 claim 并安装新 token。
 +type SessionOwner = { readonly sessionID: SessionID; readonly token: object; readonly active: Effect.Effect<void> }
-+
 +const CurrentOwner = Context.Reference<SessionOwner | undefined>("@opencode/LSP/SessionOwner", { defaultValue: () => undefined })
-+
++// #499：每次 withSession 生成新 token 对象——generation 身份由对象引用唯一决定。
 +export function withSession(sessionID: SessionID, active: Effect.Effect<void>) {
 +  return <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provideService(CurrentOwner, { sessionID, token: {}, active }))
 +}
 +
- export const layer = Layer.effect(
+ const layer = Layer.effect(
    Service,
    Effect.gen(function* () {
      const config = yield* Config.Service
      const flags = yield* RuntimeFlags.Service
-+    const fs = yield* AppFileSystem.Service
+     const events = yield* EventV2Bridge.Service
 +    const bridge = yield* EffectBridge.make()
++    // #499：existsSafe 是 FSUtil 服务方法（非命名空间静态）——root 复验经服务实例。
++    const fs = yield* FSUtil.Service
++    // #499：地址簿只收已物化 State；Session 删除事件需在任何 InstanceState 上撤销 claim。
 +    const states = new Set<State>()
++    // #499：admission 与删除共用线性化锁，二者只会看到对方的已完成状态。
 +    const lifecycle = Semaphore.makeUnsafe(1)
  
      const state = yield* InstanceState.make<State>(
        Effect.fn("LSP.state")(function* (ctx) {
-@@ -207,19 +231,25 @@ export const layer = Layer.effect(
-         }
- 
-         const s: State = {
-+          updated: Effect.promise(() => Bus.publish(Event.Updated, {}, { context: { instance: ctx } })),
-           clients: [],
+@@ -203,13 +236,22 @@ const layer = Layer.effect(
            servers,
            broken: new Set(),
            spawning: new Map(),
++          // #499：claim 变化经 EventV2Bridge 发布——TUI 重拉作用域化 status。
++          updated: events.publish(Event.Updated, {}) as Effect.Effect<void>,
 +          tokens: new Map(),
 +          bridgeOwners: new Map(),
 +          closed: false,
            bridgeDiagnostics: undefined,
            bridgeSnapshot: {},
          }
- 
--        yield* Effect.addFinalizer(() =>
--          Effect.promise(async () => {
--            await Promise.all(s.clients.map((client) => client.shutdown()))
--          }),
--        )
 +        states.add(s)
-+        yield* Effect.addFinalizer(() => {
-+          // closed 先于 shutdown，阻止跨过 initialize 的旧 fiber 在 finalizer 后回挂孤儿 client。
-+          s.closed = true
-+          states.delete(s)
-+          return shutdown(detach(s, s.clients))
-+        })
  
-         return s
-       }),
-@@ -229,10 +259,39 @@ export const layer = Layer.effect(
+         yield* Effect.addFinalizer(() =>
+           Effect.promise(async () => {
+-            await Promise.all(s.clients.map((client) => client.shutdown()))
++            // #499：先同步置 closed 并从地址簿移除，再统一 detach+shutdown——迟到 exit 不得再附着。
++            s.closed = true
++            states.delete(s)
++            await Promise.all(detach(s, s.clients).map((entry) => entry.client.shutdown()))
+           }),
+         )
+ 
+@@ -221,11 +263,45 @@ const layer = Layer.effect(
        const ctx = yield* InstanceState.context
        if (!containsPath(file, ctx)) return [] as LSPClient.Info[]
        const s = yield* InstanceState.get(state)
++      // #499：status/touch 前清理 root 已消失的条目——旧进程由统一 shutdown 回收。
 +      yield* pruneMissingRoots(s)
 +      const owner = yield* CurrentOwner
-+      const token = owner?.token
-       return yield* Effect.promise(async () => {
++      const token = owner?.token ?? undefined
+       const clients = yield* Effect.promise(async () => {
          const extension = path.parse(file).ext || file
          const result: LSPClient.Info[] = []
+         let updated = 0
  
-+        // client 身份属于 server/root；Session generation 只是一份独立 claim。
-+        // 这样并发 Session 可以复用进程，同时 status 仍能按 Session 精确投影。
-+        async function claim(entry: ClientEntry, pending?: PendingClient) {
++        // #499：client 身份属于 server/root；Session generation 只是一份独立 claim。
++        // 并发 Session 复用进程，status 仍按 Session 精确投影。
++        async function claim(entry: ClientEntry, pending?: PendingClient): Promise<LSPClient.Info | undefined> {
 +          if (!owner) {
 +            const changed = !entry.unscoped
 +            entry.unscoped = true
@@ -887,33 +786,37 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 +            return entry.client
 +          }
 +
-+          // token 已退休时，请求不能继续消费 client。若该 entry 没有其他 owner，
-+          // 立即走统一 detach；共享 entry 则只拒绝这次旧 claim。
-+          // spawning waiter 与 Promise 共存；旧 claimant 仅在没有当前 waiter 时回收，让新 generation 原子接管。
-+          const waiting = !s.closed && (pending?.owners.has(undefined) || [...s.tokens.values()].some((token) => pending?.owners.has(token)))
++          // #499：token 已退休时请求不能继续消费 client。无其他 owner 的 entry 走统一 detach；
++          // 共享 entry 只拒绝旧 claim；spawning 旧 claimant 仅在没有当前 waiter 时回收，让新 generation 原子接管。
++          // #499：任一已安装 token 在该 pending 上有 waiter 即视为有当前 generation 接管——
++          // 旧 claimant 不回收，让新 generation 原子接管同一 spawn。
++          const waiting =
++            !s.closed &&
++            (pending?.owners.has(undefined) || [...s.tokens.values()].some((token) => pending?.owners.has(token)))
 +          if (s.clients.includes(entry) && !entry.unscoped && entry.owners.size === 0 && !waiting) {
 +            await bridge.promise(shutdown(detach(s, [entry])))
 +            await bridge.promise(s.updated)
 +          }
++          return undefined
 +        }
 +
          async function schedule(server: LSPServer.Info, root: string, key: string) {
            const handle = await server
              .spawn(root, ctx, flags)
-@@ -263,15 +322,26 @@ export const layer = Layer.effect(
-           })
+@@ -253,14 +329,25 @@ const layer = Layer.effect(
  
            if (!client) return undefined
-+          // initialize 是 root 可消失的异步边界；注册前复验，避免消费已不可能使用的 client。
-+          if (!(await bridge.promise(fs.existsSafe(root)))) {
+ 
+-          const existing = s.clients.find((x) => x.root === root && x.serverID === server.id)
++          // #499：initialize 是 root 可消失的异步边界；注册前复验，避免消费已不可能使用的 client。
++          if (!(await Effect.runPromise(fs.existsSafe(root)))) {
 +            await client.shutdown()
 +            return undefined
 +          }
- 
--          const existing = s.clients.find((x) => x.root === root && x.serverID === server.id)
 +          const existing = s.clients.find((x) => x.client.root === root && x.client.serverID === server.id)
            if (existing) {
              await Process.stop(handle.process)
++            // #499：返回整条 entry（含 owners 注册表）——claim 需要 ClientEntry，raw client 会绕过所有权记录。
              return existing
            }
  
@@ -921,8 +824,7 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 -          return client
 +          const entry: ClientEntry = { client, owners: new Map(), unscoped: false }
 +          s.clients.push(entry)
-+          // 监听后再检查退出码，同时覆盖“注册前已退出”和“注册后退出”；重复回调
-+          // 由 exact-entry detach 幂等吸收，不需要第二套进程状态判断。
++          // #499：监听后再检查退出码，覆盖"注册前已退出"与"注册后退出"；重复回调由 exact-entry detach 幂等吸收。
 +          const exited = () => bridge.fork(removeExitedClient(s, entry))
 +          handle.process.once("exit", exited)
 +          if (handle.process.exitCode !== null || handle.process.signalCode !== null) exited()
@@ -930,7 +832,7 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
          }
  
          for (const server of Object.values(s.servers)) {
-@@ -281,36 +351,40 @@ export const layer = Layer.effect(
+@@ -270,42 +357,47 @@ const layer = Layer.effect(
            if (!root) continue
            if (s.broken.has(root + server.id)) continue
  
@@ -959,7 +861,8 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
  
            const task = schedule(server, root, root + server.id)
 -          s.spawning.set(root + server.id, task)
-+          const pending = { promise: task, owners: new Set([token]) }
++          // #499：PendingClient 携带 waiter 身份集合——旧 claimant 与新 generation 的接管是原子判定。
++          const pending: PendingClient = { promise: task, owners: new Set([token]) }
 +          s.spawning.set(root + server.id, pending)
  
            task.finally(() => {
@@ -976,24 +879,33 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 +          if (!entry) continue
  
 -          result.push(client)
--          void busRuntime.runPromise((bus) =>
--            bus.publish(Event.Updated, {}).pipe(Effect.provideService(InstanceRef, ctx)),
--          )
+-          updated++
++          // #499：claim 成功即发布——取代计数器批量发布，慢路径不再丢 updated 通知。
 +          const client = await claim(entry, pending)
 +          if (client) result.push(client)
          }
  
-         return result
-@@ -324,7 +398,7 @@ export const layer = Layer.effect(
+-        return { result, updated }
++        return result
+       })
+-      yield* Effect.forEach(Array.from({ length: clients.updated }), () => events.publish(Event.Updated, {}), {
+-        discard: true,
+-      })
+-      return clients.result
++      return clients
+     })
+ 
+     const run = Effect.fnUntraced(function* <T>(file: string, fn: (client: LSPClient.Info) => Promise<T>) {
+@@ -315,7 +407,7 @@ const layer = Layer.effect(
  
      const runAll = Effect.fnUntraced(function* <T>(fn: (client: LSPClient.Info) => Promise<T>) {
        const s = yield* InstanceState.get(state)
 -      return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x))))
-+      return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x.client))))
++      return yield* Effect.promise(() => Promise.all(s.clients.map((entry) => fn(entry.client))))
      })
  
-     // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存。
-@@ -391,12 +465,94 @@ export const layer = Layer.effect(
+     // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存；
+@@ -381,29 +473,128 @@ const layer = Layer.effect(
      }
  
      const init = Effect.fn("LSP.init")(function* () {
@@ -1003,46 +915,41 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 +      if (owner) yield* beginSession(s, owner)
      })
  
++    // #499：registry 是进程生命周期的权威索引；同步 detach 后才允许异步 shutdown，
++    // admission/deletion 的线性化锁不需要等待外部进程退出。
 +    function detach(s: State, entries: ClientEntry[]) {
-+      // registry 是进程生命周期的权威索引；同步 detach 后才允许异步 shutdown，
-+      // 因而 admission/deletion 的线性化锁不需要等待外部进程退出。
 +      const discarded = new Set(entries)
 +      s.clients = s.clients.filter((entry) => !discarded.has(entry))
 +      return entries
 +    }
-+
 +    const shutdown = (entries: ClientEntry[]) =>
 +      Effect.promise(() => Promise.all(entries.map((entry) => entry.client.shutdown())).then(() => undefined))
-+
 +    const removeExitedClient = Effect.fnUntraced(function* (s: State, entry: ClientEntry) {
-+      // reset/root cleanup 已先 detach 时，迟到 exit 只属于旧对象；按对象身份检查
-+      // 可防止同 server/root 的 replacement 被旧进程终态误删。
++      // #499：reset/root cleanup 已先 detach 时，迟到 exit 只属于旧对象；按对象身份检查
++      // 防止同 server/root 的 replacement 被旧进程终态误删。
 +      if (!s.clients.includes(entry)) return
 +      yield* shutdown(detach(s, [entry]))
 +      yield* s.updated
 +    })
-+
 +    const pruneMissingRoots = Effect.fnUntraced(function* (s: State) {
-+      const existing = yield* Effect.forEach(s.clients, (entry) => fs.existsSafe(entry.client.root), { concurrency: "unbounded" })
++      const existing = yield* Effect.forEach(s.clients, (entry) => fs.existsSafe(entry.client.root), {
++        concurrency: "unbounded",
++      })
 +      const stale = s.clients.filter((_, index) => !existing[index])
 +      const detached = detach(s, stale)
 +      if (detached.length === 0) return
 +      yield* shutdown(detached)
 +      yield* s.updated
 +    })
-+
 +    function retireSession(s: State, sessionID: SessionID) {
-+      // token 先失效再撤销 claim，仍在 initialize 的旧请求恢复后只能走
-+      // orphan detach；新 run 与删除共用这一条状态转换。
++      // #499：token 先失效再撤销 claim——仍在 initialize 的旧请求恢复后只能走 orphan detach。
 +      s.tokens.delete(sessionID)
 +      const bridgeChanged = s.bridgeOwners.delete(sessionID)
-+      // map 后再 some，确保同一 Session 跨多个 root 的 claims 全部撤销；
-+      // 直接 some(delete) 会在首个 true 后短路并留下后续 client。
++      // map 后再 some：同一 Session 跨多个 root 的 claims 全部撤销，不短路。
 +      const changed = s.clients.map((entry) => entry.owners.delete(sessionID)).some(Boolean) || bridgeChanged
 +      const unused = s.clients.filter((entry) => !entry.unscoped && entry.owners.size === 0)
 +      return { changed: changed || unused.length > 0, detached: detach(s, unused) }
 +    }
-+
 +    function retireEverywhere(sessionID: SessionID) {
 +      const retired = [...states].map((state) => ({ state, ...retireSession(state, sessionID) }))
 +      return {
@@ -1050,14 +957,19 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 +        detached: retired.flatMap((item) => item.detached),
 +      }
 +    }
-+
-+    const finishTransition = (transition: ReturnType<typeof retireEverywhere>) => Effect.all([shutdown(transition.detached), Effect.forEach(transition.changed, (state) => state.updated)], { concurrency: "unbounded", discard: true })
-+
++    const finishTransition = (transition: ReturnType<typeof retireEverywhere>) =>
++      Effect.all(
++        [
++          shutdown(transition.detached),
++          Effect.forEach(transition.changed, (s) => s.updated, { discard: true }),
++        ] as const,
++        { concurrency: "unbounded" },
++      ).pipe(Effect.asVoid)
 +    const beginSession = Effect.fnUntraced(function* (s: State, owner: SessionOwner) {
 +      const transition = yield* lifecycle.withPermits(1)(
 +        Effect.gen(function* () {
-+          // Session 存在性检查与内存 transition 共用线性化点：删除先完成时
-+          // admission 失败；admission 先完成时，后到删除必然看见已安装 token。
++          // #499：Session 存在性检查与内存 transition 共用线性化点——删除先完成时 admission 失败；
++          // admission 先完成时后到删除必然看见已安装 token。
 +          yield* owner.active
 +          const retired = retireEverywhere(owner.sessionID)
 +          if (!s.closed) s.tokens.set(owner.sessionID, owner.token)
@@ -1066,8 +978,7 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 +      )
 +      yield* finishTransition(transition)
 +    })
-+
-+    // Session 模块经 MessageV2 依赖 LSP；这里在 layer 已完成模块求值后再取正式事件定义，
++    // #499：Session 模块经 MessageV2 依赖 LSP；layer 完成模块求值后再取事件定义，
 +    // 避免为删除清理制造静态 Session -> LSP -> Session 环。
 +    const deleted = (yield* Effect.promise(() => import("@/session/session"))).Event.Deleted.type
 +    const decodeSessionID = Schema.decodeUnknownOption(SessionID)
@@ -1075,26 +986,47 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
 +      if (event.payload?.type !== deleted) return
 +      const sessionID = decodeSessionID(event.payload.properties?.sessionID)
 +      if (Option.isNone(sessionID)) return
-+
-+      // 地址簿只遍历已经物化的 State，不创建 cache；持久化 D、事件 envelope
-+      // 与 Workspace target T 即使不同，也不会漏掉真实 claim。
-+      bridge.fork(lifecycle.withPermits(1)(Effect.sync(() => retireEverywhere(sessionID.value))).pipe(Effect.flatMap(finishTransition)))
++      // #499：地址簿只遍历已物化 State；持久化 D、事件 envelope 与 Workspace target T
++      // 即使不同也不会漏掉真实 claim。
++      bridge.fork(
++        lifecycle
++          .withPermits(1)(Effect.sync(() => retireEverywhere(sessionID.value)))
++          .pipe(
++            Effect.flatMap(finishTransition),
++            Effect.catch(() => Effect.void),
++            Effect.catchDefect(() => Effect.void),
++          ),
++      )
 +    }
-+    yield* Effect.acquireRelease(Effect.sync(() => GlobalBus.on("event", onGlobalEvent)), () => Effect.sync(() => GlobalBus.off("event", onGlobalEvent)))
++    yield* Effect.acquireRelease(
++      Effect.sync(() => GlobalBus.on("event", onGlobalEvent)),
++      () => Effect.sync(() => GlobalBus.off("event", onGlobalEvent)),
++    )
 +
      const status = Effect.fn("LSP.status")(function* () {
        const ctx = yield* InstanceState.context
        const s = yield* InstanceState.get(state)
++      // #499：status 入口同步清理 root 已消失条目，投影与 registry 不背离。
 +      yield* pruneMissingRoots(s)
-       // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态。
+       // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态
        const bridge = yield* resolveLspBridge()
        if (bridge && s.bridgeDiagnostics !== "failed") {
-@@ -405,15 +561,18 @@ export const layer = Layer.effect(
-           name: "VSCode",
-           root: ".",
-           status: "connected" as const,
-+          ...(s.bridgeOwners.size ? { sessionIDs: [...s.bridgeOwners.keys()] } : {}),
-         }]
+-        return [{
+-          id: "vscode",
+-          name: "VSCode",
+-          root: ".",
+-          status: "connected" as const,
+-        }]
++        return [
++          {
++            id: "vscode",
++            name: "VSCode",
++            root: ".",
++            status: "connected" as const,
++            // #499：Bridge 连接的可见性按 Session 记录——release 只删 claim 不关连接。
++            ...(s.bridgeOwners.size ? { sessionIDs: [...s.bridgeOwners.keys()] } : {}),
++          },
++        ]
        }
        const result: Status[] = []
 -      for (const client of s.clients) {
@@ -1105,21 +1037,21 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
            name: s.servers[client.serverID].id,
            root: path.relative(ctx.directory, client.root),
            status: "connected",
++          // #499：行只对 claim 它的 Session 可见；unscoped 行保持无 sessionIDs。
 +          ...(entry.owners.size ? { sessionIDs: [...entry.owners.keys()] } : {}),
          })
        }
        return result
-@@ -439,13 +598,21 @@ export const layer = Layer.effect(
-     })
- 
+@@ -431,20 +622,29 @@ const layer = Layer.effect(
      const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
 +      const s = yield* InstanceState.get(state)
 +      const owner = yield* CurrentOwner
-       // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode。
+       // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode
        const bridge = yield* resolveLspBridge(input)
        if (bridge) {
-+        // Bridge 连接由外部进程拥有；这里只在异步解析后校验 token 并记录可见性，
-+        // release 只删除 claim，绝不关闭或重连外部 Bridge。
++        // #499：Bridge 连接由外部进程拥有；这里只在异步解析后校验 token 并记录可见性，
++        // release 只删除 claim，绝不关闭或重连外部 Bridge。light warm 也必须 claim——
++        // claim 记录的是 owner 可见性而非诊断请求，不能推迟到 mapped 判定之后。
 +        if (owner && !s.closed && s.tokens.get(owner.sessionID) === owner.token) {
 +          const changed = s.bridgeOwners.get(owner.sessionID) !== owner.token
 +          s.bridgeOwners.set(owner.sessionID, owner.token)
@@ -1130,70 +1062,68 @@ index cd561c31f32f04b857fd4e6358f3ab3918ed5b5f..b2b1be4561a2809cdfdd0201b58052ee
          const mapped = bridgeDiagnosticsToMap(touched)
 -        const s = yield* InstanceState.get(state)
          if (mapped) {
-           const normalized = AppFileSystem.normalizePath(input)
+           const normalized = FSUtil.normalizePath(input)
            // 空数组也覆盖旧快照，保证“未发现错误”不会保留上一次错误。
-@@ -459,7 +626,6 @@ export const layer = Layer.effect(
+           // 非空数组同样固定在本次 Tool 结果中，后到事件不能修改已经返回的输出。
+           s.bridgeSnapshot[normalized] = mapped[normalized] ?? []
+           s.bridgeDiagnostics = "ok"
+           return
+         }
+         s.bridgeDiagnostics = "failed"
+         // bridge 已被选中后失败属于真实失败，不允许再切换内置 LSP 改变诊断语义。
          return
        }
-       if (diagnostics) {
--        const s = yield* InstanceState.get(state)
-         // strong touch 没有 bridge 时直接标记失败；仅 light warm 保留原有内置 LSP 兼容路径。
-         s.bridgeDiagnostics = "failed"
-         return
-@@ -656,7 +822,7 @@ export const layer = Layer.effect(
-   }),
- )
- 
--export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.defaultLayer))
-+export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.defaultLayer), Layer.provide(AppFileSystem.defaultLayer))
- 
- export * as Diagnostic from "./diagnostic"
- 
+
 diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/session/run-state.ts
-index d54030a19f006aa556f89c6ca9c2741eed4be093..db1c8dbf53b79effc99d898abadf2b33d0cef6b5 100644
 --- a/packages/opencode/src/session/run-state.ts
 +++ b/packages/opencode/src/session/run-state.ts
-@@ -7,6 +7,9 @@ import { MessageV2 } from "./message-v2"
+@@ -8,6 +8,10 @@ import { Session } from "./session"
  import { SessionID } from "./schema"
+ import { SessionActivity } from "@/session/activity"
  import { SessionStatus } from "./status"
- import { SessionActivity } from "./activity"
++// #499：runner 所有权 daemon 化——admitted work 由 LSP per-Session claim 与提交者 refs 共同界定。
 +import { LSP } from "@/lsp/lsp"
 +import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 +import { attachWith } from "@/effect/run-service"
  
  export interface Interface {
    readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
-@@ -43,11 +46,16 @@ export const layer = Layer.effect(
+@@ -44,11 +48,17 @@ const layer = Layer.effect(
    Effect.gen(function* () {
      const background = yield* BackgroundJob.Service
      const status = yield* SessionStatus.Service
 +    const sessions = yield* Session.Service
 +    const lsp = yield* LSP.Service
-+    // Runner 身份必须跨 Project 唯一，否则 Workspace 将 Session 从 D 路由到 T 后，
-+    // T 会把 D 的活跃 run 误判为空闲；InstanceState 只继续拥有资源释放责任。
-+    const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
++    // #499：daemon-wide 索引——Workspace 路由的 prompt 在目标 T 加入 D 的 runner，而非建第二个控制面。
++    const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
  
      const state = yield* InstanceState.make(
        Effect.fn("SessionRunState.state")(function* (ctx) {
          const scope = yield* Scope.Scope
--        const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
-+        const owned = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
+-        const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
++        // #499：InstanceState 只保留 identity-checked owned 集合供 dispose；
++        // 权威 runner 索引在 layer 级（跨 Workspace 路由共享）。
++        const owned = new Set<Runner.Runner<SessionV1.WithParts>>()
          // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
          // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
          const reverting = new Set<SessionID>()
-@@ -55,16 +63,19 @@ export const layer = Layer.effect(
-         const exclusive = new Map<SessionID, symbol>()
+@@ -57,16 +67,23 @@ const layer = Layer.effect(
+         // assertNotBusy/beginRevert 视为 Busy，防止 prompt、shell 与维护工作并发冲突
          yield* Effect.addFinalizer(
            Effect.fnUntraced(function* () {
 -            yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
-+            // D 销毁时只能取消仍由 D 创建的同一对象；旧 finalizer 不能误删
-+            // 已在 T 重建的同 Session Runner。
-+            const active = [...owned].filter(([sessionID, runner]) => runners.get(sessionID) === runner)
-+            yield* Effect.forEach(active, ([, runner]) => runner.cancel, {
++            // #499：只取消仍归本 State 拥有的 runner——identity 检查防止陈旧 finalizer
++            // 取消已被其他目录 runner 接管的 Session。
++            yield* Effect.forEach([...owned], (runner) => runner.cancel, {
                concurrency: "unbounded",
                discard: true,
              })
 -            runners.clear()
++            for (const runner of owned) {
++              for (const [id, candidate] of runners) {
++                if (candidate === runner) runners.delete(id)
++              }
++            }
 +            owned.clear()
              reverting.clear()
              exclusive.clear()
@@ -1204,18 +1134,20 @@ index d54030a19f006aa556f89c6ca9c2741eed4be093..db1c8dbf53b79effc99d898abadf2b33
        }),
      )
  
-@@ -73,23 +84,25 @@ export const layer = Layer.effect(
-       onInterrupt: Effect.Effect<MessageV2.WithParts>,
+@@ -75,23 +92,27 @@ const layer = Layer.effect(
+       onInterrupt: Effect.Effect<SessionV1.WithParts>,
      ) {
        const data = yield* InstanceState.get(state)
 -      const existing = data.runners.get(sessionID)
 +      const existing = runners.get(sessionID)
        if (existing) return existing
-       const next = Runner.make<MessageV2.WithParts>(data.scope, {
+       const next = Runner.make<SessionV1.WithParts>(data.scope, {
          onIdle: Effect.gen(function* () {
 -          data.runners.delete(sessionID)
++          // #499：guarded delete——只有索引仍指向本 runner 时移除（接管期间旧 runner 的
++          // idle 回调不得删除新 runner 的登记）。
 +          if (runners.get(sessionID) === next) runners.delete(sessionID)
-+          data.owned.delete(sessionID)
++          data.owned.delete(next)
            yield* status.set(sessionID, { type: "idle" })
          }),
          onBusy: status.set(sessionID, { type: "busy" }),
@@ -1223,7 +1155,7 @@ index d54030a19f006aa556f89c6ca9c2741eed4be093..db1c8dbf53b79effc99d898abadf2b33
        })
 -      data.runners.set(sessionID, next)
 +      runners.set(sessionID, next)
-+      data.owned.set(sessionID, next)
++      data.owned.add(next)
        return next
      })
  
@@ -1234,325 +1166,170 @@ index d54030a19f006aa556f89c6ca9c2741eed4be093..db1c8dbf53b79effc99d898abadf2b33
        if (existing?.busy) yield* busyError(sessionID)
        // revert 进行中也视为 busy——阻止 compact/deleteMessage 等操作与 revert 并发
        if (data.reverting.has(sessionID)) yield* busyError(sessionID)
-@@ -119,8 +132,7 @@ export const layer = Layer.effect(
-     })
+@@ -122,7 +143,7 @@ const layer = Layer.effect(
  
      const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
--      const data = yield* InstanceState.get(state)
+       const data = yield* InstanceState.get(state)
 -      const existing = data.runners.get(sessionID)
 +      const existing = runners.get(sessionID)
-       if (!existing || !existing.busy) {
+       if (!existing) {
          // 无 runner 时仍需取消可能残留的 background jobs
          yield* Effect.all([cancelBackgroundJobs(background, sessionID), status.set(sessionID, { type: "idle" })], {
-@@ -142,12 +154,21 @@ export const layer = Layer.effect(
-       onInterrupt: Effect.Effect<MessageV2.WithParts>,
-       work: Effect.Effect<MessageV2.WithParts>,
+@@ -146,8 +167,21 @@ const layer = Layer.effect(
      ) {
+       // #152：runner 生命周期计入 SessionActivity，供 worker 空闲判定
+       const end = SessionActivity.begin(`session:${sessionID}`)
++      // #499：只有真正 admitted 的工作才进入 LSP per-Session claim；提交者的
++      // Instance/Workspace refs 绑定到 work，ShellThenRun 移交保留原目录语义。
 +      const refs = { instance: yield* InstanceRef, workspace: yield* WorkspaceRef }
-       const tracked = Effect.acquireUseRelease(
-         Effect.sync(() => SessionActivity.begin(`session:${sessionID}`)),
--        () => work,
-+        () =>
-+          Effect.gen(function* () {
-+            // admission 位于 Runner 真正执行的 work 内；Running caller 只等待 done，
-+            // 不会退休当前 run 仍使用的 LSP claim。
-+            yield* lsp.init()
-+            return yield* work
-+          }).pipe(LSP.withSession(sessionID, sessions.get(sessionID).pipe(Effect.asVoid, Effect.orDie))),
-         (end) => Effect.sync(end),
-       )
--      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(tracked)
-+      // ShellThenRun 由旧 D shell fiber 启动；显式绑定提交方 T 的 references，
-+      // 防止延迟执行时把 Prompt 和 Read/LSP 工作重新路由回 D。
-+      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(attachWith(tracked, refs))
++      const tracked = Effect.gen(function* () {
++        yield* lsp.init()
++        return yield* work
++      }).pipe(
++        LSP.withSession(sessionID, sessions.get(sessionID).pipe(Effect.asVoid, Effect.orDie)),
++        // attachWith 非 dual 形态——pipe 内显式传参。
++        (effect) => attachWith(effect, refs),
++      )
++      // #499：ensureRunning 保证 work 与 runner 生命周期一致；end 在退出时归还
++      // daemon 索引槽位，防止陈旧 finalizer 取消被接管的 runner。
+       return yield* (yield* runner(sessionID, onInterrupt))
+-        .ensureRunning(work)
++        .ensureRunning(tracked)
+         .pipe(Effect.ensuring(Effect.sync(end)))
      })
  
-     const startExclusive = Effect.fn("SessionRunState.startExclusive")(function* (
-@@ -225,6 +246,8 @@ export const layer = Layer.effect(
- export const defaultLayer = layer.pipe(
-   Layer.provide(BackgroundJob.defaultLayer),
-   Layer.provide(SessionStatus.defaultLayer),
-+  Layer.provide(Session.defaultLayer),
-+  Layer.provide(LSP.defaultLayer),
- )
- 
- const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (
-diff --git a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-index 4bf72cff9d23b9439b4e95e1995a803055f04c54..d7eb126fea0c2dcd14049e1fef11fe9dd0ffa98e 100644
---- a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-@@ -8,6 +8,7 @@ import { KVProvider, useKV } from "../../../../src/cli/cmd/tui/context/kv"
- import { ProjectProvider, useProject } from "../../../../src/cli/cmd/tui/context/project"
- import { SDKProvider, type SDKTestTransport } from "../../../../src/cli/cmd/tui/context/sdk"
- import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
-+import { RouteProvider, useRoute, type Route } from "../../../../src/cli/cmd/tui/context/route"
- import type { GlobalEvent } from "@opencode-ai/sdk/v2"
- 
- export const worktree = "/tmp/opencode"
-@@ -109,13 +110,14 @@ export function createFetch(override?: FetchHandler) {
-   return { fetch, session }
+@@ -248,6 +282,10 @@ function busyError(sessionID: SessionID) {
+   return new Session.BusyError({ sessionID })
  }
  
--type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync> }
-+type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; route: ReturnType<typeof useRoute>; sync: ReturnType<typeof useSync> }
+-export const node = LayerNode.make({ service: Service, layer: layer, deps: [BackgroundJob.node, SessionStatus.node] })
++export const node = LayerNode.make({
++  service: Service,
++  layer: layer,
++  deps: [BackgroundJob.node, SessionStatus.node, Session.node, LSP.node],
++})
  
--export async function mount(override?: FetchHandler) {
-+export async function mount(override?: FetchHandler, initialRoute?: Route) {
-   const calls = createFetch(override)
-   const events = createEventSource()
-   let sync!: ReturnType<typeof useSync>
-   let project!: ReturnType<typeof useProject>
-+  let route!: ReturnType<typeof useRoute>
-   let kv!: ReturnType<typeof useKV>
-   let done!: () => void
-   const ready = new Promise<void>((resolve) => {
-@@ -123,10 +125,11 @@ export async function mount(override?: FetchHandler) {
-   })
- 
-   function Probe() {
--    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync() }
-+    const ctx: Ctx = { kv: useKV(), project: useProject(), route: useRoute(), sync: useSync() }
-     onMount(() => {
-       sync = ctx.sync
-       project = ctx.project
-+      route = ctx.route
-       kv = ctx.kv
-       done()
-     })
-@@ -138,13 +141,15 @@ export async function mount(override?: FetchHandler) {
-       <ArgsProvider>
-         <ExitProvider>
-           <KVProvider>
--            <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
--              <ProjectProvider>
--                <SyncProvider>
--                  <Probe />
--                </SyncProvider>
--              </ProjectProvider>
--            </SDKProvider>
-+            <RouteProvider initialRoute={initialRoute}>
-+              <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-+                <ProjectProvider>
-+                  <SyncProvider>
-+                    <Probe />
-+                  </SyncProvider>
-+                </ProjectProvider>
-+              </SDKProvider>
-+            </RouteProvider>
-           </KVProvider>
-         </ExitProvider>
-       </ArgsProvider>
-@@ -171,5 +176,5 @@ export async function mount(override?: FetchHandler) {
- 
-   await ready
-   await wait(() => sync.status === "complete")
--  return { app, emit: events.emit, kv, project, sync, session: calls.session }
-+  return { app, emit: events.emit, kv, project, route, sync, session: calls.session }
- }
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index 90b5ec4da0f3062c199f08dff13c57d78fe6c475..6cb0ebe3eeed6b96fd24b54c3ca411fee8b66640 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -231,6 +231,53 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
- }
- 
- describe("tui sync", () => {
-+  test("projects LSP status through the active Session route and rejects a late response", async () => {
-+    const [sessionA, sessionB] = [{ id: "ses_lsp_a", directory: "/workspace/a", workspaceID: "wrk_a", time: { created: 1, updated: 1 } }, { id: "ses_lsp_b", directory: "/workspace/b", workspaceID: "wrk_b", time: { created: 1, updated: 1 } }]
-+    const requests: Array<{ directory: string | null; workspace: string | null }> = []
-+    const delayedA = Promise.withResolvers<void>(), delayedB = Promise.withResolvers<void>()
-+    let refreshA = false
-+    const { app, emit, route, sync } = await mount((url) => {
-+        if (url.pathname === "/session") return json([sessionA, sessionB])
-+        if (url.pathname !== "/lsp") return
-+        return (async () => {
-+          requests.push({ directory: url.searchParams.get("directory"), workspace: url.searchParams.get("workspace") })
-+          if (url.searchParams.get("directory") === sessionA.directory) {
-+            if (refreshA) await delayedA.promise
-+            return json([{ id: "typescript", name: "typescript", root: "a", status: "connected", sessionIDs: [sessionA.id] }])
-+          }
-+          await delayedB.promise
-+          return json([{ id: "typescript", name: "typescript", root: "b", status: "connected", sessionIDs: [sessionB.id] }])
-+        })()
-+    }, { type: "session", sessionID: sessionA.id })
-+
-+    try {
-+      await wait(() => sync.data.lsp[0]?.root === "a")
-+      refreshA = true
-+      // project 不同的 LSP invalidation 仍须进入当前 route 的唯一 refresh。
-+      emit({ directory: sessionA.directory, project: "proj_b", payload: { id: "evt_lsp_a", type: "lsp.updated", properties: {} } })
-+      await wait(() => requests.filter((request) => request.directory === sessionA.directory).length === 2)
-+
-+      route.navigate({ type: "session", sessionID: sessionB.id })
-+      await wait(() => requests.some((request) => request.directory === sessionB.directory))
-+      // B 响应仍被阻塞时，route owner 已变化；旧 A snapshot 必须同步失效，
-+      // 否则 sidebar/footer 会继续把 A 的 LSP 显示在 B 下。
-+      expect(sync.data.lsp).toEqual([])
-+      expect(requests).toContainEqual({ directory: sessionB.directory, workspace: sessionB.workspaceID })
-+      delayedB.resolve()
-+      await wait(() => sync.data.lsp[0]?.root === "b")
-+
-+      delayedA.resolve()
-+      await wait(() => sync.data.lsp[0]?.root === "b")
-+
-+      route.navigate({ type: "home" })
-+      await wait(() => sync.data.lsp.length === 0)
-+    } finally {
-+      delayedA.resolve()
-+      delayedB.resolve()
-+      app.renderer.destroy()
-+    }
-+  })
-+
-   test("recovers pending permission and question requests after reconnect", async () => {
-     const previous = Global.Path.state
-     await using tmp = await tmpdir()
+ export * as SessionRunState from "./run-state"
+
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
-index 447de0980977394cf67c9e8cb75531ff4a483cc6..35d3b63286547b55dd81405b4b96bbe4ebd8abf2 100644
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -1,28 +1,44 @@
+@@ -1,11 +1,23 @@
  import { describe, expect, spyOn } from "bun:test"
 +import fs from "node:fs/promises"
  import path from "path"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 -import { Deferred, Effect, Layer } from "effect"
 +import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
- import { Bus } from "@/bus"
+ import { EventV2Bridge } from "@/event-v2-bridge"
  import { Config } from "@/config/config"
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { LSP } from "@/lsp/lsp"
++// #499：lifecycle 用例驱动 per-Session 所有权——真实 client 与 fake 进程联合验证。
 +import { LSPClient } from "@/lsp/client"
- import * as LSPServer from "@/lsp/server"
 +import { spawn as lspSpawn } from "@/lsp/launch"
 +import { SessionID } from "@/session/schema"
 +import { Session } from "@/session/session"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
 +import { Process } from "@/util/process"
++import { provideInstance, tmpdirScoped } from "../fixture/fixture"
++import { disposeInstance } from "@/effect/instance-registry"
++import { pollWithTimeout } from "../lib/effect"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import * as LSPServer from "@/lsp/server"
  import * as VscodeBridge from "@/ide/vscode-bridge"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
--import { provideTmpdirInstance } from "../fixture/fixture"
--import { awaitWithTimeout, testEffect } from "../lib/effect"
-+import { provideInstance, provideTmpdirInstance, tmpdirScoped } from "../fixture/fixture"
-+import { disposeInstance } from "@/effect/instance-registry"
-+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
- 
--const it = testEffect(Layer.mergeAll(LSP.defaultLayer, CrossSpawnSpawner.defaultLayer))
-+const it = testEffect(Layer.mergeAll(LSP.defaultLayer, Session.defaultLayer, CrossSpawnSpawner.defaultLayer))
- const experimentalTyIt = testEffect(
-   Layer.mergeAll(
--    LSP.layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.layer({ experimentalLspTy: true }))),
-+    LSP.layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.layer({ experimentalLspTy: true })), Layer.provide(AppFileSystem.defaultLayer)),
-     CrossSpawnSpawner.defaultLayer,
-   ),
+@@ -27,6 +39,215 @@ const disabledDownloadIt = testEffect(
+   Layer.mergeAll(lspLayer({ disableLspDownload: true }), LayerNode.compile(CrossSpawnSpawner.node)),
  )
- const fakeServerPath = path.join(__dirname, "../fixture/lsp/fake-lsp-server.js")
+ 
++// #499：lifecycle 层——LSP + Session 共享同一 EventV2Bridge/Database，
++// deletion 事件经 GlobalBus 触发跨 InstanceState 的 claim 退休。
++const lifecycleLayer = AppNodeBuilder.build(
++  LayerNode.group([
++    LSP.node,
++    Session.node,
++    // #499：Session create/remove 走 durable 事件——缺 projector 时行不落库，get/remove 全部 NotFound。
++    SessionProjector.node,
++    Config.node,
++    RuntimeFlags.node,
++    EventV2Bridge.node,
++    CrossSpawnSpawner.node,
++  ]),
++)
++const lifecycleIt = testEffect(lifecycleLayer)
 +const fakeConfig = { lsp: { fake: { command: [process.execPath, fakeServerPath], extensions: [".repro"] } } }
-+const typescriptOnly = {
-+  lsp: { eslint: { disabled: true }, oxlint: { disabled: true }, biome: { disabled: true } },
-+} satisfies Partial<Config.Info>
++// #499：不覆盖 typescript 条目——config 覆盖会替换 spawn 闭包使 spyOn 失效；
++// builtin Typescript 的 spawn 由测试直接拦截并返回受控 fake 进程。
++const typescriptOnly = {}
 +const touchAs = (lsp: LSP.Interface, sessionID: SessionID, file: string) =>
 +  Effect.gen(function* () {
 +    yield* lsp.init()
 +    yield* lsp.touchFile(file)
 +  }).pipe(LSP.withSession(sessionID, Effect.void))
- const disabledDownloadIt = testEffect(
-   Layer.mergeAll(
--    LSP.layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.layer({ disableLspDownload: true }))),
-+    LSP.layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.layer({ disableLspDownload: true })), Layer.provide(AppFileSystem.defaultLayer)),
-     CrossSpawnSpawner.defaultLayer,
-   ),
- )
-@@ -127,14 +143,7 @@ describe("lsp.spawn", () => {
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
-           const file = path.join(dir, "src", "inside.ts")
--          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
--            id: "bridge",
--            port: 1,
--            token: "token",
--            host: "127.0.0.1",
--            source: "registry",
--            capabilities: { lsp: true },
--          } satisfies VscodeBridge.BridgeRef)
-+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({ id: "bridge", port: 1, token: "token", host: "127.0.0.1", source: "registry", capabilities: { lsp: true } } satisfies VscodeBridge.BridgeRef)
-           const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true, diagnostics: [] })
-           const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
- 
-@@ -307,15 +316,17 @@ describe("lsp.spawn", () => {
-         Effect.gen(function* () {
-           const lsp = yield* LSP.Service
-           const updated = yield* Deferred.make<void>()
--          const unsubscribe = Bus.subscribe(LSP.Event.Updated, () =>
--            Effect.runSync(Deferred.succeed(updated, undefined)),
--          )
-+          let updates = 0
-+          const unsubscribe = Bus.subscribe(LSP.Event.Updated, () => (++updates, Effect.runSync(Deferred.succeed(updated, undefined))))
-           yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
- 
-           const file = path.join(dir, "sample.repro")
-           yield* Effect.promise(() => Bun.write(file, "sample\n"))
-           yield* lsp.touchFile(file)
-           yield* awaitWithTimeout(Deferred.await(updated), "lsp.updated event was not published")
-+          // 同一 owner 重复 touch 没有 metadata 变化，不能伪造一次列表刷新。
-+          yield* lsp.touchFile(file)
-+          expect(updates).toBe(1)
-         }),
-       {
-         config: {
-@@ -330,6 +341,130 @@ describe("lsp.spawn", () => {
-     ),
-   )
- 
-+  it.live("shuts a shared LSP client down only after its final Session releases it", () =>
-+    provideTmpdirInstance(
-+      (dir) =>
++
++describe("lsp session lifecycle", () => {
++  lifecycleIt.instance(
++    "shuts a shared LSP client down only after its final Session releases it",
++    () =>
++      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
-+          const lsp = yield* LSP.Service
 +          const sessions = yield* Session.Service
 +          const sessionA = yield* sessions.create({ title: "LSP A" })
 +          const sessionB = yield* sessions.create({ title: "LSP B" })
 +          const target = yield* tmpdirScoped({ config: fakeConfig })
++          const dir = (yield* TestInstance).directory
 +          const file = path.join(dir, "release.repro")
 +          yield* Effect.promise(() => Bun.write(file, "release\n"))
-+
 +          yield* touchAs(lsp, sessionA.id, file)
 +          yield* touchAs(lsp, sessionB.id, file)
-+          // 两个 Session 共享一条底层 client row；owner metadata 只决定投影与
++          // #499：两个 Session 共享一条底层 client row；owner metadata 只决定投影与
 +          // final-owner shutdown，不能复制进程。
 +          expect((yield* lsp.status())[0]?.sessionIDs).toEqual([sessionA.id, sessionB.id])
-+
-+          // 新 run 可以在 Workspace target T 发起，但必须退休该 Session 在 D
++          // #499：新 run 可以在 Workspace target T 发起，但必须退休该 Session 在 D
 +          // 已物化 registry 中的旧 claim；B 仍持有时共享进程不能被关闭。
 +          yield* provideInstance(target)(lsp.init().pipe(LSP.withSession(sessionA.id, Effect.void)))
 +          expect(yield* lsp.status()).toEqual([expect.objectContaining({ id: "fake", sessionIDs: [sessionB.id] })])
-+
-+          // B 是最后 owner；它释放后，client 必须从公共状态移除并完成 shutdown。
++          // #499：B 是最后 owner；它释放后 client 必须从公共状态移除并完成 shutdown。
 +          yield* provideInstance(target)(lsp.init().pipe(LSP.withSession(sessionB.id, Effect.void)))
 +          expect(yield* lsp.status()).toEqual([])
-+
 +          const targetFile = path.join(target, "target.repro")
 +          yield* Effect.promise(() => Bun.write(targetFile, "target\n"))
 +          yield* provideInstance(target)(touchAs(lsp, sessionA.id, targetFile))
 +          yield* provideInstance(target)(touchAs(lsp, sessionB.id, targetFile))
 +          const [checking, resume] = yield* Effect.all([Deferred.make<void>(), Deferred.make<void>()])
-+          const active = Deferred.succeed(checking, undefined).pipe(Effect.andThen(Deferred.await(resume)), Effect.andThen(sessions.get(sessionA.id)), Effect.asVoid, Effect.orDie)
-+          const admission = yield* provideInstance(target)(lsp.init().pipe(LSP.withSession(sessionA.id, active))).pipe(Effect.forkChild)
++          // #499：active 尾部复查 Session 存在性——删除先提交 DB 后，仍在等待的
++          // admission 在恢复后必然 NotFound，不得安装不可见的新 token。
++          const active = Deferred.succeed(checking, undefined)
++            .pipe(Effect.andThen(Deferred.await(resume)), Effect.andThen(sessions.get(sessionA.id)), Effect.asVoid, Effect.orDie)
++          const admission = yield* provideInstance(target)(
++            lsp.init().pipe(LSP.withSession(sessionA.id, active), Effect.forkChild),
++          )
 +          yield* Deferred.await(checking)
-+          // 删除先提交 DB 后，仍在等待的 admission 必须失败；它不能在删除事件
++          // #499：删除先提交 DB 后，仍在等待的 admission 必须失败；它不能在删除事件
 +          // 已退休 claims 之后再安装一个不可见的新 token。
 +          yield* sessions.remove(sessionA.id)
 +          yield* Deferred.succeed(resume, undefined)
 +          expect(Exit.isFailure(yield* Fiber.await(admission))).toBe(true)
 +          yield* pollWithTimeout(
-+            provideInstance(target)(lsp.status()).pipe(Effect.map((rows) => (rows[0]?.sessionIDs?.join(",") === sessionB.id ? true : undefined))),
++            provideInstance(target)(lsp.status()).pipe(
++              Effect.map((rows) => (rows[0]?.sessionIDs?.join(",") === sessionB.id ? true : undefined)),
++            ),
 +            "deleting Session A did not retire its target-State claim",
 +          )
-+
-+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({ id: "bridge", port: 1, token: "token", host: "127.0.0.1", source: "registry", capabilities: { lsp: true } } satisfies VscodeBridge.BridgeRef)
++          // 源 lifecycle 用例的 IDE-bridge 腿：bridge 环境下 touchFile 走 owner claim（token 校验），
++          // 两个 Session 共享同一条外部资源 row；退休 owner 不能关闭或复制它。
++          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
++            id: "bridge",
++            port: 1,
++            token: "token",
++            host: "127.0.0.1",
++            source: "registry",
++            capabilities: { lsp: true },
++          } satisfies VscodeBridge.BridgeRef)
 +          try {
 +            yield* touchAs(lsp, sessionA.id, file)
 +            yield* touchAs(lsp, sessionB.id, file)
-+            // Bridge 只共享一条外部资源 row；退休 owner 不能关闭或复制它。
 +            expect((yield* lsp.status())[0]?.sessionIDs).toEqual([sessionA.id, sessionB.id])
 +            yield* lsp.init().pipe(LSP.withSession(sessionA.id, Effect.void))
 +            expect((yield* lsp.status())[0]?.sessionIDs).toEqual([sessionB.id])
@@ -1560,34 +1337,55 @@ index 447de0980977394cf67c9e8cb75531ff4a483cc6..35d3b63286547b55dd81405b4b96bbe4
 +            resolve.mockRestore()
 +          }
 +        }),
-+      { config: fakeConfig },
-+    ),
++      ),
++    { config: fakeConfig },
 +  )
 +
-+  it.live("removes terminated clients and rejects stale in-flight claims", () =>
-+    provideTmpdirInstance(
-+      (dir) =>
++  lifecycleIt.instance(
++    "removes terminated clients and rejects stale in-flight claims",
++    () =>
++      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
-+          const lsp = yield* LSP.Service
-+          const observed = { shutdowns: 0, create: LSPClient.create }, create = spyOn(LSPClient, "create").mockImplementation(async (input) => { const client = await observed.create(input); return { ...client, shutdown: async () => { observed.shutdowns++; await client.shutdown() } } })
++          const dir = (yield* TestInstance).directory
++          const observed = { shutdowns: 0, create: LSPClient.create }
++          const create = spyOn(LSPClient, "create").mockImplementation(async (input) => {
++            const client = await observed.create(input)
++            return {
++              ...client,
++              shutdown: async () => {
++                observed.shutdowns++
++                await client.shutdown()
++              },
++            }
++          })
 +          yield* Effect.addFinalizer(() => Effect.sync(() => create.mockRestore()))
 +          for (const terminal of ["root", "process"] as const) {
-+            const root = path.join(dir, terminal), file = path.join(root, "index.ts")
++            const root = path.join(dir, terminal),
++              file = path.join(root, "index.ts")
 +            let child: ReturnType<typeof lspSpawn> | undefined
 +            yield* Effect.promise(() => fs.mkdir(root, { recursive: true }))
 +            yield* Effect.promise(() => Bun.write(file, "export {}\n"))
 +            const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
-+            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => ({ process: (child = lspSpawn(process.execPath, [fakeServerPath], { cwd: root })) }))
++            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => ({
++              process: (child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })),
++            }))
 +            try {
 +              yield* lsp.touchFile(file)
 +              expect((yield* lsp.status()).some((item) => item.id === "typescript")).toBe(true)
 +              if (!child) return yield* Effect.die(new Error("fake LSP process was not captured"))
 +              const processHandle = child
-+              // root 与 child exit 都必须进入 exact-entry detach/shutdown 终态，而不是只隐藏 status row。
++              // #499：root 与 child exit 都必须进入 exact-entry detach/shutdown 终态，
++              // 而不是只隐藏 status row。
 +              if (terminal === "root") yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
 +              else yield* Effect.promise(() => Process.stop(processHandle))
 +              yield* pollWithTimeout(
-+                lsp.status().pipe(Effect.map((rows) => (!rows.some((item) => item.id === "typescript") && observed.shutdowns === (terminal === "root" ? 1 : 2) ? true : undefined))),
++                lsp.status().pipe(
++                  Effect.map((rows) =>
++                    !rows.some((item) => item.id === "typescript") && observed.shutdowns === (terminal === "root" ? 1 : 2)
++                      ? true
++                      : undefined,
++                  ),
++                ),
 +                `${terminal} terminal did not remove LSP client`,
 +              )
 +            } finally {
@@ -1597,13 +1395,19 @@ index 447de0980977394cf67c9e8cb75531ff4a483cc6..35d3b63286547b55dd81405b4b96bbe4
 +          }
 +          const sessionID = SessionID.make("ses_lsp_stale_generation")
 +          for (const transition of ["handoff", "reload", "missing-root"] as const) {
-+            const root = path.join(dir, transition), file = path.join(root, "index.ts")
++            const root = path.join(dir, transition),
++              file = path.join(root, "index.ts")
 +            const [started, release] = yield* Effect.all([Deferred.make<void>(), Deferred.make<void>()])
 +            let child: ReturnType<typeof lspSpawn> | undefined
 +            yield* Effect.promise(() => fs.mkdir(root, { recursive: true }))
 +            yield* Effect.promise(() => Bun.write(file, "export {}\n"))
 +            const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
-+            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => { child = lspSpawn(process.execPath, [fakeServerPath], { cwd: root }); Effect.runSync(Deferred.succeed(started, undefined)); await Effect.runPromise(Deferred.await(release)); return { process: child } })
++            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => {
++              child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })
++              Effect.runSync(Deferred.succeed(started, undefined))
++              await Effect.runPromise(Deferred.await(release))
++              return { process: child }
++            })
 +            try {
 +              const touch = yield* Effect.gen(function* () {
 +                yield* lsp.init()
@@ -1611,64 +1415,111 @@ index 447de0980977394cf67c9e8cb75531ff4a483cc6..35d3b63286547b55dd81405b4b96bbe4
 +              }).pipe(LSP.withSession(sessionID, Effect.void), Effect.forkChild)
 +              yield* awaitWithTimeout(Deferred.await(started), "LSP spawn did not reach the controlled boundary")
 +
-+              // 新 token 必须接管同一 spawn；没有接管者的 disposed State 仍要销毁孤儿。
-+              const handoff = Effect.yieldNow.pipe(Effect.andThen(Deferred.succeed(release, undefined)), Effect.forkChild, Effect.andThen(touchAs(lsp, sessionID, file)))
-+              yield* (transition === "handoff" ? handoff : (transition === "missing-root" ? Effect.promise(() => fs.rename(root, `${root}.gone`)) : Effect.promise(() => disposeInstance(dir))).pipe(Effect.andThen(Deferred.succeed(release, undefined))))
++              // #499：新 token 必须接管同一 spawn；没有接管者的 disposed State 仍要销毁孤儿。
++              const handoff = Effect.yieldNow.pipe(
++                Effect.andThen(Deferred.succeed(release, undefined)),
++                Effect.forkChild,
++                Effect.andThen(touchAs(lsp, sessionID, file)),
++              )
++              yield* (
++                transition === "handoff"
++                  ? handoff
++                  : (
++                      transition === "missing-root"
++                        ? Effect.promise(() => fs.rename(root, `${root}.gone`))
++                        : Effect.promise(() => disposeInstance(dir))
++                    ).pipe(Effect.andThen(Deferred.succeed(release, undefined)))
++              )
 +              yield* Fiber.join(touch)
-+              if (transition === "missing-root") yield* pollWithTimeout(Effect.sync(() => child && (child.exitCode !== null || child.signalCode !== null) ? true : undefined), "missing-root client process did not exit")
-+              expect((yield* lsp.status()).filter((item) => item.id === "typescript")).toEqual(transition === "handoff" ? [expect.objectContaining({ sessionIDs: [sessionID] })] : [])
++              if (transition === "missing-root")
++                yield* pollWithTimeout(
++                  Effect.sync(() =>
++                    child && (child.exitCode !== null || child.signalCode !== null) ? true : undefined,
++                  ),
++                  "missing-root client process did not exit",
++                )
++              expect((yield* lsp.status()).filter((item) => item.id === "typescript")).toEqual(
++                transition === "handoff" ? [expect.objectContaining({ sessionIDs: [sessionID] })] : [],
++              )
 +            } finally {
 +              resolveRoot.mockRestore()
 +              spawn.mockRestore()
 +            }
 +          }
 +        }),
-+      { config: typescriptOnly },
-+    ),
++      ),
++    { config: typescriptOnly },
 +  )
++})
 +
-   it.live("would spawn builtin LSP for files inside instance when config object is provided", () =>
-     provideTmpdirInstance(
-       (dir) =>
+ describe("lsp.spawn", () => {
+   it.instance(
+     "does not spawn builtin LSP for files outside instance",
+@@ -256,14 +458,22 @@
+         const lsp = yield* LSP.Service
+         const updated = yield* Deferred.make<void>()
++        // 计数器与 Deferred 同步推进：awaitWithTimeout 返回时计数已是终值，第二次 touch 断言无竞态。
++        let updates = 0
+         const events = yield* EventV2Bridge.Service
+         const unsubscribe = yield* events.listen((event) => {
+-          if (event.type === LSP.Event.Updated.type) Deferred.doneUnsafe(updated, Effect.void)
++          if (event.type === LSP.Event.Updated.type) {
++            updates++
++            Deferred.doneUnsafe(updated, Effect.void)
++          }
+           return Effect.void
+         })
+         yield* Effect.addFinalizer(() => unsubscribe)
+ 
+         const file = path.join(dir, "sample.repro")
+         yield* Effect.promise(() => Bun.write(file, "sample\n"))
+         yield* lsp.touchFile(file)
+         yield* awaitWithTimeout(Deferred.await(updated), "lsp.updated event was not published")
++        // 同一 owner 重复 touch 没有 metadata 变化，不能伪造一次列表刷新。
++        yield* lsp.touchFile(file)
++        expect(updates).toBe(1)
+       }),
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 05c5fa133cce66952ec62de7990dc2cdd9e1e737..eb703cba970830ede7e49ce3fc4e1b35495aaa0e 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -50,12 +50,14 @@ import * as Database from "../../src/storage/db"
- import { Ripgrep } from "../../src/file/ripgrep"
+@@ -60,7 +60,11 @@ import { Truncate } from "@/tool/truncate"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
  import { Format } from "../../src/format"
- import { Reference } from "../../src/reference/reference"
 -import { TestInstance } from "../fixture/fixture"
-+import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
++import { TestInstance, provideInstance, tmpdirScoped } from "../fixture/fixture"
++// #499：LSP admission 目录追踪——并发 caller 共享一次 init 的断言载体。
++import { InstanceState } from "@/effect/instance-state"
++// #499：跨目录提交/控制面测试需要直接操作 InstanceRef。
++import { InstanceRef } from "@/effect/instance-ref"
  import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
  import { httpError, reply, TestLLMServer } from "../lib/llm-server"
- import { SyncEvent } from "@/sync"
  import { RuntimeFlags } from "@/effect/runtime-flags"
- import { EventV2Bridge } from "@/event-v2-bridge"
-+import { InstanceState } from "@/effect/instance-state"
-+import { InstanceRef } from "@/effect/instance-ref"
+@@ -155,10 +159,16 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
+   )
+ }
  
- void Log.init({ print: false })
- 
-@@ -140,10 +142,11 @@ const mcp = Layer.succeed(
-   }),
- )
- 
++// #499：记录每次 admission 推进时的 Instance 目录——并发 caller 应共享同一 Running work 的单次 init。
 +const lspDirectories: string[] = []
  const lsp = Layer.succeed(
    LSP.Service,
    LSP.Service.of({
 -    init: () => Effect.void,
-+    init: () => InstanceState.directory.pipe(Effect.tap((directory) => Effect.sync(() => lspDirectories.push(directory))), Effect.asVoid),
++    init: () =>
++      InstanceState.directory.pipe(
++        Effect.tap((directory) => Effect.sync(() => lspDirectories.push(directory))),
++        Effect.asVoid,
++      ),
      status: () => Effect.succeed([]),
      hasClients: () => Effect.succeed(false),
      touchFile: () => Effect.void,
-@@ -2143,17 +2146,23 @@ it.instance(
+@@ -2719,17 +2729,24 @@ it.instance(
      Effect.gen(function* () {
        const { llm } = yield* useServerConfig(providerCfg)
        const prompt = yield* SessionPrompt.Service
 +      const run = yield* SessionRunState.Service
        const sessions = yield* Session.Service
++      // #499：T 侧目录的 InstanceRef——第二个 caller 经 T 目录提交，控制面必须仍命中 D 的同一 Runner。
 +      const source = yield* InstanceRef
 +      if (!source) return yield* Effect.die(new Error("InstanceRef not provided"))
 +      const target = { ...source, directory: path.join(source.directory, "target") }
@@ -1683,51 +1534,42 @@ index 05c5fa133cce66952ec62de7990dc2cdd9e1e737..eb703cba970830ede7e49ce3fc4e1b35
        yield* Effect.sleep(50)
  
 -      yield* prompt.cancel(chat.id)
-+      // T 的 join、busy 与 cancel 必须命中 D 的同一 Runner，不能按目录再建控制面。
++      // #499：T 的 join、busy 与 cancel 必须命中 D 的同一 Runner，不能按目录再建控制面。
 +      expect(Exit.isFailure(yield* run.assertNotBusy(chat.id).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
 +      yield* prompt.cancel(chat.id).pipe(Effect.provideService(InstanceRef, target))
        const [exitA, exitB] = yield* Effect.all([Fiber.await(a), Fiber.await(b)])
        expect(Exit.isSuccess(exitA)).toBe(true)
        expect(Exit.isSuccess(exitB)).toBe(true)
-@@ -2162,7 +2171,7 @@ it.instance(
-       }
-     }),
-   { git: true },
--  shortSessionTimeout,
-+  10_000,
- )
+@@ -2769,11 +2786,18 @@ it.instance("concurrent loop callers all receive same error result", () =>
+     yield* user(chat.id, "hello")
  
- // Queue semantics
-@@ -2172,6 +2181,7 @@ it.instance(
-   () =>
-     Effect.gen(function* () {
-       const { prompt, run, chat } = yield* boot()
+       // #496：这里只断言并发 loop 共享结果；包级 timeout 仅防进程挂死，不构成 3 秒性能契约。
 +      const offset = lspDirectories.length
-       yield* seed(chat.id, { finish: "stop" })
- 
-       const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
-@@ -2180,6 +2190,11 @@ it.instance(
- 
-       expect(a.info.id).toBe(b.info.id)
-       expect(a.info.role).toBe("assistant")
-+      // 两个并发 caller 共享一个 Running work；若 admission 也推进 generation，
+     const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
+       concurrency: "unbounded",
+     })
+     expect(a.info.id).toBe(b.info.id)
+     expect(a.info.role).toBe("assistant")
++      // #499：两个并发 caller 共享一个 Running work；若 admission 也推进 generation，
 +      // 同一次真实 agent run 会错误触发两次 LSP ownership refresh。
 +      expect(lspDirectories.slice(offset)).toHaveLength(1)
 +      yield* prompt.loop({ sessionID: chat.id })
++      // #499：下一次 run 属于新 generation——admission 应再次推进 LSP ownership。
 +      expect(lspDirectories.slice(offset)).toHaveLength(2)
-       yield* run.assertNotBusy(chat.id)
-     }),
-   { git: true },
-@@ -3027,6 +3042,8 @@ it.instance(
+   }),
+ )
+ 
+@@ -3174,6 +3198,9 @@ it.instance(
        const { llm } = yield* useServerConfig(providerCfg)
        const prompt = yield* SessionPrompt.Service
        const sessions = yield* Session.Service
++      // #499：提交方 T 的独立目录——queued Prompt 经 T 目录提交，admission 必须保留 T 的 InstanceRef。
 +      const target = yield* tmpdirScoped({ git: true })
 +      yield* writeConfig(target, providerCfg(llm.url))
        const chat = yield* sessions.create({
          title: "Pinned",
          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-@@ -3038,7 +3055,8 @@ it.instance(
+@@ -3185,7 +3212,8 @@ it.instance(
          .pipe(Effect.forkChild)
        yield* waitForBusy(chat.id)
  
@@ -1737,25 +1579,290 @@ index 05c5fa133cce66952ec62de7990dc2cdd9e1e737..eb703cba970830ede7e49ce3fc4e1b35
        yield* Effect.sleep(50)
  
        expect(yield* llm.calls).toBe(0)
-@@ -3052,6 +3070,9 @@ it.instance(
+@@ -3199,6 +3227,9 @@ it.instance(
          expect(exit.value.parts.some((part) => part.type === "text" && part.text === "after-shell")).toBe(true)
        }
        expect(yield* llm.calls).toBe(1)
-+      // queued Prompt 的 Effect 最终由 D shell fiber 启动，但 admission 必须保留
++      // #499：queued Prompt 的 Effect 最终由 D shell fiber 启动，但 admission 必须保留
 +      // 提交方 T 的 InstanceRef；否则 Read/LSP 会重新归属旧目录 D。
 +      expect(lspDirectories.slice(offset)).toEqual([target])
      }),
    { git: true },
-   // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
+     // Windows 负载下 shell+loop 往返超过 10s；与其他测试的 30s 对齐
+
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index 35f1551ce35f123573829cca1c08153d0689284d..c8d2ed65c09dfe30f15e7a01d85b2b165ef919c9 100644
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -1861,6 +1861,7 @@ export type LspStatus = {
+@@ -2410,6 +2410,8 @@ export type LspStatus = {
    name: string
    root: string
    status: "connected" | "error"
++  // #499：claim 该 client 的 Session 集合——TUI 按 active Session 过滤投影。
 +  sessionIDs?: Array<string>
  }
  
  export type FormatterStatus = {
+
+diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
+--- a/packages/tui/src/context/event.ts
++++ b/packages/tui/src/context/event.ts
+@@ -69,6 +69,12 @@ export function useEvent() {
+ 
+       // #164/#165：单次投递前做 project/global 作用域判定
+       const currentProject = project.project()
++      // #499：lsp.updated 只表示"当前 route 需要重拉"，不携带可渲染状态；跨 Project
++      // 放行后仍由 SyncProvider 按 active Session 请求和过滤，不能在这里丢失通知。
++      if (event.payload.type === "lsp.updated") {
++        handler(event.payload, { directory: event.directory, workspace: event.workspace })
++        return
++      }
+       if (
+         !shouldDeliverScopedEvent(
+           { directory: event.directory, project: (event as { project?: string }).project },
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -23,13 +23,15 @@ import type {
+ } from "@opencode-ai/sdk/v2"
+ import { createStore, produce, reconcile } from "solid-js/store"
+ import { useProject } from "./project"
++// #499：LSP 请求以 active route 的 Session 为作用域。
++import { useRoute } from "./route"
+ import { useEvent } from "./event"
+ import { useSDK } from "./sdk"
+ import { useTuiStartup } from "./runtime"
+ import { createSimpleContext } from "./helper"
+ import { useExit } from "./exit"
+ import { useArgs } from "./args"
+-import { batch, onCleanup, onMount } from "solid-js"
++import { batch, createEffect, onCleanup, onMount } from "solid-js"
+ import path from "path"
+ import { SessionPath } from "@opencode-ai/core/session/path"
+ // #132：会话 path 规范化
+@@ -176,6 +178,34 @@ export const {
+     const project = useProject()
+     const sdk = useSDK()
+ 
++    // #499：LSP 行以 active Session 为作用域——请求限定其 directory/workspace，
++    // 返回按 sessionIDs 过滤；route/Session 列表任一变化即重拉。
++    const route = useRoute()
++    let lspRefreshVersion = 0
++    let lspRoute: string | undefined
++    function clearLsp(owner?: string) {
++      lspRoute = owner
++      setStore("lsp", reconcile([]))
++    }
++
++    async function refreshLsp() {
++      const version = ++lspRefreshVersion
++      const current = route.data
++      if (current.type !== "session") return clearLsp()
++      const match = search(store.session, current.sessionID, (session) => session.id)
++      if (!match.found) return clearLsp(current.sessionID)
++      const session = store.session[match.index]
++      const owner = `${current.sessionID}\0${session.directory}\0${session.workspaceID ?? ""}`
++      // #499：snapshot owner 在请求前切换；同步清空才能保证 B 的请求挂起或失败时，
++      // sidebar/footer 也绝不会继续渲染已经属于 A 的 rows。
++      if (lspRoute !== owner) clearLsp(owner)
++      const response = await sdk.client.lsp.status({ directory: session.directory, workspace: session.workspaceID })
++      // #499：route A 的请求可能在切到 B 后才返回；只有最新 token 能提交，
++      // 否则一次网络乱序就会把 B 的右侧列表重新污染成 A。
++      if (version !== lspRefreshVersion) return
++      setStore("lsp", reconcile((response.data ?? []).filter((item) => item.sessionIDs?.includes(current.sessionID))))
++    }
++
+     const fullSyncedSessions = new Set<string>()
+     // #132：区分首次 connected 与重连
+     let connectedOnce = false
+@@ -781,11 +811,9 @@ export const {
+           break
+         }
+ 
+-        case "lsp.updated": {
+-          const workspace = project.workspace.current()
+-          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
++        case "lsp.updated":
++          void refreshLsp()
+           break
+-        }
+ 
+         case "vcs.branch.updated": {
+           if (workspace === project.workspace.current()) {
+@@ -943,7 +971,8 @@ export const {
+             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
+             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
+-            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
++            // #499：bootstrap LSP 拉取同样经 refreshLsp 作用域化（route 尚非 session 时清空）。
++            Promise.resolve(refreshLsp()),
+             sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
+             sdk.client.experimental.resource
+               .list({ workspace })
+@@ -975,7 +1004,14 @@ export const {
+         })
+     }
+ 
++    // #499：route 与 Session snapshot 都是 reactive 输入。Session 列表在 bootstrap 后到达时，
++
++    // 当前 route 会自动补做一次正确目录/Workspace 的 LSP 请求。
++
++    createEffect(() => void refreshLsp())
++
++
+     onMount(() => {
+       void bootstrap()
+     })
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+@@ -10,6 +10,8 @@ import { SDKProvider } from "../../../../src/context/sdk"
+ import { SyncProvider, useSync } from "../../../../src/context/sync"
+ import { PermissionProvider } from "../../../../src/context/permission"
+ import { ExitProvider } from "../../../../src/context/exit"
++// #499：refreshLsp 读取 reactive route——fixture 须提供 RouteProvider 并暴露 route 给断言。
++import { RouteProvider, useRoute, type Route } from "../../../../src/context/route"
+ import { createEventSource, createFetch, type FetchHandler, directory } from "../../../fixture/tui-sdk"
+ import { TestTuiContexts } from "../../../fixture/tui-environment"
+ export { createEventSource, createFetch, directory, eventSource, json, worktree } from "../../../fixture/tui-sdk"
+@@ -23,21 +25,30 @@ export async function wait(fn: () => boolean, timeout = 2000) {
+   }
+ }
+ 
+-type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync> }
++// #499：route 作用域测试需要 RouteProvider 包裹与 route 暴露。
++type Ctx = {
++  kv: ReturnType<typeof useKV>
++  project: ReturnType<typeof useProject>
++  route: ReturnType<typeof useRoute>
++  sync: ReturnType<typeof useSync>
++}
+ 
+-export async function mount(override?: FetchHandler, state?: string) {
++export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route) {
+   const calls = createFetch(override)
+   const events = createEventSource()
+   let sync!: ReturnType<typeof useSync>
+   let project!: ReturnType<typeof useProject>
+   let kv!: ReturnType<typeof useKV>
++  // #499：route 经 Probe 捕获——测试用其 reactive data 驱动 LSP 作用域断言。
++  let route!: ReturnType<typeof useRoute>
+   let done!: () => void
+   const ready = new Promise<void>((resolve) => {
+     done = resolve
+   })
+ 
+   function Probe() {
+-    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync() }
++    const ctx: Ctx = { kv: useKV(), project: useProject(), route: useRoute(), sync: useSync() }
++    route = ctx.route
+     onMount(() => {
+       sync = ctx.sync
+       project = ctx.project
+@@ -50,6 +61,8 @@ export async function mount(override?: FetchHandler, state?: string) {
+   const app = await testRender(
+     () => (
+     <TestTuiContexts paths={state ? { state } : undefined}>
++      {/* #499：RouteProvider 在 SyncProvider 外层——refreshLsp 的 reactive route 输入由此提供。 */}
++      <RouteProvider initialRoute={initialRoute}>
+       <ArgsProvider>
+         <KVProvider>
+           <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+@@ -65,6 +78,7 @@ export async function mount(override?: FetchHandler, state?: string) {
+           </SDKProvider>
+         </KVProvider>
+       </ArgsProvider>
++      </RouteProvider>
+     </TestTuiContexts>
+     ),
+     {
+@@ -89,6 +103,6 @@ export async function mount(override?: FetchHandler, state?: string) {
+ 
+   await ready
+   await wait(() => sync.status === "complete")
+-  return { app, emit: events.emit, kv, project, sync, session: calls.session }
++  return { app, emit: events.emit, kv, project, route, sync, session: calls.session }
+ }
+ 
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -435,6 +435,76 @@ describe("tui sync", () => {
+       app.renderer.destroy()
+     }
+   })
++
++  // #499：LSP 行经 active Session route 作用域化——迟到的跨 route 响应必须被版本 token 拒绝。
++  test("projects LSP status through the active Session route and rejects a late response", async () => {
++    const [sessionA, sessionB] = [
++      { id: "ses_lsp_a", directory: "/workspace/a", workspaceID: "wrk_a", time: { created: 1, updated: 1 } },
++      { id: "ses_lsp_b", directory: "/workspace/b", workspaceID: "wrk_b", time: { created: 1, updated: 1 } },
++    ] as const
++    const requests: Array<{ directory: string | null; workspace: string | null }> = []
++    const delayedA = Promise.withResolvers<void>(),
++      delayedB = Promise.withResolvers<void>()
++    // #499：第一次 A 请求立即返回供 bootstrap；切换 route 后的 A 重拉被挂起，
++    // 用于断言迟到响应不得覆盖 B 的快照。
++    let refreshA = false
++    const { app, emit, route, sync } = await mount(
++      (url) => {
++        if (url.pathname === "/session") return json([sessionA, sessionB])
++        if (url.pathname !== "/lsp") return
++        return (async () => {
++          requests.push({ directory: url.searchParams.get("directory"), workspace: url.searchParams.get("workspace") })
++          if (url.searchParams.get("directory") === sessionA.directory) {
++            if (refreshA) await delayedA.promise
++            return json([
++              {
++                id: "typescript",
++                name: "typescript",
++                root: "a",
++                status: "connected",
++                sessionIDs: [sessionA.id],
++              },
++            ])
++          }
++          await delayedB.promise
++          return json([
++            {
++              id: "typescript",
++              name: "typescript",
++              root: "b",
++              status: "connected",
++              sessionIDs: [sessionB.id],
++            },
++          ])
++        })()
++      },
++      undefined,
++      { type: "session", sessionID: sessionA.id },
++    )
++    try {
++      await wait(() => sync.data.lsp[0]?.root === "a")
++      refreshA = true
++      // #499：project 不同的 LSP invalidation 仍须进入当前 route 的唯一 refresh。
++      emit({ directory: sessionA.directory, project: "proj_b", payload: { id: "evt_lsp_a", type: "lsp.updated", properties: {} } })
++      await wait(() => requests.filter((request) => request.directory === sessionA.directory).length === 2)
++      route.navigate({ type: "session", sessionID: sessionB.id })
++      await wait(() => requests.some((request) => request.directory === sessionB.directory))
++      // #499：B 响应仍被阻塞时 route owner 已变化；旧 A snapshot 必须同步失效，
++      // 否则 sidebar/footer 会继续把 A 的 LSP 显示在 B 下。
++      expect(sync.data.lsp).toEqual([])
++      expect(requests).toContainEqual({ directory: sessionB.directory, workspace: sessionB.workspaceID })
++      delayedB.resolve()
++      await wait(() => sync.data.lsp[0]?.root === "b")
++      delayedA.resolve()
++      await wait(() => sync.data.lsp[0]?.root === "b")
++      route.navigate({ type: "home" })
++      await wait(() => sync.data.lsp.length === 0)
++    } finally {
++      delayedA.resolve()
++      delayedB.resolve()
++      app.renderer.destroy()
++    }
++  })
+ })
+ 
+ function assistantMessage(): AssistantMessage {

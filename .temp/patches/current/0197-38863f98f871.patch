@@ -968,5 +968,5 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +  )
 +
  
- each("asks for external_directory permission for wildcard external paths", () =>
+   each("asks for external_directory permission for wildcard external paths", () =>
      runIn(

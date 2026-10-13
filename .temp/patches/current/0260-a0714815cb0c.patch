@@ -9,10 +9,6 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/.github/workflows/beta.yml b/archived/github-workflows/beta.yml
-similarity index 100%
-rename from .github/workflows/beta.yml
-rename to archived/github-workflows/beta.yml
 diff --git a/.github/workflows/close-issues.yml b/archived/github-workflows/close-issues.yml
 similarity index 100%
 rename from .github/workflows/close-issues.yml

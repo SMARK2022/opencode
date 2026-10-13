@@ -493,20 +493,35 @@ index 0000000000000000000000000000000000000000..ff5a6bcd7897c7a1018762859453a5de
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 397c2577236dce9d50b7c65f6a8a51156abd729a..27e5e8a0c083e300d44d18a54eb73932c23108e3 100644
+index d0f2f59fb..4eb462779 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -135,6 +135,8 @@ interface ProcessorContext extends Input {
+@@ -135,15 +135,17 @@ interface ProcessorContext extends Input {
    needsCompaction: boolean
-   currentText: MessageV2.TextPart | undefined
-   reasoningMap: Record<string, MessageV2.ReasoningPart>
-+  // 只记录本次 stream 已落库且可撤回的非 Tool Part；Tool Part 不进入集合，避免把外部副作用伪装成可安全重放。
+   currentText: SessionV1.TextPart | undefined
+   reasoningMap: Record<string, SessionV1.ReasoningPart>
++  // #519：只记录本次 attempt（自上次 retry 起）已落库且可撤回的非 Tool Part ID。
++  // Tool Part 不进入集合，避免把外部副作用伪装成可安全重放；step-finish part 同样保留。
 +  attemptPartIDs: Set<PartID>
+   // 输入字符数和细分：由 prompt.ts 计算，在 step-finish 中持久化
    inputChars: number | undefined
-   inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
+   inputBreakdown: SessionV1.StepFinishPart["inputBreakdown"] | undefined
    // [local-smark] 追踪当前 step 是否产生了语义输出（text/reasoning/tool）。
-@@ -187,6 +189,7 @@ export const layer = Layer.effect(
+-  // 在 finish-step 时用于检测 provider 空完成：
+-  // finishReason="unknown"（目标词表无 "other"：AI SDK 原生路径与 openai-chat 协议路径均把
+-  // network_error 等未知 finish_reason 归一化为 "unknown"，ids.ts FinishReason 联合可证）+ 三个标志全 false
+-  // = provider 返回了空终止流，必须抛出 retryable APIError 而非静默写成 completed。
+-  // 每个 process() 调用开头重置，retry 时也重置（与 currentText/reasoningMap 同处）。
++  // #519 后检测只依赖 hasToolCall（partial text / reasoning-only 也进入重试）；
++  // finish 词表："unknown"（目标无 "other"：AI SDK 与 openai-chat 两条路径均把
++  // network_error 等未知 finish_reason 归一化为 "unknown"，ids.ts FinishReason 联合可证），
++  // 谓词保留 "other" 防御双写。三个标志仍在 process() 开头与 retry 时重置。
+   hasText: boolean
+   hasReasoning: boolean
+   hasToolCall: boolean
+@@ -188,6 +190,7 @@ const layer = Layer.effect(
          needsCompaction: false,
          currentText: undefined,
          reasoningMap: {},
@@ -514,11 +529,11 @@ index 397c2577236dce9d50b7c65f6a8a51156abd729a..27e5e8a0c083e300d44d18a54eb73932
          inputChars: undefined,
          inputBreakdown: undefined,
          hasText: false,
-@@ -386,8 +389,11 @@ export const layer = Layer.effect(
-             }
+@@ -498,8 +501,11 @@ const layer = Layer.effect(
+             if (value.id in ctx.reasoningMap) return
              // [local-smark] 标记本轮已产生 reasoning 输出，用于 finish-step 空完成检测
              ctx.hasReasoning = true
-+            // reasoning Part 在 finish-step 前已落库；记录 ID 让 retry 清理当前 attempt，而不是清理整个 Message。
++            // #519：reasoning Part 在 finish 落库前就可能持久化；记录 ID 让 retry 撤回当前 attempt。
 +            const reasoningPartID = PartID.ascending()
 +            ctx.attemptPartIDs.add(reasoningPartID)
              ctx.reasoningMap[value.id] = {
@@ -527,11 +542,11 @@ index 397c2577236dce9d50b7c65f6a8a51156abd729a..27e5e8a0c083e300d44d18a54eb73932
                messageID: ctx.assistantMessage.id,
                sessionID: ctx.assistantMessage.sessionID,
                type: "reasoning",
-@@ -683,8 +689,11 @@ export const layer = Layer.effect(
-                 })
-               }
-             }
-+            // step-start 也属于当前尝试；失败时与 text/reasoning 一起撤回，避免留下孤立成功步骤。
+@@ -652,8 +658,11 @@ const layer = Layer.effect(
+           case "step-start":
+             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+             // #124：把 daemon 请求前快照写入 step-start，供 streaming 展示分类
++            // #519：step-start 也属于当前 attempt；失败时与 text/reasoning 一起撤回，避免孤立成功步骤。
 +            const stepPartID = PartID.ascending()
 +            ctx.attemptPartIDs.add(stepPartID)
              yield* session.updatePart({
@@ -540,110 +555,71 @@ index 397c2577236dce9d50b7c65f6a8a51156abd729a..27e5e8a0c083e300d44d18a54eb73932
                messageID: ctx.assistantMessage.id,
                sessionID: ctx.sessionID,
                snapshot: ctx.snapshot,
-@@ -705,6 +714,21 @@ export const layer = Layer.effect(
-               usage: value.usage,
+@@ -690,22 +699,22 @@ const layer = Layer.effect(
+               usage: value.usage ?? new Usage({}),
                metadata: value.providerMetadata,
              })
-+            // [local-smark] `other` 只在没有 Tool 的当前 attempt 中引流到既有 retry；
+-            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
+-            // 任何 text/reasoning/tool 输出，且 reason="unknown"（两条 runtime 归一化路径
+-            // 一致产出，ai-sdk.ts:21-23 / openai-chat.ts:378-384）。这通常表示服务端
+-            // 推理阶段异常终止（如 GLM 大上下文下的 network_error）。
+-            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
+-            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
+-            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
+-            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
+-            if (["other", "unknown"].includes(value.reason) && !ctx.hasText && !ctx.hasReasoning && !ctx.hasToolCall) {
+-              // 目标 message-v2 未转出 APIError——SessionV1.APIError 即 core/v1/session 的同一类
+-              // throw 在 Effect.gen 内是 defect，SessionRetry 只重试 failure——必须 yield* 让错误进重试通道
+-              // NamedError 类非 yieldable：throw 的 defect 由外层 catchCauseIf squash 转回
+-              // typed failure，正好进入 SessionRetry.retry 的分类重试通道
++            // [local-smark] #519：`other`/`unknown` 只在没有 Tool 的当前 attempt 中引流到既有 retry；
 +            // Tool 生命周期和后续重试策略由 prompt loop 另行拥有，本分支不重放 Tool。
 +            // 这里转换的是 Provider completion 语义，不改变外层 retry 的退避或次数。
-+            if (value.finishReason === "other" && !ctx.hasToolCall) {
++            // 目标 message-v2 未转出 APIError——SessionV1.APIError 即 core/v1/session 的同一类；
++            // NamedError 类非 yieldable：throw 的 defect 由外层 catchCauseIf squash 转回
++            // typed failure，正好进入 SessionRetry.retry 的分类重试通道。
++            if (["other", "unknown"].includes(value.reason) && !ctx.hasToolCall) {
 +              yield* Effect.forEach([...ctx.attemptPartIDs], (partID) =>
 +                session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID }),
 +              )
 +              // 清理先于抛错，确保 retry 接收到的错误不会与上一轮部分输出混合。
 +              ctx.attemptPartIDs.clear()
-+              throw new MessageV2.APIError({
-+                message: `Provider returned incomplete completion (finish_reason: ${value.finishReason})`,
-+                isRetryable: true,
-+                metadata: { finishReason: value.finishReason },
-+              })
-+            }
-             if (!ctx.assistantMessage.summary) {
-               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-               if (flags.experimentalEventSystem) {
-@@ -718,25 +742,6 @@ export const layer = Layer.effect(
-                 })
-               }
+               throw new SessionV1.APIError({
+-                message: `Provider returned empty completion (finish_reason: ${value.reason}), no content/reasoning/tool produced`,
++                message: `Provider returned incomplete completion (finish_reason: ${value.reason})`,
+                 isRetryable: true,
++                metadata: { finishReason: value.reason },
+               })
              }
--            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
--            // 任何 text/reasoning/tool 输出，且 finishReason="other"（AI SDK 对
--            // network_error 等未知 finish_reason 的归一化值）。这通常表示服务端
--            // 推理阶段异常终止（如 GLM-5.2 大上下文下的 network_error）。
--            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
--            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
--            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
--            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
--            if (
--              value.finishReason === "other" &&
--              !ctx.hasText &&
--              !ctx.hasReasoning &&
--              !ctx.hasToolCall
--            ) {
--              throw new MessageV2.APIError({
--                message: `Provider returned empty completion (finish_reason: ${value.finishReason}), no content/reasoning/tool produced`,
--                isRetryable: true,
--              })
--            }
-             ctx.assistantMessage.finish = value.finishReason
-             ctx.assistantMessage.cost += usage.cost
-             ctx.assistantMessage.tokens = usage.tokens
-@@ -810,6 +815,8 @@ export const layer = Layer.effect(
-               time: { start: Date.now() },
-               metadata: value.providerMetadata,
-             }
-+            // 结束后的 textPart 不再保存在 currentText 中，集合保留其 ID 供 finish-step 撤回。
-+            ctx.attemptPartIDs.add(ctx.currentText.id)
-             yield* session.updatePart(ctx.currentText)
-             logPartStart("text", { partID: ctx.currentText.id })
-             return
-@@ -1008,6 +1015,8 @@ export const layer = Layer.effect(
-           yield* Effect.gen(function* () {
-             ctx.currentText = undefined
-             ctx.reasoningMap = {}
-+            // 每次 retry 建立新的 attempt 集合；上一轮已撤回，其他错误路径保持原有持久化行为。
-+            ctx.attemptPartIDs.clear()
-             // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志
-             // 必须清零，否则空完成检测会因残留标志而跳过。
+             ctx.assistantMessage.finish = value.reason
+@@ -766,8 +775,11 @@ const layer = Layer.effect(
+           case "text-start":
+             // [local-smark] 标记本轮已产生 text 输出，用于 finish-step 空完成检测
+             ctx.hasText = true
++            // #519：目标在 text-start 即落盘 part；ID 入集合供 other-finish 撤回整个 attempt。
++            const textPartID = PartID.ascending()
++            ctx.attemptPartIDs.add(textPartID)
+             ctx.currentText = {
+-              id: PartID.ascending(),
++              id: textPartID,
+               messageID: ctx.assistantMessage.id,
+               sessionID: ctx.assistantMessage.sessionID,
+               type: "text",
+@@ -969,6 +981,8 @@ const layer = Layer.effect(
              ctx.hasText = false
+             ctx.hasReasoning = false
+             ctx.hasToolCall = false
++            // #519：每次 retry 建立新的 attempt 集合；上一轮已撤回或按原语义持久化。
++            ctx.attemptPartIDs.clear()
+             yield* status.set(ctx.sessionID, { type: "busy" })
+             const stream = llm.stream(streamInput)
+ 
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index d76466c1dc015f91e0b2f50425fd494dde716d22..da2a75cdba99efafe5ca1782512c65e90a0cafa4 100644
+index dc6ef2020..cc32b5da3 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -1,6 +1,6 @@
- import { NodeFileSystem } from "@effect/platform-node"
- import { expect } from "bun:test"
--import { Cause, Effect, Exit, Fiber, Layer, Scope } from "effect"
-+import { Cause, Effect, Exit, Fiber, Layer, Schema, Scope } from "effect"
- import path from "path"
- import type { Agent } from "../../src/agent/agent"
- import { Agent as AgentSvc } from "../../src/agent/agent"
-@@ -21,6 +21,8 @@ import { SessionSummary } from "../../src/session/summary"
- import { Snapshot } from "../../src/snapshot"
- import * as Log from "@opencode-ai/core/util/log"
- import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-+import { EventV2 } from "@opencode-ai/core/event"
-+import { SessionEvent } from "@opencode-ai/core/session-event"
- import { provideTmpdirServer } from "../fixture/fixture"
- import { awaitWithTimeout, testEffect } from "../lib/effect"
- import { httpError, raw, reply, TestLLMServer } from "../lib/llm-server"
-@@ -487,7 +489,6 @@ it.live("session.processor effect tests stop after token overflow requests compa
-           sessionID: chat.id,
-           model: mdl,
-         })
--
-         const value = yield* handle.process({
-           user: {
-             id: parent.id,
-@@ -504,7 +505,6 @@ it.live("session.processor effect tests stop after token overflow requests compa
-           messages: [{ role: "user", content: "compact" }],
-           tools: {},
-         })
--
-         const parts = MessageV2.parts(msg.id)
- 
-         expect(value).toBe("compact")
-@@ -1357,14 +1357,14 @@ it.live("session.processor empty completion with finish_reason=other throws retr
+@@ -1439,14 +1439,14 @@ it.live("session.processor empty completion with finish_reason=other throws retr
    ),
  )
  
@@ -654,51 +630,36 @@ index d76466c1dc015f91e0b2f50425fd494dde716d22..da2a75cdba99efafe5ca1782512c65e9
        Effect.gen(function* () {
          const { processors, session, provider } = yield* boot()
  
--        // 有 text delta 但 finish_reason=network_error（→ "other"）
+-        // 有 text delta 但 finish_reason=unknown
 -        // hasText=true → 不应触发空完成检测
-+        // 第一次有 text delta 但 finish_reason=network_error（→ "other"），
++        // 第一次有 text delta 但 finish_reason=unknown（归一化路径同 "other" 家族），
 +        // 第二次返回可识别的 stop，验证 partial output 也进入现有 retry。
          yield* llm.push(
            raw({
              head: [
-@@ -1379,6 +1379,7 @@ it.live("session.processor partial output with finish_reason=other does not thro
-               },
+@@ -1457,6 +1457,7 @@ it.live("session.processor partial output with finish_reason=other does not thro
+               { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "unknown" }] },
              ],
            }),
 +          reply().text("recovered").stop(),
          )
  
          const chat = yield* session.create({})
-@@ -1390,6 +1391,11 @@ it.live("session.processor partial output with finish_reason=other does not thro
-           sessionID: chat.id,
-           model: mdl,
-         })
-+        const ended: string[] = []
-+        const unsubscribe = yield* (yield* EventV2.Service).sync((event) => {
-+          if (Schema.is(SessionEvent.Step.Ended)(event)) ended.push(event.data.finish)
-+          return Effect.void
-+        })
+@@ -1488,11 +1489,81 @@ it.live("session.processor partial output with finish_reason=other does not thro
  
-         const value = yield* handle.process({
-           user: {
-@@ -1407,14 +1413,80 @@ it.live("session.processor partial output with finish_reason=other does not thro
-           messages: [{ role: "user", content: "partial output" }],
-           tools: {},
-         })
-+        yield* unsubscribe
- 
-         const parts = MessageV2.parts(msg.id)
+         const parts = yield* MessageV2.parts(msg.id)
  
 -        // 有输出（hasText=true），不触发空完成检测 → 正常完成
-+        // partial other 先被转换为 retryable APIError，再由第二次 stop 恢复。
++        // partial unknown 先被转换为 retryable APIError，再由第二次 stop 恢复。
          expect(value).toBe("continue")
 -        expect(yield* llm.calls).toBe(1)
 +        expect(yield* llm.calls).toBe(2)
 +        expect(handle.message.error).toBeUndefined()
 +        expect(parts.some((part) => part.type === "text" && part.text === "partial")).toBe(false)
 +        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
-+        // 失败的 other 不得先发布成功态，事件流只应看到恢复后的 stop。
-+        expect(ended).toEqual(["stop"])
++        // #519：目标 V1 processor 不发布 SessionEvent.Step.Ended（那是 V2 runner 事件）；
++        // 等价不变量是消息终端态：失败的 unknown 不得成为最终 finish，只留恢复后的 stop。
++        expect(handle.message.finish).toBe("stop")
 +      }),
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
@@ -722,7 +683,7 @@ index d76466c1dc015f91e0b2f50425fd494dde716d22..da2a75cdba99efafe5ca1782512c65e9
 +              {
 +                id: "chatcmpl-test",
 +                object: "chat.completion.chunk",
-+                choices: [{ delta: {}, finish_reason: "network_error" }],
++                choices: [{ delta: {}, finish_reason: "unknown" }],
 +              },
 +            ],
 +          }),
@@ -733,7 +694,11 @@ index d76466c1dc015f91e0b2f50425fd494dde716d22..da2a75cdba99efafe5ca1782512c65e9
 +        const parent = yield* user(chat.id, "reasoning only")
 +        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
 +        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
++        const handle = yield* processors.create({
++          assistantMessage: msg,
++          sessionID: chat.id,
++          model: mdl,
++        })
 +
 +        const value = yield* handle.process({
 +          user: {
@@ -743,7 +708,7 @@ index d76466c1dc015f91e0b2f50425fd494dde716d22..da2a75cdba99efafe5ca1782512c65e9
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model: mdl,
 +          agent: agent(),
@@ -752,7 +717,7 @@ index d76466c1dc015f91e0b2f50425fd494dde716d22..da2a75cdba99efafe5ca1782512c65e9
 +          tools: {},
 +        })
 +
-+        const parts = MessageV2.parts(msg.id)
++        const parts = yield* MessageV2.parts(msg.id)
 +
 +        // 断言用户可观察的恢复结果和失败前缀消失，不依赖 processor 内部追踪字段。
 +        expect(value).toBe("continue")

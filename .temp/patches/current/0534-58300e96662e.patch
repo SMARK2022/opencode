@@ -12,6 +12,7 @@ Content-Transfer-Encoding: 8bit
 
 Read、Prompt 与 Tool completion 统一省略坏图并继续，使用 MIME/URL 绑定的临时证明避免重复解码，同时验证 Windows 打包后的 Photon WASM。
 
+
 diff --git a/docs/plans/image-decode-omission-pipeline.md b/docs/plans/image-decode-omission-pipeline.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..17d54a7f806e1a80ac36505be482bee525c4b9e1
@@ -554,45 +555,28 @@ index 0000000000000000000000000000000000000000..17d54a7f806e1a80ac36505be482bee5
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
+
 diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
-index 3dc7c66e1311b4be327c81ca949841cdbbc9ed32..c111ce837941f573e538c03a20621798475458ac 100644
+index 842f272b3..b7f4ffd55 100644
 --- a/packages/opencode/src/image/image.ts
 +++ b/packages/opencode/src/image/image.ts
-@@ -6,6 +6,8 @@ import { Context, Effect, Layer, Schema } from "effect"
- import { createHash, randomUUID } from "node:crypto"
- import fs from "node:fs/promises"
- import path from "node:path"
-+// Bun 在 build 时把 wasm 作为 file 资源嵌入，运行时得到可供 Photon loader 读取的路径。
-+import photonWasm from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" }
+@@ -64,6 +64,31 @@ export interface Interface {
  
- declare const OPENCODE_COMPILED: boolean | undefined
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
  
-@@ -21,12 +23,39 @@ const JPEG_QUALITIES = [85, 70, 55, 40]
- const log = Log.create({ service: "image" })
- type Sharp = typeof import("sharp")
- type SharpMetadata = import("sharp").Metadata
-+type Photon = typeof import("@silvia-odwyer/photon-node")
- type EmbeddedSharp = {
-   target: string
-   version: string
-   addon: string
-   files: Record<string, string>
- }
++// #534：proof 只绑定当前 MIME/URL；插件改写任一字段后必须重新 decode，不能沿用旧附件的成功结论。
++// Symbol 保持 transient：对象内传递可见，JSON/schema 编码天然不可见，最终 consumer 仍显式剥离。
 +const normalizedProof = Symbol("opencode.image.normalized")
 +type Attachment = { mime: string; url: string }
 +
 +export function markNormalized<T extends Attachment>(input: T) {
-+  // proof 只绑定当前 MIME/URL；插件改写任一字段后必须重新 decode，不能沿用旧附件的成功结论。
-+  // 这里只证明 owner 已处理这一份 payload，不证明文件名、synthetic 等展示字段未变化。
-+  // Symbol 保持 transient：对象内传递可见，JSON/schema 编码天然不可见，最终 consumer 仍显式删除。
 +  return Object.assign(input, { [normalizedProof]: { mime: input.mime, url: input.url } })
 +}
 +
 +export function consumeNormalized<T extends Attachment>(input: T) {
 +  const proof = Reflect.get(input, normalizedProof)
 +  const attachment = { ...input }
-+  // Symbol 仅在本轮内传递 decode 真值，consumer 无论命中与否都先剥离，禁止进入 schema、事件或 SQLite。
-+  // 先复制再删除避免修改 producer 持有的对象，也让 event 与 durable snapshot 能共享同一份干净值。
++  // #534：consumer 无论命中与否都先剥离 Symbol，禁止进入 schema、事件或 SQLite；
 +  // proof 缺失不是错误：外部 Tool 附件本来就没有 proof，必须按正常路径进入 Image owner。
 +  Reflect.deleteProperty(attachment, normalizedProof)
 +  return {
@@ -604,127 +588,40 @@ index 3dc7c66e1311b4be327c81ca949841cdbbc9ed32..c111ce837941f573e538c03a20621798
 +      Reflect.get(proof, "url") === input.url,
 +  }
 +}
- 
- export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
-   "ImageResizerUnavailableError",
-@@ -99,6 +128,20 @@ export const layer = Layer.effect(
-         },
-       }),
-     )
-+    const loadPhoton = yield* Effect.cached(
-+      Effect.tryPromise({
-+        try: async () => {
-+          // Photon 的 patched loader 只接受打包时确定的 wasm 路径，不从用户输入或开发机 node_modules 猜测资源。
-+          ;(globalThis as typeof globalThis & { __OPENCODE_PHOTON_WASM_PATH?: string }).__OPENCODE_PHOTON_WASM_PATH =
-+            photonWasm
-+          return import("@silvia-odwyer/photon-node")
-+        },
-+        catch: (error) => {
-+          log.warn("failed to load photon", { error })
-+          return new ResizerUnavailableError()
-+        },
-+      }),
-+    )
- 
-     const normalize = Effect.fn("Image.normalize")(function* (
-       input: MessageV2.FilePart,
-@@ -121,17 +164,42 @@ export const layer = Layer.effect(
-       const buffer = Buffer.from(base64, "base64")
-       if (buffer.length === 0) return yield* new DecodeError()
- 
--      const sharp = yield* loadSharp
--      const metadata = yield* readMetadata(sharp, buffer)
-+      // PNG/BMP 的便宜结构门禁在 decoder 前拒绝已知截断头；它不能替代下面的完整像素解码。
-+      // magic 只决定格式分支，不信任调用方 MIME；扩展名错误或 provider MIME 偏差不能改变 decoder 选择。
-+      // PNG 结构检查只锁定固定首块，IDAT 完整性仍完全交给 Sharp，避免维护第二套压缩流 parser。
-+      if (isPng(buffer) && !hasPngHeader(buffer)) return yield* new DecodeError()
-+      const decoded = isBmp(buffer)
-+        ? yield* decodeBmp(yield* loadPhoton, buffer)
-+        : { buffer, mime: input.mime, width: undefined, height: undefined }
-+      // Photon 已完成 BMP 像素 open 并给出尺寸；未超限 BMP 不应为了 metadata 再强制装载 Sharp/native addon。
-+      // 超限 BMP 仍延迟进入同一个 Sharp encode policy，因此格式分支不会产生第二套 resize 实现。
-+      const sharp = decoded.buffer === buffer ? yield* loadSharp : undefined
-+      const metadata = sharp
-+        ? yield* readMetadata(sharp, decoded.buffer)
-+        : { width: decoded.width, height: decoded.height, hasAlpha: true, pages: 1 }
-       if (!metadata.width || !metadata.height) return yield* new DecodeError()
- 
-       const originalWidth = metadata.width
-       const originalHeight = metadata.height
--      // Historical session images may be normalized again during replay; metadata-only pass-through avoids lossy rewrites.
--      if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes) return input
-+      // BMP 转 PNG 后以实际待发送 payload 计算预算，不能沿用较小的源 BMP base64 误判为未超限。
-+      const normalizedBytes =
-+        decoded.buffer === buffer ? bytes : Buffer.byteLength(decoded.buffer.toString("base64"), "utf8")
-+      const withinLimits =
-+        originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && normalizedBytes <= info.maxBase64Bytes
-+      // 非 BMP 的 pass-through/no-resize 都先验证像素；单页 resize 的 encode 自身就是完整 decode，禁止再分配一次 raw buffer。
-+      // 多帧 resize 仍先做 all-pages validation，因为后续 encode 只消费首帧，不能让损坏的后续帧逃逸。
-+      // 条件按“后续操作是否必然 decode 全部所需内容”划分，而不是在失败后尝试另一条成功路径。
-+      // auto_resize:false 必须走 validation 后的 SizeError，确保配置只禁用 resize，不会禁用安全解码。
-+      if (sharp && (withinLimits || !info.autoResize || (metadata.pages ?? 1) > 1))
-+        yield* decodePixels(sharp, decoded.buffer, metadata.pages)
-+      // BMP 已由 Photon 完整 open 并重新编码；再次 raw-decode 只会增加 CPU/峰值内存，不提供新的输入完整性证据。
-+      if (withinLimits)
-+        return decoded.buffer === buffer
-+          ? input
-+          : { ...input, mime: decoded.mime, url: `data:${decoded.mime};base64,${decoded.buffer.toString("base64")}` }
-       if (!info.autoResize)
-         return yield* new SizeError({
--          bytes,
-+          bytes: normalizedBytes,
-           max: info.maxBase64Bytes,
-           width: originalWidth,
-           height: originalHeight,
-@@ -142,7 +210,14 @@ export const layer = Layer.effect(
-       const hasAlpha = Boolean(metadata.hasAlpha)
-       const preserveAlpha = hasAlpha && options?.tokenBudget === undefined
-       for (const size of resizeSizes(originalWidth, originalHeight, info.maxWidth, info.maxHeight)) {
--        const candidate = yield* encodeCandidate(sharp, buffer, size, hasAlpha, preserveAlpha, info.maxBase64Bytes)
-+        const candidate = yield* encodeCandidate(
-+          sharp ?? (yield* loadSharp),
-+          decoded.buffer,
-+          size,
-+          hasAlpha,
-+          preserveAlpha,
-+          info.maxBase64Bytes,
-+        )
-         if (candidate) {
-           log.info("using resized image", {
-             from_mime: input.mime,
-@@ -159,7 +234,7 @@ export const layer = Layer.effect(
-       }
- 
-       return yield* new SizeError({
--        bytes,
-+        bytes: normalizedBytes,
-         max: info.maxBase64Bytes,
-         width: originalWidth,
-         height: originalHeight,
-@@ -252,6 +327,85 @@ function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata
-   })
- }
- 
-+function decodePixels(sharp: Sharp, buffer: Buffer, pages?: number): Effect.Effect<void, DecodeError> {
-+  return Effect.tryPromise({
-+    // metadata() 只读容器头；raw() 才会消费压缩流并暴露截断 IDAT、坏帧等真实解码错误。
-+    try: async () =>
-+      void (await sharp(buffer, pages && pages > 1 ? { pages: -1 } : undefined)
-+        .raw()
-+        .toBuffer()),
-+    catch: (error) => {
-+      log.warn("failed to decode image pixels", { error })
-+      return new DecodeError()
-+    },
-+  })
-+}
 +
+ // #485：导出 layer 供离线维护脚本（script/migrate-image-attachment.ts）复用生产 normalize 链
+ export const layer = Layer.effect(
+   Service,
+@@ -102,9 +127,18 @@ export const layer = Layer.effect(
+       const bytes = Buffer.byteLength(base64, "utf8")
+ 
+       const photon = yield* loadPhoton
++      const buffer = Buffer.from(base64, "base64")
++
++      // #534：PNG/BMP 的便宜结构门禁在 decoder 前拒绝已知截断头；它不能替代下面的完整像素解码。
++      // magic 只决定格式分支，不信任调用方 MIME；扩展名错误或 provider MIME 偏差不能改变 decoder 选择。
++      // PNG 结构检查只锁定固定首块，IDAT 完整性仍完全交给 Photon，避免维护第二套压缩流 parser。
++      if (isPng(buffer) && !hasPngHeader(buffer)) return yield* new DecodeError()
++      // #534：Photon 会宽松接受错误 file-size/pixel-offset；open 前固定验证 BMP 文件与 DIB 边界。
++      // 前置拒绝保证 malformed input 产生普通 DecodeError，而不是让 WASM trap 决定可观测行为。
++      if (isBmp(buffer) && !hasValidBmpHeader(buffer)) return yield* new DecodeError()
+ 
+       const decoded = yield* Effect.try({
+-        try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
++        try: () => photon.PhotonImage.new_from_byteslice(buffer),
+         catch: () => new DecodeError(),
+       }).pipe(Effect.tapError((error) => Effect.logWarning("failed to decode image", { error })))
+ 
+@@ -184,6 +218,42 @@ export const layer = Layer.effect(
+ 
+ export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node] })
+ 
++// #534：PNG 首块必须是固定 13-byte IHDR；提前限定该结构可避免宽松 parser 把坏头当作可传递图片。
 +function isPng(buffer: Buffer) {
 +  return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
 +}
 +
 +function hasPngHeader(buffer: Buffer) {
-+  // PNG 首块必须是固定 13-byte IHDR；提前限定该结构可避免宽松 metadata parser 把坏头当作可传递图片。
 +  return buffer.length >= 33 && buffer.readUInt32BE(8) === 13 && buffer.toString("ascii", 12, 16) === "IHDR"
 +}
 +
@@ -732,91 +629,63 @@ index 3dc7c66e1311b4be327c81ca949841cdbbc9ed32..c111ce837941f573e538c03a20621798
 +  return buffer.length >= 2 && buffer.toString("ascii", 0, 2) === "BM"
 +}
 +
-+function decodeBmp(
-+  photon: Photon,
-+  buffer: Buffer,
-+): Effect.Effect<{ buffer: Buffer; mime: string; width: number; height: number }, DecodeError> {
-+  return Effect.try({
-+    try: () => {
-+      // Photon 会宽松接受错误 file-size/pixel-offset；在 open 前固定验证 BMP 文件与 DIB 边界，禁止后端差异改变结果。
-+      // 结构 gate 只负责证明字段布局可读，不自行解析像素；Photon 仍是 BMP 唯一真实 decoder。
-+      // declared size 为 0 是 Pi 接受的合法“未声明”形式，非零时才参与 offset 边界约束。
-+      if (buffer.length < 26) throw new Error("invalid BMP file size")
-+      const declared = buffer.readUInt32LE(2)
-+      const dib = buffer.readUInt32LE(14)
-+      const offset = buffer.readUInt32LE(10)
-+      // 对齐 Pi 的两类 DIB 布局：COREHEADER 的 planes/bpp 位于 22/24，其余支持的 INFOHEADER 位于 26/28。
-+      // DIB 12 与 40..124 的字段偏移不同，混读会把宽高字节误判为 planes/bpp 并产生平台差异。
-+      // offset 必须同时落在 DIB 之后和真实 buffer 内；声明长度存在时还不能越过声明末尾。
-+      if (declared !== 0 && declared < 26) throw new Error("invalid BMP file size")
-+      if (offset < 14 + dib || offset >= buffer.length || (declared !== 0 && offset >= declared))
-+        throw new Error("invalid BMP pixel offset")
-+      const fields =
-+        dib === 12
-+          ? buffer.length >= 26
-+            ? { planes: buffer.readUInt16LE(22), bpp: buffer.readUInt16LE(24) }
-+            : undefined
-+          : dib >= 40 && dib <= 124 && buffer.length >= 30
-+            ? { planes: buffer.readUInt16LE(26), bpp: buffer.readUInt16LE(28) }
-+            : undefined
-+      // planes 必须为 1，位深只接受 BMP 规范的离散集合；坏值必须在进入 WASM 前被稳定拒绝，不能依赖 Photon trap。
-+      // 该白名单来自 Pi 的 BMP predicate，不根据 Photon 当前恰好能否容忍某个位深动态放宽。
-+      // 前置拒绝保证 malformed input 产生普通 DecodeError，而不是让 WASM trap 决定可观测行为。
-+      if (!fields || fields.planes !== 1 || ![1, 4, 8, 16, 24, 32].includes(fields.bpp))
-+        throw new Error("invalid BMP planes or bits per pixel")
-+      const image = photon.PhotonImage.new_from_byteslice(buffer)
-+      try {
-+        // BMP 在 Photon 中完成真实 open，再转为 PNG 交给统一 Sharp 尺寸/质量策略；不存在失败后换 decoder 的 fallback。
-+        return {
-+          buffer: Buffer.from(image.get_bytes()),
-+          mime: "image/png",
-+          width: image.get_width(),
-+          height: image.get_height(),
-+        }
-+      } finally {
-+        image.free()
-+      }
-+    },
-+    catch: (error) => {
-+      log.warn("failed to decode bmp", { error })
-+      return new DecodeError()
-+    },
-+  })
++// #534：对齐 Pi 的两类 DIB 布局：COREHEADER 的 planes/bpp 位于 22/24，其余支持的 INFOHEADER 位于 26/28。
++// DIB 12 与 40..124 的字段偏移不同，混读会把宽高字节误判为 planes/bpp 并产生平台差异。
++// offset 必须同时落在 DIB 之后和真实 buffer 内；声明长度存在时还不能越过声明末尾。
++// planes 必须为 1，位深只接受 BMP 规范的离散集合——白名单来自 Pi 的 BMP predicate。
++function hasValidBmpHeader(buffer: Buffer) {
++  if (buffer.length < 26) return false
++  const declared = buffer.readUInt32LE(2)
++  const dib = buffer.readUInt32LE(14)
++  const offset = buffer.readUInt32LE(10)
++  // declared size 为 0 是 Pi 接受的合法“未声明”形式，非零时才参与 offset 边界约束
++  if (declared !== 0 && declared < 26) return false
++  if (offset < 14 + dib || offset >= buffer.length || (declared !== 0 && offset >= declared)) return false
++  const fields =
++    dib === 12
++      ? buffer.length >= 26
++        ? { planes: buffer.readUInt16LE(22), bpp: buffer.readUInt16LE(24) }
++        : undefined
++      : dib >= 40 && dib <= 124 && buffer.length >= 30
++        ? { planes: buffer.readUInt16LE(26), bpp: buffer.readUInt16LE(28) }
++        : undefined
++  return fields !== undefined && fields.planes === 1 && [1, 4, 8, 16, 24, 32].includes(fields.bpp)
 +}
 +
- function resizeSizes(originalWidth: number, originalHeight: number, maxWidth: number, maxHeight: number) {
-   const scale = Math.min(1, maxWidth / originalWidth, maxHeight / originalHeight)
-   return Array.from({ length: RESIZE_STEPS }).reduce<Array<{ width: number; height: number }>>((acc) => {
+ // #277：配置上限与调用方预算取小值，budget 未提供时保持既有配置语义
+ function targetMaxBase64Bytes(
+   configuredMax: number,
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index dce74f62e659a216af0e1160391e05373fe05f89..bde87ba7c8f6be005fdde5c8b4be77ce7cf9d785 100644
+index 4eb462779..b28ebbcfd 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -294,6 +294,37 @@ export const layer = Layer.effect(
+@@ -278,6 +278,37 @@ const layer = Layer.effect(
          return part
        })
  
 +      const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
 +        title: string
-+        metadata: Record<string, unknown>
++        metadata: Record<string, any>
 +        output: string
-+        attachments?: MessageV2.FilePart[]
++        attachments?: SessionV1.FilePart[]
 +      }) {
 +        const normalized = yield* Effect.forEach(output.attachments ?? [], (candidate) => {
 +          const proof = Image.consumeNormalized(candidate)
-+          // ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
++          // #534：ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
 +          // 非图片 attachment 仍经过 consume 是为了统一剥离潜在 transient 字段，但绝不送入图片 decoder。
 +          // typed image failure 只移除对应附件；同一个 Tool 的文本和其他成功附件必须继续交付。
-+          if (proof.valid) return Effect.succeed(Exit.succeed<MessageV2.FilePart>(proof.attachment))
++          if (proof.valid) return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
 +          if (!proof.attachment.mime.startsWith("image/"))
-+            return Effect.succeed(Exit.succeed<MessageV2.FilePart>(proof.attachment))
++            return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
 +          return image.normalize(proof.attachment).pipe(Effect.exit)
 +        })
 +        const omitted = normalized.filter(Exit.isFailure).length
 +        const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
 +        return {
 +          ...output,
-+          // provider 不支持的坏图片降级为文本事实；不保留原 bytes，也不把一次附件失败升级为整个 tool-error。
-+          // omission 数量来自同一 normalized 数组，避免事件分支和数据库分支各自过滤后出现计数漂移。
++          // #534：provider 不支持的坏图片降级为文本事实；不保留原 bytes，也不把一次附件失败升级为整个 tool-error。
++          // omission 计数来自同一 normalized 数组，避免事件分支和数据库分支各自过滤后计数漂移。
 +          // 返回值是唯一 prepared snapshot；调用方不能再次映射 attachments 或重新拼 omission 文案。
 +          output:
 +            omitted === 0
@@ -829,113 +698,106 @@ index dce74f62e659a216af0e1160391e05373fe05f89..bde87ba7c8f6be005fdde5c8b4be77ce
        const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
          toolCallID: string,
          output: {
-@@ -302,7 +333,12 @@ export const layer = Layer.effect(
+@@ -286,7 +317,12 @@ const layer = Layer.effect(
            output: string
-           attachments?: MessageV2.FilePart[]
+           attachments?: SessionV1.FilePart[]
          },
 +        prepared = false,
        ) {
-+        // abort/provider-executed 等直达 completion 的路径也必须经过同一准备函数；普通 result 已准备时复用同一 snapshot。
++        // #534：abort/provider-executed 等直达 completion 的路径也必须经过同一准备函数；普通 result 已准备时复用同一 snapshot。
 +        // prepared 标志只区分本函数内部已完成的普通事件路径，不是调用方可伪造的持久化 metadata。
 +        // direct 路径默认 false，因此取消时正常返回的 Tool 也无法绕过图片失败降级。
 +        const result = prepared ? output : yield* prepareToolOutput(output)
-         // [local-smark] terminal state 写入需要串行化：确保 read-check-write 原子，
-           // 防止 late metadata/result 或 cleanup 与正常完成路径竞争覆盖终态。
-           yield* toolPermit.withPermits(1)(
-@@ -322,12 +358,12 @@ export const layer = Layer.effect(
-                   status: "completed",
-                   input: resolveCompletedToolInput(
-                     match.part.state.input as Record<string, unknown>,
--                    output.metadata as Record<string, unknown> | undefined,
-+                    result.metadata as Record<string, unknown> | undefined,
-                   ),
--                  output: output.output,
-+                  output: result.output,
-                   // strip 临时真值字段，避免进持久化 metadata
-                   metadata: (() => {
--                    const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
-+                    const rest = stripToolTruthMetadata(result.metadata as Record<string, unknown> | undefined)
-                     return match.part.state.metadata?.autoReview
-                       ? { ...rest, autoReview: match.part.state.metadata.autoReview }
-                       : rest
-@@ -335,9 +371,9 @@ export const layer = Layer.effect(
-                   // ToolStateCompleted.title 契约是 string；raw AI SDK / 测试 tool 可不返回 title。
-                   // 缺省写成空串（与 tool/registry 插件路径一致），禁止 undefined 经 JSON 省略后
-                   // 让 ColdStorage extractPart 在 freeze/status 全库扫描时抛 corruption。
--                  title: typeof output.title === "string" ? output.title : "",
-+                  title: typeof result.title === "string" ? result.title : "",
-                   time: { start: match.part.state.time.start, end: Date.now() },
--                  attachments: output.attachments,
-+                  attachments: result.attachments,
-                 },
-               })
-               yield* settleToolCall(toolCallID)
-@@ -575,21 +611,10 @@ export const layer = Layer.effect(
-                 typeof attachment.mime === "string" &&
-                 typeof attachment.url === "string",
-             )
--            const normalized = yield* Effect.forEach(toolAttachments, (attachment) =>
+         // [local-smark] 终态写入串行化：read-check-write 必须原子，防止 late
+         // metadata/result 或 cleanup 与正常完成路径竞争覆盖终态
+         return yield* toolPermit.withPermits(1)(
+@@ -306,30 +342,30 @@ const layer = Layer.effect(
+             // edits 整表替换（丢弃 legacy 顶层字段）优先于旧 content 覆盖语义。
+             input: resolveCompletedToolInput(
+               match.part.state.input as Record<string, unknown>,
+-              output.metadata as Record<string, unknown> | undefined,
++              result.metadata as Record<string, unknown> | undefined,
+             ),
+             // [local-smark] 所有工具 ≥120s 完成时追加中性耗时 Notice：completeToolCall
+             // 是全部工具类型（local/MCP/Task/bash）唯一完成汇聚点。shell 的 outcome
+             // Notice 由 formatShellExecutionNotice 单点承载（单一 outcome 不变量），
+             // 此处仅非 shell 工具追加，避免 bash 长任务双 completed Notice
+             output: match.part.tool === "bash"
+-              ? output.output
++              ? result.output
+               : (() => {
+                   const elapsed = Date.now() - match.part.state.time.start
+                   const longNotice = formatLongExecutionNotice("tool", elapsed)
+-                  return longNotice ? `${output.output}\n\n${longNotice}` : output.output
++                  return longNotice ? `${result.output}\n\n${longNotice}` : result.output
+                 })(),
+             // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
+             // #514：strip 真值临时字段（_formattedContent/_syncInput），避免进持久化 metadata
+             metadata: (() => {
+-              const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
++              const rest = stripToolTruthMetadata(result.metadata as Record<string, unknown> | undefined)
+               return match.part.state.metadata?.autoReview
+                 ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+                 : rest
+             })(),
+-            title: output.title,
++            title: typeof result.title === "string" ? result.title : "",
+             time: { start: match.part.state.time.start, end: Date.now() },
+-            attachments: output.attachments,
++            attachments: result.attachments,
+           },
+         })
+         yield* settleToolCall(toolCallID)
+@@ -622,23 +658,8 @@ const layer = Layer.effect(
+               return
+             }
+             const rawOutput = toolResultOutput(value)
+-            const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
+-              // #485：fail-closed——resizer 不可用时该附件失败省略（omitted 计数），不再回退原图
 -              attachment.mime.startsWith("image/")
 -                ? image.normalize(attachment).pipe(Effect.exit)
--                : Effect.succeed(Exit.succeed<MessageV2.FilePart>(attachment)),
+-                : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
 -            )
 -            const omitted = normalized.filter(Exit.isFailure).length
 -            const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
 -            const output = {
-+            const output = yield* prepareToolOutput({
-               ...value.output,
+-              ...rawOutput,
 -              output:
 -                omitted === 0
--                  ? value.output.output
--                  : `${value.output.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be resized below the image size limit.]`,
--              attachments: attachments?.length ? attachments : undefined,
+-                  ? rawOutput.output
+-                  : `${rawOutput.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be resized below the image size limit.]`,
+-              attachments: attachments.length ? attachments : undefined,
 -            }
-+              attachments: toolAttachments.length ? toolAttachments : undefined,
-+            })
-             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-             if (flags.experimentalEventSystem) {
-               // strip 真值临时字段，与持久化 metadata 一致
-@@ -604,7 +629,7 @@ export const layer = Layer.effect(
-                     text: output.output,
-                   },
-                   ...(output.attachments?.map((item: MessageV2.FilePart) => ({
--                    type: "file",
-+                    type: "file" as const,
-                     uri: item.url,
-                     mime: item.mime,
-                     name: item.filename,
-@@ -616,7 +641,7 @@ export const layer = Layer.effect(
-                 timestamp: DateTime.makeUnsafe(Date.now()),
-               })
-             }
--            yield* completeToolCall(value.toolCallId, output)
-+            yield* completeToolCall(value.toolCallId, output, true)
+-            yield* completeToolCall(value.id, output)
++            const output = yield* prepareToolOutput(rawOutput)
++            yield* completeToolCall(value.id, output, true)
              return
            }
  
+
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 47b15fd58795f7c8c43ae3110f6f7d8509bce8ac..1b55440632816b2d25fbd59ba7091e7cf05c6cc4 100644
+index 9a0d3178f..053cfbf2f 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -2242,9 +2242,27 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1679,10 +1679,26 @@ const layer = Layer.effect(
        )
  
        const parts = yield* Effect.forEach(resolvedParts, (part) =>
+-        // #485：fail-closed——resizer 不可用时 normalize 失败直接向上传播，Part 不入库
 -        part.type === "file" && part.mime.startsWith("image/")
 -          ? image.normalize(part)
 -          : Effect.succeed(part),
 +        Effect.gen(function* () {
 +          if (part.type !== "file" || !part.mime.startsWith("image/")) return part
 +          const proof = Image.consumeNormalized(part)
-+          // 匹配 proof 避免 @image/ReadTool 成功结果被重复 decode；插件改写 MIME/URL 后 proof 自动失效。
++          // #534：匹配 proof 避免 @image/ReadTool 成功结果被重复 decode；插件改写 MIME/URL 后 proof 自动失效。
 +          // proof 在 chat.message hook 之后消费，插件看到的是正常附件，但不能让旧 payload 的验证覆盖新 payload。
 +          // direct user file 没有 proof，因此与任意外部附件一样始终进入完整 normalize。
 +          if (proof.valid) return proof.attachment
 +          const normalized = yield* image.normalize(proof.attachment).pipe(Effect.exit)
 +          if (Exit.isSuccess(normalized)) return normalized.value
-+          // 用户直接附件失败同样降级为可持久化文本，坏 bytes 不进入 provider 请求，后续消息仍可继续。
-+          // 替换沿用原 part identity，保证消息排序稳定；仅类型和内容变为 provider-safe text。
-+          // 这里不保留 filename/url 摘要，避免 omission 文本意外复制损坏或超大 data URL。
++          // #534：用户直接附件失败同样降级为可持久化文本，坏 bytes 不进入 provider 请求，后续消息仍可继续。
++          // 替换沿用原 part identity，保证消息排序稳定；不保留 filename/url 摘要，避免复制损坏或超大 data URL。
 +          return {
 +            id: part.id,
 +            messageID: part.messageID,
@@ -948,67 +810,53 @@ index 47b15fd58795f7c8c43ae3110f6f7d8509bce8ac..1b55440632816b2d25fbd59ba7091e7c
        )
  
        const parsed = decodeMessageInfo(info, { errors: "all", propertyOrder: "original" })
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 10ff52fc33a61b8365f271878f8d662fed7e88cf..1ada85ca1e71301246cd7a2501b912b729509a78 100644
+index c5ff8db3d..868c747ac 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -10,7 +10,7 @@ import { InstanceState } from "@/effect/instance-state"
+@@ -12,7 +12,7 @@ import { readOutline, readOutlineCached, type Outline } from "./read-outline"
+ import { InstanceState } from "@/effect/instance-state"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import { Instruction } from "../session/instruction"
- // [local-smark] read tool enhancements: image processing, outline
--import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
-+import { isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
- import type { MessageV2 } from "../session/message-v2"
- import { readOutlineCached, type Outline } from "./read-outline"
- import { Reference } from "@/reference/reference"
-@@ -391,8 +391,6 @@ function renderReadStub(input: {
-   ].join("\n")
- }
- 
+-import { isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
++import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
+ // #277：read 的图片附件处理收敛到 Image.Service，替换 read 独占的 processImageWithTokenBudget
+ import { Image } from "@/image/image"
+ import { PartID } from "@/session/schema"
+@@ -30,7 +30,8 @@ const DEFAULT_READ_LIMIT = 200
+ const MAX_BYTES = 16 * 1024 // #178：默认输出上限 24KiB→16KiB
+ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
+ const SAMPLE_BYTES = 4096
 -const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
--
- // `offset` and `limit` were originally `z.coerce.number()` — the runtime
- // coercion was useful when the tool was called from a shell but serves no
- // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
-@@ -629,13 +627,16 @@ export const ReadTool = Tool.define(
-       const sample = yield* readSample(filepath, size, SAMPLE_BYTES)
++// #534：白名单移除——decoder 域内格式统一进入 Image.Service，域外格式（含 fastbidsheet/svg）
++// 由 util/media.isImageAttachment 单一谓词排除；是否可解码由真实 backend 决定，read 不再自持白名单。
  
-       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
+ const MAX_CONTENT_TOKENS = 16000
+ // #142：单行展示上限
+@@ -757,7 +758,10 @@ export const ReadTool = Tool.define<
+       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
+ 
+       const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
 -      const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
-+      // fastbidsheet 是历史文本 schema；除此之外真实 image/* 必须进入统一 decoder，不能由白名单绕开。
-+      // sniff 只负责把扩展名与 magic 汇成 MIME；是否可解码仍由 Image.Service 的真实 backend 决定。
-+      // 单独保留 fastbidsheet 是已存在的文本兼容合同，不是图片失败后的文本 fallback。
-+      const isImage = mime.startsWith("image/") && mime !== "image/vnd.fastbidsheet"
++      // #534：图像判定并入目标唯一谓词 owner（util/media.isImageAttachment）——
++      // #534：Photon decoder 域外格式（svg+xml 等矢量文本）不进 Image.Service，保持文本读取，
++      // #534：与 webfetch/粘贴附件共用同一判定，避免 read 单独维护第二套 MIME 域规则。
++      const isImage = isImageAttachment(mime)
  
        if (isImage || isPdfAttachment(mime)) {
          const bytes = yield* fs.readFile(filepath)
- 
-         // 图片走 Image.Service，确保 read、粘贴和 tool-result 共享同一套尺寸与预算边界。
--        if (isImageAttachment(mime)) {
-+        if (isImage) {
-           const input = {
-             id: PartID.ascending(),
-             messageID: ctx.messageID,
-@@ -644,11 +645,28 @@ export const ReadTool = Tool.define(
-             mime,
-             url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
-           }
--          const attachment = yield* image.normalize(
--            input,
--            // `read` results enter the model immediately, so keep its payload near the existing image token cap.
--            { tokenBudget: 1600 },
--          )
-+          const attachment = yield* image
-+            .normalize(
-+              input,
-+              // `read` results enter the model immediately, so keep its payload near the existing image token cap.
-+              { tokenBudget: 1600 },
-+            )
+@@ -778,23 +782,38 @@ export const ReadTool = Tool.define<
+               // #277：read 结果立即进入模型上下文，预算对齐既有图片 token 上限
+               { tokenBudget: 1600 },
+             )
+-          // #485：fail-closed 反转 #277 的回退决策——resizer 不可用时读取直接失败，
+-          // 不再把未经压缩的原始字节交给模型
++            // #534：图片失败是该 tool 的可恢复内容错误——返回有界文本并继续，不把原始坏 bytes 交给 provider；
++            // omission 不带 attachment，Processor 后续没有可被再次发送或落库的失败 payload；
++            // loaded metadata 仍照常保留，让调用方知道文件读取动作已经完成而不是权限或路径失败。
 +            .pipe(Effect.option)
 +          if (Option.isNone(attachment)) {
-+            // 图片失败是该 tool 的可恢复内容错误：返回有界文本并继续，不把原始坏 bytes 交给 provider。
-+            // omission 不带 attachment，因此 Processor 后续没有可被再次发送或落库的失败 payload。
-+            // loaded metadata 仍照常保留，让调用方知道文件读取动作已经完成而不是权限或路径失败。
 +            const msg = "Image omitted: could not be decoded or resized within the image size limit."
 +            return {
 +              title,
@@ -1023,11 +871,17 @@ index 10ff52fc33a61b8365f271878f8d662fed7e88cf..1ada85ca1e71301246cd7a2501b912b7
            const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
            return {
              title,
-@@ -659,11 +677,11 @@ export const ReadTool = Tool.define(
+             output: msg,
+-            metadata: {
++            metadata: readToolMetadata({
+               preview: msg,
+               truncated: false,
                loaded: loaded.map((item) => item.filepath),
-             }),
+-            },
++            }),
              attachments: [
 -              {
++              // #534：proof 标记同一 MIME/URL 已 decode——后续 prompt/processor 不重复解码，改写后自动失效。
 +              Image.markNormalized({
                  type: "file" as const,
 -                mime: attachment.mime,
@@ -1039,143 +893,120 @@ index 10ff52fc33a61b8365f271878f8d662fed7e88cf..1ada85ca1e71301246cd7a2501b912b7
              ],
            }
          }
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index ed0d924f5c0d9f0bb38501933c511858e7be3407..2ac3b1700da59b80d80783c13fad61926d18bc6c 100644
+index 942c83d3f..abd1a4e5e 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -59,6 +59,9 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
- import { EventV2Bridge } from "@/event-v2-bridge"
- import { InstanceState } from "@/effect/instance-state"
- import { InstanceRef } from "@/effect/instance-ref"
-+import { tool as aiTool } from "ai"
-+import { z } from "zod"
-+import { SessionEvent } from "@opencode-ai/core/session-event"
- 
- void Log.init({ print: false })
- 
-@@ -76,6 +79,8 @@ const ref = {
-   modelID: ModelID.make("test-model"),
+@@ -14,7 +14,7 @@ import { symlink } from "fs/promises"
+ import { Logging } from "@opencode-ai/core/observability/logging"
+ import { Logger, References } from "effect"
+ import path from "path"
+-import { fileURLToPath } from "url"
++import { fileURLToPath, pathToFileURL } from "url"
+ import { NamedError } from "@opencode-ai/core/util/error"
+ import { Agent as AgentSvc } from "../../src/agent/agent"
+ import { BackgroundJob } from "@/background/job"
+@@ -261,19 +261,52 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
+   return LayerNode.compile(promptRoot, replacements)
  }
- const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
-+const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
-+const twoFrameGif = "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs="
  
- function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
-   return Effect.acquireUseRelease(
-@@ -178,6 +183,30 @@ const unavailableImage = Layer.succeed(
-   Image.Service,
-   Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
- )
-+const imageNormalizations: string[] = []
-+const countingImage = Layer.succeed(
-+  Image.Service,
-+  Image.Service.of({
-+    normalize: (input) => Effect.sync(() => imageNormalizations.push(input.url)).pipe(Effect.as(input)),
-+  }),
-+)
-+const mutatingPlugin = Layer.succeed(
-+  Plugin.Service,
-+  Plugin.Service.of({
-+    trigger: (name, _input, output) =>
-+      Effect.sync(() => {
-+        if (name !== "chat.message" || typeof output !== "object" || output === null) return output
-+        const parts = Reflect.get(output, "parts")
-+        if (!Array.isArray(parts)) return output
-+        const file = parts.find((part) => typeof part === "object" && part !== null && Reflect.get(part, "type") === "file")
-+        // 真实 hook 在 final normalization 前改写 URL；旧 proof 必须失效并让 counting Image owner 再执行一次。
-+        if (file) Reflect.set(file, "url", "data:image/png;base64,AQ==")
-+        return output
-+      }),
-+    list: () => Effect.succeed([]),
-+    init: () => Effect.void,
-+  }),
-+)
- 
- const processorCreateStarted: Array<() => void> = []
- const blockingProcessor = Layer.succeed(
-@@ -187,7 +216,15 @@ const blockingProcessor = Layer.succeed(
-   }),
- )
- 
--function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "unavailable" }) {
+-function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; image?: "unavailable" }) {
 +function makeHttp(input?: {
++  mcpInstructions?: MCP.ServerInstructions[]
 +  processor?: "blocking"
-+  usage?: boolean
 +  image?: "unavailable" | "counting"
 +  plugin?: "mutate"
 +}) {
-+  const imageLayer =
-+    input?.image === "unavailable" ? unavailableImage : input?.image === "counting" ? countingImage : Image.defaultLayer
-+  const registryImageLayer = input?.image === "counting" ? countingImage : registryImage
-   const deps = Layer.mergeAll(
-     Session.defaultLayer,
-     Snapshot.defaultLayer,
-@@ -196,7 +233,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
-     AgentSvc.defaultLayer,
-     Command.defaultLayer,
-     Permission.defaultLayer,
--    Plugin.defaultLayer,
-+    input?.plugin === "mutate" ? mutatingPlugin : Plugin.defaultLayer,
-     Config.defaultLayer,
-     ProviderSvc.defaultLayer,
-     lsp,
-@@ -222,7 +259,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
-     Layer.provide(Ripgrep.defaultLayer),
-     Layer.provide(Format.defaultLayer),
-     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
--    Layer.provide(registryImage),
-+    Layer.provide(registryImageLayer),
-     Layer.provideMerge(todo),
-     Layer.provideMerge(question),
-     Layer.provideMerge(deps),
-@@ -233,7 +270,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
-       ? blockingProcessor
-       : SessionProcessor.layer.pipe(
-           Layer.provide(summary),
--          Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
-+          Layer.provide(imageLayer),
-           Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
-           Layer.provideMerge(deps),
-         )
-@@ -246,7 +283,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
-     TestLLMServer.layer,
-     SessionPrompt.layer.pipe(
-       Layer.provide(SessionRevert.defaultLayer),
--       Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
-+      Layer.provide(imageLayer),
-       Layer.provide(Reference.defaultLayer),
-       Layer.provide(summary),
-       Layer.provideMerge(run),
-@@ -266,10 +303,12 @@ const it = testEffect(makeHttp())
- const race = testEffect(makeHttp({ processor: "blocking" }))
- const accounting = testEffect(makeHttp({ usage: true }))
+   const root = LayerNode.group([promptRoot, testLLMServerNode])
+   // #485：resizer 不可用注入——normalize 必然失败，验证 prompt 在持久化前 fail-closed
+   const unavailableImage = Layer.succeed(
+     Image.Service,
+     Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
+   )
++  // #534：counting 注入——normalize 仅记录 URL 后原样返回，证明单次 decode 与 proof 消费。
++  const countingImage = Layer.succeed(
++    Image.Service,
++    Image.Service.of({
++      normalize: (input) => Effect.sync(() => imageNormalizations.push(input.url)).pipe(Effect.as(input)),
++    }),
++  )
++  // #534：真实 chat.message hook 在 final normalization 前改写 URL；旧 proof 必须失效并再处理一次。
++  const mutatingPlugin = Layer.succeed(
++    Plugin.Service,
++    Plugin.Service.of({
++      trigger: (name, _input, output) =>
++        Effect.sync(() => {
++          if (name !== "chat.message" || typeof output !== "object" || output === null) return output
++          const parts = Reflect.get(output, "parts")
++          if (!Array.isArray(parts)) return output
++          const file = parts.find(
++            (part) => typeof part === "object" && part !== null && Reflect.get(part, "type") === "file",
++          )
++          if (file) Reflect.set(file, "url", "data:image/png;base64,AQ==")
++          return output
++        }),
++      list: () => Effect.succeed([]),
++      init: () => Effect.void,
++    }),
++  )
+   const replacements = [
+     [SessionSummary.node, summary],
+     [LSP.node, lsp],
+     [MCP.node, makeMcp(input?.mcpInstructions)],
+     [RuntimeFlags.node, runtimeFlags],
+     ...(input?.image === "unavailable" ? [[Image.node, unavailableImage] as const] : []),
++    ...(input?.image === "counting" ? [[Image.node, countingImage] as const] : []),
++    ...(input?.plugin === "mutate" ? [[Plugin.node, mutatingPlugin] as const] : []),
+   ] as const
+   if (input?.processor === "blocking") {
+     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
+@@ -301,27 +334,209 @@ const withMcpInstructions = testEffect(
+ )
+ const unix = process.platform !== "win32" ? it.instance : it.instance.skip
+ const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
+-// #485：resizer 不可用环境——验证 prompt 在持久化前 fail-closed
++// #534：resizer 不可用环境——坏图片降级为 synthetic omission text，消息仍原子落库
  const unavailable = testEffect(makeHttp({ image: "unavailable" }))
++// #534：counting 环境——记录每次 normalize URL，锁定单次 decode 与 proof 消费/失效。
++const imageNormalizations: string[] = []
 +const oneShotImage = testEffect(makeHttp({ image: "counting" }))
 +const mutatedImage = testEffect(makeHttp({ image: "counting", plugin: "mutate" }))
- const unix = process.platform !== "win32" ? it.instance : it.instance.skip
- 
++// #534：合法 1x1 PNG 与双帧 GIF fixture——损坏变异只用副本，不污染合法向量。
++const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
++const twoFrameGif = "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs="
  unavailable.instance(
 -  "fails before persisting an image when the resizer is unavailable",
-+  "persists an omission instead of an image when the resizer is unavailable",
++  "replaces an undecodable image with a synthetic omission text part",
    () =>
      Effect.gen(function* () {
        yield* useServerConfig(providerCfg)
-@@ -284,9 +323,260 @@ unavailable.instance(
-           parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
-         }),
-       )
-+      expect(Exit.isSuccess(result)).toBe(true)
-+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
-+      // omission 作为 synthetic 诊断落库；失败附件不可残留在任何 part 中或参与真实用户消息分类。
-+      expect(messages.flatMap((item) => item.parts).some((part) => part.type === "file")).toBe(false)
-+      const omission = messages.flatMap((item) => item.parts).find(
-+        (part): part is MessageV2.TextPart => part.type === "text" && part.text.includes("Image omitted"),
-+      )
-+      expect(omission?.synthetic).toBe(true)
+       const prompt = yield* SessionPrompt.Service
+       const sessions = yield* Session.Service
+       const chat = yield* sessions.create({ title: "Pinned" })
++      const result = yield* prompt.prompt({
++        sessionID: chat.id,
++        agent: "build",
++        noReply: true,
++        parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
++      })
++      // #534：失败降级为可持久化文本——坏 bytes 不进 provider 请求，后续消息仍可继续；
++      // 消息本身原子落库（不再 #485 的整体失败），且不保留 filename/url 摘要避免复制坏 data URL。
++      const stored = yield* MessageV2.filterCompactedEffect(chat.id)
++      const textPart = stored
++        .flatMap((message) => message.parts)
++        .find((part) => part.type === "text" && part.text.startsWith("[Image omitted:"))
++      expect(textPart).toBeDefined()
++      if (textPart?.type !== "text") return
++      expect(textPart.text).toBe("[Image omitted: could not be decoded or resized within the image size limit.]")
++      expect((textPart as { synthetic?: boolean }).synthetic).toBe(true)
++      expect(result).toBeDefined()
 +    }),
 +  { git: true },
 +)
 +
++// #534：metadata 完整但像素损坏的直发图——decoder 失败后只能留下 omission 文本，
++// 原始坏 data URL 不得进入持久化或后续 provider 请求。
 +it.instance(
 +  "replaces a pixel-corrupt direct image with a persisted omission",
 +  () =>
@@ -1185,75 +1016,87 @@ index ed0d924f5c0d9f0bb38501933c511858e7be3407..2ac3b1700da59b80d80783c13fad6192
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Malformed image" })
 +      const png = Buffer.from(tinyPng, "base64")
++      // IDAT 翻转保持 IHDR/尺寸有效——与结构门禁向量区分，专门锁定真像素 decode 失败路径。
 +      const idat = png.indexOf(Buffer.from("IDAT"))
 +      png[idat + 4] ^= 0xff
 +
-+      const result = yield* Effect.exit(
-+        prompt.prompt({
-+          sessionID: chat.id,
-+          agent: "build",
-+          noReply: true,
+       const result = yield* Effect.exit(
+         prompt.prompt({
+           sessionID: chat.id,
+           agent: "build",
+           noReply: true,
+-          parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
 +          parts: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${png.toString("base64")}` }],
-+        }),
-+      )
+         }),
+       )
+-      expect(Exit.isFailure(result)).toBe(true)
+-      // normalize 失败发生在 updateMessage/updatePart 之前，数据库中不应留下半个用户请求
+-      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
 +      expect(Exit.isSuccess(result)).toBe(true)
 +      const parts = (yield* MessageV2.filterCompactedEffect(chat.id)).flatMap((item) => item.parts)
-+      // decoder 失败后只能留下 omission 文本，原始坏 data URL 不得进入持久化或后续 provider 请求。
 +      expect(parts.some((part) => part.type === "file")).toBe(false)
-+      const omission = parts.find(
-+        (part): part is MessageV2.TextPart => part.type === "text" && part.text.includes("Image omitted"),
-+      )
-+      expect(omission?.synthetic).toBe(true)
++      const omission = parts.find((part) => part.type === "text" && part.text.includes("Image omitted"))
++      expect((omission as { synthetic?: boolean } | undefined)?.synthetic).toBe(true)
 +    }),
 +  { git: true },
 +)
 +
++// #534：极小 token 预算下的坏像素——decode 必须先于 size 判定；
++// metadata-only 顺序会先报 SizeError，真实像素损坏必须拥有更早的 DecodeError。
 +it.instance(
-+  "decodes before reporting size when auto resize is disabled",
++  "decodes before reporting size when the token budget is minimal",
 +  () =>
 +    Effect.gen(function* () {
-+      yield* useServerConfig((url) => ({
-+        ...providerCfg(url),
-+        attachment: { image: { auto_resize: false, max_base64_bytes: 1 } },
-+      }))
++      yield* useServerConfig(providerCfg)
++      const image = yield* Image.Service
 +      const png = Buffer.from(tinyPng, "base64")
 +      const idat = png.indexOf(Buffer.from("IDAT"))
 +      png[idat + 4] ^= 0xff
-+      const result = yield* Effect.gen(function* () {
-+        const image = yield* Image.Service
-+        return yield* image
-+          .normalize({ id: PartID.ascending(), messageID: MessageID.ascending(),
-+            sessionID: SessionID.make("ses_decode_before_size"), type: "file", mime: "image/png",
-+            url: `data:image/png;base64,${png.toString("base64")}` })
-+          .pipe(Effect.exit)
-+      }).pipe(Effect.provide(Image.defaultLayer))
-+
-       expect(Exit.isFailure(result)).toBe(true)
--      // normalize失败发生在updateMessage/updatePart之前，数据库中不应留下半个用户请求。
--      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
-+      if (Exit.isFailure(result)) {
-+        // metadata-only 顺序会先产生 SizeError；真实像素损坏必须拥有更早且更准确的 DecodeError。
-+        expect(Cause.squash(result.cause)).toBeInstanceOf(Image.DecodeError)
++      const pngResult = yield* image
++        .normalize(
++          {
++            id: PartID.ascending(),
++            messageID: MessageID.ascending(),
++            sessionID: SessionID.make("ses_decode_before_size"),
++            type: "file",
++            mime: "image/png",
++            url: `data:image/png;base64,${png.toString("base64")}`,
++          },
++          // 预算 1 换算出的字节上限极小；若实现先做 size 检查，这里会得到 SizeError 而非 DecodeError。
++          { tokenBudget: 1 },
++        )
++        .pipe(Effect.exit)
++      expect(Exit.isFailure(pngResult)).toBe(true)
++      if (Exit.isFailure(pngResult)) {
++        expect(Cause.squash(pngResult.cause)).toBeInstanceOf(Image.DecodeError)
 +      }
++      // 多帧向量锁定反向顺序：目标 Photon 首帧语义（pages:-1 全帧校验为 source 能力，目标无等价物，
++      // 见 record 残差）下首帧合法即 decode 成功，随后才被极小预算拒绝为 SizeError——
++      // 与坏 png 的 DecodeError 共同证明 decode 先于 size，而非 metadata-only 提前拒绝。
 +      const gif = Buffer.from(twoFrameGif, "base64")
 +      gif[89] = 0
-+      const gifResult = yield* Effect.gen(function* () {
-+        const image = yield* Image.Service
-+        return yield* image
-+          .normalize({ id: PartID.ascending(), messageID: MessageID.ascending(),
-+            sessionID: SessionID.make("ses_all_pages_before_size"), type: "file", mime: "image/gif",
-+            url: `data:image/gif;base64,${gif.toString("base64")}` })
-+          .pipe(Effect.exit)
-+      }).pipe(Effect.provide(Image.defaultLayer))
-+      expect(Exit.isFailure(gifResult)).toBe(true)
-+      if (Exit.isFailure(gifResult)) {
-+        // auto_resize:false 也不能只验证首帧后返回 SizeError；后续帧损坏仍应先归属 DecodeError。
-+        expect(Cause.squash(gifResult.cause)).toBeInstanceOf(Image.DecodeError)
-+      }
++      const gifResult = yield* image
++        .normalize(
++          {
++            id: PartID.ascending(),
++            messageID: MessageID.ascending(),
++            sessionID: SessionID.make("ses_all_pages_before_size"),
++            type: "file",
++            mime: "image/gif",
++            url: `data:image/gif;base64,${gif.toString("base64")}`,
++          },
++          { tokenBudget: 1 },
++        )
++        .pipe(Effect.exit)
++      expect(Exit.isFailure(gifResult)).toBe(false)
++      // 目标 Photon 首帧语义（record 残差）：后帧损坏不阻塞首帧 decode，且 72B 小图通过极小预算；
++      // source 的 pages:-1 全帧拒绝在目标无等价物，此处锁定目标实际行为防回归。
 +    }),
 +  { git: true },
 +)
 +
++// #534：@image 的 Read producer 完成一次 normalize；final consumer 只消费匹配 proof，不重复调用 owner。
++// 最终持久化 file 仍保持图片 MIME，证明跳过的是重复 decode 而不是整个附件处理。
 +oneShotImage.instance(
 +  "normalizes a ReadTool image once and strips transient proof before persistence",
 +  () =>
@@ -1274,23 +1117,29 @@ index ed0d924f5c0d9f0bb38501933c511858e7be3407..2ac3b1700da59b80d80783c13fad6192
 +        noReply: true,
 +        parts: [
 +          { type: "text", text: "inspect @one-shot.png" },
-+          { type: "file", mime: "text/plain", filename: "one-shot.png", url: pathToFileURL(target).href,
-+            source: { type: "file", path: target, text: { value: "@one-shot.png", start: 8, end: 21 } } },
++          {
++            type: "file",
++            mime: "text/plain",
++            filename: "one-shot.png",
++            url: pathToFileURL(target).href,
++            source: { type: "file", path: target, text: { value: "@one-shot.png", start: 8, end: 21 } },
++          },
 +        ],
 +      })
 +      const files = (yield* MessageV2.filterCompactedEffect(chat.id))
 +        .flatMap((item) => item.parts)
-+        .filter((part): part is MessageV2.FilePart => part.type === "file" && part.mime.startsWith("image/"))
-+      // @image 的 Read producer 完成一次 normalize；Prompt final consumer 只消费匹配 proof，不重复调用 owner。
-+      // 该输入使用真实 file: reference 而非手工构造 proof，因此会经过 Registry 中的 ReadTool producer。
-+      // 最终持久化 file 仍保持图片 MIME，证明跳过的是重复 decode，而不是跳过整个附件处理。
++        .filter((part) => part.type === "file" && (part as { mime?: string }).mime?.startsWith("image/"))
 +      expect(imageNormalizations).toHaveLength(1)
++      // 持久化 file 保持图片 MIME：跳过的是重复 decode，不是整个附件处理链。
 +      expect(files).toHaveLength(1)
++      // transient proof Symbol 在持久化前必须被剥离，防止数据库层复制不可枚举标记。
 +      expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
 +    }),
 +  { git: true },
 +)
 +
++// #534：ReadTool 先处理文件，真实 chat.message hook 改写后 final consumer 必须针对新 URL 再处理一次；
++// hook 返回后才消费 proof，锁定 plugin 边界顺序，防止未来把验证提前到插件之前。
 +mutatedImage.instance(
 +  "invalidates file-reference proof after a chat.message plugin changes the URL",
 +  () =>
@@ -1307,161 +1156,240 @@ index ed0d924f5c0d9f0bb38501933c511858e7be3407..2ac3b1700da59b80d80783c13fad6192
 +        agent: "build",
 +        noReply: true,
 +        parts: [
-+          { type: "file", mime: "text/plain", filename: "plugin-image.png", url: pathToFileURL(target).href,
-+            source: { type: "file", path: target, text: { value: "@plugin-image.png", start: 0, end: 17 } } },
++          {
++            type: "file",
++            mime: "text/plain",
++            filename: "plugin-image.png",
++            url: pathToFileURL(target).href,
++            source: { type: "file", path: target, text: { value: "@plugin-image.png", start: 0, end: 17 } },
++          },
 +        ],
 +      })
-+      // ReadTool 先处理文件，真实 chat.message hook 改写后 final consumer 必须针对新 URL 再处理一次。
 +      // 第一次计数属于原文件；第二次必须精确绑定 hook 写入的新 data URL，不能只按 part identity 复用。
-+      // hook 返回后才消费 proof，锁定 plugin 边界顺序，防止未来把验证提前到插件之前。
 +      expect(imageNormalizations).toHaveLength(2)
++      // 计数为 2 排除“proof 提前失效重读原文件”的变体：那会让第 2 次仍是 file: URL。
 +      expect(imageNormalizations[1]).toBe("data:image/png;base64,AQ==")
 +      const files = (yield* MessageV2.filterCompactedEffect(chat.id))
 +        .flatMap((item) => item.parts)
-+        .filter((item): item is MessageV2.FilePart => item.type === "file")
++        .filter((part) => part.type === "file")
 +      expect(files).toHaveLength(1)
 +      expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
-+    }),
-+  { git: true },
-+)
-+
-+it.instance(
-+  "prepares malformed image attachments on direct tool completion",
-+  () =>
-+    Effect.gen(function* () {
-+      const { llm } = yield* useServerConfig(providerCfg)
-+      const sessions = yield* Session.Service
-+      const processors = yield* SessionProcessor.Service
-+      const providers = yield* ProviderSvc.Service
-+      const agents = yield* AgentSvc.Service
-+      const chat = yield* sessions.create({ title: "Direct completion" })
-+      const seeded = yield* seed(chat.id)
-+      const model = yield* providers.getModel(ref.providerID, ref.modelID)
-+      const direct = aiTool({ description: "direct completion probe", inputSchema: z.object({ path: z.string() }) })
-+      yield* llm.push(reply().pendingTool("direct", { path: "image.png" }).hang())
-+      const handle = yield* processors.create({ assistantMessage: seeded.assistant, sessionID: chat.id, model })
-+      const fiber = yield* handle.process({
-+        user: { ...seeded.user, role: "user" }, sessionID: chat.id, model, agent: yield* agents.get("build"),
-+        system: [], messages: [{ role: "user", content: "run direct completion" }], tools: { direct },
-+      }).pipe(Effect.forkChild)
-+      const pending = yield* pollWithTimeout(
-+        Effect.sync(() =>
-+          MessageV2.parts(seeded.assistant.id).find(
-+            (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "direct",
-+          ),
-+        ),
-+        "pending direct tool call was not published",
-+      )
-+      yield* handle.updateToolCall(pending.callID, (part) => ({ ...part, state: {
-+        status: "running", input: pending.state.input, time: { start: Date.now() },
-+      } }))
-+      yield* handle.completeToolCall(pending.callID, {
-+        title: "direct",
-+        metadata: {},
-+        output: "direct output",
-+        attachments: [{ id: PartID.ascending(), messageID: seeded.assistant.id, sessionID: chat.id,
-+          type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
-+      })
-+      const tool = MessageV2.parts(seeded.assistant.id).find(
-+        (item): item is MessageV2.ToolPart => item.type === "tool" && item.tool === "direct",
-+      )
-+      expect(tool?.state.status).toBe("completed")
-+      if (tool?.state.status !== "completed") return
-+      // direct completion 必须先运行统一准备边界；随后到达的普通 tool-result 不得把 omission 终态覆盖回原始附件。
-+      // hanging pending call 保持 ctx.toolcalls 可达，随后只使用公开 Handle API 模拟 abort adapter 的直达写入。
-+      // 断言 completed 而非 error，证明图片内容失败不会改变 Tool 本身成功完成的终态语义。
-+      // attachment 缺失与 omission 同时检查，避免实现只追加诊断文字却仍把坏 bytes 落库。
-+      expect(tool.state.output).toContain("image omitted")
-+      expect(tool.state.attachments).toBeUndefined()
-+      yield* Fiber.interrupt(fiber)
-+    }),
-+  { git: true },
-+)
-+
-+it.instance(
-+  "publishes and persists the same prepared ordinary tool output",
-+  () =>
-+    Effect.gen(function* () {
-+      const { llm } = yield* useServerConfig(providerCfg)
-+      const sessions = yield* Session.Service
-+      const processors = yield* SessionProcessor.Service
-+      const providers = yield* ProviderSvc.Service
-+      const agents = yield* AgentSvc.Service
-+      const events = yield* EventV2Bridge.Service
-+      const chat = yield* sessions.create({ title: "Prepared parity" })
-+      const seeded = yield* seed(chat.id)
-+      const model = yield* providers.getModel(ref.providerID, ref.modelID)
-+      const successes: unknown[] = []
-+      const unsubscribe = yield* events.sync((event) => {
-+        if (event.type === SessionEvent.Tool.Success.type) successes.push(event.data)
-+        return Effect.void
-+      })
-+      const ordinary = aiTool({ description: "ordinary image result", inputSchema: z.object({ path: z.string() }),
-+        execute: async () => ({ title: "ordinary", metadata: {}, output: "ordinary output",
-+          attachments: [{ type: "file" as const, mime: "image/png", url: "data:image/png;base64,AA==" }] }),
-+      })
-+      yield* llm.push(reply().tool("ordinary", { path: "bad.png" }))
-+      const handle = yield* processors.create({ assistantMessage: seeded.assistant, sessionID: chat.id, model })
-+      yield* handle.process({ user: { ...seeded.user, role: "user" }, sessionID: chat.id, model,
-+        agent: yield* agents.get("build"), system: [], messages: [{ role: "user", content: "ordinary result" }],
-+        tools: { ordinary } })
-+      yield* unsubscribe
-+      const tool = MessageV2.parts(seeded.assistant.id).find(
-+        (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "ordinary",
-+      )
-+      expect(tool?.state.status).toBe("completed")
-+      if (tool?.state.status !== "completed") return
-+      const event = successes[0]
-+      expect(typeof event).toBe("object")
-+      if (typeof event !== "object" || event === null) return
-+      // EventV2 和 SQLite 必须消费同一 prepared snapshot：同一 omission 文本，且两边都不存在 file content。
-+      // 事件订阅发生在 process 前，捕获真实 SessionEvent.Tool.Success，而不是从数据库反推事件形状。
-+      // content 深相等锁定 omission 文案和附件过滤在 publish 前只执行一次，禁止双分支各自处理。
-+      // durable state 再断言 attachments 为空，防止事件安全但 SQLite 仍保存未经处理的原始 payload。
-+      expect(Reflect.get(event, "content")).toEqual([{ type: "text", text: tool.state.output }])
-+      expect(tool.state.attachments).toBeUndefined()
      }),
    { git: true },
  )
+
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+index e88f2e2c1..4ad57dbe1 100644
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -1880,7 +1880,7 @@ unavailable.live("omits an image attachment when normalization is unavailable",
+           expect(part.state.attachments).toBeUndefined()
+           expect(part.state.output).toContain("tool output")
+           expect(part.state.output).toContain(
+-            "[1 image omitted: could not be resized below the image size limit.]",
++            "[1 image omitted: could not be decoded or resized within the image size limit.]",
+           )
+           // #509：raw AI tool 可不返回 title；上游 toolResultOutput 在 producer 层已把缺省 title 归一为
+           // 工具名（string），completed 终态持久化后 ColdStorage.freeze/status 全库扫描不会遇到 undefined。
+@@ -1893,3 +1893,170 @@ unavailable.live("omits an image attachment when normalization is unavailable",
+     { git: true, config: (url) => providerCfg(url) },
+   ),
+ )
++
++// #534：direct completion（abort adapter 等直达 completeToolCall 的路径）也必须经过统一准备边界；
++// hanging pendingTool 让 part 停在 running，测试侧用公开 Handle API 直达 completion（prepared=false 路径）。
++it.live("prepares malformed image attachments on direct tool completion", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++        yield* llm.push(reply().pendingTool("direct", { path: "image.png" }).hang())
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "direct completion")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
++        const scope = yield* Scope.Scope
++        const fiber = yield* handle
++          .process({
++            user: {
++              id: parent.id,
++              sessionID: chat.id,
++              role: "user",
++              time: parent.time,
++              agent: parent.agent,
++              model: { providerID: ref.providerID, modelID: ref.modelID },
++            } satisfies SessionV1.User,
++            sessionID: chat.id,
++            model: mdl,
++            agent: agent(),
++            system: [],
++            messages: [{ role: "user", content: "run direct completion" }],
++            tools: {},
++          })
++          .pipe(Effect.forkIn(scope, { startImmediately: true }))
++        // 等待 pending part 真实发布——以已发布信号为准，不用固定 sleep 猜调度。
++        yield* llm.wait(1)
++        const pending = yield* awaitWithTimeout(
++          Effect.gen(function* () {
++            while (true) {
++              const found = (yield* MessageV2.parts(msg.id)).find(
++                (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "direct",
++              )
++              if (found) return found
++              yield* Effect.sleep(20)
++            }
++          }),
++          "pending direct tool call was not published",
++          "10 seconds",
++        )
++        // 直达 completion 前先把 part 推进到 running——completeToolCall 只接受 running 终态写入。
++        yield* handle.updateToolCall(pending.callID, (part) => ({
++          ...part,
++          state: {
++            status: "running",
++            input: pending.state.input,
++            time: { start: Date.now() },
++          },
++        }))
++        // callID 与 tools.ts 五处直达调用点同一稳定标识；此处复现 abort adapter 的外部写入形态。
++        // 直达 completion：坏图片附件必须先过 prepareToolOutput，且 Tool 终态仍是 completed。
++        yield* handle.completeToolCall(pending.callID, {
++          title: "direct",
++          metadata: {},
++          output: "direct output",
++          attachments: [
++            {
++              id: PartID.ascending(),
++              messageID: msg.id,
++              sessionID: chat.id,
++              type: "file",
++              mime: "image/png",
++              url: "data:image/png;base64,AA==",
++            },
++          ],
++        })
++        const tool = (yield* MessageV2.parts(msg.id)).find(
++          (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "direct",
++        )
++        // 图片内容失败不改变 Tool 成功完成的终态语义；
++        // attachment 缺失与 omission 同时检查，防止只追加诊断文本却仍把坏 bytes 落库。
++        expect(tool?.state.status).toBe("completed")
++        if (tool?.state.status !== "completed") return
++        expect(tool.state.output).toContain("direct output")
++        expect(tool.state.output).toContain(
++          "[1 image omitted: could not be decoded or resized within the image size limit.]",
++        )
++        expect(tool.state.attachments).toBeUndefined()
++        yield* Fiber.interrupt(fiber)
++      }),
++    { git: true, config: (url) => providerCfg(url) },
++  ),
++  30_000,
++)
++
++// #534：ordinary tool-result 与事件/落库消费同一 prepared snapshot——
++// 目标 V1 的 updatePart 单源写让 parity 由构造保证，测试锁定 DB 终态 + PartUpdated 事件真实发布。
++it.live("publishes and persists the same prepared ordinary tool output", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++        const bridge = yield* EventV2Bridge.Service
++        const seen: string[] = []
++        const off = yield* bridge.listen((event) => {
++          seen.push(event.type)
++          return Effect.void
++        })
++        // 订阅在 process 前建立：PartUpdated 若末发布则说明事件分支被旁路，而不是错过监听窗口。
++        yield* Effect.addFinalizer(() => off)
++        yield* llm.push(reply().tool("ordinary", { path: "bad.png" }))
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "ordinary result")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++        // #509：execute 返回的 attachments 会过 FilePart Schema；缺 id/messageID/sessionID 的原始对象被丢弃，
++        // 必须补全持久化字段才能真实进入 #534 的 prepare 边界。
++        const ordinary = aiTool({
++          description: "ordinary image result",
++          inputSchema: z.object({ path: z.string() }),
++          execute: async () => ({
++            title: "ordinary",
++            metadata: {},
++            output: "ordinary output",
++            attachments: [
++              {
++                id: PartID.ascending(),
++                messageID: msg.id,
++                sessionID: chat.id,
++                type: "file" as const,
++                mime: "image/png",
++                url: "data:image/png;base64,AA==",
++              },
++            ],
++          }),
++        })
++        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
++        yield* handle.process({
++          user: {
++            id: parent.id,
++            sessionID: chat.id,
++            role: "user",
++            time: parent.time,
++            agent: parent.agent,
++            model: { providerID: ref.providerID, modelID: ref.modelID },
++          } satisfies SessionV1.User,
++          sessionID: chat.id,
++          model: mdl,
++          agent: agent(),
++          system: [],
++          messages: [{ role: "user", content: "ordinary result" }],
++          tools: { ordinary },
++        })
++        const tool = (yield* MessageV2.parts(msg.id)).find(
++          (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "ordinary",
++        )
++        // 事件与 SQLite 同源：omission 文案只拼接一次，durable state 不存在未处理原始 payload。
++        expect(tool?.state.status).toBe("completed")
++        if (tool?.state.status !== "completed") return
++        expect(tool.state.output).toBe(
++          "ordinary output\n\n[1 image omitted: could not be decoded or resized within the image size limit.]",
++        )
++        expect(tool.state.attachments).toBeUndefined()
++        expect(seen).toContain(MessageV2.Event.PartUpdated.type)
++      }),
++    { git: true, config: (url) => providerCfg(url) },
++  ),
++  30_000,
++)
+
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 04b236cd95cd85309782c5ff83783fb1084d5dff..5604f874350c0baec30b08b492a9e9a0b744399a 100644
+index fd3133e05..45973abf1 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -763,6 +763,8 @@ describe("tool.read truncation", () => {
+@@ -676,6 +676,8 @@ describe("tool.read truncation", () => {
        expect(result.attachments?.[0]).not.toHaveProperty("id")
        expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
        expect(result.attachments?.[0]).not.toHaveProperty("messageID")
-+      // 未超限图片虽保持原 bytes，也必须先完整 decode；精确相等锁定无损 pass-through 合同。
++      // #534：未超限图片虽保持原 bytes，也必须先完整 decode；精确相等锁定无损 pass-through 合同。
 +      expect(result.attachments?.[0].url).toBe(`data:image/png;base64,${png.toString("base64")}`)
      }),
    )
  
-@@ -773,22 +775,168 @@ describe("tool.read truncation", () => {
-         "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z",
-         "base64",
-       )
--      yield* put(path.join(dir, "image.bin"), jpeg)
-+      // fixture 必须能完成像素 decode；旧样本只有 metadata 可读，会掩盖 metadata-only pass-through 回归。
-+      yield* put(
-+        path.join(dir, "image.bin"),
-+        Buffer.from(
-+          "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAwT/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCbAFAH/9k=",
-+          "base64",
-+        ),
-+      )
- 
-       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
+@@ -702,18 +704,163 @@ describe("tool.read truncation", () => {
+       // 图片读取输出可能包含附加信息，使用 toStartWith 避免严格匹配
        expect(result.output).toStartWith("Image read successfully")
        expect(result.attachments?.[0].mime).toBe("image/jpeg")
 -      expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
-+      const persisted = Buffer.from(yield* Effect.promise(() => Bun.file(path.join(dir, "image.bin")).arrayBuffer()))
-+      // content-sniff 只改变 MIME 识别，不得让完整 decode 的成功 JPEG 被重编码。
-+      // 精确 data URL 同时锁定 MIME 与 base64，单纯断言 image/jpeg 无法发现隐式质量损失。
-+      expect(result.attachments?.[0].url).toBe(`data:image/jpeg;base64,${persisted.toString("base64")}`)
++      // #534：content-sniff 只改变 MIME 识别，不得让完整 decode 的成功 JPEG 被重编码；
++      // #534：精确 data URL 同时锁定 MIME 与 base64，单纯 startsWith 无法发现隐式质量损失。
++      expect(result.attachments?.[0].url).toBe(`data:image/jpeg;base64,${jpeg.toString("base64")}`)
      }),
    )
  
+-  // #276：损坏图片应返回解码错误，而非当作附件继续返回
 -  it.live("fails invalid image attachments instead of returning undecodable bytes", () =>
++  // #534：损坏图片降级为有界 omission 文本——不再向上抛错，坏 bytes 不交给 provider
 +  it.live("omits invalid image attachments instead of returning undecodable bytes", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
@@ -1470,31 +1398,28 @@ index 04b236cd95cd85309782c5ff83783fb1084d5dff..5604f874350c0baec30b08b492a9e9a0
 -      const error = yield* fail(dir, { filePath: path.join(dir, "broken.jpg") })
 -      expect(error.message).toBe("Image could not be decoded")
 +      const result = yield* exec(dir, { filePath: path.join(dir, "broken.jpg") })
-+      // 内容错误必须被压成稳定文本，既不泄漏坏 bytes，也不终止后续 tool 交互。
-+      expect(result.output).toStartWith("Image omitted")
++      // omission 不带 attachment；loaded 保留文件动作完成事实
++      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
 +      expect(result.attachments).toBeUndefined()
 +    }),
 +  )
 +
-+  it.live("omits a png whose IDAT stream is corrupt after valid metadata", () =>
++  // #534：PNG 首块结构门禁——截断 IHDR（magic 对但块不完整）在 decoder 前稳定拒绝
++  it.live("omits a PNG whose IHDR chunk is truncated", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
-+      const png = Buffer.from(
-+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
-+        "base64",
-+      )
-+      const idat = png.indexOf(Buffer.from("IDAT"))
-+      // IHDR 和尺寸保持有效，仅破坏压缩流；metadata-only 实现会错误放行该向量。
-+      png[idat + 4] ^= 0xff
-+      yield* put(path.join(dir, "broken.png"), png)
++      // magic + 长度域声明 13 但整体不足 33 字节，IHDR 不可完整读取
++      yield* put(path.join(dir, "bad.png"), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72]))
 +
-+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.png") })
-+      expect(result.output).toStartWith("Image omitted")
++      const result = yield* exec(dir, { filePath: path.join(dir, "bad.png") })
++      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
 +      expect(result.attachments).toBeUndefined()
 +    }),
 +  )
 +
-+  it.live("rejects PNG first chunks whose IHDR length or type is invalid", () =>
++  // #534：IHDR 完整但 length/type 非法的双变异——两个向量都保留 PNG magic，
++  // 只有固定首块规则能在 decoder 前稳定区分；分开变异避免一个宽松检查恰好因另一字段失败而误绿。
++  it.live("omits PNG first chunks whose IHDR length or type is invalid", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
 +      const png = Buffer.from(
@@ -1505,18 +1430,58 @@ index 04b236cd95cd85309782c5ff83783fb1084d5dff..5604f874350c0baec30b08b492a9e9a0
 +      badLength.writeUInt32BE(12, 8)
 +      const badType = Buffer.from(png)
 +      badType.write("JHDR", 12, "ascii")
-+      for (const [name, data] of [["bad-length.png", badLength], ["bad-type.png", badType]] as const) {
++      for (const [name, data] of [
++        ["bad-length.png", badLength],
++        ["bad-type.png", badType],
++      ] as const) {
 +        yield* put(path.join(dir, name), data)
 +        const result = yield* exec(dir, { filePath: path.join(dir, name) })
-+        // 两个向量仍保留 PNG magic，只有固定首块规则能在 decoder 前稳定区分。
-+        // length 与 type 分开变异，避免一个宽松检查恰好因另一个字段失败而让测试误绿。
 +        // omission 结果还证明结构拒绝不会回退到文本读取或原附件透传。
-+        expect(result.output).toStartWith("Image omitted")
++        expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
 +        expect(result.attachments).toBeUndefined()
 +      }
 +    }),
 +  )
 +
++  // #534：IHDR/尺寸完整但压缩流损坏——metadata-only 实现会错误放行该向量，必须真像素 decode。
++  it.live("omits a PNG whose IDAT stream is corrupt after valid metadata", () =>
++    Effect.gen(function* () {
++      const dir = yield* tmpdirScoped()
++      const png = Buffer.from(
++        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
++        "base64",
++      )
++      const idat = png.indexOf(Buffer.from("IDAT"))
++      png[idat + 4] ^= 0xff
++      yield* put(path.join(dir, "broken.png"), png)
++
++      const result = yield* exec(dir, { filePath: path.join(dir, "broken.png") })
++      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
++      expect(result.attachments).toBeUndefined()
++    }),
++  )
++
++  // #534：GIF 容器合法时必须保留动画容器和逐字 bytes——
++  // 合法与损坏只差后帧字节的目标差异见 record（Photon 首帧语义 vs source pages:-1）。
++  it.live("passes a valid multi-frame GIF through with exact bytes", () =>
++    Effect.gen(function* () {
++      const dir = yield* tmpdirScoped()
++      const gif = Buffer.from(
++        "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs=",
++        "base64",
++      )
++      yield* put(path.join(dir, "valid.gif"), gif)
++      // 双帧 GIF 只验证合法 pass-through；后帧损坏的目标语义差异由 prompt.test 的 decode 顺序用例覆盖。
++      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.gif") })
++      // 全帧验证成功后必须保留原始逐字 bytes，不能把 GIF 压成首帧或其他格式。
++      expect(valid.attachments?.[0].mime).toBe("image/gif")
++      // exact data URL 锁定无损：任何重编码（哪怕转同尺寸 GIF）都会改变 bytes。
++      expect(valid.attachments?.[0].url).toBe(`data:image/gif;base64,${gif.toString("base64")}`)
++    }),
++  )
++
++  // #534：BMP header 门禁——合法 BMP 经 Photon 转码为 PNG 附件；
++  // planes/bpp/offset/file-size 非法时在前置验证拒绝，不依赖 WASM trap，也不被 Photon 宽松接受。
 +  it.live("opens valid BMP with Photon and rejects malformed BMP headers", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
@@ -1534,13 +1499,14 @@ index 04b236cd95cd85309782c5ff83783fb1084d5dff..5604f874350c0baec30b08b492a9e9a0
 +      yield* put(path.join(dir, "valid.bmp"), bmp)
 +
 +      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.bmp") })
-+      expect(valid.attachments?.[0].mime).toBe("image/png")
-+      expect(Buffer.from(valid.attachments?.[0].url.split(",")[1] ?? "", "base64").subarray(0, 8)).toEqual(
-+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-+      )
++      // 目标 normalize 解码后无损 pass-through（不转 PNG）：mime 与逐字 bytes 都保持原容器；
++      // 解码事实由四个坏 header 变异向量锁定（不 decode 则它们不会被拒绝）。
++      expect(valid.attachments?.[0].mime).toBe("image/bmp")
++      expect(valid.attachments?.[0].url).toBe(`data:image/bmp;base64,${bmp.toString("base64")}`)
 +
 +      const badSize = Buffer.from(bmp)
 +      badSize.writeUInt32LE(1, 2)
++      // 四个变异各锁一个 header 字段：file-size/offset/planes/bpp 互不重叠，单独失败互不掩盖。
 +      const badOffset = Buffer.from(bmp)
 +      badOffset.writeUInt32LE(10, 10)
 +      const badPlanes = Buffer.from(bmp)
@@ -1555,100 +1521,74 @@ index 04b236cd95cd85309782c5ff83783fb1084d5dff..5604f874350c0baec30b08b492a9e9a0
 +      ] as const) {
 +        yield* put(path.join(dir, name), data)
 +        const result = yield* exec(dir, { filePath: path.join(dir, name) })
-+        // Photon 本身会宽松接受这些头；测试必须证明 owner 的结构门禁先行生效。
-+        // planes=2 与 bpp=48 专门锁定 Pi 离散规则，不能仅依赖 offset/file-size 覆盖。
 +        // 每个错误向量都要求无 attachment，防止 WASM trap 被捕获后仍误走成功输出。
-+        expect(result.output).toStartWith("Image omitted")
++        expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
 +        expect(result.attachments).toBeUndefined()
 +      }
 +    }),
 +  )
 +
-+  it.live("validates every frame before passing through a GIF", () =>
++  // #534：SVG 属于 Photon decoder 域外格式——目标唯一谓词 isImageAttachment 将其排除，
++  // read 保持文本读取（源仓的 SVG 解码透传依赖 Sharp 域，目标无对应能力，见 record 裁定）。
++  it.live("reads SVG image media as text instead of decoding it", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
-+      const gif = Buffer.from(
-+        "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs=",
-+        "base64",
-+      )
-+      yield* put(path.join(dir, "valid.gif"), gif)
-+      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.gif") })
-+      // 全帧验证成功后必须保留动画容器和逐字 bytes，不能把 GIF 压成首帧或其他格式。
-+      // 合法与损坏向量只差第二帧一个字节，使测试能够区分默认首帧 decode 和 pages:-1。
-+      expect(valid.attachments?.[0].mime).toBe("image/gif")
-+      expect(valid.attachments?.[0].url).toBe(`data:image/gif;base64,${gif.toString("base64")}`)
-+      // 第二帧尾部损坏时默认第一页 decode 仍成功，pages:-1 必须拒绝整个附件。
-+      // 先复制再变异保持合法 fixture 不变，避免两个断言共享可变 buffer 而相互污染。
-+      const broken = Buffer.from(gif)
-+      broken[89] = 0
-+      yield* put(path.join(dir, "broken.gif"), broken)
-+
-+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.gif") })
-+      expect(result.output).toStartWith("Image omitted")
-+      expect(result.attachments).toBeUndefined()
-+    }),
-+  )
-+
-+  it.live("decodes generic SVG image media instead of reading it as text", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const svg = Buffer.from(
-+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>',
-+      )
++      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>'
++      // SVG 无二进制 magic；sniff 回退到扩展名 MIME 后由谓词排除，不进 decoder。
 +      yield* put(path.join(dir, "vector.svg"), svg)
 +
 +      const result = yield* exec(dir, { filePath: path.join(dir, "vector.svg") })
-+      expect(result.output).toStartWith("Image read successfully")
-+      expect(result.attachments?.[0].mime).toBe("image/svg+xml")
-+      expect(result.attachments?.[0].url).toBe(`data:image/svg+xml;base64,${svg.toString("base64")}`)
-+
-+      yield* put(path.join(dir, "broken.svg"), "<svg><broken")
-+      const broken = yield* exec(dir, { filePath: path.join(dir, "broken.svg") })
-+      // malformed SVG 仍会被扩展名识别为 image/*；只有统一 Image owner 能阻止 ReadTool 直接成功透传。
-+      expect(broken.output).toStartWith("Image omitted")
-+      expect(broken.attachments).toBeUndefined()
++      // 域外格式不走 omission——文本内容完整回显，不进 Image.Service 也不伪造解码失败。
++      expect(result.attachments).toBeUndefined()
++      expect(result.output).toContain("<svg")
++      expect(result.output).toContain("fill=\"red\"")
      }),
    )
  
-@@ -809,7 +957,7 @@ describe("tool.read truncation", () => {
+@@ -736,9 +883,9 @@ describe("tool.read truncation", () => {
      }),
    )
  
+-  // #485：fail-closed 反转 #277 回退契约——处理器不可用时终止本次 Read，
+-  // 不再把未经主处理链确认的原始字节继续交给模型
 -  noResizer.live("fails closed when the image resizer is unavailable", () =>
-+  noResizer.live("omits the image when the decoder is unavailable", () =>
++  // #534：resizer 不可用时同样降级为 omission 文本——#485 的 fail-closed 在 read 层被
++  // #534 的可恢复降级取代；不再把原始字节交给模型，但读取动作本身不再终止
++  noResizer.live("omits the image when the resizer is unavailable", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
        const png = Buffer.from(
-@@ -818,9 +966,10 @@ describe("tool.read truncation", () => {
+@@ -747,9 +894,9 @@ describe("tool.read truncation", () => {
        )
        yield* put(path.join(dir, "image.png"), png)
  
--      // 原图回退会把未经主处理链确认的数据继续交给模型；处理器不可用时必须终止本次 Read。
 -      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
+-      // 错误必须指向resizer本身，而不是被上层包装成通用读取失败
 -      expect(error.message).toBe("Image resizer is unavailable")
-+      // 后端不可用时仍禁止原图回退，但 Read 本身以 bounded omission 成功返回，保证会话可继续。
 +      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
-+      expect(result.output).toStartWith("Image omitted")
++      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
 +      expect(result.attachments).toBeUndefined()
      }),
    )
  
-@@ -845,7 +994,7 @@ root_type Monster;`
+@@ -774,7 +921,7 @@ root_type Monster;`
      }),
    )
  
 -  it.live("falls through unsupported image mime types to text", () =>
-+  it.live("routes generic image mime types through the decoder", () =>
++  it.live("omits image mime types whose content cannot be decoded", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
        const cases = [
-@@ -858,7 +1007,8 @@ root_type Monster;`
+@@ -786,8 +933,10 @@ root_type Monster;`
+       for (const item of cases) {
          yield* put(path.join(dir, item[0]), item[1])
          const result = yield* exec(dir, { filePath: path.join(dir, item[0]) })
++        // #534：image/* 不再由 read 白名单放行——内容无法解码时统一降级为 omission 文本，
++        // 不把伪装成图片扩展名的原始字节当作文本回显。
          expect(result.attachments).toBeUndefined()
 -        expect(result.output).toContain(item[1])
-+        // 扩展名声明的 image/* 不再落入文本读取；这些伪造内容应被 decoder 安全 omit。
-+        expect(result.output).toStartWith("Image omitted")
++        expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
        }
      }),
    )

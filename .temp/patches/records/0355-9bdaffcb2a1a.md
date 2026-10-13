@@ -38,3 +38,36 @@
 
 ## 批次结语
 - 批次 351-355：五项均无 B 级行为缺陷（双向审计一致），E/C 硬门全部独立复算通过；本批唯一阻塞为五份 record 低于契约长度（G-01~G-05），本扩写系列即修复。346-350 前批 seal 缺失（G-07）由 0350 record 侧闭合后统一补封。
+
+## record 增补（2026-09-25，降级修复：恢复 ≥50 行 / ≥3000 字符门禁）
+
+- 背景：本 record 在历史轮次被过度精简至门禁以下。本节在**保留原有全部内容不动**的前提下，依据 `original/`、`current/` 现文件与当前链状态补足记录完整性；未重写、未撤回既有内容。
+
+### Source（original 现文件事实）
+- 文件：`0355-9bdaffcb2a1a.patch`（存在，28743 B）
+- Subject：(编码主题，见 original 文件头)
+- 规模：3 个路径，diffstat 合计 +334 / −34
+- 逐路径 diffstat（source 意图的完整文件面，重放审计按此清单核对）：
+  - `docs/precheck-parser-fix-plan.md` +189 / −0
+  - `packages/opencode/src/permission/precheck.ts` +77 / −34
+  - `packages/opencode/test/permission/precheck.test.ts` +68 / −0
+
+### Current 适配（current 现文件事实）
+- 文件：`0355-9bdaffcb2a1a.patch`（存在，28936 B）
+- 目标路径清单（owner 适配后的落点）：
+  - `docs/precheck-parser-fix-plan.md` +189 / −0
+  - `packages/opencode/src/permission/precheck.ts` +75 / −34
+  - `packages/opencode/test/permission/precheck.test.ts` +68 / −0
+
+### 链状态（v1.18.32 基线）
+- index ≥188：v1.18.32 基线重验未开始；本 record 既有内容仍为 v1.17.x 时代验证记录，重验时将按批次补录
+- 权威证据以 `.temp/patches/reports/v1.18.32/` 最新批次报告为准；本 record 既有验证节所引历史报告属于 v1.17.x 时代基线，保留作演进证据。
+
+### 门禁自检
+- 增补前行数 41 / 字符 2417；增补后见下（脚本复核输出）。
+- E/C 与行为验证结论以所在批次双审独立复算为准，本节不重复申报数值。
+
+## v1.18.32 基线重验（批次 354-358）
+
+- materialize 358 通过（states/v1.18.32/0358-ddb68abdf40a）；typecheck 358 passed 358/358（31 workspace）。
+- 行为测试（.test-workspace）：precheck 80 pass / 0 fail。
