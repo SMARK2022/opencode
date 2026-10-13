@@ -9,171 +9,8 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
+适配说明：目标已注册 effect@4.0.0-beta.83 补丁，Deferred doneUnsafe 快照遍历修复以扩展现有 patches/effect@4.0.0-beta.83.patch 承载（dist/src 双侧），bun.lock/package.json 注册 hunk 由目标既有状态满足；MaintenanceTask 类型取自 @opencode-ai/core/storage/cold-storage（目标 owner），fixture 复用 ServerLock.writeMaintenanceTask 原子发布；目标无虚假 owner 覆写残留，该删除不需要；test.yml/typecheck.yml/test-ci.ts/turbo.json 语义逐字对齐。
 
-diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
-index ef20fe2ce3f2e119b546c5a15bc4cb174a8b2df1..b6ffc50773a6ce5edf8568fbe7b112563f0942a8 100644
---- a/.github/workflows/test.yml
-+++ b/.github/workflows/test.yml
-@@ -40,7 +40,7 @@ jobs:
-             label: packages/opencode
-             os_label: Linux
-             runner: ubuntu-latest
--            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
-             junit: packages/opencode/.artifacts/unit/*.xml
-           # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
-           # 分片 env 纳入测试缓存键，报告路径逐片唯一，失败不能互相覆盖。
-@@ -93,7 +93,7 @@ jobs:
-             label: packages/opencode
-             os_label: macOS
-             runner: macos-latest
--            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
-             junit: packages/opencode/.artifacts/unit/*.xml
-           - id: core-macos
-             label: packages/core
-@@ -119,6 +119,10 @@ jobs:
- 
-       - name: Setup Bun
-         uses: ./.github/actions/setup-bun
-+        with:
-+          # root 提供 Turbo 等执行工具；包路径过滤保留本 job 的声明闭包与原 root hooks。
-+          install-flags: --filter './' --filter './${{ matrix.label }}'
-+          cache-scope: test-${{ matrix.label }}-root-v1
- 
-       - name: Configure git identity
-         run: |
-@@ -127,7 +131,12 @@ jobs:
- 
-       - name: Run required package tests
-         id: test
--        run: ${{ matrix.command }}
-+        # 预留 job 剩余时间上传证据；超时仍失败，不把收尾截止当作挂起修复。
-+        timeout-minutes: 45
-+        run: |
-+          mkdir -p "${{ matrix.label }}/.artifacts/ci"
-+          # 默认 bash 启用 pipefail；tee 不覆盖测试真实失败，日志不依赖 JUnit 完成。
-+          ${{ matrix.command }} 2>&1 | tee "${{ matrix.label }}/.artifacts/ci/test.log"
- 
-       - name: Check unit report
-         id: junit
-@@ -151,14 +160,17 @@ jobs:
-           fail_on_failure: false
- 
-       - name: Upload required unit artifact
--        if: always() && steps.junit.outputs.exists == 'true'
-+        # child 未退出时可能没有 XML，仍保留已输出的 build/测试进展。
-+        if: always()
-         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-         with:
-           name: required-unit-${{ matrix.id }}-${{ github.run_attempt }}
-           include-hidden-files: true
-           if-no-files-found: ignore
-           retention-days: 14
--          path: ${{ matrix.junit }}
-+          path: |
-+            ${{ matrix.junit }}
-+            ${{ matrix.label }}/.artifacts/ci/test.log
- 
-       - name: Write required summary
-         if: always()
-@@ -250,6 +262,10 @@ jobs:
- 
-       - name: Setup Bun
-         uses: ./.github/actions/setup-bun
-+        with:
-+          # 三个 mode 共享 CLI 测试依赖图，不为路由检查安装桌面和文档工具。
-+          install-flags: --filter './' --filter './packages/opencode'
-+          cache-scope: test-packages/opencode-root-v1
- 
-       - name: Run HttpApi exerciser gate
-         id: test
-@@ -359,15 +375,17 @@ jobs:
- 
-       - name: Setup Bun
-         uses: ./.github/actions/setup-bun
-+        with:
-+          # SDK 的 ^build 会反向执行 OpenCode generate，排除 CLI 测试仍须保留其源码依赖。
-+          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
-+          cache-scope: test-app-cli-root-v1
- 
-       - name: Run upstream unit compatibility tests
-         id: upstream
-         continue-on-error: true
--        # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
--        # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
--        # Windows 的 OpenCode 已由必过三分片完整覆盖，此处只跑其余包，避免重复占据约 30m。
--        # 其余包仍在同机串行；Linux 保留原有全量兼容性检查，Windows 实时日志保留卡点。
--        run: bun turbo test:ci --continue=always --summarize --concurrency=1 ${{ matrix.runner == 'windows-latest' && '--filter=!opencode --log-order=stream' || '' }}
-+        # 三个核心包在同平台 required job 验证；这里保留 App/UI 与原 SDK build 的兼容性链。
-+        # 保持同机串行，避免在没有新生命周期证据时恢复历史有问题的并发方式。
-+        run: bun turbo test:ci --filter=@opencode-ai/app --filter=@opencode-ai/ui --continue=always --summarize --concurrency=1 --log-order=stream
- 
-       - name: Warn on upstream unit failures
-         if: always() && steps.upstream.outcome != 'success'
-@@ -408,7 +426,7 @@ jobs:
-             echo "### 警告 上游单元兼容性"
-             echo "| 范围 | 平台 | 结果 | 说明 |"
-             echo "| --- | --- | --- | --- |"
--            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
-+            echo "| App/UI（OpenCode、Core、HTTP recorder 由同平台必过 job 覆盖） | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
-           } >> "$GITHUB_STEP_SUMMARY"
- 
-   upstream-extra-warning:
-@@ -456,6 +474,10 @@ jobs:
- 
-       - name: Setup Bun
-         uses: ./.github/actions/setup-bun
-+        with:
-+          # Console 测试经 resource 消费 root SST；保留 root 工具，不裁掉真实传递依赖。
-+          install-flags: --filter './' --filter './${{ matrix.path }}'
-+          cache-scope: test-${{ matrix.path }}-root-v1
- 
-       - name: Run upstream extra package tests
-         id: upstream
-@@ -553,6 +575,10 @@ jobs:
- 
-       - name: Setup Bun
-         uses: ./.github/actions/setup-bun
-+        with:
-+          # 保留自动浏览器/开发服务器兼容检查，与 App/UI warning 复用同一安装图。
-+          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
-+          cache-scope: test-app-cli-root-v1
- 
-       - name: Read Playwright version
-         id: playwright-version
-diff --git a/.github/workflows/typecheck.yml b/.github/workflows/typecheck.yml
-index f11b45c3a39c0baf87281caa8b24a3f10931e65e..85ea370f972c94b9ff0aef4318af665c168632de 100644
---- a/.github/workflows/typecheck.yml
-+++ b/.github/workflows/typecheck.yml
-@@ -12,6 +12,8 @@ on:
- jobs:
-   typecheck:
-     runs-on: ubuntu-latest
-+    # 热运行约一分钟，仍给冷安装充足余量；异常不得占满默认六小时 job。
-+    timeout-minutes: 15
-     steps:
-       - name: Checkout repository
-         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-@@ -20,4 +22,5 @@ jobs:
-         uses: ./.github/actions/setup-bun
- 
-       - name: Run typecheck
--        run: bun typecheck
-+        # 输出直接暴露当前 package；不把类型检查缓存或分片当作安装优化。
-+        run: bun typecheck --log-order=stream
-diff --git a/bun.lock b/bun.lock
-index dc354f48cf9e51fb22b58d13284c1e964a14a58f..069443ee0453e3a4be59a174b5f1ee0662e132a7 100644
---- a/bun.lock
-+++ b/bun.lock
-@@ -706,6 +706,7 @@
-     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
-     "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
-     "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
-+    "effect@4.0.0-beta.65": "patches/effect@4.0.0-beta.65.patch",
-     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
-     "@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz": "patches/@opentui%2Fcore@0.4.3-smark.13.patch",
-   },
 diff --git a/docs/plans/ci-test-typecheck-execution-and-preparation-repair.md b/docs/plans/ci-test-typecheck-execution-and-preparation-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..c792a4075e2be0e58d331d786b85cb5671b82531
@@ -1429,32 +1266,170 @@ index 0000000000000000000000000000000000000000..c792a4075e2be0e58d331d786b85cb56
 +第二轮 B-01 已由可直接读取的真实命令结果关闭。当前实现满足用户选择的本地验收范围，可以记录本轮完整审计结论并进入已授权的本地 commit；无需新增云端验证。
 +
 +本轮审计未修改文件、未创建提交、未推送。
-diff --git a/package.json b/package.json
-index ecfcb778afb17f9b4ede0b95bc0d88c7afeb1699..59c52ba000d5cd0f281948c1efc62bec73f2bb92 100644
---- a/package.json
-+++ b/package.json
-@@ -149,6 +149,7 @@
-     "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
-     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
-     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
--    "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch"
-+    "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
-+    "effect@4.0.0-beta.65": "patches/effect@4.0.0-beta.65.patch"
-   }
- }
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -44,7 +44,7 @@ jobs:
+             label: packages/opencode
+             os_label: Linux
+             runner: ubuntu-latest
+-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+             # opencode 分片产出 junit-core.xml 与 junit-tui.xml——消费侧一律 glob 拾取。
+             junit: packages/opencode/.artifacts/unit/*.xml
+           # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
+@@ -98,7 +98,7 @@ jobs:
+             label: packages/opencode
+             os_label: macOS
+             runner: macos-latest
+-            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+             junit: packages/opencode/.artifacts/unit/*.xml
+           - id: core-macos
+             label: packages/core
+@@ -124,6 +124,10 @@ jobs:
+ 
+       - name: Setup Bun
+         uses: ./.github/actions/setup-bun
++        with:
++          # root 提供 Turbo 等执行工具；包路径过滤保留本 job 的声明闭包与原 root hooks。
++          install-flags: --filter './' --filter './${{ matrix.label }}'
++          cache-scope: test-${{ matrix.label }}-root-v1
+ 
+       - name: Configure git identity
+         run: |
+@@ -132,7 +136,12 @@ jobs:
+ 
+       - name: Run required package tests
+         id: test
+-        run: ${{ matrix.command }}
++        # 预留 job 剩余时间上传证据；超时仍失败，不把收尾截止当作挂起修复。
++        timeout-minutes: 45
++        run: |
++          mkdir -p "${{ matrix.label }}/.artifacts/ci"
++          # 默认 bash 启用 pipefail；tee 不覆盖测试真实失败，日志不依赖 JUnit 完成。
++          ${{ matrix.command }} 2>&1 | tee "${{ matrix.label }}/.artifacts/ci/test.log"
+ 
+       - name: Check unit report
+         id: junit
+@@ -156,14 +165,17 @@ jobs:
+           fail_on_failure: false
+ 
+       - name: Upload required unit artifact
+-        if: always() && steps.junit.outputs.exists == 'true'
++        # child 未退出时可能没有 XML，仍保留已输出的 build/测试进展。
++        if: always()
+         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+         with:
+           name: required-unit-${{ matrix.id }}-${{ github.run_attempt }}
+           include-hidden-files: true
+           if-no-files-found: ignore
+           retention-days: 14
+-          path: ${{ matrix.junit }}
++          path: |
++            ${{ matrix.junit }}
++            ${{ matrix.label }}/.artifacts/ci/test.log
+ 
+       - name: Write required summary
+         if: always()
+@@ -251,6 +263,10 @@ jobs:
+ 
+       - name: Setup Bun
+         uses: ./.github/actions/setup-bun
++        with:
++          # 三个 mode 共享 CLI 测试依赖图，不为路由检查安装桌面和文档工具。
++          install-flags: --filter './' --filter './packages/opencode'
++          cache-scope: test-packages/opencode-root-v1
+ 
+       - name: Run HttpApi exerciser gate
+         id: test
+@@ -362,15 +378,17 @@ jobs:
+ 
+       - name: Setup Bun
+         uses: ./.github/actions/setup-bun
++        with:
++          # SDK 的 ^build 会反向执行 OpenCode generate，排除 CLI 测试仍须保留其源码依赖。
++          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
++          cache-scope: test-app-cli-root-v1
+ 
+       - name: Run upstream unit compatibility tests
+         id: upstream
+         continue-on-error: true
+-        # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
+-        # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
+-        # Windows 的 OpenCode 已由必过三分片完整覆盖，此处只跑其余包，避免重复占据约 30m。
+-        # 其余包仍在同机串行；Linux 保留原有全量兼容性检查，Windows 实时日志保留卡点。
+-        run: bun turbo test:ci --continue=always --summarize --concurrency=1 ${{ matrix.runner == 'windows-latest' && '--filter=!opencode --log-order=stream' || '' }}
++        # 三个核心包在同平台 required job 验证；这里保留 App/UI 与原 SDK build 的兼容性链。
++        # 保持同机串行，避免在没有新生命周期证据时恢复历史有问题的并发方式。
++        run: bun turbo test:ci --filter=@opencode-ai/app --filter=@opencode-ai/ui --continue=always --summarize --concurrency=1 --log-order=stream
+ 
+       - name: Warn on upstream unit failures
+         if: always() && steps.upstream.outcome != 'success'
+@@ -412,7 +430,7 @@ jobs:
+             echo "### 警告 上游单元兼容性"
+             echo "| 范围 | 平台 | 结果 | 说明 |"
+             echo "| --- | --- | --- | --- |"
+-            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
++            echo "| App/UI（OpenCode、Core、HTTP recorder 由同平台必过 job 覆盖） | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
+           } >> "$GITHUB_STEP_SUMMARY"
+ 
+   upstream-extra-warning:
+@@ -461,6 +479,10 @@ jobs:
+ 
+       - name: Setup Bun
+         uses: ./.github/actions/setup-bun
++        with:
++          # Console 测试经 resource 消费 root SST；保留 root 工具，不裁掉真实传递依赖。
++          install-flags: --filter './' --filter './${{ matrix.path }}'
++          cache-scope: test-${{ matrix.path }}-root-v1
+ 
+       - name: Run upstream extra package tests
+         id: upstream
+@@ -560,6 +582,10 @@ jobs:
+ 
+       - name: Setup Bun
+         uses: ./.github/actions/setup-bun
++        with:
++          # 保留自动浏览器/开发服务器兼容检查，与 App/UI warning 复用同一安装图。
++          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
++          cache-scope: test-app-cli-root-v1
+ 
+       - name: Read Playwright version
+         id: playwright-version
+
+diff --git a/.github/workflows/typecheck.yml b/.github/workflows/typecheck.yml
+--- a/.github/workflows/typecheck.yml
++++ b/.github/workflows/typecheck.yml
+@@ -12,6 +12,8 @@ on:
+ jobs:
+   typecheck:
+     runs-on: ubuntu-latest
++    # 热运行约一分钟，仍给冷安装充足余量；异常不得占满默认六小时 job。
++    timeout-minutes: 15
+     steps:
+       - name: Checkout repository
+         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+@@ -20,4 +22,5 @@ jobs:
+         uses: ./.github/actions/setup-bun
+ 
+       - name: Run typecheck
+-        run: bun typecheck
++        # 输出直接暴露当前 package；不把类型检查缓存或分片当作安装优化。
++        run: bun typecheck --log-order=stream
+
 diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test-ci.ts
-index f3e56f3286a9b3a075549d092b5bd53c7aff7a3d..f16d95b95a0017b5c10a8fe88aedc8176fc9d0bc 100644
 --- a/packages/opencode/script/test-ci.ts
 +++ b/packages/opencode/script/test-ci.ts
 @@ -23,6 +23,7 @@ export function partitionTestFiles(files: readonly string[]) {
+ }
  
  async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFiles>, files: readonly string[]) {
-   console.log(`Running ${name} test shard (${files.length} files)`)
 +  const started = Date.now()
+   console.log(`Running ${name} test shard (${files.length} files)`)
    // 每个 child 独占 JUnit 路径；复用同一文件会覆盖先完成 shard 的失败证据。
    const proc = Bun.spawn(
-     [
-@@ -39,7 +40,12 @@ async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFile
+@@ -40,7 +41,12 @@ async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFile
        stderr: "inherit",
      },
    )
@@ -1468,19 +1443,19 @@ index f3e56f3286a9b3a075549d092b5bd53c7aff7a3d..f16d95b95a0017b5c10a8fe88aedc817
  }
  
  async function main() {
+
 diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
-index 8246a26043a8bf2d605e02bcfbd0a9d1550c62b0..f76090cf9f436a0c2a8d8a9b72d5313797d61e4c 100644
 --- a/packages/opencode/test/cli/db-maintenance.test.ts
 +++ b/packages/opencode/test/cli/db-maintenance.test.ts
-@@ -7,6 +7,7 @@ import { spawn as spawnPty, type Proc } from "#pty"
- import { Database as SQLite } from "bun:sqlite"
+@@ -8,6 +8,7 @@ import { Database as SQLite } from "bun:sqlite"
  import { Flock } from "@opencode-ai/core/util/flock"
- import * as ServerLock from "../../src/cli/cmd/tui/server-lock"
-+import type { MaintenanceTask } from "../../src/storage/cold"
+ // #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
+ import { ServerLock } from "../../src/cli/tui/server-lock"
++import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
  import { tmpdir } from "../fixture/fixture"
  // 测试只走公开 CLI/PTY seam；不导入 renderer 或调用维护私有函数，避免实现重构产生假绿。
  const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
-@@ -411,7 +412,7 @@ describe("database maintenance CLI", () => {
+@@ -439,7 +440,7 @@ describe("database maintenance CLI", () => {
            taskID = `dbm_hung_${crypto.randomUUID()}`
            const root = `${dbPath}.maintenance`
            await mkdir(path.join(root, "tasks"), { recursive: true })
@@ -1489,7 +1464,7 @@ index 8246a26043a8bf2d605e02bcfbd0a9d1550c62b0..f76090cf9f436a0c2a8d8a9b72d53137
              version: 1,
              taskID,
              dbPath,
-@@ -427,7 +428,8 @@ describe("database maintenance CLI", () => {
+@@ -455,7 +456,8 @@ describe("database maintenance CLI", () => {
              createdAt: Date.now(),
              updatedAt: Date.now(),
            }
@@ -1499,7 +1474,7 @@ index 8246a26043a8bf2d605e02bcfbd0a9d1550c62b0..f76090cf9f436a0c2a8d8a9b72d53137
            // live owner 必须与 task 同时存在，否则首帧 reconcile 会直接降为 interrupted。
            await mkdir(path.join(root, "lock"), { recursive: true })
            await Bun.write(
-@@ -452,19 +454,13 @@ describe("database maintenance CLI", () => {
+@@ -480,11 +482,12 @@ describe("database maintenance CLI", () => {
                base.processed = processed
                base.rawBytes = processed * 1000
                base.updatedAt = Date.now()
@@ -1509,29 +1484,41 @@ index 8246a26043a8bf2d605e02bcfbd0a9d1550c62b0..f76090cf9f436a0c2a8d8a9b72d53137
              base.status = "completed"
              base.updatedAt = Date.now()
 -            await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
++            // 终态 checkpoint 同样原子提交；随后直接移除 lease 目录，不覆写虚假 owner。
 +            await ServerLock.writeMaintenanceTask(base)
              // 终态后撤掉 owner，模拟 worker finally 释放 lease，settlement GET 可立即返回。
--            await Bun.write(path.join(root, "lock", "owner.json"), JSON.stringify({
--              taskID: "dbm_released",
--              dbPath,
--              pid: 1,
--              token: "released",
--              startedAt: Date.now(),
--            })).catch(() => undefined)
-+            // 不先覆写虚假 owner，避免并发读者读到半份 JSON；终态 checkpoint 已先提交。
              await import("fs/promises").then((fs) => fs.rm(path.join(root, "lock"), { recursive: true, force: true }))
              terminal = true
-           })()
-diff --git a/patches/effect@4.0.0-beta.65.patch b/patches/effect@4.0.0-beta.65.patch
-new file mode 100644
-index 0000000000000000000000000000000000000000..9d80134571b6319ab48f9fa80db181205e4e32aa
---- /dev/null
-+++ b/patches/effect@4.0.0-beta.65.patch
-@@ -0,0 +1,36 @@
+
+diff --git a/turbo.json b/turbo.json
+--- a/turbo.json
++++ b/turbo.json
+@@ -4,6 +4,13 @@
+   "globalPassThroughEnv": ["CI", "OPENCODE_DISABLE_SHARE"],
+   "tasks": {
+     "typecheck": {},
++    "@opencode-ai/app#typecheck": {
++      "cache": false
++    },
++    "@opencode-ai/desktop#typecheck": {
++      "dependsOn": ["@opencode-ai/app#typecheck"],
++      "cache": false
++    },
+     "build": {
+       "dependsOn": [],
+       "outputs": ["dist/**"]
+
+diff --git a/patches/effect@4.0.0-beta.83.patch b/patches/effect@4.0.0-beta.83.patch
+--- a/patches/effect@4.0.0-beta.83.patch
++++ b/patches/effect@4.0.0-beta.83.patch
+@@ -55,3 +55,39 @@ index f2920365cf0328146523ce2e2dba04d6a8809a4a..5482d635cdf01a72063ff683d244fab8
+  /**
+   * Creates a streaming `Uint8Array` success response schema.
+   *
 +diff --git a/dist/Deferred.js b/dist/Deferred.js
 +--- a/dist/Deferred.js
 ++++ b/dist/Deferred.js
-+@@ -438,11 +438,12 @@
++@@ -652,11 +652,12 @@
 + export const doneUnsafe = (self, effect) => {
 +   if (self.effect) return false;
 +   self.effect = effect;
@@ -1549,7 +1536,7 @@ index 0000000000000000000000000000000000000000..9d80134571b6319ab48f9fa80db18120
 +diff --git a/src/Deferred.ts b/src/Deferred.ts
 +--- a/src/Deferred.ts
 ++++ b/src/Deferred.ts
-+@@ -1154,11 +1154,12 @@
++@@ -1614,11 +1614,12 @@
 + export const doneUnsafe = <A, E>(self: Deferred<A, E>, effect: Effect<A, E>): boolean => {
 +   if (self.effect) return false
 +   self.effect = effect
@@ -1559,26 +1546,8 @@ index 0000000000000000000000000000000000000000..9d80134571b6319ab48f9fa80db18120
 ++    // 中断恢复会同步移除等待者；遍历快照才能通知同一次完成的全部订阅者。
 ++    for (const resume of self.resumes.slice()) {
 ++      resume(effect)
-+     }
-+     self.resumes = undefined
-+   }
-+   return true
++    }
++    self.resumes = undefined
++  }
++  return true
 + }
-diff --git a/turbo.json b/turbo.json
-index 126040f5b15d13c6923fb0334a01906d2df62e92..6453aca079af37a9c7d1b59246a15fefdda39fcd 100644
---- a/turbo.json
-+++ b/turbo.json
-@@ -4,6 +4,13 @@
-   "globalPassThroughEnv": ["CI", "OPENCODE_DISABLE_SHARE"],
-   "tasks": {
-     "typecheck": {},
-+    "@opencode-ai/app#typecheck": {
-+      "cache": false
-+    },
-+    "@opencode-ai/desktop#typecheck": {
-+      "dependsOn": ["@opencode-ai/app#typecheck"],
-+      "cache": false
-+    },
-     "build": {
-       "dependsOn": [],
-       "outputs": ["dist/**"]

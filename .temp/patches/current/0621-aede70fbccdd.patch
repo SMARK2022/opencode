@@ -15,6 +15,8 @@ Content-Transfer-Encoding: 8bit
 
 工具文案：edit.txt/apply_patch.txt 各增陈旧转写禁令与 more-than-3-lines 歧义诱导，edit.txt 门禁条目劝导勿用 bash 输出作编辑依据。
 
+适配说明：编辑三工具（edit/write/apply_patch）上下文一致性反馈与 diff 预算门预过滤完整重锚。目标以 #NNN 注释体系与 core 服务导入（FSUtil/FileSystem/Watcher）承载同源逻辑——10 个失败文件按 0620 态真实上下文重建（fuzz+手工）：patch/index.ts（withAmbiguityAdvice 助手）；match.ts（AmbiguityCandidates 类型+ambiguityCandidates 工厂+unsafeNormalizedOffsets 数组化）；apply_patch.ts（displayPath 相对路径渲染×3/finalContents post-formatter 真值/Truncate 服务/ staleness note）；edit-apply.ts（INV-03 诊断块：AMBIGUITY_MAX_CANDIDATES=8/uniqueExtensionHint 注入验证/formatAmbiguityHint/ambiguitySuffix）；edit.ts（FileTouchHistory/scanFileTouchHistory/formatStalenessNote/mismatchHistoryNotes 共享 seam+boundDiff 严格前缀截断）；read.ts（visibleReadMeta 导出为单一可见性协议——按目标 ReadRangeMeta 形状适配签名，collectVisibleReads 反向迭代保留）；write.ts（formattedContent 反馈段+formattedChanged 标志）；file-diff.ts（boundDiff+exceedsEditBudgetByLineMultiset 预算预过滤）。三个测试文件按目标 fixture 重锚（Watcher core 导入/#522 注释漂移）。语义与 original 逐 hunk 等价。
+
 diff --git a/docs/plans/edit-harness-reliability-investigation.md b/docs/plans/edit-harness-reliability-investigation.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..d167e527247bd794ff35e6dccd3e86009432db3d
@@ -986,22 +988,21 @@ index 0000000000000000000000000000000000000000..5161ed042daa7d92a004f168599c910c
 +
 +第 1 轮返工记录（R3 不变，纯实施修正）：①read.ts 新增 `visibleReadMeta` 作为可见性协议的唯一 part 级判定（completed+未 compacted+非 stub+metadata.read 合法），collectVisibleReads 改经它表达；edit.ts 的 scanFileTouchHistory 全量改用它（readRanges/lastReadEnd/同名判定全部来自可见 read），collectVisibleReads/isReadMetadata 回滚为私有，edit.ts 只导入 canonicalReadPath/visibleReadMeta；新增红绿用例「does not count compacted reads as visible history」。②apply_patch.txt 改回合同措辞「more than 3 lines」，测试断言同步。返工后 edit 96/96、apply_patch 71/71、read 82/82、typecheck 零错误。
 diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
-index c2ff8e55c4d96a1d9e78a62283dea0bf8b80ace4..0c2dd3669825a3dc81e9058c1f7161ee661a857c 100644
 --- a/packages/opencode/src/patch/index.ts
 +++ b/packages/opencode/src/patch/index.ts
-@@ -4,7 +4,8 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import * as Log from "@opencode-ai/core/util/log"
- import * as Bom from "../util/bom"
- import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
+@@ -5,7 +5,8 @@ import * as Bom from "../util/bom"
+ import { convertToLineEnding, detectLineEnding, splitLines } from "../util/line-ending"
+ // #131：patch 逻辑行匹配，写回保留原行尾
+ // #533：locateContext 是 chunk 局部导航下界，与 old block 候选判定分离
 -import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./match"
 +import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset, type AmbiguityCandidates } from "./match"
 +import { formatAmbiguityHint, uniqueExtensionHint } from "../tool/edit-apply"
  
- const log = Log.create({ service: "patch" })
- 
+ export const PatchSchema = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
 @@ -376,7 +377,14 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
-     const result = locateExact(originalLines, chunk.old_lines, searchFrom, chunk.is_end_of_file, terminated)
      if (result.type === "ambiguous") {
+       // #533：ambiguity 的修正动作是补充 context；重复打印已在 Tool input 中的 old block 不增加决策信息。
        throw new Error(
 -        `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
 +        withAmbiguityAdvice(
@@ -1015,7 +1016,7 @@ index c2ff8e55c4d96a1d9e78a62283dea0bf8b80ace4..0c2dd3669825a3dc81e9058c1f7161ee
        )
      }
      if (result.type === "not-found") {
-@@ -434,6 +442,30 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
+@@ -438,6 +446,32 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
    return lines
  }
  
@@ -1032,6 +1033,8 @@ index c2ff8e55c4d96a1d9e78a62283dea0bf8b80ace4..0c2dd3669825a3dc81e9058c1f7161ee
 +) {
 +  if (!candidates || candidates.lines.length === 0) return message
 +  // old block 是整行域输入，lineAligned 恒成立。
++  // terminated=false（文件在 old block 之前结束）时不存在向下扩展空间，
++  // 建议只能来自向上扩展；此时盲目拼装双向文案会让模型去取不存在的行。
 +  const hint = uniqueExtensionHint(
 +    originalLines,
 +    candidates.lines,
@@ -1046,18 +1049,19 @@ index c2ff8e55c4d96a1d9e78a62283dea0bf8b80ace4..0c2dd3669825a3dc81e9058c1f7161ee
  function formatLineReplacement(
    newLines: string[],
    span: { start: number; end: number },
+
 diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
-index efaeda50adf06bcc8e48311ec53c006f6f7dc704..aeb250162c0c19406981efb30a1eaf6b7b76574f 100644
 --- a/packages/opencode/src/patch/match.ts
 +++ b/packages/opencode/src/patch/match.ts
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
  import { diffChars } from "diff"
+ // #533：Patch 与 Edit 共用同一 PI normalization contract（edit-apply 无反向依赖，无环）
 -import { normalizeForMatch } from "../tool/edit-apply"
 +import { AMBIGUITY_MAX_CANDIDATES, normalizeForMatch } from "../tool/edit-apply"
  
+ // #533：normalized raw view 的逐 grapheme 分段器——模块级单例避免每次定位重建 Segmenter
  const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
- 
-@@ -7,10 +7,15 @@ export type ExactLocation =
+@@ -9,10 +9,15 @@ export type ExactLocation =
    | { kind: "line"; startLine: number; endLine: number }
    | { kind: "substring"; startOffset: number; endOffset: number }
  
@@ -1074,7 +1078,7 @@ index efaeda50adf06bcc8e48311ec53c006f6f7dc704..aeb250162c0c19406981efb30a1eaf6b
  
  // 行起点统一从当前 working lines 推导，避免前一次替换后继续使用失效的原始坐标。
  // index 等于行数时表示逻辑文本末尾，供删除和 replacement 后的 cursor 使用。
-@@ -48,6 +53,35 @@ export function locateExact(
+@@ -50,6 +55,35 @@ export function locateExact(
      starts.push(offset)
      offset += line.length + 1
    }
@@ -1110,26 +1114,29 @@ index efaeda50adf06bcc8e48311ec53c006f6f7dc704..aeb250162c0c19406981efb30a1eaf6b
    // cursor 落在一行内部时该行已被部分消费，whole-line 分支只能从下一个完整行起点继续。
    const firstEligibleLine = starts.findIndex((offset) => offset >= cursorOffset)
    const startLine = firstEligibleLine === -1 ? lines.length : firstEligibleLine
-@@ -88,7 +122,7 @@ export function locateExact(
+@@ -91,7 +125,7 @@ export function locateExact(
  
-   // proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
+   // #533：proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
    if (exactLineByOffset.size > 0) {
 -    if (lineCandidates.length > 1) return { type: "ambiguous" }
 +    if (lineCandidates.length > 1) return { type: "ambiguous", candidates: ambiguityCandidates(lineCandidates, []) }
      return { type: "found", location: lineCandidates[0].location }
    }
  
-@@ -111,7 +145,8 @@ export function locateExact(
+@@ -115,8 +149,11 @@ export function locateExact(
  
    const normalized = normalizedRawView(text)
    const normalizedLiteral = normalizeForMatch(literal)
 -  let unsafeNormalized = 0
 +  // unsafe 命中没有可写 raw span，但歧义载荷仍需其行号，故收集 ownerStart 而非只计数。
 +  const unsafeNormalizedOffsets: number[] = []
+   // #533：normalized 域只补充 lower-tier 候选；raw boundary 可逆才可写，否则计入 unsafe 计数。
++  // 位置数组（而非计数）是 INV-03 诊断的输入合同：edit-apply 据此把 normalized 域
++  // 命中换算成模型可定位的 1-based 展示行号，计数无法承载该职责。
    if (normalized && normalizedLiteral.length > 0) {
      for (
        let start = normalized.text.indexOf(normalizedLiteral);
-@@ -125,7 +160,7 @@ export function locateExact(
+@@ -130,7 +167,7 @@ export function locateExact(
        const ownerStart = rawStart ?? normalizedOwnerStart(normalized.owners, start)
        if (ownerStart < cursorOffset) continue
        if (rawStart === undefined || rawEnd === undefined || hasInternalGap(normalized.gaps, start, end)) {
@@ -1137,11 +1144,11 @@ index efaeda50adf06bcc8e48311ec53c006f6f7dc704..aeb250162c0c19406981efb30a1eaf6b
 +        unsafeNormalizedOffsets.push(ownerStart)
          continue
        }
-       // whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
-@@ -139,9 +174,11 @@ export function locateExact(
+       // #533：whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
+@@ -144,9 +181,11 @@ export function locateExact(
    }
  
-   // unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
+   // #533：unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
 -  if (candidates.length + unsafeNormalized > 1) return { type: "ambiguous" }
 -  if (unsafeNormalized > 0) return { type: "not-found" }
 -  if (candidates.length > 1) return { type: "ambiguous" }
@@ -1153,11 +1160,11 @@ index efaeda50adf06bcc8e48311ec53c006f6f7dc704..aeb250162c0c19406981efb30a1eaf6b
    if (candidates.length === 0) return { type: "not-found" }
    return { type: "found", location: candidates[0].location }
  }
+
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cbc9d46cee 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -7,7 +7,9 @@ import { FileWatcher } from "../file/watcher"
+@@ -7,7 +7,9 @@ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
  import { InstanceState } from "@/effect/instance-state"
  import { Patch } from "../patch"
  import { assertExternalDirectoryEffect } from "./external-directory"
@@ -1167,10 +1174,10 @@ index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cb
 +import { Truncate } from "./truncate"
  import { LSP } from "@/lsp/lsp"
  // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
- import type * as LSPClient from "@/lsp/client"
-@@ -47,6 +49,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+ import * as LSPClient from "@/lsp/client"
+@@ -50,6 +52,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
    instance: InstanceContext,
-   afs: AppFileSystem.Interface,
+   afs: FSUtil.Interface,
  ) {
 +  // diff 头统一用 worktree 相对路径（正斜杠）：output 在 win32 有不许含反斜杠的合同测试；
 +  // 相对路径同时是 UI/SummaryCache 的既有展示形态，proposal 与 result 共用同一渲染。
@@ -1178,42 +1185,42 @@ index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cb
    const first = group.hunks[0]
    switch (first.type) {
      case "add": {
-@@ -62,7 +67,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -67,7 +72,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
        const next = Bom.split(newContent)
        // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
 -      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
 +      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
+       // #518：add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
        // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
        return {
-         filePath: group.filePath,
-@@ -107,7 +112,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -116,7 +121,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
          return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
        }
        // 元数据 diff 走唯一有界 seam；正常路径产物与旧实现逐字节一致（INV-02）。
 -      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
 +      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
+       // #518：expected 只包含 source；update 未声明 move 时不锁任何 destination 路径。
        const expected = [snapshot]
        if (movePath) {
-         // move destination 也是 proposal 的 expected state，不能只锁 source。
-@@ -138,7 +143,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -149,7 +154,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
        const source = Bom.split(Mutation.decode(snapshot))
        // delete 的全量语义保留：中小文件仍记录全文行 diff；只有二进制/超限中段换标记表示。
 -      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(source.text), "")
 +      const rendered = renderFileDiff(displayPath, normalizeLineEndings(source.text), "")
-       // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
+       // #518：delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
        return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: rendered.patch, additions: rendered.additions, deletions: rendered.deletions, bom: source.bom, expected: [snapshot] }
      }
-@@ -204,6 +209,7 @@ export const ApplyPatchTool = Tool.define(
-     const afs = yield* AppFileSystem.Service
+@@ -221,6 +226,7 @@ export const ApplyPatchTool = Tool.define(
+     const afs = yield* FSUtil.Service
      const format = yield* Format.Service
-     const bus = yield* Bus.Service
+     const events = yield* EventV2Bridge.Service
 +    const truncate = yield* Truncate.Service
  
      const run = Effect.fn("ApplyPatchTool.execute")(function* (
        params: Schema.Schema.Type<typeof Parameters>,
-@@ -263,7 +269,10 @@ export const ApplyPatchTool = Tool.define(
+@@ -283,7 +289,10 @@ export const ApplyPatchTool = Tool.define(
          const exit = yield* Effect.exit(processHunkGroup(group, instance, afs))
          if (Exit.isFailure(exit)) {
            const err = Cause.squash(exit.cause)
@@ -1225,25 +1232,25 @@ index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cb
            continue
          }
          const change = exit.value
-@@ -305,6 +314,9 @@ export const ApplyPatchTool = Tool.define(
-       // Apply the changes
+@@ -328,6 +337,9 @@ export const ApplyPatchTool = Tool.define(
+       // #518：updates/editedFiles 在 execute 内填充、commit 成功后才发布；冲突路径不会留下半套事件。
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
        const editedFiles: string[] = []
 +      // INV-07：commit 锁内逐文件记录最终落盘内容，供 commit 后重算 post-formatter diff。
 +      // delete 无最终内容不记录；未 formatter 的文件沿用 proposal newContent（两者本就一致）。
 +      const finalContents = new Map<string, string>()
        const expected = fileChanges.flatMap((change) => change.expected)
-       // 所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
- 
-@@ -345,6 +357,7 @@ export const ApplyPatchTool = Tool.define(
+       // #518：所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
+       // expected 保持 proposal 顺序；coordinator 内部按 canonical 字典序加锁，顺序不影响正确性。
+@@ -372,6 +384,7 @@ export const ApplyPatchTool = Tool.define(
              }
  
              if (edited) {
 +              let finalText = change.newContent
+               // #518：formatter 与 BOM 回写留在 commit critical section 内，避免另一 mutation 在格式化中途读盘。
                if (yield* format.file(edited)) {
                  const formattedText = yield* Bom.syncFile(afs, edited, change.bom)
-                 // FileChange.ending 来自同一 proposal/source；formatter 只拥有文本变化，不接管 existing EOL。
-@@ -356,7 +369,9 @@ export const ApplyPatchTool = Tool.define(
+@@ -384,7 +397,9 @@ export const ApplyPatchTool = Tool.define(
                  if (restoredText !== formattedText) {
                    yield* afs.writeWithDirs(edited, Bom.join(restoredText, change.bom))
                  }
@@ -1253,7 +1260,16 @@ index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cb
                editedFiles.push(edited)
              }
            }
-@@ -448,11 +463,52 @@ export const ApplyPatchTool = Tool.define(
+@@ -442,6 +457,8 @@ export const ApplyPatchTool = Tool.define(
+       const diagMetadata: Record<string, LSPClient.Diagnostic[]> = {}
+ 
+       // [local-smark] 逐文件计算增量诊断，只显示本次 patch 新引入的错误
++      // 基线在 commit 前采集（beforeIssues）：新增错误必须以 patch 前状态为参照，
++      // 与 after 混采会把既有错误误报为本次引入，反向则漏报真实回归。
+       for (const change of fileChanges) {
+         if (change.type === "delete") continue
+         const target = change.movePath ?? change.filePath
+@@ -478,11 +495,52 @@ export const ApplyPatchTool = Tool.define(
          }
        }
  
@@ -1306,9 +1322,10 @@ index f66da3f426d7907bab27571ae7d875fd3718353d..eb2dc8e230ee07c4ceb3ce53038bb6cb
 -          files,
 +          diff: resultDiff,
 +          files: resultFiles,
-           // [local-smark] metadata.diagnostics 存储新错误数组 + diagnosticSummary 聚合摘要
+           // [local-smark] metadata.diagnostics 存新错误数组 + diagnosticSummary 聚合摘要
            diagnostics: diagMetadata,
-           // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突。
+           // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突
+
 diff --git a/packages/opencode/src/tool/apply_patch.txt b/packages/opencode/src/tool/apply_patch.txt
 index 9a927631f661a386eb486b4776bab92a0fb35370..eac1e3522dfeb562e711f99311ee5d5b81374e4b 100644
 --- a/packages/opencode/src/tool/apply_patch.txt
@@ -1322,7 +1339,6 @@ index 9a927631f661a386eb486b4776bab92a0fb35370..eac1e3522dfeb562e711f99311ee5d5b
 +- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.
  - A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
 diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
-index 21805459f9b47f11b32c3985693780356ae69a98..8cb44ea36ddffa7c205367cfeeedbe3c0f9deeb2 100644
 --- a/packages/opencode/src/tool/edit-apply.ts
 +++ b/packages/opencode/src/tool/edit-apply.ts
 @@ -169,6 +169,152 @@ export function applyReplacementsPreservingUnchangedLines(
@@ -1478,10 +1494,10 @@ index 21805459f9b47f11b32c3985693780356ae69a98..8cb44ea36ddffa7c205367cfeeedbe3c
  // progressive locate：先字面 exact，失败才进封闭 normalize；不使用打分/closest 成功。
  export function findMatch(content: string, oldString: string) {
    const exactIndex = content.indexOf(oldString)
-@@ -453,12 +599,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
-       ? countOccurrences(replacementBase, edit.oldString)
+@@ -454,12 +600,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        : exactLiteralCount(replacementBase, edit.oldString)
      if (occurrences > 1 && edit.replaceAll !== true) {
+       // #521：歧义失败同样携带 editIndex；唯一性证据属于当前 edit，不能借邻近 edit 的定位解释。
 -      throw new EditApplyError(
 +      const message =
          edits.length === 1
@@ -1494,30 +1510,30 @@ index 21805459f9b47f11b32c3985693780356ae69a98..8cb44ea36ddffa7c205367cfeeedbe3c
      }
  
      const ranges = usedNormalized
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 5f9b7f0cf776dd6f749c137a1cb8429b84da7171..b6aacb1c09b5c45a225ddaa9b0372af6dafda605 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -3,7 +3,7 @@ import { createHash } from "crypto"
+@@ -4,7 +4,7 @@ import { createHash } from "crypto"
  import { Effect, Schema } from "effect"
  import * as Tool from "./tool"
  import { LSP } from "@/lsp/lsp"
 -import { renderFileDiff } from "./file-diff"
 +import { boundDiff, renderFileDiff } from "./file-diff"
  import DESCRIPTION from "./edit.txt"
- import { File } from "../file"
- import { FileWatcher } from "../file/watcher"
-@@ -17,6 +17,9 @@ import * as Bom from "@/util/bom"
+ import { FileSystem } from "@opencode-ai/core/filesystem"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+@@ -18,6 +18,9 @@ import * as Bom from "@/util/bom"
  import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
  import { closestWindow } from "@/patch/match"
- import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+ // #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
 +import { canonicalReadPath, visibleReadMeta } from "./read"
 +import { mergeRanges } from "@/util/range"
 +import type { MessageV2 } from "../session/message-v2"
+ import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+ // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
  import * as Mutation from "./file-mutation-coordinator"
- import * as Truncate from "./truncate"
- 
-@@ -87,6 +90,97 @@ export function prepareEditArguments(input: unknown): unknown {
+@@ -92,6 +95,101 @@ export function prepareEditArguments(input: unknown): unknown {
    return args
  }
  
@@ -1581,6 +1597,8 @@ index 5f9b7f0cf776dd6f749c137a1cb8429b84da7171..b6aacb1c09b5c45a225ddaa9b0372af6
 +            resolveForCompare((file as { filePath: string }).filePath) === targetKey,
 +        )
 +        if (touched && end > history.lastWriteEnd) {
++          // 取 max 而非覆盖：历史扫描不保证时间单调（回放/导入的 session 可能乱序），
++          // 时效判定只信任全局最晚写入，避免早到的晚写覆盖真正的最晚事实。
 +          history.lastWriteEnd = end
 +          history.lastWriteTool = part.tool
 +        }
@@ -1593,6 +1611,8 @@ index 5f9b7f0cf776dd6f749c137a1cb8429b84da7171..b6aacb1c09b5c45a225ddaa9b0372af6
 +// 时效事实句（INV-04）：只陈述「最后写入晚于最后读取」的先后事实并指向作用后结果，
 +// 不诱导 re-read（用户决策）。apply_patch 与 edit 共用同一文案。
 +export function formatStalenessNote(history: FileTouchHistory) {
++  // lastWriteEnd<=0 表示会话内无自写；写入不晚于读取时磁盘内容仍是模型可见真值，
++  // 两种情形都不附时效句——事实句只在「不可见写入」真实发生时出现。
 +  if (history.lastWriteEnd <= 0 || history.lastWriteEnd <= history.lastReadEnd) return ""
 +  return history.lastReadEnd > 0
 +    ? `\n\nThis file was modified by your own ${history.lastWriteTool} after your last read. Use the result returned by that call (its diff or formatted-changes section) as the current content.`
@@ -1615,17 +1635,17 @@ index 5f9b7f0cf776dd6f749c137a1cb8429b84da7171..b6aacb1c09b5c45a225ddaa9b0372af6
  function isCreate(edits: EditReplacement[]) {
    return edits.length === 1 && edits[0].oldString === ""
  }
-@@ -282,7 +376,8 @@ export const EditTool = Tool.define(
-                   message +
-                     (closest
-                       ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
--                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
-+                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
-+                    mismatchHistoryNotes(ctx.messages, filePath),
-                 )
-               }
-               throw error
-@@ -405,20 +500,19 @@ export const EditTool = Tool.define(
+@@ -289,7 +387,8 @@ export const EditTool = Tool.define(
+                     message +
+                       (closest
+                         ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+-                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
++                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
++                      mismatchHistoryNotes(ctx.messages, filePath),
+                   )
+                 }
+                 throw error
+@@ -418,20 +517,19 @@ export const EditTool = Tool.define(
              output += `\n\nChanged:`
              consumedBytes += Buffer.byteLength("\n\nChanged:", "utf-8")
              consumedLines += 3
@@ -1658,6 +1678,7 @@ index 5f9b7f0cf776dd6f749c137a1cb8429b84da7171..b6aacb1c09b5c45a225ddaa9b0372af6
                output += marker
                consumedBytes += Buffer.byteLength(marker, "utf-8")
                consumedLines++
+
 diff --git a/packages/opencode/src/tool/edit.txt b/packages/opencode/src/tool/edit.txt
 index 89d945cfefb1f8c6b96c057c51cc06408406fae7..174de35da0ec76dfd45f713fa8143ba9939644a2 100644
 --- a/packages/opencode/src/tool/edit.txt
@@ -1682,7 +1703,6 @@ index 89d945cfefb1f8c6b96c057c51cc06408406fae7..174de35da0ec76dfd45f713fa8143ba9
  - Create/overwrite: single edit with empty `oldString` only (raw empty string). Whitespace-only oldString is not create and will fail.
  - If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins when non-empty.
 diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
-index 9e4fbd968da8f76bf2feeb965a8c6bb938402c0b..97c4720654a94c7ad129850e875c218ba45cdb9b 100644
 --- a/packages/opencode/src/tool/file-diff.ts
 +++ b/packages/opencode/src/tool/file-diff.ts
 @@ -27,6 +27,22 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
@@ -1749,85 +1769,84 @@ index 9e4fbd968da8f76bf2feeb965a8c6bb938402c0b..97c4720654a94c7ad129850e875c218b
    // 门B（R2）：带预算的真实计算取代中段体积猜测。探测即主路径计算本身（jsdiff 原生
    // maxEditLength，预算耗尽同步返回 undefined），不是失败后备路径。
    const probe = diffLines(oldText, newText, { maxEditLength: MAX_DIFF_EDIT_LINES })
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 1ada85ca1e71301246cd7a2501b912b729509a78..73a9740788613065d20050792eec10de740a2964 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -170,7 +170,9 @@ function resolveReadPath(input: string, directory: string) {
-   return AppFileSystem.normalizePath(path.resolve(directory, input))
- }
+@@ -233,7 +233,9 @@ function fileSizeOf(stat: { size: unknown }) {
  
+ // #142：Windows 规范化后小写，保证同路径可见集合
+ // #142：路径规范化键
 -function canonicalReadPath(filepath: string) {
 +// canonicalPath 协议与可见读取收集是 read metadata 的唯一权威判定；edit 失败诊断
 +// （INV-04/05/09）复用同一判定，禁止调用方另写路径规范化导致两侧漂移。
 +export function canonicalReadPath(filepath: string) {
-   const normalized = AppFileSystem.normalizePath(filepath).replaceAll("\\", "/")
-   return process.platform === "win32" ? normalized.toLowerCase() : normalized
- }
-@@ -202,21 +204,29 @@ function isReadMetadata(input: unknown): input is ReadMetadata {
-   )
+   return process.platform === "win32" ? FSUtil.normalizePath(filepath).toLowerCase() : filepath
  }
  
+@@ -265,16 +267,33 @@ function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
+ 
+ // #142：从会话历史收集同文件、未 stub 的可见读取
+ // #142：扫描 assistant 已完成 read
 +// 「内容仍在模型上下文中可见」的 part 级判定是本模块的单一协议：completed、
 +// 未 compacted、非 stub、metadata.read 合法。collectVisibleReads 与 edit 失败诊断
 +// （INV-04/05）都必须经此判定，复制条件会让两侧对同一历史给出不同答案。
-+export function visibleReadMeta(part: MessageV2.ToolPart): ReadMetadata | undefined {
-+  if (part.tool !== "read") return undefined
-+  if (part.state.status !== "completed") return undefined
-+  if (part.state.time.compacted) return undefined
++export function visibleReadMeta(part: {
++  type?: string
++  tool?: string
++  state?: { status?: string; time?: { start?: number; end?: number; compacted?: number }; metadata?: { read?: unknown } }
++}): ReadRangeMeta | undefined {
++  if (part.type !== "tool" || part.tool !== "read") return undefined
++  if (part.state?.status !== "completed" || part.state?.time?.compacted) return undefined
 +  // Use metadata rather than parsing XML so the visible-context decision
 +  // stays stable even if the human-facing formatting changes later.
-+  const meta = part.state.metadata?.read
-+  if (!isReadMetadata(meta)) return undefined
-+  if (meta.stub) return undefined
++  const meta = part.state?.metadata?.read
++  if (!isReadRangeMeta(meta) || meta.stub) return undefined
 +  return meta
 +}
 +
- function collectVisibleReads(messages: MessageV2.WithParts[], canonicalPath: string) {
-   const reads: ReadMetadata[] = []
-   for (const msg of messages) {
+ function collectVisibleReads(messages: Array<{ info: { role: string }; parts: any[] }>, canonicalPath: string) {
+   const reads: ReadRangeMeta[] = []
++  // 逆序扫描：同一文件多次可见读取时，下游区间合并只需关心最新版本；
++  // 新→旧遍历让首个命中即可携带最新 size/fp，避免额外排序 pass。
+   for (let i = messages.length - 1; i >= 0; i--) {
+     const msg = messages[i]
      if (msg.info.role !== "assistant") continue
      for (const part of msg.parts) {
-       if (part.type !== "tool") continue
--      if (part.tool !== "read") continue
--      if (part.state.status !== "completed") continue
--      if (part.state.time.compacted) continue
--
--      // Use metadata rather than parsing XML so the visible-context decision
--      // stays stable even if the human-facing formatting changes later.
--      const meta = part.state.metadata?.read
--      if (!isReadMetadata(meta)) continue
--      if (meta.stub) continue
+-      if (part.type !== "tool" || part.tool !== "read") continue
+-      if (part.state.status !== "completed" || part.state.time.compacted) continue
+-      const meta = (part.state.metadata as { read?: unknown } | undefined)?.read
+-      if (!isReadRangeMeta(meta) || meta.stub) continue
 +      const meta = visibleReadMeta(part)
 +      if (!meta) continue
        if (meta.canonicalPath !== canonicalPath) continue
        reads.push(meta)
      }
+
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 78ca08d8827a84d6fbd151384510af4f0e677a0d..a48c440b13b5c2cbedda4f4f5c89c998066833ab 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -8,6 +8,8 @@ import { Bus } from "../bus"
- import { File } from "../file"
- import { FileWatcher } from "../file/watcher"
+@@ -8,6 +8,8 @@ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { FileSystem } from "@opencode-ai/core/filesystem"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
  import { Format } from "../format"
 +import { boundDiff } from "./file-diff"
 +import { Truncate } from "./truncate"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
  import { InstanceState } from "@/effect/instance-state"
  import { renderFileDiff } from "./file-diff"
-@@ -30,6 +32,7 @@ export const WriteTool = Tool.define(
-     const fs = yield* AppFileSystem.Service
-     const bus = yield* Bus.Service
+@@ -33,6 +35,7 @@ export const WriteTool = Tool.define(
+     const fs = yield* FSUtil.Service
+     const events = yield* EventV2Bridge.Service
      const format = yield* Format.Service
 +    const truncate = yield* Truncate.Service
  
      return {
        description: DESCRIPTION,
-@@ -159,6 +162,26 @@ export const WriteTool = Tool.define(
-           })
- 
-           let output = "Wrote file successfully."
+@@ -162,6 +165,26 @@ export const WriteTool = Tool.define(
+           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
+           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+           // summary 只有在 LSP 可靠可用时才传给 TUI
 +          // INV-06/G04：formatter 实际改变内容时，回显「提交内容→最终落盘」的差异段，
 +          // 否则模型记忆中的写入与磁盘真值分叉（后续 edit 凭意图文本构造 oldString 必败）。
 +          // 未改变时本段整体缺席（常态零成本：新建文件的 full diff 与提交内容重复，不回显）。
@@ -1848,10 +1867,10 @@ index 78ca08d8827a84d6fbd151384510af4f0e677a0d..a48c440b13b5c2cbedda4f4f5c89c998
 +              output += `\n… (${bounded.omitted} more lines omitted; full diff written to ${artifact})`
 +            }
 +          }
-           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
-           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
-           const beforeDiagnostics = yield* lsp.diagnostics()
-@@ -202,6 +225,9 @@ export const WriteTool = Tool.define(
+           let diagnosticSummary: typeof delta | undefined = delta
+           if (block) {
+             output += `\n\nNew LSP errors introduced by this edit:\n${block}`
+@@ -196,6 +219,9 @@ export const WriteTool = Tool.define(
                // _formattedContent 由 processor 的 completeToolCall 消费：
                // 覆盖 state.input.content 后从此 metadata 中 strip，不持久化
                ...(formattedContent !== undefined ? { _formattedContent: formattedContent } : {}),
@@ -1861,11 +1880,11 @@ index 78ca08d8827a84d6fbd151384510af4f0e677a0d..a48c440b13b5c2cbedda4f4f5c89c998
              },
              output,
            }
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 503349d09ef42dbc5c8d29d123f885f122c48349..3a1d18a0d4b15731029e44920f15864098d5fdcf 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -16,6 +16,7 @@ import { Bus } from "../../src/bus"
+@@ -18,6 +18,7 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
  import { Truncate } from "@/tool/truncate"
  import { TestInstance } from "../fixture/fixture"
  import { SessionID, MessageID } from "../../src/session/schema"
@@ -1873,7 +1892,7 @@ index 503349d09ef42dbc5c8d29d123f885f122c48349..3a1d18a0d4b15731029e44920f158640
  import { testEffect } from "../lib/effect"
  
  const it = testEffect(
-@@ -276,6 +277,176 @@ describe("tool.apply_patch freeform", () => {
+@@ -287,6 +288,176 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
@@ -2050,46 +2069,54 @@ index 503349d09ef42dbc5c8d29d123f885f122c48349..3a1d18a0d4b15731029e44920f158640
    // current-text cursor 允许第二个 chunk 在同一存活行继续向右匹配，而不覆盖第一处结果。
    // 这个真实 Tool 输出会在退回 line tuple 或原始 line cursor 时立即变红。
    it.instance("composes multiple substring chunks on one line", () =>
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index fa37d6cae59071e678e5c6afa04d372b30af690f..0c987d41a0816858f91989edc9bea8c0c506a316 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -17,6 +17,8 @@ import * as Tool from "../../src/tool/tool"
- import { testEffect } from "../lib/effect"
- import { FileWatcher } from "../../src/file/watcher"
+@@ -20,6 +20,8 @@ import { testEffect } from "../lib/effect"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+ // #522：oracle 测试直接消费公开 closestWindow；不读取 production 私有 helper。
  import { closestWindow } from "@/patch/match"
 +import { canonicalReadPath } from "../../src/tool/read"
 +import { renderFileDiff } from "@/tool/file-diff"
  
  const ctx = {
    sessionID: SessionID.make("ses_test-edit-session"),
-@@ -102,6 +104,25 @@ const itTruncated = testEffect(
-     Layer.mock(Truncate.Service, {
-       limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
-       output: (text: string) => Effect.succeed({ content: text, truncated: false }),
-+      // C01 工件兜底路径：超预算 diff 会调 write，mock 必须提供而不是抛 UnimplementedError。
-+      write: () => Effect.succeed("<artifact>"),
-+    }),
-+    Agent.defaultLayer,
-+  ),
-+)
-+
+@@ -91,6 +93,8 @@ const itTruncated = testEffect(
+         Layer.mock(Truncate.Service, {
+           limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
+           output: (text: string) => Effect.succeed({ content: text, truncated: false }),
++          // C01 工件兜底路径：超预算 diff 会调 write，mock 必须提供而不是抛 UnimplementedError。
++          write: () => Effect.succeed("<artifact>"),
+         }),
+       ],
+     ],
+@@ -150,6 +154,24 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
+   }
+ }
+ 
 +// [local-smark] 中档预算层：diff 预算（limits−2048B/10行 保留额）落在「部分可显示」
 +// 区间，C01 前缀测试才能区分连续前缀与跳行截断；itTruncated 的 1024B 会裁到 0 行。
 +const itMidBudget = testEffect(
-+  Layer.mergeAll(
-+    LSP.defaultLayer,
-+    AppFileSystem.defaultLayer,
-+    Format.defaultLayer,
-+    Bus.layer,
-+    Layer.mock(Truncate.Service, {
-+      limits: () => Effect.succeed({ maxLines: 100, maxBytes: 4096 }),
-+      output: (text: string) => Effect.succeed({ content: text, truncated: false }),
-+      write: () => Effect.succeed("<artifact>"),
-     }),
-     Agent.defaultLayer,
-   ),
-@@ -170,6 +191,86 @@ type EditTestArgs =
++  LayerNode.compile(
++    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]), [
++      [
++        Truncate.node,
++        Layer.mock(Truncate.Service, {
++          limits: () => Effect.succeed({ maxLines: 100, maxBytes: 4096 }),
++          output: (text: string) => Effect.succeed({ content: text, truncated: false }),
++          // C01 工件兜底路径：超预算 diff 会调 write，mock 必须提供而不是抛 UnimplementedError。
++          write: () => Effect.succeed("<artifact>"),
++        }),
++      ],
++    ],
++  ),
++)
++
+ // #514：测试入参允许 legacy 顶层字段；execute 前由 prepareEditArguments 折成 edits[]，
+ // 与生产 wrap 链同一折叠语义（不复制折叠逻辑，直接调用被测函数）。
+ type EditTestArgs =
+@@ -161,6 +183,86 @@ type EditTestArgs =
        replaceAll?: boolean
      }
  
@@ -2163,8 +2190,8 @@ index fa37d6cae59071e678e5c6afa04d372b30af690f..0c987d41a0816858f91989edc9bea8c0
 +          path: { cwd: ".", root: "." },
 +          cost: 0,
 +          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+          modelID: ModelID.make("test"),
-+          providerID: ProviderID.make("test"),
++          modelID: ModelV2.ID.make("test"),
++          providerID: ProviderV2.ID.make("test"),
 +          time: { created: 0 },
 +        } satisfies MessageV2.Assistant,
 +        parts,
@@ -2176,7 +2203,7 @@ index fa37d6cae59071e678e5c6afa04d372b30af690f..0c987d41a0816858f91989edc9bea8c0
  function isCreateArgs(args: EditTestArgs) {
    if ("edits" in args && Array.isArray(args.edits) && args.edits.length > 0) {
      return args.edits.length === 1 && args.edits[0]?.oldString === ""
-@@ -177,6 +278,15 @@ function isCreateArgs(args: EditTestArgs) {
+@@ -168,6 +270,15 @@ function isCreateArgs(args: EditTestArgs) {
    return "oldString" in args && args.oldString === ""
  }
  
@@ -2192,7 +2219,7 @@ index fa37d6cae59071e678e5c6afa04d372b30af690f..0c987d41a0816858f91989edc9bea8c0
  const run = Effect.fn("EditToolTest.run")(function* (args: EditTestArgs, next?: Tool.Context) {
    const tool = yield* init()
    // [local-smark] 非 create 时注入 prior read；兼容 edits[] 与 legacy 顶层 oldString。
-@@ -1154,6 +1264,169 @@ describe("tool.edit", () => {
+@@ -1177,6 +1288,169 @@ describe("tool.edit", () => {
        }),
      )
  
@@ -2362,11 +2389,11 @@ index fa37d6cae59071e678e5c6afa04d372b30af690f..0c987d41a0816858f91989edc9bea8c0
      it.instance("emits change event for existing files", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
+
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index a8781fac5e3373de3b102f13f972645644e3847e..e3ed2e5f0b0c333edfbed4b9be90b3240f4a82bb 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
-@@ -109,6 +109,32 @@ const run = Effect.fn("WriteToolTest.run")(function* (
+@@ -124,6 +124,32 @@ const run = Effect.fn("WriteToolTest.run")(function* (
  })
  
  describe("tool.write", () => {

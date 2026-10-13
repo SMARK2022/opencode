@@ -1,18 +1,20 @@
 From 50c58ea0b2c88c2b8df309cae1fde9a9b36a7569 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sun, 30 Aug 2026 06:04:44 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tool):=20=E5=85=83=E6=95=B0=E6=8D=AE=20diff?=
- =?UTF-8?q?=20=E6=9C=89=E7=95=8C=E5=8C=96=E4=B8=8E=E7=94=9F=E6=88=90?=
- =?UTF-8?q?=E6=80=A7=E8=83=BD=E4=BF=AE=E5=A4=8D?=
+Subject: [PATCH] =?UTF-8?q?fix(tool):=20=E5=85=83=E6%95=B0=E6=8D=AE=20diff?=
+ =?UTF-8?q?=20=E6=9C=89=E7=95=8C=E5=8C=96=E4%B8=8E=E7=94=9F=E6=88=90=E6=80?=
+ =?UTF-8?q?=A7=E8=83=BD=E4=BF=AE=E5=A4=8D?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-apply_patch/edit/write 的元数据 diff 统一收口到 file-diff 单一 seam：二进制（NUL-8KB，git 同规则）与超限中段（>64KiB，jsdiff 二次方 Myers 实测）改用标记+度量+sha256 的有界表示，正常文本路径产物与计数逐字节不变；summary 摄入端补首见+归并双聚合界并优先工具显式计数，免疫存量巨型 metadata。消除 407MB 单 part 行与 216MB summary 行两类事故路径，并删除第二遍 diffLines 计数；revert 走 git snapshot 不受影响。
+元数据 diff 全链改走唯一有界 seam file-diff.ts（二进制/超限中段改标记表示，计数随产物单遍推导）；summary-cache 双摄入界免疫 legacy 巨型 metadata；write 摄入端携带显式计数；edit/apply_patch 删除第二遍 diffLines 计数。
+
+适配说明：全部 hunk 机械重锚至目标形态——summary-cache 五 hunk 原样（offset 自动吸收）；apply_patch/edit/write 的 import 与分支 hunk 按目标 core Watcher/LSPClient 无 type 形态与 #518/#533 行内注释重排（被删代码行连同其行内注释移除，保留行注释不动）；write 的 0581 统一 finalSource 形态承载 source 双分支语义（新文件 contentOld 为空串，单分支等价）；file-diff.ts/plan/测试尾段 8 describe 直落。
+
 
 diff --git a/docs/plans/tool-diff-bounding-performance-repair.md b/docs/plans/tool-diff-bounding-performance-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..50568ee55c43965626adf847a7bfbdd57c2d6286
 --- /dev/null
 +++ b/docs/plans/tool-diff-bounding-performance-repair.md
 @@ -0,0 +1,585 @@
@@ -601,11 +603,11 @@ index 0000000000000000000000000000000000000000..50568ee55c43965626adf847a7bfbdd5
 +| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R3（approved） | yes | 无阻塞性发现。逐 hunk 映射 R3：renderFileDiff 三路分发 + `"@@"` 门控 countPatchStats = §10；九个生成点全部改接且输入相同（正常路径 patch 逐字节一致，门控计数经探针等价含裸 `@@` 契约形状）；countDiff 与 edit 第二遍循环删除 = §12；write metadata 计数与持久化 diff 同源 + 摄入优先 typeof-number 守卫 = §10（B-02）；boundMergedPatch 双点应用且计数保留 = §10/§16 切片 4；naive 扫描器删除并留迁移理由注释 = §12。测试纯增加（+244/-0），商定 seam + 独立字面量，无断言弱化；红侧历史由审计方 round-1 探针独立确立。审计方亲自重跑全部 §18 命令（apply_patch 61 ✓、edit 87 ✓、write 25 ✓、summary-tool-diff 6 ✓、revert-compact 16 ✓、cold 42 ✓、typecheck ✓）+ 原始回路（binary 382 chars/132ms、rewrite 505 chars/66ms、aggregate 47，3 pass）+ 额外面（snapshot-tool-race + file-mutation-concurrency 11 pass）。E/C 独立重算 E=323、C=64、19.8%（要求 ≥15%/下限 10%，达标）。预算 6 文件 +434/-100 ≤ 800 | I-01（cold.test 与其他文件同进程捆绑调用时因跨文件全局 DB 状态泄漏失败——本 diff 无因果路径，隔离运行 42/42，§18 契约为逐文件；建议未来基建关注）、I-02（E/C 口径差异：builder 416 含删除行 vs policy 323，均过门禁）、I-03（trimDiff 生产零调用者，保留为 §12 批准处置，后续清理候选）、I-04（§3/§4 旧路径残留——本轮已更正）、I-05（file-diff.ts 116 行，已更正） | 批准 (APPROVE) — R3 实际 diff（六文件，+434/-100）；行政后续留用户决定：D:\Temp\opencode 沙箱残留清理需明确确认；I-01 捆绑调用异常与 I-03 trimDiff 清理属本任务文件预算外的后续任务 | ses_fb0c86f79ffeRWBjr9r65ZPRzZ |
+
 diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/src/session/summary-cache.ts
-index 4b41a0e1cba002c49cae755dc203984db544adec..56f7215747eaa07b08a618a4536e45f4637549f7 100644
 --- a/packages/opencode/src/session/summary-cache.ts
 +++ b/packages/opencode/src/session/summary-cache.ts
-@@ -9,6 +9,7 @@ import { MessageID, SessionID } from "./schema"
+@@ -10,6 +10,7 @@ import { MessageID, SessionID } from "./schema"
  import { Snapshot } from "@/snapshot"
  import type { MessageV2 } from "./message-v2"
  import { NotFoundError, Storage } from "@/storage/storage"
@@ -613,7 +615,7 @@ index 4b41a0e1cba002c49cae755dc203984db544adec..56f7215747eaa07b08a618a4536e45f4
  
  const isDiffs = Schema.is(Schema.Array(Snapshot.FileDiff))
  type Diffs = Snapshot.FileDiff[]
-@@ -83,6 +84,13 @@ function createAccumulator(initial: readonly Snapshot.FileDiff[] = []): DiffAccu
+@@ -84,6 +85,13 @@ function createAccumulator(initial: readonly Snapshot.FileDiff[] = []): DiffAccu
    }
  }
  
@@ -627,7 +629,7 @@ index 4b41a0e1cba002c49cae755dc203984db544adec..56f7215747eaa07b08a618a4536e45f4
  function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
    if (!item.file) {
      // 无 file 的历史条目无法安全归并，只能按原顺序追加而不猜测路径。
-@@ -93,15 +101,24 @@ function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
+@@ -94,15 +102,24 @@ function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
    if (index === undefined) {
      // 新文件记录首次 index，后续增量在原位置更新以保持 UI 顺序。
      target.byFile.set(item.file, target.values.length)
@@ -655,7 +657,7 @@ index 4b41a0e1cba002c49cae755dc203984db544adec..56f7215747eaa07b08a618a4536e45f4
      // 计数直接相加，与首次全量 collect 保持同一 totals 口径。
      additions: current.additions + item.additions,
      deletions: current.deletions + item.deletions,
-@@ -173,7 +190,12 @@ export function collectToolDiffs(messages: readonly ToolDiffMessage[], worktree:
+@@ -174,7 +191,12 @@ export function collectToolDiffs(messages: readonly ToolDiffMessage[], worktree:
        const diff = stringValue(record.diff)
        const file = stringValue(record.filepath)
        if (diff && file) {
@@ -669,7 +671,7 @@ index 4b41a0e1cba002c49cae755dc203984db544adec..56f7215747eaa07b08a618a4536e45f4
          merge(file, diff, stats.additions, stats.deletions)
        }
      }
-@@ -785,16 +807,8 @@ function toWorktreeRel(base: string, target: string, fromBase: string = base) {
+@@ -793,16 +815,8 @@ function toWorktreeRel(base: string, target: string, fromBase: string = base) {
    return path.relative(base, abs).replaceAll("\\", "/")
  }
  
@@ -688,12 +690,12 @@ index 4b41a0e1cba002c49cae755dc203984db544adec..56f7215747eaa07b08a618a4536e45f4
  
  function inferStatus(additions: number, deletions: number): "added" | "deleted" | "modified" {
    if (deletions === 0 && additions > 0) return "added"
+
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd3718353d 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -6,9 +6,8 @@ import { Bus } from "../bus"
- import { FileWatcher } from "../file/watcher"
+@@ -6,9 +6,8 @@ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
  import { InstanceState } from "@/effect/instance-state"
  import { Patch } from "../patch"
 -import { createTwoFilesPatch, diffLines } from "diff"
@@ -702,9 +704,9 @@ index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd
 +import { renderFileDiff } from "./file-diff"
  import { LSP } from "@/lsp/lsp"
  // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
- import type * as LSPClient from "@/lsp/client"
-@@ -62,19 +61,17 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
-       const oldContent = ""
+ import * as LSPClient from "@/lsp/client"
+@@ -67,10 +66,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+       // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
        const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
        const next = Bom.split(newContent)
 -      const diffOld = normalizeLineEndings(oldContent)
@@ -713,9 +715,10 @@ index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd
 -      const { additions, deletions } = countDiff(diffOld, diffNew)
 +      // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
 +      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
+       // #518：add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
        // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
        return {
-         filePath: group.filePath,
+@@ -78,9 +75,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
          oldContent,
          newContent: ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text,
          type: "add" as const,
@@ -728,20 +731,21 @@ index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd
          bom: next.bom,
          ending,
          expected: [snapshot],
-@@ -109,10 +106,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
-       } catch (error) {
+@@ -118,11 +115,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+         // #518：每个 parsed entry 保留 Patch owner 的定位边界；Tool 只丢弃 proposal，不运行第二套 matcher。
          return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
        }
 -      const diffOld = normalizeLineEndings(oldContent)
+-      // #533：diff 与计数都来自单次派生的最终 content，与 commit 写盘观察同一份文本。
 -      const diffNew = normalizeLineEndings(fileUpdate.content)
 -      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
 -      const { additions, deletions } = countDiff(diffOld, diffNew)
 +      // 元数据 diff 走唯一有界 seam；正常路径产物与旧实现逐字节一致（INV-02）。
 +      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
+       // #518：expected 只包含 source；update 未声明 move 时不锁任何 destination 路径。
        const expected = [snapshot]
        if (movePath) {
-         // move destination 也是 proposal 的 expected state，不能只锁 source。
-@@ -129,9 +124,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -140,9 +134,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
          newContent: fileUpdate.content,
          type: movePath ? ("move" as const) : ("update" as const),
          movePath,
@@ -754,7 +758,7 @@ index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd
          bom: fileUpdate.bom,
          ending: detectLineEnding(oldContent),
          expected,
-@@ -142,27 +137,16 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+@@ -154,11 +148,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        const snapshot = yield* Mutation.read(afs, group.filePath)
        if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
        const source = Bom.split(Mutation.decode(snapshot))
@@ -763,16 +767,18 @@ index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd
 -      const { deletions } = countDiff(diffOld, "")
 +      // delete 的全量语义保留：中小文件仍记录全文行 diff；只有二进制/超限中段换标记表示。
 +      const rendered = renderFileDiff(group.filePath, normalizeLineEndings(source.text), "")
-       // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
+       // #518：delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
 -      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom, expected: [snapshot] }
 +      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: rendered.patch, additions: rendered.additions, deletions: rendered.deletions, bom: source.bom, expected: [snapshot] }
      }
      default:
-       return yield* Effect.fail(new Error(`Unknown hunk type: ${(first as { type: string }).type}`))
+       // 未知 hunk 类型来自 parser 版本差异；拒绝而不是跳过，避免静默丢 hunk。
+@@ -166,17 +159,6 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
    }
  })
  
 -function countDiff(oldContent: string, newContent: string) {
+-  // #518：计数与展示用同一对归一后文本（#131），保证 additions/deletions 与用户看到的 diff 一致。
 -  let additions = 0
 -  let deletions = 0
 -  for (const change of diffLines(oldContent, newContent)) {
@@ -783,56 +789,52 @@ index 2a6dc56a535dcfd97d75c64991c59c3ec0b5cb3d..f66da3f426d7907bab27571ae7d875fd
 -}
 -
  function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
-   // Tool 只拥有 filesystem identity 与 mutation boundary；old block 语义继续下沉给 Patch owner。
-   const groups = new Map<string, HunkGroup>()
+   // #533：Tool 只拥有 filesystem identity 与 mutation boundary；old block 语义继续下沉给 Patch owner。
+   // #518：分组先于 Permission 与 proposal；Map 保持首次出现顺序，fileChanges 顺序与 patchText 一致。
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 82a78ff51be554ce29b77d80cead1e0c42b0b35f..5f9b7f0cf776dd6f749c137a1cb8429b84da7171 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -3,7 +3,7 @@ import { createHash } from "crypto"
+@@ -4,7 +4,7 @@ import { createHash } from "crypto"
  import { Effect, Schema } from "effect"
  import * as Tool from "./tool"
  import { LSP } from "@/lsp/lsp"
 -import { createTwoFilesPatch, diffLines } from "diff"
 +import { renderFileDiff } from "./file-diff"
  import DESCRIPTION from "./edit.txt"
- import { File } from "../file"
- import { FileWatcher } from "../file/watcher"
-@@ -198,14 +198,8 @@ export const EditTool = Tool.define(
-             // oldString="" 仅在文件缺失时是纯 create；已有 proposal 上它仍是 overwrite，须继承磁盘行尾。
-             // 新文件没有 EOL 属性，继续保留模型提交字节，避免 create 被隐式规范化。
-             contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
+ import { FileSystem } from "@opencode-ai/core/filesystem"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+@@ -212,10 +212,8 @@ export const EditTool = Tool.define(
+             const desiredBom = next.bom
+             contentOld = ""
+             contentNew = next.text
 -            diff = trimDiff(
--              createTwoFilesPatch(
--                filePath,
--                filePath,
--                normalizeLineEndings(contentOld),
--                normalizeLineEndings(contentNew),
--              ),
+-              // #131：ask 元数据 diff 忽略纯行尾差异
+-              createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
 -            )
 +            // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，ask 预览与最终 metadata 同界）。
 +            diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
              yield* ctx.ask({
                permission: "edit",
                patterns: [path.relative(instance.worktree, filePath)],
-@@ -299,14 +293,8 @@ export const EditTool = Tool.define(
-             const desiredBom = source.bom || Bom.split(contentNew).bom
-             contentNew = Bom.split(contentNew).text
+@@ -302,14 +300,8 @@ export const EditTool = Tool.define(
+               const desiredBom = source.bom || Bom.split(contentNew).bom
+               contentNew = Bom.split(contentNew).text
  
--            diff = trimDiff(
--              createTwoFilesPatch(
--                filePath,
--                filePath,
--                normalizeLineEndings(contentOld),
--                normalizeLineEndings(contentNew),
--              ),
--            )
-+            // 预计算 diff 供权限预览；有界 seam 保证审批 metadata 不携带无界产物。
-+            diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
-             yield* ctx.ask({
-               permission: "edit",
-               patterns: [path.relative(instance.worktree, filePath)],
-@@ -377,27 +365,14 @@ export const EditTool = Tool.define(
+-              diff = trimDiff(
+-                createTwoFilesPatch(
+-                  filePath,
+-                  filePath,
+-                  normalizeLineEndings(contentOld),
+-                  normalizeLineEndings(contentNew),
+-                ),
+-              )
++              // 预计算 diff 供权限预览；有界 seam 保证审批 metadata 不携带无界产物。
++              diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
+ 
+               yield* ctx.ask({
+                 permission: "edit",
+@@ -383,28 +375,14 @@ export const EditTool = Tool.define(
            // 共享出口统一重算 diff：此刻两分支的 contentNew 均已同步 commit/formatter 后的
            // 最终磁盘内容，output 的 Changed 段与 metadata.diff 因此共用 post-formatter 真值；
            // 权限请求的预计算 diff 保留在各自 ask 之前，审批预览不受影响（R5）。
@@ -846,6 +848,7 @@ index 82a78ff51be554ce29b77d80cead1e0c42b0b35f..5f9b7f0cf776dd6f749c137a1cb8429b
 -          )
 -          const diffOld = normalizeLineEndings(contentOld)
 -          const diffNew = normalizeLineEndings(contentNew)
+-          // #131：统计增删行时忽略行尾风格
 -          let additions = 0
 -          let deletions = 0
 -          for (const change of diffLines(diffOld, diffNew)) {
@@ -866,9 +869,9 @@ index 82a78ff51be554ce29b77d80cead1e0c42b0b35f..5f9b7f0cf776dd6f749c137a1cb8429b
            }
  
            yield* ctx.metadata({
+
 diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1af9ab4b0e38a8fccd41303f4b9e24d027e8dc14
 --- /dev/null
 +++ b/packages/opencode/src/tool/file-diff.ts
 @@ -0,0 +1,116 @@
@@ -988,8 +991,8 @@ index 0000000000000000000000000000000000000000..1af9ab4b0e38a8fccd41303f4b9e24d0
 +}
 +
 +export * as FileDiff from "./file-diff"
+
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 4ad6f02a423136a5aa01c8f94adb3b44fcbbced4..78ca08d8827a84d6fbd151384510af4f0e677a0d 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
 @@ -3,7 +3,6 @@ import * as path from "path"
@@ -998,113 +1001,95 @@ index 4ad6f02a423136a5aa01c8f94adb3b44fcbbced4..78ca08d8827a84d6fbd151384510af4f
  import { LSP } from "@/lsp/lsp"
 -import { createTwoFilesPatch } from "diff"
  import DESCRIPTION from "./write.txt"
- import { Bus } from "../bus"
- import { File } from "../file"
-@@ -11,7 +10,7 @@ import { FileWatcher } from "../file/watcher"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { FileSystem } from "@opencode-ai/core/filesystem"
+@@ -11,7 +10,7 @@ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
  import { Format } from "../format"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
  import { InstanceState } from "@/effect/instance-state"
 -import { trimDiff } from "./edit"
 +import { renderFileDiff } from "./file-diff"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import * as Bom from "@/util/bom"
- import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
-@@ -68,10 +67,13 @@ export const WriteTool = Tool.define(
+ import { normalizeLineEndings } from "@/util/line-ending"
+@@ -71,11 +70,10 @@ export const WriteTool = Tool.define(
            // 新文件没有可继承属性，继续逐字采用提交内容，避免 write 对创建行为施加全局 EOL 策略。
            const contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
-           // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
--
+ 
 -          const diff = trimDiff(
+-            // #131：permission 元数据忽略纯行尾 diff
+-            // #518：diff 基于proposal 时的旧内容；ask 展示的是本次写入的意图而非磁盘实时状态。
 -            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+-          )
 +          // 元数据 diff 走唯一有界 seam：ask 预览与最终 metadata 同界（二进制/超限中段改标记表示）。
-+          const rendered = renderFileDiff(
-+            filepath,
-+            normalizeLineEndings(contentOld),
-+            normalizeLineEndings(contentNew),
-           )
++          // #518：diff 基于 proposal 时的旧内容；ask 展示的是本次写入的意图而非磁盘实时状态。
++          const rendered = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew))
 +          const diff = rendered.patch
            yield* ctx.ask({
              permission: "edit",
              patterns: [path.relative(instance.worktree, filepath)],
-@@ -112,6 +114,9 @@ export const WriteTool = Tool.define(
-           }).pipe(Effect.orDie)
-           // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
+@@ -127,18 +125,15 @@ export const WriteTool = Tool.define(
+           // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
            let metadataDiff: string | undefined
+           let formattedContent: string | undefined
 +          // [local-smark] 摄入端（summary-cache diff/filepath 分支）优先读取显式计数，
 +          // 避免对有界标记重扫描退化为 0/0（plan B-02）；与 edit/apply_patch 的计数口径一致。
 +          let diffCounts: { additions: number; deletions: number } | undefined
-           // [local-smark] 当 auto-format 改变了写入内容时，将格式化后的内容
-           // 通过 metadata._formattedContent 传递给 processor。
-           // processor 的 completeToolCall 会用它直接覆盖 state.input.content，
-@@ -123,25 +128,19 @@ export const WriteTool = Tool.define(
-           if (exists || formatted) {
-             // finalSource 在 commit lock 内读取，metadata 不会引用另一个 mutation 的中间内容。
-             if (exists) {
--              metadataDiff = trimDiff(
--                createTwoFilesPatch(
--                  filepath,
--                  filepath,
--                  normalizeLineEndings(contentOld),
--                  normalizeLineEndings(finalSource.text),
--                ),
-+              const overwrite = renderFileDiff(
-+                filepath,
-+                normalizeLineEndings(contentOld),
-+                normalizeLineEndings(finalSource.text),
-               )
-+              metadataDiff = overwrite.patch
-+              diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
-             } else {
-               // 新文件被 formatter 改变内容：diff 基于格式化后的最终落盘内容，
-               // 使 computeDiff 的工具流能按工具归因追踪新文件改动
--              metadataDiff = trimDiff(
--                createTwoFilesPatch(
--                  filepath,
--                  filepath,
--                  "",
--                  normalizeLineEndings(finalSource.text),
--                ),
--              )
-+              const created = renderFileDiff(filepath, "", normalizeLineEndings(finalSource.text))
-+              metadataDiff = created.patch
-+              diffCounts = { additions: created.additions, deletions: created.deletions }
-             }
+           // #518：finalSource 只在锁内赋值；冲突失败时保持 undefined，不生成误导性 metadata。
+           if (finalSource) {
+-            // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
+-            metadataDiff = trimDiff(
+-              createTwoFilesPatch(
+-                filepath,
+-                filepath,
+-                // #131：格式化后最终 diff 也归一行尾
+-                normalizeLineEndings(contentOld),
+-                normalizeLineEndings(finalSource.text),
+-              ),
+-            )
++            // diff 生成：唯一有界 seam 渲染格式化后最终内容（#131 归一行尾语义不变）。
++            const overwrite = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(finalSource.text))
++            metadataDiff = overwrite.patch
++            diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
              // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
              if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
-@@ -151,6 +150,7 @@ export const WriteTool = Tool.define(
-             // 新文件且未格式化：用写入前已计算的 diff（空内容 → contentNew），
-             // 确保新文件写入也出现在工具流 diff 中，而非仅依赖 git 兜底
+               formattedContent = finalSource.text
+@@ -147,6 +142,7 @@ export const WriteTool = Tool.define(
+             // #477：新文件且未格式化：用写入前算好的 diff（""→contentNew），
+             // git 兜底移除后这是新文件入工具流的唯一路径。
              metadataDiff = diff
 +            diffCounts = { additions: rendered.additions, deletions: rendered.deletions }
            }
-           yield* bus.publish(File.Event.Edited, { file: filepath })
-           yield* bus.publish(FileWatcher.Event.Updated, {
-@@ -198,6 +198,7 @@ export const WriteTool = Tool.define(
-               filepath,
+           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
+           yield* events.publish(Watcher.Event.Updated, {
+@@ -195,6 +191,8 @@ export const WriteTool = Tool.define(
                exists,
+               // 条件展开：仅在 metadataDiff 存在时展开 diff 字段，避免 undefined 污染 metadata
                ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
++              // 摄入端优先消费显式计数（plan B-02）；有界标记不再被重扫描成 0/0。
 +              ...(diffCounts ? { additions: diffCounts.additions, deletions: diffCounts.deletions } : {}),
                // _formattedContent 由 processor 的 completeToolCall 消费：
                // 覆盖 state.input.content 后从此 metadata 中 strip，不持久化
                ...(formattedContent !== undefined ? { _formattedContent: formattedContent } : {}),
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index f888ea7a9517bdb6804577e57a956ef6112a99a2..ca2b5481542c7716b226686ff72db18584289170 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -3,6 +3,9 @@ import path from "path"
- import * as fs from "fs/promises"
- import { Cause, Effect, Exit, Layer } from "effect"
+@@ -5,6 +5,9 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Cause, Effect, Exit, Layer, Schema } from "effect"
  import { ApplyPatchTool } from "../../src/tool/apply_patch"
 +import { WriteTool } from "../../src/tool/write"
 +import { EditTool } from "../../src/tool/edit"
 +import { SummaryCache } from "@/session/summary-cache"
  import { LSP } from "@/lsp/lsp"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
  import { Format } from "../../src/format"
-@@ -1219,3 +1222,244 @@ EOF`
+@@ -1271,3 +1274,245 @@ EOF`
      }),
    )
  })
++
 +
 +// [local-smark] 元数据 diff 有界切片：二进制 delete 的全文行 diff 是 407MB part 行事故的
 +// 直接构成物；本组切片锁定"标记 + 度量 + sha256 身份"的有界表示与计数精确性（INV-01/07/08）。

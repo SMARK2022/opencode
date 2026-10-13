@@ -13,7 +13,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 -          const err = new ProviderError.ResponseStreamError("SSE read timed out")
 +          const err = Object.assign(new ProviderError.ResponseStreamError("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
            ctl.abort(err)
-           void reader.cancel(err)
+           reader.cancel(err).catch(() => {})
            reject(err)
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
@@ -193,16 +193,28 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
 --- a/packages/opencode/src/session/retry.ts
 +++ b/packages/opencode/src/session/retry.ts
-@@ -73,7 +73,10 @@ export function retryable(error: Err, provider: string) {
+@@ -90,12 +90,13 @@ export function retryable(error: Err, provider: string) {
      // 5xx errors are transient server failures and should always be retried,
      // even when the provider SDK doesn't explicitly mark them as retryable.
      // 网络异常（statusCode 为 undefined）也应重试，避免瞬时网络故障直接失败
--    if (!error.data.isRetryable && !(status !== undefined && status >= 500) && status !== undefined) return undefined
+-    if (
+-      !error.data.isRetryable &&
+-      !(status !== undefined && status >= 500) &&
+-      status !== undefined &&
+-      !matchesRetryableMessage(error.data.message) &&
+-      !matchesRetryableMessage(error.data.responseBody)
+-    )
+-      return undefined
 +    // #191：移除 status !== undefined 守卫——无 statusCode 的可重试错误（transport）也应重试
-+    // #191：5xx 恒重试、无 statusCode 的可重试错误也重试；有 statusCode 的 4xx 仍不重试
-+    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
++    if (
++      !error.data.isRetryable &&
++      !(status !== undefined && status >= 500) &&
++      !matchesRetryableMessage(error.data.message) &&
++      !matchesRetryableMessage(error.data.responseBody)
++    )
++      return undefined
      if (error.data.responseBody?.includes("FreeUsageLimitError")) {
-+    // #191：FreeUsageLimitError 是计费门槛，优先于通用 5xx 重试判定
++      // #191：FreeUsageLimitError 是计费门槛，优先于通用 5xx 重试判定
        return {
          message: GO_UPSELL_MESSAGE,
 diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/test/session/retry.test.ts

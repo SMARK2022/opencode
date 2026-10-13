@@ -12,9 +12,9 @@ Content-Transfer-Encoding: 8bit
 
 补充 schema-valid 503、Spinner 终态、abort/stale 与 factory dispose 公共 seam 测试，并加强 searchScan/collection-route 覆盖。
 
+
 diff --git a/docs/plans/tui-session-search-race-successor.md b/docs/plans/tui-session-search-race-successor.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea3450b2386919ef2a77aa9fc18291f430067312
 --- /dev/null
 +++ b/docs/plans/tui-session-search-race-successor.md
 @@ -0,0 +1,498 @@
@@ -516,117 +516,155 @@ index 0000000000000000000000000000000000000000..ea3450b2386919ef2a77aa9fc18291f4
 +| 1 | N2 | yes | none | none | APPROVE | ses_055c931e6ffeWZaw5QKCvE5O2v |
 +
 +Exact auditor release verdict: **No blocking findings. APPROVE.** Audited revision N2; full original scope covered. Ready for `verified-implementation-and-commit`.
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-index 21a8960f908d9a1e46dff36dc9362efd8c614008..17889222cf7810440758c943e716e1a45005c413 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-@@ -50,14 +50,20 @@ export function DialogSessionList() {
+
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
+@@ -103,8 +103,8 @@ export function DialogSessionList() {
    const [search, setSearch] = createDebouncedSignal("", 150)
-   // [local-smark] Session list preview functionality
+   // #120：sessionID -> 多行用户消息预览（非单行再折词）
    const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
--  // progressive search 状态：generation 与 Abort 绑定 committed query
-+  // progressive search 状态：AbortSignal 绑定 committed query 的唯一过期事实
+-  // #544 progressive search 状态：generation 与 Abort 绑定 committed query。
+-  // 单一 generation 计数器拒绝过期写回：每次改词自增，异步回调比对后才可 set 信号。
++  // #544 progressive search 状态：AbortSignal 是 committed query 的唯一过期事实。
++  // #561 单轨收敛：改词/清空/卸载都只 abort 当前 controller，不再维护 generation 双轨。
    const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
-   // success complete 只信 scan；error complete 保留 title∪scan（INV-12 已展示 hits）
-   const [searchTerminal, setSearchTerminal] = createSignal<"success" | "error" | undefined>()
+   // success complete 只信 scan；error complete 保留 title∪scan（已展示 hits 不抹掉）
+   // terminal 与 phase 分离：phase 驱动 Spinner/文案，terminal 决定 complete 的展示集合来源。
+@@ -112,8 +112,16 @@ export function DialogSessionList() {
+   // title 首屏与 scan 权威流分开存：partial 需要 union 展示，complete 需要单选 scan。
    const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
    const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
 -  let searchGeneration = 0
-+  // disposed 防止 dialog.replace 后旧闭包仍启动 progressive search
++  // #561 disposed 防止 dialog.replace 后旧闭包仍启动 progressive search
 +  let disposed = false
++  // controller 引用与 disposed 同域：卸载语义集中在一处，不散落到各 async 分支。
    let searchController: AbortController | undefined
 +  onCleanup(() => {
++    // 卸载即最终态：置位后任何 startSearch 调用都成为 no-op。
 +    disposed = true
 +    searchController?.abort()
 +    searchController = undefined
 +  })
  
+   // Hit 形状与 browse 同源（Session.Info）——visibleSessions/options 管道无需分支适配。
    type SessionHit = (typeof sync.data.session)[number]
- 
-@@ -80,9 +86,9 @@ export function DialogSessionList() {
+@@ -130,6 +138,7 @@ export function DialogSessionList() {
+   // #544：POST/手写 GET 都需 directory query，workspace routing 才能定位实例
+   function directoryQuery(url: URL) {
+     // sync.path.directory 优先：workspace 子目录会话必须路由回其所属实例。
++    // title/scan 共用同一 directory 解析：路由不一致会让两阶段命中不同实例。
+     const dir = sync.path.directory || sdk.directory
+     if (dir) url.searchParams.set("directory", dir)
+   }
+@@ -139,11 +148,12 @@ export function DialogSessionList() {
     * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
     * 2) contentDelay 后再串行 POST /session/search/scan
     * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
 -   * generation+Abort 保证改词/清空时丢弃过期响应。
-+   * AbortSignal 是唯一过期事实：改词/清空/卸载都 abort 当前 controller。
++   * #561 AbortSignal 是唯一过期事实：改词/清空/卸载都 abort 当前 controller。
     */
 -  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
 +  async function runProgressiveSearch(query: string, signal: AbortSignal) {
      const scope = sessionListScopeParams()
+     // 起始即 awaiting_first：首个 title 响应到达前列表显示 Searching… 而非 Not Found。
++    // 首行即清空旧代集合：新代不继承任何上代 hits，避免跨代串味。
      setSearchPhase("awaiting_first")
      setSearchTerminal(undefined)
-@@ -102,12 +108,16 @@ export function DialogSessionList() {
-       if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
+     setTitleHits([])
+@@ -163,17 +173,23 @@ export function DialogSessionList() {
  
+       // limit 与 Path B 搜索上限同源：title 子集也被 cap 在 400，partial 展示不会超发。
        const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
 -      if (signal.aborted || generation !== searchGeneration) return
 -      if (titleRes.ok) {
 -        const titleData = (await titleRes.json()) as SessionHit[]
 -        if (signal.aborted || generation !== searchGeneration) return
+-        // 非数组响应按空集处理：title 是增强首屏，坏响应不构成失败终态。
 -        setTitleHits(Array.isArray(titleData) ? titleData : [])
++      // 唯一过期检查：controller abort 后 transport 可能仍解析响应。
 +      if (signal.aborted) return
 +      if (!titleRes.ok) {
-+        // title 失败已经结束本代搜索，不能把失败伪装成 partial 再发起 scan。
++        // #561 title 失败已经结束本代搜索，不能把失败伪装成 partial 再发起 scan。
 +        setSearchTerminal("error")
 +        setSearchPhase("complete")
 +        return
        }
 +      const titleData = (await titleRes.json()) as SessionHit[]
 +      if (signal.aborted) return
++      // 非数组响应按空集处理：title 是增强首屏，坏响应不构成失败终态。
 +      setTitleHits(Array.isArray(titleData) ? titleData : [])
++      // partial 阶段开始：title∪scan 并集展示，Spinner 仍在。
        setSearchPhase("partial")
  
        // contentDelay：输入 debounce 之后再等一截，慢打时少发过期 scan
-@@ -120,13 +130,13 @@ export function DialogSessionList() {
+-      // 该等待处于 generation 守卫之下：改词后旧代的 timer 会随 Abort 立即失效。
++      // #561 该等待处于 abort 守卫之下：改词后旧代的 timer 会随 Abort 立即失效。
+       await new Promise<void>((resolve, reject) => {
+         const timer = setTimeout(resolve, SESSION_LIST_CONTENT_DELAY_MS)
+         const onAbort = () => {
+@@ -183,17 +199,20 @@ export function DialogSessionList() {
          if (signal.aborted) return onAbort()
          signal.addEventListener("abort", onAbort, { once: true })
        })
 -      if (signal.aborted || generation !== searchGeneration) return
++      // 等待期被 abort 会以 AbortError 出走 catch，不进入 scan。
 +      if (signal.aborted) return
  
-       // B2：串行 keyset scan；early-stop 只数 scanFullHits
+       // B2：串行 keyset scan——串行而非并发是为了 abort 即停与 SQLite 单写者压力。
+       // early-stop 只数 scanFullHits：title 是子集查询，计入会让 complete 偏离 list top-400。
        let cursor: { time_updated: number; id: string } | null = null
        let scanHits: SessionHit[] = []
        for (;;) {
 -        if (signal.aborted || generation !== searchGeneration) return
++        // 循环顶也只认 abort：分页继续的唯一条件是当前 controller 仍存活。
 +        if (signal.aborted) return
          if (shouldStopSearchScan(scanHits.length)) break
  
          const scanUrl = new URL("/session/search/scan", sdk.url)
-@@ -146,11 +156,10 @@ export function DialogSessionList() {
++        // scan 端点恒定：分页状态只经 cursor 传递，不再用 URL 携带代次。
+         directoryQuery(scanUrl)
+         const body = {
+           // start/scope/path 与 browse 同宇宙：候选窗不得引入第二套 scope 语义。
+@@ -211,22 +230,22 @@ export function DialogSessionList() {
            body: JSON.stringify(body),
            signal,
          })
 -        // 每批结束后再检查 generation，防止慢响应写回已过期 query
 -        if (signal.aborted || generation !== searchGeneration) return
-+        // 每批结束后再检查 abort，防止慢响应写回已过期 query
++        // #561 每批结束后再检查 abort，防止慢响应写回已过期 query
 +        if (signal.aborted) return
          // 非 2xx：标记 error 终态并退出；保留已展示 title/scan hits
          if (!scanRes.ok) {
 -          if (signal.aborted || generation !== searchGeneration) return
+-          // error 终态仍算 complete：Spinner 停转，但已展示 title/scan hits 不清空。
++          // 已展示 hits 不抹掉：error complete 的展示集合仍由 resolveDisplayHits 决定。
            setSearchTerminal("error")
            setSearchPhase("complete")
            return
-@@ -160,7 +169,7 @@ export function DialogSessionList() {
+         }
++        // 页体解析失败会以异常进入 catch——与网络失败同一 error 终态。
+         const page = (await scanRes.json()) as {
+           sessions: SessionHit[]
            nextCursor: { time_updated: number; id: string } | null
            done: boolean
          }
 -        if (signal.aborted || generation !== searchGeneration) return
 +        if (signal.aborted) return
          // 只累积 full-condition 命中；title overlay 不在此写入
+         // append 去重并保序：scan 页本身按 recency 返回，cap 截断即 early-stop 信号。
          scanHits = appendScanHits(scanHits, page.sessions ?? [])
-         setScanFullHits(scanHits)
-@@ -170,26 +179,34 @@ export function DialogSessionList() {
+@@ -237,41 +256,49 @@ export function DialogSessionList() {
          cursor = page.nextCursor
        }
  
 -      if (signal.aborted || generation !== searchGeneration) return
 +      if (signal.aborted) return
-       // 成功 complete：权威集合仅为 scanFullHits（INV-09）
+       // 成功 complete：权威集合仅为 scanFullHits——title overlay 从此不再参与展示
        setSearchTerminal("success")
        setSearchPhase("complete")
      } catch {
-       // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback all
+       // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback browse
 -      if (signal.aborted || generation !== searchGeneration) return
 +      if (signal.aborted) return
        setSearchTerminal("error")
@@ -634,48 +672,57 @@ index 21a8960f908d9a1e46dff36dc9362efd8c614008..17889222cf7810440758c943e716e1a4
      }
    }
  
-+  // 唯一启动入口：组件存活期内才创建 controller，旧请求一律 abort
++  // #561 唯一启动入口：组件存活期内才创建 controller，旧请求一律 abort
 +  function startSearch(query: string) {
 +    if (disposed) return
++    // 旧请求立即过期：新 controller 尚未创建即先断旧链。
 +    searchController?.abort()
 +    const controller = new AbortController()
++    // 单一 controller 引用：任何时刻至多一代搜索在途。
 +    searchController = controller
++    // fire-and-forget：终态只经 signal/UI 反映，调用方不 await。
 +    void runProgressiveSearch(query, controller.signal)
 +  }
 +
-   // committed query 变化：清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
+   // #544：committed query 变化——清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
+-  // onCleanup 兜底 abort：组件卸载时进行中的请求不允许写回已销毁的信号图。
++  // #561 卸载兜底 abort 由组件级 onCleanup 承担，effect 内不再重复注册。
    createEffect(
      on(
        () => search(),
        (query) => {
 -        searchController?.abort()
          if (!query) {
+-          // 清空是显式回 browse：自增 generation 使任何 in-flight 写回立即过期。
 -          searchGeneration += 1
++          // 清空是显式回 browse：abort 使任何 in-flight 写回立即过期。
 +          searchController?.abort()
            searchController = undefined
++          // browse 态无 phase/terminal：清空即回初始列表。
            setSearchPhase(undefined)
            setSearchTerminal(undefined)
-@@ -197,12 +214,8 @@ export function DialogSessionList() {
+           setTitleHits([])
            setScanFullHits([])
            return
          }
--        // 新 generation 立即丢弃旧 hits，避免 C→CJ 串味
+-        // 新 generation 立即丢弃旧 hits，避免改词串味
 -        const generation = ++searchGeneration
 -        const controller = new AbortController()
 -        searchController = controller
 -        onCleanup(() => controller.abort())
 -        void runProgressiveSearch(query, generation, controller.signal)
-+        // 新 query 立即丢弃旧 hits，避免 C→CJ 串味
++        // #561 新 query 立即丢弃旧 hits，避免改词串味
 +        startSearch(query)
        },
      ),
    )
-@@ -250,15 +263,11 @@ export function DialogSessionList() {
-   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
-   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
- 
--  // 删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
-+  // 删除后重跑当前 query；必须走 startSearch，才能被 dispose/cleanup 约束
+@@ -333,16 +360,13 @@ export function DialogSessionList() {
+     () => sync.session.query(),
+     (filter) => loadDialogSessionList({ filter, list: (query) => sdk.client.session.list(query) }),
+   )
+-  // #544：删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
++  // #561：删除后重跑当前 query；必须走 startSearch，才能被 dispose/cleanup 约束
+   // browse 侧由调用点 refetchBrowse 负责；此处只重建 search 代，避免双拉。
    function refetchSearch() {
      const query = search()
      if (!query) return
@@ -684,66 +731,49 @@ index 21a8960f908d9a1e46dff36dc9362efd8c614008..17889222cf7810440758c943e716e1a4
 -    const controller = new AbortController()
 -    searchController = controller
 -    void runProgressiveSearch(query, generation, controller.signal)
++    // closed-over refetch 与 effect 同一入口，无第二套 controller 构造。
 +    startSearch(query)
    }
  
    const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
-diff --git a/packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx b/packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx
+
+diff --git a/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx b/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc6e1fb0b5
 --- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx
-@@ -0,0 +1,485 @@
++++ b/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx
+@@ -0,0 +1,467 @@
 +/** @jsxImportSource @opentui/solid */
-+import { Global } from "@opencode-ai/core/global"
 +import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 +import { testRender, useRenderer } from "@opentui/solid"
-+import { afterAll, expect, mock, test as baseTest } from "bun:test"
++import { expect, test as baseTest } from "bun:test"
 +import { onCleanup, onMount } from "solid-js"
 +import type { Session as SessionInfo } from "@opencode-ai/sdk/v2"
-+import { ArgsProvider } from "@/cli/cmd/tui/context/args"
-+import { ExitProvider } from "@/cli/cmd/tui/context/exit"
-+import { KVProvider } from "@/cli/cmd/tui/context/kv"
-+import { LocalProvider } from "@/cli/cmd/tui/context/local"
-+import { ProjectProvider } from "@/cli/cmd/tui/context/project"
-+import { RouteProvider } from "@/cli/cmd/tui/context/route"
-+import { SDKProvider, type SDKTestTransport } from "@/cli/cmd/tui/context/sdk"
-+import { SyncProvider, useSync } from "@/cli/cmd/tui/context/sync"
-+import { ThemeProvider } from "@/cli/cmd/tui/context/theme"
-+import { TuiConfigProvider } from "@/cli/cmd/tui/context/tui-config"
-+import { OpencodeKeymapProvider, registerOpencodeKeymap } from "@/cli/cmd/tui/keymap"
-+import { CommandPaletteProvider } from "@/cli/cmd/tui/context/command-palette"
++import { ArgsProvider } from "../../../../src/context/args"
++import { ExitProvider } from "../../../../src/context/exit"
++import { KVProvider } from "../../../../src/context/kv"
++import { LocalProvider } from "../../../../src/context/local"
++import { ProjectProvider } from "../../../../src/context/project"
++import { RouteProvider } from "../../../../src/context/route"
++import { SDKProvider, type EventSource } from "../../../../src/context/sdk"
++import { SyncProvider, useSync } from "../../../../src/context/sync"
++import { ThemeProvider } from "../../../../src/context/theme"
++import { PermissionProvider } from "../../../../src/context/permission"
++import { TuiConfigProvider } from "../../../../src/config"
++import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/keymap"
 +import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
++import { TestTuiContexts } from "../../../fixture/tui-environment"
 +import { tmpdir } from "../../../fixture/fixture"
 +import { createEventSource, createFetch, directory, json } from "./sync-fixture"
-+import { DialogProvider, useDialog } from "../../../../src/cli/cmd/tui/ui/dialog"
-+import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
++import { DialogProvider, useDialog } from "../../../../src/ui/dialog"
++import { ToastProvider } from "../../../../src/ui/toast"
 +
-+// Solid 的 server test runtime 会让 scheduled.debounce 直接 no-op；只替换这一层
-+// 的 trailing timer，保留真实 DialogSessionList、SDK transport 和 renderer seam。
-+// timer 只恢复既有 150ms 提交契约，不放宽失败终态或改变请求顺序。
-+mock.module("@solid-primitives/scheduled", () => ({
-+  debounce: (callback: (value: string) => void, wait: number) => {
-+    let timer: ReturnType<typeof setTimeout> | undefined
-+    const schedule = (value: string) => {
-+      if (timer) clearTimeout(timer)
-+      timer = setTimeout(() => callback(value), wait)
-+    }
-+    return Object.assign(schedule, { clear: () => timer && clearTimeout(timer) })
-+  },
-+  leadingAndTrailing: (_scheduler: unknown, callback: (...args: unknown[]) => void) => callback,
-+  throttle: (callback: (...args: unknown[]) => void) => callback,
-+}))
-+
-+const { DialogSessionList } = await import("@/cli/cmd/tui/component/dialog-session-list")
-+// module mock 只服务本文件的 Solid server runtime，测试结束必须恢复全局模块注册。
-+afterAll(() => mock.restore())
-+
++// #561：目标 createDebouncedSignal 是原生 setTimeout 实现（非 @solid-primitives/scheduled），
++// 无需模块 mock；真实 150ms 提交契约直接参与渲染级断言。
++const { DialogSessionList } = await import("../../../../src/component/dialog-session-list")
 +// 用例共享原生 renderer，串行运行才能把输入、frame 和 cleanup 保持在同一生命周期内。
 +const test = baseTest.serial
 +const sessionID = "ses_search_failure"
 +const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/
-+
 +test("title HTTP failure ends search without starting a scan", async () => {
 +  // schema-valid 503 必须在 Response.ok 分支终止；plain-text 503 会因 json() 误入 catch。
 +  // scan 故意 pending：若 early-return 缺失，组件会停在 Searching 而不是 Not Found。
@@ -751,12 +781,13 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +  const pendingScan = new Promise<Response>((resolve) => {
 +    releaseScan = () => resolve(json({ sessions: [], nextCursor: null, done: true }))
 +  })
-+
 +  await withSessionList({
 +    title: () => json([], { status: 503 }),
++    // scan 永不返回：Not Found 证明组件没等 scan 就终止。
 +    scan: () => pendingScan,
 +    run: async ({ app }) => {
 +      await enterSearch(app, "needle")
++      // INV-03 断言点：Not Found 而非 Searching——证明 title 失败终止于 ok 分支。
 +      const frame = await waitForFrame(app, (value) => value.includes("Not Found needle"))
 +      expect(frame).not.toContain("Search failed")
 +      expect(frame).not.toMatch(SPINNER)
@@ -764,7 +795,6 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +  })
 +  releaseScan()
 +})
-+
 +test("scan HTTP failure stops later scans and preserves visible title hits", async () => {
 +  // 第一页 503 带 nextCursor；第二页若被请求会渲染 Forbidden later scan。
 +  // 公开 Spinner 先出现后消失，证明 complete 而不是停在 partial。
@@ -773,6 +803,7 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    title: () => json([sessionInfo()]),
 +    scan: () => {
 +      scanCount += 1
++      // 第一页带 nextCursor 的 503：错误页也必须终止分页链。
 +      if (scanCount === 1) {
 +        return json(
 +          {
@@ -791,17 +822,18 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    },
 +    run: async ({ app }) => {
 +      await enterSearch(app, "needle")
++      // title hits 必须先可见：error complete 不清空已展示集合（INV-12）。
 +      await waitForFrame(app, (value) => value.includes("Visible search session") && SPINNER.test(value))
 +      const frame = await waitForFrame(
 +        app,
 +        (value) => value.includes("Visible search session") && !SPINNER.test(value),
 +      )
++      // 第二页 503 后不允许第三页：串行 keyset 在 error 终态停止（INV-04）。
 +      expect(frame).not.toContain("Forbidden later scan")
 +      expect(frame).not.toContain("Search failed")
 +    },
 +  })
 +})
-+
 +test("successful empty search still shows Not Found", async () => {
 +  // 失败路径不得改写成功空结果文案；用户侧 empty 文案必须保持 Not Found。
 +  await withSessionList({
@@ -809,15 +841,16 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    scan: () => json({ sessions: [], nextCursor: null, done: true }),
 +    run: async ({ app }) => {
 +      await enterSearch(app, "needle")
++      // 成功空结果走同一文案——失败路径不得污染空态合同（INV-05/10）。
 +      const frame = await waitForFrame(app, (value) => value.includes("Not Found needle"))
 +      expect(frame).not.toContain("Search failed")
 +      expect(frame).not.toMatch(SPINNER)
 +    },
 +  })
 +})
-+
 +test("query edit aborts the previous title request signal", async () => {
 +  // 改词必须 abort 旧 transport；只观察公开 RequestInit.signal，不读组件私有状态。
++  // 两个 promise 门阀保证新旧两代 title 都真实到达后才断言 abort。
 +  let oldSignal!: AbortSignal
 +  let oldTitleSeen!: () => void
 +  const oldTitleReady = new Promise<void>((resolve) => {
@@ -827,8 +860,8 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +  const newTitleReady = new Promise<void>((resolve) => {
 +    newTitleSeen = resolve
 +  })
-+
 +  await withSessionList({
++    // 首个 title 挂起持有旧 signal；改词后第二个立即返回。
 +    title: (_url, init) => {
 +      const signal = init?.signal
 +      if (!signal) throw new Error("title request missing AbortSignal")
@@ -846,12 +879,12 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +      await oldTitleReady
 +      await replaceFilter(app, "old", "new")
 +      await newTitleReady
++      // 旧 signal 公开可观察地 abort——改词即断链（INV-01）。
 +      await waitFor(() => oldSignal.aborted)
 +      await waitForFrame(app, (value) => value.includes("Fresh new result") && !SPINNER.test(value))
 +    },
 +  })
 +})
-+
 +test("late old title response cannot rewind a completed new query", async () => {
 +  // transport 故意忽略 abort 并迟到；post-await signal.aborted 必须挡住写回。
 +  let releaseOld!: (response: Response) => void
@@ -859,8 +892,8 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    releaseOld = resolve
 +  })
 +  let titleCount = 0
-+
 +  await withSessionList({
++    // 首个 title 完全受控：测试决定何时放行旧响应。
 +    title: (_url, init) => {
 +      titleCount += 1
 +      if (titleCount === 1) {
@@ -876,7 +909,9 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +      await waitFor(() => titleCount === 1)
 +      await replaceFilter(app, "old", "new")
 +      await waitForFrame(app, (value) => value.includes("Fresh new result") && !SPINNER.test(value))
++      // 迟到响应只持旧引用；写回前唯一守卫是 post-await abort 检查（INV-02）。
 +      releaseOld(json([sessionInfo({ id: "ses_stale_old", title: "Stale old result" })]))
++      // 50ms 覆盖渲染批：若旧响应写回，frame 必然出现 Stale 文本。
 +      await Bun.sleep(50)
 +      await app.renderOnce()
 +      const frame = app.captureCharFrame()
@@ -886,19 +921,19 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    },
 +  })
 +})
-+
 +test(
 +  "disposed list does not start progressive search after closed-over refetch",
 +  async () => {
 +    // 生产 recover：dialog.replace 工厂卸载旧 list，旧闭包 onDelete 仍可能调用 refetchSearch。
 +    // 预创建 JSX 的 owner 不在 dialog stack，clear/replace 不会 dispose；必须 factory 挂载。
++    // 30s 上限：本用例含两次确认帧与 workspace 联动，慢机器需要更宽裕的预算。
 +    let titleCount = 0
 +    let liveSignal!: AbortSignal
 +    let scanCount = 0
 +    let deleteCalls = 0
 +    let removeCalls = 0
-+
 +    await withSessionList({
++      // title 立即返回但 scan 挂起：保证 replace 时 controller 仍存活。
 +      title: (_url, init) => {
 +        titleCount += 1
 +        const signal = init?.signal
@@ -916,6 +951,7 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +        return neverResponse(signal)
 +      },
 +      fetch: (url, request, init) => {
++        // workspace 元数据驱动 error 状态：recover 面板由此出现。
 +        const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
 +        if (url.pathname === "/experimental/workspace") {
 +          return json([
@@ -949,15 +985,14 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +          4_000,
 +          `first scan live controller (scan=${scanCount} title=${titleCount})`,
 +        )
-+
-+        // 两次 ctrl+d：确认删除；workspace 会话失败后 recover 会 replace 卸载旧 list。
++        // 删除失败触发 recover：dialog.replace 工厂卸载旧 list（生产 seam）。
 +        app.mockInput.pressKey("d", { ctrl: true })
 +        await waitForFrame(app, (value) => value.includes("again to confirm"), 4_000)
 +        app.mockInput.pressKey("d", { ctrl: true })
 +        await waitForFrame(app, (value) => value.includes("Failed to Delete Session"), 4_000)
 +        expect(deleteCalls).toBeGreaterThan(0)
++        // 卸载必须 abort 在途 controller——组件级 onCleanup 的可观察证据（INV-06b）。
 +        await waitFor(() => liveSignal.aborted, 4_000, "abort after recover dialog.replace")
-+
 +        const titleBeforeRefetch = titleCount
 +        // recover 选项用 mouse seam 确认；return 可能仍被 filter/keymap 吃掉。
 +        await clickVisibleText(app, "Delete workspace")
@@ -968,14 +1003,13 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +        )
 +        await Bun.sleep(100)
 +        await app.renderOnce()
-+        // disposed 后旧闭包 startSearch 必须 no-op；onDone 新 list 以空 search 挂载，不发 progressive title。
++        // disposed 后旧闭包 startSearch no-op：title 请求数不增。
 +        expect(titleCount).toBe(titleBeforeRefetch)
 +      },
 +    })
 +  },
 +  { timeout: 30_000 },
 +)
-+
 +async function withSessionList(input: {
 +  title: (url: URL, init?: RequestInit) => Response | Promise<Response>
 +  scan: (url: URL, init?: RequestInit) => Response | Promise<Response>
@@ -985,13 +1019,12 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    dialog: ReturnType<typeof useDialog>
 +  }) => Promise<void>
 +}) {
-+  const previousState = Global.Path.state
 +  await using state = await tmpdir()
-+  Global.Path.state = state.path
-+  // KV 文件是 Local/Sync provider 的真实启动输入，不预置它会把测试失败误判为搜索失败。
++  // #561：目标 TuiPaths 承载 state 目录（TestTuiContexts paths）；KV 文件仍是
++  // Local/Sync provider 的真实启动输入，不预置它会把测试失败误判为搜索失败。
 +  await Bun.write(`${state.path}/kv.json`, "{}")
-+
 +  const events = createEventSource()
++  // transport 路由保持单一入口：title/scan/杂项 fetch 都过同一 createFetch。
 +  const transport = createFetch((url, request, init) => {
 +    // title 与 scan 都从同一个真实 SDK transport 进入，避免只测函数级状态转换。
 +    if (url.pathname === "/session" && url.searchParams.get("searchMode") === "title") {
@@ -1002,16 +1035,17 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    }
 +    return input.fetch?.(url, request, init)
 +  })
-+
 +  let sync!: ReturnType<typeof useSync>
 +  let dialog!: ReturnType<typeof useDialog>
 +  let ready!: () => void
 +  const mounted = new Promise<void>((resolve) => {
 +    ready = resolve
 +  })
++  // 100x20 足够容纳列表与 dialog：frame 断言不受截断影响。
 +  const app = await testRender(
 +    () => (
 +      <Harness
++        state={state.path}
 +        fetch={transport.fetch}
 +        events={events.source}
 +        onReady={(nextSync, nextDialog) => {
@@ -1023,7 +1057,6 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    ),
 +    { width: 100, height: 20, footerHeight: 0, useThread: false },
 +  )
-+
 +  try {
 +    await mounted
 +    // Sync complete 是公开 readiness signal，防止输入落在首轮 Session fetch 之前。
@@ -1033,11 +1066,81 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    // 先停事件源再销毁 renderer，避免异步 bus 回调在 teardown 后写入 native frame。
 +    events.dispose()
 +    app.renderer.destroy()
-+    Global.Path.state = previousState
 +  }
 +}
-+
++function Harness(props: {
++  state: string
++  fetch: typeof globalThis.fetch
++  events: EventSource
++  onReady: (sync: ReturnType<typeof useSync>, dialog: ReturnType<typeof useDialog>) => void
++}) {
++  const renderer = useRenderer()
++  const config = createTuiResolvedConfig()
++  // provider 顺序镜像 TUI 真实依赖：SDK/Project/Sync 先就绪，Dialog 再挂载 Session list。
++  const keymap = createDefaultOpenTuiKeymap(renderer)
++  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
++  return (
++    // 路径经 TuiPaths 注入：目标无 Global.Path 全局可变状态。
++    <TestTuiContexts directory={props.state} paths={{ home: props.state, state: props.state, worktree: props.state }}>
++      <OpencodeKeymapProvider keymap={keymap}>
++        <ArgsProvider>
++          <ExitProvider exit={() => {}}>
++            <KVProvider>
++              <RouteProvider initialRoute={{ type: "home" }}>
++                <TuiConfigProvider config={config}>
++                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
++                    <PermissionProvider>
++                      <ProjectProvider>
++                        <SyncProvider>
++                          <ThemeProvider mode="dark">
++                            <ToastProvider>
++                              <LocalProvider>
++                                <DialogProvider>
++                                  <OpenSessionList onReady={props.onReady} />
++                                </DialogProvider>
++                              </LocalProvider>
++                            </ToastProvider>
++                          </ThemeProvider>
++                        </SyncProvider>
++                      </ProjectProvider>
++                    </PermissionProvider>
++                  </SDKProvider>
++                </TuiConfigProvider>
++              </RouteProvider>
++            </KVProvider>
++          </ExitProvider>
++        </ArgsProvider>
++      </OpencodeKeymapProvider>
++    </TestTuiContexts>
++  )
++}
++function OpenSessionList(props: {
++  onReady: (sync: ReturnType<typeof useSync>, dialog: ReturnType<typeof useDialog>) => void
++}) {
++  const dialog = useDialog()
++  const sync = useSync()
++  onMount(() => {
++    props.onReady(sync, dialog)
++    // 生产 app/recover 都传 factory；预创建 JSX 的 owner 不在 dialog stack，clear 不会 dispose。
++    dialog.replace(() => <DialogSessionList />)
++  })
++  return null
++}
++function sessionInfo(extra: Partial<SessionInfo> = {}) {
++  // fixture 使用稳定的 SessionID 与标题，响应体仍由 SDK test transport 通过公开 fetch 返回。
++  return {
++    id: sessionID,
++    slug: "search-failure",
++    projectID: "proj_test",
++    directory,
++    title: "Visible search session",
++    version: "1.0.0",
++    time: { created: 1, updated: 1 },
++    ...extra,
++  } satisfies SessionInfo
++}
 +async function enterSearch(app: Awaited<ReturnType<typeof testRender>>, text: string) {
++  // 等 Sessions 标题：dialog 首帧完成后输入才可靠。
 +  await waitForFrame(app, (frame) => frame.includes("Sessions"))
 +  // DialogSelect 在 ref 后延迟 1ms focus；等待真实 focus tick，避免文字被 renderer 丢弃。
 +  await Bun.sleep(10)
@@ -1046,8 +1149,8 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +  await app.mockInput.pasteBracketedText(text)
 +  await waitForFrame(app, (frame) => frame.includes(text))
 +}
-+
 +async function replaceFilter(app: Awaited<ReturnType<typeof testRender>>, from: string, to: string) {
++  // 逐键退格走真实 keymap：绕过它会漏掉输入焦点的边角行为。
 +  for (let i = 0; i < from.length; i++) {
 +    app.mockInput.pressKey("BACKSPACE")
 +    await app.renderOnce()
@@ -1055,8 +1158,8 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +  await app.mockInput.pasteBracketedText(to)
 +  await waitForFrame(app, (frame) => frame.includes(to))
 +}
-+
 +function neverResponse(signal: AbortSignal) {
++  // 挂起到 abort：供「迟到/停止后」两类竞态断言复用。
 +  return new Promise<Response>((resolve, reject) => {
 +    if (signal.aborted) {
 +      reject(new DOMException("Aborted", "AbortError"))
@@ -1069,8 +1172,8 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    )
 +  })
 +}
-+
 +async function waitFor(predicate: () => boolean, timeout = 2_000, label = "Session list signal") {
++  // 轮询公开信号而非固定 sleep：慢机器上不产生竞态假绿。
 +  const deadline = Date.now() + timeout
 +  // 轮询的是请求/同步状态等可观察信号，避免慢机器上的固定 sleep 竞态。
 +  while (!predicate()) {
@@ -1078,7 +1181,6 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    await Bun.sleep(10)
 +  }
 +}
-+
 +async function waitForFrame(
 +  app: Awaited<ReturnType<typeof testRender>>,
 +  predicate: (frame: string) => boolean,
@@ -1094,7 +1196,6 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +    await Bun.sleep(10)
 +  }
 +}
-+
 +async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
 +  // mockMouse 使用当前 char frame 的 0-based 坐标；先落帧再点，避免点到旧布局。
 +  const frame = await waitForFrame(app, (value) => value.includes(text), 4_000)
@@ -1108,122 +1209,42 @@ index 0000000000000000000000000000000000000000..1af4205b3c5ac92de3a6fe8d15e5ccfc
 +  await app.mockMouse.click(targetX, y)
 +  await app.renderOnce()
 +}
-+
-+function Harness(props: {
-+  fetch: typeof globalThis.fetch
-+  events: SDKTestTransport["events"]
-+  onReady: (sync: ReturnType<typeof useSync>, dialog: ReturnType<typeof useDialog>) => void
-+}) {
-+  const renderer = useRenderer()
-+  const config = createTuiResolvedConfig()
-+  // provider 顺序镜像 TUI 真实依赖：SDK/Project/Sync 先就绪，Dialog 再挂载 Session list。
-+  const keymap = createDefaultOpenTuiKeymap(renderer)
-+  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
-+
-+  return (
-+    <OpencodeKeymapProvider keymap={keymap}>
-+      <ArgsProvider>
-+        <ExitProvider>
-+          <KVProvider>
-+            <ToastProvider>
-+              <RouteProvider initialRoute={{ type: "home" }}>
-+                <TuiConfigProvider config={config}>
-+                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
-+                    <ProjectProvider>
-+                      <SyncProvider>
-+                        <ThemeProvider mode="dark">
-+                          <LocalProvider>
-+                            <DialogProvider>
-+                              <CommandPaletteProvider>
-+                                <OpenSessionList onReady={props.onReady} />
-+                              </CommandPaletteProvider>
-+                            </DialogProvider>
-+                          </LocalProvider>
-+                        </ThemeProvider>
-+                      </SyncProvider>
-+                    </ProjectProvider>
-+                  </SDKProvider>
-+                </TuiConfigProvider>
-+              </RouteProvider>
-+            </ToastProvider>
-+          </KVProvider>
-+        </ExitProvider>
-+      </ArgsProvider>
-+    </OpencodeKeymapProvider>
-+  )
-+}
-+
-+function OpenSessionList(props: {
-+  onReady: (sync: ReturnType<typeof useSync>, dialog: ReturnType<typeof useDialog>) => void
-+}) {
-+  const dialog = useDialog()
-+  const sync = useSync()
-+  onMount(() => {
-+    props.onReady(sync, dialog)
-+    // 生产 app/recover 都传 factory；预创建 JSX 的 owner 不在 dialog stack，clear 不会 dispose。
-+    dialog.replace(() => <DialogSessionList />)
-+  })
-+  return null
-+}
-+
-+function sessionInfo(extra: Partial<SessionInfo> = {}) {
-+  // fixture 使用稳定的 SessionID 与标题，响应体仍由 SDK test transport 通过公开 fetch 返回。
-+  return {
-+    id: sessionID,
-+    slug: "search-failure",
-+    projectID: "proj_test",
-+    directory,
-+    title: "Visible search session",
-+    version: "1.0.0",
-+    time: { created: 1, updated: 1 },
-+    ...extra,
-+  } satisfies SessionInfo
-+}
+
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
-index db432320334af99f48238e8068ed64e3cc113a20..0ce1978769b7f2b815c504f7580bffd9593e51f9 100644
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1383,19 +1383,29 @@ const scenarios: Scenario[] = [
+@@ -1727,15 +1727,21 @@ const scenarios: Scenario[] = [
        // 空 sessionIDs 返回空对象
        check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
      }),
--  // gate 差集登记：progressive searchScan 路由烟测（域正确性由 session-list 覆盖）
-+  // gate 差集登记 + progressive searchScan 公共端点覆盖（域正确性亦由 session-list 覆盖）。
-+  // batch=100 是候选窗口上限；隔离库只有一个 seed Session，应在一页耗尽。
-+  // 终态 cursor 必须为空，证明 HTTP 响应走完真实的 done contract。
+-  // #558：session.search.scan gate 差集登记——POST 载荷为全库扫描（非单会话），断言集合返回形态。
++  // #561：session.search.scan seeded progressive 契约——seeded session 必须命中且单批扫尽（done=true、无后续 cursor）。
    http.protected
      .post("/session/search/scan", "session.search.scan")
+-    .at((ctx) => ({ path: "/session/search/scan", headers: ctx.headers(), body: { search: "httpapi-exercise-scan" } }))
 +    .seeded((ctx) => ctx.session({ title: "Progressive search session" }))
-     .at((ctx) => ({
-       path: route("/session/search/scan", {}),
-       headers: ctx.headers(),
--      body: { search: "httpapi-exercise-scan" },
-+      body: { search: "Progressive", batch: 100 },
-     }))
--    .json(200, (body) => {
-+    .json(200, (body, ctx) => {
-       object(body)
--      check(Array.isArray(body.sessions), "search scan should return sessions array")
--      check(typeof body.done === "boolean", "search scan should return done boolean")
--      check("nextCursor" in body, "search scan should return nextCursor")
-+      array(body.sessions)
++    .at((ctx) => ({ path: "/session/search/scan", headers: ctx.headers(), body: { search: "Progressive", batch: 100 } }))
+     .json(200, (body) => {
+-      const result = body as { sessions?: unknown[]; done?: boolean; nextCursor?: unknown }
++      const result = body as { sessions?: { title?: string }[]; done?: boolean; nextCursor?: unknown }
+       check(Array.isArray(result.sessions), "search scan should return sessions array")
+-      check(typeof result.done === "boolean", "search scan should report done boolean")
+-      check(result.nextCursor !== undefined, "search scan should include nextCursor")
++      // seeded 命中是路由到真实 handler 的证据：仅形态断言无法区分代理与实现。
 +      check(
-+        body.sessions.some(
-+          (item) =>
-+            isRecord(item) && item.id === ctx.state.id && item.title === "Progressive search session",
-+        ),
-+        "search scan should return the seeded title match",
++        (result.sessions ?? []).some((s) => s.title === "Progressive search session"),
++        "search scan should hit the seeded session title",
 +      )
-+      check(body.done === true, "single seeded page should complete the scan")
-+      check(body.nextCursor === null, "completed scan should not return a cursor")
++      check(result.done === true, "search scan should finish in one batch for the seeded corpus")
++      check(result.nextCursor === null, "search scan should end with a null nextCursor")
      }),
    http.protected
      .post("/tui/append-prompt", "tui.appendPrompt")
+
 diff --git a/packages/opencode/test/server/workspace-routing.test.ts b/packages/opencode/test/server/workspace-routing.test.ts
-index a921ae2774c56f52482238e29e87a68178c31fd8..93861f63c9a61ac00b55716972cc612ad8d010cf 100644
 --- a/packages/opencode/test/server/workspace-routing.test.ts
 +++ b/packages/opencode/test/server/workspace-routing.test.ts
-@@ -46,6 +46,17 @@ describe("getWorkspaceRouteSessionID", () => {
+@@ -51,6 +51,17 @@ describe("getWorkspaceRouteSessionID", () => {
      expect(getWorkspaceRouteSessionID(url)).toBeNull()
    })
  

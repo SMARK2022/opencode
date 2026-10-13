@@ -46,9 +46,10 @@ index 1111111111..2222222222 100644
  
  // 格式化 token 数为人类可读的 k/m 简写
  function formatTokens(tokens: number) {
-@@ -259,10 +266,12 @@
+@@ -259,10 +266,13 @@
  
    // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
++  // #157：inputRaw 的响应式依赖由深快照建立，后续 produce 内的 raw 增量可精确触发重算
    const inputRaw = createMemo(() => {
 -    // 展开拷贝消息数组：避免直接引用 sync 内部状态，防止后续 mutation 影响响应式追踪
 -    const messages = [...(sync.data.message[props.sessionID] ?? [])]

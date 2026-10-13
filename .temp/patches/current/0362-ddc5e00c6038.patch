@@ -18,20 +18,6 @@ Provider.Service 缓存（不触碰 SessionRunState），发 global.disposed
 重建缓存并获取新密钥。configUpdate 路径保留旧行为（已知限制）。
 
 
-diff --git a/packages/app/src/components/dialog-connect-provider.tsx b/packages/app/src/components/dialog-connect-provider.tsx
-index 6499642b3..c96999da0 100644
---- a/packages/app/src/components/dialog-connect-provider.tsx
-+++ b/packages/app/src/components/dialog-connect-provider.tsx
-@@ -498,7 +498,8 @@ function ProviderConnection(props: {
-   })
- 
-   async function complete() {
--    await serverSDK().client.global.dispose()
-+    // #362：不再调 global.dispose()——服务端 authSet/callback handler 已刷新 Provider 缓存。
-+    // global.disposed 事件会触发 bootstrap.refetch() 使 UI 获取最新 provider 列表。
-     dialog.close()
-     showToast({
-       variant: "success",
 diff --git a/packages/app/src/components/settings-providers.tsx b/packages/app/src/components/settings-providers.tsx
 index bcd30edbc..51625b214 100644
 --- a/packages/app/src/components/settings-providers.tsx
@@ -151,24 +137,20 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/provi
 index e1377b6f7..40acd5a6e 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts
-@@ -2,7 +2,7 @@ import { ProviderAuth } from "@/provider/auth"
- import { Config } from "@/config/config"
+@@ -3,4 +3,5 @@ import { ProviderAuth } from "@/provider/auth"
  import { ModelsDev } from "@opencode-ai/core/models-dev"
  import { Provider } from "@/provider/provider"
--
+ import { Auth } from "@/auth"
 +import { refreshProviderCaches } from "@/server/global-lifecycle"
- import { mapValues } from "remeda"
- import { Effect, Schema } from "effect"
- import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
-@@ -101,6 +101,8 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
+ 
+@@ -102,4 +103,6 @@ import { ProviderAuth } from "@/provider/auth"
+           method: ctx.payload.method,
            code: ctx.payload.code,
          }),
        )
 +      // #362：OAuth 回调内部已写入 auth，刷新 Provider 缓存使新凭据立即生效
 +      yield* refreshProviderCaches()
        return true
-     })
- 
 diff --git a/packages/opencode/test/fake/provider.ts b/packages/opencode/test/fake/provider.ts
 index 1dbfa6fa7..113fe8c7c 100644
 --- a/packages/opencode/test/fake/provider.ts

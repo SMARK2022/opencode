@@ -1,7 +1,7 @@
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -365,6 +365,8 @@ jobs:
+@@ -364,6 +364,8 @@ jobs:
      runs-on: ubuntu-latest
      steps:
        - uses: actions/checkout@v4
@@ -9,8 +9,8 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 +          fetch-depth: 0 # release notes 需要完整 commit 历史 + 全部 tag
  
        - name: Download release workflow artifacts
-         # #156：checksums job 汇总各平台 artifact
-@@ -400,25 +402,82 @@ jobs:
+          # #156：merge-multiple 平铺目录：免逐平台拼路径，find 可枚举全部资产
+@@ -401,25 +403,85 @@ jobs:
            echo "==== checksums.txt ===="
            cat checksums.txt
  
@@ -35,10 +35,12 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 +            if [ -z "$PREV_TAG" ]; then
 +              echo "（首次发布）"
 +              git log --format="%h %s" --reverse | head -50
++                # 首次发布无上界：head -50 防止全量历史撑爆 release body
 +            else
 +              # 版本 bump commit：首个把当前版本号写进 package.json 的提交
 +              BUMPCOMMIT=$(git log "${PREV_TAG}..HEAD" --reverse --format="%H" \
 +                -S "\"version\": \"${VERSION}\"" -- packages/opencode/package.json | head -1)
++                # -S pickaxe 把检索限定在 package.json 首个引入该版本串的提交，避免误抓 changelog 同名文本
 +
 +              if [ -n "$BUMPCOMMIT" ]; then
 +                # 有版本 bump：分两节，避免上个版本期间积累的 commit 与本版本新增混在一起
@@ -52,14 +54,14 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 +
 +                ACCUMULATED=$(git log "${PREV_TAG}..${BUMPCOMMIT}" --format="%h %s" --reverse)
 +                if [ -n "$ACCUMULATED" ]; then
-+                  echo "### 自 \`${PREV_TAG}` 积累"
++                  echo "### 自 \`${PREV_TAG}\` 积累"
 +                  echo ""
 +                  echo "$ACCUMULATED"
 +                  echo ""
 +                fi
 +              else
 +                # 无版本 bump（同版本重新 push 或手动覆盖版本号）：单节展示全部增量
-+                echo "自 \`${PREV_TAG}` 以来的变更："
++                echo "自 \`${PREV_TAG}\` 以来的变更："
 +                echo ""
 +                git log "${PREV_TAG}..HEAD" --format="%h %s" --reverse
 +                echo ""
@@ -69,13 +71,14 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 +            echo "---"
 +            echo "自动构建 from ${{ github.sha }}"
 +          } > release-notes.md
++            # 两分支输出统一经块重定向落盘，保证 release create/edit 读到完整 markdown
 +
 +          echo "==== release-notes.md ===="
 +          cat release-notes.md
 +
 +      - name: Create or update GitHub Release
          env:
-           # #156：Actions 内置 token 注入 GH_TOKEN
+           # #156：GITHUB_TOKEN 而非 PAT：同仓库 release 写入已授权且永不过期
            GH_TOKEN: ${{ github.token }}
            TAG: ${{ needs.version.outputs.tag }}
 -          VERSION: ${{ needs.version.outputs.version }}

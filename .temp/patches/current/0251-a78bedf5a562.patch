@@ -117,10 +117,12 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 +      // 不能挤掉这个已持久化的 tail 边界。
 +      yield* ssn.updatePart({ ...firstCompactionPart!, tail_start_id: anchor.id })
        yield* createSummaryAssistantMessage(session.id, firstCompaction!, test.directory, "summary ".repeat(800))
-@@ -1603,3 +1706,5 @@
--      msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
-+      // #251：第二次 process 传 raw stream——数据库真实形态；过滤由 process
-+      // 内部的 filterCompacted 统一承担（与生产上传路径同一语义）
-+      msgs = yield* MessageV2.stream(session.id)
+@@ -1740,5 +1740,7 @@
+ 
+      // #242：同上——u4 后的新 marker 只在原始 messages 可见
+-      msgs = yield* ssn.messages({ sessionID: session.id })
++      // #251：第二次 process 传原始消息（时间正序，与生产调用同形状）
++      // 过滤由 process 内部的 filterCompacted 统一承担（与生产上传路径同一语义）
++      msgs = yield* ssn.messages({ sessionID: session.id })
       parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()

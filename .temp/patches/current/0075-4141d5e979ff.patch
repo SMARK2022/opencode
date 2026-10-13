@@ -31,16 +31,21 @@ index d32678bf5f..20ebf61fe4 100644
  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
    if (typeof ms !== "number" || ms <= 0) return res
    if (!res.body) return res
-@@ -1239,7 +1254,8 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
+@@ -1271,9 +1286,13 @@
      family: model.family,
      api: {
        id: model.id,
 -      url: model.provider?.api ?? provider.api ?? "",
 +      // models.dev 模型：写入解析后的默认 api.url
-+url: apiUrl({ npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible", api: model.provider?.api ?? provider.api }),
-       npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
-     },
-     status: model.status ?? "active",
++      url: apiUrl({
++        npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
++        api: model.provider?.api ?? provider.api,
++      }),
+       npm:
+         cloudflareGatewayNpm(provider.id, model.id) ??
+         model.provider?.npm ??
+         provider.npm ??
+         "@ai-sdk/openai-compatible",
 @@ -1450,7 +1466,27 @@ const layer = Layer.effect(
            const existing = baseType ? database[baseType] : database[providerID]
            // 克隆现有提供者的模型，覆盖 providerID 和 api 配置

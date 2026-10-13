@@ -1,23 +1,23 @@
 From b46e22cc0c2a73557bd54ae19ebe1c2a76dd7f7a Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 5 Jul 2026 14:51:02 +0800
+Date: Mon, 6 Jul 2026 21:05:41 +0800
 Subject: [PATCH] =?UTF-8?q?fix(shell):=20=E5=9B=9E=E9=80=80=20detached=20?=
- =?UTF-8?q?=E6=94=B9=E5=8A=A8=EF=BC=8C=E4=BF=9D=E6=8C=81=20process.platfor?=
- =?UTF-8?q?m=20!=3D=3D=20"win32"?=
+ =?UTF-8?q?=E6=94=B9=E5=8A=A8=EF=BC=8C=E4=BF=9D=E6=8C=81=20process?=
+ =?UTF-8?q?=2Eplatform=20!=3D=3D=20=22win32=22?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-detached:false 在 macOS 上破坏了 abort/timeout 的进程组隔离，导致
-5 个 abort/timeout 测试超时失败。detached:true 是独立 kill 子进程的
-必要条件。macOS CI 上 echo test 偶发空输出是 Bun 调度抖动导致的
-flaky test，不应通过移除 detached 来修。
-
+适配：V1 shell.ts 重锚至 703（前导含 [local-smark] 注释行，删尾部空白上下文行）；
+V2 core/bash.ts 按 B-01 对称契约同步回退——源回退理由（detached:true 是 abort/timeout
+进程组隔离硬性依赖，detached:false 致 5 个 abort/timeout 测试超时；macOS 竞态是
+Bun 调度抖动 flaky）为平台机制级，对经同一 spawner 的 V2 同样成立；后续链（0475
+测试侧补偿、0590 spawner 根因修复）再确认该决策。两侧 0473 的 linux-only 注释
+随回退替换为镜像回退理由，避免残留错误陈述。
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index a0c30f28baa08b39983c4ca8b2874ac2c3a2d379..02f494f9ec3d883b8afda24aa83cc8110567077d 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -451,15 +451,16 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
+@@ -703,15 +703,16 @@
+   // [local-smark] 不使用 spawn 的 shell 选项；改为显式传递 shell 路径和 -c 参数。
    // Bun macOS 上 shell 选项 + detached 组合存在 stdout 管道未建立的 bug，
    // 导致 echo test 退出码 0 但输出为空。显式 -c 在所有平台行为等价且避免该 bug。
    // cmd.exe 需保留 /d（禁用 AutoRun 注册表命令）和 /s（规范引号剥离）标志。
@@ -36,4 +36,18 @@ index a0c30f28baa08b39983c4ca8b2874ac2c3a2d379..02f494f9ec3d883b8afda24aa83cc811
 +    detached: process.platform !== "win32",
    })
  }
- 
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -160,7 +161,7 @@
+                 shell,
+                 stdin: "ignore",
+-                // V2 canonical bash 与 V1 shell.ts 同一产品职责：macOS detached:true 的 stdout
+-                // 管道竞态两侧同步收敛为仅 Linux detach；kill 降级由 spawner 既有
+-                // killGroup→killOne 回退承载，与 V1 接受的权衡同构。
+-                detached: process.platform === "linux",
++                // V2 canonical bash 与 V1 shell.ts 同一产品职责：detached:true 是 abort/timeout
++                // 正确 kill 子进程的必要条件（独立进程组），两侧同步保持 !== "win32"；
++                // macOS 偶发空输出属订阅时序 flaky，不以移除 detached 来修。
++                detached: process.platform !== "win32",
+                 forceKillAfter: Duration.seconds(3),

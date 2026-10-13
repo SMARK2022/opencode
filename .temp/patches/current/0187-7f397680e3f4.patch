@@ -300,27 +300,25 @@ new file mode 100644
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -58,6 +58,13 @@ import { Prompt, type PromptRef } from "../../component/prompt"
+@@ -58,5 +58,11 @@ import { Prompt, type PromptRef } from "../../component/prompt"
  import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
  import { ConnectionError } from "../../util/connection-error"
  import { previewDiff } from "../../util/preview-diff"
 +import {
++  // #187：formatPendingCounts/formatPendingPathLabel 仅供测试消费，不在生产 index 导入
 +  createPendingToolInputParser,
-+  formatPendingCounts,
-+  formatPendingPathLabel,
 +  PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
 +  type PendingToolInputStats,
 +} from "./pending-tool-input"
- import {
-   hasStreamingAssistant,
-   pendingAssistantID,
+ // #154：pending/streaming 判定抽到 util，便于单测与去重
+ import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
 @@ -2114,12 +2121,72 @@ function GenericTool(props: ToolProps) {
    )
  }
  
 +
-+// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats
-+function createPendingToolInputStats(part: () => ToolPart) {
++// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats；导出供行为测试直接驱动
++export function createPendingToolInputStats(part: () => ToolPart) {
 +  const [stats, setStats] = createSignal<PendingToolInputStats>()
 +  let parser = createPendingToolInputParser(part().tool)
 +  let key = ""
@@ -436,7 +434,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  const writePending = createMemo(() => {
 +    const stats = writePendingStats()
 +    const filePath = pendingPath(pathFormatter, stats?.filePath)
-+    if (!filePath && !stats?.added) return "Preparing write..."
++    if (!filePath && !stats?.added) return "Preparing write…"
 +    return (
 +      <>
 +        Write
@@ -448,15 +446,11 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    // 文件内容展开/收缩：超过 10 行时默认收缩，点击展开
    const [expanded, setExpanded] = createSignal(false)
    const code = createMemo(() => {
-@@ -2638,7 +2728,7 @@ function Write(props: ToolProps) {
-       <Match when={true}>
-         <InlineTool
-           icon="←"
--          pending="Preparing write..."
-+          pending={writePending()}
-           complete={stringValue(props.input.filePath)}
-           part={props.part}
-         >
+@@ -2620,3 +2728,3 @@ function Write(props: ToolProps) {
+      <Match when={true}>
+-        <InlineTool icon="←" pending="Preparing write…" complete={stringValue(props.input.filePath)} part={props.part}>
++        <InlineTool icon="←" pending={writePending()} complete={stringValue(props.input.filePath)} part={props.part}>
+          Write {pathFormatter.format(stringValue(props.input.filePath))}
 @@ -2906,6 +2996,21 @@ function Edit(props: ToolProps) {
    const ctx = use()
    const { theme, syntax } = useTheme()
@@ -467,7 +461,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  const editPending = createMemo(() => {
 +    const stats = editPendingStats()
 +    const filePath = pendingPath(pathFormatter, stats?.filePath)
-+    if (!filePath && !stats?.added && !stats?.removed) return "Preparing edit..."
++    if (!filePath && !stats?.added && !stats?.removed) return "Preparing edit…"
 +    return (
 +      <>
 +        Edit
@@ -483,7 +477,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          </BlockTool>
        </Match>
        <Match when={true}>
--        <InlineTool icon="←" pending="Preparing edit..." complete={stringValue(props.input.filePath)} part={props.part}>
+-        <InlineTool icon="←" pending="Preparing edit…" complete={stringValue(props.input.filePath)} part={props.part}>
 +        <InlineTool icon="←" pending={editPending()} complete={stringValue(props.input.filePath)} part={props.part}>
            Edit {pathFormatter.format(stringValue(props.input.filePath))} {input({ replaceAll: props.input.replaceAll })}
          </InlineTool>
@@ -497,7 +491,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  // #187：stats 空回落 Preparing patch...；多文件用 fileCount
 +  const patchPending = createMemo(() => {
 +    const stats = patchPendingStats()
-+    if (!stats) return "Preparing patch..."
++    if (!stats) return "Preparing patch…"
 +    const filePath = pendingPath(pathFormatter, stats.filePath)
 +    return (
 +      <>
@@ -516,7 +510,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          </For>
        </Match>
        <Match when={true}>
--        <InlineTool icon="%" pending="Preparing patch..." failure="Patch failed" complete={false} part={props.part}>
+-        <InlineTool icon="%" pending="Preparing patch…" failure="Patch failed" complete={false} part={props.part}>
 +        <InlineTool icon="%" pending={patchPending()} failure="Patch failed" complete={false} part={props.part}>
            Patch
          </InlineTool>
@@ -525,13 +519,15 @@ diff --git a/packages/tui/test/routes/session/pending-tool-input.test.ts b/packa
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/routes/session/pending-tool-input.test.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,113 @@
 +import { describe, expect, test } from "bun:test"
++import { createRoot, createSignal } from "solid-js"
 +import {
 +  createPendingToolInputParser,
 +  formatPendingCounts,
 +  formatPendingPathLabel,
 +} from "../../../src/routes/session/pending-tool-input"
++import { createPendingToolInputStats } from "../../../src/routes/session/index"
 +
 +describe("pending tool input parser (#187)", () => {
 +  test("edit parser counts old/new lines from streamed raw JSON", () => {
@@ -613,3 +609,58 @@ new file mode 100644
 +    expect(formatPendingCounts(stats).length).toBeGreaterThan(0)
 +  })
 +})
++
++describe("pending tool input stats pipeline (#187)", () => {
++  // #187：createPendingToolInputStats 是 index.tsx 的有状态接线（signal+200ms 节流），
++  // #187：用 solid root 驱动 part signal 验证流式 raw → stats 的行为契约（B-01 修复）
++  const part = (raw: string) => ({ id: "p1", tool: "edit", state: { status: "pending", raw } })
++
++  test("throttles streamed raw into stats", async () => {
++    // #187：节流窗口内不更新，窗口后产出路径与 +/- 计数
++    let stats: (() => { filePath?: string; added: number; removed: number } | undefined) | undefined
++    const early: unknown[] = []
++    createRoot(() => {
++      const [p, setP] = createSignal(part(""))
++      stats = createPendingToolInputStats(p as never) as never
++      setP(() => part(JSON.stringify({ filePath: "src/a.ts", oldString: "x\ny\n", newString: "x\n" })) as never)
++      early.push((stats as () => unknown)())
++    })
++    expect(early[0]).toBeUndefined()
++    await new Promise((resolve) => setTimeout(resolve, 320))
++    const after = stats!()
++    expect(after?.filePath).toBe("src/a.ts")
++    expect(after?.removed).toBe(2)
++    expect(after?.added).toBe(1)
++  })
++})
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -231,6 +231,27 @@ describe("TUI inline tool wrapping", () => {
+  test("replaces pending copy when a tool fails before completion", async () => {
+    const frame = await renderFrame(() => <FailedPendingToolFixture />, { width: 72, height: 3 })
+    expect(frame).toContain("Patch failed")
+    expect(frame).not.toContain("Preparing patch")
+  })
++
++  test("pending fallback renders string pending with tilde prefix", async () => {
++    // #187：string pending 走单一 text 节点，complete 前保留 ~ 占位（B-01 修复）
++    const frame = await renderFrame(() => <InlineToolRow icon="←" complete={false} pending="Preparing write…">Write src/a.ts</InlineToolRow>, { width: 60, height: 3 })
++    expect(frame).toContain("~ Preparing write…")
++    // #187：pending 态 label 未就绪，仅 ~ 占位（complete/failed 分支才显示 label）
++  })
++
++  test("pending fallback renders JSX stats fragment directly", async () => {
++    // #187：JSX pending（PendingStats 形态）走 fallback 直渲染分支，不进 text 包裹（B-01 修复）
++    const frame = await renderFrame(
++      () => (
++        <InlineToolRow icon="←" complete={false} pending={<text>-2 +1</text>}>
++          Edit src/b.ts
++        </InlineToolRow>
++      ),
++      { width: 60, height: 3 },
++    )
++    expect(frame).toContain("-2 +1")
++    // #187：pending 态 label 未就绪；JSX 片段与 ~ 前缀同行渲染
++  })
+ 

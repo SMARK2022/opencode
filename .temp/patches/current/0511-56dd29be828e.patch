@@ -570,121 +570,125 @@ index 0000000000000000000000000000000000000000..c9802ebd836b9873adce7118d1017eac
 +5. Implementation audit.
 +
 +No production code is modified by this plan revision.
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 9a8b7722d074098bc78e76d72d388222891c8b76..751dbc7315b5253046ea4aaf9ef52461463d0d1d 100644
+index eb5313c9d..236719829 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -2,6 +2,7 @@ import { Effect, Option, Schema, Scope } from "effect"
- import { createReadStream } from "fs"
- import { createInterface } from "readline"
+@@ -1,6 +1,8 @@
+ // #188：成功 edit/write/apply_patch 后禁止再 read 确认，工具自身会报错
+ import { Effect, Option, Schema, Scope, Stream } from "effect"
  import { NonNegativeInt } from "@opencode-ai/core/schema"
++// #511：头采样指纹用于同版本判定，复用既有 4096B sample，零额外 I/O
 +import { Hash } from "@opencode-ai/core/util/hash"
  import * as path from "path"
  import * as Tool from "./tool"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
-@@ -83,6 +84,8 @@ type ReadMetadata = {
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -180,6 +182,9 @@ type ReadRangeMeta = {
    size: number
    modified: string
    modifiedMs: number
-+  // head-sample 内容身份；可选以兼容旧 part（无 DB/参数 schema 迁移）
++  // #511：可选内容指纹（头部采样 sha1）。仅前向写入：新读必带；历史缺失即证明不足，
++  // 同版本判定 fail-open 返回内容，禁止回退 size+mtime 弱键。
 +  fp?: string
    start: number
    end: number
    total: number
-@@ -223,11 +226,21 @@ function collectVisibleReads(messages: MessageV2.WithParts[], canonicalPath: str
+@@ -274,11 +279,25 @@ function collectVisibleReads(messages: Array<{ info: { role: string }; parts: an
    return reads
  }
  
-+// 版本键 = size + mtime + head-sample fp（非全文件完备）。三处 filter 必须共用此判定。
-+// 缺 fp = 证明不足 → 不得 suppress，禁止回退 size+mtime 弱键。
-+// Hash.fast 对 sample bytes 同步摘要；空文件 digest 空 Buffer，始终得到非空 hex。
-+function isSameFileVersion(a: ReadMetadata, b: ReadMetadata) {
-+  if (a.size !== b.size || a.modifiedMs !== b.modifiedMs) return false
-+  if (typeof a.fp !== "string" || a.fp.length === 0) return false
-+  if (typeof b.fp !== "string" || b.fp.length === 0) return false
-+  return a.fp === b.fp
++// #511：同版本判定 = size 相等 ∧ modifiedMs 相等 ∧ 双侧 fp 均为非空字符串 ∧ fp 相等。
++// 任一侧缺 fp 即不抑制（fail-open）——等长改写可用 utimes 还原 mtime，弱键不足以证明内容未变。
++function isSameFileVersion(a: ReadRangeMeta, b: ReadRangeMeta) {
++  return (
++    a.size === b.size &&
++    a.modifiedMs === b.modifiedMs &&
++    typeof a.fp === "string" &&
++    a.fp !== "" &&
++    typeof b.fp === "string" &&
++    b.fp !== "" &&
++    a.fp === b.fp
++  )
 +}
 +
- function findReadStub(visibleReads: ReadMetadata[], current: ReadMetadata) {
-   // Only suppress output when a non-stub read for the same file version is
-   // still visible in the active context. Compacted history and modified files
-   // fall through to a normal read.
--  const sameVersion = visibleReads.filter((read) => read.size === current.size && read.modifiedMs === current.modifiedMs)
-+  const sameVersion = visibleReads.filter((read) => isSameFileVersion(read, current))
-   const sameRange = sameVersion.find((read) => read.start === current.start && read.end === current.end)
+ // #142：决定是否 stub
+ function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
+   // #142：仅当同文件版本已在上下文可见时抑制输出
+-  // #142：仅同 size+mtime 视为同文件版本
+-  const sameVersion = visibleReads.filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
++  // #511：三处过滤共用 isSameFileVersion（size+mtime+fp），缺 fp 一律不命中
++  const sameVersion = visibleReads.filter((item) => isSameFileVersion(item, current))
+   // #142：完全相同 start-end 优先 stub_same_range
+   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
    if (sameRange) return { status: "stub_same_range_visible" as const }
- 
-@@ -241,7 +254,7 @@ function findReadStub(visibleReads: ReadMetadata[], current: ReadMetadata) {
- function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
-   let best: { start: number; end: number; lines: number } | undefined
-   for (const read of visibleReads) {
--    if (read.size !== current.size || read.modifiedMs !== current.modifiedMs) continue
-+    if (!isSameFileVersion(read, current)) continue
-     const start = Math.max(read.start, current.start)
-     const end = Math.min(read.end, current.end)
-     if (start > end) continue
-@@ -258,7 +271,7 @@ function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
- 
- // [local-smark] 计算请求范围内未被任何同版本已可见读取覆盖的行区间。
- // 复用 mergeRanges（src/util/range.ts）合并已覆盖区间后再做减法。
--// 正确性红线：必须做同版本 filter（size+modifiedMs）——collectVisibleReads
-+// 正确性红线：必须做同版本 filter（isSameFileVersion）——collectVisibleReads
- // 不做版本过滤，findOverlapNote/findReadStub 各自过滤。此处也必须过滤，
- // 否则会减算旧版本区间，错误地告诉模型"这些行没读过"。
- function computeUnreadRanges(
-@@ -267,7 +280,7 @@ function computeUnreadRanges(
+@@ -292,7 +311,7 @@ function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
+ // #142：计算 overlap note
+ function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
+   const overlaps = visibleReads
+-    .filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
++    .filter((item) => isSameFileVersion(item, current))
+     .map((item) => {
+       const start = Math.max(item.start, current.start)
+       const end = Math.min(item.end, current.end)
+@@ -317,9 +336,9 @@ function computeUnreadRanges(
+   visibleReads: ReadRangeMeta[],
+   current: ReadRangeMeta,
  ): Array<{ start: number; end: number }> {
-   // 收集同版本 visible reads 的区间
+-  // 收集同版本 visible reads 的区间
++  // 收集同版本 visible reads 的区间（#511：与 findReadStub/findOverlapNote 共用 isSameFileVersion）
    const covered = visibleReads
 -    .filter((r) => r.size === current.size && r.modifiedMs === current.modifiedMs)
 +    .filter((r) => isSameFileVersion(r, current))
      .map((r) => ({ start: r.start, end: r.end }))
    if (covered.length === 0) return [{ start: current.start, end: current.end }]
    // 合并已覆盖区间，再做减法得到未覆盖部分
-@@ -354,7 +367,7 @@ function renderReadStub(input: {
+@@ -415,7 +434,7 @@ function renderReadStub(input: {
    const offsetExit = reachedEof
      ? "No unread lines remain (end of file reached); use grep to locate symbols."
      : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
 -  // 两行高信息量文案。findReadStub 已经过 size+modifiedMs 同版本门控，故可断言
-+  // 两行高信息量文案。findReadStub 已经过 isSameFileVersion（size+mtime+fp）门控，故可断言
++  // 两行高信息量文案。isSameFileVersion（#511：size+mtime+fp）已门控同版本，故可断言
    // "上下文里的内容是最新版本"——这直接消除模型对"是否过期需重读"的疑虑，避免它
    // 把 stub 误读为"内容陈旧、需刷新"而重复请求同一范围（诊断：连续 13 次 stub 死循环）。
    // coveredBy 在 stub_covered_range_visible 分支恒非空（findReadStub 仅此时赋值），
-@@ -695,6 +708,8 @@ export const ReadTool = Tool.define(
-       const start = file.offset
-       const end = file.raw.length === 0 ? file.offset - 1 : file.offset + file.raw.length - 1
-       const canonicalPath = canonicalReadPath(filepath)
-+      // fp 复用已读 head sample，零额外 I/O；在 findReadStub 前写入 current 以便双侧比对。
+@@ -866,6 +885,8 @@ export const ReadTool = Tool.define<
+       }
+ 
+       // #142：构造当前读区间元数据供 stub/overlap
++      // #511：fp 由既有头部采样计算——sha1 完整 40 位 hex，不截断；sample 读取已付费，零额外 I/O。
 +      const fp = Hash.fast(Buffer.from(sample))
-       const current: ReadMetadata = {
-         path: filepath,
-         canonicalPath,
-@@ -702,6 +717,7 @@ export const ReadTool = Tool.define(
+       // #142：当前文件 size
+ const size = fileSizeOf(stat)
+       // #142：当前 mtime
+@@ -888,6 +909,8 @@ const current: ReadRangeMeta = {
          size,
          modified,
-         modifiedMs: versionMs,
+         modifiedMs: mtimeMs,
++        // #511：仅前向写入：新非 stub 读必带 fp；不回填历史 part（旧记录缺 fp 即 fail-open）
 +        fp,
          start,
          end,
          total: file.count,
-@@ -737,7 +753,7 @@ export const ReadTool = Tool.define(
+@@ -932,7 +955,7 @@ const stub = findReadStub(visibleReads, current)
+ 
        // [local-smark] 高重叠 suppress：当已可见读取与当前请求的重叠率 >= 80% 时，
-       // 返回 stub 而非仅 note。引导式文案告诉模型哪些行是新的、如何精确读取，
-       // 而非绝对禁止 "do NOT re-read"。内容 < 300 字符时不 suppress（见下方检查）。
+       // 直接返回 stub 而非仅 note。这减少了大量部分重叠的重复读取（如偏移微调的重复读）。
 -      // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
-+      // 仍走 isSameFileVersion 同版本门控（findOverlapNote 内部已检查）。
++      // 版本门控统一走 isSameFileVersion（#511：findOverlapNote 内部已检查，缺 fp 不命中）。
+       // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
        const overlapRange = findOverlapNote(visibleReads, current)
        if (overlapRange) {
-         const [overlapStart, overlapEnd] = overlapRange.split("-").map(Number)
+
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 55e6154f07f5da8e5475142f1b68f8f3f38423ad..032482d5a33dfbef6d32c3c1b10572f3f6184e08 100644
+index dab2fc3ae..c7c3a9d92 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -870,6 +870,75 @@ describe("tool.read visible context", () => {
+@@ -1076,6 +1076,75 @@ describe("tool.read visible context stubs", () => {
      }),
    )
  
-+  // 等长改写 + utimes 锁死 mtime：size/mtime 无法区分版本，必须靠 head-sample fp 失效 suppress。
++  // #511：等长改写 + utimes 锁死 mtime：size/mtime 无法区分版本，必须靠 head-sample fp 失效 suppress。
 +  it.live("does not stub when equal-size rewrite preserves mtime but head content changes", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
@@ -713,7 +717,7 @@ index 55e6154f07f5da8e5475142f1b68f8f3f38423ad..032482d5a33dfbef6d32c3c1b10572f3
 +    }),
 +  )
 +
-+  // 历史 read 缺 fp：证明不足，禁止回退到 size+mtime 弱键 suppress。
++  // #511：历史 read 缺 fp：证明不足，禁止回退到 size+mtime 弱键 suppress。
 +  it.live("does not stub when visible history matches size and mtime but lacks fp", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
@@ -733,7 +737,7 @@ index 55e6154f07f5da8e5475142f1b68f8f3f38423ad..032482d5a33dfbef6d32c3c1b10572f3
 +    }),
 +  )
 +
-+  // 未改文件时 suppress 收益必须保留：新 read 写入非空 fp，同版本同区间仍 stub。
++  // #511：未改文件时 suppress 收益必须保留：新 read 写入非空 fp，同版本同区间仍 stub。
 +  it.live("writes non-empty fp on non-stub reads and still stubs unchanged same range", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
@@ -753,6 +757,6 @@ index 55e6154f07f5da8e5475142f1b68f8f3f38423ad..032482d5a33dfbef6d32c3c1b10572f3
 +    }),
 +  )
 +
-   it.live("returns full content with a short note for significant overlap", () =>
+   // #142：显著重叠时返回全文并附 short overlap note
+   it.instance("returns full content with a short note for significant overlap", () =>
      Effect.gen(function* () {
-       const dir = yield* tmpdirScoped()

@@ -14,8 +14,8 @@ new file mode 100644
 +
 +// #184：tip 主列 paddingLeft2+paddingRight1=3
 +const SESSION_MAIN_HORIZONTAL_PADDING = 3
-+// #184：消息左边框+左 padding（assistant chrome）
-+const SESSION_MESSAGE_LEFT_CHROME = 4
++// #184：消息 TextPart paddingLeft=3；tip 无 v1.17.x 左边框，按现布局实测重推导
++const SESSION_MESSAGE_LEFT_CHROME = 3
 +// #184：tip viewport+content 各 paddingRight 1，合计 gutter 2
 +const SESSION_SCROLLBAR_GUTTER = 2
 +
@@ -36,10 +36,9 @@ new file mode 100644
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -15,6 +15,7 @@ import {
+@@ -15,5 +15,6 @@ import {
    useContext,
  } from "solid-js"
- import { Dynamic } from "solid-js/web"
 +import { sessionMessageContentWidth } from "./layout"
  import path from "node:path"
  import { mkdir, writeFile } from "node:fs/promises"
@@ -102,18 +101,18 @@ new file mode 100644
 +  test("does not subtract sidebar when overlay (narrow)", () => {
 +    // #184：窄屏侧栏 overlay，消息区应保留全宽扣 chrome
 +    const w = sessionMessageContentWidth({ terminalWidth: 80, sidebarInLayout: false, scrollbarEnabled: false })
-+    expect(w).toBe(80 - 3 - 4)
++    expect(w).toBe(80 - 3 - 3)
 +  })
 +
 +  test("subtracts docked sidebar on wide layout", () => {
 +    // #184：宽屏 docked 侧栏必须计入
 +    const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: false })
-+    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4)
++    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3)
 +  })
 +
 +  test("subtracts scrollbar gutter when enabled", () => {
 +    // #184：滚动条开启再扣 tip 双层 paddingRight 合计 2
 +    const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: true })
-+    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4 - 2)
++    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 2)
 +  })
 +})

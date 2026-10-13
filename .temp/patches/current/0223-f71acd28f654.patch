@@ -33,7 +33,7 @@ new file mode 100644
 index 0000000000..7af6e6361f
 --- /dev/null
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,144 @@
 +import { describe, expect, test } from "bun:test"
 +import type { ToolContext, PluginInput } from "@opencode-ai/plugin"
 +import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
@@ -43,7 +43,10 @@ index 0000000000..7af6e6361f
 +// tool 定义和 execute 行为，因此传入最小 mock。
 +// #223：插件在模块加载时就初始化 tool map——V2 的 tool() 工厂返回静态定义，
 +// 不依赖 Effect runtime，所以顶层 await 安全
++// #223：V2 Plugin.tool 为可选字段——测试依赖 tool map 存在，缺失即直接失败
 +const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
++const tools = plugin.tool
++if (!tools) throw new Error("plugin did not register tools")
 +
 +describe("vscode bridge plugin", () => {
 +  // #223：验证三个 notebook 变更工具在调用 bridge 前都经过各自专属权限 key；
@@ -80,7 +83,7 @@ index 0000000000..7af6e6361f
 +    // 测试中 ask 立即抛错，所以 execute 不会到达 call("/notebook/run", ...)
 +    // #223：timeoutMs 设为 1_000 确保即使 ask 意外放行，bridge 调用也快速超时
 +    await expect(
-+      plugin.tool.vscode_notebook_run.execute(
++      tools.vscode_notebook_run.execute(
 +        {
 +          filePath,
 +          cellId: "#VSC-12345678",
@@ -93,7 +96,7 @@ index 0000000000..7af6e6361f
 +    // #223：edit 工具先经过 vscode_notebook_edit 专属权限，再经过通用 edit 权限；
 +    // 专属 ask 抛错后不会到达 edit ask，验证专属门禁的优先级
 +    await expect(
-+      plugin.tool.vscode_notebook_edit.execute(
++      tools.vscode_notebook_edit.execute(
 +        {
 +          filePath,
 +          cellId: "#VSC-12345678",
@@ -108,7 +111,7 @@ index 0000000000..7af6e6361f
 +    // #223：env 工具经过 vscode_notebook_env 专属权限——configure/restart/save
 +    // 都会改变 Jupyter/VS Code 状态，不能用通用 edit 覆盖
 +    await expect(
-+      plugin.tool.vscode_notebook_env.execute(
++      tools.vscode_notebook_env.execute(
 +        {
 +          filePath,
 +          operation: "restart",
@@ -145,7 +148,7 @@ index 0000000000..7af6e6361f
 +    // #223：mock ask 只在 permission === "edit" 时抛错，vscode_notebook_edit 放行；
 +    // 这样可以验证两个 ask 都被调用，且顺序是先专属后通用
 +    await expect(
-+      plugin.tool.vscode_notebook_edit.execute(
++      tools.vscode_notebook_edit.execute(
 +        {
 +          filePath,
 +          cellId: "#VSC-12345678",

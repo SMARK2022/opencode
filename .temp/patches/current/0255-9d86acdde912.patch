@@ -1,14 +1,11 @@
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -32,7 +32,8 @@
- export const PRUNE_PROTECT = 40_000
+@@ -33,5 +33,6 @@
  const TOOL_OUTPUT_MAX_CHARS = 2_000
  const PRUNE_PROTECTED_TOOLS = ["skill"]
--const DEFAULT_TAIL_TURNS = 2
 -const MIN_PRESERVE_RECENT_TOKENS = 2_000
--const MAX_PRESERVE_RECENT_TOKENS = 8_000
-+const DEFAULT_TAIL_TURNS = 4
+-const MAX_PRESERVE_RECENT_TOKENS = 15_000
 +// #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
 +const MIN_PRESERVE_RECENT_TOKENS = 4_000
 +const MAX_PRESERVE_RECENT_TOKENS = 16_000
@@ -26,11 +23,19 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
          yield* createCompactionMarker(session.id)
  
          const msgs = yield* ssn.messages({ sessionID: session.id })
-@@ -1542,5 +1544,7 @@
-         expect(captured).toContain("older context")
-         expect(captured).not.toContain("keep this turn")
-         expect(captured).not.toContain("and this one too")
+@@ -1548,10 +1550,14 @@
+        expect(captured).toContain("[User]: older context")
+        expect(captured).not.toContain("keep this turn")
+        expect(captured).not.toContain("and this one too")
++        // #255：tail 轮数翻倍（config tail_turns:4）后第三/四轮也进入保留窗——压缩输入不得包含它们
 +        expect(captured).not.toContain("third retained turn")
 +        expect(captured).not.toContain("fourth retained turn")
-         expect(captured).not.toContain("What did we do so far?")
-       }).pipe(withCompaction({ llm: stub.llmLayer }))
+        expect(captured).not.toContain("What did we do so far?")
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
++          // #255：窗口翻倍——tail_turns 2→4 与 source DEFAULT_TAIL_TURNS 2→4 对齐，四轮保留窗
+-          config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }),
++          config: cfg({ tail_turns: 4, preserve_recent_tokens: 10_000 }),
+        }),
+      )

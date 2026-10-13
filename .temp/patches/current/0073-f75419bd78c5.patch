@@ -268,7 +268,7 @@ index 5faaa18dc7..a5eda68d76 100644
 @@ -34,6 +34,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
  import { ProviderError } from "./error"
  
- const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+ const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 +// 请求默认超时 5 分钟：覆盖无显式 timeout 的 provider 请求
 +const DEFAULT_TIMEOUT_MS = 300_000
  
@@ -289,9 +289,11 @@ diff --git a/packages/opencode/test/config/config.test.ts b/packages/opencode/te
 index e281831ddf..489f366219 100644
 --- a/packages/opencode/test/config/config.test.ts
 +++ b/packages/opencode/test/config/config.test.ts
-@@ -9,6 +9,7 @@ import { Config } from "@/config/config"
+@@ -9,8 +9,9 @@ import { Config } from "@/config/config"
  import { ConfigManaged } from "@/config/managed"
  import { ConfigParse } from "../../src/config/parse"
+ import { ConfigV2Compat } from "../../src/config/v2-compat"
+ import { snapshot } from "./snapshot"
  import { Npm } from "@opencode-ai/core/npm"
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
  

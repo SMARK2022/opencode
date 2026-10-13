@@ -19,13 +19,13 @@ index 1111111111..2222222222 100644
 +# #156：push dev-smark 与手动 workflow_dispatch
  on:
 -  # #104：去掉 version input，避免与 package.json 双源
-+  # #156：支持手动触发并可选 version 覆盖
++  # #156：手动触发不依赖 push，可单独发布紧急修复版
    workflow_dispatch:
 -  # push 自动触发：dev-smark + 路径过滤（含 setup-bun 变更）
 +    inputs:
-+      # #156：默认版本来自 package.json；inputs.version 仅覆盖
++      # #156：inputs.version 非空才覆盖；空串与未传等同，避免 workflow 与包版本双源漂移
 +      version:
-+        # #156：package.json 仍为默认版本单源
++        # #156：显式版本允许 v 前缀，脚本内统一去 v 后再拼接 tag
 +        description: "Override version, for example 1.14.42-smark. Empty means packages/opencode/package.json version."
 +        required: false
 +        type: string
@@ -47,29 +47,29 @@ index 1111111111..2222222222 100644
 +
 +# #156：顶层 permissions 供 release 写权限
 +permissions:
-+  # #156：仅授予发布所需 contents 写权限
++  # #156：仅申请 contents:write：重试上传不需要 actions 写权限，最小权限原则
 +  contents: write
 +
 +# #156：同 ref+version 串行且不 cancel 半成品 release
 +concurrency:
 +  group: build-opencode-${{ github.ref }}-${{ github.event.inputs.version || 'package-json' }}
-+  # #156：禁止 cancel 半成品 release
++  # #156：cancel-in-progress: false：被顶替的旧构建仍完成上传，避免 release 资产缺失
 +  cancel-in-progress: false
 +
 +# #156：version→build-*→checksums 流水线
  jobs:
 -  # #104：唯一版本源 = packages/opencode/package.json，读失败 fail-closed
    version:
-+    # #156：linux/checksums 使用 ubuntu runner
++    # #156：checksums 与 linux 同 runner：下载 artifact 无平台约束，省 macOS 配额
      runs-on: ubuntu-latest
      outputs:
        version: ${{ steps.pkg.outputs.version }}
        tag: ${{ steps.pkg.outputs.tag }}
      steps:
-+      # #156：检出源码供构建脚本使用
++      # #156：检出触发 ref：version 从 package.json 读默认号，build 用同源码
        - uses: actions/checkout@v4
 +
-+      # #156：version job 输出 version 与 tag
++      # #156：version/tag 作为 job 输出供 build 消费，避免各 job 重复解析造成版本不一致
        - id: pkg
          shell: bash
          run: |
@@ -136,14 +136,14 @@ index 1111111111..2222222222 100644
 +
 +  # #156：mac 双架构构建与 codesign
 +  build-macos:
-+    # #156：job 依赖保证 version 先解析
++    # #156：needs 显式声明：version 失败时 build 不以空版本号产出错误资产
 +    needs: version
-+    # #156：mac 双架构构建 arm64+x64
++    # #156：单 job 双 target：共享 bun 缓存，比 matrix 拆分省一半 setup 时间
 +    runs-on: macos-latest
      steps:
        - uses: actions/checkout@v4
 +
-+      # #156：复用 setup-bun composite action
++      # #156：composite action 单一来源：本地 workflow 与上游工具链升级自动同步
        - uses: ./.github/actions/setup-bun
  
 -      - name: Build Linux
@@ -158,7 +158,7 @@ index 1111111111..2222222222 100644
 -
 -      - name: Package Linux tar.gz
 -        run: |
-+          # #156：调用 opencode 构建脚本产出二进制
++          # #156：同一 build.ts 产三平台：构建参数差异只在一处维护
 +          bun run script/build.ts \
 +            --version=${{ needs.version.outputs.version }} \
 +            --os=darwin \
@@ -193,7 +193,7 @@ index 1111111111..2222222222 100644
 +            rm -f "$out"
 +            (
 +              cd "${DIST}/${target}/bin"
-+              # #156：mac/windows zip 资产
++              # #156：系统 zip 保证跨 runner 一致：Compress-Archive 在 PS7 下才稳定
 +              zip -9 -q "${GITHUB_WORKSPACE}/${out}" opencode
 +            )
 +
@@ -216,7 +216,7 @@ index 1111111111..2222222222 100644
 +            release-assets/opencode-darwin-arm64.zip
 +            release-assets/opencode-darwin-x64.zip
 +
-+  # #156：Linux 构建与 artifact 上传
++  # #156：Linux 需 dpkg-dev 打 deb：runner 预装但 apt 缓存可能失效，先显式安装
 +  build-linux:
 +    needs: version
 +    runs-on: ubuntu-latest
@@ -280,7 +280,7 @@ index 1111111111..2222222222 100644
 +            chmod +x "$bin"
 +            (
 +              cd "${DIST}/${target}/bin"
-+              # #156：打包 tar.gz 资产名含 os/arch
++              # #156：资产名含 os/arch 是 install 候选探测契约，改名即断 404 回退链
 +              tar -czf "${GITHUB_WORKSPACE}/${out}" opencode
 +            )
 +
@@ -312,7 +312,7 @@ index 1111111111..2222222222 100644
            Package: opencode
            Version: ${VERSION}
            Section: utils
-@@ -111,100 +235,208 @@
+@@ -111,100 +235,210 @@
            Description: opencode AI-powered development tool (smark build)
             A standalone AI coding assistant with TUI, version ${VERSION}.
            EOF
@@ -342,7 +342,7 @@ index 1111111111..2222222222 100644
 +  # #156：Windows x64 构建保留 MSVC 工具链
 +  build-windows:
 +    needs: version
-+    # #156：Windows job 保留 node/python/msbuild 工具链
++    # #156：保留 node/python：sharp 等 native 模块在 Windows 构建时需 node-gyp 工具链
 +    runs-on: windows-latest
 +    steps:
 +      - uses: actions/checkout@v4
@@ -385,7 +385,7 @@ index 1111111111..2222222222 100644
 +          New-Item -ItemType Directory -Force -Path $Assets | Out-Null
 +          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 +
-+          # #156：Windows 复制 exe 到 dist 发布名
++          # #156：裸 exe 与 zip 双资产：install 的 exe 直装分支按候选名探测
 +          Copy-Item $Source (Join-Path $Stage "opencode.exe") -Force
 +          Copy-Item $Source $ExeOut -Force
 +
@@ -419,7 +419,7 @@ index 1111111111..2222222222 100644
 +      - uses: actions/checkout@v4
 +
 +      - name: Download release workflow artifacts
-+        # #156：checksums job 汇总各平台 artifact
++        # #156：merge-multiple 平铺目录：免逐平台拼路径，find 可枚举全部资产
 +        uses: actions/download-artifact@v4
 +        with:
 +          pattern: release-assets-*
@@ -431,18 +431,20 @@ index 1111111111..2222222222 100644
 +        run: |
 +          set -euo pipefail
 +
++          # fail-closed：仓库缺 install 脚本时中止，不发布残缺资产
 +          if [ ! -f install ]; then
 +            echo "Missing repository install script at ./install" >&2
 +            exit 1
 +          fi
 +
++          # install 脚本与二进制同批发布：用户 curl 到的脚本与资产版本永远对齐
 +          cp install release-assets/install
 +          chmod +x release-assets/install
 +
 +          cd release-assets
 +
 +          echo "Release assets before checksums:"
-+          # #156：枚举 release-assets 目录全部文件
++          # #156：find 而非 glob：资产名含 os/arch 组合，新平台资产自动进 checksums
 +          find . -maxdepth 1 -type f -printf '%f\n' | sort
 +
 +          find . -maxdepth 1 -type f ! -name checksums.txt -printf '%f\0' \
@@ -454,7 +456,7 @@ index 1111111111..2222222222 100644
 +
 +      - name: Create release if missing
 +        env:
-+          # #156：Actions 内置 token 注入 GH_TOKEN
++          # #156：GITHUB_TOKEN 而非 PAT：同仓库 release 写入已授权且永不过期
 +          GH_TOKEN: ${{ github.token }}
 +          TAG: ${{ needs.version.outputs.tag }}
 +          VERSION: ${{ needs.version.outputs.version }}
@@ -575,7 +577,7 @@ index 1111111111..2222222222 100644
 +            while true; do
 +              echo "Uploading ${file} attempt ${attempt}/${max_attempts}"
 +
-+              # #156：统一上传点，配合重试
++              # #156：统一上传点：--clobber 幂等，重试不会产生 -1 后缀副本
 +              if gh release upload "$TAG" "$file" \
 +                --repo "$GITHUB_REPOSITORY" \
 +                --clobber; then
@@ -588,7 +590,7 @@ index 1111111111..2222222222 100644
 +                return 1
 +              fi
 +
-+              # #156：重试退避 sleep，降低 API 限流
++              # #156：15s×attempt 线性退避：release 上传 429 多为瞬时窗口，指数退避反而拉长失败反馈
 +              sleep $(( attempt * 15 ))
 +              attempt=$(( attempt + 1 ))
 +            done
@@ -615,7 +617,7 @@ diff --git a/install b/install
 index 1111111111..2222222222 100755
 --- a/install
 +++ b/install
-@@ -1,29 +1,91 @@
+@@ -1,29 +1,85 @@
  #!/usr/bin/env bash
 +# #156：管道与未定义变量失败即退出，禁止静默半安装
  set -euo pipefail
@@ -624,13 +626,13 @@ index 1111111111..2222222222 100755
  APP=opencode
 -
 +# #156：默认 SMARK2022/opencode，可用 OPENCODE_REPO 覆盖
-+# #156：默认仓库指向 SMARK fork
++# #156：环境变量而非 flag：CI 可全局注入，无需改每条命令
 +REPO=${OPENCODE_REPO:-SMARK2022/opencode}
 +
 +# #156：颜色仅装饰，不改变控制流
  MUTED='\033[0;2m'
  RED='\033[0;31m'
-+# #156：警告色与错误色分流
++# #156：ORANGE 而非 YELLOW：多数终端主题下黄色与前景难分
  ORANGE='\033[38;5;214m'
 -NC='\033[0m' # No Color
 -
@@ -647,27 +649,21 @@ index 1111111111..2222222222 100755
 +Usage: install [options]
  
  Options:
-+    # #156：-h/--help 打印 usage 后成功退出
      -h, --help              Display this help message
 -    -v, --version <version> Install a specific version (e.g., 1.0.180)
 +    -v, --version <version> Install a specific version, for example 1.14.41-smark or v1.14.41-smark
-+    # #156：支持本地二进制安装旁路下载
      -b, --binary <path>     Install from a local binary instead of downloading
-+        # #156：受限环境可跳过 shell rc 改写
          --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
  
 +Environment variables:
 +    OPENCODE_REPO           GitHub repo to download from. Default: SMARK2022/opencode
-+    # #156：显式安装目录优先于 XDG 与默认路径
 +    OPENCODE_INSTALL_DIR    Install directory. Default: ~/.opencode/bin
-+    # #156：遵循 XDG 时仍次于 OPENCODE_INSTALL_DIR
 +    XDG_BIN_DIR             Used as install directory when OPENCODE_INSTALL_DIR is not set
 +    VERSION                 Same as --version
 +
  Examples:
 -    curl -fsSL https://opencode.ai/install | bash
 -    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.0.180
-+    # #156：下载失败（非 2xx）视为错误
 +    curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
 +    curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash -s -- --version 1.14.41-smark
 +    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
@@ -693,7 +689,7 @@ index 1111111111..2222222222 100755
 +
 +# #156：必需外部命令缺失 fail-closed
 +need_cmd() {
-+    # #156：探测可选工具（sha256sum 等）是否存在
++    # #156：command -v 而非 which：跨 busybox/POSIX 行为一致且不产生额外输出
 +    if ! command -v "$1" >/dev/null 2>&1; then
 +        print_message error "Error: '$1' is required but not installed."
 +        # #156：不可恢复错误统一非零退出
@@ -703,11 +699,11 @@ index 1111111111..2222222222 100755
 +
 +# #156：跨平台 sha256，供 checksums 比对
 +sha256_file() {
-+    # #156：linux 优先 sha256sum
++    # #156：sha256sum 在主流发行版必装；两者都缺时返回空串，由调用方软跳过校验
 +    if command -v sha256sum >/dev/null 2>&1; then
-+        # #156：解析校验和字段
++        # #156：awk 只取首字段：行尾是文件名，不能整行当哈希比对
 +        sha256sum "$1" | awk '{print $1}'
-+    # #156：mac 上 sha256 回退 shasum -a 256
++    # #156：macOS 无 GNU coreutils 时 shasum -a 256 与 sha256 输出等价
 +    elif command -v shasum >/dev/null 2>&1; then
 +        shasum -a 256 "$1" | awk '{print $1}'
 +    else
@@ -734,7 +730,7 @@ index 1111111111..2222222222 100755
                  exit 1
              fi
              ;;
-@@ -59,38 +121,69 @@
+@@ -59,38 +121,70 @@
              shift
              ;;
          *)
@@ -758,7 +754,7 @@ index 1111111111..2222222222 100755
 +}
 +
 +INSTALL_DIR=$(resolve_install_dir)
-+# #156：确保安装目录存在
++# #156：mkdir -p 幂等：已存在时保留既有安装不中断
  mkdir -p "$INSTALL_DIR"
  
 -# If --binary is provided, skip all download/detection logic
@@ -780,6 +776,7 @@ index 1111111111..2222222222 100755
      specific_version="local"
  else
 +    need_cmd curl
++    # curl 无 wget 回退：探测与下载单一路径，失败语义可预测
 +
 +    # #156：OS 探测 fail-closed，未知系统退出
      raw_os=$(uname -s)
@@ -815,7 +812,7 @@ index 1111111111..2222222222 100755
  
      if [ "$os" = "darwin" ] && [ "$arch" = "x64" ]; then
        rosetta_flag=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
-@@ -104,131 +197,117 @@
+@@ -104,131 +198,117 @@
        linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64)
          ;;
        *)
@@ -915,7 +912,7 @@ index 1111111111..2222222222 100755
 +        specific_version="$requested_version"
 +
 +        # #156：HTTP 非 2xx / 404 驱动候选切换
-+        # #156：捕获 HTTP 状态驱动 404 候选切换
++        # #156：-w 与 -o 分离：只取状态码不落盘，不污染安装目录
 +        http_status=$(curl -sI -L -o /dev/null -w "%{http_code}" "https://github.com/${REPO}/releases/tag/v${requested_version}")
 +        if [ "$http_status" = "404" ]; then
 +            print_message error "Error: Release v${requested_version} not found"
@@ -935,7 +932,7 @@ index 1111111111..2222222222 100755
 -            echo -e "${MUTED}Available releases: https://github.com/anomalyco/opencode/releases${NC}"
 +    fi
 +
-+    # #156：target 形如 os-arch，驱动资产文件名
++    # #156：os-arch 与 workflow 资产后缀同源，双方改名必须同步
 +    target="$os-$arch"
 +
 +    # Keep installer target names exactly aligned with the workflow assets.
@@ -1042,7 +1039,7 @@ index 1111111111..2222222222 100755
              exit 0
          fi
      fi
-@@ -240,7 +319,8 @@
+@@ -240,7 +320,8 @@
      elif echo | sed -l -e "" >/dev/null 2>&1; then
          sed -nl "$@"
      else
@@ -1052,7 +1049,7 @@ index 1111111111..2222222222 100755
          sed -ne "s/$/\\${pad}/" "$@"
      fi
  }
-@@ -256,16 +336,18 @@
+@@ -256,16 +337,18 @@
      local on=$(( percent * width / 100 ))
      local off=$(( width - on ))
  
@@ -1074,22 +1071,22 @@ index 1111111111..2222222222 100755
      local output="$2"
  
      if [ -t 2 ]; then
-@@ -274,6 +356,7 @@
+@@ -274,6 +357,7 @@
          exec 4>/dev/null
      fi
  
-+    # #156：mktemp 目录隔离每次安装尝试
++    # #156：TMPDIR+PID 后缀隔离：不依赖 mktemp 可用性，$$ 天然唯一
      local tmp_dir=${TMPDIR:-/tmp}
      local basename="${tmp_dir}/opencode_install_$$"
      local tracefile="${basename}.trace"
-@@ -281,13 +364,13 @@
+@@ -281,13 +365,13 @@
      rm -f "$tracefile"
      mkfifo "$tracefile"
  
 -    # Hide cursor
      printf "\033[?25l" >&4
  
-+    # #156：退出钩子清理临时文件
++    # RETURN trap：函数退出即恢复光标与关闭 fd，trace 不跨调用残留
      trap "trap - RETURN; rm -f \"$tracefile\"; printf '\033[?25h' >&4; exec 4>&-" RETURN
  
      (
@@ -1098,7 +1095,7 @@ index 1111111111..2222222222 100755
      ) &
      local curl_pid=$!
  
-@@ -324,31 +407,119 @@
+@@ -324,31 +408,119 @@
      return $ret
  }
  
@@ -1123,7 +1120,7 @@ index 1111111111..2222222222 100755
 +    fi
 +
 +    local expected
-+    # #156：从 checksums.txt 提取对应资产行
++    # #156：按资产名精确匹配行，避免子串误中其它平台条目
 +    expected=$(grep -E "[[:space:]]${asset_name}$" "$checksums_file" | awk '{print $1}' | head -n 1 || true)
 +    if [ -z "$expected" ]; then
 +        print_message warning "No checksum entry for ${asset_name}; local sha256: $actual"
@@ -1198,7 +1195,7 @@ index 1111111111..2222222222 100755
 +    else
 +        local extracted=""
 +        if [ "$os" = "windows" ]; then
-+            # #156：解压后按名查找 opencode 可执行文件
++            # #156：解包产物可能嵌套目录，find 按名定位避免猜路径
 +            extracted=$(find "$tmp_dir" -type f -name "opencode.exe" | head -n 1 || true)
 +            exe_name="opencode.exe"
 +        else
@@ -1233,7 +1230,7 @@ index 1111111111..2222222222 100755
  }
  
  if [ -n "$binary_path" ]; then
-@@ -358,7 +529,7 @@
+@@ -358,7 +530,7 @@
      download_and_install
  fi
  
@@ -1242,7 +1239,7 @@ index 1111111111..2222222222 100755
  add_to_path() {
      local config_file=$1
      local command=$2
-@@ -370,14 +541,14 @@
+@@ -370,14 +542,15 @@
          echo "$command" >> "$config_file"
          print_message info "${MUTED}Successfully added ${NC}opencode ${MUTED}to \$PATH in ${NC}$config_file"
      else
@@ -1256,19 +1253,21 @@ index 1111111111..2222222222 100755
 -
 -current_shell=$(basename "$SHELL")
 +current_shell=$(basename "${SHELL:-sh}")
++# SHELL 未导出时回退 sh：cron/CI 等非交互环境不保证设置 SHELL
 +
  case $current_shell in
      fish)
          config_files="$HOME/.config/fish/config.fish"
-@@ -395,7 +566,6 @@
+@@ -395,7 +568,7 @@
          config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
      ;;
++    # 默认分支收敛 bash 语法：rc 差异只在路径，export 语句 POSIX 兼容
      *)
 -        # Default case if none of the above matches
          config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
      ;;
  esac
-@@ -417,29 +587,16 @@
+@@ -417,29 +590,17 @@
              fish)
                  add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
              ;;
@@ -1297,12 +1296,13 @@ index 1111111111..2222222222 100755
 -if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" == "true" ]; then
 -    echo "$INSTALL_DIR" >> $GITHUB_PATH
 +if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" = "true" ]; then
++    # GITHUB_ACTIONS 环境检测：CI 内自动生效，本地安装零干扰
 +    # #156：CI 写入 GITHUB_PATH 供后续 step 发现二进制
 +    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
      print_message info "Added $INSTALL_DIR to \$GITHUB_PATH"
  fi
  
-@@ -448,7 +605,6 @@
+@@ -448,7 +609,6 @@
  echo -e "${MUTED}█▀▀█ █▀▀█ █▀▀█ █▀▀▄ ${NC}█▀▀▀ █▀▀█ █▀▀█ █▀▀█"
  echo -e "${MUTED}█░░█ █░░█ █▀▀▀ █░░█ ${NC}█░░░ █░░█ █░░█ █▀▀▀"
  echo -e "${MUTED}▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ${NC}▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"
@@ -1310,7 +1310,7 @@ index 1111111111..2222222222 100755
  echo -e ""
  echo -e "${MUTED}OpenCode includes free models, to start:${NC}"
  echo -e ""
-@@ -457,4 +613,3 @@
+@@ -457,4 +617,3 @@
  echo -e ""
  echo -e "${MUTED}For more information visit ${NC}https://opencode.ai/docs"
  echo -e ""

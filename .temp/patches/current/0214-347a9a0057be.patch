@@ -22,9 +22,9 @@ index 86f3a64c20..9fe118d2da 100644
  import { Session } from "@/session/session"
  import { MessageV2 } from "@/session/message-v2"
 +import { SessionRetry } from "@/session/retry"
+ import { Database } from "@opencode-ai/core/database/database"
+ 
  import { MessageID, PartID, SessionID } from "@/session/schema"
- import { ToolJsonSchema } from "@/tool/json-schema"
- import type { ToolPart, User, Assistant, TextPart, ReasoningPart } from "@opencode-ai/core/v1/session"
 @@ -132,6 +133,8 @@ export const layer = Layer.effect(
              ? yield* recordReviewerRequest({
                  session: reviewerSession,
@@ -216,7 +216,7 @@ index 022a518ee5..12e7f11f48 100644
 +            metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
              status: "running",
              input: args,
-             time: { start: Date.now() },
+              time: match.state.status === "running" ? match.state.time : { start: Date.now() },
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index dbc8646ca4..447d77a264 100644
 --- a/packages/opencode/test/session/prompt.test.ts
@@ -633,7 +633,7 @@ index 21fa77517b..dfa0e7a627 100644
 +        {/* #214：InlineTool 共享审查状态行——autoReview 由 context 自动渲染 */}
          <InlineTool
            icon="$"
-           pending="Writing command..."
+           pending="Writing command…"
            complete={stringValue(props.input.command)}
            part={props.part}
 -          onClick={() => {

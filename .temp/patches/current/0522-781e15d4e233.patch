@@ -887,11 +887,12 @@ index 0000000000000000000000000000000000000000..f4399afc3eef55ce8a1952f32113a986
 +### Verbatim Implementation Audit Verdict
 +
 +> **APPROVE** — The exact audited R4 implementation diff has no blocking findings and satisfies the original behavioral, primary-path, scope, performance, budget, Unicode/CRLF, tie, attribution, renderer, test-independence, typecheck, and comment-gate requirements. The package-wide test command remains environmentally incomplete with unrelated failures, but the changed matcher and Tool surfaces pass the complete focused verification suite.
+
 diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
-index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569e79b1fb5 100644
+index e41385a31..2a86abc27 100644
 --- a/packages/opencode/src/patch/match.ts
 +++ b/packages/opencode/src/patch/match.ts
-@@ -85,53 +85,315 @@ export type ClosestWindow = {
+@@ -85,58 +85,330 @@ export type ClosestWindow = {
  }
  
  type NormalizedText = {
@@ -921,7 +922,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -  const points: string[] = []
 -  const rawStarts: number[] = []
 -  const rawEnds: number[] = []
-+// 诊断预算从 closestWindow 入口开始，超限只能返回 undefined，不能提交部分 actual 或改走另一 matcher。
++// #522：诊断预算从 closestWindow 入口开始，超限只能返回 undefined，不能提交部分 actual 或改走另一 matcher。
 +// performance.now 使用单调时钟，系统时间跳变不会让四秒上限倒退或提前失效。
 +// 同步 matcher 无法由外部 Promise 抢占，因此每个可能无界的阶段都必须协作检查这一 deadline。
 +const MATCH_DIAGNOSTIC_BUDGET_MS = 4000
@@ -934,11 +935,12 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +const MATCH_RENDER_SOURCE_UTF16 = 1024 * 1024
 +
 +function expired(deadline: number) {
++  // #522：统一走单一 expired 判定，禁止各阶段自造时钟读取而绕过预算语义。
 +  return performance.now() >= deadline
 +}
 +
 +function rawBudgetAllows(contentLength: number, expectedLength: number, deadline: number) {
-+  // 此预检只能读取 O(1) 的 raw length；任何 replaceAll/split/typed-array 分配都必须位于它之后。
++  // #522：此预检只能读取 O(1) 的 raw length；任何 replaceAll/split/typed-array 分配都必须位于它之后。
 +  // raw UTF-16 length 是 normalized point 数的保守上界，因此可能早拒绝，但绝不会低估工作集。
 +  // profile 按每个 pattern point 预留一行是故意的最坏估算，避免高基数字符集绕过内存门禁。
 +  // reverse row 与 Myers scratch 同时计入，因为恢复阶段开始前 forward 数组仍然处于作用域内。
@@ -956,7 +958,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +}
  
 +function measureNormalized(text: string, deadline: number) {
-+  // 先计数再精确分配 typed arrays，避免可增长 JS 数组在长文件上制造未计入预算的临时副本。
++  // #522：先计数再精确分配 typed arrays，避免可增长 JS 数组在长文件上制造未计入预算的临时副本。
 +  // 计数遍与填充遍共享 CRLF/code-point 规则，否则预分配长度与后续 raw boundary 会发生偏移。
 +  // 每 4096 个 raw UTF-16 单元检查一次时间，在线性预扫描中同时限制最坏响应延迟。
 +  let pointCount = 0
@@ -988,6 +990,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
  
 -  return { points, rawStarts, rawEnds }
 +function normalizePattern(text: string, deadline: number) {
++  // #522：pattern 与 content 分开归一化；expected 侧不需要行边界，避免多余的 Float64 分配。
 +  const measured = measureNormalized(text, deadline)
 +  if (!measured) return undefined
 +  const points = new Uint32Array(measured.pointCount)
@@ -1062,7 +1065,8 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -  if (sameSpan(left.span, right.span)) {
 -    return { ...left, hasDistinctEqualSpan: left.hasDistinctEqualSpan || right.hasDistinctEqualSpan }
 +function findLine(lineStarts: Float64Array, rawOffset: number) {
-+  // upper-bound 让恰好落在下一行起点的 rawEnd 归入下一行，保持旧 renderer 对终止换行的扩展语义。
++  // #522：upper-bound 让恰好落在下一行起点的 rawEnd 归入下一行，保持旧 renderer 对终止换行的扩展语义。
++  // 行定位是 O(log n)；替代了旧实现中每个候选前的全文 prefix split。
 +  let low = 0
 +  let high = lineStarts.length
 +  while (low < high) {
@@ -1079,6 +1083,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +  // valid 只描述最后一个有效 word 的高位，topMask 取它的末位而不是固定取 bit 31。
 +  const blocks = Math.ceil(pattern.length / 32)
 +  const valid = pattern.length - 32 * (blocks - 1)
++  // #522：lastMask/topMask 派生自最后一个有效 word；它们约束 carry 与 ±1 判定不进入 padding 位。
 +  const lastMask = valid === 32 ? 0xffffffff : (2 ** valid - 1) >>> 0
 +  const topMask = 1 << (valid - 1)
 +  const profile = new Map<number, Uint32Array>()
@@ -1102,6 +1107,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +  const shiftedHP = new Uint32Array(blocks)
 +  const shiftedHN = new Uint32Array(blocks)
 +  if (expired(deadline)) return undefined
++  // #522：七个 scratch 全部在循环外分配；每列只做位运算，避免热路径内反复 GC 压力破坏预算。
 +  // VP 初态编码 scalar 第一列 D[i,0]=i；partial block 之外的 1 必须在第一次更新前清掉。
 +  vp.fill(0xffffffff)
 +  vp[blocks - 1] &= lastMask
@@ -1139,6 +1145,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +    if ((hp[blocks - 1] & topMask) !== 0) score++
 +    else if ((hn[blocks - 1] & topMask) !== 0) score--
 +
++    // #522：top bit 的 HP/HN 变化就是 D[m,j] 的 ±1；这是 bit-vector 与标量 DP 的唯一交汇点。
 +    if (score < bestDistance) {
 +      bestDistance = score
 +      bestEnd = textIndex + 1
@@ -1176,6 +1183,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +  }
 +
 +  if (expired(deadline) || bestEnd < 0) return undefined
++  // #522：返回的 end 是唯一全局最优列；endCount 饱和后只区分「唯一/不唯一」两种调用方分支。
 +  return { distance: bestDistance, end: bestEnd, endCount: bestEndCount }
 +}
 +
@@ -1191,6 +1199,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +  // minimumLength 至少为一，明确排除空 span；诊断必须指向文件中的实际文本证据。
 +  const row = new Int32Array(pattern.length + 1)
 +  let cellsUntilCheck = 256
++  // #522：反向行初始化为反向 pattern 前缀代价；与 forward 的全局最优共享同一 distance 基准。
 +  for (let index = 0; index <= pattern.length; index++) {
 +    row[index] = index
 +    if (--cellsUntilCheck !== 0) continue
@@ -1200,11 +1209,13 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +
 +  let matchCount = 0
 +  let start = -1
++  // #522：matchCount 只取 1 或 >1；所有同 end 等距 length 都收集完后再决定唯一性。
 +  // 反向 row 只恢复已证明 bestEnd 的 start；|m-L|<=d 把范围限制在最多 2m，不会启动第二次全局搜索。
 +  // pattern 与文件后缀同时反向后距离不变，所以一个 row 就能依次验证所有允许的 start。
 +  // 这里不重新比较其他 endpoint；forward 已完成全局证明，reverse 只补回 bit-vector 未携带的 span 身份。
 +  // row[pattern.length] 只在完整反向候选结束时读取，避免中途 prefix 距离被误当作 span 距离。
 +  for (let length = 1; length <= maximumLength; length++) {
++    // #522：从 bestEnd 向左逐步扩展候选；每一轮 length 都是一次完整反向列计算。
 +    const point = text[match.end - length]
 +    let diagonal = row[0]
 +    row[0] = length
@@ -1238,13 +1249,21 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
  }
  
  function truncateExcerpt(text: string, limit: number) {
-@@ -146,15 +408,19 @@ function truncateExcerpt(text: string, limit: number) {
+   if (text.length <= limit) return text
+-  // 为 omission marker 预留固定上限，其余预算平分首尾，最终提示不会再次无标记截断。
++  // #522：为 omission marker 预留固定上限，其余预算平分首尾，最终提示不会再次无标记截断。
+   const visible = Math.max(0, limit - 48)
+   const head = Math.ceil(visible / 2)
+   const tail = Math.floor(visible / 2)
+@@ -146,16 +418,21 @@ function truncateExcerpt(text: string, limit: number) {
  }
  
  // Edit 与 Patch 共用此 renderer，避免同一 candidate 在两个 Tool result 中重新形成相互漂移的 expected 副本。
 -function formatClosestDifference(expected: string[], candidate: string[], startLine: number) {
 +function formatClosestDifference(expected: string[], candidate: string[], startLine: number, deadline: number) {
+   // #521：变长候选不能进入逐行配对 renderer；列号语义只在等行数时成立。
    if (expected.length !== candidate.length) return ""
++  // #522：deadline 在入口即检查；超限返回 undefined 而不是空串，避免与“无差异”混淆。
 +  if (expired(deadline)) return undefined
  
    const output: string[] = []
@@ -1259,7 +1278,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
      let requestedColumn = 1
      let actualColumn = 1
      let requestedStart: number | undefined
-@@ -186,6 +452,7 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
+@@ -187,10 +464,12 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
      const requestedLast = requestedEnd ?? requestedStart - 1
      const actualLast = actualEnd ?? actualStart - 1
      // actual excerpt 围绕首尾变化点截取，长公共前缀不会挤掉真正差异；JSON 字符串同时显式保留空白。
@@ -1267,7 +1286,12 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
      const actualPoints = Array.from(actual)
      const visibleStart = Math.max(0, actualStart - 1 - 30)
      const visibleEnd = Math.min(actualPoints.length, Math.max(actualStart - 1, actualLast) + 20)
-@@ -198,118 +465,85 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
+     // 两端省略数量必须显式可见，避免模型把紧凑窗口误认为完整 actual 行。
++    // #522：窗口切片只作用于已限长的行；budget 由外层 MATCH_RENDER_DIFF_POINTS 预先封闭。
+     const prefix = visibleStart > 0 ? `...[${visibleStart} chars omitted]...` : ""
+     const suffix = visibleEnd < actualPoints.length ? `...[${actualPoints.length - visibleEnd} chars omitted]...` : ""
+     const visible = `${prefix}${actualPoints.slice(visibleStart, visibleEnd).join("")}${suffix}`
+@@ -199,123 +478,93 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
        `difference: requested columns ${requestedStart}-${requestedLast} differ from actual columns ${actualStart}-${actualLast}`,
      )
    }
@@ -1283,6 +1307,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
  export function closestWindow(content: string, expected: string): ClosestWindow | undefined {
 +  const deadline = performance.now() + MATCH_DIAGNOSTIC_BUDGET_MS
 +  if (!rawBudgetAllows(content.length, expected.length, deadline)) return undefined
++  // #522：deadline 从入口一次性推导；后续所有阶段只读取，不各自重置或延长预算。
 +
 +  // raw 预算先于这些线性中间结构；无上限 oldString 不能在门禁前触发 replaceAll/split 分配。
    const expectedLines = expected.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
@@ -1293,6 +1318,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -  const pattern = normalizeText(expected).points
 -  if (pattern.length === 0 || text.points.length === 0) return undefined
 -
+-  // #521：滚动数组只保留上一 pattern 行；空前缀路径由 undefined 单元表达，避免占用哨兵状态。
 -  let previous: Array<MatchState | undefined> = Array.from({ length: text.points.length + 1 }, () => undefined)
 -
 -  for (let patternIndex = 1; patternIndex <= pattern.length; patternIndex++) {
@@ -1339,12 +1365,14 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -      current.push(state)
 -    }
 -
+-    // #521：行交换后 current 丢弃重建；不保留跨行缓存，内存始终为 O(n)。
 -    previous = current
 -  }
 -
 -  let bestDistance = Number.POSITIVE_INFINITY
 -  const spans = new Map<string, CandidateSpan>()
 -  let tied = false
+-  // #521：末行聚合只看终态；每个终态携带自己的 span 集合，不再回溯中间行。
 -  for (const state of previous) {
 -    if (!state?.span) continue
 -    if (state.distance < bestDistance) {
@@ -1361,16 +1389,19 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -
 -  if (!Number.isFinite(bestDistance) || tied || spans.size !== 1) return undefined
 -  const span = spans.values().next().value as CandidateSpan
++  // #522：纯空白 expected 的拒绝沿用 0521 语义；Myers 对全换行 pattern 的唯一 span 同样不可展示。
 +  if (expired(deadline)) return undefined
 +
 +  const pattern = normalizePattern(expected, deadline)
 +  if (!pattern) return undefined
++  // #522：content 后归一化；大 pattern 提前退出时避免为文件做无谓的 typed-array 分配。
 +  const text = normalizeContent(content, deadline)
 +  if (!text || pattern.length === 0 || text.points.length === 0) return undefined
 +
 +  const match = closestDistance(text.points, pattern, deadline)
 +  // endpoint tie 在 score 前拒绝；高相似度不能把两个同样可信的位置伪装成唯一定位。
 +  if (!match || match.endCount !== 1) return undefined
++  // #522：forward 只证明距离与唯一 end；span 身份必须由 reverse 阶段独立恢复，两者共享同一 deadline。
 +  const span = recoverUniqueSpan(text.points, pattern, match, deadline)
 +  // span tie 同样先于 score；长度偏好或文件顺序都不属于可靠性证据。
 +  if (!span) return undefined
@@ -1385,6 +1416,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -  const rawEnd = text.rawEnds[span.end - 1]
 +  const rawStart = text.rawBoundaries[span.start]
 +  const rawEnd = text.rawBoundaries[span.end]
++  // #522：rawBoundaries[span.end] 是「span 后第一个未被消费的 UTF-16 偏移」，slice 半开区间直接可用。
 +  // renderer 上限在任何候选 slice 前检查，超限路径不会暂时构造随后被丢弃的大 actual。
 +  if (rawEnd - rawStart > MATCH_RENDER_SOURCE_UTF16 || expired(deadline)) return undefined
 +  const startLine = findLine(text.lineStarts, rawStart)
@@ -1405,6 +1437,7 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 -  const nextLF = content.indexOf("\n", rawEnd)
 -  const nextCR = content.indexOf("\r", rawEnd)
 -  const lineEnd = [nextLF, nextCR].filter((index) => index !== -1).reduce((min, index) => Math.min(min, index), content.length)
+-  // #521：渲染窗口扩展到包含 raw span 的整行；CRLF 在展示层折叠，不影响上述 DP 坐标。
 -  const renderedText = content.slice(renderStart, lineEnd).replaceAll("\r\n", "\n").replaceAll("\r", "\n")
 +  let isEquivalentCandidate = candidatePointLength === pattern.length
 +  for (let index = 0; isEquivalentCandidate && index < pattern.length; index++) {
@@ -1415,9 +1448,12 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +
 +  const renderedText = content.slice(renderStart, renderEnd).replaceAll("\r\n", "\n").replaceAll("\r", "\n")
 +  if (expired(deadline)) return undefined
++  // #522：candidate 行数组只服务列差异 renderer；变长分支完全不消费它。
    const candidate = renderedText.split("\n")
+-  // #521：行号由 raw 行首推导；renderStart 之前的 CR/LF 序列完整计入行数，与编辑器 1-based 行号一致。
 -  const line = content.slice(0, renderStart).split(/\r\n|\r|\n/).length
 +  if (expired(deadline)) return undefined
++  // #522：startLine 是 0-based 二分结果；对外行号统一 +1，与文件编辑器语义一致。
 +  const line = startLine + 1
    // 展示扩展只改变上下文范围，不改变 score、line 起点或 raw 边界，因此提示与选择始终来自同一候选。
    // 变长分支直接截取 DP raw span，完整行只服务等行数列差异，避免长前后缀遮蔽已证明的 actual。
@@ -1439,21 +1475,23 @@ index 419d6830c91c726a3a62b2b02b5ca6a4697e3c73..a976451035446c4722678aa83aced569
 +    if (difference === undefined) return undefined
 +    excerpt = difference || truncateExcerpt(renderedText, 500)
 +  } else {
++    // #522：变长分支不进入列差异；excerpt 就是 raw span 本身，不重选窗口。
 +    excerpt = truncateExcerpt(candidateText, 500)
 +  }
  
 +  if (expired(deadline)) return undefined
    return { line, excerpt: truncateExcerpt(excerpt, 500), score }
  }
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 846b73576e95cb5ba5e182393a812d839e12153f..f45996b041e594f02aff3d077e3051d3e65a5c48 100644
+index b051cd094..5ae0685d6 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -938,6 +938,37 @@ EOF`
+@@ -993,6 +993,38 @@ EOF`
        }),
      )
  
-+  // 两个不同 end 与 failed chunk 具有相同最小距离；Patch 不能按文件顺序挑选一个 actual。
++  // #522：两个不同 end 与 failed chunk 具有相同最小距离；Patch 不能按文件顺序挑选一个 actual。
 +  // 文件不变断言同时证明 tie 仍属于 diagnostic failure，而不是 fuzzy replacement success。
 +  it.instance("suppresses a multi-end closest tie", () =>
 +    Effect.gen(function* () {
@@ -1473,6 +1511,7 @@ index 846b73576e95cb5ba5e182393a812d839e12153f..f45996b041e594f02aff3d077e3051d3
 +
 +      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
 +
++      // #522：双 end tie 在 bit-vector forward 阶段即被 endCount=2 捕获；error 不携带任一候选。
 +      expect(Exit.isFailure(exit)).toBe(true)
 +      if (Exit.isFailure(exit)) {
 +        const error = Cause.squash(exit.cause) as Error
@@ -1485,26 +1524,28 @@ index 846b73576e95cb5ba5e182393a812d839e12153f..f45996b041e594f02aff3d077e3051d3
 +  )
 +
    // Tool wrapper 不能在 owner 丢失身份后重扫第一个 chunk；提示必须绑定真正失败的第二个 chunk。
-   // 失败身份由 Patch owner 的主路径确定，wrapper 只负责组合既有错误文案和 actual 证据。
+   // #521：失败身份由 Patch owner 的主路径确定，wrapper 只负责组合既有错误文案和 actual 证据。
    // 长字符集 decoy 同时证明 bounded window 选择第 4 行候选，而不是重复旧的无界 scorer。
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b170439363a1e 100644
+index 35c8d4c25..8f1b0acfd 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -16,6 +16,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
+@@ -18,6 +18,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
  import * as Tool from "../../src/tool/tool"
  import { testEffect } from "../lib/effect"
- import { FileWatcher } from "../../src/file/watcher"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
++// #522：oracle 测试直接消费公开 closestWindow；不读取 production 私有 helper。
 +import { closestWindow } from "@/patch/match"
  
  const ctx = {
    sessionID: SessionID.make("ses_test-edit-session"),
-@@ -179,6 +180,73 @@ const onceBus = Effect.fn("EditToolTest.onceBus")(function* (def: typeof FileWat
+@@ -177,6 +179,74 @@ const onceBus = Effect.fn("EditToolTest.onceBus")(function* (def: typeof Watcher
    return deferred
  })
  
 +function scalarDistance(left: string[], right: string[]) {
-+  // oracle 使用普通二维递推的一行压缩形式，与 production bit-vector 不共享 profile、carry 或 block 边界。
++  // #522：oracle 使用普通二维递推的一行压缩形式，与 production bit-vector 不共享 profile、carry 或 block 边界。
 +  // tiny fixture 仍逐个比较 Unicode point，避免 JS UTF-16 下标替 oracle 引入另一套距离定义。
 +  const row = Array.from({ length: right.length + 1 }, (_, index) => index)
 +  for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
@@ -1528,7 +1569,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +  const pattern = Array.from(expected)
 +  let distance = Number.POSITIVE_INFINITY
 +  let spans: { start: number; end: number }[] = []
-+  // 穷举只接受非空 half-open span，直接对应 diagnostic 必须展示实际文件证据的契约。
++  // #522：穷举只接受非空 half-open span，直接对应 diagnostic 必须展示实际文件证据的契约。
 +  // 该 oracle 不假定候选等长，因此能独立覆盖 insertion/deletion 产生的变长最优窗口。
 +  for (let start = 0; start < text.length; start++) {
 +    for (let end = start + 1; end <= text.length; end++) {
@@ -1550,8 +1591,9 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +}
 +
 +test("closestWindow agrees with an exhaustive scalar span oracle", () => {
-+  // 二元字母表穷举所有 1..5 长输入，包含 unique、same-end tie、multi-end tie 和低分结果。
++  // #522：二元字母表穷举所有 1..5 长输入，包含 unique、same-end tie、multi-end tie 和低分结果。
 +  // expected value 完全由 pairwise Levenshtein 生成，不读取 private helper 或 production 中间状态。
++  // 穷举总量 62*62≈3.8k 对；任何 bit-vector 边界（31/32 位）在此规模内已由逐点比较覆盖。
 +  for (let contentLength = 1; contentLength <= 5; contentLength++) {
 +    for (let contentBits = 0; contentBits < 2 ** contentLength; contentBits++) {
 +      const content = Array.from({ length: contentLength }, (_, index) => ((contentBits >>> index) & 1 ? "a" : "b")).join("")
@@ -1573,11 +1615,11 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
  describe("tool.edit", () => {
    describe("creating new files", () => {
      it.instance("creates new file when oldString is empty", () =>
-@@ -423,6 +491,87 @@ describe("tool.edit", () => {
+@@ -464,6 +534,91 @@ describe("tool.edit", () => {
        }),
      )
  
-+    // renderer 只允许有限 diff 输入；超限时必须回到既有 no-reliable 文案，不能把大型 actual 作为诊断证据提交。
++    // #522：renderer 只允许有限 diff 输入；超限时必须回到既有 no-reliable 文案，不能把大型 actual 作为诊断证据提交。
 +    // 该行为保护四秒预算，同时不改变 replacement success，因为 closest 只在 applyEdits 失败后运行。
 +    it.instance("suppresses actual when diagnostic rendering budget is exceeded", () =>
 +      Effect.gen(function* () {
@@ -1587,6 +1629,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +        const actual = "actual-only:" + body
 +        const actualPoints = Array.from(actual)
 +        const mismatchIndex = 1000
++        // #522：requested 与文件只差一个字符，确保距离计算通过而只在 renderer 输入门禁处被拒。
 +        const requested = actualPoints
 +          .slice(0, mismatchIndex)
 +          .concat(actualPoints[mismatchIndex] === "X" ? "Y" : "X", actualPoints.slice(mismatchIndex + 1))
@@ -1600,7 +1643,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +      }),
 +    )
 +
-+    // working-set 预检必须先于 closest 的 expected 归一化分配；超限只复用既有 no-reliable 文案。
++    // #522：working-set 预检必须先于 closest 的 expected 归一化分配；超限只复用既有 no-reliable 文案。
 +    // 真实 Edit seam 同时证明大型 oldString 不会被截短后误报某段 actual。
 +    it.instance("suppresses actual when diagnostic workspace budget is exceeded", () =>
 +      Effect.gen(function* () {
@@ -1608,6 +1651,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +        const filepath = path.join(test.directory, "workspace-budget.txt")
 +        yield* put(filepath, "actual content must remain private")
 +
++        // #522：oldString 超出 64MiB 估算的上界；预检必须在任何归一化分配前拒绝。
 +        const error = yield* fail({ filePath: filepath, oldString: "x".repeat(1_000_000), newString: "replacement" })
 +
 +        expect(error.message).toContain("No reliable nearby candidate was found")
@@ -1615,7 +1659,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +      }),
 +    )
 +
-+    // 31/32/33 等边界覆盖跨 word carry 和最后 partial block；actual 与差异列均由 fixture 独立确定。
++    // #522：31/32/33 等边界覆盖跨 word carry 和最后 partial block；actual 与差异列均由 fixture 独立确定。
 +    // 每个候选都放在第二行，避免测试通过 private matcher state 观察实现细节。
 +    it.instance("keeps Myers word boundary candidates exact", () =>
 +      Effect.gen(function* () {
@@ -1625,6 +1669,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +          const actual = Array.from({ length }, (_, index) => String.fromCharCode(33 + ((index * 37) % 90))).join("")
 +          const points = Array.from(actual)
 +          const mismatchIndex = Math.floor(length / 2)
++          // #522：单字符差异让 span 唯一；失败时列号断言能同时暴露跨块 carry 错误。
 +          const requested = points
 +            .slice(0, mismatchIndex)
 +            .concat(points[mismatchIndex] === "X" ? "Y" : "X", points.slice(mismatchIndex + 1))
@@ -1639,7 +1684,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +      }),
 +    )
 +
-+    // lineStarts/lineContentEnds 必须直接定位尾部候选，不能复制并 split 它前面的完整文件。
++    // #522：lineStarts/lineContentEnds 必须直接定位尾部候选，不能复制并 split 它前面的完整文件。
 +    // 二万行 fixture 的一基行号是独立常量，覆盖大前缀与 renderer handoff。
 +    it.instance("reports a candidate after a large file prefix", () =>
 +      Effect.gen(function* () {
@@ -1653,6 +1698,7 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
 +          newString: "replacement",
 +        })
 +
++        // #522：filler 前缀必须被 Myers 一次性扫过；行号断言排除「重新 split 全文」的退化实现。
 +        expect(error.message).toContain("Closest match at line 20001")
 +        expect(error.message).toContain("gamxa")
 +      }),
@@ -1661,11 +1707,11 @@ index fa7045ad1b8465e0a83610bdce70ff8aed1c2fc7..66ba8e2337ab93a86e1aac2b807b1704
      it.instance("closest match accepts the normalized score boundary", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -535,6 +684,20 @@ describe("tool.edit", () => {
+@@ -577,6 +732,20 @@ describe("tool.edit", () => {
        }),
      )
  
-+    // `aa` 到同一 end 的 `ba` 与 `a` 都是 distance=1；forward end 唯一仍必须由 reverse length 判 tie。
++    // #522：`aa` 到同一 end 的 `ba` 与 `a` 都是 distance=1；forward end 唯一仍必须由 reverse length 判 tie。
 +    it.instance("suppresses a same-end closest tie", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance

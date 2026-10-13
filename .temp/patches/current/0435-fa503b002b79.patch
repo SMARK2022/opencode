@@ -221,59 +221,6 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -767,7 +767,8 @@ withMcpInstructions.instance(
-       yield* llm.hang
-       yield* user(chat.id, "hello")
- 
-+      // [local-smark] loop 以 fiber 运行：MCP instruction 请求在 loop 内挂起，主体需 await 后再 interrupt
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* awaitWithTimeout(llm.wait(1), "timed out waiting for MCP instruction request", "10 seconds")
- 
-       const hits = yield* llm.hits
-@@ -860,7 +860,8 @@ it.instance(
-       yield* llm.hang
-       yield* user(chat.id, "run a subagent")
-       // #150：fork loop fiber（与 preserves-metadata / slash-cancel 同入口）
-+      // [local-smark] #150：子会话 busy 轮询期间父 loop 需保持可 cancel（cancel-idle 契约）
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
- 
-       // #150：等到 task running 且带 child sessionId
-@@ -1960,7 +1962,10 @@ it.instance(
-           })
-           .item(),
-       )
-+      // [local-smark] permission 请求由 loop fiber 内的工具发出，fork 后主体才能轮询并批准
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-+      if (process.platform === "win32")
-+        yield* awaitWithTimeout(llm.wait(1), "auto metadata model request never started", "20 seconds")
-       const [request] = yield* waitForPermission(1)
-       expect(request.permission).toBe("todowrite")
-       // Tool implementations should not each remember to copy ctx.agent into
-@@ -1969,7 +1974,7 @@ it.instance(
-       expect(request.metadata.agent).toBe("auto")
-       yield* permission.reply({ requestID: request.id, reply: "reject" })
-       yield* Fiber.await(fiber)
-     }),
-   { git: true },
--  10_000,
-+  process.platform === "win32" ? 30_000 : 10_000,
- )
-@@ -2014,7 +2019,10 @@ it.instance(
-       )
- 
-       // #216：fork loop 使 cancel 可在 review 进行中并发触发
-+      // [local-smark] #216：review 进行中 cancel 必须可并发触发，loop 必须在 fiber 上
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-+      if (process.platform === "win32")
-+        yield* awaitWithTimeout(llm.wait(1), "shell review model request never started", "20 seconds")
-       // #216：等待 shell 工具进入 reviewing 状态——确认 auto-review 已启动
-       const reviewing = yield* pollWithTimeout(
-         Effect.gen(function* () {
 @@ -2047,7 +2055,8 @@ it.instance(
        // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
        yield* prompt.cancel(chat.id)
@@ -294,107 +241,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 -  15_000,
 +  process.platform === "win32" ? 30_000 : 15_000,
  )
-@@ -2212,7 +2212,7 @@ it.instance(
-       const msg = yield* user(chat.id, "hello")
-       yield* addSubtask(chat.id, msg.id)
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       const tool = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2254,7 +2254,7 @@ it.instance(
-       yield* llm.hang
-       yield* user(chat.id, "hello")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       const tool = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2293,7 +2293,7 @@ it.instance(
-       const chat = yield* sessions.create({})
-       yield* user(chat.id, "hi")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
-       expect((yield* status.get(chat.id)).type).toBe("busy")
-       yield* prompt.cancel(chat.id)
-@@ -2387,7 +2387,8 @@ it.instance("cancel interrupts loop and resolves with an assistant message", ()
- 
-     yield* user(chat.id, "more")
- 
-+      // [local-smark] cancel-interrupt 断言依赖 fiber 句柄；同步 yield 会阻塞测试主体
--    const fiber = yield* prompt.loop({ sessionID: chat.id })
-+    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
-     yield* prompt.cancel(chat.id)
-@@ -2408,7 +2408,8 @@ it.instance("cancel records MessageAbortedError on interrupted process", () =>
-     yield* llm.hang
-     yield* user(chat.id, "hello")
- 
-+      // [local-smark] MessageAbortedError 记录验证同样依赖 interrupt 路径，fork 为前置条件
--    const fiber = yield* prompt.loop({ sessionID: chat.id })
-+    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
-     yield* prompt.cancel(chat.id)
-@@ -2447,7 +2447,7 @@ raceNoLLMServer.instance(
- 
-       const firstCreate = defer<void>()
-       processorCreateStarted.push(firstCreate.resolve)
--      const first = yield* prompt.loop({ sessionID: chat.id })
-+      const first = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* Effect.promise(() => firstCreate.promise)
- 
-       yield* prompt.cancel(chat.id)
-@@ -2473,7 +2473,7 @@ raceNoLLMServer.instance(
- 
-       const secondCreate = defer<void>()
-       processorCreateStarted.push(secondCreate.resolve)
--      const second = yield* prompt.loop({ sessionID: chat.id })
-+      const second = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* Effect.promise(() => secondCreate.promise)
- 
-       yield* prompt.cancel(chat.id)
-@@ -2534,7 +2534,8 @@ noLLMServer.instance(
-       const msg = yield* user(chat.id, "hello")
-       yield* addSubtask(chat.id, msg.id)
- 
-+      // [local-smark] processor create 竞态验证：fork 后主体与 loop 并发推进 firstCreate 门闩
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* awaitWithTimeout(Deferred.await(ready), "timed out waiting for task tool to start", "10 seconds")
-       yield* prompt.cancel(chat.id)
- 
-@@ -2572,7 +2572,7 @@ it.instance(
-       const msg = yield* user(chat.id, "hello")
-       yield* addSubtask(chat.id, msg.id)
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
- 
-       const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-@@ -2616,9 +2628,13 @@ it.instance(
-       yield* llm.hang
-       yield* user(chat.id, "hello")
- 
--      const a = yield* prompt.loop({ sessionID: chat.id })
-+      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
--      yield* llm.wait(1)
-+      yield* (
-+        process.platform === "win32"
-+          ? awaitWithTimeout(llm.wait(1), "queued callers model request never started", "20 seconds")
-+          : llm.wait(1)
-+      )
--      const b = yield* prompt.loop({ sessionID: chat.id })
-+      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* Effect.sleep(50)
- 
-       yield* prompt.cancel(chat.id)
 @@ -2629,6 +2645,6 @@ it.instance(
          expect(exitA.value.info.id).toBe(exitB.value.info.id)
        }
@@ -403,71 +249,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 -  10_000,
 +  process.platform === "win32" ? 30_000 : 10_000,
  )
-@@ -2745,7 +2745,7 @@ it.instance("assertNotBusy fails with BusyError when loop running", () =>
-     const chat = yield* sessions.create({})
-     yield* user(chat.id, "hi")
- 
--    const fiber = yield* prompt.loop({ sessionID: chat.id })
-+    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
- 
-@@ -2784,7 +2784,7 @@ it.instance(
-       const chat = yield* sessions.create({})
-       yield* user(chat.id, "hi")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
- 
-       const exit = yield* prompt
-@@ -2818,7 +2818,7 @@ it.instance("shell rejects with BusyError when loop running", () =>
-     yield* llm.hang
-     yield* user(chat.id, "hi")
- 
--    const fiber = yield* prompt.loop({ sessionID: chat.id })
-+    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
- 
-@@ -3026,7 +3026,7 @@ it.instance(
-         .pipe(Effect.forkChild)
-       yield* waitForBusy(chat.id)
- 
--      const loop = yield* prompt.loop({ sessionID: chat.id })
-+      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* Effect.sleep(50)
- 
-       expect(yield* llm.calls).toBe(0)
-@@ -3064,8 +3064,8 @@ it.instance(
-         .pipe(Effect.forkChild)
-       yield* waitForBusy(chat.id)
- 
--      const a = yield* prompt.loop({ sessionID: chat.id })
--      const b = yield* prompt.loop({ sessionID: chat.id })
-+      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-+      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* Effect.sleep(50)
- 
-       expect(yield* llm.calls).toBe(0)
-@@ -3229,7 +3229,7 @@ unix(
-         workdir: path.resolve(dir),
-       })
- 
--      const run = yield* prompt.loop({ sessionID: chat.id })
-+      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
-       yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -3268,7 +3268,7 @@ unixNoLLMServer(
-       const sh = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "sleep 30" }).pipe(Effect.forkChild)
-       yield* waitForBusy(chat.id)
- 
--      const loop = yield* prompt.loop({ sessionID: chat.id })
-+      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* Effect.sleep(50)
- 
-       yield* prompt.cancel(chat.id)
 @@ -3840,6 +3856,7 @@
        expect(hasExtAuto).toBe(true)
        expect(hasBashAuto).toBe(true)
@@ -477,52 +258,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  // 父子会话各自保留真实模型与 Git 路径，Windows 总预算覆盖两轮初始化。
 +  process.platform === "win32" ? 60_000 : 15_000,
  )
-@@ -3877,7 +3877,7 @@ it.instance(
-       // 第一轮：hang 住 LLM，让 agent loop 卡住
-       yield* llm.hang
-       yield* user(chat.id, "first")
--      const fiber = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       yield* llm.wait(1)
- 
-       // 取消当前 agent loop（fork 让 cancel 在后台执行）
-@@ -3886,7 +3886,7 @@ it.instance(
-       // 立即提交新命令——在 cancel 的 abortPendingAssistants 执行前
-       yield* llm.push(reply().text("second response").stop().item())
-       yield* user(chat.id, "second")
--      const fiber2 = yield* prompt.loop({ sessionID: chat.id })
-+      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       // 等待第二个 loop 完成
-       const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("10 seconds"))
-@@ -4011,10 +4011,10 @@ it.instance.skip(
-       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
-       // 目标 llm API：每次 push 一个完整 provider turn（tool call + stop），
-       // 随后 llm.text 提供下一 turn 的文本回复
--      yield* llm.push(reply().tool("goal", {}).stop())
--      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
-+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
-+      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
-       yield* llm.text("pending recorded")
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
-       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
-@@ -4037,10 +4037,10 @@ it.instance.skip(
- 
-       // D 经真实 Prompt/GoalTool path 再次使用同 reason；若 chronology 被 S rewind，
-       // 这里会错误成为 attempt 2 并把 Goal 终态化，因此最终 active 是行为级信号。
--      yield* llm.push(reply().tool("goal", {}).stop())
--      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
-+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
-+      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
-       yield* llm.text("second pending recorded")
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       // C 是 D 的 previous eligible turn；late S(B) 不能把 B 重新排到 C 之后。
-       const result = yield* goalSvc.get(chat.id)
 @@ -4081,10 +4081,12 @@ it.instance(
          synthetic: true,
          goalContinuation: true,
@@ -539,60 +274,51 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  
        // 旧 marker 没有 lineage，但 compaction part 足以证明它是 technical；
        // D 的 previous 仍是 B，所以相同 reason 的第二次确认应真正 terminal。
-@@ -4111,10 +4111,10 @@ it.instance.skip(
- 
-       const terminalTurn = yield* user(chat.id, "finish now", { created: 1_000 })
-       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+@@ -4031,3 +4031,3 @@
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
+       yield* llm.text("pending recorded")
+@@ -4057,3 +4057,3 @@
+-      yield* llm.push(reply().tool("goal", {}).stop())
+-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
++      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
+       yield* llm.text("second pending recorded")
+@@ -4131,3 +4131,5 @@
++      // [local-smark] E2E 先 read 建立快照再 operate 终态转换——必填 schema 下旧空调用会被 decode 拒绝，
++      // read→complete 配对同时锁定 trusted-read 前置条件
 -      yield* llm.push(reply().tool("goal", {}).stop())
 -      yield* llm.push(reply().tool("goal", { mark: "complete", reason: "all work verified" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "complete", reason: "all work verified" }).stop())
        yield* llm.text("complete recorded")
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       // 先通过真实 Tool 写入 model terminal，确保 terminal_turn_id 来自 production transition；
-       // 直接调用 user set 会产生不同 ownership，不能证明 recovery actor classifier。
-@@ -4123,10 +4123,10 @@ it.instance.skip(
-         created: 2_000,
-         synthetic: true,
-       })
+@@ -4143,3 +4143,3 @@
 -      yield* llm.push(reply().tool("goal", {}).stop())
 -      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
        yield* llm.text("technical recovery rejected")
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       const afterTechnical = yield* goalSvc.get(chat.id)
-       if (afterTechnical._tag === "Some") expect(afterTechnical.value.status).toBe("complete")
- 
-@@ -4137,18 +4137,18 @@ it.instance.skip(
-         synthetic: true,
-         goalContinuation: true,
-       })
+@@ -4157,3 +4157,3 @@
 -      yield* llm.push(reply().tool("goal", {}).stop())
 -      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
        yield* llm.text("continuation recovery rejected")
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-       const afterContinuation = yield* goalSvc.get(chat.id)
-       if (afterContinuation._tag === "Some") expect(afterContinuation.value.status).toBe("complete")
- 
-       yield* user(chat.id, "please continue", { created: 4_000 })
+@@ -4165,3 +4165,3 @@
 -      yield* llm.push(reply().tool("goal", {}).stop())
 -      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
        yield* llm.text("recovery accepted")
--      yield* prompt.loop({ sessionID: chat.id })
-+      yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
- 
-       // technical/continuation 只验证拒绝；真正的新用户 Goal turn 才拥有恢复授权。
-       const result = yield* goalSvc.get(chat.id)
- 
+@@ -4174,4 +4176,5 @@
+     }),
+   { git: true },
+-  60_000,
++  // Windows 冷启动下多轮真实 loop 耗时接近 60s——放宽到 120s 避免 flaky
++  process.platform === "win32" ? 120_000 : 60_000,
+ )
 diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/tool/goal.test.ts
 --- a/packages/opencode/test/tool/goal.test.ts
 +++ b/packages/opencode/test/tool/goal.test.ts

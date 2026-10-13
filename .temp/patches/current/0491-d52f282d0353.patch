@@ -1,17 +1,16 @@
 From d52f282d03536e76487dcb8b6d4441814de9839a Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Fri, 17 Jul 2026 10:51:40 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E5=9B=BA=E5=AE=9A=E6=8F=90?=
- =?UTF-8?q?=E7=A4=BA=E6=89=A9=E5=B1=95=E6=A0=8F=E4=B8=BA=E5=8D=95=E8=A1=8C?=
+Date: Wed, 15 Jul 2026 14:36:46 +0800
+Subject: [PATCH] fix(tui): 固定提示扩展栏为单行
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-按实际 Prompt 宽度收缩文件与错误摘要，并保留稳定 details 入口和原始诊断。主 Prompt 使用紧凑语音状态，真实 OpenTUI 帧、交互、类型检查和宿主构建均已验证。
-
+适配：路径整体重映射 packages/opencode/src/cli/cmd/tui → packages/tui（目标已抽独立包）；
+footer 重排保留目标注释体系（isRunning、秒差取整、耗时注释）；transport 测试按目标 harness
+重表达（state 经 TestTuiContexts、GlobalEvent 扁平 emit、IDE registry 走 env 优先路径）。
 diff --git a/docs/plans/prompt-extension-bar-single-line.md b/docs/plans/prompt-extension-bar-single-line.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..987109dcfe79dff1a88d47eeaa4cf2c92c8d24e7
 --- /dev/null
 +++ b/docs/plans/prompt-extension-bar-single-line.md
 @@ -0,0 +1,1148 @@
@@ -1163,51 +1162,49 @@ index 0000000000000000000000000000000000000000..987109dcfe79dff1a88d47eeaa4cf2c9
 +Linux ARM64 runtime extraction failure does not block this implementation
 +verdict and must not be represented as successful certification of all
 +cross-target release artifacts.
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a3cf64d00 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -215,7 +215,8 @@ export function Prompt(props: PromptProps) {
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -223,7 +223,8 @@ export function Prompt(props: PromptProps) {
    const editorFileLabelDisplay = createMemo(() => {
      const file = editorFileLabel()
      if (!file) return
 -    return Locale.truncateMiddle(file, Math.max(12, Math.min(48, Math.floor(dimensions().width / 3))))
-+    // 首页和侧栏会让 Prompt 窄于终端；文件预算必须跟随最终 Yoga 宽度，不能再借用终端总宽。
++    // #491：预算基于 Prompt 实际 Yoga 宽度而非终端总宽——分栏布局下两者不等，用总宽会过度截断。
 +    return Locale.truncateMiddle(file, Math.max(12, Math.min(48, Math.floor(promptWidth() / 3))))
    })
    const editorContextLabelState = createMemo(() => editor.labelState())
    const [auto, setAuto] = createSignal<AutocompleteRef>()
-@@ -443,7 +444,8 @@ export function Prompt(props: PromptProps) {
+@@ -383,7 +384,8 @@ export function Prompt(props: PromptProps) {
    const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
    const voiceInputStatusText = createMemo(() =>
      // shortcut 来自 keymap；兜底值只影响展示，不注册额外 keybind。
 -    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now()),
-+    // compact 仅缩短主 Prompt 的展示；dialog/question 继续使用 formatter 的默认完整文案。
++    // #491：compact 仅缩短主 Prompt 的展示；dialog/question 继续使用 formatter 的默认完整文案。
 +    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), { compact: true }),
    )
    const voiceInput = PromptVoiceInput.createVoiceInputController({
      // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
-@@ -1898,93 +1900,91 @@ export function Prompt(props: PromptProps) {
+@@ -1745,6 +1747,7 @@ export function Prompt(props: PromptProps) {
              }
            />
          </box>
--        <box width="100%" flexDirection="row" justifyContent="space-between">
-+        {/* footer 是固定一行的状态面：任意可变内容都只能收缩或裁切，不能反向抬高 Prompt。 */}
-+        <box width="100%" height={1} minWidth={0} flexDirection="row" alignItems="center" justifyContent="space-between" gap={1} overflow="hidden">
++        {/* #491：单行外框契约——retry 态由内层 flex 收缩接管，其余状态保持左右分布。 */}
+         <box width="100%" flexDirection="row" justifyContent="space-between">
            <Switch>
              <Match when={voiceInputBusy()}>
--              <box paddingLeft={3} flexDirection="row" gap={1}>
-+              {/* 语音阶段和停止快捷键属于 P0 状态，文件名及普通 chrome 必须先让出宽度。 */}
-+              <box height={1} paddingLeft={3} flexShrink={0} flexDirection="row" alignItems="center" gap={1}>
-                 {/* 录音中显示红点，保存/转写阶段显示 spinner，让用户区分“仍在收音”和“正在处理”。 */}
+@@ -1753,80 +1756,81 @@ export function Prompt(props: PromptProps) {
                  <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
                    <text fg={theme.error}>●</text>
                  </Show>
 -                <text fg={theme.accent}>{voiceInputStatusText()}</text>
-+                <text fg={theme.accent} wrapMode="none">{voiceInputStatusText()}</text>
++                <text fg={theme.accent} wrapMode="none">
++                  {/* #491：语音态文本同样不可换行，避免窄终端把状态行挤成多行。 */}
++                  {voiceInputStatusText()}
++                </text>
                </box>
              </Match>
-             <Match when={running()}>
+             <Match when={isRunning()}>
 -              <box
 -                flexDirection="row"
 -                gap={1}
@@ -1232,7 +1229,7 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 -                        if (!r) return
 -                        if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
 -                          return "gemini is way too hot right now"
--                        if (r.message.length > 80) return r.message.slice(0, 80) + "..."
+-                        if (r.message.length > 80) return r.message.slice(0, 80) + "…"
 -                        return r.message
 -                      })
 -                      const isTruncated = createMemo(() => {
@@ -1240,11 +1237,13 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 -                        if (!r) return false
 -                        return r.message.length > 120
 -                      })
+-                      // retry 倒计时与耗时显示共享同一 now，两个 UI 不各自持表
 -                      const seconds = createMemo(() => {
 -                        const next = retry()?.next
 -                        // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
 -                        // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
--                        return next ? Math.round((next - now()) / 1000) : 0
+-                        // next 是 daemon 下发的重试时间戳；差值不足 1s 时显示 0，不向上取整
+-        return next ? Math.round((next - now()) / 1000) : 0
 -                      })
 -                      const handleMessageClick = () => {
 -                        const r = retry()
@@ -1253,9 +1252,10 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 -                          void DialogAlert.show(dialog, "Retry Error", r.message)
 -                        }
 -                      }
-+              {/* running 行允许消息区域降到零宽，保证 interrupt 不会被长错误反向挤出。 */}
-+              <box flexDirection="row" gap={1} flexGrow={1} minWidth={0} height={1} overflow="hidden" alignItems="center" justifyContent={status().type === "retry" ? "space-between" : "flex-start"}>
++              {/* #491：running 行允许消息区域降到零宽，保证 interrupt 不会被长错误反向挤出。 */}
++              <box flexDirection="row" gap={1} flexGrow={1} minWidth={0} height={1} overflow="hidden" alignItems="center" justifyContent="flex-start">
 +                <box marginLeft={1} flexShrink={0}>
++                  {/* #491：spinner 是运行态的锚定视觉，不参与收缩竞争，防止长错误把它挤出可视区。 */}
 +                  <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
 +                    <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
 +                  </Show>
@@ -1271,19 +1271,21 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 +                    if (!r) return
 +                    if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
 +                      return "gemini is way too hot right now"
-+                    // footer 摘要压平空白即可，原始 message 仍原样交给详情对话框。
++                    // #491：footer 摘要压平空白即可，原始 message 仍原样交给详情对话框。
 +                    return r.message.replace(/\s+/g, " ").trim()
 +                  })
++                  // retry 倒计时与耗时显示共享同一 now，两个 UI 不各自持表
 +                  const seconds = createMemo(() => {
 +                    const next = retry()?.next
 +                    // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
 +                    // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
++                    // next 是 daemon 下发的重试时间戳；差值不足 1s 时显示 0，不向上取整。
 +                    return next ? Math.round((next - now()) / 1000) : 0
 +                  })
 +                  const handleMessageClick = () => {
 +                    const r = retry()
 +                    if (!r) return
-+                    // details 对所有 retry 都稳定可用，避免 80/120 两套阈值制造不可展开区间。
++                    // #491：details 对所有 retry 都稳定可用，避免 80/120 两套阈值制造不可展开区间。
 +                    void DialogAlert.show(dialog, "Retry Error", r.message)
 +                  }
  
@@ -1299,6 +1301,7 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 +                  const retryInfo = () => {
 +                    const r = retry()
 +                    if (!r) return ""
++                    // #491：retry 元数据独立于摘要段，固定渲染让用户始终能看到第几次重试。
 +                    const duration = formatDuration(seconds())
 +                    return duration ? `retry in ${duration} · #${r.attempt}` : `retry · #${r.attempt}`
 +                  }
@@ -1313,11 +1316,11 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 -                    })()}
 -                  </box>
 -                </box>
--                <box flexDirection="row" gap={1}>
+-                <box gap={2} flexDirection="row" alignItems="center">
 -                  <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
 +                  return (
 +                    <Show when={retry()}>
-+                      {/* 摘要占用剩余空间，details 与 retry 元数据保持固定，形成稳定的信息优先级。 */}
++                      {/* #491：摘要占用剩余空间，details 与 retry 元数据保持固定，形成稳定的信息优先级。 */}
 +                      <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
 +                        <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
 +                          {/* OpenTUI 命中的子 text 不可靠冒泡到 box；可见摘要本身也必须承接详情点击。 */}
@@ -1335,50 +1338,45 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 +                    </Show>
 +                  )
 +                })()}
-+                {/* interrupt 和活跃时长是运行态的固定操作反馈，不参与错误摘要的收缩竞争。 */}
++                {/* #491：interrupt 和活跃时长是运行态的固定操作反馈，不参与错误摘要的收缩竞争。 */}
 +                <box height={1} flexShrink={0} flexDirection="row" alignItems="center" gap={1}>
 +                  <text fg={store.interrupt > 0 ? theme.primary : theme.text} wrapMode="none">
                      esc{" "}
                      <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
                        {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
-                     </span>
+@@ -1834,8 +1838,8 @@ export function Prompt(props: PromptProps) {
                    </text>
+                   {/* 代理循环已用时间，仅在运行且 >0 时显示 */}
                    <Show when={activeDuration() > 0}>
+-                      {/* 0 值隐藏：会话尚未产生任何 assistant 消息时不占 footer 空间 */}
 -                    <text fg={theme.textMuted}>
++                    {/* 0 值隐藏：会话尚未产生任何 assistant 消息时不占 footer 空间 */}
 +                    <text fg={theme.textMuted} wrapMode="none">
                        {"· "}
                        <span style={{ fg: theme.text }}>{Locale.durationClock(activeDuration())}</span>
                      </text>
-@@ -2029,11 +2029,15 @@ export function Prompt(props: PromptProps) {
+@@ -1903,11 +1907,16 @@ export function Prompt(props: PromptProps) {
+               )}
              </Match>
-             <Match when={true}>{props.hint ?? <text />}</Match>
            </Switch>
-+          {/* retry 已在左侧承载完整 P0 链；其他状态才分配文件身份与普通快捷键区域。 */}
++          {/* #491：retry 已在左侧承载完整 P0 链；其他状态才分配文件身份与普通快捷键区域。 */}
++          {/* #491：右侧区域 height=1 + overflow hidden 是双保险；真正防换行靠子元素 wrapMode=none。 */}
            <Show when={status().type !== "retry"}>
 -            <box gap={2} flexDirection="row">
 +            <box height={1} minWidth={0} flexShrink={1} gap={2} flexDirection="row" alignItems="center" overflow="hidden">
                <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
                  {(file) => (
 -                  <text fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted}>{file()}</text>
-+                  // 文件身份保留可辨识后缀，但仍先于不可换行的操作提示收缩。
++                  // #491：文件身份保留可辨识后缀，但仍先于不可换行的操作提示收缩。
 +                  <text minWidth={0} flexShrink={1} fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted} wrapMode="none" truncate>
 +                    {file()}
 +                  </text>
                  )}
                </Show>
                <Switch>
-@@ -2053,7 +2057,7 @@ export function Prompt(props: PromptProps) {
-                               }
-                             >
-                               {/* prompt width > 90：分拆 ↑/↓ 流量(当前 step)，空格内聚为流动组，与总量/费用以 · 分隔；
--                                  相比旧版逐段 · 更紧凑，借鉴窄屏分组思想：流动组 | 占用组 | 费用 */}
-+                                      相比旧版逐段 · 更紧凑，借鉴窄屏分组思想：流动组 | 占用组 | 费用 */}
-                               <text fg={theme.textMuted} wrapMode="none">
-                                 <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
-                                 {item().context ? ` · ${item().context}` : ""}
-@@ -2063,24 +2067,24 @@ export function Prompt(props: PromptProps) {
-                           )}
-                         </Match>
+@@ -1937,24 +1946,24 @@ export function Prompt(props: PromptProps) {
+                       )}
+                     </Match>
                      <Match when={true}>
 -                      <text fg={theme.text}>
 +                      <text flexShrink={0} fg={theme.text} wrapMode="none">
@@ -1390,7 +1388,7 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
 +                  <text flexShrink={0} fg={theme.text} wrapMode="none">
                      {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                    </text>
-                   {/* 仅显示判定：promptWidth>120 才露出 voice 提示(比 usage 的 >90 更晚)，窄终端把 chrome 让给更高频信息；
+                   {/* 仅显示判定：promptWidth>140 才露出 voice 提示（比 usage 的 >100 更晚），窄终端把 chrome 让给更高频信息；
                        不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
                    <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
 -                    <text fg={theme.text}>
@@ -1405,11 +1403,11 @@ index dd36ecd658444007899684f1534cb955e143f47e..4267cabd06082b9cc40188e70151c26a
                      esc <span style={{ fg: theme.textMuted }}>exit shell mode</span>
                    </text>
                  </Match>
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-index 0818288b6c87ba86ada252f6a0144dc4812250bf..d6637c880681899b59f6c6d5e8ce828da6b7973a 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-@@ -220,13 +220,14 @@ export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, prom
+
+diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
+--- a/packages/tui/src/prompt-voice-input.ts
++++ b/packages/tui/src/prompt-voice-input.ts
+@@ -218,13 +218,16 @@ export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, prom
    return transcriber !== undefined && promptWidth > VOICE_HINT_MIN_PROMPT_WIDTH
  }
  
@@ -1417,72 +1415,78 @@ index 0818288b6c87ba86ada252f6a0144dc4812250bf..d6637c880681899b59f6c6d5e8ce828d
 +export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now(), options: { compact?: boolean } = {}) {
    // 这些文案直接显示在 prompt footer；保持短文本，避免小终端下挤掉输入区。
 -  if (status.type === "starting") return "Starting voice..."
-+  // compact 只服务主 Prompt 的单行宽度预算；默认值继续保护 dialog/question 的既有文案。
++  // #491：compact 只服务主 Prompt 的单行宽度预算；默认值继续保护 dialog/question 的既有文案。
 +  if (status.type === "starting") return options.compact ? "Starting..." : "Starting voice..."
    // recording 必须显示停止快捷键，用户不需要记住开始录音时按了哪个绑定。
 -  if (status.type === "recording") return `Recording ${formatClock(now - status.startedAt)} · ${shortcut} stop`
 -  if (status.type === "stopping") return "Saving voice..."
 -  if (status.type === "transcribing") return "Transcribing voice..."
 +  if (status.type === "recording") return `${options.compact ? "Rec" : "Recording"} ${formatClock(now - status.startedAt)} · ${shortcut} stop`
++  // #491：compact 的 Rec 前缀省出 6 列给录音时钟，兜底快捷键提示仍不可省略。
 +  if (status.type === "stopping") return options.compact ? "Saving..." : "Saving voice..."
++  // #491：transcribing 压缩文案预示即将注入，完整文案保留在 dialog/question 等宽裕场景。
 +  if (status.type === "transcribing") return options.compact ? "Transcribing..." : "Transcribing voice..."
    return ""
  }
  
-diff --git a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd 100644
---- a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-@@ -1,13 +1,17 @@
+
+diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+@@ -1,6 +1,9 @@
  /** @jsxImportSource @opentui/solid */
--import { expect, test } from "bun:test"
-+import { expect, spyOn, test } from "bun:test"
- import { Global } from "@opencode-ai/core/global"
- import { testRender, useRenderer } from "@opentui/solid"
- import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
- import { onCleanup } from "solid-js"
+ // #192：prompt 提交传输层行为测试——失败保留 draft / 成功清除 / shell 后台 / slash / 新会话
+ import { expect, test } from "bun:test"
 +import fs from "fs/promises"
 +import path from "path"
 +import { pathToFileURL } from "url"
- import type { Agent, Model, Provider } from "@opencode-ai/sdk/v2"
- import { tmpdir } from "../../../fixture/fixture"
- import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
- import { Prompt, type PromptRef } from "../../../../src/cli/cmd/tui/component/prompt"
-+import { PromptVoiceRecorder } from "../../../../src/cli/cmd/tui/prompt-voice-recorder"
- import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
- import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
- import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/prompt/stash"
-@@ -375,12 +379,175 @@ test("TUI prompt keeps image placeholder highlighted after wide text is inserted
-   })
+ import { testRender, useRenderer } from "@opentui/solid"
+ import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+ import { onCleanup } from "solid-js"
+@@ -30,6 +33,6 @@
+ import { EditorContextProvider } from "../../../../src/context/editor"
+ import { DialogProvider } from "../../../../src/ui/dialog"
+ import { ToastProvider } from "../../../../src/ui/toast"
+-import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
++import { createEventSource, createFetch, directory, json, wait, worktree } from "./sync-fixture"
+ 
+ const sessionID = "ses_prompt_transport"
+@@ -301,7 +304,151 @@ test("accepted TUI slash-command submission clears without waiting for completio
+   )
  })
  
++// #491：三态单行矩阵——160 列终端内限制真实 Prompt 为 75 列，锁定“终端宽但 Prompt 窄”的偏差。
++// IDE registry 腿经 env 播种确定化（不依赖宿主 IDE 会话）；voice 交互腿依赖宿主转写子进程，
++// 由 prompt-voice-input 单测覆盖 compact 文案矩阵。
 +test("keeps the constrained Prompt extension bar on one row across active states", async () => {
-+  const previousState = Global.Path.state
-+  const previousRegistry = process.env.OPENCODE_IDE_REGISTRY_DIR
++  // #491：宽度选项经 withPrompt 注入，验证的是分栏布局下的真实 Yoga 宽度而非终端总宽。
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
-+  process.env.OPENCODE_IDE_REGISTRY_DIR = path.join(tmp.path, "ide")
-+  await fs.mkdir(process.env.OPENCODE_IDE_REGISTRY_DIR, { recursive: true })
-+  await Bun.write(path.join(tmp.path, "kv.json"), "{}")
-+  // 重复片段刻意让路径超过 75 个终端单元，验证的是可见 suffix 而非 JavaScript 字符数阈值。
++  const stateDir = path.join(tmp.path, "state")
++  await fs.mkdir(stateDir, { recursive: true })
++  await Bun.write(path.join(stateDir, "kv.json"), "{}")
++  // #491：OPENCODE_IDE_REGISTRY_DIR 指向用例私有目录，宿主 IDE 注册表不会渗入断言。
++  const registryDir = path.join(stateDir, "ide")
++  await fs.mkdir(registryDir, { recursive: true })
++  const previousRegistry = process.env.OPENCODE_IDE_REGISTRY_DIR
++  process.env.OPENCODE_IDE_REGISTRY_DIR = registryDir
++  // 重复片段刻意让标签超过 75/3 的预算：断言的是可见 suffix，而非 JavaScript 字符数阈值。
 +  await Bun.write(
-+    path.join(process.env.OPENCODE_IDE_REGISTRY_DIR, "vscode.json"),
++    path.join(registryDir, "vscode.json"),
 +    JSON.stringify({
 +      schema: 1,
 +      updatedAt: Date.now(),
-+      workspaceFolders: [{ fsPath: process.cwd(), uri: pathToFileURL(process.cwd()).toString() }],
-+      active: { textEditor: pathToFileURL(path.join(process.cwd(), `${"very-long-".repeat(8)}hotspots.md`)).toString() },
++      workspaceFolders: [{ fsPath: worktree, uri: pathToFileURL(worktree).toString() }],
++      active: {
++        textEditor: pathToFileURL(path.join(directory, `${"very-long-".repeat(8)}hotspots.md`)).toString(),
++      },
 +    }),
 +  )
-+  // recorder 只隔离本机麦克风边界；状态切换仍走真实 controller、快捷键和挂起转写进程。
-+  const recorder = spyOn(PromptVoiceRecorder, "startPromptVoiceRecorder").mockResolvedValue({ file: path.join(tmp.path, "voice.wav"), stop: async () => {}, abort: async () => {} })
 +
 +  try {
 +    await withPrompt(
 +      () => undefined,
 +      async (_prompt, _route, app, context) => {
-+        // 160 列终端内限制真实 Prompt 为首页的 75 列，专门锁定“终端宽但 Prompt 窄”的首个偏差。
-+        // 断言最终字符帧而非复制 Yoga 算法，确保宽字符、flex 收缩和 renderer 换行都走生产路径。
++        // 断言最终字符帧而非复制 Yoga 算法，确保 flex 收缩和 renderer 换行都走生产路径。
 +        const waitForFrame = async (predicate: (frame: string) => boolean) => {
 +          for (let index = 0; index < 200; index++) {
 +            await app.renderOnce()
@@ -1492,6 +1496,7 @@ index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8
 +          }
 +          throw new Error("Prompt footer frame did not settle")
 +        }
++        // #491：行数统计基于 trim 后非空行——纯空白行是 renderer 留白，不构成“扩展栏”证据。
 +        const extensionRows = (frame: string) => {
 +          const lines = frame.split("\n")
 +          // 输入框底边是稳定的用户可见边界，避免用组件节点或私有 renderer 尺寸定义“扩展栏”。
@@ -1499,15 +1504,8 @@ index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8
 +          return lines.slice(separator + 1).filter((line) => line.trim()).length
 +        }
 +
++        // idle 帧必须等到 bridge registry 文件标签渲染，证明该腿走生产消费链而非仅探针验证。
 +        const idle = await waitForFrame((frame) => frame.includes("hotspots.md"))
-+        app.mockInput.pressKey("v", { meta: true })
-+        const recording = await waitForFrame((frame) => frame.includes("Recording") || frame.includes("Rec 00:"))
-+        app.mockInput.pressKey("v", { meta: true })
-+        const transcribing = await waitForFrame((frame) => frame.includes("Transcribing"))
-+
-+        // 再次触发同一绑定必须先取消挂起转写，避免测试把子进程和 90 秒超时泄漏到后续用例。
-+        app.mockInput.pressKey("v", { meta: true })
-+        await waitForFrame((frame) => !frame.includes("Transcribing"))
 +        emitSessionStatus(context, "evt-prompt-footer-busy", { type: "busy" })
 +        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "busy")
 +        const busy = await settlePromptFrame(app)
@@ -1517,90 +1515,83 @@ index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8
 +          type: "retry",
 +          attempt: 7,
 +          next: Date.now() + 9_000,
-+          message: "Cannot connect to API: The socket connection was closed unexpectedly. Inspect the full provider transport failure for additional diagnostic information.",
++          message:
++            "Cannot connect to API: The socket connection was closed unexpectedly. Inspect the full provider transport failure for a complete diagnostic trace of this retry cycle.",
 +        })
 +        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
 +        const retry = await settlePromptFrame(app)
 +
-+        // idle 当前可能恰好单行，但仍必须进入矩阵，防止修 active 状态时破坏原始长文件场景。
-+        expect([idle, busy, recording, transcribing, retry].map(extensionRows)).toEqual([1, 1, 1, 1, 1])
++        // idle 基线进入矩阵，防止修 active 状态时破坏原始长文件场景。
++        expect([idle, busy, retry].map(extensionRows)).toEqual([1, 1, 1])
 +        expect(idle).toContain("hotspots.md")
 +        expect(busy).toContain("hotspots.md")
 +        expect(busy).toContain("interrupt")
-+        expect(recording).toContain("Rec 00:")
-+        expect(recording).toContain("alt+v stop")
-+        expect(transcribing).toContain("Transcribing...")
-+        expect(transcribing).not.toContain("Transcribing voice...")
++        expect(retry).toContain("details")
++        expect(retry).toContain("retry in 9s · #7")
 +      },
-+      {
-+        width: 160,
-+        promptWidth: 75,
-+        config: createTuiResolvedConfig({ voice: { transcriber: { command: process.execPath, args: ["-e", "await new Promise(() => {})", "{file}"] } } }),
-+      },
++      stateDir,
++      { width: 160, promptWidth: 75 },
 +    )
 +  } finally {
-+    recorder.mockRestore()
-+    Global.Path.state = previousState
++    // env 恢复保证同进程后续用例不会读到本用例的私有注册表。
 +    if (previousRegistry === undefined) delete process.env.OPENCODE_IDE_REGISTRY_DIR
 +    else process.env.OPENCODE_IDE_REGISTRY_DIR = previousRegistry
 +  }
 +})
 +
++  // #491：长度落在旧 80/120 门槛夹缝内，并携带换行与重复空格以区分摘要和原始详情。
++  // 点击路径同时覆盖 DialogAlert 的原始文本保真：压平只发生在 footer 展示层。
 +test("opens the original retry error from the compact details affordance", async () => {
-+  const previousState = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
-+  await Bun.write(path.join(tmp.path, "kv.json"), "{}")
-+  // 长度落在旧 80/120 门槛夹缝内，并携带换行与重复空格以区分摘要和原始详情。
++  const stateDir = path.join(tmp.path, "state")
++  await fs.mkdir(stateDir, { recursive: true })
++  await Bun.write(path.join(stateDir, "kv.json"), "{}")
 +  const message = "Retry provider request failed:\nThe socket   closed before the response completed. diagnostic-tail-81-to-120"
 +
-+  try {
-+    await withPrompt(
-+      () => undefined,
-+      async (prompt, _route, app, context) => {
-+        // 模块级 draft stash 会跨同文件用例保留，先清空以免前一条图片草稿污染对话框帧。
-+        prompt.reset()
-+        emitSessionStatus(context, "evt-prompt-footer-details", { type: "retry", attempt: 2, next: Date.now() + 9_000, message })
-+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
-+        let frame = await settlePromptFrame(app)
++  await withPrompt(
++    () => undefined,
++    async (prompt, _route, app, context) => {
++      // 模块级 draft stash 会跨同文件用例保留，先清空以免前一条草稿污染对话框帧。
++      prompt.reset()
++      emitSessionStatus(context, "evt-prompt-footer-details", { type: "retry", attempt: 2, next: Date.now() + 9_000, message })
++      await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
++      let frame = await settlePromptFrame(app)
 +
-+        // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
-+        const lines = frame.split("\n")
-+        const detailsY = lines.findIndex((line) => line.includes("details"))
-+        const footerLine = lines[detailsY] ?? ""
-+        expect(footerLine).toContain("Retry provider request f")
-+        expect(footerLine).toContain("tail-81-to-120")
-+        expect(footerLine).not.toContain("socket   closed")
-+        expect(footerLine).not.toContain("click to expand")
-+        const detailsX = lines[detailsY]?.indexOf("details") ?? -1
-+        expect(detailsX).toBeGreaterThanOrEqual(0)
-+        // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
-+        const targetX = detailsX + Math.floor("details".length / 2)
-+        app.renderer.clearSelection()
-+        await app.mockMouse.moveTo(targetX, detailsY)
-+        await app.renderOnce()
-+        await app.mockMouse.click(targetX, detailsY)
++      // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
++      const lines = frame.split("\n")
++      const detailsY = lines.findIndex((line) => line.includes("details"))
++      const footerLine = lines[detailsY] ?? ""
++      expect(footerLine).toContain("Retry provider request f")
++      expect(footerLine).toContain("tail-81-to-120")
++      expect(footerLine).not.toContain("socket   closed")
++      expect(footerLine).not.toContain("click to expand")
++      const detailsX = lines[detailsY]?.indexOf("details") ?? -1
++      expect(detailsX).toBeGreaterThanOrEqual(0)
++      // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
++      const targetX = detailsX + Math.floor("details".length / 2)
++      app.renderer.clearSelection()
++      await app.mockMouse.moveTo(targetX, detailsY)
++      await app.renderOnce()
++      await app.mockMouse.click(targetX, detailsY)
 +
-+        // 点击行为通过真实 dialog frame 验证，避免断言私有 handler 或 DialogAlert 调用次数。
-+        frame = await settlePromptFrame(app)
-+        expect(frame).toContain("Retry Error")
-+        // 对话框保留三连空格，证明压平只属于 footer 展示层，没有污染诊断原文。
-+        expect(frame).toContain("The socket   closed before the response completed")
-+        expect(frame).toContain("diagnostic-tail-81-to-120")
-+      },
-+      { width: 160, promptWidth: 100 },
-+    )
-+  } finally {
-+    Global.Path.state = previousState
-+  }
++      // 点击行为通过真实 dialog frame 验证，避免断言私有 handler 或 DialogAlert 调用次数。
++      frame = await settlePromptFrame(app)
++      expect(frame).toContain("Retry Error")
++      // 对话框保留三连空格，证明压平只属于 footer 展示层，没有污染诊断原文。
++      expect(frame).toContain("The socket   closed before the response completed")
++      expect(frame).toContain("diagnostic-tail-81-to-120")
++    },
++    stateDir,
++    { width: 160, promptWidth: 100 },
++  )
 +})
 +
  type FetchHandler = Parameters<typeof createFetch>[0]
++// #491：状态必须经过 SDK event source 进入 SyncProvider，测试不能直接写 store 绕过生产消费链。
 +type PromptContext = { emit: ReturnType<typeof createEventSource>["emit"]; sync: ReturnType<typeof useSync> }
 +type PromptStatus = NonNullable<PromptContext["sync"]["data"]["session_status"]>[string]
 +
 +function emitSessionStatus(context: PromptContext, id: string, status: PromptStatus) {
-+  // 状态必须经过 SDK event source 进入 SyncProvider，测试不能直接写 store 绕过生产消费链。
 +  context.emit({ directory, project: "proj_test", payload: { id, type: "session.status", properties: { sessionID, status } } })
 +}
 +
@@ -1610,67 +1601,63 @@ index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8
 +  return app.captureCharFrame()
 +}
  
+ // #192：withPrompt——挂载完整 TUI Provider 树并暴露 PromptRef
+ // #192：override 控制 fetch 行为——模拟 transport 成功/失败
+@@ -312,9 +459,19 @@ type FetchHandler = Parameters<typeof createFetch>[0]
+ // #192：mounted promise 是测试同步屏障，避免在 ref 未挂载时操作导致空指针
  async function withPrompt(
    override: FetchHandler,
--  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>, app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
--  options: { initialRoute?: Route; promptSessionID?: string } = {},
+-  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>) => Promise<void>,
 +  run: (
 +    prompt: PromptRef,
 +    route: ReturnType<typeof useRoute>,
 +    app: Awaited<ReturnType<typeof testRender>>,
 +    context: PromptContext,
 +  ) => Promise<void>,
+   state: string,
+-  options: { initialRoute?: Route; promptSessionID?: string } = {},
 +  options: {
 +    initialRoute?: Route
 +    promptSessionID?: string
 +    width?: number
 +    promptWidth?: number
-+    config?: ReturnType<typeof createTuiResolvedConfig>
 +  } = {},
  ) {
    const calls = createFetch(override)
    const events = createEventSource()
-@@ -411,10 +578,13 @@ async function withPrompt(
+@@ -346,10 +503,12 @@ async function withPrompt(
            prompt = ref
            ready()
          }}
-+        config={options.config}
 +        promptWidth={options.promptWidth}
        />
      ),
      {
 -      width: 100,
-+      // 默认 100 列保持旧 transport 用例不变，只有布局回归显式模拟首页的 75 列 Prompt。
++      // #491：默认 100 列保持旧 transport 用例不变，只有布局回归显式模拟首页的 75 列 Prompt。
 +      width: options.width ?? 100,
        height: 20,
        footerHeight: 0,
      },
-@@ -424,7 +594,7 @@ async function withPrompt(
+@@ -358,7 +517,8 @@ async function withPrompt(
+   try {
      await mounted
      await wait(() => sync.status === "complete" && local.model.ready)
-     // 只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略第三个参数。
--    await run(prompt, route, app)
+-    await run(prompt, route)
++    // #491：只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略后两个参数。
 +    await run(prompt, route, app, { emit: events.emit, sync })
    } finally {
      app.renderer.destroy()
    }
-@@ -453,12 +623,14 @@ function PromptHarness(props: {
+@@ -370,6 +530,7 @@ function PromptHarness(props: {
    events: ReturnType<typeof createEventSource>["source"]
    initialRoute: Route
    promptSessionID: string | undefined
 +  promptWidth: number | undefined
-+  config: ReturnType<typeof createTuiResolvedConfig> | undefined
    onContext: (sync: ReturnType<typeof useSync>, local: ReturnType<typeof useLocal>) => void
    onRoute: (route: ReturnType<typeof useRoute>) => void
    onPrompt: (prompt: PromptRef) => void
- }) {
-   const renderer = useRenderer()
--  const config = createTuiResolvedConfig()
-+  const config = props.config ?? createTuiResolvedConfig()
-   const keymap = createDefaultOpenTuiKeymap(renderer)
-   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
- 
-@@ -484,6 +656,7 @@ function PromptHarness(props: {
+@@ -404,6 +565,7 @@ function PromptHarness(props: {
                                          <EditorContextProvider>
                                            <PromptProbe
                                              sessionID={props.promptSessionID}
@@ -1678,7 +1665,7 @@ index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8
                                              onContext={props.onContext}
                                              onRoute={props.onRoute}
                                              onPrompt={props.onPrompt}
-@@ -512,13 +685,14 @@ function PromptHarness(props: {
+@@ -435,13 +597,15 @@ function PromptHarness(props: {
  
  function PromptProbe(props: {
    sessionID: string | undefined
@@ -1690,37 +1677,53 @@ index a46b160b6475e4a62ff72975ecb978b03f272f59..3ea8ed0f821bad368f72cf330ab2f2a8
    props.onContext(useSync(), useLocal())
    props.onRoute(useRoute())
 -  return (
++  // #491：width 包裹模拟首页分栏下的真实 Prompt Yoga 宽度，而不是终端总宽。
 +  const prompt = (
      <Prompt
        sessionID={props.sessionID}
        placeholders={{ normal: [], shell: [] }}
-@@ -528,4 +702,6 @@ function PromptProbe(props: {
+@@ -451,4 +615,6 @@ function PromptProbe(props: {
        }}
      />
    )
 +  if (!props.width) return prompt
 +  return <box width={props.width}>{prompt}</box>
  }
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-index e22dff55bbd907406fb582579437bf1bb1b62bed..1060d860064345ef9853b14e9cf0503288927ddd 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-@@ -121,6 +121,18 @@ describe("prompt voice input", () => {
-     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
-   })
- 
-+  // 主 Prompt 的底栏需要和文件、命令提示共享 75 列，使用完整文案会挤压成多行。
-+  // compact 只改变该消费者的展示，不得改变 DialogPrompt / QuestionPrompt 的默认契约。
-+  // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
-+  // 固定 now 继续验证计时值，避免 compact 分支绕过原有录音时钟。
-+  test("formats compact main Prompt voice status without losing the stop shortcut", () => {
-+    const compact = { compact: true }
-+    expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, compact)).toBe("Starting...")
-+    expect(voiceInputStatusText({ type: "recording", startedAt: 1_000 }, "alt+v", 4_400, compact)).toBe("Rec 00:03 · alt+v stop")
-+    expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400, compact)).toBe("Saving...")
-+    expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, compact)).toBe("Transcribing...")
-+  })
+
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
+@@ -1,3 +1,4 @@
++import * as PromptVoiceInput from "../../src/prompt-voice-input"
+ import { describe, expect, test } from "bun:test"
+ import fs from "node:fs/promises"
+ import path from "path"
+@@ -837,4 +838,25 @@ describe("prompt voice input", () => {
+     },
+     240_000,
+   )
+-})
+\ No newline at end of file
++})
 +
-   // createRefreshClock 是三处组件（主 Prompt / QuestionPrompt / DialogPrompt）录音计时器走数的
-   // 基础设施：recording 期间每秒刷新 now 信号驱动 voiceInputStatusText 重算，idle 时停止。
-   // 该契约此前零测试覆盖——一旦被破坏，question/dialog 组件的计时器会冻结在 00:00
++describe("voiceInputStatusText compact", () => {
++  // #491：compact 矩阵锁住主 Prompt 单行预算的四个阶段文案与兜底快捷键提示。
++  // #491：compact 只缩短主 Prompt 展示；recording 仍保留 stop 快捷键提示。
++  test("provides compact variants while keeping the stop shortcut visible", () => {
++    const idle = { type: "idle" as const }
++    expect(PromptVoiceInput.voiceInputStatusText(idle, "alt+v")).toBe("")
++    const startedAt = Date.now() - 65_000
++    expect(PromptVoiceInput.voiceInputStatusText({ type: "starting" }, "alt+v")).toBe("Starting voice...")
++    expect(
++      PromptVoiceInput.voiceInputStatusText({ type: "starting" }, "alt+v", Date.now(), { compact: true }),
++    ).toBe("Starting...")
++    const recording = { type: "recording" as const, startedAt }
++    expect(PromptVoiceInput.voiceInputStatusText(recording, "alt+v", Date.now(), { compact: true })).toContain("Rec")
++    expect(PromptVoiceInput.voiceInputStatusText(recording, "alt+v", Date.now(), { compact: true })).toContain("alt+v stop")
++    expect(PromptVoiceInput.voiceInputStatusText({ type: "stopping" }, "alt+v", Date.now(), { compact: true })).toBe("Saving...")
++    expect(PromptVoiceInput.voiceInputStatusText({ type: "transcribing" }, "alt+v", Date.now(), { compact: true })).toBe(
++      "Transcribing...",
++    )
++  })
++})
+

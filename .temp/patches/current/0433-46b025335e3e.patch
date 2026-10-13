@@ -823,16 +823,6 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
          }
        }).pipe(withCompaction({ llm: stub.llmLayer }))
      },
-@@ -1860,7 +1904,8 @@ describe("session.compaction.process", () => {
-       // #251：第二次 process 传 raw stream——数据库真实形态；过滤由 process
-       // 内部的 filterCompacted 统一承担（与生产上传路径同一语义）
-       msgs = yield* MessageV2.stream(session.id)
--      parent = msgs.at(-1)?.info.id
-+      // stream 是 newest-first：最新 compaction marker 用显式查找取得，不能假设 at(-1) 是最新
-+      parent = msgs.find((m) => m.parts.some((pp) => pp.type === "compaction"))?.info.id
-       expect(parent).toBeTruthy()
-       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
- 
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
@@ -1148,197 +1138,14 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
    })
    return msg
  })
-@@ -739,7 +767,7 @@ withMcpInstructions.instance(
-       yield* llm.hang
-       yield* user(chat.id, "hello")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* awaitWithTimeout(llm.wait(1), "timed out waiting for MCP instruction request", "10 seconds")
- 
-       const hits = yield* llm.hits
-@@ -832,7 +860,7 @@ it.instance(
-       yield* llm.hang
-       yield* user(chat.id, "run a subagent")
-       // #150：fork loop fiber（与 preserves-metadata / slash-cancel 同入口）
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
- 
-       // #150：等到 task running 且带 child sessionId
-@@ -1032,7 +1060,14 @@ it.instance("manual compaction stops after summarizing retained tool tail", () =
-     yield* llm.text("summary")
- 
-     // #137：loop 应在摘要后 break，不得再发起 build 调用
--    const result = yield* prompt.loop({ sessionID: chat.id })
-+    // #242：手动压缩由生产者直接执行——marker 不再是 loop 可重放任务；
-+    // compact 返回摘要 assistant，retained tail 留给后续 prompt。
-+    const result = yield* prompt.compact({
-+      sessionID: chat.id,
-+      agent: "build",
-+      model: ref,
-+      auto: false,
-+    })
-     const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
- 
-     // #137：核心断言——手动压缩后 provider 只调用一次
-@@ -1821,7 +1856,7 @@ it.instance(
-           })
-           .item(),
-       )
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       const [request] = yield* waitForPermission(1)
-       expect(request.permission).toBe("todowrite")
-       // Tool implementations should not each remember to copy ctx.agent into
-@@ -1875,7 +1910,7 @@ it.instance(
-       )
- 
-       // #216：fork loop 使 cancel 可在 review 进行中并发触发
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       // #216：等待 shell 工具进入 reviewing 状态——确认 auto-review 已启动
-       const reviewing = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2073,7 +2108,7 @@ it.instance(
-       const msg = yield* user(chat.id, "hello")
-       yield* addSubtask(chat.id, msg.id)
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
- 
-       const tool = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2115,7 +2150,7 @@ it.instance(
-       yield* llm.hang
-       yield* user(chat.id, "hello")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
- 
-       const tool = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2154,7 +2189,7 @@ it.instance(
-       const chat = yield* sessions.create({})
-       yield* user(chat.id, "hi")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
-       expect((yield* status.get(chat.id)).type).toBe("busy")
-       yield* prompt.cancel(chat.id)
-@@ -2248,7 +2283,7 @@ it.instance("cancel interrupts loop and resolves with an assistant message", ()
- 
-     yield* user(chat.id, "more")
- 
--    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+    const fiber = yield* prompt.loop({ sessionID: chat.id })
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
-     yield* prompt.cancel(chat.id)
-@@ -2269,7 +2304,7 @@ it.instance("cancel records MessageAbortedError on interrupted process", () =>
-     yield* llm.hang
-     yield* user(chat.id, "hello")
- 
--    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+    const fiber = yield* prompt.loop({ sessionID: chat.id })
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
-     yield* prompt.cancel(chat.id)
-@@ -2308,7 +2343,7 @@ raceNoLLMServer.instance(
- 
-       const firstCreate = defer<void>()
-       processorCreateStarted.push(firstCreate.resolve)
--      const first = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const first = yield* prompt.loop({ sessionID: chat.id })
-       yield* Effect.promise(() => firstCreate.promise)
- 
-       yield* prompt.cancel(chat.id)
-@@ -2334,7 +2369,7 @@ raceNoLLMServer.instance(
- 
-       const secondCreate = defer<void>()
-       processorCreateStarted.push(secondCreate.resolve)
--      const second = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const second = yield* prompt.loop({ sessionID: chat.id })
-       yield* Effect.promise(() => secondCreate.promise)
- 
-       yield* prompt.cancel(chat.id)
-@@ -2395,7 +2430,7 @@ noLLMServer.instance(
-       const msg = yield* user(chat.id, "hello")
-       yield* addSubtask(chat.id, msg.id)
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* awaitWithTimeout(Deferred.await(ready), "timed out waiting for task tool to start", "10 seconds")
-       yield* prompt.cancel(chat.id)
- 
-@@ -2433,7 +2468,7 @@ it.instance(
-       const msg = yield* user(chat.id, "hello")
-       yield* addSubtask(chat.id, msg.id)
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
- 
-       const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-@@ -2477,9 +2512,9 @@ it.instance(
-       yield* llm.hang
-       yield* user(chat.id, "hello")
- 
--      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const a = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
--      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const b = yield* prompt.loop({ sessionID: chat.id })
-       yield* Effect.sleep(50)
- 
-       yield* prompt.cancel(chat.id)
-@@ -2606,7 +2641,7 @@ it.instance("assertNotBusy fails with BusyError when loop running", () =>
-     const chat = yield* sessions.create({})
-     yield* user(chat.id, "hi")
- 
--    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+    const fiber = yield* prompt.loop({ sessionID: chat.id })
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
- 
-@@ -2645,7 +2680,7 @@ it.instance(
-       const chat = yield* sessions.create({})
-       yield* user(chat.id, "hi")
- 
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
- 
-       const exit = yield* prompt
-@@ -2664,7 +2699,8 @@ it.instance(
+@@ -2019,5 +2053,6 @@
        yield* Fiber.await(fiber)
      }),
    { git: true },
--  3_000,
-+    // Windows 冷启动 + SSE bootstrap 在 3s 内完不成；与其他测试的 30s 对齐
-+    30_000,
+-  10_000,
++  // Windows 冷启动 + SSE bootstrap 在原超时内完不成；与其他测试的 30s 对齐
++  30_000,
  )
- 
- // Shell semantics
-@@ -2678,7 +2714,7 @@ it.instance("shell rejects with BusyError when loop running", () =>
-     yield* llm.hang
-     yield* user(chat.id, "hi")
- 
--    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+    const fiber = yield* prompt.loop({ sessionID: chat.id })
-     yield* llm.wait(1)
-     yield* waitForBusy(chat.id)
- 
-@@ -2886,7 +2922,7 @@ it.instance(
-         .pipe(Effect.forkChild)
-       yield* waitForBusy(chat.id)
- 
--      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const loop = yield* prompt.loop({ sessionID: chat.id })
-       yield* Effect.sleep(50)
- 
-       expect(yield* llm.calls).toBe(0)
 @@ -2902,7 +2938,8 @@ it.instance(
        expect(yield* llm.calls).toBe(1)
      }),
@@ -1349,17 +1156,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  )
  
  it.instance(
-@@ -2923,8 +2960,8 @@ it.instance(
-         .pipe(Effect.forkChild)
-       yield* waitForBusy(chat.id)
- 
--      const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
--      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const a = yield* prompt.loop({ sessionID: chat.id })
-+      const b = yield* prompt.loop({ sessionID: chat.id })
-       yield* Effect.sleep(50)
- 
-       expect(yield* llm.calls).toBe(0)
 @@ -2941,7 +2978,8 @@ it.instance(
        expect(yield* llm.calls).toBe(1)
      }),
@@ -1370,47 +1166,11 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  )
  
  unix(
-@@ -3087,7 +3125,7 @@ unix(
-         workdir: path.resolve(dir),
-       })
- 
--      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const run = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
-       yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -3126,7 +3164,7 @@ unixNoLLMServer(
-       const sh = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "sleep 30" }).pipe(Effect.forkChild)
-       yield* waitForBusy(chat.id)
- 
--      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const loop = yield* prompt.loop({ sessionID: chat.id })
-       yield* Effect.sleep(50)
- 
-       yield* prompt.cancel(chat.id)
-@@ -3735,7 +3773,7 @@ it.instance(
-       // 第一轮：hang 住 LLM，让 agent loop 卡住
-       yield* llm.hang
-       yield* user(chat.id, "first")
--      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id })
-       yield* llm.wait(1)
- 
-       // 取消当前 agent loop（fork 让 cancel 在后台执行）
-@@ -3744,7 +3782,7 @@ it.instance(
-       // 立即提交新命令——在 cancel 的 abortPendingAssistants 执行前
-       yield* llm.push(reply().text("second response").stop().item())
-       yield* user(chat.id, "second")
--      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+      const fiber2 = yield* prompt.loop({ sessionID: chat.id })
- 
-       // 等待第二个 loop 完成
-       const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("10 seconds"))
 @@ -3847,4 +3885,172 @@ it.instance(
    30_000,
  )
  
-+it.instance.skip(
++it.instance(
 +  "late technical Message cannot rewind blocked continuity past a newer real user",
 +  () =>
 +    Effect.gen(function* () {
@@ -1517,7 +1277,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  60_000,
 +)
  
-+it.instance.skip(
++it.instance(
 +  "only a later real user Goal turn authorizes model terminal recovery",
 +  () =>
 +    Effect.gen(function* () {
@@ -2032,20 +1792,6 @@ index 4573d6b48ca9fa1607c032147b0c50e8a59907c3..a002e6c8bfa87dc144eb6c4a9c05a7b2
      test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
      test("lsp", () => expect(toJsonSchema(Lsp)).toMatchSnapshot())
 
-diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
---- a/packages/opencode/src/session/message-v2.ts
-+++ b/packages/opencode/src/session/message-v2.ts
-@@ -16,6 +16,10 @@ import {
-   WithParts,
- } from "@opencode-ai/core/v1/session"
- 
-+// 0411-era terminal-error 检测依赖 MessageV2.APIError——此前只导入未导出，
-+// prompt.ts 的 isInstance 调用会抛 TypeError
-+export { APIError }
-+
- import { NamedError } from "@opencode-ai/core/util/error"
- import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
- import { Database } from "@opencode-ai/core/database/database"
 diff --git a/packages/core/src/session/goal.sql.ts b/packages/core/src/session/goal.sql.ts
 
 --- a/packages/core/src/session/goal.sql.ts

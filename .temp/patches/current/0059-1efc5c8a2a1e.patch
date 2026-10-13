@@ -21,7 +21,22 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
    }
 +,
 +  "optionalDependencies": {
-+    "sharp": "0.34.5"
++    "sharp": "0.33.5"
 +  }
  }
 
+
+
+
+diff --git a/bun.lock b/bun.lock
+index 49b3ab0f16ca59db4e89379c9ea64b31a44c0504..65ec793bd9fb67cabcfd94c5851756c3adfce10c 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -563,6 +563,7 @@
+     "packages/opencode": {
+       "name": "opencode",
+       "version": "1.18.32-smark",
++      "optionalDependencies": { "sharp": "0.33.5" }, // #59：可选压缩依赖，复用上游既有 0.33.5 解析树
+       "bin": {
+         "opencode": "./bin/opencode",
+       },

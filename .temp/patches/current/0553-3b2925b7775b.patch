@@ -10,7 +10,9 @@ Content-Transfer-Encoding: 8bit
 
 在 MessageV2、Prompt、Compaction 及各事件适配器边界统一过滤 hidden Message/Part，避免无效压缩、撤销和 tombstone 重新进入 Provider、TUI、ACP 与 CLI 输出。
 
+
 保留 raw persistence、计费统计和事件 tombstone 合同，并补充分页、冷存储、压缩、运行态与 HTTP 回归验证。
+
 
 diff --git a/docs/plans/hidden-message-production-isolation.md b/docs/plans/hidden-message-production-isolation.md
 new file mode 100644
@@ -1193,63 +1195,38 @@ index 0000000000000000000000000000000000000000..6914e04f384a6d9d1da0cffe71cb8610
 +- `late technical Message` 用例耗时贴近其 `20_000` 预算（实测 `22.90s / 22.20s / 20.67s`）；同文件另两个 Goal 用例在本次改动前即已超时。
 +- run tombstone 与 Compaction partial-hidden 测试未经完整 producer seam；对应生产行为已由其他用例覆盖。
 +- 中文注释统计口径差异（1 行）。
-diff --git a/packages/opencode/src/acp/agent.ts b/packages/opencode/src/acp/agent.ts
-index 0e8eba41412516448137a08fd01d221df9d0eabe..e8d9359ad1e88943ea8f72055b23eb4a674511bb 100644
---- a/packages/opencode/src/acp/agent.ts
-+++ b/packages/opencode/src/acp/agent.ts
-@@ -282,6 +282,8 @@ export class Agent implements ACPAgent {
-         if (event.type === "message.part.updated") log.info("message part updated", { event: event.properties })
-         const props = event.properties
-         const part = props.part
-+        // ACP client 只能追加 lifecycle 帧，不能把 tombstone 当作新的 Tool 状态。
-+        if (part.hidden) return
-         const session = this.sessionManager.tryGet(part.sessionID)
-         if (!session) return
-         const sessionId = session.id
-diff --git a/packages/opencode/src/cli/cmd/github.ts b/packages/opencode/src/cli/cmd/github.ts
-index 1a374d2a2396466e8949cc89d8a3e34056342b65..2e04d349dd20c4a4450a4c8df6086e453cfcf0ce 100644
---- a/packages/opencode/src/cli/cmd/github.ts
-+++ b/packages/opencode/src/cli/cmd/github.ts
-@@ -901,6 +901,8 @@ export const GithubRunCommand = effectCmd({
-             if (evt.properties.part.sessionID !== session.id) return
-             //if (evt.properties.part.messageID === messageID) return
-             const part = evt.properties.part
-+            // GitHub transcript 是 append-only；hidden Part 不得再次触发评论输出。
-+            if (part.hidden) return
- 
-             if (part.type === "tool" && part.state.status === "completed") {
-               const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]
+
 diff --git a/packages/opencode/src/cli/cmd/run.ts b/packages/opencode/src/cli/cmd/run.ts
-index 4c8c97d53ab354cd178de89f037a988e78792594..baab6226fc2722f2ffc6d9af957abc95952f0685 100644
 --- a/packages/opencode/src/cli/cmd/run.ts
 +++ b/packages/opencode/src/cli/cmd/run.ts
-@@ -620,6 +620,8 @@ export const RunCommand = effectCmd({
+@@ -711,6 +711,8 @@ export const RunCommand = effectCmd({
                args.format !== "json" &&
                toggles.get("start") !== true
              ) {
-+              // append-only stdout 无法撤回已写入文本；hidden Message 只能在首次输出前静默。
-+              if (event.properties.info.hidden) continue
++              // #553：append-only stdout 无法撤回已写入文本；hidden Message 只能在首次输出前静默。
++              if ("hidden" in event.properties.info && event.properties.info.hidden) continue
                UI.empty()
                UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
                UI.empty()
-@@ -629,6 +631,8 @@ export const RunCommand = effectCmd({
+@@ -720,6 +722,8 @@ export const RunCommand = effectCmd({
              if (event.type === "message.part.updated") {
                const part = event.properties.part
                if (part.sessionID !== sessionID) continue
-+              // raw event 仍需传播给可删除状态的 consumer，此 append-only consumer 不再产生副作用。
-+              if (part.hidden) continue
++              // #553：raw event 仍需传播给可删除状态的 consumer，此 append-only consumer 不再产生副作用。
++              if ("hidden" in part && part.hidden) continue
  
                if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
                  if (emit("tool_use", { part })) continue
+
 diff --git a/packages/opencode/src/cli/cmd/run/session-data.ts b/packages/opencode/src/cli/cmd/run/session-data.ts
-index d3d61dd15e6204e94359fd30c2da5a3ccc6a41ba..a096d6e026d0f18d1d7a2945f41ccbb031f85823 100644
 --- a/packages/opencode/src/cli/cmd/run/session-data.ts
 +++ b/packages/opencode/src/cli/cmd/run/session-data.ts
-@@ -687,6 +687,14 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
+@@ -828,6 +828,15 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
      }
  
      const info = event.properties.info
-+    if (info.hidden) {
++    // #553：SDK wire 类型未声明 hidden——运行时对象携带 tombstone，以 in 判定后整体静默。
++    if ("hidden" in info && info.hidden) {
 +      // Message tombstone 需要先丢弃尚未 flush 的 Part，避免延迟 delta 复活已隐藏的输出。
 +      for (const [partID, messageID] of data.msg) {
 +        if (messageID === info.id) drop(data, partID)
@@ -1260,35 +1237,36 @@ index d3d61dd15e6204e94359fd30c2da5a3ccc6a41ba..a096d6e026d0f18d1d7a2945f41ccbb0
      if (typeof info.id === "string") {
        data.role.set(info.id, info.role)
        replay(data, commits, info.id, info.role, input.thinking)
-@@ -779,6 +787,12 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
-     if (part.sessionID !== input.sessionID) {
+@@ -921,6 +930,13 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
        return out(data, commits)
      }
-+    if (part.hidden) {
-+      // Part tombstone 不产生空的 final commit；删除 buffer 才能阻止后续 delta 重放。
+ 
++    // #553：Part tombstone 不产生空的 final commit；删除 buffer 才能阻止后续 delta 重放。
++    if ("hidden" in part && part.hidden) {
 +      data.tools.delete(part.id)
 +      drop(data, part.id)
 +      return out(data, commits)
 +    }
- 
++
      if (part.type === "tool") {
        const view = syncPermission(data, part) ?? syncQuestion(data, part)
+       if (part.tool === "bash" && part.callID) {
+
 diff --git a/packages/opencode/src/cli/cmd/run/stream.transport.ts b/packages/opencode/src/cli/cmd/run/stream.transport.ts
-index bdc93a037ca02e55be96f4f4513fdf2a1be9c2b5..684e36c76156989f96e3863d4a4a7149ee13426f 100644
 --- a/packages/opencode/src/cli/cmd/run/stream.transport.ts
 +++ b/packages/opencode/src/cli/cmd/run/stream.transport.ts
-@@ -194,7 +194,8 @@ function active(event: Event, sessionID: string): boolean {
+@@ -214,7 +214,8 @@ function active(event: Event, sessionID: string): boolean {
    }
  
    if (event.type === "message.updated") {
 -    return event.properties.info.role === "assistant"
-+    // hidden assistant 仍可作为 raw tombstone 传输，但不能延长当前 run 的 live gate。
-+    return event.properties.info.role === "assistant" && !event.properties.info.hidden
++    // #553：hidden assistant 仍可作为 raw tombstone 传输，但不能延长当前 run 的 live gate。
++    return event.properties.info.role === "assistant" && !("hidden" in event.properties.info && event.properties.info.hidden)
    }
  
    if (event.type === "message.part.delta" || event.type === "message.part.updated") {
+
 diff --git a/packages/opencode/src/cli/cmd/run/subagent-data.ts b/packages/opencode/src/cli/cmd/run/subagent-data.ts
-index e9dcd6538aa181797b2ea3a41b0f385b57ffb579..e1b8a80be6b7e182bf7683ebc83dfdbeedc781c0 100644
 --- a/packages/opencode/src/cli/cmd/run/subagent-data.ts
 +++ b/packages/opencode/src/cli/cmd/run/subagent-data.ts
 @@ -78,6 +78,7 @@ export function sameSubagentTab(a: FooterSubagentTab | undefined, b: FooterSubag
@@ -1299,37 +1277,36 @@ index e9dcd6538aa181797b2ea3a41b0f385b57ffb579..e1b8a80be6b7e182bf7683ebc83dfdbe
      a.partID === b.partID &&
      a.callID === b.callID &&
      a.label === b.label &&
-@@ -298,6 +299,8 @@ function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
+@@ -314,6 +315,8 @@ function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
  
    return {
      sessionID,
-+    // 父 Message 是 Revert 的最小 tombstone 单位，tab 不能只依赖 child SessionID。
++    // #553：父 Message 是 Revert 的最小 tombstone 单位，tab 不能只依赖 child SessionID。
 +    messageID: part.messageID,
      partID: part.id,
      callID: part.callID,
      label,
-@@ -757,6 +760,13 @@ export function reduceSubagentData(input: {
+@@ -797,6 +800,12 @@ export function reduceSubagentData(input: {
+   limits: Record<string, number>
  }) {
    const event = input.event
- 
-+  if (event.type === "message.updated" && event.properties.info.hidden) {
-+    // Message-level Revert 不一定另发 Part updates，因此必须从 tab identity 直接撤销 detail。
++  // #553：Message-level Revert 不一定另发 Part updates，因此必须从 tab identity 直接撤销 detail。
++  if (event.type === "message.updated" && "hidden" in event.properties.info && event.properties.info.hidden) {
 +    const sessions = [...input.data.tabs].filter(([, tab]) => tab.messageID === event.properties.info.id).map(([sessionID]) => sessionID)
 +    sessions.forEach((sessionID) => input.data.tabs.delete(sessionID) && input.data.details.delete(sessionID))
 +    if (sessions.length) return true
 +  }
-+
+ 
    if (event.type === "message.part.updated") {
      const part = event.properties.part
-     if (part.sessionID === input.sessionID) {
-@@ -764,6 +774,14 @@ export function reduceSubagentData(input: {
+@@ -805,6 +814,14 @@ export function reduceSubagentData(input: {
          return false
        }
  
-+      if (part.hidden) {
++      // #553：hidden task Part 是 tab tombstone；即使 tab 不存在也不能进入 ordinary create path。
++      if ("hidden" in part && part.hidden) {
 +        const sessionID = taskSessionID(part)
 +        if (!sessionID) return false
-+        // hidden task Part 是 tab tombstone；即使 tab 不存在也不能进入 ordinary create path。
 +        input.data.details.delete(sessionID)
 +        return input.data.tabs.delete(sessionID)
 +      }
@@ -1337,11 +1314,11 @@ index e9dcd6538aa181797b2ea3a41b0f385b57ffb579..e1b8a80be6b7e182bf7683ebc83dfdbe
        return syncTaskTab(input.data, part)
      }
    }
+
 diff --git a/packages/opencode/src/cli/cmd/run/types.ts b/packages/opencode/src/cli/cmd/run/types.ts
-index 76ccc4c31eb79bc80a9784fdb773cc1bbeff31aa..234655080343eed32a790dfbec915ed5ceb01ecf 100644
 --- a/packages/opencode/src/cli/cmd/run/types.ts
 +++ b/packages/opencode/src/cli/cmd/run/types.ts
-@@ -167,6 +167,7 @@ export type FooterPromptRoute =
+@@ -187,6 +187,7 @@ export type FooterPromptRoute =
  
  export type FooterSubagentTab = {
    sessionID: string
@@ -1349,109 +1326,181 @@ index 76ccc4c31eb79bc80a9784fdb773cc1bbeff31aa..234655080343eed32a790dfbec915ed5
    partID: string
    callID: string
    label: string
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 58c7e37145c768a82b5ee011f7311fddf8377327..f4250d67b3a5ea3620d540aa23e6709c0ca55aa7 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -381,6 +381,8 @@ export function Session() {
-   event.on("message.part.updated", (evt) => {
-     const part = evt.properties.part
-     if (part.type !== "tool") return
-+    // plan transition 是 visible Tool 语义，hidden completion 不得切换当前 Agent。
-+    if (part.hidden) return
-     if (part.sessionID !== route.sessionID) return
-     if (part.state.status !== "completed") return
-     if (part.id === lastSwitch) return
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 65530d6f38d677309663640047eb15323b2087d9..09e00d178a094591d5cb563c2157caec94cafc56 100644
---- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream"
- import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
- import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/httpapi"
- import { InstanceHttpApi } from "../api"
-+import * as ApiError from "../errors"
- import {
-   CommandPayload,
-   DiffQuery,
-@@ -175,9 +176,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-     const message = Effect.fn("SessionHttpApi.message")(function* (ctx: {
-       params: { sessionID: SessionID; messageID: MessageID }
-     }) {
--      return yield* SessionError.mapStorageNotFound(
-+      const result = yield* SessionError.mapStorageNotFound(
-         MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
-       )
-+      // internal get 保持 raw 给 repair/reviewer；这里只有普通 SDK wire 才应用 not-found visibility。
-+      if (result.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
-+      // visible parent 的 hidden Part 仍作为 tombstone producer 保留在 raw storage，但不进入 SDK response。
-+      return { ...result, parts: result.parts.filter((part) => !part.hidden) }
-     })
- 
-     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
-@@ -426,6 +431,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-       ) {
-         return yield* new HttpApiError.BadRequest({})
-       }
-+      const parent = yield* SessionError.mapStorageNotFound(
-+        MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
-+      )
-+      // parent visibility 必须在 updatePart 前判定，否则已知 Part ID 会重新产生普通事件。
-+      if (parent.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
-       return yield* session.updatePart(payload)
-     })
- 
-diff --git a/packages/opencode/src/session/compaction-boundary.ts b/packages/opencode/src/session/compaction-boundary.ts
-index 372644151fe09394d5014412be6d394ed608c0cf..bf956813d17e282099d399c5530eafb8a17f23ce 100644
---- a/packages/opencode/src/session/compaction-boundary.ts
-+++ b/packages/opencode/src/session/compaction-boundary.ts
-@@ -58,6 +58,12 @@ export function latest(sessionID: SessionID): Info | undefined {
-         .get()
-       // 损坏或缺失配对继续寻找更早合法边界，不让一次失败尝试导致全部历史回热。
-       if (!part || part.data.type !== "compaction") continue
-+      // structural cutoff 只有在 Message visibility 成对一致、且 Compaction Part 本身可见时成立。
-+      // partial Revert 不能先裁掉旧 head，再由下游过滤尝试恢复已丢失的上下文。
-+      const summaryHidden = Boolean(summary.data.hidden)
-+      // marker/summary XOR 是 partial pair，不具备裁剪旧 head 的结构证明。
-+      if (summaryHidden !== Boolean(marker.data.hidden)) continue
-+      if (part.data.hidden) continue
-       // routine prompt/Goal/eligibility 只经过 hot 投影查询，不会为边界判断持久 thaw。
-       // 只返回 ID，调用方不能借 boundary seam 读取 transcript 或冷 memento 内容。
-       return {
+
+diff --git a/packages/core/src/session/compaction-boundary.ts b/packages/core/src/session/compaction-boundary.ts
+--- a/packages/core/src/session/compaction-boundary.ts
++++ b/packages/core/src/session/compaction-boundary.ts
+@@ -63,6 +63,12 @@ export function latest(db: TxOrDb, sessionID: SessionID): Info | undefined {
+       .get()
+     // 损坏或缺失配对继续寻找更早合法边界，不让一次失败尝试导致全部历史回热。
+     if (!part || part.data.type !== "compaction") continue
++    // #553：structural cutoff 只有在 Message visibility 成对一致、且 Compaction Part 本身可见时成立。
++    // partial Revert 不能先裁掉旧 head，再由下游过滤尝试恢复已丢失的上下文。
++    const summaryHidden = Boolean(summary.data.hidden)
++    // #553：marker/summary XOR 是 partial pair，不具备裁剪旧 head 的结构证明。
++    if (summaryHidden !== Boolean(marker.data.hidden)) continue
++    if (part.data.hidden) continue
+     // routine prompt/Goal/eligibility 只经过 hot 投影查询，不会为边界判断持久 thaw。
+     // 只返回 ID，调用方不能借 boundary seam 读取 transcript 或冷 memento 内容。
+     return {
+
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index f1d8db20c8b653289ac8b6fd95e5ecd629a6d772..d3cd01896fe4ab727e8d47f5032ebff77fcc90fe 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -932,7 +932,10 @@ export const layer = Layer.effect(
-       const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+@@ -891,7 +891,10 @@ const layer = Layer.effect(
+       )
        const msgs = structuredClone(selected.head)
        yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
--      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-+      // Compaction plugin 与普通 prompt 共用 visible head，upload ratio 不能消费已隐藏的 transformed history。
+-      const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
++      // #553：Compaction plugin 与普通 prompt 共用 visible head，序列化 conversation 不能消费已隐藏的 transformed history。
 +      // transformed clone 是唯一上传历史；raw history 仍仅服务审计和 bounded memento。
 +      const visibleMsgs = MessageV2.visible(msgs)
-+      const modelMessages = yield* MessageV2.toModelMessagesEffect(visibleMsgs, model, {
-         stripMedia: true,
-         toolOutputTruncation: { head: TOOL_OUTPUT_HEAD_CHARS, tail: TOOL_OUTPUT_TAIL_CHARS },
-       })
-@@ -953,7 +956,7 @@ export const layer = Layer.effect(
++      const conversation = visibleMsgs.map(serialize).filter(Boolean).join("\n\n")
+       const nextPrompt =
+         compacting.prompt ??
+         [
+@@ -910,7 +913,8 @@ const layer = Layer.effect(
        const estimatedInput = TokenEstimate.estimateUploadInput({
-         text: messageEstimate.text,
-         attachments: messageEstimate.attachments,
--        history,
+         text: compactionEstimate.text,
+         attachments: compactionEstimate.attachments,
+-        history: selected.head,
++        // #553：upload 估算与 wire 同源——hidden 的 transformed history 不得计入 history 侧估算。
 +        history: visibleMsgs,
          model,
        }).inputTokens
-       const inputBreakdown = {
+       // #456：pending 细分与 processor 交接——summary 请求绕过 prompt.ts，流式期间不能闪回 0。
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 6df0ca928489ac9dc8691f8813ef93bc2fea94ab..e0e6cd62b1bf2f30ac5c13dd9ffc46f4a05b360d 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -751,6 +751,14 @@ export type WithParts = {
-   parts: Part[]
- }
+@@ -256,6 +256,7 @@ export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID
+       type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
+       synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
+       goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
++      hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
+     })
+     .from(PartTable)
+     .where(eq(PartTable.session_id, sessionID))
+@@ -263,7 +264,9 @@ export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID
+     .all()
+     .pipe(Effect.orDie)
+   const byMessage = new Map<string, ChronologyPart[]>()
++  // #553：只在 narrow locator projection 过滤 hidden Part，避免为 Goal chronology thaw 完整 payload。
+   for (const part of parts) {
++    if (part.hidden !== null) continue
+     const value: ChronologyPart = {
+       type: part.type,
+       ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
+@@ -273,7 +276,9 @@ export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID
+     if (list) list.push(value)
+     else byMessage.set(part.messageID, [value])
+   }
+-  return messages.map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
++  return messages
++    .filter((message) => !message.data.hidden)
++    .map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
+ })
  
-+// visible 是 normal business projection；raw persistence、audit、fork 和 accounting 不经过这里。
+ // #0500：cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant
+@@ -307,7 +312,7 @@ export const decodePartRow = part
+ const older = (row: Cursor) =>
+   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
+ 
+-function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
++function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
+   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
+   // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
+   // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
+@@ -327,7 +332,8 @@ function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (
+         .pipe(Effect.orDie)
+       // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
+       // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
+-      const restoredParts = ColdStorage.thawPartRows(sync, partRows)
++      // #553：visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
++      const restoredParts = ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden))
+       for (const row of restoredParts) {
+         const next = partFromRestored(row)
+         const list = partByMessage.get(row.message_id)
+@@ -368,6 +374,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+   model: Provider.Model,
+   options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
+ ) {
++  // #553：直接 Provider caller 不能假设上游已经完成 projection；这里是最终 wire trust seam。
++  input = visible(input)
+   const result: UIMessage[] = []
+   const toolNames = new Set<string>()
+   // Track media from tool results that need to be injected as user messages
+@@ -726,14 +734,37 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+     ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
+     : eq(MessageTable.session_id, input.sessionID)
+   const where = before ? and(base, older(before)) : base
+-  const rows = yield* db
++  // #553：raw page 保留 indexed limit 与 structural caller 合同；visible page 在相同 physical cursor 上 refill，
++  // 直到业务 capacity 成立后才 hydrate，避免 hidden rows 消耗 limit 或触发无意义 Part thaw。
++  const scanLimit = input.includeHidden ? input.limit + 1 : input.limit + Math.min(input.limit, 10) + 1
++  let chunk = yield* db
+     .select()
+     .from(MessageTable)
+     .where(where)
+     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+-    .limit(input.limit + 1)
++    .limit(scanLimit)
+     .all()
+     .pipe(Effect.orDie)
++  let rows = chunk
++  if (!input.includeHidden) {
++    // #553：refill 只沿最后一条 physical row 前进；hidden row 只驱动扫描，永不成为公开 cursor。
++    // 小额 overfetch 控制常见页成本，聚集 tombstone 仍由同一 indexed range 循环补足 capacity。
++    const visibleRows = chunk.filter((row) => !row.data.hidden)
++    while (visibleRows.length <= input.limit && chunk.length === scanLimit) {
++      const physicalCursor = chunk.at(-1)
++      if (!physicalCursor) break
++      chunk = yield* db
++        .select()
++        .from(MessageTable)
++        .where(and(base, older({ id: physicalCursor.id, time: physicalCursor.time_created })))
++        .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
++        .limit(scanLimit)
++        .all()
++        .pipe(Effect.orDie)
++      visibleRows.push(...chunk.filter((row) => !row.data.hidden))
++    }
++    rows = visibleRows
++  }
+   if (rows.length === 0) {
+     const row = yield* db
+       .select({ id: SessionTable.id })
+@@ -751,23 +782,14 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+ 
+   const more = rows.length > input.limit
+   const slice = more ? rows.slice(0, input.limit) : rows
+-  const items = yield* hydrate(db, sync, slice)
++  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden))
+   items.reverse()
+ // Hidden messages remain persisted for audit/recovery, but are removed from
+ // normal prompt replay and visible history. Each reason names the workflow that
+ // owns the invisibility boundary: undo hides reverted turns, repair hides empty
+ // dangling assistants, and permission-reviewer protocol retry hides malformed
+ // reviewer attempts before the same permission request is retried once.
+-  // #106：默认剔除 hidden 消息与 part；includeHidden=true 时原样返回
+-  if (!input.includeHidden) {
+-    for (let i = items.length - 1; i >= 0; i--) {
+-      if (items[i].info.hidden) {
+-        items.splice(i, 1)
+-        continue
+-      }
+-      items[i].parts = items[i].parts.filter((p) => !p.hidden)
+-    }
+-  }
++
+   const tail = slice.at(-1)
+   return {
+     items,
+@@ -1013,24 +1035,30 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
+   }
+ })
+ 
++// #553：visible 是 normal business projection；raw persistence、audit、fork 和 accounting 不经过这里。
 +// Message 与 Part 必须原子地过滤，避免 hidden 父记录或 tombstone 重新进入 Provider/output。
 +export function visible(messages: Iterable<WithParts>) {
 +  return Array.from(messages).flatMap((message) =>
@@ -1459,131 +1508,33 @@ index 6df0ca928489ac9dc8691f8813ef93bc2fea94ab..e0e6cd62b1bf2f30ac5c13dd9ffc46f4
 +  )
 +}
 +
- const RECENT_USER_MEMENTO_INTRO =
-   "Recent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail."
- 
-@@ -867,13 +875,16 @@ export function chronology(sessionID: SessionID): ChronologyMessage[] {
-         type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
-         synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
-         goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
-+        hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
-       })
-       .from(PartTable)
-       .where(eq(PartTable.session_id, sessionID))
-       .orderBy(PartTable.message_id, PartTable.id)
-       .all()
-     const byMessage = new Map<string, ChronologyPart[]>()
-+    // 只在 narrow locator projection 过滤 hidden Part，避免为 Goal chronology thaw 完整 payload。
-     for (const part of parts) {
-+      if (part.hidden !== null) continue
-       const value: ChronologyPart = {
-         type: part.type,
-         ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
-@@ -883,7 +894,9 @@ export function chronology(sessionID: SessionID): ChronologyMessage[] {
-       if (list) list.push(value)
-       else byMessage.set(part.messageID, [value])
-     }
--    return messages.map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
-+    return messages
-+      .filter((message) => !message.data.hidden)
-+      .map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
-   })
- }
- 
-@@ -933,7 +946,7 @@ const older = (row: Cursor) =>
- 
- // hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
- // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
--function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
-+function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
-   // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
-   // Message refs 在单次批量 seam 中 thaw，避免逐 owner 重复打开共享 pack。
-   const restoredRows = ColdStorage.thawMessageRows(rows)
-@@ -952,7 +965,8 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
-     )
-     // grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
-     // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
--    const restoredParts = ColdStorage.thawPartRows(partRows)
-+    // visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
-+    const restoredParts = ColdStorage.thawPartRows(includeHidden ? partRows : partRows.filter((row) => !row.data.hidden))
-     for (const row of restoredParts) {
-       const next = partFromRestored(row)
-       const list = partByMessage.get(row.message_id)
-@@ -991,6 +1005,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
-   model: Provider.Model,
-   options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
- ) {
-+  // 直接 Provider caller 不能假设上游已经完成 projection；这里是最终 wire trust seam。
-+  input = visible(input)
-   const result: UIMessage[] = []
-   const toolNames = new Set<string>()
-   // Track media from tool results that need to be injected as user messages
-@@ -1324,9 +1340,9 @@ export function toModelMessages(
-   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
- }
- 
--// page 的 SQL 先只取 limit+1 个 Message rows，hydrate 只查询该 slice 的 Parts；next-page 探针不会被 thaw。
-+// raw page 保留 indexed limit 与 structural caller 合同；visible page 在相同 physical cursor 上 refill，
-+// 直到业务 capacity 成立后才 hydrate，避免 hidden rows 消耗 limit 或触发无意义 Part thaw。
- // cursor 由 time_created+id 组成，fractional 历史 timestamp 仍可分页，冷存储不能借机收紧旧数据合同。
--// includeHidden 过滤发生在选定 page hydrate 后，保证 structural recovery caller 与可见 transcript 共用同一边界。
- // 该函数是所有业务 Message 范围读取的 cold-aware seam；raw SQL 诊断命令明确不具备透明展开承诺。
- export const page = Effect.fn("MessageV2.page")(function* (input: {
-   sessionID: SessionID
-@@ -1352,15 +1368,32 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-     ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
-     : eq(MessageTable.session_id, input.sessionID)
-   const where = before ? and(base, older(before)) : base
--  const rows = Database.use((db) =>
-+  const scanLimit = input.includeHidden ? input.limit + 1 : input.limit + Math.min(input.limit, 10) + 1
-+  let chunk = Database.use((db) =>
-     db
-       .select()
-       .from(MessageTable)
-       .where(where)
-       .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
--      .limit(input.limit + 1)
-+      .limit(scanLimit)
-       .all(),
-   )
-+  let rows = chunk
-+  if (!input.includeHidden) {
-+    // refill 只沿最后一条 physical row 前进；hidden row 只驱动扫描，永不成为公开 cursor。
-+    // 小额 overfetch 控制常见页成本，聚集 tombstone 仍由同一 indexed range 循环补足 capacity。
-+    const visibleRows = chunk.filter((row) => !row.data.hidden)
-+    while (visibleRows.length <= input.limit && chunk.length === scanLimit) {
-+      const physicalCursor = chunk.at(-1)
-+      if (!physicalCursor) break
-+      chunk = Database.use((db) =>
-+        db.select().from(MessageTable).where(and(base, older({ id: physicalCursor.id, time: physicalCursor.time_created })))
-+          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(scanLimit).all(),
-+      )
-+      visibleRows.push(...chunk.filter((row) => !row.data.hidden))
-+    }
-+    rows = visibleRows
-+  }
-   if (rows.length === 0) {
-     const row = Database.use((db) =>
-       db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
-@@ -1374,7 +1407,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
- 
-   const more = rows.length > input.limit
-   const slice = more ? rows.slice(0, input.limit) : rows
--  const items = hydrate(slice)
-+  const items = hydrate(slice, Boolean(input.includeHidden))
-   items.reverse()
-   if (!input.includeHidden) {
-     for (let i = items.length - 1; i >= 0; i--) {
-@@ -1631,7 +1664,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
-   // history and inflate the next compaction request past the model limit.
+ export function filterCompacted(msgs: Iterable<WithParts>) {
+   // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
+   // #204：调用方传入顺序不一（流式 newest-first 或按时序数组），此处归一化把安全边界留在过滤器内部
+   // #204：MessageID.ascending() 是持久化顺序不变量；依赖调用方顺序会复活 summary 前历史并撑爆下次压缩
    const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
    const result = [] as WithParts[]
 -  const completed = new Set<string>()
 +  const completed = new Map<MessageID, boolean>()
    let retain: MessageID | undefined
-   // Hidden messages can still be structural compaction anchors, but they must
-   // never be replayed to providers after undo/repair. Keep them during the
-@@ -1652,22 +1685,28 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+   // #205：hidden 消息仍可作结构压缩锚点，但 undo/repair 后绝不能重放给 provider
+   // #205：边界遍历时保留它们，仅从返回的 prompt 窗口剔除
+   // #242：悬挂 compaction 清理链在 #205 hidden 剔除之后执行——hidden 锚点参与边界遍历、
+ // 但与被取消的压缩标记一样绝不能出现在返回的 prompt 窗口
+-const visible = (items: SessionV1.WithParts[]) =>
+-  visibleCompactions(
+-    items
+-      .filter((msg) => !msg.info.hidden)
+-      .map((msg) => ({ ...msg, parts: msg.parts.filter((part) => !part.hidden) })),
+-  )
++// #553：hidden Part 必须保留给 visibleCompactions 做配对证明（marker 的 hidden Compaction Part
++// 要以“配对失败”的方式被剔除，而不是提前消失）；hidden 消息前置剔除，
++// 配对后由模块级 visible() 统一收敛 part 级 hidden。
++const visibleWindow = (items: SessionV1.WithParts[]) => visible(visibleCompactions(items.filter((msg) => !msg.info.hidden)))
+   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
+   for (const msg of ordered) {
+     result.push(msg)
+@@ -1038,22 +1066,30 @@ const visible = (items: SessionV1.WithParts[]) =>
        if (msg.info.id === retain) break
        continue
      }
@@ -1591,6 +1542,7 @@ index 6df0ca928489ac9dc8691f8813ef93bc2fea94ab..e0e6cd62b1bf2f30ac5c13dd9ffc46f4
 -      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction")
 -      if (!part) continue
 +    if (msg.info.role === "user") {
++      // #553：summary 的 hidden 态必须与 marker 配对一致；hidden Compaction Part 不再构成可见边界。
 +      const summaryHidden = completed.get(msg.info.id)
 +      if (summaryHidden === undefined) continue
 +      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction" && !item.hidden)
@@ -1605,6 +1557,7 @@ index 6df0ca928489ac9dc8691f8813ef93bc2fea94ab..e0e6cd62b1bf2f30ac5c13dd9ffc46f4
      }
      if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
 -      completed.add(msg.info.parentID)
++      // #553：completed 记录 summary 的 hidden 态，供 marker 配对时校验 XOR 一致性。
 +      completed.set(msg.info.parentID, Boolean(msg.info.hidden))
      }
    }
@@ -1616,23 +1569,36 @@ index 6df0ca928489ac9dc8691f8813ef93bc2fea94ab..e0e6cd62b1bf2f30ac5c13dd9ffc46f4
        msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
    )
    const compaction = result[compactionIndex]
-@@ -1680,7 +1719,10 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+@@ -1066,34 +1102,41 @@ const visible = (items: SessionV1.WithParts[]) =>
            index > compactionIndex &&
            msg.info.role === "assistant" &&
            msg.info.summary &&
--          msg.info.parentID === compaction.info.id,
-+          msg.info.parentID === compaction.info.id &&
 +          msg.info.finish &&
 +          !msg.info.error &&
-+          Boolean(msg.info.hidden) === Boolean(compaction.info.hidden),
++          // #553：summary 与 marker 的 hidden 态必须成对，partial Revert 不能构成可重放边界。
++          Boolean(msg.info.hidden) === Boolean(compaction.info.hidden) &&
+           msg.info.parentID === compaction.info.id,
        )
      : -1
    const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
-@@ -1699,26 +1741,23 @@ function visibleCompactions(items: WithParts[]) {
-   // is a durable boundary. Failed or abandoned markers are local maintenance
-   // debris: keep unrelated messages, but remove the marker/summary pair before
-   // prompt replay and latest-task detection see it.
+   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
+-    return visible([
++    return visibleWindow([
+       ...result.slice(compactionIndex, summaryIndex + 1),
+       ...result.slice(tailIndex, compactionIndex),
+       ...result.slice(summaryIndex + 1),
+     ])
+   }
+-  return visible(result)
++  return visibleWindow(result)
+ }
+ 
+ function visibleCompactions(items: SessionV1.WithParts[]) {
+   // #242：只有 user(compaction) 与已完成且无错的摘要 assistant 配对才是持久边界；
+   // 悬挂标记/摘要是本地维护残渣——在 prompt 重放与 latest 任务检测看到它们之前剔除，
+   // 否则会复活旧 compact 或把「What did we do so far?」注入后续 user prompt
 -  const compactions = new Set(
++  // #553：Map 携带 marker 本体——completed 配对时校验 hidden 一致与可见 Compaction Part。
 +  const compactions = new Map(
      items
        .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
@@ -1645,98 +1611,155 @@ index 6df0ca928489ac9dc8691f8813ef93bc2fea94ab..e0e6cd62b1bf2f30ac5c13dd9ffc46f4
        if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
 -      if (!compactions.has(msg.info.parentID)) return []
 +      const marker = compactions.get(msg.info.parentID)
++      // #553：marker/summary XOR hidden 是 partial pair；hidden Compaction Part 也不构成持久边界。
 +      if (!marker || !marker.parts.some((part) => part.type === "compaction" && !part.hidden) || Boolean(marker.info.hidden) !== Boolean(msg.info.hidden)) return []
        return [msg.info.parentID]
      }),
    )
-   return items.filter((msg) => {
--    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
--      return completed.has(msg.info.id)
--    }
--    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) {
--      return completed.has(msg.info.parentID)
--    }
-+    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) return completed.has(msg.info.id)
-+    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) return completed.has(msg.info.parentID)
-     return true
-   })
- }
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index bde87ba7c8f6be005fdde5c8b4be77ce7cf9d785..a7e4cf00149cd1c7d4aeb3d2a506b350d7461908 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -673,7 +673,8 @@ export const layer = Layer.effect(
-             const failedInput = toolCall?.part.state.input
-             // 当前 message 只取 tool 终态，避免 step-finish/text 挤占 slice 尾部导致漏检。
-             const currentTools = MessageV2.parts(ctx.assistantMessage.id).filter(
--              (part) => part.type === "tool" && part.state.status !== "pending",
-+              // current Tool 与历史 Tool 使用同一 visible contract，hidden error 不计入阈值。
+@@ -497,7 +497,8 @@ const layer = Layer.effect(
+             Effect.provideService(Database.Service, database),
+           )
+           const currentTools = parts.filter(
+-            (part) => part.type === "tool" && part.state.status !== "pending",
++            // #553：current Tool 与历史 Tool 使用同一 visible contract，hidden error 不计入阈值。
 +              (part) => part.type === "tool" && !part.hidden && part.state.status !== "pending",
-             )
-             const preceding = MessageV2.previousAssistantToolTail({
-               sessionID: ctx.sessionID,
+           )
+           const preceding = yield* MessageV2.previousAssistantToolTail({
+             sessionID: ctx.sessionID,
+
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 1a9eb5ddb337f0e7b4b3b6ec933fc9039c9849e5..4df82f38ab18fb32dcf1f97159fb6cf5d0bd2046 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -2871,6 +2871,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             }
+@@ -2241,6 +2241,8 @@ const layer = Layer.effect(
  
+             // decide 跳过插件 transform，避免外部改写只读上下文
              if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-+            // plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
++            // #553：plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
 +            msgs = MessageV2.visible(msgs)
  
+             // 仅用户可配置工具计入 system prompt 的工具使用指引；decide 无工具
              const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
-             const [skills, env, instructions, mcpInstr] = yield* Effect.all([
-diff --git a/packages/opencode/test/acp/event-subscription.test.ts b/packages/opencode/test/acp/event-subscription.test.ts
-index 3f39d760340f40480fcd8c02c217244ec5bf1568..93a3fec0c4ef7c4ec06235a34e103cc8a130c095 100644
---- a/packages/opencode/test/acp/event-subscription.test.ts
-+++ b/packages/opencode/test/acp/event-subscription.test.ts
-@@ -75,6 +75,7 @@ function toolEvent(
-     callID: string
-     tool: string
-     input: Record<string, unknown>
-+    hidden?: boolean
-   } & (
-     | { status: "running"; metadata?: Record<string, unknown> }
-     | { status: "pending"; raw: string }
-@@ -120,6 +121,7 @@ function toolEvent(
-       },
-     },
-   }
-+  if (opts.hidden) payload.properties.part.hidden = { time: Date.now(), reason: "undo" }
-   return { directory: cwd, payload }
- }
+
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -48,6 +48,7 @@ import {
+   UpdatePayload,
+ } from "../groups/session"
+ import { PermissionNotFoundError } from "../errors"
++import * as ApiError from "../errors"
+ import * as SessionError from "./session-errors"
  
-@@ -866,6 +868,8 @@ describe("acp.agent event subscription", () => {
-             tool: "read",
-             status: "running",
-             input: { filePath: "/tmp/example.txt" },
-+            // hidden Tool 只传播 tombstone，ACP 不应创建 pending/running lifecycle。
-+            hidden: true,
-           }),
-         )
-         // provider callID 只在 Session 内唯一；A 的较高版本不能压掉 B 的首帧，
-@@ -880,7 +884,7 @@ describe("acp.agent event subscription", () => {
-         )
-         await pollUntil(
-           () =>
--            sessionUpdates.filter((u) => u.sessionId === sessionA).length >= 4 &&
-+            sessionUpdates.filter((u) => u.sessionId === sessionA).length >= 2 &&
-             sessionUpdates.filter((u) => u.sessionId === sessionB).length >= 2,
-           "per-session tool lifecycle updates never arrived",
-         )
-@@ -891,7 +895,7 @@ describe("acp.agent event subscription", () => {
-             .map((u) => u.update)
-             .filter((u) => u.sessionUpdate === "tool_call" || isToolCallUpdate(u))
-             .map((u) => (isToolCallUpdate(u) ? inProgressText(u) : u.status))
--        expect(updates(sessionA)).toEqual(["pending", "session-a", "pending", undefined])
-+        expect(updates(sessionA)).toEqual(["pending", "session-a"])
-         expect(updates(sessionB)).toEqual(["pending", "session-b"])
-         stop()
-       },
+ const tryParseJson = (text: string) =>
+@@ -194,9 +195,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     const message = Effect.fn("SessionHttpApi.message")(function* (ctx: {
+       params: { sessionID: SessionID; messageID: MessageID }
+     }) {
+-      return yield* SessionError.mapStorageNotFound(
++      const result = yield* SessionError.mapStorageNotFound(
+         MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
+       )
++      // #553：internal get 保持 raw 给 repair/reviewer；这里只有普通 SDK wire 才应用 not-found visibility。
++      if (result.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
++      // #553：visible parent 的 hidden Part 仍作为 tombstone producer 保留在 raw storage，但不进入 SDK response。
++      return { ...result, parts: result.parts.filter((part) => !part.hidden) }
+     })
+ 
+     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
+@@ -512,6 +517,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       ) {
+         return yield* new HttpApiError.BadRequest({})
+       }
++      const parent = yield* SessionError.mapStorageNotFound(
++        MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
++      )
++      // #553：parent visibility 必须在 updatePart 前判定，否则已知 Part ID 会重新产生普通事件。
++      if (parent.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
+       return yield* session.updatePart(payload)
+     })
+ 
+
+diff --git a/packages/opencode/src/acp/event.ts b/packages/opencode/src/acp/event.ts
+--- a/packages/opencode/src/acp/event.ts
++++ b/packages/opencode/src/acp/event.ts
+@@ -197,6 +197,8 @@ export class Subscription {
+ 
+   private async handlePartUpdated(event: EventMessagePartUpdated | EventMessagePartProgress) {
+     const part = event.properties.part
++    // #553：ACP client 只能追加 lifecycle 帧，不能把 tombstone 当作新的 Tool 状态。
++    if ("hidden" in part && part.hidden) return
+     const sessionId = part.sessionID || event.properties.sessionID
+     const session = await Effect.runPromise(this.input.session.tryGet(sessionId))
+     if (!session) return
+
+diff --git a/packages/opencode/src/cli/cmd/github.handler.ts b/packages/opencode/src/cli/cmd/github.handler.ts
+--- a/packages/opencode/src/cli/cmd/github.handler.ts
++++ b/packages/opencode/src/cli/cmd/github.handler.ts
+@@ -856,6 +856,8 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?:
+           if (data.part.sessionID !== session.id) return Effect.void
+           //if (evt.properties.part.messageID === messageID) return
+           const part = data.part
++          // #553：GitHub transcript 是 append-only；hidden Part 不得再次触发评论输出。
++          if (part.hidden) return Effect.void
+ 
+           if (part.type === "tool" && part.state.status === "completed") {
+             const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]
+
+diff --git a/packages/slack/src/index.ts b/packages/slack/src/index.ts
+--- a/packages/slack/src/index.ts
++++ b/packages/slack/src/index.ts
+@@ -25,6 +25,8 @@ void (async () => {
+   for await (const event of events.stream) {
+     if (event.type === "message.part.updated") {
+       const part = event.properties.part
++      // #553：Slack 消息已经外发，tombstone 只能阻止新的外部通知而不能回收旧消息。
++      if ("hidden" in part && part.hidden) continue
+       if (part.type === "tool") {
+         // Find the session for this tool update
+         for (const [_sessionKey, session] of sessions.entries()) {
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -512,6 +512,8 @@ export function Session() {
+   event.on("message.part.updated", (evt) => {
+     const part = evt.properties.part
+     if (part.type !== "tool") return
++    // #553：plan transition 是 visible Tool 语义，hidden completion 不得切换当前 Agent。
++    if ("hidden" in part && part.hidden) return
+     if (part.sessionID !== route.sessionID) return
+     if (part.state.status !== "completed") return
+     if (part.id === lastSwitch) return
+
+diff --git a/packages/opencode/test/acp/event.test.ts b/packages/opencode/test/acp/event.test.ts
+--- a/packages/opencode/test/acp/event.test.ts
++++ b/packages/opencode/test/acp/event.test.ts
+@@ -591,6 +591,19 @@ describe("acp event routing", () => {
+     expect(harness.updates[1]?.update).toMatchObject({ status: "in_progress", toolCallId: "call_1" })
+   })
+ 
++  it("ignores hidden Part updates instead of emitting a tool lifecycle", async () => {
++    const harness = createHarness()
++    await Effect.runPromise(harness.session.create({ id: "ses_hidden", cwd: "/workspace" }))
++
++    // #553：hidden Tool 只传播 tombstone，ACP 不得创建 pending/running lifecycle 帧。
++    await harness.subscription.handle(
++      // SDK wire 类型未声明 hidden——运行时携带，此处展开注入并以 ToolPart 视图收窄。
++      toolUpdated({ ...runningTool("ses_hidden", "call_hidden", "hello"), hidden: { time: Date.now(), reason: "undo" } } as ToolPart),
++    )
++
++    expect(toolUpdates(harness.updates)).toEqual([])
++  })
++
+   it("includes available input in the synthetic pending tool call", async () => {
+     const harness = createHarness()
+     await Effect.runPromise(harness.session.create({ id: "ses_pending_input", cwd: "/workspace" }))
+
 diff --git a/packages/opencode/test/cli/run/session-data.test.ts b/packages/opencode/test/cli/run/session-data.test.ts
-index 439d988be9e787878d9bd18a8ee75644a1073a75..51a9edbf2779c27e63f0013922881d3354c60bd5 100644
 --- a/packages/opencode/test/cli/run/session-data.test.ts
 +++ b/packages/opencode/test/cli/run/session-data.test.ts
 @@ -111,6 +111,14 @@ function tool(input: { id: string; messageID: string; tool: string; state: Recor
@@ -1744,7 +1767,7 @@ index 439d988be9e787878d9bd18a8ee75644a1073a75..51a9edbf2779c27e63f0013922881d33
  
  describe("run session data", () => {
 +  test("treats hidden Message and Part updates as tombstones", () => {
-+    // 先验证 Message tombstone 不会写 footer，再验证 delayed Part 也不会制造补偿输出。
++    // #553：先验证 Message tombstone 不会写 footer，再验证 delayed Part 也不会制造补偿输出。
 +    const hiddenMessage = reduce(createSessionData(), assistant("msg-hidden", { hidden: { time: 1, reason: "undo" } }))
 +    expect({ commits: hiddenMessage.commits, footer: hiddenMessage.footer }).toEqual({ commits: [], footer: undefined })
 +    const visible = text({ id: "part-hidden", messageID: "msg-hidden", text: "secret", time: { end: 2 } })
@@ -1754,23 +1777,24 @@ index 439d988be9e787878d9bd18a8ee75644a1073a75..51a9edbf2779c27e63f0013922881d33
    test("buffers delayed assistant text until the role is known", () => {
      let data = createSessionData()
      data = reduce(data, delta("msg-1", "txt-1", "hello")).data
+
 diff --git a/packages/opencode/test/cli/run/stream.transport.test.ts b/packages/opencode/test/cli/run/stream.transport.test.ts
-index aab2f3dc60b098f037a61113149e730d394a21c7..b03992601604f05580bc194c5e61043aa56eb64d 100644
 --- a/packages/opencode/test/cli/run/stream.transport.test.ts
 +++ b/packages/opencode/test/cli/run/stream.transport.test.ts
-@@ -82,6 +82,11 @@ function assistant(id: string) {
-   } satisfies SdkEvent
- }
+@@ -101,6 +101,12 @@ function assistant(id: string) {
+ 
+ const StreamClosed = undefined as never
  
 +function hiddenAssistant(id: string) {
++  // #553：SDK wire 类型未声明 hidden——运行时对象携带；内层 info 以原类型收窄后再组装事件。
 +  const event = assistant(id)
-+  return { ...event, properties: { ...event.properties, info: { ...event.properties.info, hidden: { time: 1, reason: "undo" as const } } } } satisfies SdkEvent
++  const info = { ...event.properties.info, hidden: { time: 1, reason: "undo" as const } } as unknown as typeof event.properties.info
++  return { ...event, properties: { ...event.properties, info } }
 +}
-+
- function feed<T>() {
+ function feed<T, R = never>(returnValue: R = StreamClosed) {
    const list: T[] = []
    let done = false
-@@ -1126,18 +1131,20 @@ describe("run stream transport", () => {
+@@ -2071,18 +2077,21 @@ describe("run stream transport", () => {
    test("falls back to session status polling when idle events are missing", async () => {
      const src = eventFeed()
      const ui = footer()
@@ -1783,6 +1807,7 @@ index aab2f3dc60b098f037a61113149e730d394a21c7..b03992601604f05580bc194c5e61043a
            queueMicrotask(() => {
 -            src.push(assistant("msg-1"))
 -            busy = false
++            // #553：hidden assistant 不延长 live gate——turn 只能由 status polling 或 visible 消息收口。
 +            src.push(hiddenAssistant("msg-hidden"))
            })
            return ok(undefined)
@@ -1795,25 +1820,26 @@ index aab2f3dc60b098f037a61113149e730d394a21c7..b03992601604f05580bc194c5e61043a
        }),
        sessionID: "session-1",
        thinking: true,
-@@ -1157,6 +1164,7 @@ describe("run stream transport", () => {
+@@ -2102,6 +2111,8 @@ describe("run stream transport", () => {
          }),
          new Promise((_, reject) => setTimeout(() => reject(new Error("turn timed out")), 1_000)),
        ])
++      // #553：hidden tombstone 不能关闭 turn——必须有第二次 status 轮询接手。
 +      expect(statusCalls).toBeGreaterThanOrEqual(2)
      } finally {
        src.close()
        await transport.close()
+
 diff --git a/packages/opencode/test/cli/run/subagent-data.test.ts b/packages/opencode/test/cli/run/subagent-data.test.ts
-index 8d2dad365bd5cd297d4b89dfa644c926131495f4..95da68b335a95065679d32dc570b8c2a9b84750a 100644
 --- a/packages/opencode/test/cli/run/subagent-data.test.ts
 +++ b/packages/opencode/test/cli/run/subagent-data.test.ts
-@@ -453,4 +453,22 @@ describe("run subagent data", () => {
-       expect.objectContaining({ sessionID: "child-2", status: "running" }),
+@@ -544,4 +544,22 @@ describe("run subagent data", () => {
+       }),
      ])
    })
 +
 +  test("clears a task tab when its parent Message becomes hidden", () => {
-+    // 该测试故意只发送 Message tombstone，覆盖 Revert 不重复发送 Part hidden update 的路径。
++    // #553：该测试故意只发送 Message tombstone，覆盖 Revert 不重复发送 Part hidden update 的路径。
 +    const data = createSubagentData()
 +    reduce(data, { type: "message.part.updated", properties: { part: taskMessage("child-1", "running").parts[0] } })
 +    expect(snapshotSubagentData(data).tabs).toEqual([expect.objectContaining({ sessionID: "child-1" })])
@@ -1822,7 +1848,7 @@ index 8d2dad365bd5cd297d4b89dfa644c926131495f4..95da68b335a95065679d32dc570b8c2a
 +      properties: { sessionID: "parent-1", info: { id: "msg-child-1", role: "assistant", hidden: { time: 2, reason: "undo" } } },
 +    })
 +    expect(snapshotSubagentData(data)).toEqual({ tabs: [], details: {}, permissions: [], questions: [] })
-+    // 同一 reducer 还必须把 hidden task Part 当删除事件，且无 tab 时不能创建。
++    // #553：同一 reducer 还必须把 hidden task Part 当删除事件，且无 tab 时不能创建。
 +    const part = { ...taskMessage("child-1", "running").parts[0], hidden: { time: 2, reason: "undo" } }
 +    expect(reduce(data, { type: "message.part.updated", properties: { part } })).toBe(false)
 +    reduce(data, { type: "message.part.updated", properties: { part: taskMessage("child-1", "running").parts[0] } })
@@ -1830,48 +1856,62 @@ index 8d2dad365bd5cd297d4b89dfa644c926131495f4..95da68b335a95065679d32dc570b8c2a
 +    expect(snapshotSubagentData(data).tabs).toEqual([])
 +  })
  })
+
 diff --git a/packages/opencode/test/server/httpapi-sdk.test.ts b/packages/opencode/test/server/httpapi-sdk.test.ts
-index aa23b107ea2a91c0c279004c12401b303664ef48..9d1336b3b2e15a71084e0e85ad9dd18ac0a8f402 100644
 --- a/packages/opencode/test/server/httpapi-sdk.test.ts
 +++ b/packages/opencode/test/server/httpapi-sdk.test.ts
-@@ -655,6 +655,9 @@ describe("HttpApi SDK", () => {
-         const session = yield* capture(() => sdk.session.create({ title: "messages" }))
-         const sessionID = String(record(session.data).id)
-         const seeded = yield* seedMessage(directory, sessionID)
-+        const updatePart = <T extends typeof seeded.part>(part: T) => capture(() =>
-+          sdk.part.update({ sessionID, messageID: seeded.message.id, partID: seeded.part.id, part }),
-+        )
-         const list = yield* capture(() => sdk.session.messages({ sessionID }))
-         const page = yield* capture(() => sdk.session.messages({ sessionID, limit: 1 }))
-         const message = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
-@@ -669,6 +672,22 @@ describe("HttpApi SDK", () => {
+@@ -670,6 +670,46 @@ describe("HttpApi SDK", () => {
            }),
          )
          const updated = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
-+        // ordinary SDK 的 GET 与 PATCH 必须共享 hidden parent 的 public not-found 合同。
-+        yield* updatePart({ ...seeded.part, text: "updated message", hidden: { time: Date.now(), reason: "undo" } })
++        // #553：ordinary SDK 的 GET 与 PATCH 必须共享 hidden parent 的 public not-found 合同。
++        yield* capture(() =>
++          sdk.part.update({
++            sessionID,
++            messageID: seeded.message.id,
++            partID: seeded.part.id,
++            part: { ...seeded.part, text: "updated message", hidden: { time: Date.now(), reason: "undo" } } as NonNullable<
++              Parameters<Sdk["part"]["update"]>[0]["part"]
++            >,
++          }),
++        )
 +        const hiddenPart = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
 +        yield* InstanceStore.Service.use((store) =>
 +          store.provide(
 +            { directory },
-+            SessionNs.Service.use((svc) => svc.updateMessage({ ...seeded.message, hidden: { time: Date.now(), reason: "undo" } })).pipe(Effect.provide(SessionNs.defaultLayer)),
++            SessionNs.Service.use((svc) => svc.updateMessage({ ...seeded.message, hidden: { time: Date.now(), reason: "undo" } })),
 +          ),
 +        )
 +        const hiddenMessage = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
-+        const hiddenParentPatch = yield* updatePart({ ...seeded.part, text: "resurrected message" })
-+        const hiddenParentRaw = yield* MessageV2.get({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id })
++        const hiddenParentPatch = yield* capture(() =>
++          sdk.part.update({
++            sessionID,
++            messageID: seeded.message.id,
++            partID: seeded.part.id,
++            part: { ...seeded.part, text: "resurrected message" } as NonNullable<
++              Parameters<Sdk["part"]["update"]>[0]["part"]
++            >,
++          }),
++        )
++        // raw 读取走 Session.getPart（实例域内定点 seam）——hidden part 在 raw storage 保留原文。
++        const rawPart = yield* InstanceStore.Service.use((store) =>
++          store.provide(
++            { directory },
++            SessionNs.Service.use((svc) => svc.getPart({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id, partID: seeded.part.id })),
++          ),
++        )
 +        expect([
 +          hiddenPart.status, array(record(hiddenPart.data).parts).length,
-+          hiddenMessage.status, hiddenParentPatch.status, firstPartText(hiddenParentRaw),
++          hiddenMessage.status, hiddenParentPatch.status, record(rawPart).text,
 +        ]).toEqual([200, 0, 404, 404, "updated message"])
          const partDelete = yield* capture(() =>
            sdk.part.delete({ sessionID, messageID: seeded.message.id, partID: seeded.part.id }),
          )
+
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 4fe883f933df44604cd05ef158404507d3f21a2a..28167d9a3141a41c8d48de094900070231b88d24 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -483,9 +483,18 @@ function plugin(ready: Deferred.Deferred<void>) {
+@@ -444,9 +444,19 @@ function plugin(ready: Deferred.Deferred<void>) {
    })
  }
  
@@ -1879,6 +1919,7 @@ index 4fe883f933df44604cd05ef158404507d3f21a2a..28167d9a3141a41c8d48de0949000702
 +function autocontinue(enabled: boolean, hideHistory = false) {
    return Layer.mock(Plugin.Service)({
      trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
++      // #553：plugin 是第二个 Message producer——transform 后隐藏指定 history，验证 visible 收敛。
 +      if (hideHistory && name === "experimental.chat.messages.transform" && typeof output === "object" && output) {
 +        const messages = Reflect.get(output, "messages")
 +        if (Array.isArray(messages)) {
@@ -1891,7 +1932,7 @@ index 4fe883f933df44604cd05ef158404507d3f21a2a..28167d9a3141a41c8d48de0949000702
        if (name !== "experimental.compaction.autocontinue") return Effect.succeed(output)
        return Effect.sync(() => {
          ;(output as { enabled: boolean }).enabled = enabled
-@@ -1817,11 +1826,16 @@ describe("session.compaction.process", () => {
+@@ -1318,11 +1328,17 @@ describe("session.compaction.process", () => {
      }),
    )
  
@@ -1900,6 +1941,7 @@ index 4fe883f933df44604cd05ef158404507d3f21a2a..28167d9a3141a41c8d48de0949000702
      "stores pending input estimate on summary assistant before streaming",
 -    Effect.gen(function* () {
 +    () => {
++      // #553：plugin transform 隐藏 120K history 后，upload 估算与 wire 都不得消费它。
 +      const stub = llm()
 +      let captured: LLM.StreamInput | undefined
 +      stub.push(reply("summary", (input) => (captured = input)))
@@ -1910,30 +1952,36 @@ index 4fe883f933df44604cd05ef158404507d3f21a2a..28167d9a3141a41c8d48de0949000702
        const msg = yield* createUserMessage(session.id, "hello")
        const msgs = yield* ssn.messages({ sessionID: session.id })
  
-@@ -1840,8 +1854,11 @@ describe("session.compaction.process", () => {
+@@ -1339,12 +1355,15 @@ describe("session.compaction.process", () => {
+ 
+       expect(summary?.info.role).toBe("assistant")
        if (summary?.info.role !== "assistant") return
+-      // 三个断言分别锁 pending 估算的三个落点：tokens、字符数、组件细分。
        expect(summary.info.inputTokens).toBeGreaterThan(0)
        expect(summary.info.inputChars).toBeGreaterThan(0)
+-      // breakdown.total>0 证明 summary 消息携带了完整请求体口径，而非 0 占位。
 -      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
 -    }),
-+      // Provider wire 与 persisted upload snapshot 均排除 plugin-hidden 的 120K history。
-+      expect(JSON.stringify(captured?.messages)).not.toContain("plugin-hidden-compaction-history")
++      // #553：#194 后 summary wire 即 nextPrompt 单文本（serialize(visibleMsgs)），estimate 直接度量 upload 内容；
++      // inputBreakdown 是 upload snapshot——hidden 120K history 不得进入，以总 token 上界锁死。
 +      expect(summary.info.inputBreakdown?.messages.total).toBeLessThan(20_000)
-+      }).pipe(withCompaction({ llm: stub.layer, plugin: autocontinue(true, true) }))
++      // 估算的字符口径同样不得承载 hidden 原文（120K >> 20K tokens 上界的字符侧证明）。
++      expect(summary.info.inputChars).toBeLessThan(200_000)
++      }).pipe(withCompaction({ llm: stub.llmLayer, plugin: autocontinue(true, true) }))
 +    },
    )
  
-   it.instance(
+   itCompaction.instance(
+
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index c186eca0f4ec847f644d252917461c0b356ebdc4..fbee2d5a5c37479259db2eb7df1f4fc686c94932 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -155,6 +155,14 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -525,6 +525,14 @@ describe("session.message-v2.toModelMessage", () => {
      expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([])
    })
  
 +  test("direct Provider conversion excludes hidden messages and parts", async () => {
-+    // converter 是独立 wire seam，不能依赖 Prompt 已经做过 projection。
++    // #553：converter 是独立 wire seam，不能依赖 Prompt 已经做过 projection。
 +    const hiddenMessage = userInfo("m-hidden")
 +    hiddenMessage.hidden = { time: 1, reason: "undo" }
 +    const input = [{ info: hiddenMessage, parts: [{ ...basePart("m-hidden", "p"), type: "text", text: "hidden" }] }, { info: userInfo("m-visible"), parts: [{ ...basePart("m-visible", "p1"), type: "text", text: "hidden", hidden: { time: 1, reason: "undo" } }, { ...basePart("m-visible", "p2"), type: "text", text: "visible" }] }] as MessageV2.WithParts[]
@@ -1943,11 +1991,11 @@ index c186eca0f4ec847f644d252917461c0b356ebdc4..fbee2d5a5c37479259db2eb7df1f4fc6
    test("filters out user messages with only empty text parts", async () => {
      const messageID = "m-user"
  
+
 diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
-index 6dc36dfd1d08eacf493d727c5dbe90948481e843..7d97bb28fa165fd025babc5f932ac73995396569 100644
 --- a/packages/opencode/test/session/messages-pagination.test.ts
 +++ b/packages/opencode/test/session/messages-pagination.test.ts
-@@ -229,19 +229,61 @@ describe("MessageV2.page", () => {
+@@ -232,18 +232,68 @@ describe("MessageV2.page", () => {
      ),
    )
  
@@ -1958,64 +2006,71 @@ index 6dc36dfd1d08eacf493d727c5dbe90948481e843..7d97bb28fa165fd025babc5f932ac739
        Effect.gen(function* () {
 -        const ids = yield* fill(sessionID, 5)
 -
++        const { sync } = yield* Database.Service
 +        const ids = yield* fill(sessionID, 4)
 +        const hidden = yield* MessageV2.get({ sessionID, messageID: ids[3] })
 +        yield* session.updateMessage({ ...hidden.info, hidden: { time: Date.now(), reason: "undo" } })
 +        const visible = yield* MessageV2.get({ sessionID, messageID: ids[2] })
 +        const part = Option.getOrThrow(Option.fromNullishOr(visible.parts.find((item) => item.type === "text")))
 +        yield* session.updatePart({ ...part, type: "reasoning", text: "cold".repeat(512), time: { start: Date.now() }, hidden: { time: Date.now(), reason: "undo" } })
-+        expect(ColdStorage.freezeOwner({ type: "part", id: part.id, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
++        expect(ColdStorage.freezeOwner(sync, { type: "part", id: part.id, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
          const result = yield* MessageV2.page({ sessionID, limit: 1 })
 -        expect(result.items).toHaveLength(1)
 -        expect(result.items[0].info.id).toBe(ids[ids.length - 1])
-+        expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sessionID)]).toEqual([ids[2], [], 1])
++        // #553：hidden Message 不消耗 limit；被隐藏 part 的冷 payload 不得因 page 读取被 thaw。
++        expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sync, sessionID)]).toEqual([ids[2], [], 1])
          expect(result.more).toBe(true)
        }),
      ),
    )
- 
 +  it.instance(
 +    "visibility performance uses the production page and chronology seams",
 +    withSession(({ session, sessionID }) =>
 +      Effect.gen(function* () {
-+        // 固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
++        // #553：固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
 +        const ids = yield* fill(sessionID, 6326)
 +        for (const id of ids.filter((_, index) => index % 17 === 0).slice(0, 364)) {
 +          const message = yield* MessageV2.get({ sessionID, messageID: id })
 +          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
 +        }
 +
-+        const p95 = (run: () => unknown) => {
-+          for (let i = 0; i < 5; i++) run()
-+          const samples = Array.from({ length: 20 }, () => {
++        // page/chronology 都是需服务上下文的 Effect——计时在 generator 内以 yield* 采样，保持 production seam。
++        const timed = function* <A, E, R>(run: Effect.Effect<A, E, R>) {
++          const samples: number[] = []
++          for (let i = 0; i < 20; i++) {
 +            const started = performance.now()
-+            run()
-+            return performance.now() - started
-+          }).sort((a, b) => a - b)
++            yield* run
++            samples.push(performance.now() - started)
++          }
++          samples.sort((a, b) => a - b)
 +          // 20 个样本的 nearest-rank p95 是第 19 个值；取最大值会把单次离群当成 p95。
-+          const [nearestRank] = samples.slice(-2)
-+          return nearestRank ?? 0
++          return samples[samples.length - 2] ?? 0
 +        }
-+        const medianP95 = (run: () => unknown) => {
-+          const [, median] = [p95(run), p95(run), p95(run)].sort((a, b) => a - b)
-+          return median ?? 0
++        const medianOf = (values: number[]) => values.sort((a, b) => a - b)[1] ?? 0
++        const rawRuns: number[] = []
++        const visibleRuns: number[] = []
++        const chronologyRuns: number[] = []
++        for (let round = 0; round < 3; round++) {
++          rawRuns.push(yield* timed(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
++          visibleRuns.push(yield* timed(MessageV2.page({ sessionID, limit: 301 })))
++          // #553：chronology 走 Effect 化 seam——hidden 过滤在 SQL locator 层完成，不引入额外 thaw。
++          chronologyRuns.push(yield* timed(MessageV2.chronology(sessionID)))
 +        }
-+        const rawPage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
-+        const visiblePage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301 })))
++        const rawPage = medianOf(rawRuns)
++        const visiblePage = medianOf(visibleRuns)
 +        const page = yield* MessageV2.page({ sessionID, limit: 301 })
 +        expect(page.items).toHaveLength(301)
 +        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
 +        const chronologyBaseline = 51.831
-+        expect(medianP95(() => MessageV2.chronology(sessionID))).toBeLessThanOrEqual(chronologyBaseline * 1.25)
++        expect(medianOf(chronologyRuns)).toBeLessThanOrEqual(chronologyBaseline * 1.25)
 +      }),
 +    ),
 +    90_000,
 +  )
-+
+ 
    it.instance("hydrates multiple parts per message", () =>
      withSession(({ session, sessionID }) =>
-       Effect.gen(function* () {
-@@ -828,6 +870,7 @@ describe("MessageV2.filterCompacted", () => {
+@@ -826,6 +876,7 @@ describe("MessageV2.filterCompacted", () => {
    it.instance("stops at compaction boundary and returns chronological order", () =>
      withSession(({ session, sessionID }) =>
        Effect.gen(function* () {
@@ -2023,29 +2078,31 @@ index 6dc36dfd1d08eacf493d727c5dbe90948481e843..7d97bb28fa165fd025babc5f932ac739
          // Chronological: u1(+compaction part), a1(summary, parentID=u1), u2, a2
          // Stream (newest first): a2, u2, a1(adds u1 to completed), u1(in completed + compaction) -> break
          const u1 = yield* addUser(sessionID, "first question")
-@@ -839,6 +882,8 @@ describe("MessageV2.filterCompacted", () => {
+@@ -837,6 +888,9 @@ describe("MessageV2.filterCompacted", () => {
            type: "text",
            text: "summary",
          })
++        // #553：隐藏 summary——marker/summary hidden 不一致时不得构成可重放边界。
 +        const summary = yield* MessageV2.get({ sessionID, messageID: a1 })
 +        yield* session.updateMessage({ ...summary.info, hidden: { time: Date.now(), reason: "undo" } })
          yield* addCompactionPart(sessionID, u1)
  
          const u2 = yield* addUser(sessionID, "new question")
-@@ -851,10 +896,8 @@ describe("MessageV2.filterCompacted", () => {
+@@ -849,10 +903,9 @@ describe("MessageV2.filterCompacted", () => {
            text: "new response",
          })
  
--        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 -        // Includes compaction boundary: u1, a1, u2, a2
 -        expect(result[0].info.id).toBe(u1)
 -        expect(result.length).toBe(4)
 +        const result = yield* MessageV2.filterCompactedEffect(sessionID)
++        // #553：hidden summary 使配对不成立——marker 失去 completed 资格被剔除，hidden summary 亦不返回。
 +        expect(result.map((item) => item.info.id)).toEqual([old, u2, a2])
        }),
      ),
    )
-@@ -866,14 +909,19 @@ describe("MessageV2.filterCompacted", () => {
+@@ -864,14 +917,20 @@ describe("MessageV2.filterCompacted", () => {
      }),
    )
  
@@ -2063,15 +2120,17 @@ index 6dc36dfd1d08eacf493d727c5dbe90948481e843..7d97bb28fa165fd025babc5f932ac739
 +        yield* session.updatePart({ ...part, hidden: { time: Date.now(), reason: "undo" } })
          const u2 = yield* addUser(sessionID, "world")
  
--        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 +        const result = yield* MessageV2.filterCompactedEffect(sessionID)
++        // #553：hidden Compaction Part 不构成可见边界——marker/summary 从 prompt 窗口剔除。
          expect(result.map((item) => item.info.id)).toEqual([u2])
        }),
      ),
-@@ -882,6 +930,10 @@ describe("MessageV2.filterCompacted", () => {
+@@ -880,6 +939,11 @@ describe("MessageV2.filterCompacted", () => {
    it.instance("drops compaction marker with errored summary", () =>
      withSession(({ sessionID }) =>
        Effect.gen(function* () {
++        // #553：先建立一对合法已完成边界——errored 重试只应剔除失败 pair，不能吞掉更早的合法边界。
 +        const old = yield* addUser(sessionID, "old")
 +        const completed = yield* addUser(sessionID)
 +        yield* addCompactionPart(sessionID, completed, old)
@@ -2079,44 +2138,48 @@ index 6dc36dfd1d08eacf493d727c5dbe90948481e843..7d97bb28fa165fd025babc5f932ac739
          const u1 = yield* addUser(sessionID, "hello")
          yield* addCompactionPart(sessionID, u1)
  
-@@ -892,8 +944,8 @@ describe("MessageV2.filterCompacted", () => {
+@@ -890,8 +954,9 @@ describe("MessageV2.filterCompacted", () => {
          yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
          const retry = yield* addUser(sessionID, "retry")
  
--        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
 -        expect(result.map((item) => item.info.id)).toEqual([retry])
 +        const result = yield* MessageV2.filterCompactedEffect(sessionID)
++        // #553：合法 pair 保留（含其 tail old），errored pair 与 marker 剔除。
 +        expect(result.map((item) => item.info.id)).toEqual([completed, completedSummary, old, retry])
        }),
      ),
    )
-@@ -1013,11 +1065,15 @@ describe("MessageV2.filterCompacted", () => {
-           type: "text",
-           text: "summary",
+@@ -1017,11 +1082,16 @@ describe("MessageV2.filterCompacted", () => {
          })
+         const next = yield* addUser(sessionID, "next request")
+ 
+-        // #205：stream 传 includeHidden=true 让 hidden 锚点参与边界遍历；visible() 保证其不返回
+-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID, { includeHidden: true }))
++        // #553：marker/summary 成对隐藏后，边界仍参与结构遍历但从返回窗口剔除。
 +        for (const id of [compact, summary]) {
 +          const message = yield* MessageV2.get({ sessionID, messageID: id })
 +          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
 +        }
-         const next = yield* addUser(sessionID, "next request")
- 
--        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
++
 +        const result = yield* MessageV2.filterCompactedEffect(sessionID)
  
+-        // #205：anchor 被 visible() 剔除，结果仅 compact/summary/next
 -        expect(result.map((item) => item.info.id)).toEqual([compact, summary, next])
++        // #553：hidden pair 不进入 prompt 窗口，仅保留 next；raw 结构遍历仍能看到它们。
 +        expect(result.map((item) => item.info.id)).toEqual([next])
        }),
      ),
    )
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index 6813b3efa77a2d802227f8eb4f46aeeb666b0d88..433562573211da71976291257a51538b2f208b3b 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -1172,6 +1172,59 @@ it.live("doom_loop AND: cross-turn different-input errors do not trigger", () =>
-   ),
- )
+@@ -1679,6 +1679,60 @@ it.live("doom_loop AND: cross-turn different-input errors do not trigger", () =>
  
-+// 两个 visible failure 加一个 hidden current Tool 仍不足三次；tombstone 不能触发 doom-loop。
+ // #508：核心：生产默认每 step 新 assistant、每 turn 1 tool；同 path 三次 error 必须在第 3 次 stop。
+ // 覆盖 multi-assistant tail 深度；禁止用「单 assistant 堆 3 条 tool」冒充此形状。
++// #553：两个 visible failure 加一个 hidden current Tool 仍不足三次；tombstone 不能触发 doom-loop。
 +// 使用真实 Processor seam，避免只测试筛选 helper 而漏掉 current-message 合并顺序。
 +it.live("doom_loop AND: hidden current Tool does not satisfy the threshold", () =>
 +  provideTmpdirServer(
@@ -2137,6 +2200,7 @@ index 6813b3efa77a2d802227f8eb4f46aeeb666b0d88..433562573211da71976291257a51538b
 +            model: mdl,
 +          })
 +          if (turn === 1) {
++            // #553：current message 追加 hidden error Tool——不计入连续失败阈值。
 +            yield* session.updatePart({
 +              id: PartID.ascending(), messageID: msg.id, sessionID: chat.id,
 +              type: "tool", callID: "hidden", tool: "read", hidden: { time: Date.now(), reason: "undo" },
@@ -2152,7 +2216,7 @@ index 6813b3efa77a2d802227f8eb4f46aeeb666b0d88..433562573211da71976291257a51538b
 +              time: parent.time,
 +              agent: parent.agent,
 +              model: { providerID: ref.providerID, modelID: ref.modelID },
-+            } satisfies MessageV2.User,
++            } satisfies SessionV1.User,
 +            sessionID: chat.id,
 +            model: mdl,
 +            agent: agent(),
@@ -2169,33 +2233,43 @@ index 6813b3efa77a2d802227f8eb4f46aeeb666b0d88..433562573211da71976291257a51538b
 +  ),
 +)
 +
- // 核心：生产默认每 step 新 assistant、每 turn 1 tool；同 path 三次 error 必须在第 3 次 stop。
- // 覆盖 multi-assistant tail 深度；禁止用「单 assistant 堆 3 条 tool」冒充此形状。
  it.live("doom_loop AND: cross-turn same-input errors trigger", () =>
+   provideTmpdirServer(
+     ({ dir, llm }) =>
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 378a8e6a826cd825f6ae4a895d9b177d57e479dc..501dba94f7086a0f0f9486d3351900884884b2a3 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -195,7 +195,17 @@ const mutatingPlugin = Layer.succeed(
-   Plugin.Service.of({
-     trigger: (name, _input, output) =>
-       Effect.sync(() => {
--        if (name !== "chat.message" || typeof output !== "object" || output === null) return output
-+        if (typeof output !== "object" || output === null) return output
-+        if (name === "experimental.chat.messages.transform") {
-+          const messages = Reflect.get(output, "messages")
-+          if (!Array.isArray(messages)) return output
-+          const target = messages.find((message) =>
-+            message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-history")),
-+          )
-+          if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
-+          return output
-+        }
-+        if (name !== "chat.message") return output
-         const parts = Reflect.get(output, "parts")
-         if (!Array.isArray(parts)) return output
-         const file = parts.find((part) => typeof part === "object" && part !== null && Reflect.get(part, "type") === "file")
-@@ -453,7 +463,7 @@ mutatedImage.instance(
+@@ -286,7 +286,18 @@ function makeHttp(input?: {
+     Plugin.Service.of({
+       trigger: (name, _input, output) =>
+         Effect.sync(() => {
+-          if (name !== "chat.message" || typeof output !== "object" || output === null) return output
++          if (typeof output !== "object" || output === null) return output
++          // #553：plugin-hidden history——transform 是第二个 producer，验证 prompt wire 的 visible 收敛。
++          if (name === "experimental.chat.messages.transform") {
++            const messages = Reflect.get(output, "messages")
++            if (!Array.isArray(messages)) return output
++            const target = messages.find((message) =>
++              message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-history")),
++            )
++            if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
++            return output
++          }
++          if (name !== "chat.message") return output
+           const parts = Reflect.get(output, "parts")
+           if (!Array.isArray(parts)) return output
+           const file = parts.find(
+@@ -465,7 +476,7 @@ oneShotImage.instance(
+   () =>
+     Effect.gen(function* () {
+       imageNormalizations.length = 0
+-      const { dir } = yield* useServerConfig(providerCfg)
++      const { dir, llm } = yield* useServerConfig(providerCfg)
+       const prompt = yield* SessionPrompt.Service
+       const sessions = yield* Session.Service
+       const chat = yield* sessions.create({
+@@ -508,7 +519,7 @@ mutatedImage.instance(
    () =>
      Effect.gen(function* () {
        imageNormalizations.length = 0
@@ -2204,8 +2278,8 @@ index 378a8e6a826cd825f6ae4a895d9b177d57e479dc..501dba94f7086a0f0f9486d335190088
        const prompt = yield* SessionPrompt.Service
        const sessions = yield* Session.Service
        const chat = yield* sessions.create({ title: "Changed image" })
-@@ -478,6 +488,15 @@ mutatedImage.instance(
-         .filter((item): item is MessageV2.FilePart => item.type === "file")
+@@ -537,6 +548,19 @@ mutatedImage.instance(
+         .filter((part) => part.type === "file")
        expect(files).toHaveLength(1)
        expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
 +      yield* user(chat.id, `plugin-hidden-history ${"x".repeat(120_000)}`)
@@ -2215,29 +2289,21 @@ index 378a8e6a826cd825f6ae4a895d9b177d57e479dc..501dba94f7086a0f0f9486d335190088
 +      const messages = yield* sessions.messages({ sessionID: chat.id })
 +      const assistant = messages.findLast((message) => message.info.role === "assistant")
 +      if (assistant?.info.role !== "assistant") throw new Error("Expected assistant snapshot")
-+      // persisted snapshot 与 wire 一起排除 plugin-hidden history，raw 120K 文本也不能触发 Compaction。
-+      expect([JSON.stringify((yield* llm.inputs)[0]?.messages).includes("plugin-hidden-history"), assistant.info.inputBreakdown?.messages.userText, messages.some((message) => message.info.summary)]).toEqual([false, "current".length, false])
++      // #553：persisted snapshot 与 wire 一起排除 plugin-hidden history；userText 以显式上界锁死 120K 原文不进入估算，
++      // 且 raw 120K 文本也不能触发 Compaction（无 summary 落盘）。
++      const wireExcludes = JSON.stringify((yield* llm.inputs).at(-1)?.messages).includes("plugin-hidden-history")
++      expect(wireExcludes).toBe(false)
++      expect(assistant.info.inputBreakdown?.messages.userText ?? 0).toBeLessThan(1_000)
++      expect(messages.some((message) => message.info.summary)).toBe(false)
      }),
    { git: true },
  )
-@@ -4352,6 +4371,7 @@ it.instance(
-         reply().text("pending recorded").stop(),
-       )
+@@ -4445,6 +4469,8 @@ it.instance(
+       yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
+       yield* llm.text("pending recorded")
        yield* prompt.loop({ sessionID: chat.id })
++      // #553：B 被 undo 隐藏——hidden user 不能回灌 chronology 参与 Goal 排序。
 +      yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
  
        // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
        // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
-diff --git a/packages/slack/src/index.ts b/packages/slack/src/index.ts
-index bd5523a2a04ea6cf1333bfd9c82bdd51310224cf..e7b7e91589f94165aaf9364a07278144ba6314ca 100644
---- a/packages/slack/src/index.ts
-+++ b/packages/slack/src/index.ts
-@@ -25,6 +25,8 @@ void (async () => {
-   for await (const event of events.stream) {
-     if (event.type === "message.part.updated") {
-       const part = event.properties.part
-+      // Slack 消息已经外发，tombstone 只能阻止新的外部通知而不能回收旧消息。
-+      if ("hidden" in part && part.hidden) continue
-       if (part.type === "tool") {
-         // Find the session for this tool update
-         for (const [_sessionKey, session] of sessions.entries()) {

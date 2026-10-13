@@ -30,7 +30,9 @@ diff --git a/package.json b/package.json
 index fa950adcb6..3c36b2255a 100644
 --- a/package.json
 +++ b/package.json
-@@ -139,7 +139,9 @@
+@@ -138,7 +138,9 @@
+     "@ai-sdk/anthropic": "3.0.111",
+     "@opentui/core": "catalog:",
      "@opentui/keymap": "catalog:",
      "@opentui/solid": "catalog:",
      "@types/bun": "catalog:",
@@ -40,4 +42,3 @@ index fa950adcb6..3c36b2255a 100644
 +    "poe-oauth": "0.0.6"
    },
    "patchedDependencies": {
-     "@ff-labs/fff-bun@0.9.3": "patches/@ff-labs%2Ffff-bun@0.9.3.patch",

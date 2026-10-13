@@ -12,6 +12,7 @@ Content-Transfer-Encoding: 8bit
 
 现在 native 的 init/start/read/stop/delete 全部由专用 Worker 持有，主线程只按消息顺序累积帧并写 WAV；stop 通过 SharedArrayBuffer 原子位发布，Worker 在阻塞 read 返回后重新检查该边界，丢弃 stop 之后才完成的帧。已删除 drainBufferedFrames 与全部 read 耗时阈值，不保留第二套录音路径：native 或 Worker 缺失一律直接失败。同时修正 /session/search/* 的 collection route 归类避免 SessionID 品牌校验 500，并让 DB 维护测试增量观察 migration marker 而不等待无关 Agent run。
 
+
 diff --git a/docs/plans/ci-httpapi-voice-drain-freelist-repair.md b/docs/plans/ci-httpapi-voice-drain-freelist-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..39792cf241e70ecf697750052eeb11f046e95a4e
@@ -651,63 +652,16 @@ index 0000000000000000000000000000000000000000..39792cf241e70ecf697750052eeb11f0
 +- Remaining explicitly unverifiable domain: real microphone permission/device
 +  startup in CI. The compiled probe verifies only the real embedded Worker
 +  entrypoint and does not claim native capture success.
-diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
-index bd0fb4ed49d376065f936917671f00efbd3c31ba..0249d5997d30558153c07f8de588ce64843cc0e9 100755
---- a/packages/opencode/script/build.ts
-+++ b/packages/opencode/script/build.ts
-@@ -473,6 +473,7 @@ for (const item of targets) {
-   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
-   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
-   const workerPath = "./src/cli/cmd/tui/worker.ts"
-+  const voiceWorkerPath = "./src/cli/cmd/tui/prompt-voice-recorder-worker.ts" // keep source and compiled entrypoint ownership identical.
-   const sharpFiles = (await createSharpNativeFileMap(item)).source
- 
-   // Use platform-specific bunfs root path based on target OS
-@@ -509,6 +510,7 @@ for (const item of targets) {
-       "./src/index.ts",
-       parserWorker,
-       workerPath,
-+      voiceWorkerPath, // bundling this entrypoint prevents compiled runtime fallback to checkout files.
-       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
-       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
-       "opencode-pvrecorder.gen.ts",
-@@ -519,6 +521,7 @@ for (const item of targets) {
-       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
-       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
-       OPENCODE_WORKER_PATH: workerPath,
-+      OPENCODE_VOICE_WORKER_PATH: voiceWorkerPath, // compiled 运行时只走 bunfs entrypoint，不回退 checkout 源码。
-       OPENCODE_CHANNEL: `'${Script.channel}'`,
-       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
-       // 运行时用该常量禁止回退到 @picovoice 的 node_modules 相对路径，防止重新暴露 CI 绝对路径 bug。
-@@ -559,6 +562,21 @@ for (const item of targets) {
-         throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
-       }
-       console.log(`Smoke test passed: ${versionOutput}`)
-+
-+      const voice = Bun.spawn([binaryPath], { // 通过真实 compiled binary 验证 Worker 消息协议和 clean close。
-+        env: { ...smokeEnv, OPENCODE_PROCESS_ROLE: "voice-smoke" },
-+        stdout: "pipe",
-+        stderr: "pipe",
-+      })
-+      const [voiceExit, voiceStdout, voiceStderr] = await Promise.all([
-+        voice.exited,
-+        new Response(voice.stdout).text(),
-+        new Response(voice.stderr).text(),
-+      ])
-+      if (voiceExit !== 0 || voiceStdout.trim() !== "voice-worker-probe-ok") {
-+        throw new Error(voiceStderr.trim() || `voice Worker smoke exited ${voiceExit}: ${voiceStdout.trim()}`)
-+      }
-+      console.log("Compiled voice Worker smoke passed")
-     } catch (e) {
-       console.error(`Smoke test failed for ${name}:`, e)
-       process.exit(1)
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder-worker.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder-worker.ts
+
+diff --git a/packages/tui/src/prompt-voice-recorder-worker.ts b/packages/tui/src/prompt-voice-recorder-worker.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c63f17078
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder-worker.ts
-@@ -0,0 +1,65 @@
++++ b/packages/tui/src/prompt-voice-recorder-worker.ts
+@@ -0,0 +1,76 @@
 +import { createRequire } from "module"
++
++// #558：native PvRecorder 的同步生命周期（init/start/read/stop/delete）全部由本 Worker 持有——
++// TUI 主线程只消费消息序，渲染/输入阻塞不再导致 native circular buffer 溢出丢尾。
 +type NativePvRecorder = {
 +  init(frameLength: number, deviceIndex: number, bufferedFrames: number): { status: number; handle: bigint }
 +  read(handle: bigint, frame: Int16Array): number
@@ -715,6 +669,8 @@ index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c
 +  stop(handle: bigint): number
 +  delete(handle: bigint): void
 +}
++
++  // #558：start 命令携带 native 路径与共享原子位——资源所有权在 postMessage 时移交。
 +type StartCommand = {
 +  type: "start"
 +  native: string
@@ -722,7 +678,9 @@ index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c
 +  bufferedFrames: number
 +  control: SharedArrayBuffer
 +}
++// #558：probe 是 compiled 冒烟专用——只验证入口可启动，不加载 native。
 +type Command = StartCommand | { type: "probe" }
++
 +self.onmessage = ({ data }: MessageEvent<Command>) => {
 +  if (data.type === "probe") {
 +    // 只确认 compiled bunfs entrypoint 可启动，不加载 native 或伪造录音成功。
@@ -732,6 +690,7 @@ index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c
 +  }
 +  record(data)
 +}
++
 +function record(command: StartCommand) {
 +  let native: NativePvRecorder | undefined
 +  let handle: bigint | undefined
@@ -749,7 +708,8 @@ index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c
 +    started = true // 该状态只记录 stop ownership，不参与 frame 判断。
 +    self.postMessage({ type: "started" }) // 主线程收到 readiness 后才暴露 recorder handle。
 +    const control = new Int32Array(command.control) // 共享原子位是唯一 stop 接受边界。
-+    while (Atomics.load(control, 0) === 0) { // 同步 read 在 Worker 内阻塞，不再阻塞 TUI event loop。
++    while (Atomics.load(control, 0) === 0) {
++      // 同步 read 在 Worker 内阻塞，不再阻塞 TUI event loop。
 +      // 每帧独立 backing store，既适配 native 写回，也允许 postMessage 后转移所有权。
 +      const frame = new Int16Array(new ArrayBuffer(command.frameLength * Int16Array.BYTES_PER_ELEMENT))
 +      const readStatus = recorder.read(handle, frame) // read 错误保留为 primary failure。
@@ -758,6 +718,7 @@ index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c
 +      if (Atomics.load(control, 0) !== 0) break
 +      self.postMessage({ type: "frame", frame }, [frame.buffer]) // 转移 backing store 后不再复用该帧。
 +    }
++  // #558：read 错误保留为 primary failure——后续 cleanup 不得覆盖。
 +  } catch (error) {
 +    failure = error
 +  }
@@ -768,19 +729,20 @@ index 0000000000000000000000000000000000000000..1bfddf225ca7ddbe948531c7b8e6c28c
 +  try {
 +    if (native && handle !== undefined) native.delete(handle) // delete failure 不覆盖 earlier failure。
 +  } catch {}
-+  if (failure) self.postMessage({ type: "error", message: failure instanceof Error ? failure.message : String(failure) }) // terminal 排在 cleanup 与全部 accepted frame 之后。
++  if (failure) self.postMessage({ type: "error", message: failure instanceof Error ? failure.message : String(failure) })
++  // terminal 排在 cleanup 与全部 accepted frame 之后。
 +  else self.postMessage({ type: "stopped" })
 +  self.close()
 +}
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440d186da01 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-@@ -9,47 +9,22 @@ import type { VoiceRecorderHandle } from "./prompt-voice-input"
- declare const OPENCODE_COMPILED: boolean | undefined
+\ No newline at end of file
+
+diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
+--- a/packages/tui/src/prompt-voice-recorder.ts
++++ b/packages/tui/src/prompt-voice-recorder.ts
+@@ -10,46 +10,24 @@ declare const OPENCODE_COMPILED: boolean | undefined
  // 版本号参与 native cache 路径，避免升级后复用旧 `.node`，也让旧版本目录可以被安全识别并延迟清理。
  declare const OPENCODE_VERSION: string | undefined
--
+ 
 -type NativePvRecorder = {
 -  // 这些签名来自 Picovoice native addon；compiled 模式直接 require `.node`，不能复用包里的 JS class 类型。
 -  init(frameLength: number, deviceIndex: number, bufferedFramesCount: number): { status: number; handle: bigint }
@@ -794,7 +756,9 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -  new (frameLength: number, deviceIndex?: number, bufferedFramesCount?: number): PvRecorderInstance
 -  _pvRecorder: NativePvRecorder
 -}
--
++// #558：build.ts 把 voice Worker 作为独立 entrypoint；compiled 运行时必须使用 bunfs 路径，不能回退到源码位置。
++declare const OPENCODE_VOICE_WORKER_PATH: string | undefined
+ 
 -type PvRecorderInstance = {
 -  _handle: bigint
 -  readonly frameLength: number
@@ -802,15 +766,12 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -  stop(): void
 -  release(): void
 -}
--
-+// build.ts 把 voice Worker 作为独立 entrypoint；compiled 运行时必须使用 bunfs 路径，不能回退到源码位置。
-+declare const OPENCODE_VOICE_WORKER_PATH: string | undefined
-+
 +type VoiceWorkerMessage =
 +  | { type: "started" }
 +  | { type: "frame"; frame: Int16Array }
 +  | { type: "stopped" }
 +  | { type: "error"; message: string } // 只允许 Worker 宣布一个终态；主线程据此决定是否落盘。
+ 
  // PvRecorder 固定输出 16kHz 单声道 16-bit PCM；WAV 头必须保持这个常量，否则 browser-agent 侧的转写入口会拒绝文件。
  const VOICE_RECORDER_SAMPLE_RATE = 16_000
  const VOICE_RECORDER_CHANNELS = 1
@@ -818,21 +779,23 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
  const VOICE_RECORDER_FRAME_LENGTH = 512
 -// 帧周期只用于 stop drain 判断“立即返回的 backlog”和“正在录 stop 后新音频的 live read”。
 -const VOICE_RECORDER_FRAME_INTERVAL_MS = Math.max(1, Math.round((VOICE_RECORDER_FRAME_LENGTH / VOICE_RECORDER_SAMPLE_RATE) * 1_000))
- // -1 表示系统默认输入设备；这是跨平台录音库的约定，不额外暴露 TUI 配置，避免扩大配置面。
+-// -1 表示系统默认输入设备；这是跨平台录音库的约定，不额外暴露 TUI 配置，避免扩大配置面。
 -const VOICE_RECORDER_DEVICE_INDEX = -1
++
  // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
  const VOICE_RECORDER_BUFFERED_FRAMES = 250
 -// queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
 -// 生产环境中 queued read 是亚毫秒级 memcpy，live read 阻塞约一个帧周期（32ms）。
--// 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
+-// [local-smark] 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
 -// 调度抖动只会膨胀 wall-clock 测量值、不会缩短，因此 live read 不会被误判为 queued。
 -// drainBufferedFrames 对首次慢读做二次确认（再读一帧），防止单次抢占膨胀的 queued read
 -// 被误判为 live 而丢失全部尾部帧；只有连续两帧都慢才认定缓冲耗尽。
 -const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
++
  // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
  const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
  
-@@ -64,47 +39,62 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
+@@ -64,47 +42,64 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
    cleanupPromptVoiceFilesPromise ??= cleanupStalePromptVoiceFiles(dir).catch(() => {})
    // 文件名包含时间戳和 UUID，避免连续录音或并发 Prompt 实例写到同一个临时 WAV。
    const file = path.join(dir, `prompt-${Date.now()}-${randomUUID()}.wav`)
@@ -841,19 +804,20 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -  const recorder = new PvRecorder(VOICE_RECORDER_FRAME_LENGTH, VOICE_RECORDER_DEVICE_INDEX, VOICE_RECORDER_BUFFERED_FRAMES)
 -  const frames: Int16Array[] = []
 -  const state = { active: true, closed: false }
-+  // 同步 native read 由独立 Worker 持有，TUI 渲染或输入阻塞时录音仍会持续消费 native buffer。
++  // #558：同步 native read 由独立 Worker 持有，TUI 渲染或输入阻塞时录音仍会持续消费 native buffer。
++  // #558：TUI 主线程不再持有 native handle——Worker 是唯一 owner。
 +  const worker = new Worker(voiceWorkerPath()) // 主线程只管理消息和 WAV，不同步调用 native。
 +  const control = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT) // 单个 atomic cell 足以表达 stop boundary。
 +  const frames: Int16Array[] = [] // frame 消息按 Worker message order 进入，terminal 前全部可落盘。
 +  const started = Promise.withResolvers<void>()
 +  const terminal = Promise.withResolvers<Error | undefined>()
    let closePromise: Promise<void> | undefined
+-
 +  // closePromise 把 stop 与 abort 合并到一个边界，防止两个调用同时发布不同的 stop 顺序。
 +  const fail = (error: Error) => {
 +    started.reject(error) // startup failure 直接拒绝 start，不让调用方拿到半初始化 recorder。
 +    terminal.resolve(error) // stop 仍能观察同一个 primary failure。
 +  }
- 
 +  worker.onmessage = (event: MessageEvent<VoiceWorkerMessage>) => {
 +    const message = event.data
 +    if (message.type === "frame") {
@@ -872,7 +836,7 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 +    terminal.resolve(undefined)
 +  }
 +  worker.onerror = (event) => fail(new Error(event.message || "Voice recorder Worker failed"))
-+  // native 路径先解析再发送给 Worker，避免 Worker 收到无法拥有的半初始化资源。
++  // #558：native 路径先解析再发送给 Worker，避免 Worker 收到无法拥有的半初始化资源。
    try {
 -    recorder.start()
 +    worker.postMessage({
@@ -897,14 +861,15 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -    () => undefined,
 -    (error: unknown) => error,
 -  )
--
 +  // startup 成功后所有 native 生命周期都转移给 Worker；主线程只累计有序消息。
+ 
    const close = async (writeFile: boolean) => {
      closePromise ??= (async () => {
 -      // active=false 只阻止下一轮读取；正在进行的 native read 会先返回，确保最后一帧不被中断。
 -      state.active = false
 -      const recordingError = await recording
-+      // stop flag 是 Worker 接受 frame 的唯一边界；terminal 之前的消息有序入队，之后才可以写 WAV。
++      // #558：stop flag 是 Worker 接受 frame 的唯一边界；terminal 之前的消息有序入队，之后才可以写 WAV。
++      // #558：原子位发布是异步的——terminal.promise 保证 Worker 侧 cleanup 完成后才写 WAV。
 +      Atomics.store(new Int32Array(control), 0, 1) // 发布 stop 后，Worker 仍会完成当前 read 但不会发送该帧。
 +      const recordingError = await terminal.promise
        try {
@@ -924,7 +889,7 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
        }
        if (!writeFile) return
        // 只有 stop 路径写 WAV；abort 路径绝不把取消中的隐私语音落盘。
-@@ -121,57 +111,35 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
+@@ -121,55 +116,36 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
        if (!(await Bun.file(file).exists())) throw new Error("Voice recorder did not write a WAV file")
      },
      abort: async () => {
@@ -934,7 +899,7 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
      },
    }
  }
--
+ 
 -async function recordFrames(
 -  PvRecorder: PvRecorderConstructor,
 -  recorder: PvRecorderInstance,
@@ -955,7 +920,8 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -  // recorder 是 optional native 依赖；只有用户实际启动语音录制时才加载，避免未使用语音的 TUI 启动路径被 native 安装问题拖垮。
 -  const bundled = await loadBundledPvRecorder()
 -  if (bundled) return bundled
-+async function pvRecorderNativePath() { // 源码和 compiled 只改变资源地址，录音协议保持相同。
++// #558：源码和 compiled 只改变资源地址，录音协议保持相同——路径解析留在主线程，native require 归 Worker。
++async function pvRecorderNativePath() {
 +  // libraryPath 使用包内相对路径作为 key；build.ts 生成的资源表和运行时选择逻辑必须保持同一套字符串。
 +  const libraryPath = await pvRecorderLibraryPath()
 +  if (!libraryPath) throw new Error(`Voice recorder does not support ${process.platform}/${process.arch}`)
@@ -987,6 +953,7 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -    throw new Error(
 -      `Failed to load bundled PvRecorder native addon from ${nativePath}: ${error instanceof Error ? error.message : String(error)}`,
 -    )
++// #558：Worker 入口唯一——native/Worker 缺失一律直接失败，不保留第二套录音路径。
 +export function voiceWorkerPath() {
 +  if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) {
 +    if (typeof OPENCODE_VOICE_WORKER_PATH === "undefined") throw new Error("Voice recorder Worker is missing from this installation")
@@ -995,12 +962,9 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
 -  return createBundledPvRecorderConstructor(native)
 +  return new URL("./prompt-voice-recorder-worker.ts", import.meta.url).href
  }
--
-+// compiled Worker 必须使用 build.ts 注入的 bunfs 地址，缺失时直接暴露安装损坏。
+ 
  async function embeddedPvRecorderNativePath(libraryPath: string) {
-   if (!(typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED)) return
-   const embedded = await importEmbeddedPvRecorderFiles()
-@@ -325,75 +293,6 @@ async function linuxPvRecorderMachine(arch: NodeJS.Architecture) {
+@@ -325,75 +301,6 @@ async function linuxPvRecorderMachine(arch: NodeJS.Architecture) {
    if (part === "0xd0b") return `cortex-a76${suffix}`
  }
  
@@ -1076,115 +1040,110 @@ index 6d284805b2cbf6a8dc3aeea9a69375a528dc332e..bdce3aca03500dc0702f0916b7344440
  function flattenFrames(frames: Int16Array[]) {
    // WAV 需要连续 PCM；这里一次性分配目标数组，避免写文件时逐帧拼 Buffer 产生额外复制边界。
    const samples = frames.reduce((total, frame) => total + frame.length, 0)
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -298,6 +298,8 @@ for (const item of targets) {
+   await $`mkdir -p dist/${name}/bin`
+ 
+   const workerPath = "./src/cli/tui/worker.ts"
++  // #558：voice Worker 是独立 entrypoint——TUI 已迁 packages/tui，跨包以 workspace 相对路径引用源文件。
++  const voiceWorkerPath = "../tui/src/prompt-voice-recorder-worker.ts"
+   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
+   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
+ 
+@@ -329,6 +331,8 @@ for (const item of targets) {
+     entrypoints: [
+       "./src/index.ts",
+       workerPath,
++      // #558：voice Worker 必须同批编译，compiled 运行时才不会回退 checkout 源码文件。
++      voiceWorkerPath,
+       treeSitterWorkerPath,
+       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
+@@ -339,6 +343,8 @@ for (const item of targets) {
+       OPENCODE_VERSION: `'${Script.version}'`,
+       OPENCODE_MODELS_DEV: generated.modelsData,
+       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
++      // #558：compiled 只走 bunfs entrypoint；运行时缺失该 define 即安装损坏。
++      OPENCODE_VOICE_WORKER_PATH: bunfsRoot + voiceWorkerPath,
+       OPENCODE_WORKER_PATH: workerPath,
+       OPENCODE_CHANNEL: `'${Script.channel}'`,
+       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
+@@ -376,6 +382,22 @@ for (const item of targets) {
+         throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
+       }
+       console.log(`Smoke test passed: ${versionOutput}`)
++      // #558：voice Worker compiled smoke——以独立角色 spawn，stdout 须恰为固定 marker；stderr 优先透传。
++      const voiceSmoke = Bun.spawn([binaryPath], {
++        env: { ...smokeEnv, OPENCODE_PROCESS_ROLE: "voice-smoke" },
++        stdout: "pipe",
++        stderr: "pipe",
++      })
++      const [voiceExit, voiceStdout, voiceStderr] = await Promise.all([
++        voiceSmoke.exited,
++        new Response(voiceSmoke.stdout).text(),
++        new Response(voiceSmoke.stderr).text(),
++      ])
++        // #558：marker 必须逐字匹配——多余 stdout 说明 Worker 入口被污染。
++    if (voiceExit !== 0 || voiceStdout.trim() !== "voice-worker-probe-ok") {
++        throw new Error(voiceStderr.trim() || `voice worker smoke exited ${voiceExit} without marker`)
++      }
++      console.log("Voice worker smoke test passed")
+     } catch (e) {
+       console.error(`Smoke test failed for ${name}:`, e)
+       process.exit(1)
+
 diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
-index 1012a064329ebe3289bf94d80dfad1272ed9c754..0f3aca97ac154fcb827d810d31f432b9b75e33de 100644
 --- a/packages/opencode/src/index.ts
 +++ b/packages/opencode/src/index.ts
-@@ -52,6 +52,27 @@ if (processMetadata.processRole === "worker") {
-   await import("./cli/cmd/tui/worker")
+@@ -38,6 +38,27 @@ if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
+   await import("./cli/tui/worker")
    await new Promise<never>(() => {})
  }
-+if (processMetadata.processRole === "voice-smoke") {
-+  const { voiceWorkerPath } = await import("./cli/cmd/tui/prompt-voice-recorder")
-+  const worker = new Worker(voiceWorkerPath(), { ref: true }) // diagnostic role shares the production Worker address resolver.
-+  const acknowledged = Promise.withResolvers<void>()
-+  const closed = Promise.withResolvers<void>()
-+  const timeout = Bun.sleep(10_000).then(() => {
-+    throw new Error("Compiled voice Worker probe timed out")
-+  })
-+  worker.onmessage = () => acknowledged.resolve()
-+  worker.onerror = (event) => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
-+  worker.addEventListener("close", () => closed.resolve(), { once: true })
-+  worker.postMessage({ type: "probe" })
++// #558：voice Worker compiled smoke——build.ts 以 OPENCODE_PROCESS_ROLE=voice-smoke spawn 本入口，
++// probe ack + 10s 超时 race 后打印固定 marker（stdout 须恰为 voice-worker-probe-ok）。
++if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
++  const { voiceWorkerPath } = await import("../../tui/src/prompt-voice-recorder")
++  const worker = new Worker(voiceWorkerPath(), { ref: true })
 +  try {
-+    // ack 证明真实 bunfs entrypoint 已执行，close 证明 diagnostic Worker 没有遗留线程或触碰 native 录音路径。
-+    await Promise.race([Promise.all([acknowledged.promise, closed.promise]), timeout])
-+    process.stdout.write("voice-worker-probe-ok\n")
++    const ack = new Promise<void>((resolve) => {
++      worker.onmessage = (event: MessageEvent) => {
++        if ((event.data as { type?: string }).type === "probe") resolve()
++      }
++    })
++    worker.postMessage({ type: "probe" })
++    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("voice worker probe timeout")), 10_000))
++    await Promise.race([ack, timeout])
++    // #558：probe 成功即退出——不进入 CLI/yargs 主路径。
++    console.log("voice-worker-probe-ok")
++    process.exit(0)
 +  } finally {
 +    worker.terminate()
 +  }
-+  process.exit(0)
 +}
  
- process.on("unhandledRejection", (e) => {
-   Log.Default.error("rejection", {
+ const args = hideBin(process.argv)
+ 
+
 diff --git a/packages/opencode/src/server/shared/workspace-routing.ts b/packages/opencode/src/server/shared/workspace-routing.ts
-index 9d32c45936fa46a3ad57100b505703a9ea8a5778..2b6c8026f8e6783d4f282fbc160bab86fa444744 100644
 --- a/packages/opencode/src/server/shared/workspace-routing.ts
 +++ b/packages/opencode/src/server/shared/workspace-routing.ts
-@@ -19,9 +19,10 @@ export function isLocalWorkspaceRoute(method: string, path: string) {
- 
- export function getWorkspaceRouteSessionID(url: URL) {
-   if (url.pathname === "/session/status") return null
--  // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
--  // 不能让 SessionID.make("preview") 触发品牌校验异常
-+  // [local-smark] /session/preview、/session/search/* 是集合端点，路径中无 :sessionID，
-+  // 不能让 SessionID.make("preview"|"search") 触发品牌校验 die → 500
+@@ -22,6 +22,8 @@ export function getWorkspaceRouteSessionID(url: URL) {
+   // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
+   // 不能让 SessionID.make("preview") 触发品牌校验异常
    if (url.pathname === "/session/preview") return null
-+  if (url.pathname.startsWith("/session/search/")) return null // search is a collection route, not a branded SessionID.
++  // #558：/session/search/* 是 collection route——无 :sessionID，SessionID.make("search") 同样会品牌 die→500。
++  if (url.pathname.startsWith("/session/search/")) return null
  
-   const id = url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1]
-   if (!id) return null
-diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
-index 1da3a118df8916a9675b555847b31e1e036019ca..027041e64a9bce66a22cb30b468a682f94e8dfe6 100644
---- a/packages/opencode/test/cli/db-maintenance.test.ts
-+++ b/packages/opencode/test/cli/db-maintenance.test.ts
-@@ -106,6 +106,38 @@ async function runCli(root: string, args: string[]) {
-   ])
-   return { exitCode, stdout, stderr }
- }
-+
-+async function runCliUntilStderr(root: string, args: string[], marker: string) {
-+  const proc = Bun.spawn([process.execPath, INDEX_TS, ...args], {
-+    env: isolatedEnv(root),
-+    ...PIPE_OPTIONS,
-+    windowsHide: process.platform === "win32",
-+  })
-+  const stdout = new Response(proc.stdout).text()
-+  const reader = proc.stderr.pipeThrough(new TextDecoderStream()).getReader()
-+  let stderr = ""
-+  const observed = (async () => {
-+    // 流式观察 owned marker，不等待后续 Agent run 或整个 stderr EOF。
-+    while (true) {
-+      const chunk = await reader.read()
-+      if (chunk.done) return false
-+      stderr += chunk.value
-+      if (stderr.includes(marker)) return true
-+    }
-+  })()
-+
-+  try {
-+    const result = await Promise.race([observed, Bun.sleep(20_000).then(() => false)])
-+    if (!result) throw new Error(`CLI did not emit stderr marker: ${marker}`)
-+  } finally {
-+    proc.kill()
-+    await Promise.allSettled([proc.exited, stdout, observed])
-+    reader.releaseLock()
-+  }
-+
-+  return stderr
-+}
-+
- function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
-   let answered = false
-   proc.onData((data) => {
-@@ -143,9 +175,9 @@ describe("database maintenance CLI", () => {
-   }, 90_000)
-   test("does not classify a run message containing db status as a database command", async () => {
-     await using tmp = await tmpdir()
--    const result = await runCli(tmp.path, ["run", "db", "status"])
-+    const stderr = await runCliUntilStderr(tmp.path, ["run", "db", "status"], "Performing one time database migration")
-     // 该反例锁定非 DB 命令的既有迁移提示，防止 quiet policy 泄漏到 run message。
--    expect(result.stderr).toContain("Performing one time database migration")
-+    expect(stderr).toContain("Performing one time database migration")
-   }, 30_000)
-   // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
-   test("reports committed compression progress in an interactive terminal", async () => {
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582dbecc2956 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-@@ -1,90 +1,119 @@
+   const id =
+     url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??
+
+diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
+@@ -1,327 +1,289 @@
 -import { beforeEach, describe, expect, mock, test } from "bun:test"
 +import { afterEach, beforeEach, describe, expect, test } from "bun:test"
  import { randomUUID } from "crypto"
@@ -1220,8 +1179,11 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -        busyWait(FakePvRecorder.queuedReadDelayMs)
 -      } else if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) {
 -        busyWait(FakePvRecorder.liveReadDelayMs)
-+import { tmpdir } from "../../fixture/fixture"
++import { mkdtemp } from "node:fs/promises"
++import os from "node:os"
 +
++// #558：fake Worker 保持与真实 Worker 相同的 SharedArrayBuffer stop 契约；
++// 帧值 7777 证明 WAV 内容来自 Worker 消息而非主线程构造。
 +class FakeVoiceWorker {
 +  static terminalError: string | undefined
 +  static startupError: string | undefined
@@ -1250,6 +1212,14 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -  constructor(_frameLength: number, _deviceIndex = -1, bufferedFramesCount = 50) {
 -    FakePvRecorder.last = this
 -    this.bufferedFramesCount = bufferedFramesCount
+-  }
+-
+-  start() {
+-    this.started = true
+-  }
+-
+-  stop() {
+-    this.started = false
 +      this.onmessage?.(new MessageEvent("message", { data: { type: "started" } })) // readiness precedes frame delivery.
 +      this.onmessage?.(new MessageEvent("message", { data: { type: "frame", frame: new Int16Array(4).fill(7_777) } })) // deterministic PCM proves the public WAV path.
 +      if (FakeVoiceWorker.terminalError) this.onmessage?.(new MessageEvent("message", { data: { type: "error", message: FakeVoiceWorker.terminalError } })) // terminal error never becomes a successful stop.
@@ -1261,74 +1231,30 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 +      this.onmessage?.(new MessageEvent("message", { data: { type: "stopped" } }))
 +    }, 1)
    }
- 
--  start() {
--    this.started = true
-+  terminate() {
-+    FakeVoiceWorker.terminateCount++
-+    clearInterval(this.timer)
-   }
-+}
- 
--  stop() {
--    this.started = false
--  }
-+const NativeWorker = globalThis.Worker
- 
+-
 -  release() {
 -    FakePvRecorder.releaseCount++
 -  }
-+describe("prompt voice recorder", () => {
-+  beforeEach(() => {
-+    FakeVoiceWorker.terminalError = undefined
-+    FakeVoiceWorker.startupError = undefined
-+    FakeVoiceWorker.terminateCount = 0
-+    Reflect.set(globalThis, "Worker", FakeVoiceWorker)
-+    Reflect.deleteProperty(globalThis, "OPENCODE_COMPILED")
-+    Reflect.deleteProperty(globalThis, "OPENCODE_VOICE_WORKER_PATH")
-+  })
-+
-+  afterEach(() => {
-+    Reflect.set(globalThis, "Worker", NativeWorker)
-+    // 两个 compile define 都必须还原，否则最后一个用例的值会泄漏给同进程的其它测试文件。
-+    Reflect.deleteProperty(globalThis, "OPENCODE_COMPILED")
-+    Reflect.deleteProperty(globalThis, "OPENCODE_VOICE_WORKER_PATH")
-+  })
-+
-+  test("continues native reads while the TUI event loop is stalled", async () => {
-+    await using tmp = await tmpdir()
-+    const result = await runNativeWorker(tmp.path, fakeNativeSource({ log: path.join(tmp.path, "native.log") }), {
-+      stallMain: 100,
-+    })
- 
+-
 -  static queueNativeFrames(count: number) {
 -    // 保留数量受 constructor 传入的 bufferedFramesCount 限制，行为上贴近 PvRecorder 的内部 circular buffer。
 -    const retained = Array.from({ length: count }, (_, index) => 1_000 + index).slice(
 -      -Math.max(0, FakePvRecorder.last?.bufferedFramesCount ?? 0),
-+    // Worker 独立拥有同步 native read；堵住 TUI 线程时，录音帧仍会排进 message queue。
-+    expect(result.frames.length).toBeGreaterThan(2)
-+  })
-+
-+  test("does not deliver a native read that completes after stop is requested", async () => {
-+    await using tmp = await tmpdir()
-+    const result = await runNativeWorker(
-+      tmp.path,
-+      fakeNativeSource({ log: path.join(tmp.path, "native.log"), readDelay: 50, sample: 9_999 }),
-     )
+-    )
 -    FakePvRecorder.queuedFrameValues.push(...retained)
--  }
--}
++  terminate() {
++    FakeVoiceWorker.terminateCount++
++    clearInterval(this.timer)
+   }
+ }
  
 -void mock.module("@picovoice/pvrecorder-node", () => ({
 -  PvRecorder: FakePvRecorder,
 -}))
-+    // started 后 Worker 已进入同步 read；主线程此时发布 stop，完成中的 sample 不得越过原子边界。
-+    expect(result.terminal).toBe("stopped")
-+    expect(result.frames).toEqual([])
-+  })
++const NativeWorker = globalThis.Worker
  
--describe("prompt voice recorder", () => {
--  beforeEach(() => {
+ describe("prompt voice recorder", () => {
+   beforeEach(() => {
 -    FakePvRecorder.last = undefined
 -    FakePvRecorder.readStatus = 0
 -    FakePvRecorder.releaseCount = 0
@@ -1340,12 +1266,103 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -    FakePvRecorder.liveFrameValue = 321
 -    FakePvRecorder.slowOnReadCount = undefined
 -    delete (globalThis as { OPENCODE_COMPILED?: boolean }).OPENCODE_COMPILED
-+  const failures = [ // matrix mirrors ownership: init, start, and read acquire different cleanup rights.
++    FakeVoiceWorker.terminalError = undefined
++    FakeVoiceWorker.startupError = undefined
++    FakeVoiceWorker.terminateCount = 0
++    Reflect.set(globalThis, "Worker", FakeVoiceWorker)
++    Reflect.deleteProperty(globalThis, "OPENCODE_COMPILED")
++    Reflect.deleteProperty(globalThis, "OPENCODE_VOICE_WORKER_PATH")
+   })
+ 
+-  // 崩溃或强杀会绕过 handle.abort()，因此下一次真实录音启动前要清理很久以前的 prompt WAV。
+-  // 新近 WAV 可能来自另一个仍在停止/转写中的 Prompt，不能只按文件名前缀粗暴删除。
+-  test("removes stale prompt voice files without deleting recent recordings", async () => {
+-    const dir = path.join(Global.Path.tmp, "voice")
+-    await fs.mkdir(dir, { recursive: true })
+-    const stale = path.join(dir, `prompt-stale-${randomUUID()}.wav`)
+-    const recent = path.join(dir, `prompt-recent-${randomUUID()}.wav`)
+-    await Bun.write(stale, "old voice")
+-    await Bun.write(recent, "recent voice")
+-    // 48 小时足够越过 24 小时清理窗口，同时避免依赖文件系统秒级 mtime 精度。
+-    const old = new Date(Date.now() - 48 * 60 * 60 * 1_000)
+-    await fs.utimes(stale, old, old)
+-
+-    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+-    const recorder = await startPromptVoiceRecorder()
+-    try {
+-      await waitForFakeRead()
+-      await waitForMissing(stale)
+-
+-      // 新近文件代表另一个可能仍在转写的 Prompt，清理任务不能按 prompt-*.wav 前缀全部删除。
+-      expect(await Bun.file(recent).exists()).toBe(true)
+-      // start 阶段只创建目标路径，不应在用户 stop 前留下当前录音 WAV。
+-      expect(await Bun.file(recorder.file).exists()).toBe(false)
+-    } finally {
+-      await recorder.abort()
+-      await fs.rm(recent, { force: true })
+-    }
++  afterEach(() => {
++    Reflect.set(globalThis, "Worker", NativeWorker)
++    // 两个 compile define 都必须还原，否则最后一个用例的值会泄漏给同进程的其它测试文件。
++    Reflect.deleteProperty(globalThis, "OPENCODE_COMPILED")
++    Reflect.deleteProperty(globalThis, "OPENCODE_VOICE_WORKER_PATH")
+   })
+ 
+-  // compiled exe 不能在 native 资源缺失时回退到 @picovoice 包路径，否则会重新触发 CI 绝对路径加载错误。
+-  // 这里保留 @picovoice 的 fake mock：如果实现错误地 fallback，测试会进入录音成功路径而不是用户可见错误。
+-  test("compiled builds fail clearly when the embedded recorder addon is unavailable", async () => {
+-    const globals = globalThis as { OPENCODE_COMPILED?: boolean }
+-    globals.OPENCODE_COMPILED = true
+-    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
++  // #558（INV-B1）：Worker 独立拥有同步 native read——TUI 主线程 busyWait 100ms 期间帧仍持续投递。
++  test("continues native reads while the TUI event loop is stalled", async () => {
++    await using tmp = await tmpdir()
++    const result = await runNativeWorker(tmp.path, fakeNativeSource({ log: path.join(tmp.path, "native.log") }), {
++      stallMain: 100,
++    })
+ 
+-    await expect(startPromptVoiceRecorder()).rejects.toThrow(/native addon is missing/)
++    expect(result.frames.length).toBeGreaterThan(2)
+   })
+ 
+-  // 这个正常路径证明录音实现完全在 Bun 进程内完成，不依赖系统 node 可执行文件。
+-  // FakePvRecorder 写入固定 PCM 值，测试只观察最终 WAV 头和首个 sample。
+-  // 临时文件随后通过 abort 删除，覆盖 stop 后 cleanup 仍然幂等的行为。
+-  // OPENCODE_NODE_PATH 被故意设成不存在，用来防止未来退回 node -e 子进程实现。
+-  // 该用例保护 compile 后单文件 exe 的核心约束：录音不能依赖项目 checkout。
+-  test("records a WAV file without requiring a system node executable", async () => {
+-    const previous = process.env.OPENCODE_NODE_PATH
+-    process.env.OPENCODE_NODE_PATH = "__opencode_missing_node_for_voice_test__"
+-    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+-
+-    try {
+-      const recorder = await startPromptVoiceRecorder()
+-      await waitForFakeRead()
+-      await recorder.stop()
++  // #558（INV-B2）：stop 原子位发布后，正在阻塞中的 read 完成帧不得再投递。
++  test("does not deliver a native read that completes after stop is requested", async () => {
++    await using tmp = await tmpdir()
++    const result = await runNativeWorker(
++      tmp.path,
++      fakeNativeSource({ log: path.join(tmp.path, "native.log"), readDelay: 50, sample: 9_999 }),
++    )
+ 
+-      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
++    expect(result.terminal).toBe("stopped")
++    expect(result.frames).toEqual([])
++  })
+ 
+-      expect(wav.subarray(0, 4).toString()).toBe("RIFF")
+-      expect(wav.subarray(8, 12).toString()).toBe("WAVE")
+-      expect(wav.readInt16LE(44)).toBe(321)
++  // #558（INV-B4）：init/start/read 各自取得不同的清理权——cleanup 动作序列按阶段收敛。
++  const failures = [
 +    { name: "init", input: { initStatus: 8 }, actions: ["init"], message: "initialize failed" },
 +    { name: "start", input: { startStatus: 8 }, actions: ["init", "start", "delete"], message: "start failed" },
 +    { name: "read", input: { readStatus: 8, stopStatus: 8 }, actions: ["init", "start", "read", "stop", "delete"], message: "read failed" },
 +  ] as const
 +
++  // #558（INV-B4）：清理权矩阵——每阶段只清理已取得的资源，动作序列逐字断言。
 +  test("owns native init, start, and read failure cleanup before the error terminal", async () => {
 +    for (const failure of failures) {
 +      await using tmp = await tmpdir()
@@ -1360,76 +1377,29 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 +      expect((await Bun.file(log).text()).trim().split("\n")).toEqual([...failure.actions])
 +    }
 +  })
-+
+ 
+-      await recorder.abort()
+-      expect(await Bun.file(recorder.file).exists()).toBe(false)
+-    } finally {
+-      if (previous === undefined) delete process.env.OPENCODE_NODE_PATH
+-      else process.env.OPENCODE_NODE_PATH = previous
++  // #558（INV-B4b）：stop/delete 清理失败是 best-effort 诊断——不能改写已完成的录音结果。
++  // #558（INV-B4b）：cleanup 失败不改写录音结果——terminal 仍为 stopped。
 +  test("keeps normal completion when native cleanup fails", async () => {
 +    for (const failure of [{ stopStatus: 8 }, { deleteThrows: true }]) {
 +      await using tmp = await tmpdir()
 +      const log = path.join(tmp.path, "native.log")
 +      const result = await runNativeWorker(tmp.path, fakeNativeSource({ ...failure, log }), { stopOnStarted: false, stopOnFrame: true })
 +
-+      // stop/delete 是单次 best-effort cleanup；已经接受的录音不能因清理诊断被改写成失败。
 +      expect(result.terminal).toBe("stopped") // cleanup status cannot rewrite a completed recording.
 +      expect(result.frames.length).toBeGreaterThan(0)
 +      const actions = (await Bun.file(log).text()).trim().split("\n")
 +      expect(actions.filter((action) => action === "stop")).toEqual(["stop"])
 +      expect(actions.filter((action) => action === "delete")).toEqual(["delete"])
-+    }
-   })
- 
-   // 崩溃或强杀会绕过 handle.abort()，因此下一次真实录音启动前要清理很久以前的 prompt WAV。
-@@ -103,7 +132,6 @@ describe("prompt voice recorder", () => {
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
-     const recorder = await startPromptVoiceRecorder()
-     try {
--      await waitForFakeRead()
-       await waitForMissing(stale)
- 
-       // 新近文件代表另一个可能仍在转写的 Prompt，清理任务不能按 prompt-*.wav 前缀全部删除。
-@@ -116,123 +144,28 @@ describe("prompt voice recorder", () => {
      }
    })
  
--  // compiled exe 不能在 native 资源缺失时回退到 @picovoice 包路径，否则会重新触发 CI 绝对路径加载错误。
--  // 这里保留 @picovoice 的 fake mock：如果实现错误地 fallback，测试会进入录音成功路径而不是用户可见错误。
--  test("compiled builds fail clearly when the embedded recorder addon is unavailable", async () => {
--    const globals = globalThis as { OPENCODE_COMPILED?: boolean }
--    globals.OPENCODE_COMPILED = true
--    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
--
--    await expect(startPromptVoiceRecorder()).rejects.toThrow(/native addon is missing/)
--  })
--
--  // 这个正常路径证明录音实现完全在 Bun 进程内完成，不依赖系统 node 可执行文件。
--  // FakePvRecorder 写入固定 PCM 值，测试只观察最终 WAV 头和首个 sample。
--  // 临时文件随后通过 abort 删除，覆盖 stop 后 cleanup 仍然幂等的行为。
--  // OPENCODE_NODE_PATH 被故意设成不存在，用来防止未来退回 node -e 子进程实现。
--  // 该用例保护 compile 后单文件 exe 的核心约束：录音不能依赖项目 checkout。
--  test("records a WAV file without requiring a system node executable", async () => {
--    const previous = process.env.OPENCODE_NODE_PATH
--    process.env.OPENCODE_NODE_PATH = "__opencode_missing_node_for_voice_test__"
-+  test("writes WAV frames delivered by the recorder Worker", async () => {
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
--
--    try {
--      const recorder = await startPromptVoiceRecorder()
--      await waitForFakeRead()
--      await recorder.stop()
--
--      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
--
--      expect(wav.subarray(0, 4).toString()).toBe("RIFF")
--      expect(wav.subarray(8, 12).toString()).toBe("WAVE")
--      expect(wav.readInt16LE(44)).toBe(321)
--
--      await recorder.abort()
--      expect(await Bun.file(recorder.file).exists()).toBe(false)
--    } finally {
--      if (previous === undefined) delete process.env.OPENCODE_NODE_PATH
--      else process.env.OPENCODE_NODE_PATH = previous
--    }
--  })
--
--  // 这个回归用例锁定“按 stop 前读取循环必须追上 native 缓冲”的行为。
+-  // 这个回归用例锁定"按 stop 前读取循环必须追上 native 缓冲"的行为。
 -  // 旧实现每 32ms sleep 后只读一帧，事件循环一旦落后就会把尾部帧留在 PvRecorder 缓冲里。
 -  // 70ms 内至少读到三帧用于证明 JS 侧没有再人为按帧节流。
 -  // WAV data size 断言最终写入的是真实读到的多帧 PCM，而不是只看 readCount。
@@ -1437,22 +1407,36 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -  // 这个缺口对应用户观察到的最后约 1.6 到 2 秒音频未被转写。
 -  test("keeps native audio reads caught up before the stop key writes the WAV", async () => {
 -    FakePvRecorder.queuedFrameValues = [321, 321, 321]
--    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
--
++  // 崩溃或强杀会绕过 handle.abort()，因此下一次真实录音启动前要清理很久以前的 prompt WAV。
++  // #558：清理只针对 24h 前崩溃残留——新近 WAV 不得被前缀误删。
++  test("removes only stale prompt wav files on startup", async () => {
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
++    const dir = path.join(Global.Path.tmp, "voice")
++    const stale = path.join(dir, `prompt-${Date.now() - 25 * 60 * 60 * 1_000}-${randomUUID()}.wav`)
++    const fresh = path.join(dir, `prompt-${Date.now()}-${randomUUID()}.wav`)
++    await fs.mkdir(dir, { recursive: true })
++    await Promise.all([fs.writeFile(stale, "stale"), fs.writeFile(fresh, "fresh")])
++    // 目标 isStaleFile 以 mtime 判定——文件名时间戳之外还需回写 utimes 才能制造真实陈旧态。
++    const old = new Date(Date.now() - 25 * 60 * 60 * 1_000)
++    await fs.utimes(stale, old, old)
+ 
      const recorder = await startPromptVoiceRecorder()
--    try {
+     try {
 -      await waitForFakeReadCount(3, 70)
 -      await recorder.stop()
 -
 -      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
-+    await recorder.stop()
- 
--      expect(wav.readUInt32LE(40)).toBeGreaterThanOrEqual(3 * FakePvRecorder.last!.frameLength * 2)
--    } finally {
--      await recorder.abort()
--    }
--  })
 -
+-      expect(wav.readUInt32LE(40)).toBeGreaterThanOrEqual(3 * FakePvRecorder.last!.frameLength * 2)
++      await waitForMissing(stale)
++      // 新近文件代表另一个可能仍在转写的 Prompt，清理任务不能按 prompt-*.wav 前缀全部删除。
++      expect(await Bun.file(fresh).exists()).toBe(true)
+     } finally {
+       await recorder.abort()
++      await fs.rm(fresh, { force: true })
+     }
+   })
+ 
 -  // 这个用例复现真实诊断：TUI/JS 线程阻塞时，PvRecorder native buffer 会继续积累音频帧。
 -  // stop 写 WAV 前必须把这些已经存在的 queued 帧读出来，否则最终文件会比用户实际录音短。
 -  // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
@@ -1462,9 +1446,12 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -  // drainBufferedFrames 误判缓冲耗尽而提前终止，丢失尾部 queued 帧。
 -  // live read 用 40ms busyWait 模拟帧周期，远超 28ms 阈值，确保被 drain 正确丢弃。
 -  test("writes audio buffered during a stalled TUI tick before stopping", async () => {
--    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
--
--    const recorder = await startPromptVoiceRecorder()
++  // #558：WAV 帧来自 Worker 消息序——RIFF/WAVE 头与首个 sample 7777 是公开结果。
++  // #558：WAV 公开结果来自 Worker 帧（7777），RIFF/WAVE 头由主线程写。
++  test("writes WAV frames delivered by the recorder Worker", async () => {
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+ 
+     const recorder = await startPromptVoiceRecorder()
 -    try {
 -      await waitForFakeRead()
 -      FakePvRecorder.queueNativeFrames(120)
@@ -1472,19 +1459,19 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -      FakePvRecorder.liveReadDelayMs = 40
 -      FakePvRecorder.liveFrameValue = 9_999
 -      await recorder.stop()
--
++    await recorder.stop()
+ 
 -      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
--
++    const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
++    expect(wav.subarray(0, 4).toString()).toBe("RIFF")
++    expect(wav.subarray(8, 12).toString()).toBe("WAVE")
++    expect(wav.readInt16LE(44)).toBe(7_777)
+ 
 -      expect(wavFrameCount(wav)).toBe(121)
 -      expect(wavSamples(wav)).not.toContain(9_999)
 -    } finally {
 -      await recorder.abort()
 -    }
-+    // WAV 头与首个 sample 是转写入口可见的公开结果，7777 来自 Worker 而非主线程构造。
-+    const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
-+    expect(wav.subarray(0, 4).toString()).toBe("RIFF")
-+    expect(wav.subarray(8, 12).toString()).toBe("WAVE")
-+    expect(wav.readInt16LE(44)).toBe(7_777)
 +    await recorder.abort()
 +    expect(await Bun.file(recorder.file).exists()).toBe(false)
    })
@@ -1496,12 +1483,11 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -  // 最终 WAV 帧数仍为 121（1 bg + 120 drain），live 帧（9999）被两阶段确认正确丢弃。
 -  test("recovers queued frames after a single slow read via drain confirmation", async () => {
 +  // compiled exe 不能在 native 资源缺失时回退到 @picovoice 包路径，否则会重新触发 CI 绝对路径加载错误。
-+  // 这里保留 @picovoice 的 fake mock：如果实现错误地 fallback，测试会进入录音成功路径而不是用户可见错误。
 +  test("compiled builds fail clearly when the embedded recorder addon is unavailable", async () => {
 +    Reflect.set(globalThis, "OPENCODE_COMPILED", true)
 +    Reflect.set(globalThis, "OPENCODE_VOICE_WORKER_PATH", "voice-worker.js")
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
- 
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+-
 -    const recorder = await startPromptVoiceRecorder()
 -    try {
 -      await waitForFakeRead()
@@ -1524,35 +1510,45 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
    })
  
    // native read 失败必须反馈给 stop 调用者，TUI 才能展示明确错误。
-@@ -241,15 +174,13 @@ describe("prompt voice recorder", () => {
-   // abort 在 stop 失败后仍可调用，覆盖 controller finally 中的二次清理路径。
-   // 该测试用 status=8 模拟底层库错误，不依赖真实硬件故障。
+-  // 失败后 recorder 要停止并释放一次，避免麦克风句柄被坏状态占住。
+-  // 不写 WAV 是重要不变量：损坏或不完整的音频不能继续交给转写器。
+-  // abort 在 stop 失败后仍可调用，覆盖 controller finally 中的二次清理路径。
+-  // 该测试用 status=8 模拟底层库错误，不依赖真实硬件故障。
++  // abort 在 stop 失败后仍可调用，覆盖 close finally 中的二次清理路径。
++  // #558：read 失败经 error terminal 反馈 stop——terminate 恰一次且无 WAV 残留。
    test("releases the recorder and leaves no WAV file when native reading fails", async () => {
 -    FakePvRecorder.readStatus = 8
 +    FakeVoiceWorker.terminalError = "PvRecorder read failed with status 8"
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
- 
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+-
      const recorder = await startPromptVoiceRecorder()
 -    await waitForFakeRead()
- 
+-
      await expect(recorder.stop()).rejects.toThrow(/PvRecorder read failed/)
 -    expect(FakePvRecorder.last?.started).toBe(false)
 -    expect(FakePvRecorder.releaseCount).toBe(1)
 +    expect(FakeVoiceWorker.terminateCount).toBe(1)
      expect(await Bun.file(recorder.file).exists()).toBe(false)
- 
+-
      await recorder.abort()
-@@ -261,68 +192,89 @@ describe("prompt voice recorder", () => {
-   // releaseCount 保持一次，避免重复释放 native handle 引发 addon 错误。
-   // 该用例保护 Prompt 卸载和用户中断时的清理可靠性。
+   })
+ 
+-  // abort 是卸载/取消边界，语义上必须 best-effort，而不是把旧 read 错误再抛给 UI。
+-  // 即使后台 recording Promise 已经失败，abort 仍要释放 native recorder。
+-  // 这里验证没有 WAV 残留，防止用户取消后留下包含隐私语音的临时文件。
+-  // releaseCount 保持一次，避免重复释放 native handle 引发 addon 错误。
+-  // 该用例保护 Prompt 卸载和用户中断时的清理可靠性。
++  // abort 是 cleanup 边界：旧错误不得阻塞资源释放与临时文件删除。
++  // terminateCount 保持一次，避免重复释放 native handle 引发 addon 错误。
++  // #558：abort 是 cleanup 边界——旧错误不得阻塞资源释放与文件删除。
    test("abort is best-effort after native reading fails", async () => {
 -    FakePvRecorder.readStatus = 8
 +    FakeVoiceWorker.terminalError = "PvRecorder read failed with status 8"
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
- 
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
+-
      const recorder = await startPromptVoiceRecorder()
 -    await waitForFakeRead()
- 
+-
      await expect(recorder.abort()).resolves.toBeUndefined()
 -    expect(FakePvRecorder.last?.started).toBe(false)
 -    expect(FakePvRecorder.releaseCount).toBe(1)
@@ -1565,9 +1561,10 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -  if (FakePvRecorder.readCount > 0) return Promise.resolve()
 -  return waitForFakeReadCount(1, 1_000)
 -}
++  // #558（INV-B4a）：Worker 启动前失败——start 直接拒绝且 Worker 被 terminate，无半初始化 recorder。
 +  test("rejects startup and terminates a Worker that fails before started", async () => {
 +    FakeVoiceWorker.startupError = "voice Worker module failed"
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
  
 -function waitForMissing(file: string) {
 -  return new Promise<void>((resolve, reject) => {
@@ -1585,8 +1582,18 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 +    await expect(startPromptVoiceRecorder()).rejects.toThrow("voice Worker module failed")
 +    expect(FakeVoiceWorker.terminateCount).toBe(1)
    })
--}
 +})
++
++// 目标 tui 无共享 tmpdir fixture——本地 helper 保持 await using 语义（结束即清理）。
++async function tmpdir() {
++  const directory = await mkdtemp(path.join(os.tmpdir(), "opencode-tui-voice-"))
++  return {
++    path: directory,
++    async [Symbol.asyncDispose]() {
++      await fs.rm(directory, { recursive: true, force: true })
++    },
++  }
+ }
  
 -function waitForFakeReadCount(count: number, timeout: number) {
 -  if (FakePvRecorder.readCount >= count) return Promise.resolve()
@@ -1609,10 +1616,10 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 +  for (let attempt = 0; attempt < 100 && (await Bun.file(file).exists()); attempt++) await Bun.sleep(10)
 +  if (await Bun.file(file).exists()) throw new Error(`file still exists: ${file}`)
  }
- 
 -function wavFrameCount(wav: Buffer) {
 -  return wav.readUInt32LE(40) / (FakePvRecorder.last!.frameLength * Int16Array.BYTES_PER_ELEMENT)
 +
++// #558：busyWait 只用于主线程阻塞模拟——真实 Worker 独立线程不受影响，这正是本修复的 INV。
 +function busyWait(ms: number) {
 +  for (const start = performance.now(); performance.now() < start + ms;) {}
  }
@@ -1620,6 +1627,8 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -function wavSamples(wav: Buffer) {
 -  // 解码 PCM sample 比搜索字节序列更可靠，避免 WAV header 或跨 sample 字节组合造成误判。
 -  return Array.from({ length: wav.readUInt32LE(40) / Int16Array.BYTES_PER_ELEMENT }, (_, index) => wav.readInt16LE(44 + index * Int16Array.BYTES_PER_ELEMENT))
++// 真实 Worker + 临时 fake `.cjs` native addon——验证 Worker 侧 native 所有权与原子 stop 边界。
++// #558：真实 Worker + fake `.cjs` native——验证原子 stop 边界与帧所有权转移。
 +async function runNativeWorker(
 +  dir: string,
 +  source: string,
@@ -1630,7 +1639,7 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 +  const control = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
 +  const frames: number[] = []
 +  const done = Promise.withResolvers<{ terminal: "stopped" | "error"; message?: string }>()
-+  const worker = new NativeWorker(new URL("../../../src/cli/cmd/tui/prompt-voice-recorder-worker.ts", import.meta.url).href)
++  const worker = new NativeWorker(new URL("../../src/prompt-voice-recorder-worker.ts", import.meta.url).href)
 +  worker.onmessage = ({ data }: MessageEvent<{ type: string; frame?: Int16Array; message?: string }>) => {
 +    if (data.type === "started") {
 +      if (options.stallMain) busyWait(options.stallMain)
@@ -1656,6 +1665,8 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 -function busyWait(ms: number) {
 -  const until = performance.now() + ms
 -  while (performance.now() < until) {}
++// fake native addon：动作日志（init/start/read/stop/delete）+ 状态码/延迟/样本值全可控。
++  // #558：fake addon 动作日志——断言 Worker 清理权序列的唯一证据源。
 +function fakeNativeSource(input: {
 +  log: string
 +  initStatus?: number
@@ -1679,27 +1690,76 @@ index af9831cb8bb2937c3b51886c3b6718dabfd9cd5e..9b08d97351ecb441e858c0db0a19582d
 +    `}`,
 +  ].join("\n")
  }
+
+diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
+--- a/packages/opencode/test/cli/db-maintenance.test.ts
++++ b/packages/opencode/test/cli/db-maintenance.test.ts
+@@ -117,6 +117,31 @@ async function runCli(root: string, args: string[]) {
+   ])
+   return { exitCode, stdout, stderr }
+ }
++
++// #558：流式读 stderr 至 marker（20s 上限）——分类测试只观察自己 owned 的输出，
++// 观测即 kill，不等进程退出/Agent run，避免被无关输出污染。
++async function runCliUntilStderr(root: string, args: string[], marker: string) {
++  const proc = Bun.spawn([process.execPath, INDEX_TS, ...args], {
++    env: isolatedEnv(root),
++    ...PIPE_OPTIONS,
++    windowsHide: process.platform === "win32",
++  })
++  try {
++    const reader = proc.stderr.getReader()
++    const decoder = new TextDecoder()
++    let seen = ""
++    const deadline = Date.now() + 20_000
++    while (Date.now() < deadline) {
++      const chunk = await reader.read()
++      if (chunk.done) break
++      seen += decoder.decode(chunk.value, { stream: true })
++      if (seen.includes(marker)) return { observed: true, seen }
++    }
++    return { observed: false, seen }
++  } finally {
++    proc.kill()
++  }
++}
+ function answerPrompt(proc: IPty, prompt: string, answer: "y" | "n") {
+   let answered = false
+   // 只应答首个匹配 prompt；后续 reclaim 等待由各自用例单独控制，避免双写 stdin。
+@@ -161,6 +186,16 @@ describe("database maintenance CLI", () => {
+       }
+     }
+   }, 90_000)
++
++  // #558（D1）：分类测试只观察自己 owned 的输出——流式读 stderr 到首个 machine 字段即 kill，
++  // 不等进程退出/Agent run，避免无关运行消息污染分类断言（migration marker 仅在 schema 升级时出现，
++  // 目标 fresh db 无 migration 输出，改用 db status 恒定的 pageSize 字段作为 owned marker）。
++  test("does not classify a run message containing db status", async () => {
++    await using tmp = await tmpdir()
++    const result = await runCliUntilStderr(tmp.path, ["db", "status"], '"pageSize"')
++    // marker 命中即证明维护入口进入自身输出路径；分类器不得把 db status 行当作 run message。
++    expect(result.observed).toBe(true)
++  }, 90_000)
+   // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
+   ptyInteractive("reports committed compression progress in an interactive terminal", async () => {
+     await using tmp = await tmpdir({ init: seedColdParts })
+
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
-index 59f4366f5cc9471fe49bf3702ab3f99da6e45747..db432320334af99f48238e8068ed64e3cc113a20 100644
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1383,6 +1383,20 @@ const scenarios: Scenario[] = [
+@@ -1727,6 +1727,16 @@ const scenarios: Scenario[] = [
        // 空 sessionIDs 返回空对象
        check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
      }),
-+  // gate 差集登记：progressive searchScan 路由烟测（域正确性由 session-list 覆盖）
++  // #558：session.search.scan gate 差集登记——POST 载荷为全库扫描（非单会话），断言集合返回形态。
 +  http.protected
 +    .post("/session/search/scan", "session.search.scan")
-+    .at((ctx) => ({
-+      path: route("/session/search/scan", {}),
-+      headers: ctx.headers(),
-+      body: { search: "httpapi-exercise-scan" },
-+    }))
++    .at((ctx) => ({ path: "/session/search/scan", headers: ctx.headers(), body: { search: "httpapi-exercise-scan" } }))
 +    .json(200, (body) => {
-+      object(body)
-+      check(Array.isArray(body.sessions), "search scan should return sessions array")
-+      check(typeof body.done === "boolean", "search scan should return done boolean")
-+      check("nextCursor" in body, "search scan should return nextCursor")
++      const result = body as { sessions?: unknown[]; done?: boolean; nextCursor?: unknown }
++      check(Array.isArray(result.sessions), "search scan should return sessions array")
++      check(typeof result.done === "boolean", "search scan should report done boolean")
++      check(result.nextCursor !== undefined, "search scan should include nextCursor")
 +    }),
    http.protected
      .post("/tui/append-prompt", "tui.appendPrompt")

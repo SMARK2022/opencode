@@ -1,9 +1,8 @@
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -7,12 +7,14 @@ import "./version-env"
+@@ -7,11 +7,13 @@ import "./version-env"
  import { $ } from "bun"
- import fs from "fs"
  import path from "path"
 +import { createRequire } from "module"
  import { fileURLToPath } from "url"
@@ -66,28 +65,21 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
  await $`rm -rf dist`
  
  const binaries: Record<string, string> = {}
-@@ -194,8 +239,19 @@ for (const item of targets) {
-       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
-       windows: {},
-     },
--    files: embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {},
--    entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
-+    files: {
-+      ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
+@@ -192,10 +237,14 @@ for (const item of targets) {
+    files: {
+      [treeSitterWorkerPath]: treeSitterWorker,
+      ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
 +      // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
 +      "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
-+    },
-+    entrypoints: [
-+      "./src/index.ts",
-+      parserWorker,
-+      workerPath,
-+      ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+    },
+    entrypoints: [
+      "./src/index.ts",
+      workerPath,
+      treeSitterWorkerPath,
+      ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
 +      // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
 +      "opencode-pvrecorder.gen.ts",
-+    ],
-     define: {
-       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
-       OPENCODE_VERSION: `'${Script.version}'`,
+    ],
 @@ -204,6 +260,8 @@ for (const item of targets) {
        OPENCODE_WORKER_PATH: workerPath,
        OPENCODE_CHANNEL: `'${Script.channel}'`,

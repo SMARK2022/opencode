@@ -6,22 +6,22 @@ Subject: [PATCH] =?UTF-8?q?chore(vscode):=20=E5=8D=87=E7=BA=A7=E6=89=A9?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
+扩展版本 1.15.10→1.15.11（source 谱系）；v1.18.32 目标链映射为扩展 1.18.40→1.18.43、CLI 1.18.40-smark→1.18.43-smark。
 同步 VSIX manifest、README 与打包指南版本，修正 hidden diagnostics 表述，并将源码目录改为树形结构。
 diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
-index 91c2f88f1..f66bec8cd 100644
 --- a/docs/VSIX-Packaging.md
 +++ b/docs/VSIX-Packaging.md
-@@ -10,7 +10,7 @@ This document describes how to build, inspect, install, and publish the SMARK Op
+@@ -10,7 +10,7 @@
  | Package path | `sdks/vscode` |
  | Source repository | `https://github.com/SMARK2022/opencode` |
  | Source branch | `dev-smark` |
--| Repository extension version | `1.17.28` |
-+| Repository extension version | `1.17.31` |
- | Recommended CLI | `opencode 1.17.28-smark` |
+-| Repository extension version | `1.18.40` |
++| Repository extension version | `1.18.43` |
+-| Recommended CLI | `opencode 1.18.40-smark` |
++| Recommended CLI | `opencode 1.18.43-smark` |
  | Default version source | `sdks/vscode/package.json` |
  | Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
-@@ -77,15 +77,15 @@ The expected payload is compact:
+@@ -77,15 +77,15 @@
  
  ```text
  extension/
@@ -46,7 +46,7 @@ index 91c2f88f1..f66bec8cd 100644
  ```
  
  Excluded files are controlled by `sdks/vscode/.vscodeignore`. Source files, test output, local dependencies, build scripts, TypeScript config, lint config, source maps, logs, and nested VSIX files are not packaged.
-@@ -113,7 +113,7 @@ After installing locally:
+@@ -113,7 +113,7 @@
  2. Run `OpenCode: Show Bridge Log` and confirm the bridge is listening on `127.0.0.1`.
  3. Run `Open or Focus OpenCode Terminal` and confirm an `opencode` terminal starts.
  4. Open a source file supported by an enabled VS Code language extension and request hover or definition at a known symbol.
@@ -55,19 +55,16 @@ index 91c2f88f1..f66bec8cd 100644
  6. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
  7. If the notebook has executable cells, call `vscode_notebook_run` on one safe cell.
  8. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
-@@ -158,9 +158,9 @@ Do not publish before the extension manifest, README, and recommended CLI state.
+@@ -157,7 +157,7 @@
  
  ## Versioning
  
--Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.17.28`) so Marketplace tooling accepts it; the recommended CLI is `1.17.28-smark`, but the two packages remain independently versioned.
-+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.17.31`) so Marketplace tooling accepts it; the recommended CLI is `1.17.28-smark`, but the two packages remain independently versioned.
+-Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.18.40`) so Marketplace tooling accepts it; the recommended CLI is `1.18.40-smark`, but the two packages remain independently versioned.
++Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.18.43`) so Marketplace tooling accepts it; the recommended CLI is `1.18.43-smark`, but the two packages remain independently versioned.
  
  Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
  
- The repository root `script/release` currently targets a `publish.yml` workflow that is absent from this checkout. It is not an extension tag helper. Do not substitute either root release script for the local VSIX and manual publishing flow documented above.
- 
-@@ -178,19 +178,19 @@ Supported IDE commands are `code`, `code-insiders`, `windsurf`, `cursor`, and `c
- 
+@@ -178,18 +178,18 @@
  ```text
  sdks/vscode/src/
 -|-- extension.ts           Entry point, lifecycle, terminal commands
@@ -103,21 +100,22 @@ index 91c2f88f1..f66bec8cd 100644
  ```
 \ No newline at end of file
 diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
-index 9a3331438..9a2d04e7a 100644
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
-@@ -3,7 +3,7 @@ # SMARK OpenCode IDE Bridge
--Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code language, workspace, and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.17.27` until this repository build is published.
+@@ -3 +3 @@
+-Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code language, workspace, and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.18.39` until this repository build is published.
 +Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code language, workspace, and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
- 
- | Field | Value |
- | --- | --- |
+@@ -7,7 +7,7 @@
  | Extension ID | `SMARK2022.opencode-ide-bridge` |
  | Publisher | `SMARK2022` |
--| Repository extension version | `1.17.28` |
-+| Repository extension version | `1.17.31` |
-@@ -121,7 +121,7 @@ The bridge does not bundle language servers. It calls providers registered by en
+-| Repository extension version | `1.18.40` |
++| Repository extension version | `1.18.43` |
+-| Recommended CLI | `opencode 1.18.40-smark` or newer |
++| Recommended CLI | `opencode 1.18.43-smark` |
+ | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
  
+ ## What It Adds
+@@ -120,6 +120,6 @@
  | Operation | VS Code-backed behavior |
  | --- | --- |
 -| Touch | Reveals a preserve-focus preview when a strong diagnostics refresh needs VS Code to activate the document. |
@@ -125,8 +123,7 @@ index 9a3331438..9a2d04e7a 100644
  | Diagnostics | Reads diagnostics currently published by VS Code, optionally scoped to one file; the CLI aggregate path requests all published diagnostics. |
  | Hover | Returns hover contents at a position. |
  | Definition | Returns definition locations for a symbol. |
-@@ -129,9 +129,9 @@ The bridge does not bundle language servers. It calls providers registered by en
- | Document symbols | Returns symbols from one document. |
+@@ -127,7 +127,7 @@
  | Workspace symbols | Searches symbols registered for the current workspace. |
  
 -For supported operations, OpenCode falls back to its built-in LSP when the bridge request fails. Diagnostics also falls back when its response structure is invalid; for other successful responses, a missing result field may currently be interpreted as empty. A valid empty result does not trigger fallback and does not by itself prove that the entire project passes type checking. Implementation lookup and prepare/incoming/outgoing call hierarchy are not bridge endpoints and continue to use the built-in LSP.
@@ -136,9 +133,7 @@ index 9a3331438..9a2d04e7a 100644
 +Opening a document with `vscode.workspace.openTextDocument` does not reveal it. The diagnostics touch endpoint keeps the target hidden, preserves the active editor, and does not add a preview tab.
  
  ## HTTP Endpoints
- 
-@@ -148,7 +148,7 @@ The OpenCode CLI uses these bridge endpoints internally. Normal users should pre
- | `POST` | `/notebook/output` | Bearer | Export outputs as artifacts. |
+@@ -147,6 +147,6 @@
  | `POST` | `/notebook/cell-output` | Bearer | Alias for `/notebook/output`. |
  | `POST` | `/notebook/env` | Bearer | Kernel info/configure/restart/stop and notebook create/save operations. |
 -| `POST` | `/lsp/touch` | Bearer | Activate a document and wait briefly for diagnostics. |
@@ -146,9 +141,7 @@ index 9a3331438..9a2d04e7a 100644
  | `POST` | `/lsp/diagnostics` | Bearer | Return diagnostics for one file when scoped, or all currently published diagnostics when omitted. |
  | `POST` | `/lsp/hover` | Bearer | Return hover results at a position. |
  | `POST` | `/lsp/definition` | Bearer | Return definition locations at a position. |
-@@ -236,21 +236,21 @@ For extension host debugging:
- 
- ```text
+@@ -236,17 +236,17 @@
  VS Code Extension Host
 -|-- extension.ts           Activation, lifecycle, terminal commands
 -|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
@@ -181,18 +174,11 @@ index 9a3331438..9a2d04e7a 100644
 +    ├── format.ts          Summary text and cell ID formatting
 +    └── resolve.ts         Notebook and cell resolution
  ```
- 
- ## Troubleshooting
 diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
-index e118aa534..7a8c4d9e7 100644
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
-@@ -2,6 +2,6 @@
-   "name": "opencode-ide-bridge",
-   "displayName": "OpenCode IDE Bridge",
-   "description": "SMARK OpenCode IDE bridge for VS Code. Provides VS Code-backed language intelligence, notebook and Jupyter kernel operations, workspace context sharing, and terminal integration over a local authenticated bridge.",
--  "version": "1.17.28",
--  "//": "#408：协同升号 1.17.27→1.17.28——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
-+  "version": "1.17.31",
-+  "//": "#450：扩展版本对齐 CLI 1.17.31——1.17.28→1.17.31，格式保持三段式",
-   "homepage": "https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode",
+@@ -5,2 +5,2 @@
+-  "version": "1.18.40",
+-  "//": "#408：协同升号 1.18.39→1.18.40——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
++  "version": "1.18.43",
++  "//": "#450：扩展版本对齐 CLI 1.18.43-smark——1.18.40→1.18.43（承 #408 谱系链），格式保持三段式",

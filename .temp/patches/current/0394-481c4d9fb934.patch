@@ -135,7 +135,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -329,25 +329,34 @@ const layer = Layer.effect(
+@@ -329,23 +329,35 @@
        yield* lock.withPermits(1)(
          Effect.gen(function* () {
            yield* Effect.logInfo("cancel", { "session.id": sessionID })
@@ -156,23 +156,27 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
        )
      })
  
-     // #153：cancel 收口所有未完成 assistant（含空 dangling）
      // #216：显式类型标注使 abortPendingAssistants 可在 abortChildren 中递归自引用
--    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-+    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<string>) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<string>) {
-       // #153：用 Session.messages 枚举，避免 MessageV2.stream 泄漏 Database.Service 到 cancel 的 R
-       const msgs = yield* sessions.messages({ sessionID }).pipe(
-         Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
-       )
-       // #153：过滤未完成 assistant（含空 parts dangling）
--      const pending = msgs.filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+-    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
++    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<string>) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<string>) {
+      // #153：cancel 必须覆盖全部可见未完成 assistant，而非仅 findMessage 命中的第一条
+      // sessions.messages 返回 chronological 顺序且默认过滤 hidden，取消只需覆盖可见项
+      const visible = yield* sessions.messages({ sessionID })
 +      // 只终态化 cancel 开始前已存在的消息，不触碰 cancel 后新建的消息
-+      const pending = msgs.filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed && (!pendingIds || pendingIds.has(msg.info.id)))
-       // #216：递归中止子会话——auto-review 创建的 permission-reviewer 子会话也需终态化
+-      const pending = visible.filter(
+-        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
+-          msg.info.role === "assistant" && !msg.info.time.completed,
+-      )
++      const pending = visible.filter(
++        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
++          msg.info.role === "assistant" &&
++          !msg.info.time.completed &&
++          // pendingIds 存在时只收 cancel 前已存在的消息，防止误杀 cancel 后新建的命令
++          (!pendingIds || pendingIds.has(msg.info.id)),
++      )
+      // #216：递归中止子会话——auto-review 创建的 permission-reviewer 子会话也需终态化
 +      // 子会话递归时不传 pendingIds——子会话无用户输入竞态
-       const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
-         discard: true,
-       })
+      const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
 diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/session/run-state.ts
 --- a/packages/opencode/src/session/run-state.ts
 +++ b/packages/opencode/src/session/run-state.ts

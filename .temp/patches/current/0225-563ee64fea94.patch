@@ -315,3 +315,30 @@ index a7bcf64..bb46680 100644
          always: ["*"],
          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
        })
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -626,7 +626,8 @@ describe("tool.shell permissions", () => {
+  }
+
+  for (const item of ps) {
+-    reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
++    // #225：agent 标识统一小写 auto——与 agent key/name、metadata.agent 的生产比较保持同构
++    reviewed.live(`routes auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+@@ -664,12 +665,12 @@ describe("tool.shell permissions", () => {
+          permission: "bash",
+          patterns: [String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`],
+          metadata: {
+            action_kind: "shell",
+-            agent: "Auto",
++            agent: "auto",
+            command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
+            cwd: projectRoot,
+            shell: item.shell,
+          },
+          always: [],
+          ruleset,
+        })

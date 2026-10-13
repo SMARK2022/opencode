@@ -44,7 +44,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
  } from "./stats-charts"
  
  // #174：ColorMode 仅 auto/always/never
-@@ -138,21 +128,105 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+@@ -138,23 +128,107 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
        )
      }
    }
@@ -138,6 +138,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    // #181：models 与 providers 纵向堆叠，不再 two-column
 +  const body = [
      ...header(report, "stats dashboard"),
+-    // #176：失败/中止请求存在时置顶提示，与 usage 表 errors/aborted 同源
+-    ...(report.total.errors + report.total.aborted > 0 ? [`requests failed=${report.total.errors} aborted=${report.total.aborted}`] : []),
 -    ...renderCallout("models", `top ${Math.min(5, report.models.length)}`),
 -    ...renderRankBars({
 -      rows: limitRows(report.models, options.limit ?? 5).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
@@ -146,6 +148,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 -    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
 -  ].join("\n")
 +        // #181：models 表绑定 modelSeries 趋势
++    // #176：失败/中止请求存在时置顶提示（#176 契约在 #181 顶表重写后保留）
++    ...(report.total.errors + report.total.aborted > 0 ? [`requests failed=${report.total.errors} aborted=${report.total.aborted}`] : []),
 +    ...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total),
 +    "",
 +        // #181：providers 表绑定 providerSeries 趋势

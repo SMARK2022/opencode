@@ -1034,9 +1034,9 @@ index c0dfc67dc1..865fdaf98b 100644
      // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
      let pendingPartDeltas: EventMessagePartDelta[] = []
 @@ -270,6 +280,61 @@ export const {
-     }
+     const args = useArgs()
  
-     // #153：集中刷新 session_status，供 force-sync / stale-busy 复用
+     // #153：session_status 独立刷新，force sync 与 bootstrap 共用同一入口
 +    // #192：快照按 session 建表，供后续增量 update 提供二分查找的排序不变式
 +    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) { return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => { ;(result[request.sessionID] ??= []).push(request); return result }, {}) }
 +    function pendingRequestChangeKey(sessionID: string, requestID: string) { return `${sessionID}\0${requestID}` }
@@ -1093,8 +1093,8 @@ index c0dfc67dc1..865fdaf98b 100644
 +    }
 +
      async function refreshStatus() {
-       const workspace = project.workspace.current()
-       const x = await sdk.client.session.status({ workspace })
+       // 失败随 bootstrap 的 Effect.all 语义上抛，与其他首次拉取保持一致的致命性
+       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
 @@ -294,6 +351,7 @@ export const {
            void bootstrap({ fatal: false }).catch(() => undefined)
            break
@@ -1129,7 +1129,7 @@ index c0dfc67dc1..865fdaf98b 100644
              setStore("question", request.sessionID, [request])
 @@ -674,6 +735,9 @@ export const {
              sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-             // #153：bootstrap 走 refreshStatus，与 force-sync 同一入口
+            // #153：bootstrap 以同一入口拉取 status，替代原先内联的实现
              refreshStatus(),
 +            // #192：refresh 拉取快照后回放本地变更，pending 请求在 store 中重建
 +            refreshPermissionRequests(workspace),

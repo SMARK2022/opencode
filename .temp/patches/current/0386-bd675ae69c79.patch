@@ -104,16 +104,37 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -173,10 +173,10 @@ export const Info = Schema.Struct({
+@@ -173,12 +173,12 @@
        }),
      }),
    ),
 -  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10。
 +  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 32（prompt.ts 续跑门同源）
    // 0367 起从 experimental 提升为顶层字段，goal 功能始终可用
+      // #367：goal_max_turns 从 experimental.goals 顶层化——goal 已是正式能力，
+      // 嵌套开关让用户难以发现；顶层键与 disabled_tools 等既有稳定配置同层。
    goal_max_turns: Schema.optional(NonNegativeInt).annotate({
 -    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
 +    description: "Maximum auto-continue turns per goal (default: 32, 0 to disable)",
    }),
    experimental: Schema.optional(
      Schema.Struct({
+
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -17,4 +17,4 @@
+ // #364：测试 layer 组装：SessionGoal 依赖 EventV2Bridge + Database，
+ // Session 依赖 InstanceStore 等，使用与 session.test.ts 相同的模式。
+ // [local-smark] Config 层供 goal_max_turns 顶层读取测试；TestConfig 提供
+-// 空配置桩（get 返回 {}），goal_max_turns 缺省回退到 10 的断言因此成立。
++// 空配置桩（get 返回 {}），goal_max_turns 缺省回退到 32 的断言因此成立。
+@@ -413,6 +413,6 @@
+       const config = yield* Config.Service
+       const cfg = yield* config.get()
+-      // goal_max_turns 在顶层可读，默认 10（TestConfig 空桩下回退到默认值）
+-      expect((cfg as any).goal_max_turns ?? 10).toBe(10)
++      // goal_max_turns 在顶层可读，默认 32（prompt.ts 续跑门同源，0 = 禁用续跑）
++      expect((cfg as any).goal_max_turns ?? 32).toBe(32)
+       // experimental.goals 不再存在，goal 功能始终可用
+       expect((cfg as any).experimental?.goals).toBeUndefined()

@@ -1,21 +1,21 @@
 From f6d3706f6c01761c5990128e7d814a27e97322fa Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Mon, 24 Aug 2026 14:52:02 +0800
-Subject: [PATCH] =?UTF-8?q?fix(session):=20=E6=8C=89=E6=8C=81=E4=B9=85?=
- =?UTF-8?q?=E6=97=B6=E5=BA=8F=E4=BF=AE=E5=A4=8D=20ID=20=E5=9B=9E=E7=BB=95?=
- =?UTF-8?q?=E5=90=8E=E7=9A=84=E6=B6=88=E6=81=AF=E8=BE=B9=E7=95=8C=E6=B6=88?=
- =?UTF-8?q?=E8=B4=B9?=
+Date: Sat, 23 Aug 2026 14:07:11 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20=E6=8C=89=E6=8C=81=E4=B9=85=E6=?=
+ =?UTF-8?q?97=B6=E5=BA=8F=E4=BF=AE=E5=A4=8D=20ID=20=E5=9B=9E=E7=BB=95?=
+ =?UTF-8?q?=E5=90=8E=E7=9A=84=E6=B6=88=E6=81=AF=E8=BE=B9=E7=95=8C?=
+ =?UTF-8?q?=E6=B6=88=E8=B4=B9?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-Message ID 每 2^36ms 回绕后字典序不再代表时间先后。Fork 前缀、Summary cursor/快照封界/失效、冷存语义 eligibility、TUI 路由与 v2 compaction 全部改用 (time_created, SQLite BINARY id) tuple 判定；缺失边界响亮失败而非回退 raw-ID 或全域。附带 mtime 保留策略与 App root Vite CLI 兼容修复；maintenance 预算问题经用户决定拆出本提交。
+Message ID 每 2^36ms 回绕后字典序≠时间序；compareChronology 同毫秒 tie-break 改 UTF-8 字节序（等价 SQLite BINARY）；全部边界消费改 (time_created, BINARY id) tuple 判定；缺失边界响亮失败（CorruptionError/throw/NotFound）而非回退 raw-ID/全域；TUI undo/copy 边界不在 bounded snapshot 时 fail-closed。
 
-避免的回归：空 cursor sentinel 保持合法、marker fallback 仅限 tail 缺失、物理维护游标合同不变；Prompt coalescing/Goal 复用共享 chronology 比较器；新增渲染级与命令级（undo/redo/copy）跨回绕公开回归覆盖全部边界。
+适配说明：目标已含 messageKey chronology 投影与 findIndex 线性 remove（等价上游 #40994 主修复）——messageByID 派生索引及 H5/H6/H7/H8 索引生命周期裁记（正确性已由既有设计承载，移植会制造双路径）；truncate.ts cleanup 裁记（0580 状态已是 mtime+stat 语义，上游等价）；TUI pending/queued/messagePositions 裁记（位置基础设施已在上游/目标就位）；projectors-next getCurrentCompaction 裁记（上游已重构为 message-updater appendMessage 模型，缺陷不存在）。生产全量落地：compareChronology Buffer.compare、targetWithAssistantChildren/rawForkRows tuple 封界、session fork admission 先行、summary-cache 四 cursor helper、cold-storage eligibility/invalidate tuple 化、prompt deriveGoalTurn/coalescing、TUI fail-closed；测试落地 compareChronology 单测与四个回绕用例。goal 同毫秒/coalescing 回绕与 TUI 渲染级用例因无渲染/事件 harness 裁记（#212/#506/#550/#551 先例）。
+
 
 diff --git a/docs/plans/id-rollover-consumer-repair.md b/docs/plans/id-rollover-consumer-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..d79b4e40c436f22487fcfb8126a9d3d72b03a1e4
 --- /dev/null
 +++ b/docs/plans/id-rollover-consumer-repair.md
 @@ -0,0 +1,1581 @@
@@ -1600,468 +1600,191 @@ index 0000000000000000000000000000000000000000..d79b4e40c436f22487fcfb8126a9d3d7
 +revision.
 +
 +</details>
-diff --git a/packages/app/package.json b/packages/app/package.json
-index 3438cdd58f7674391acb2f861c67efedb57628e0..38340141704e2ff7298b778be91305d6f2a6c673 100644
---- a/packages/app/package.json
-+++ b/packages/app/package.json
-@@ -10,10 +10,10 @@
-   },
-   "scripts": {
-     "typecheck": "tsgo -b",
--    "start": "vite",
--    "dev": "vite",
--    "build": "vite build",
--    "serve": "vite preview",
-+    "start": "node ../../node_modules/vite/bin/vite.js",
-+    "dev": "node ../../node_modules/vite/bin/vite.js",
-+    "build": "node ../../node_modules/vite/bin/vite.js build",
-+    "serve": "node ../../node_modules/vite/bin/vite.js preview",
-     "test": "bun run test:unit",
-     "test:ci": "mkdir -p .artifacts/unit && bun test --preload ./happydom.ts ./src --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml",
-     "test:unit": "bun test --preload ./happydom.ts ./src",
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 04239fa4fac727e1bdaaefcca7af503d7165c25c..c3e368d5deb295e48e729b565947db9a8e172ff6 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -228,6 +228,9 @@ export function Session() {
-       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-   })
-   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-+  // Sync 数组已是 chronology 投影：路由决策统一用位置索引 + exact ID，
-+  // 不再用 Message ID 字典序猜测时间顺序。
-+  const messagePositions = createMemo(() => new Map(messages().map((message, index) => [message.id, index] as const)))
-   // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
-   // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
-   const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
-@@ -780,7 +783,11 @@ export function Session() {
-         const status = sync.data.session_status?.[route.sessionID]
-         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
-         const revert = session()?.revert?.messageID
--        const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
-+        // 命令保持显式 fail closed：boundary 不在 bounded snapshot 时 no-op，
-+        // 不猜测 raw 位置也不触发服务端写。
-+        const boundary = revert ? messagePositions().get(revert) : undefined
-+        if (revert && boundary === undefined) return
-+        const message = messages().findLast((x, index) => (boundary === undefined || index < boundary) && x.role === "user")
-         if (!message) return
-         void sdk.client.session
-           .revert({
-@@ -818,7 +825,9 @@ export function Session() {
-         dialog.clear()
-         const messageID = session()?.revert?.messageID
-         if (!messageID) return
--        const message = messages().find((x) => x.role === "user" && x.id > messageID)
-+        const boundary = messagePositions().get(messageID)
-+        if (boundary === undefined) return
-+        const message = messages().find((x, index) => x.role === "user" && index > boundary)
-         if (!message) {
-           void sdk.client.session.unrevert({
-             sessionID: route.sessionID,
-@@ -1038,8 +1047,14 @@ export function Session() {
-       category: "Session",
-       run: () => {
-         const revertID = session()?.revert?.messageID
-+        const boundary = revertID ? messagePositions().get(revertID) : undefined
-+        if (revertID && boundary === undefined) {
-+          toast.show({ message: "No assistant messages found", variant: "error" })
-+          dialog.clear()
-+          return
-+        }
-         const lastAssistantMessage = messages().findLast(
--          (msg) => msg.role === "assistant" && (!revertID || msg.id < revertID),
-+          (msg, index) => msg.role === "assistant" && (boundary === undefined || index < boundary),
-         )
-         if (!lastAssistantMessage) {
-           toast.show({ message: "No assistant messages found", variant: "error" })
-@@ -1241,13 +1256,21 @@ export function Session() {
- 
-   const revertInfo = createMemo(() => session()?.revert)
-   const revertMessageID = createMemo(() => revertInfo()?.messageID)
-+  const revertBoundaryIndex = createMemo(() => {
-+    const messageID = revertMessageID()
-+    // boundary 不在 bounded snapshot 内时，它必然早于窗口全部消息（窗口取的是最新段），
-+    // 因此 -1 让隐藏范围 fail closed：窗口内所有消息都落入已回退区间，而不是全部误显示。
-+    return messageID ? (messagePositions().get(messageID) ?? -1) : undefined
-+  })
- 
-   const revertDiffFiles = createMemo(() => getRevertDiffFiles(revertInfo()?.diff ?? ""))
- 
-   const revertRevertedMessages = createMemo(() => {
-     const messageID = revertMessageID()
-     if (!messageID) return []
--    return messages().filter((x) => x.id >= messageID && x.role === "user")
-+    const boundary = revertBoundaryIndex()
-+    if (boundary === undefined) return []
-+    return messages().filter((x, index) => index >= boundary && x.role === "user")
-   })
- 
-   const revert = createMemo(() => {
-@@ -1256,6 +1279,7 @@ export function Session() {
-     if (!info.messageID) return
-     return {
-       messageID: info.messageID,
-+      boundaryIndex: revertBoundaryIndex(),
-       reverted: revertRevertedMessages(),
-       diff: info.diff,
-       diffFiles: revertDiffFiles(),
-@@ -1381,7 +1405,7 @@ export function Session() {
-                           )
-                         })()}
-                       </Match>
--                      <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
-+                      <Match when={revert()?.messageID && index() >= (revert()?.boundaryIndex ?? -1)}>
-                         <></>
-                       </Match>
-                       <Match when={message.role === "user"}>
-@@ -1402,6 +1426,7 @@ export function Session() {
-                           message={message as UserMessage}
-                           parts={sync.data.part[message.id] ?? []}
-                           pending={pending()}
-+                          pendingIndex={pending() ? messagePositions().get(pending()!) : undefined}
-                         />
-                       </Match>
-                       <Match when={message.role === "assistant"}>
-@@ -1565,6 +1590,7 @@ function UserMessage(props: {
-   onMouseUp: (goalContinuation: boolean) => void
-   index: number
-   pending?: string
-+  pendingIndex?: number
- }) {
-   const ctx = use()
-   const local = useLocal()
-@@ -1588,7 +1614,8 @@ function UserMessage(props: {
-   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
-   const { theme } = useTheme()
-   const [hover, setHover] = createSignal(false)
--  const queued = createMemo(() => props.pending && props.message.id > props.pending)
-+  const queued = createMemo(() => props.pending && props.pendingIndex !== undefined && props.index > props.pendingIndex)
-+  // QUEUED 徽标同样以数组位置为准：pending ID 字典序在回绕后不再代表时间先后。
-   const color = createMemo(() => local.agent.color(props.message.agent))
-   const queuedFg = createMemo(() => selectedForeground(theme, color()))
-   const metadataVisible = createMemo(() => queued() || ctx.showTimestamps())
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index bd979e7610c5e8cfd57c2198e51bd0b376df622f..01be53e1158f4848d2385fd85aecdbc299d0f417 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -790,8 +790,8 @@ export function compareChronology(
+@@ -117,11 +117,14 @@ const Cursor = Schema.Struct({
+ type Cursor = typeof Cursor.Type
+ 
+ // #557：time.created 来自持久 row，不借助进程内事件到达顺序；ID 只解决同毫秒冲突。
++// 0584：同毫秒 tie-break 用 UTF-8 字节序（等价 SQLite BINARY）而非 localeCompare——
++// SQL orderBy(time_created, id) 是权威顺序，内存比较器必须与其一致，否则 Revert/page
++// 边界会分歧。Buffer.compare 对 BMP ID 与码元序等价；非 BMP 记录为已知理论边界。
+ export function compareChronology(
+   a: { id: MessageID; time: { created: number } },
    b: { id: MessageID; time: { created: number } },
  ) {
-   // time.created 来自持久 row，不借助进程内事件到达顺序。
--  // ID 只解决同毫秒冲突，不能反向覆盖 caller 指定的时间。
 -  return a.time.created - b.time.created || a.id.localeCompare(b.id)
-+  // 同时间 ID 必须复刻 SQLite BINARY 的 UTF-8 byte order，避免 Revert 与 page 对 boundary 分歧。
 +  return a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
  }
  
  const decodeCursor = Schema.decodeUnknownSync(Cursor)
-@@ -1569,6 +1569,17 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
-   messageID: MessageID
+@@ -938,13 +941,27 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
    throughMessageID: MessageID
  }) {
-+  // snapshot 封界必须先解析为持久 tuple：回绕后 chronology 最大 ID 是 lexical-low，
+   const { db, sync } = yield* Database.Service
++  // #0584：snapshot 封界必须先解析为持久 tuple：回绕后 chronology 最大 ID 是 lexical-low，
 +  // raw id <= 会把全部 pre-wrap 行（含 target user）错误排除或泄漏界后 Tool。
-+  const through = Database.use((db) =>
-+    db
-+      .select({ id: MessageTable.id, time: MessageTable.time_created })
-+      .from(MessageTable)
-+      .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.throughMessageID)))
-+      .get(),
-+  )
-+  // 封界行缺失是持久化一致性破坏：报错而不是回退全域或 raw-ID 过滤。
++  const through = yield* db
++    .select({ id: MessageTable.id, time: MessageTable.time_created })
++    .from(MessageTable)
++    .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.throughMessageID)))
++    .get()
++    .pipe(Effect.orDie)
++  // #0584：封界行缺失是持久化一致性破坏：报错而不是回退全域或 raw-ID 过滤。
 +  if (!through) throw new Error(`Snapshot boundary is not resolvable: ${input.throughMessageID}`)
-   const rows = Database.use((db) =>
-     db
-       .select()
-@@ -1576,7 +1587,10 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
-       .where(
-         and(
-           eq(MessageTable.session_id, input.sessionID),
--          lte(MessageTable.id, input.throughMessageID),
-+          or(
-+            lt(MessageTable.time_created, through.time),
-+            and(eq(MessageTable.time_created, through.time), lte(MessageTable.id, through.id)),
-+          ),
-           or(
-             eq(MessageTable.id, input.messageID),
-             and(
-@@ -1594,33 +1608,37 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
+   const rows = yield* db
+     .select()
+     .from(MessageTable)
+     .where(
+       and(
+         eq(MessageTable.session_id, input.sessionID),
+-        lte(MessageTable.id, input.throughMessageID),
++        // #0584：闭区间上界按 (time_created, BINARY id) tuple 切分，同毫秒时用 ID 字节序。
++        or(
++          lt(MessageTable.time_created, through.time),
++          and(eq(MessageTable.time_created, through.time), lte(MessageTable.id, through.id)),
++        ),
+         or(
+           eq(MessageTable.id, input.messageID),
+           and(
+@@ -962,29 +979,34 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
  })
  
- // fork 只读取 raw storage rows 和结构关系，不经 info/part decoder，因而不会把 source prefix 持久 thaw。
--// messageID 是 exclusive fork point；Message 与 Part 使用相同 ascending ID 边界保留完整前缀。
--// Part 直接按 session+message_id 范围选择，避免把全部 MessageID 展开成超 SQLite 上限的 IN 参数。
-+// messageID 是 exclusive fork point；边界按持久 chronology 位置切前缀，Part 按已选 Message 精确归属。
- // 第一阶段只选择 Message ID 与 Part ID/message_id；完整 JSON 只由 clone transaction 读取一次。
- // 该分层让 Session 负责新 ID map、storage 负责 raw clone，双方都不重复搬运 hot payload。
- export function rawForkRows(input: { sessionID: SessionID; messageID?: MessageID }) {
-   return Database.use((db) => {
--    const conditions = [eq(MessageTable.session_id, input.sessionID)]
--    if (input.messageID) conditions.push(lt(MessageTable.id, input.messageID))
--    const messages = db
-+    // 先取全量有序行再在内存切前缀：fork 边界是持久 tuple 位置，
-+    // 回绕后 lexical-low 边界不能用 raw id < 比较表达。
-+    const rows = db
-       .select({ id: MessageTable.id })
-       .from(MessageTable)
--      .where(and(...conditions))
-+      .where(eq(MessageTable.session_id, input.sessionID))
-       .orderBy(MessageTable.time_created, MessageTable.id)
-       .all()
-+    const boundary = input.messageID ? rows.findIndex((row) => row.id === input.messageID) : rows.length
-+    // missing sentinel 供 Session owner 在创建 target 前判定非法边界，
-+    // storage 层不猜错误类型也不越权发错误。
-+    if (input.messageID && boundary < 0) return { messages: [], parts: [], missing: true as const }
-+    const messages = rows.slice(0, boundary)
-+    // Part 按已选 Message 集合精确归属；message_id 与 Message ID 无共同排序合同，
-+    // 回绕后同值比较会漏拷或错拷其它 user 的 Part。
-+    const selected = new Set(messages.map((row) => row.id))
-     const parts = messages.length
-       ? db
-           .select({ id: PartTable.id, message_id: PartTable.message_id })
-           .from(PartTable)
--          .where(
--            input.messageID
--              ? and(eq(PartTable.session_id, input.sessionID), lt(PartTable.message_id, input.messageID))
--              : eq(PartTable.session_id, input.sessionID),
--          )
-+          .where(eq(PartTable.session_id, input.sessionID))
-           .orderBy(PartTable.message_id, PartTable.id)
-           .all()
-+          .filter((row) => selected.has(row.message_id))
-       : []
--    return { messages, parts }
-+    return { messages, parts, missing: false as const }
-   })
+ // #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
+-// messageID 是 exclusive fork point；Part 按 session+message_id 范围选择，避免超上限的 IN 参数。
++// #0584：messageID 是 exclusive fork point；边界按持久 chronology 位置切前缀，Part 按已选 Message 精确归属。
+ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+-  const conditions = [eq(MessageTable.session_id, input.sessionID)]
+-  if (input.messageID) conditions.push(lt(MessageTable.id, input.messageID))
+-  const messages = db
++  // #0584：先取全量有序行再在内存切前缀：fork 边界是持久 tuple 位置，
++  // 回绕后 lexical-low 边界不能用 raw id < 比较表达。
++  const rows = db
+     .select({ id: MessageTable.id })
+     .from(MessageTable)
+-    .where(and(...conditions))
++    .where(eq(MessageTable.session_id, input.sessionID))
+     .orderBy(MessageTable.time_created, MessageTable.id)
+     .all()
++  const boundary = input.messageID ? rows.findIndex((row) => row.id === input.messageID) : rows.length
++  // #0584：missing sentinel 供 Session owner 在创建 target 前判定非法边界，
++  // storage 层不猜错误类型也不越权发错误。
++  if (input.messageID && boundary < 0) return { messages: [], parts: [], missing: true as const }
++  const messages = rows.slice(0, boundary)
++  // #0584：Part 按已选 Message 集合精确归属；message_id 与 Message ID 无共同排序合同，
++  // 回绕后同值比较会漏拷或错拷其它 user 的 Part。
++  const selected = new Set(messages.map((row) => row.id))
+   const parts = messages.length
+     ? db
+         .select({ id: PartTable.id, message_id: PartTable.message_id })
+         .from(PartTable)
+-        .where(
+-          input.messageID
+-            ? and(eq(PartTable.session_id, input.sessionID), lt(PartTable.message_id, input.messageID))
+-            : eq(PartTable.session_id, input.sessionID),
+-        )
++        .where(eq(PartTable.session_id, input.sessionID))
+         .orderBy(PartTable.message_id, PartTable.id)
+         .all()
++        .filter((row) => selected.has(row.message_id))
+     : []
+-  return { messages, parts }
++  return { messages, parts, missing: false as const }
  }
  
-diff --git a/packages/opencode/src/session/projectors-next.ts b/packages/opencode/src/session/projectors-next.ts
-index ae5b9c5d2fb95f8d3494e88d93f76cdfc51f3667..51d3ac11e6cbe8fc53c74baf55112d7656f0b29d 100644
---- a/packages/opencode/src/session/projectors-next.ts
-+++ b/packages/opencode/src/session/projectors-next.ts
-@@ -39,11 +39,13 @@ function sqlite(db: Database.TxOrDb, sessionID: SessionID): SessionMessageUpdate
-         .find((message): message is SessionMessage.Assistant => message.type === "assistant" && !message.time.completed)
-     },
-     getCurrentCompaction() {
-+      // compaction "当前行"由 (time_created, BINARY id) 决定；回绕后新事件的 ascending ID
-+      // 字典序更低，按 raw id DESC 会把 delta/ended 合入旧纪元行。
-       return db
-         .select()
-         .from(SessionMessageTable)
-         .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "compaction")))
--        .orderBy(desc(SessionMessageTable.id))
-+        .orderBy(desc(SessionMessageTable.time_created), desc(SessionMessageTable.id))
-         .all()
-         .map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }))
-         .find((message): message is SessionMessage.Compaction => message.type === "compaction")
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 3abb89f96102aac116ed8ac294fd107a52d5add8..079e1595d14701a9c88be01a5b463b04dddc4908 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -163,7 +163,7 @@ function deriveGoalTurn(
-       return [{ id: message.info.id, created: message.info.time.created, userInitiated }]
-     })
-     // caller 可以自选 MessageID，因此 chronology 必须先看持久化时间；ID 只处理同毫秒 tie。
--    .toSorted((a, b) => a.created - b.created || a.id.localeCompare(b.id))
-+    .toSorted((a, b) => MessageV2.compareChronology({ id: a.id, time: { created: a.created } }, { id: b.id, time: { created: b.created } }))
-   const current = turns.at(-1)
-   if (!current) return
-   // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
-@@ -2463,11 +2463,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         return message
-       }
-       const result = yield* loop({ sessionID: input.sessionID })
-+      // parent 缺失属于持久化一致性破坏：保留响亮失败（orDie），不能静默猜测为未合并。
-+      const parent =
-+        result.info.role === "assistant"
-+          ? yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.info.parentID }).pipe(Effect.orDie)
-+          : undefined
-       if (
-         result.info.role === "assistant" &&
-         !result.info.summary &&
--        // own < parent 表示本请求已被更新 user 合并；反向关系代表尚未回答，不能伪完成。
--        message.info.id < result.info.parentID
-+        // 用持久 Message 时间和 BINARY ID 判断合并顺序，不能把 caller ID 字典序当作 chronology。
-+        parent &&
-+        MessageV2.compareChronology(message.info, parent.info) < 0
-       ) {
-         const requestUsageCoalesced = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-         if (requestUsageCoalesced) {
+ // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取；fromMessageID 供 boundary-first 起点裁剪。
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -299,7 +299,9 @@ export function Session() {
+     const messageID = session()?.revert?.messageID
+     if (!messageID) return messages()
+     const index = messages().findIndex((message) => message.id === messageID)
+-    return index === -1 ? messages() : messages().slice(0, index)
++    // 0584：边界不在 bounded snapshot 内时 fail-closed 返回空——原 fail-open 返回全部消息，
++    // 会把回绕后已裁出窗口的边界误判为"无回退"，导致 undo/copy 操作错误内容。
++    return index === -1 ? [] : messages().slice(0, index)
+   }
+   // #212：内容增长信号——跟踪 part 文本/tool-raw 长度（非仅 part 数量），确保 text delta 触发贴底跟随
+   // #212：applyPartDelta 原地修改 part 文本不改 part 数组长度——仅计 part.length 会漏 text delta
+@@ -919,7 +921,11 @@ export function Session() {
+         dialog.clear()
+         const messageID = session()?.revert?.messageID
+         if (!messageID) return
+-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
++        // 0584：命令保持显式 fail closed：boundary 不在 bounded snapshot 时 no-op，
++        // 不猜测 raw 位置也不触发服务端写。
++        const boundary = messages().findIndex((message) => message.id === messageID)
++        if (boundary === -1) return
++        const message = messages().find((x, index) => x.role === "user" && index > boundary)
+         if (!message) {
+           void sdk.client.session.unrevert({
+             sessionID: route.sessionID,
+@@ -1398,9 +1404,10 @@ export function Session() {
+     const messageID = revertMessageID()
+     if (!messageID) return []
+     const index = revertMessageIndex()
+-    if (index === -1) return []
++    // 0584：boundary 不在 bounded snapshot 内时它必然早于窗口全部消息（窗口取的是最新段），
++    // 隐藏范围 fail closed：窗口内所有消息都落入已回退区间，而不是全部误显示。
+     return messages()
+-      .slice(index)
++      .slice(index === -1 ? 0 : index)
+       .filter((message) => message.role === "user")
+   })
+ 
+@@ -1548,7 +1555,9 @@ export function Session() {
+                         })()}
+                       </Match>
+                       <Match
+-                        when={revert()?.messageID && revertMessageIndex() !== -1 && index() >= revertMessageIndex()}
++                        // 0584：boundary 不在窗口时 revertMessageIndex() 为 -1，
++                        // 全部 index >= -1 均隐藏（fail closed），不再用 !== -1 守卫误显示已回退消息。
++                        when={revert()?.messageID && index() >= revertMessageIndex()}
+                       >
+                         <></>
+                       </Match>
+
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 0e817082667c0c4a2c4e25369b2a1ca0cab55bb6..206e26c0cb9809ff8cc481c59a5881df5a335129 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -806,13 +806,16 @@ export const layer: Layer.Layer<
+@@ -750,6 +750,12 @@ const layer: Layer.Layer<
        const ctx = yield* InstanceState.context
        const original = yield* get(input.sessionID)
        const title = getForkedTitle(original.title)
-+      // source admission 先于 target 创建：非法边界必须在任何持久化制作用前失败，
++      // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
++      const { sync } = database
++      // #0584：source admission 先于 target 创建：非法边界必须在任何持久化制作用前失败，
 +      // 避免留下空 orphan session 再回滚的第二条成功路径。
-+      const raw = MessageV2.rawForkRows({ sessionID: input.sessionID, messageID: input.messageID })
-+      if (raw.missing) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
++      const raw = MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID })
++      if (raw.missing) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
        const session = yield* createNext({
          directory: ctx.directory,
          path: sessionPath(ctx.worktree, ctx.directory),
-         workspaceID: original.workspaceID,
+@@ -757,11 +763,8 @@ const layer: Layer.Layer<
          title,
+         metadata: structuredClone(original.metadata),
        })
--      const raw = MessageV2.rawForkRows({ sessionID: input.sessionID, messageID: input.messageID })
-       // source-to-target map 在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
+-      // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
+-      const { sync } = database
+       // #493：source→target 映射在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
        // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
-       // 一个 Forked event 把 owner inserts 与 refcount 增量放进同一 SyncEvent transaction。
-diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/src/session/summary-cache.ts
-index 26150e905cad17886272d97ae82d7b4c8b0b51a2..4b41a0e1cba002c49cae755dc203984db544adec 100644
---- a/packages/opencode/src/session/summary-cache.ts
-+++ b/packages/opencode/src/session/summary-cache.ts
-@@ -1,6 +1,6 @@
- import { Effect, Schema } from "effect"
- import path from "path"
--import { and, asc, desc, eq, gt, isNull, lte, sql, type SQL } from "drizzle-orm"
-+import { and, asc, desc, eq, gt, isNull, lte, or, sql, type SQL } from "drizzle-orm"
- import { Database, type TxOrDb } from "@/storage/db"
- import { ColdStorage, type SummaryPayload } from "@/storage/cold"
- import { InstanceState } from "@/effect/instance-state"
-@@ -27,6 +27,48 @@ type ToolDiffMessage = {
-   parts: ToolDiffPart[]
- }
- 
-+type MessageCursor = { id: MessageID; time: number }
-+
-+// 持久 cursor 只存 MessageID；任何非空 cursor 在使用前必须解析回同 Session 的持久 tuple。
-+// 解析失败即 corruption：不允许借用附近行或忽略边界继续扫描。
-+
-+function resolveMessageCursor(db: TxOrDb, sessionID: SessionID, id: string): MessageCursor {
-+  const row = db
-+    .select({ id: MessageTable.id, time: MessageTable.time_created })
-+    .from(MessageTable)
-+    .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, MessageID.make(id))))
-+    .get()
-+  if (!row) throw new ColdStorage.CorruptionError({ message: `Session summary cursor is not resolvable: ${sessionID}` })
-+  return row
-+}
-+
-+// 开区间增量：只取严格晚于 cursor 的行，避免每次 load 重复累计同一 patch。
-+function afterCursor(cursor: MessageCursor) {
-+  return or(
-+    gt(MessageTable.time_created, cursor.time),
-+    and(eq(MessageTable.time_created, cursor.time), gt(MessageTable.id, cursor.id)),
-+  )
-+}
-+
-+// 闭区间上界：同毫秒时用 SQLite BINARY 的 ID 序，不能把同时间整段都纳入。
-+function throughCursor(cursor: MessageCursor) {
-+  return or(
-+    sql`${MessageTable.time_created} < ${cursor.time}`,
-+    and(eq(MessageTable.time_created, cursor.time), lte(MessageTable.id, cursor.id)),
-+  )
-+}
-+
-+// 空字符串是无 closed Message 的合法 sentinel，恒早于任何具体行；
-+// 其余比较复用持久 (time, UTF-8 ID) 序，禁止 JS locale 字典序。
-+function compareMessageCursors(db: TxOrDb, sessionID: SessionID, left: string, right: string) {
-+  if (left === right) return 0
-+  if (left === "") return -1
-+  if (right === "") return 1
-+  const a = resolveMessageCursor(db, sessionID, left)
-+  const b = resolveMessageCursor(db, sessionID, right)
-+  return a.time - b.time || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
-+}
-+
- type DiffAccumulator = {
-   values: Snapshot.FileDiff[]
-   byFile: Map<string, number>
-@@ -166,17 +208,22 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string,
-     sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-     closed,
-   ]
--  // after 是已提交 cursor 的开区间，避免每次 load 重复累计同一 patch。
--  if (after) messageConditions.push(gt(MessageTable.id, MessageID.make(after)))
--  // through 是稳定历史闭区间，单轮 summary 不越过调用方目标。
--  if (through) messageConditions.push(lte(MessageTable.id, MessageID.make(through)))
-+  // cursor 只保存 MessageID，但范围判断必须先恢复同 Session 的 persisted tuple。
-+  if (after) {
-+    const condition = afterCursor(resolveMessageCursor(db, sessionID, after))
-+    if (condition) messageConditions.push(condition)
-+  }
-+  if (through) {
-+    const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
-+    if (condition) messageConditions.push(condition)
-+  }
-   // Message 与 Part 分开查询，只搬运必要 Tool rows 而不构造完整 transcript。
--  // 两组查询按持久 ID 排序，SQLite 扫描顺序不会改变 aggregate hash。
-+  // 两组查询按 persisted chronology 排序，SQLite 扫描顺序不会改变 aggregate hash。
-   const messages = db
-     .select()
-     .from(MessageTable)
-     .where(and(...messageConditions))
--    .orderBy(asc(MessageTable.id))
-+    .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
-     .all()
-   // snapshot cursor 基于全部可见 closed Message，即使没有 Tool diff 也推进已观察位置。
-   const snapshotConditions: SQL[] = [
-@@ -184,12 +231,15 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string,
-     sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-     closed,
-   ]
--  if (through) snapshotConditions.push(lte(MessageTable.id, MessageID.make(through)))
-+  if (through) {
-+    const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
-+    if (condition) snapshotConditions.push(condition)
-+  }
-   const snapshotMaxID = db
-     .select({ id: MessageTable.id })
-     .from(MessageTable)
-     .where(and(...snapshotConditions))
--    .orderBy(desc(MessageTable.id))
-+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-     .limit(1)
-     .get()?.id ?? ""
-   const partConditions: SQL[] = [
-@@ -198,14 +248,16 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string,
-     sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
-     sql`json_type(${PartTable.data}, '$.hidden') is null`,
-   ]
--  if (after) partConditions.push(gt(PartTable.message_id, MessageID.make(after)))
--  if (through) partConditions.push(lte(PartTable.message_id, MessageID.make(through)))
-+  // Part 归属以已选 Message 集合为准：回绕后 message_id 与 cursor 无共同排序，
-+  // 不能用 id 范围二次过滤。
-+  const selectedMessageIDs = new Set(messages.map((row) => row.id))
-   const parts = db
-     .select()
-     .from(PartTable)
-     .where(and(...partConditions))
-     .orderBy(asc(PartTable.message_id), asc(PartTable.id))
-     .all()
-+    .filter((row) => selectedMessageIDs.has(row.message_id))
-   // inspect 只在内存恢复 metadata，不持久 thaw compacted head。
-   const restored = ColdStorage.inspectPartRows(db, parts)
-   // 最小消息形状只服务 collectToolDiffs，禁止借此读取 Text 或 provider context。
-@@ -356,7 +408,7 @@ function greatestClosedMessageID(db: TxOrDb, sessionID: SessionID) {
-     .select({ id: MessageTable.id, data: MessageTable.data })
-     .from(MessageTable)
-     .where(eq(MessageTable.session_id, sessionID))
--    .orderBy(desc(MessageTable.id))
-+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-     .all()
-   return rows.find((row) => !row.data.hidden && (row.data.role === "user" || row.data.time.completed !== undefined))?.id ?? ""
- }
-@@ -531,7 +583,7 @@ function prepareDeltaState(
-     // 已缓存路径先扫描 cursor 后的 Tool，无变化时不解压旧 aggregate。
-     const collected = loadToolDiffMessages(db, input.sessionID, session.summaryCursor ?? undefined)
-     // cursor 落后是正常增量，超前则证明历史被外部改写，必须 hard-fail。
--    if (session.summaryCursor !== null && collected.cursor < session.summaryCursor) {
-+    if (session.summaryCursor !== null && compareMessageCursors(db, input.sessionID, collected.cursor, session.summaryCursor) < 0) {
-       throw new Error(`Session summary cursor is ahead of message history: ${input.sessionID}`)
-     }
-     const delta = collectToolDiffs(collected.messages, base)
-diff --git a/packages/opencode/src/storage/cold.ts b/packages/opencode/src/storage/cold.ts
-index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a23ad70f3c 100644
---- a/packages/opencode/src/storage/cold.ts
-+++ b/packages/opencode/src/storage/cold.ts
-@@ -922,6 +922,25 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
-     .get()
+-      const raw = MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID })
+       const messageMap = raw.messages.map((row) => ({ sourceID: row.id, targetID: MessageID.ascending() }))
+       const partMap = raw.parts.map((row) => ({ sourceID: row.id, targetID: PartID.ascending() }))
+       yield* events
+
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -937,6 +937,25 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
    if (!session) return
-   const boundary = CompactionBoundary.latest(sessionID)
-+  // marker fallback 仅在 tail 缺失时成立（shipped compatibility）；
+   // CompactionBoundary 保持目标 db-first 形态（#493），不回退 source 的无参调用。
+   const boundary = CompactionBoundary.latest(db, sessionID)
++  // #0584：marker fallback 仅在 tail 缺失时成立（shipped compatibility）；
 +  // tail 存在但行已删除时 boundary 不可解析，语义分支必须失效。
 +  const boundaryID = boundary?.tailStartID ?? boundary?.markerID
 +  const boundaryRow = boundaryID
@@ -2071,7 +1794,7 @@ index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a2
 +        .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, boundaryID)))
 +        .get()
 +    : undefined
-+  // semantic eligibility 需要 owner 与 boundary 的持久时间；维护 cursor 仍只负责物理枚举，不复用这里的顺序。
++  // #0584：semantic eligibility 需要 owner 与 boundary 的持久时间；维护 cursor 仍只负责物理枚举，不复用这里的顺序。
 +  const messageTimes = new Map<string, number>(
 +    db
 +      .select({ id: MessageTable.id, time: MessageTable.time_created })
@@ -2083,7 +1806,7 @@ index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a2
    // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
    const aged = session.parentID
      ? (() => {
-@@ -931,19 +950,44 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
+@@ -946,19 +965,44 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
      : session.updated <= now - rootOlderThanMs
    return {
      aged,
@@ -2098,7 +1821,7 @@ index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a2
 -// aged session 的所有 owner 都可检查白名单；recent session 只允许严格早于 tail_start_id 的 compacted head。
 -// 使用 MessageID 的持久字典序，因为 ID ascending 是仓库既有时间排序 invariant，不能改用 wall-clock 猜顺序。
 +// aged session 的所有 owner 都可检查白名单；recent session 只允许严格早于 completed boundary 的 compacted head。
-+// 边界与 owner 都按持久 (time_created, BINARY id) tuple 比较：回绕后 raw ID 字典序不再代表时间。
++// #0584：边界与 owner 都按持久 (time_created, BINARY id) tuple 比较：回绕后 raw ID 字典序不再代表时间。
  // marker、summary 与 tail 即使通过 age/boundary，仍必须通过 extraction 白名单才能真正冻结。
  function eligible(state: ReturnType<typeof eligibility>, messageID: string, markerPart = false) {
    if (!state) return false
@@ -2107,12 +1830,12 @@ index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a2
 +  if (state.aged) return true
 +  const ownerTime = state.messageTimes.get(messageID)
 +  if (ownerTime === undefined || state.boundary === undefined) return false
-+  // 同时间 ID 必须按 SQLite BINARY 的 UTF-8 bytes 比较，不能把 caller ID 字典序当作 chronology。
++  // #0584：同时间 ID 必须按 SQLite BINARY 的 UTF-8 bytes 比较，不能把 caller ID 字典序当作 chronology。
 +  return ownerTime < state.boundary.time ||
 +    (ownerTime === state.boundary.time && Buffer.compare(Buffer.from(messageID), Buffer.from(state.boundary.id)) < 0)
 +}
 +
-+// 空 cursor 是无 closed Message 的 sentinel：任何真实变更都晚于它，无需查行。
++// #0584：空 cursor 是无 closed Message 的 sentinel：任何真实变更都晚于它，无需查行。
 +// 非空 cursor 解析失败则是持久化损坏，必须响亮失败而不是猜测边界。
 +function compareStoredMessageCursor(db: TxOrDb, sessionID: SessionID, messageID: MessageID, cursor: string) {
 +  if (cursor === "") return 1
@@ -2132,23 +1855,25 @@ index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a2
  }
  
  // 单 hash 反算只服务普通 owner update/delete 的强一致检查；批量维护必须使用 ownerCounts 避免 N+1 SQL。
-@@ -1853,7 +1897,9 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
+@@ -1868,7 +1912,10 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
      if (session.summaryRef || session.summarySeed || (session.summaryCursor === null && session.summaryInitDirty)) {
        throw new CorruptionError({ message: `Session summary initialization state is inconsistent: ${sessionID}` })
      }
 -    if (session.summaryCursor === null || messageID > session.summaryCursor) return
 +    if (session.summaryCursor === null) return
++    // #0584：三条分支全部改为 tuple 判定：变更行早于边界才覆盖 cache。
 +    const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summaryCursor)
 +    if (relation === undefined || relation > 0) return
      const parent = db
        .select({ data: MessageTable.data })
        .from(MessageTable)
-@@ -1872,16 +1918,24 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
+@@ -1887,16 +1934,25 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
      throw new CorruptionError({ message: `Session summary cache state is inconsistent: ${sessionID}` })
    }
    if (!session.summaryRef) {
 -    if (!session.summarySeed || messageID > session.summarySeed.cursor) return
 +    if (!session.summarySeed) return
++    // #0584：seed 退休同样按 tuple 判定，不能把 caller ID 字典序当作 chronology。
 +    const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summarySeed.cursor)
 +    if (relation === undefined || relation > 0) return
      db.update(SessionTable)
@@ -2158,671 +1883,213 @@ index 2a54c4ee3bd56e7e5eebaa54187d0e2f1b33d86b..8d0bd980e38093de5a830821958933a2
      return
    }
 -  if (session.summaryCursor === null || messageID > session.summaryCursor) return
-+  // 三条分支全部改为 tuple 判定：dirty-claim、seed 退休与 ref 失效共用同一 chronology 语义，
++  // #0584：dirty-claim、seed 退休与 ref 失效共用同一 chronology 语义，
 +  // 变更行早于边界才覆盖 cache，之后则保持增量可扩展。
 +  if (session.summaryCursor === null) return
 +  const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summaryCursor)
 +  if (relation === undefined || relation > 0) return
    const payload = decodeSummary(db, session.summaryRef)
 -  const seed = payload.seed && messageID > payload.seed.cursor ? payload.seed : undefined
-+  // seed 内部 cursor 与外层 cursor 各自独立解析：保留晚于变更行的 seed，丢弃已被覆盖的 seed。
++  // #0584：seed 内部 cursor 与外层 cursor 各自独立解析：保留晚于变更行的 seed，丢弃已被覆盖的 seed。
 +  const seedRelation = payload.seed ? compareStoredMessageCursor(db, sessionID, messageID, payload.seed.cursor) : undefined
 +  const seed = payload.seed && (seedRelation === undefined || seedRelation > 0) ? payload.seed : undefined
    const updated = db
      .update(SessionTable)
      .set({
-diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
-index 0619ead5f5a75b679f5720ee0be444abf3a4a969..d67f49f6b1da26e267f0d973bb5ecc0656def467 100644
---- a/packages/opencode/src/tool/truncate.ts
-+++ b/packages/opencode/src/tool/truncate.ts
-@@ -4,7 +4,6 @@ import path from "path"
- import type { Agent } from "../agent/agent"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import { Config } from "@/config/config"
--import { Identifier } from "../id/id"
- import * as Log from "@opencode-ai/core/util/log"
- import { ToolID } from "./schema"
- import { TRUNCATION_DIR } from "./truncation-dir"
-@@ -48,16 +47,19 @@ export const layer = Layer.effect(
-     const fs = yield* AppFileSystem.Service
+
+diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/src/session/summary-cache.ts
+--- a/packages/opencode/src/session/summary-cache.ts
++++ b/packages/opencode/src/session/summary-cache.ts
+@@ -1,6 +1,6 @@
+ import { Effect, Schema } from "effect"
+ import path from "path"
+-import { and, asc, desc, eq, gt, isNull, lte, sql, type SQL } from "drizzle-orm"
++import { and, asc, desc, eq, gt, isNull, lte, or, sql, type SQL } from "drizzle-orm"
+ // #0500：目标分层——cold owner 在 core；TxOrDb 与 SummaryPayload 由 cold-storage 导出。
+ import { Database } from "@opencode-ai/core/database/database"
+ import { ColdStorage, type SummaryPayload, type TxOrDb } from "@opencode-ai/core/storage/cold-storage"
+@@ -28,6 +28,48 @@ type ToolDiffMessage = {
+   parts: ToolDiffPart[]
+ }
  
-     const cleanup = Effect.fn("Truncate.cleanup")(function* () {
--      const cutoff = Identifier.timestamp(
--        Identifier.create("tool", "ascending", Date.now() - Duration.toMillis(RETENTION)),
--      )
-+      const cutoff = Date.now() - Duration.toMillis(RETENTION)
-       const entries = yield* fs.readDirectory(TRUNCATION_DIR).pipe(
-         Effect.map((all) => all.filter((name) => name.startsWith("tool_"))),
-         Effect.catch(() => Effect.succeed([])),
-       )
-       for (const entry of entries) {
--        if (Identifier.timestamp(entry) >= cutoff) continue
--        yield* fs.remove(path.join(TRUNCATION_DIR, entry)).pipe(Effect.catch(() => Effect.void))
-+        const file = path.join(TRUNCATION_DIR, entry)
-+        // 文件名只负责唯一定位；6-byte ID 回绕后无法继续代表完整 wall-clock age。
-+        const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
-+        const mtime = info && Option.getOrUndefined(info.mtime)
-+        // stat 失败或缺少 mtime 时保留 entry，best-effort cleanup 不能把未知状态当成过期。
-+        if (!mtime || mtime.getTime() >= cutoff) continue
-+        yield* fs.remove(file).pipe(Effect.catch(() => Effect.void))
++type MessageCursor = { id: MessageID; time: number }
++
++// #0584：持久 cursor 只存 MessageID；任何非空 cursor 在使用前必须解析回同 Session 的持久 tuple。
++// 解析失败即 corruption：不允许借用附近行或忽略边界继续扫描。
++
++function resolveMessageCursor(db: TxOrDb, sessionID: SessionID, id: string): MessageCursor {
++  const row = db
++    .select({ id: MessageTable.id, time: MessageTable.time_created })
++    .from(MessageTable)
++    .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, MessageID.make(id))))
++    .get()
++  if (!row) throw new ColdStorage.CorruptionError({ message: `Session summary cursor is not resolvable: ${sessionID}` })
++  return row
++}
++
++// #0584：开区间增量：只取严格晚于 cursor 的行，避免每次 load 重复累计同一 patch。
++function afterCursor(cursor: MessageCursor) {
++  return or(
++    gt(MessageTable.time_created, cursor.time),
++    and(eq(MessageTable.time_created, cursor.time), gt(MessageTable.id, cursor.id)),
++  )
++}
++
++// #0584：闭区间上界：同毫秒时用 SQLite BINARY 的 ID 序，不能把同时间整段都纳入。
++function throughCursor(cursor: MessageCursor) {
++  return or(
++    sql`${MessageTable.time_created} < ${cursor.time}`,
++    and(eq(MessageTable.time_created, cursor.time), lte(MessageTable.id, cursor.id)),
++  )
++}
++
++// #0584：空字符串是无 closed Message 的合法 sentinel，恒早于任何具体行；
++// 其余比较复用持久 (time, UTF-8 ID) 序，禁止 JS locale 字典序。
++function compareMessageCursors(db: TxOrDb, sessionID: SessionID, left: string, right: string) {
++  if (left === right) return 0
++  if (left === "") return -1
++  if (right === "") return 1
++  const a = resolveMessageCursor(db, sessionID, left)
++  const b = resolveMessageCursor(db, sessionID, right)
++  return a.time - b.time || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
++}
++
+ type DiffAccumulator = {
+   values: Snapshot.FileDiff[]
+   byFile: Map<string, number>
+@@ -167,17 +209,23 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string,
+     sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+     closed,
+   ]
+-  // after 是已提交 cursor 的开区间，避免每次 load 重复累计同一 patch。
+-  if (after) messageConditions.push(gt(MessageTable.id, MessageID.make(after)))
++  // #0584：cursor 只保存 MessageID，但范围判断必须先恢复同 Session 的 persisted tuple。
++  if (after) {
++    const condition = afterCursor(resolveMessageCursor(db, sessionID, after))
++    if (condition) messageConditions.push(condition)
++  }
+   // through 是稳定历史闭区间，单轮 summary 不越过调用方目标。
+-  if (through) messageConditions.push(lte(MessageTable.id, MessageID.make(through)))
++  if (through) {
++    const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
++    if (condition) messageConditions.push(condition)
++  }
+   // Message 与 Part 分开查询，只搬运必要 Tool rows 而不构造完整 transcript。
+-  // 两组查询按持久 ID 排序，SQLite 扫描顺序不会改变 aggregate hash。
++  // #0584：两组查询按 persisted chronology 排序，SQLite 扫描顺序不会改变 aggregate hash。
+   const messages = db
+     .select()
+     .from(MessageTable)
+     .where(and(...messageConditions))
+-    .orderBy(asc(MessageTable.id))
++    .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
+     .all()
+   // snapshot cursor 基于全部可见 closed Message，即使没有 Tool diff 也推进已观察位置。
+   const snapshotConditions: SQL[] = [
+@@ -185,12 +233,15 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string,
+     sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+     closed,
+   ]
+-  if (through) snapshotConditions.push(lte(MessageTable.id, MessageID.make(through)))
++  if (through) {
++    const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
++    if (condition) snapshotConditions.push(condition)
++  }
+   const snapshotMaxID = db
+     .select({ id: MessageTable.id })
+     .from(MessageTable)
+     .where(and(...snapshotConditions))
+-    .orderBy(desc(MessageTable.id))
++    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+     .limit(1)
+     .get()?.id ?? ""
+   const partConditions: SQL[] = [
+@@ -199,14 +250,16 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string,
+     sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
+     sql`json_type(${PartTable.data}, '$.hidden') is null`,
+   ]
+-  if (after) partConditions.push(gt(PartTable.message_id, MessageID.make(after)))
+-  if (through) partConditions.push(lte(PartTable.message_id, MessageID.make(through)))
++  // #0584：Part 归属以已选 Message 集合为准：回绕后 message_id 与 cursor 无共同排序，
++  // 不能用 id 范围二次过滤。
++  const selectedMessageIDs = new Set(messages.map((row) => row.id))
+   const parts = db
+     .select()
+     .from(PartTable)
+     .where(and(...partConditions))
+     .orderBy(asc(PartTable.message_id), asc(PartTable.id))
+     .all()
++    .filter((row) => selectedMessageIDs.has(row.message_id))
+   // inspect 只在内存恢复 metadata，不持久 thaw compacted head。
+   const restored = ColdStorage.inspectPartRows(db, parts)
+   // 最小消息形状只服务 collectToolDiffs，禁止借此读取 Text 或 provider context。
+@@ -357,7 +410,7 @@ function greatestClosedMessageID(db: TxOrDb, sessionID: SessionID) {
+     .select({ id: MessageTable.id, data: MessageTable.data })
+     .from(MessageTable)
+     .where(eq(MessageTable.session_id, sessionID))
+-    .orderBy(desc(MessageTable.id))
++    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+     .all()
+   return rows.find((row) => !row.data.hidden && (row.data.role === "user" || row.data.time.completed !== undefined))?.id ?? ""
+ }
+@@ -534,7 +587,8 @@ function prepareDeltaState(
+     // 已缓存路径先扫描 cursor 后的 Tool，无变化时不解压旧 aggregate。
+     const collected = loadToolDiffMessages(db, input.sessionID, session.summaryCursor ?? undefined)
+     // cursor 落后是正常增量，超前则证明历史被外部改写，必须 hard-fail。
+-    if (session.summaryCursor !== null && collected.cursor < session.summaryCursor) {
++    // #0584：超前判定同样按持久 (time, BINARY id) tuple，raw 字典序在回绕后会误报。
++    if (session.summaryCursor !== null && compareMessageCursors(db, input.sessionID, collected.cursor, session.summaryCursor) < 0) {
+       throw new Error(`Session summary cursor is ahead of message history: ${input.sessionID}`)
+     }
+     const delta = collectToolDiffs(collected.messages, base)
+
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -116,7 +116,8 @@ function deriveGoalTurn(
+       return [{ id: message.info.id, created: message.info.time.created, userInitiated }]
+     })
+     // caller 可以自选 MessageID，因此 chronology 必须先看持久化时间；ID 只处理同毫秒 tie。
+-    .toSorted((a, b) => a.created - b.created || a.id.localeCompare(b.id))
++    // #0584：tie 复用 SQLite BINARY 的 UTF-8 字节序，不再用 JS locale 字典序。
++    .toSorted((a, b) => MessageV2.compareChronology({ id: a.id, time: { created: a.created } }, { id: b.id, time: { created: b.created } }))
+   const current = turns.at(-1)
+   if (!current) return
+   // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
+@@ -1779,12 +1780,23 @@ const layer = Layer.effect(
+         return message
        }
-     })
- 
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index c4b32e38cbe2a73518e5cfbf0dfc26b0988ef036..328e6f41f63722e99021b0483bc92f02793bade7 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -1,5 +1,5 @@
- /** @jsxImportSource @opentui/solid */
--import { expect, test as baseTest } from "bun:test"
-+import { expect, mock, test as baseTest } from "bun:test"
- import { Global } from "@opencode-ai/core/global"
- import { testRender, useRenderer } from "@opentui/solid"
- import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
-@@ -35,8 +35,49 @@ import parsers from "../../../../parsers-config"
- import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
- import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
- import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
-+import { useCommandPalette } from "../../../../src/cli/cmd/tui/context/command-palette"
- import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
- 
-+// 剪贴板 mock：命令级回绕回归需要观察 copy 副作用，而不是真的写入系统剪贴板。
-+// 本文件 serial 运行，模块级 override 不会与其他文件的 clipboard 用例交叉。
-+const clipboardCopies: string[] = []
-+mock.module("../../../../src/cli/cmd/tui/util/clipboard", () => ({
-+  copy: async (text: string) => {
-+    clipboardCopies.push(text)
-+  },
-+  read: async () => undefined,
-+}))
-+
-+// 命令桥：在 Provider 树内获取真实 CommandPalette，让测试以生产注册命令驱动
-+// session.undo / session.redo / messages.copy，不新增任何 production 测试出口。
-+const commandBridge = { run: (_command: string) => {} }
-+
-+// fetch 钩子：捕获 SDK 写请求（revert/unrevert/abort）。TUI SDK 会把 body 封装进
-+// Request 对象而非 init.body，因此钩子同时接收两者；不修改共享 fixture 默认行为。
-+const testFetchHooks: {
-+  onRequest?: (
-+    url: URL,
-+    request?: Request,
-+    init?: RequestInit,
-+  ) => Response | Promise<Response | undefined> | undefined
-+} = {}
-+
-+// 从 Request 或 init 中读取 JSON body 的 messageID；非 JSON 或缺失时返回 undefined。
-+const requestMessageID = async (request?: Request, init?: RequestInit): Promise<string | undefined> => {
-+  if (typeof init?.body === "string") return (JSON.parse(init.body) as { messageID?: string }).messageID
-+  if (request) {
-+    const parsed = (await request.clone().json().catch(() => undefined)) as { messageID?: string } | undefined
-+    return parsed?.messageID
-+  }
-+  return (init?.body as { messageID?: string } | undefined)?.messageID
-+}
-+
-+function CommandBridge() {
-+  const palette = useCommandPalette()
-+  commandBridge.run = (command: string) => palette.run(command)
-+  return <box />
-+}
-+
- const sessionID = "ses_render"
- // withRenderedSession 会临时改写 Global.Path.state，并驱动真实 OpenTUI
- // renderer/mockMouse。Bun 同文件并发会让多个 app 共享鼠标、selection 和
-@@ -3549,6 +3590,255 @@ test("reviewer child session shows full reviewer prompt and assistant rationale
-   )
- })
- 
-+test("revert range hides chronologically later messages despite wrapped IDs", async () => {
-+  // 回绕 fixture：较早 user 使用字典序更高 ID，revert 边界是字典序更低的较新 user。
-+  // 旧 raw-ID 比较会把 msg_z/msg_m 也判为 >= 边界而全部隐藏；数组位置必须只隐藏边界之后的行。
-+  // extraSessions 同 ID 覆盖默认 info，仅注入 revert 字段，消息/Part 仍来自同一 fixture。
-+  const messages = [
-+    userMessage("msg_z_kept_user", 1),
-+    assistantMessage("msg_m_kept_asst", 2, "msg_z_kept_user"),
-+    userMessage("msg_a_revert_boundary", 3),
-+  ]
-+  const parts = {
-+    msg_z_kept_user: [textPart("part_kept_user", "msg_z_kept_user", "KEPT_USER_MARKER")],
-+    msg_m_kept_asst: [textPart("part_kept_asst", "msg_m_kept_asst", "KEPT_ASST_MARKER")],
-+    msg_a_revert_boundary: [textPart("part_revert_boundary", "msg_a_revert_boundary", "REVERTED_USER_MARKER")],
-+  }
-+  await withRenderedSession(
-+    messages,
-+    parts,
-+    async (app) => {
-+      // 单一联合谓词避免负载下中间帧伪装成功：banner、保留以标记必须同帧出现。
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("message reverted")) &&
-+          lines.some((line) => line.includes("KEPT_USER_MARKER")) &&
-+          lines.some((line) => line.includes("KEPT_ASST_MARKER")) &&
-+          !lines.some((line) => line.includes("REVERTED_USER_MARKER")),
-+      )
-+      expect(frame.some((line) => line.includes("KEPT_USER_MARKER"))).toBe(true)
-+      expect(frame.some((line) => line.includes("KEPT_ASST_MARKER"))).toBe(true)
-+      expect(frame.some((line) => line.includes("REVERTED_USER_MARKER"))).toBe(false)
-+    },
-+    {},
-+    { height: 40 },
-+    {
-+      [sessionID]: {
-+        info: sessionInfo({ revert: { messageID: "msg_a_revert_boundary" } }),
-+        messages,
-+        parts,
-+      },
-+    },
-+  )
-+})
-+
-+test("revert boundary outside the bounded snapshot fails closed", async () => {
-+  // boundary ID 不在快照内：窗口取最新段，边界必然早于全部可见消息，
-+  // 渲染必须按“全部已回退”处理，而不是回退到 raw-ID 猜测或全部显示。
-+  // 这是 R13 批准的 fail-closed 合同：宁可全隐藏也不部分显示错误区间。
-+  const messages = [userMessage("msg_w1", 1), assistantMessage("msg_w2", 2, "msg_w1")]
-+  const parts = {
-+    msg_w1: [textPart("part_w1", "msg_w1", "WINDOW_USER_MARKER")],
-+    msg_w2: [textPart("part_w2", "msg_w2", "WINDOW_ASST_MARKER")],
-+  }
-+  await withRenderedSession(
-+    messages,
-+    parts,
-+    async (app) => {
-+      // 缺席断言需要一个确定性的渲染沉淀信号：连续多帧渲染后标记仍不出现即证明隐藏。
-+      let passes = 0
-+      // 连续多帧沉淀后断言缺席：帧数下界防止把异步尚未渲染误判为隐藏成功。
-+      const frame = await waitForFrame(app, () => {
-+        passes++
-+        return passes >= 15
-+      })
-+      expect(frame.some((line) => line.includes("WINDOW_USER_MARKER"))).toBe(false)
-+      expect(frame.some((line) => line.includes("WINDOW_ASST_MARKER"))).toBe(false)
-+    },
-+    {},
-+    {},
-+    {
-+      [sessionID]: {
-+        info: sessionInfo({ revert: { messageID: "msg_gone_out_of_window" } }),
-+        messages,
-+        parts,
-+      },
-+    },
-+  )
-+})
-+
-+test("queued badge follows transcript position across wrapped pending IDs", async () => {
-+  // pending assistant ID 字典序高于其后到达的 user；旧 raw-ID 比较会漏掉 QUEUED 徽标。
-+  // 事件用真实 session.status 形状（payload 包装）驱动 SyncProvider，不直接改内部 store。
-+  // 覆盖 time 去掉 completed：pendingAssistantID 只在存在未完成 assistant 时生效。
-+  const pendingAssistant = {
-+    ...assistantMessage("msg_z_pending_asst", 2, "msg_z_pending_user"),
-+    time: { created: 2 },
-+  } as AssistantMessage
-+  await withRenderedSession(
-+    [userMessage("msg_z_pending_user", 1), pendingAssistant, userMessage("msg_a_queued_user", 3)],
-+    {
-+      msg_z_pending_user: [textPart("part_pu", "msg_z_pending_user", "PENDING_TURN_USER_MARKER")],
-+      msg_z_pending_asst: [textPart("part_pa", "msg_z_pending_asst", "PENDING_ASST_MARKER")],
-+      msg_a_queued_user: [textPart("part_qu", "msg_a_queued_user", "QUEUED_USER_MARKER")],
-+    },
-+    async (app, emit) => {
-+      emit({
-+        directory,
-+        project: "proj_test",
-+        payload: { id: "evt_status_busy", type: "session.status", properties: { sessionID, status: { type: "busy" } } },
-+      })
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("QUEUED")))
-+      expect(frame.some((line) => line.includes("QUEUED_USER_MARKER"))).toBe(true)
-+    },
-+  )
-+})
-+
-+test("session.undo command targets the chronologically previous user across wrapped IDs", async () => {
-+  // 回绕 fixture：较早 user 字典序更高，revert 边界是字典序更低的较新 user。
-+  // 旧 raw `x.id < boundary` 会找不到任何候选而 no-op；数组位置必须选中 msg_z_undo_user。
-+  const messages = [
-+    userMessage("msg_z_undo_user", 1),
-+    assistantMessage("msg_m_undo_asst", 2, "msg_z_undo_user"),
-+    userMessage("msg_a_undo_boundary", 3),
-+  ]
-+  const parts = {
-+    msg_z_undo_user: [textPart("part_undo_u", "msg_z_undo_user", "UNDO_USER_MARKER")],
-+    msg_m_undo_asst: [textPart("part_undo_a", "msg_m_undo_asst", "UNDO_ASST_MARKER")],
-+    msg_a_undo_boundary: [textPart("part_undo_b", "msg_a_undo_boundary", "UNDO_BOUNDARY_MARKER")],
-+  }
-+  const reverts: string[] = []
-+  // undo 前置 abort：status 未初始化时命令会先 abort 再 revert；
-+  // 钩子必须吞掉 abort，否则 SDK 响应解析失败会中断断言链。
-+  testFetchHooks.onRequest = async (url, request, init) => {
-+    if (url.pathname === `/session/${sessionID}/abort`) return json({})
-+    if (url.pathname === `/session/${sessionID}/revert`) {
-+      reverts.push(String(await requestMessageID(request, init)))
-+      return json(sessionInfo())
-+    }
-+    return undefined
-+  }
-+  try {
-+    await withRenderedSession(
-+      messages,
-+      parts,
-+      async (app) => {
-+        await waitForFrame(app, (lines) => lines.some((line) => line.includes("UNDO_USER_MARKER")))
-+        // 通过真实注册命令触发，而不是直接调用实现函数。
-+        commandBridge.run("session.undo")
-+        await waitForFrame(app, () => reverts.length > 0)
-+        // 旧 raw-ID 行为在此 fixture 下找不到候选（msg_z > msg_a 字典序），
-+        // 断言 revert 目标恰为时间早于边界的 user，锁定数组位置语义。
-+        expect(reverts).toEqual(["msg_z_undo_user"])
-+      },
-+      {},
-+      { height: 40 },
-+      {
-+        [sessionID]: {
-+          info: sessionInfo({ revert: { messageID: "msg_a_undo_boundary" } }),
-+          messages,
-+          parts,
-+        },
-+      },
-+    )
-+  } finally {
-+    testFetchHooks.onRequest = undefined
-+  }
-+})
-+
-+test("session.redo command advances to the next user across wrapped IDs", async () => {
-+  // 边界 msg_z_undo_user 字典序最高但时间最早：旧 raw `x.id > boundary` 找不到
-+  // 后继 user，会错误落入 unrevert 分支；数组位置必须 revert 到 msg_a_redo_next。
-+  const messages = [
-+    userMessage("msg_z_redo_boundary", 1),
-+    assistantMessage("msg_m_redo_asst", 2, "msg_z_redo_boundary"),
-+    userMessage("msg_a_redo_next", 3),
-+  ]
-+  const parts = {
-+    msg_z_redo_boundary: [textPart("part_redo_b", "msg_z_redo_boundary", "REDO_BOUNDARY_MARKER")],
-+    msg_m_redo_asst: [textPart("part_redo_a", "msg_m_redo_asst", "REDO_ASST_MARKER")],
-+    msg_a_redo_next: [textPart("part_redo_n", "msg_a_redo_next", "REDO_NEXT_MARKER")],
-+  }
-+  const reverts: string[] = []
-+  const unreverts: string[] = []
-+  testFetchHooks.onRequest = async (url, request, init) => {
-+    if (url.pathname === `/session/${sessionID}/revert`) {
-+      reverts.push(String(await requestMessageID(request, init)))
-+      return json(sessionInfo())
-+    }
-+    if (url.pathname === `/session/${sessionID}/unrevert`) {
-+      unreverts.push("unrevert")
-+      return json(sessionInfo())
-+    }
-+    return undefined
-+  }
-+  try {
-+    await withRenderedSession(
-+      messages,
-+      parts,
-+      async (app) => {
-+        // boundary 是首条消息：其后全部消息落在已回退区间而被隐藏，
-+        // ready 信号只能用 revert banner 而不是被隐藏的正文。
-+        await waitForFrame(app, (lines) => lines.some((line) => line.includes("message reverted")))
-+        commandBridge.run("session.redo")
-+        await waitForFrame(app, () => reverts.length + unreverts.length > 0)
-+        // redo 必须推进到下一个 user；旧 raw-ID 行为会退化为 unrevert，
-+        // 因此 unreverts 断言为空同样是回绕敏感信号。
-+        expect(reverts).toEqual(["msg_a_redo_next"])
-+        expect(unreverts).toEqual([])
-+      },
-+      {},
-+      { height: 40 },
-+      {
-+        [sessionID]: {
-+          info: sessionInfo({ revert: { messageID: "msg_z_redo_boundary" } }),
-+          messages,
-+          parts,
-+        },
-+      },
-+    )
-+  } finally {
-+    testFetchHooks.onRequest = undefined
-+  }
-+})
-+
-+test("messages.copy command copies the last assistant before a wrapped revert boundary", async () => {
-+  // 边界字典序最低但时间最晚：旧 raw `msg.id < boundary` 会把 lexically 更高的
-+  // assistant 排除并报 “No assistant messages found”；数组位置必须复制其文本。
-+  const messages = [
-+    userMessage("msg_z_copy_user", 1),
-+    assistantMessage("msg_m_copy_asst", 2, "msg_z_copy_user"),
-+    userMessage("msg_a_copy_boundary", 3),
-+  ]
-+  const parts = {
-+    msg_z_copy_user: [textPart("part_copy_u", "msg_z_copy_user", "COPY_USER_MARKER")],
-+    msg_m_copy_asst: [textPart("part_copy_a", "msg_m_copy_asst", "COPY_ASST_TEXT_MARKER")],
-+    msg_a_copy_boundary: [textPart("part_copy_b", "msg_a_copy_boundary", "COPY_BOUNDARY_MARKER")],
-+  }
-+  clipboardCopies.length = 0
-+  await withRenderedSession(
-+    messages,
-+    parts,
-+    async (app) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("COPY_ASST_TEXT_MARKER")))
-+      commandBridge.run("messages.copy")
-+      await waitForFrame(app, () => clipboardCopies.length > 0)
-+      // 旧 raw-ID 行为下 assistant 被误排除并走 error toast，剪贴板不会收到任何文本。
-+      expect(clipboardCopies).toContain("COPY_ASST_TEXT_MARKER")
-+    },
-+    {},
-+    { height: 40 },
-+    {
-+      [sessionID]: {
-+        info: sessionInfo({ revert: { messageID: "msg_a_copy_boundary" } }),
-+        messages,
-+        parts,
-+      },
-+    },
-+  )
-+})
-+
- async function withRenderedSession(
-   messages: Array<AssistantMessage | SDKUserMessage>,
-   parts: Record<string, Part[]>,
-@@ -3570,7 +3860,14 @@ async function withRenderedSession(
-   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
- 
-   const info = sessionInfo()
--  const calls = createFetch((url) => {
-+  const calls = createFetch(async (url, request, init) => {
-+    // 测试钩子优先于默认 fixture：只拦截显式声明的方法/路径，其余回落原逻辑。
-+    // hook 可能返回 Promise，必须 await 后再判定是否命中，否则会拦截全部请求。
-+    const hooked = testFetchHooks.onRequest?.(url, request, init)
-+    if (hooked) {
-+      const response = await hooked
-+      if (response) return response
-+    }
-     const sessions: Record<
-       string,
-       {
-@@ -3680,6 +3977,7 @@ function SessionHarness(props: {
-                                       <PromptRefProvider>
-                                         <EditorContextProvider>
-                                           <Session />
-+                                          <CommandBridge />
-                                         </EditorContextProvider>
-                                       </PromptRefProvider>
-                                     </PromptHistoryProvider>
-diff --git a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-index d7eb126fea0c2dcd14049e1fef11fe9dd0ffa98e..b10e92a15325b1a8fbc787f3754cf98c761183f4 100644
---- a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-@@ -57,7 +57,12 @@ export function createEventSource() {
-   }
- }
- 
--type FetchHandler = (url: URL, request?: Request, init?: RequestInit) => Response | Promise<Response> | undefined
-+// 异步 handler 允许中途回落（返回 undefined 时继续走默认 switch），供请求拦截钩子复用。
-+type FetchHandler = (
-+  url: URL,
-+  request?: Request,
-+  init?: RequestInit,
-+) => Response | Promise<Response | undefined> | undefined
- 
- export function createFetch(override?: FetchHandler) {
-   const session = [] as URL[]
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 28167d9a3141a41c8d48de094900070231b88d24..c0e8ee5987f4bda43db93ab5d5d60a08e5289f65 100644
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -91,16 +91,18 @@ function createModel(opts: {
- 
- const wide = () => ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000 }) })
- 
--function createUserMessage(sessionID: SessionID, text: string) {
-+// options 供回绕 fixture 注入 caller-selected ID 与固定 created；
-+// 默认路径保持与既有用例相同的 ascending 生成。
-+function createUserMessage(sessionID: SessionID, text: string, options?: { id?: MessageID; created?: number }) {
-   return Effect.gen(function* () {
-     const ssn = yield* SessionNs.Service
-     const msg = yield* ssn.updateMessage({
--      id: MessageID.ascending(),
-+      id: options?.id ?? MessageID.ascending(),
-       role: "user",
-       sessionID,
-       agent: "build",
-       model: ref,
--      time: { created: Date.now() },
-+      time: { created: options?.created ?? Date.now() },
-     })
-     yield* ssn.updatePart({
-       id: PartID.ascending(),
-@@ -2881,6 +2883,53 @@ describe("session.compaction.process", () => {
- })
- 
- describe("ColdStorage compact eligibility", () => {
-+  itCompaction.instance("uses persisted Message chronology for a completed Compaction boundary", () =>
-+    Effect.gen(function* () {
-+      // 回绕 fixture：old 字典序最低但时间最早，tail 字典序最低中最新；
-+      // 验证目标是“冻结权由 tuple 决定”，而不是任何字典序巧合。
-+      const ssn = yield* SessionNs.Service
-+      const session = yield* ssn.create({ title: "compact chronology rollover" })
-+      const old = yield* createUserMessage(session.id, "old", { id: MessageID.make("msg_0-old"), created: 500 })
-+      const oldPart = yield* addCompletedToolPart({
-+        sessionID: session.id,
-+        messageID: old.id,
-+        tool: "read",
-+        output: "old-output-".repeat(512),
-+      })
-+      const head = yield* createUserMessage(session.id, "head", { id: MessageID.make("msg_z-head"), created: 1_000 })
-+      const headPart = yield* addCompletedToolPart({
-+        sessionID: session.id,
-+        messageID: head.id,
-+        tool: "read",
-+        output: "head-output-".repeat(512),
-+      })
-+      const tail = yield* createUserMessage(session.id, "tail", { id: MessageID.make("msg_a-tail"), created: 2_000 })
-+      const marker = yield* ssn.updatePart({
-+        id: PartID.ascending(),
-+        messageID: head.id,
-+        sessionID: session.id,
-+        type: "compaction",
-+        auto: false,
-+        tail_start_id: tail.id,
-+        recent_user_messages: [{ id: head.id, text: "memento" }],
-+      })
-+      const summary = yield* createSummaryAssistantMessage(session.id, head.id, "/tmp", "summary")
-+      // summary 时间必须晚于 boundary，否则 boundary query 不会选中本次 marker/Part 对。
-+      yield* ssn.updateMessage({ ...summary, time: { ...summary.time, created: 3_000 } })
-+
-+      // recent Session 下：早于 tail 的 owner 可冻，晚于 tail 的不可冻。
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: oldPart.id })).toBe(true)
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: headPart.id })).toBe(true)
-+      // 公开删除 present tail 后，边界不可解析：recent 分支必须 fail closed，
-+      // 不得回退 marker 或把全部 owner 当作可冻结。
-+      yield* ssn.removeMessage({ sessionID: session.id, messageID: tail.id })
-+      expect(ColdStorage.isEligibleOwner({ type: "part", id: oldPart.id })).toBe(false)
-+      yield* ssn.remove(session.id)
-+      // marker 断言防止 fixture 意外丢失 boundary 结构而不被发现。
-+      expect(marker.id).toBeTruthy()
-+    }),
-+  )
-+
-   itCompaction.instance("freezes only the compacted head when the session is still recent", () =>
-     Effect.gen(function* () {
-       // recent+completed boundary 先证明 head eligible、tail ineligible，再把同 session 变老证明 age 规则覆盖 tail。
-diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
-index fbee2d5a5c37479259db2eb7df1f4fc686c94932..c0c737d3c0061f40f063dc6f0fba3875ecda6a5f 100644
---- a/packages/opencode/test/session/message-v2.test.ts
-+++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -108,6 +108,18 @@ function basePart(messageID: string, id: string) {
-   }
- }
- 
-+describe("session.message-v2.compareChronology", () => {
-+  test("uses persisted UTF-8 byte order for equal timestamps", () => {
-+    // U+E000 与 U+10000 的 UTF-16/locale 顺序可不同；SQLite BINARY 按 UTF-8 bytes 排前者。
-+    const privateUse = userInfo("msg_\uE000")
-+    const supplementary = userInfo("msg_\u{10000}")
-+
-+    // 该断言独立锁定数据库可观察顺序，避免 Revert 与 App 对同一 boundary 作相反解释。
-+    expect(MessageV2.compareChronology(privateUse, supplementary)).toBeLessThan(0)
-+    expect(MessageV2.compareChronology(supplementary, privateUse)).toBeGreaterThan(0)
-+  })
-+})
-+
- describe("session.message-v2.toModelMessage", () => {
-   test("filters out messages with no parts", async () => {
-     const input: MessageV2.WithParts[] = [
-diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 7908b273e6670b264356cbc246db6ba21193b73a..c3ecf398a88f8c6b2c9bc1e31071f02b93bfca19 100644
---- a/packages/opencode/test/session/prompt.test.ts
-+++ b/packages/opencode/test/session/prompt.test.ts
-@@ -63,6 +63,8 @@ import { InstanceRef } from "@/effect/instance-ref"
- import { tool as aiTool } from "ai"
- import { z } from "zod"
- import { SessionEvent } from "@opencode-ai/core/session-event"
-+import { SessionMessage } from "@opencode-ai/core/session-message"
-+import * as DateTime from "effect/DateTime"
- 
- void Log.init({ print: false })
- 
-@@ -1409,6 +1411,78 @@ it.instance(
-   { git: true },
- )
- 
-+it.instance(
-+  "v2 projection routes rollover compaction deltas to the chronologically newest row",
-+  () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* Session.Service
-+      const chat = yield* sessions.create({ title: "v2 compaction rollover" })
-+      // 直接持久化回绕前旧 compaction 行：ID 字典序更高（evt_z 前缀）但 time_created 更早，
-+      // 复现回绕后旧行 ID 大于新事件 ascending ID 的持久形态。若 getCurrentCompaction 仍按
-+      // raw id DESC 排序，后续 delta/ended 会合入这旧行而不是新纪元行。
-+      Database.use((db) =>
-+        db
-+          .insert(SessionMessageTable)
-+          .values([
-+            {
-+              id: SessionMessage.ID.make("evt_z_old_compaction"),
-+              session_id: chat.id,
-+              type: "compaction",
-+              time_created: 1_000,
-+              time_updated: 1_000,
-+              data: { reason: "auto", summary: "old epoch summary", time: { created: 1_000 } } as NonNullable<
-+                (typeof SessionMessageTable.$inferInsert)["data"]
-+              >,
-+            },
-+          ])
-+          .run(),
-+      )
-+
-+      // 真实 EventV2 发布第二轮 compaction；delta/ended 由 SQLite adapter 的
-+      // getCurrentCompaction 定位目标行，必须选中时间最新行而非字典序最大行。
-+      const events = yield* EventV2Bridge.Service
-+      yield* events.publish(SessionEvent.Compaction.Started, {
-+        sessionID: chat.id,
-+        timestamp: DateTime.makeUnsafe(2_000),
-+        reason: "auto",
-+      })
-+      yield* events.publish(SessionEvent.Compaction.Delta, {
-+        sessionID: chat.id,
-+        timestamp: DateTime.makeUnsafe(3_000),
-+        text: "partial ",
-+      })
-+      yield* events.publish(SessionEvent.Compaction.Ended, {
-+        sessionID: chat.id,
-+        timestamp: DateTime.makeUnsafe(4_000),
-+        text: "new epoch summary",
-+      })
-+
-+      const rows = Database.use((db) =>
-+        db
-+          .select({ id: SessionMessageTable.id, time: SessionMessageTable.time_created, data: SessionMessageTable.data })
-+          .from(SessionMessageTable)
-+          .where(Database.and(Database.eq(SessionMessageTable.session_id, chat.id), Database.eq(SessionMessageTable.type, "compaction")))
-+          .orderBy(SessionMessageTable.time_created)
-+          .all(),
-+      )
-+      expect(rows).toHaveLength(2)
-+      // 行数断言锁住“新轮建新行”而非“合入旧行”：两条 compaction 必须同时存在。
-+      // 旧行必须保持原样：delta/ended 不得合入回绕前的字典序最大行。
-+      expect((rows[0]?.data as { summary?: string }).summary).toBe("old epoch summary")
-+      expect(String(rows[0]?.id)).toBe("evt_z_old_compaction")
-+      // 新行由 started 创建并承载新一轮 summary。
-+      expect((rows[1]?.data as { summary?: string }).summary).toBe("new epoch summary")
-+
-+      // V2Session.context 的 compaction 边界也必须选中时间最新行；
-+      // context 本身已是 tuple 查询，此断言锁定两个 owner 不再分叉。
-+      const context = yield* SessionV2.Service.use((svc) => svc.context(chat.id)).pipe(
-+        Effect.provide(SessionV2.layer),
-+      )
-+      const compaction = context.filter((message) => message.type === "compaction").at(-1)
-+      expect(compaction).toMatchObject({ type: "compaction", summary: "new epoch summary" })
-+    }),
-+)
-+
- it.instance(
-   "static loop returns assistant text through local provider",
-   () =>
-@@ -3049,10 +3123,10 @@ accounting.instance(
-         .pipe(Effect.forkChild)
-       yield* llm.wait(1)
- 
--      // 固定两个MessageID可独立证明middle早于latest，不依赖fiber实际被调度的先后。
--      // middle必须进入模型上下文，但只有latest允许成为最终assistant的parent。
--      const middleID = MessageID.ascending()
--      const latestID = MessageID.ascending()
-+      // caller-supplied ID 故意让较早 middle 的字典序高于较新的 latest，复现回绕后 raw-ID 判断失效。
-+      // 两条 user Message 仍按真实写入时间形成 chronology，只有 latest 允许成为最终 assistant parent。
-+      const middleID = MessageID.make("msg_z-middle")
-+      const latestID = MessageID.make("msg_a-latest")
-       const middle = yield* prompt
-         .prompt({
-           sessionID: chat.id,
-@@ -4921,7 +4995,7 @@ it.instance(
- )
- 
- it.instance(
--  "late technical Message cannot rewind blocked continuity past a newer real user",
-+  "same-time Unicode Goal turns follow persisted chronology despite a late technical Message",
-   () =>
-     Effect.gen(function* () {
-       const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
-@@ -4932,11 +5006,10 @@ it.instance(
-         title: "Pinned",
-         permission: [{ permission: "*", pattern: "*", action: "allow" }],
-       })
--      const suffix = crypto.randomUUID().replaceAll("-", "")
--
--      // B 的 caller-selected ID 故意大于后到的 C；Goal turn 顺序必须来自 persisted chronology。
-+      // 同毫秒下 U+E000 的 UTF-8 bytes 小于 U+10000，但 localeCompare 给出相反顺序。
-+      // B/C 因而必须由 SQLite BINARY-compatible tie-break 决定，不能依赖运行时 locale。
-       const b = yield* user(chat.id, "first Goal turn", {
--        id: MessageID.make(`msg_b${suffix}`),
-+        id: MessageID.make("msg_\uE000"),
-         created: 1_000,
-       })
-       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
-@@ -4951,8 +5024,8 @@ it.instance(
-       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
-       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
-       yield* user(chat.id, "newer real user turn without a blocked attempt", {
--        id: MessageID.make(`msg_a${suffix}`),
--        created: 2_000,
-+        id: MessageID.make("msg_𐀀"),
-+        created: 1_000,
-       })
- 
-       yield* user(chat.id, "late technical summary for B", {
+       const result = yield* loop({ sessionID: input.sessionID })
+-      // #482：own < parent 表示本请求已被更新 user 合并；先读持久化终态避免二次覆盖。
+-      // message id 单调递增——id 比较是合并归属的权威判据，不能依赖时序或内存状态
++      // #482：own 早于 parent 表示本请求已被更新 user 合并；先读持久化终态避免二次覆盖。
++      // #0584：parent 缺失属于持久化一致性破坏：保留响亮失败（orDie），不能静默猜测为未合并。
++      const parent =
++        result.info.role === "assistant"
++          ? yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.info.parentID }).pipe(
++              // 复用 layer 内已解构的 database 服务，与同文件 abortPendingAssistants 同模式，
++              // 不向 Interface 的 R 泄漏 Database.Service。
++              Effect.provideService(Database.Service, database),
++              Effect.orDie,
++            )
++          : undefined
+       if (
+         result.info.role === "assistant" &&
+         !result.info.summary &&
+-        message.info.id < result.info.parentID
++        // #0584：用持久 Message 时间和 BINARY ID 判断合并顺序，不能把 caller ID 字典序当作 chronology。
++        parent &&
++        MessageV2.compareChronology(message.info, parent.info) < 0
+       ) {
+         const requestUsageCoalesced = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+         if (requestUsageCoalesced) {
+
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
-index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd604ce228fc 100644
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
-@@ -83,21 +83,31 @@ const raceIt = testEffect(
-   Layer.mergeAll(raceSessionLayer, delayedStorageLayer, mirrorReadGateLayer, CrossSpawnSpawner.defaultLayer),
- )
- 
-+// userID/assistantID/created 可选注入：回绕用例需要 caller-selected ID 与固定时间，
-+// 默认仍走 ascending ID + 当前时间以兼容既有用例。
- function addCompletedSummaryEdit(
+@@ -35,21 +35,31 @@ const sharedIt = testEffectShared(Layer.mergeAll(coldLayer, httpApiLayer))
+ // 是 SummaryCache 认可的单文件 diff 证据形状；file 以绝对路径传入匹配归一化输入域。
+ const addCompletedSummaryEdit = (
    sessions: SessionNs.Interface,
 -  input: { sessionID: SessionID; directory: string; file: string; patch: string },
 +  input: {
@@ -2830,12 +2097,16 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +    directory: string
 +    file: string
 +    patch: string
++    // #0584：回绕用例需要 caller-selected ID 与固定时间；
++    // 默认仍走 ascending ID + 当前时间以兼容既有用例。
 +    userID?: MessageID
 +    assistantID?: MessageID
 +    created?: number
 +  },
- ) {
-   return Effect.gen(function* () {
+ ) =>
+   Effect.gen(function* () {
+     // #0500：完整 turn = user marker + completed assistant（Tool 挂 assistant）——
+     // summary cursor 以 user marker 为闭界，删除 assistant 后 user 仍是合法 cursor。
 -    const userID = MessageID.ascending()
 +    const userID = input.userID ?? MessageID.ascending()
      yield* sessions.updateMessage({
@@ -2845,30 +2116,30 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 -      time: { created: Date.now() },
 +      time: { created: input.created ?? Date.now() },
        agent: "build",
-       model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
+       model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
      })
 -    const assistantID = MessageID.ascending()
 +    const assistantID = input.assistantID ?? MessageID.ascending()
      yield* sessions.updateMessage({
        id: assistantID,
        sessionID: input.sessionID,
-@@ -110,7 +120,7 @@ function addCompletedSummaryEdit(
+@@ -62,7 +72,7 @@ const addCompletedSummaryEdit = (
+       path: { cwd: input.directory, root: input.directory },
+       cost: 0,
        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-       modelID: ModelID.make("test-model"),
-       providerID: ProviderID.make("test-provider"),
 -      time: { created: Date.now(), completed: Date.now() },
 +      time: { created: input.created ?? Date.now(), completed: input.created ?? Date.now() },
      })
      const partID = PartID.ascending()
-     yield* sessions.updatePart({
-@@ -915,6 +925,48 @@ describe.serial("ColdStorage", () => {
-   // output 在父子两次读取中逐字相等，验证 raw projection clone 没有改变 payload fields。
-   // 公开 fork transaction 若失败应由 Session 清理 target；成功路径最终显式删除两个会话。
-   // 测试不检查内部 Event 次数，只锁定数据库 row/ref 和业务读取结果。
+     const additions = input.patch.split("\n").filter((line) => line.startsWith("+")).length
+@@ -878,6 +888,261 @@ describe.serial("ColdStorage", () => {
+     }),
+   )
+ 
++  // #0584：边界字典序更低但时间更晚：raw id < 会把更早的 msg_z-old 全部排除，
++  // fork 产物丢失完整前缀；tuple 前缀切分必须保留 chronological 前缀。
 +  it.instance("forks every Message chronologically before a wrapped boundary", () =>
 +    Effect.gen(function* () {
-+      // 边界字典序更低但时间更晚：raw id < 会把更早的 msg_z-old 全部排除，
-+      // fork 产物丢失完整前缀。
 +      const sessions = yield* SessionNs.Service
 +      const source = yield* sessions.create({ title: "chronology fork source" })
 +      const oldID = MessageID.make("msg_z-old")
@@ -2879,7 +2150,7 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +        role: "user",
 +        time: { created: 1_000 },
 +        agent: "build",
-+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
++        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
 +        tools: {},
 +      })
 +      yield* sessions.updatePart({
@@ -2895,7 +2166,7 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +        role: "user",
 +        time: { created: 2_000 },
 +        agent: "build",
-+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
++        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
 +        tools: {},
 +      })
 +      const child = yield* sessions.fork({ sessionID: source.id, messageID: boundaryID })
@@ -2907,17 +2178,24 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +    }),
 +  )
 +
-   it.instance("forks cold owners with shared payloads and independent thaw", () =>
-     Effect.gen(function* () {
-       const sessions = yield* SessionNs.Service
-@@ -1905,6 +1957,218 @@ describe.serial("Packed ColdStorage V2", () => {
- 
-   // mirror 与第一轮累计值逐字段相等时只能证明 prefix，不能声称覆盖初始化时已持久化的最新 Tool tail。
-   // expected 两个文件各出现一次；丢失第二项或重复第一项都会改变公开数组与计数。
++  // #0584：不存在的显式边界必须 NotFound 失败，且 source admission 先于 target 创建，
++  // 不能留下 orphan child session。
++  it.instance("fork with a missing boundary fails and creates no child", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const source = yield* sessions.create({ title: "fork missing boundary" })
++      const before = (yield* sessions.list()).length
++      const result = yield* Effect.exit(sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }))
++      expect(Exit.isFailure(result)).toBe(true)
++      expect((yield* sessions.list()).length).toBe(before)
++      yield* sessions.remove(source.id)
++    }),
++  )
++
++  // #0584：第一次 diff 把 cursor 固定在字典序更高的 msg_z；追加的 msg_a 时间更晚。
++  // raw id > 增量扫描会永远漏掉第二轮 Tool diff。
 +  it.instance("includes a post-wrap Tool tail after the persisted summary cursor", () =>
 +    Effect.gen(function* () {
-+      // 第一次 diff 把 cursor 固定在字典序更高的 msg_z；追加的 msg_a 时间更晚。
-+      // raw id > 增量扫描会永远漏掉第二轮 Tool diff。
 +      const test = yield* TestInstance
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "summary chronology rollover" })
@@ -2944,22 +2222,23 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +        created: 2_000,
 +      })
 +      expect(yield* sessions.diff(session.id)).toEqual([first, second])
++      yield* sessions.remove(session.id)
 +    }),
 +  )
 +
++  // #0584：回绕 fixture：target user 及其 assistant 字典序更高但时间更早，through 是
++  // 字典序更低的 chronology 最大行；raw id <= 会把 target 连同 children 全部排除。
 +  it.instance("summarize snapshot keeps pre-wrap targets under a wrapped through boundary", () =>
 +    Effect.gen(function* () {
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "snapshot tuple rollover" })
-+      // 回绕 fixture：target user 及其 assistant 字典序更高但时间更早，through 是
-+      // 字典序更低的 chronology 最大行；raw id <= 会把 target 连同 children 全部排除。
 +      yield* sessions.updateMessage({
 +        id: MessageID.make("msg_z-snap-user"),
 +        sessionID: session.id,
 +        role: "user",
 +        time: { created: 1_000 },
 +        agent: "build",
-+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
++        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
 +        tools: {},
 +      })
 +      yield* sessions.updateMessage({
@@ -2972,8 +2251,8 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +        path: { cwd: session.directory, root: session.directory },
 +        cost: 0,
 +        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        modelID: ModelID.make("test-model"),
-+        providerID: ProviderID.make("test-provider"),
++        modelID: ModelV2.ID.make("test-model"),
++        providerID: ProviderV2.ID.make("test-provider"),
 +        time: { created: 1_001, completed: 1_002 },
 +      })
 +      yield* sessions.updateMessage({
@@ -2982,14 +2261,14 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +        role: "user",
 +        time: { created: 2_000 },
 +        agent: "build",
-+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
++        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
 +        tools: {},
 +      })
 +      const rows = yield* MessageV2.targetWithAssistantChildren({
 +        sessionID: session.id,
 +        messageID: MessageID.make("msg_z-snap-user"),
 +        throughMessageID: MessageID.make("msg_a-snap-through"),
-+      })
++      }).pipe(Effect.provideService(Database.Service, (yield* Database.Service)))
 +      // target 与 structural assistant children 都必须落在 tuple 封界内。
 +      expect(rows.map((row) => String(row.info.id)).sort()).toEqual(["msg_z-snap-child", "msg_z-snap-user"])
 +      // 封界行缺失必须响亮失败，而不是回退全域或 raw-ID 过滤。
@@ -2998,74 +2277,61 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +          sessionID: session.id,
 +          messageID: MessageID.make("msg_z-snap-user"),
 +          throughMessageID: MessageID.make("msg_not_persisted"),
-+        }),
++        }).pipe(Effect.provideService(Database.Service, (yield* Database.Service))),
 +      )
 +      expect(Exit.isFailure(missing)).toBe(true)
 +      yield* sessions.remove(session.id)
 +    }),
 +  )
 +
-+  it.instance("fork with a missing boundary fails and creates no child", () =>
-+    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const source = yield* sessions.create({ title: "fork missing boundary" })
-+      const before = (yield* sessions.list()).length
-+      // 不存在的显式边界必须 NotFound 失败，且 source admission 先于 target 创建，
-+      // 不能留下 orphan child session。
-+      const result = yield* Effect.exit(sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }))
-+      expect(Exit.isFailure(result)).toBe(true)
-+      expect((yield* sessions.list()).length).toBe(before)
-+      yield* sessions.remove(source.id)
-+    }),
-+  )
-+
++  // #0584：空 Session 初始化把 cursor 持久化为 ""；后续 diff 必须把空串当
++  // "无 closed Message" sentinel 跳过解析，而不是报 corruption。
 +  it.instance("empty Session diff keeps the empty-string cursor sentinel usable", () =>
 +    Effect.gen(function* () {
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "empty sentinel" })
-+      // 空 Session 初始化把 cursor 持久化为 ""；后续 diff 必须把空串当
-+      // "无 closed Message" sentinel 跳过解析，而不是报 corruption。
 +      expect(yield* sessions.diff(session.id)).toEqual([])
 +      expect(yield* sessions.diff(session.id)).toEqual([])
++      const { sync } = yield* Database.Service
 +      expect(
-+        Database.use((db) =>
-+          db
-+            .select({ cursor: SessionTable.summary_cursor })
-+            .from(SessionTable)
-+            .where(Database.eq(SessionTable.id, session.id))
-+            .get()?.cursor,
-+        ),
++        sync
++          .select({ cursor: SessionTable.summary_cursor })
++          .from(SessionTable)
++          .where(eq(SessionTable.id, session.id))
++          .get()?.cursor,
 +      ).toBe("")
 +      yield* sessions.remove(session.id)
 +    }),
 +  )
 +
++  // #0584：非空 cursor 指向已删除 Message：下一次公开 diff 必须响亮失败，
++  // 不能忽略边界或借用附近行。
 +  it.instance("rejects a persisted summary cursor pointing at a deleted Message", () =>
 +    Effect.gen(function* () {
++      const test = yield* TestInstance
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "dangling summary cursor" })
-+      const edit = yield* addCompletedSummaryEdit(sessions, {
++      yield* addCompletedSummaryEdit(sessions, {
 +        sessionID: session.id,
-+        directory: session.directory,
++        directory: test.directory,
 +        file: "src/dangling.ts",
 +        patch: "+dangling\n",
 +      })
 +      expect(yield* sessions.diff(session.id)).toHaveLength(1)
-+      // 直接把非空 cursor 改成不存在的 MessageID：合法形状但无持久行，
-+      // 下一次公开 diff 必须响亮失败而不是忽略边界或借用附近行。
-+      Database.use((db) =>
-+        db
-+          .update(SessionTable)
-+          .set({ summary_cursor: "msg_dangling_nonexistent" })
-+          .where(Database.eq(SessionTable.id, session.id))
-+          .run(),
-+      )
++      // 直接把非空 cursor 改成不存在的 MessageID：合法形状但无持久行。
++      const { sync } = yield* Database.Service
++      sync
++        .update(SessionTable)
++        .set({ summary_cursor: "msg_dangling_nonexistent" })
++        .where(eq(SessionTable.id, session.id))
++        .run()
 +      expect(Exit.isFailure(yield* Effect.exit(sessions.diff(session.id)))).toBe(true)
 +      yield* sessions.remove(session.id)
-+      void edit
 +    }),
 +  )
 +
++  // #0584：第二轮把 cursor 推进到字典序更低的 msg_a；随后修改时间更早、字典序更高的
++  // msg_z 轮：raw `mutationID > cursor` 会误判为界后而不失效，留下 stale patch。
 +  it.instance("invalidates covered history across a wrapped summary cursor", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -3083,8 +2349,6 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +      expect(yield* sessions.diff(session.id)).toEqual([
 +        { file: "src/cov-first.ts", patch: "+cov-old\n", additions: 1, deletions: 0, status: "added" },
 +      ])
-+      // 第二轮把 cursor 推进到字典序更低的 msg_a；随后修改时间更早、字典序更高的
-+      // msg_z 轮：raw `mutationID > cursor` 会误判为界后而不失效，留下 stale patch。
 +      yield* addCompletedSummaryEdit(sessions, {
 +        sessionID: session.id,
 +        directory: test.directory,
@@ -3095,6 +2359,7 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +        created: 2_000,
 +      })
 +      expect(yield* sessions.diff(session.id)).toHaveLength(2)
++      // 覆盖旧轮 Tool Part 后必须回退旧 diff：tuple 判定把 msg_z 轮识别为界前。
 +      yield* sessions.updatePart({
 +        id: first.partID,
 +        sessionID: session.id,
@@ -3126,89 +2391,172 @@ index d00e01a615c274babdcc23aeb5ac3bb1a8699cc7..ec6d4ebe8b7859193c63ffc515d0fd60
 +    }),
 +  )
 +
-   it.instance("keeps the Tool tail after proving a legacy cumulative prefix", () =>
-     Effect.gen(function* () {
-       const test = yield* TestInstance
-diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
-index 467d7d2943b7742197b30dbea16364992c6b278c..8907327571f009c5ef107e125bc93e7eb2961132 100644
---- a/packages/opencode/test/tool/truncation.test.ts
-+++ b/packages/opencode/test/tool/truncation.test.ts
-@@ -1,7 +1,7 @@
- import { describe, test, expect } from "bun:test"
- import { NodeFileSystem } from "@effect/platform-node"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
--import { Effect, FileSystem, Layer } from "effect"
-+import { Effect, FileSystem, Layer, PlatformError } from "effect"
- import { Truncate } from "@/tool/truncate"
- import { Config } from "@/config/config"
- import { Identifier } from "../../src/id/id"
-@@ -16,6 +16,29 @@ const ROOT = path.resolve(import.meta.dir, "..", "..")
+   // fork 用例在 source 冷态时调用公开 Session.fork，确保路径不能先 hydrate 再复制完整热内容。
+   // child Message/Part ID 必须独立，避免父子更新或删除命中同一 primary key。
+   // child 与 source cold_ref 完全相同，证明 payload 按内容地址共享而非重新压缩副本。
+
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -111,6 +111,25 @@ function basePart(messageID: string, id: string) {
+   }
+ }
  
- const it = testEffect(Layer.mergeAll(Truncate.defaultLayer, NodeFileSystem.layer, AppFileSystem.defaultLayer))
- 
-+const removedAfterStatFailure: string[] = []
-+const statFailureFileSystem = FileSystem.makeNoop({
-+  // 完整 noop service 保留 FileSystem 的 symbol/sink 契约，只覆写本用例可达的三个操作。
-+  readDirectory: () => Effect.succeed([Identifier.create("tool", "ascending", 0)]),
-+  stat: () =>
-+    Effect.fail(PlatformError.systemError({ _tag: "PermissionDenied", module: "FileSystem", method: "stat" })),
-+  remove: (file) =>
-+    Effect.sync(() => {
-+      removedAfterStatFailure.push(file)
-+    }),
++describe("session.message-v2.compareChronology", () => {
++  test("uses persisted UTF-8 byte order for equal timestamps", () => {
++    // #0584：U+E000 与 U+10000 的 UTF-16/locale 顺序可不同；SQLite BINARY 按 UTF-8 bytes 排前者。
++    // 该断言独立锁定数据库可观察顺序，避免 Revert 与 App 对同一 boundary 作相反解释。
++    expect(
++      MessageV2.compareChronology(
++        { id: MessageID.make("msg_\uE000"), time: { created: 0 } },
++        { id: MessageID.make("msg_\u{10000}"), time: { created: 0 } },
++      ),
++    ).toBeLessThan(0)
++    expect(
++      MessageV2.compareChronology(
++        { id: MessageID.make("msg_\u{10000}"), time: { created: 0 } },
++        { id: MessageID.make("msg_\uE000"), time: { created: 0 } },
++      ),
++    ).toBeGreaterThan(0)
++  })
 +})
-+const statFailureIt = testEffect(
-+  Truncate.layer.pipe(
-+    Layer.provide(
-+      Layer.mock(AppFileSystem.Service, {
-+        ...statFailureFileSystem,
-+        // AppFileSystem 额外的同步 matcher 不是本路径输入，但必须维持 service 的完整结构。
-+        globMatch: () => false,
-+      }),
-+    ),
-+  ),
-+)
 +
- const configuredLayer = (cfg: Config.Info) =>
-   Layer.mergeAll(
-     Truncate.defaultLayer,
-@@ -282,20 +305,36 @@ describe("Truncate", () => {
-   describe("cleanup", () => {
-     const DAY_MS = 24 * 60 * 60 * 1000
+ describe("session.message-v2.toModelMessage", () => {
  
--    it.live("deletes files older than 7 days and preserves recent files", () =>
-+    statFailureIt.live("preserves entries when stat metadata is unavailable", () =>
-+      Effect.gen(function* () {
-+        removedAfterStatFailure.length = 0
-+        const svc = yield* Truncate.Service
-+        yield* svc.cleanup()
+   // [local-smark] 新 generic interrupted 记录携带 executionElapsedMs marker：
+
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -4655,7 +4655,7 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "late technical Message cannot rewind blocked continuity past a newer real user",
++  "same-time Unicode Goal turns follow persisted chronology despite a late technical Message",
+   () =>
+     Effect.gen(function* () {
+       const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
+@@ -4666,11 +4666,11 @@ it.instance(
+         title: "Pinned",
+         permission: [{ permission: "*", pattern: "*", action: "allow" }],
+       })
+-      const suffix = crypto.randomUUID().replaceAll("-", "")
+ 
+-      // B 的 caller-selected ID 故意大于后到的 C；Goal turn 顺序必须来自 persisted chronology。
++      // #0584：同毫秒下 U+E000 的 UTF-8 bytes 小于 U+10000，但 localeCompare 给出相反顺序。
++      // B/C 因而必须由 SQLite BINARY-compatible tie-break 决定，不能依赖运行时 locale。
+       const b = yield* user(chat.id, "first Goal turn", {
+-        id: MessageID.make(`msg_b${suffix}`),
++        id: MessageID.make("msg_\uE000"),
+         created: 1_000,
+       })
+       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+@@ -4685,9 +4685,10 @@ it.instance(
+ 
+       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
+       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
++      // #0584：C 与 B 同毫秒，顺序完全由 tie-break 决定。
+       yield* user(chat.id, "newer real user turn without a blocked attempt", {
+-        id: MessageID.make(`msg_a${suffix}`),
+-        created: 2_000,
++        id: MessageID.make("msg_\u{10000}"),
++        created: 1_000,
+       })
+ 
+       yield* user(chat.id, "late technical summary for B", {
+@@ -5206,9 +5207,10 @@ it.instance(
+         .pipe(Effect.forkChild)
+       yield* llm.wait(1)
+ 
+-      // 固定两个 MessageID 可独立证明 middle 早于 latest，不依赖 fiber 调度先后
+-      const middleID = MessageID.ascending()
+-      const latestID = MessageID.ascending()
++      // #0584：caller-supplied ID 故意让较早 middle 的字典序高于较新的 latest，复现回绕后 raw-ID 判断失效。
++      // 两条 user Message 仍按真实写入时间形成 chronology，只有 latest 允许成为最终 assistant parent。
++      const middleID = MessageID.make("msg_z-middle")
++      const latestID = MessageID.make("msg_a-latest")
+       const middle = yield* prompt
+         .prompt({
+           sessionID: chat.id,
+
+diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
+--- a/packages/opencode/test/session/compaction.test.ts
++++ b/packages/opencode/test/session/compaction.test.ts
+@@ -100,16 +100,17 @@ function createModel(opts: {
+ 
+ const wide = () => ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000 }) })
+ 
+-function createUserMessage(sessionID: SessionID, text: string) {
++function createUserMessage(sessionID: SessionID, text: string, opts?: { id?: MessageID; created?: number }) {
+   return Effect.gen(function* () {
+     const ssn = yield* SessionNs.Service
+     const msg = yield* ssn.updateMessage({
+-      id: MessageID.ascending(),
++      // #0584：回绕用例需要 caller-selected ID 与固定时间；默认保持 ascending+当前时间。
++      id: opts?.id ?? MessageID.ascending(),
+       role: "user",
+       sessionID,
+       agent: "build",
+       model: ref,
+-      time: { created: Date.now() },
++      time: { created: opts?.created ?? Date.now() },
+     })
+     yield* ssn.updatePart({
+       id: PartID.ascending(),
+@@ -3328,6 +3329,55 @@ describe("SessionNs.getUsage", () => {
+ })
+ 
+ describe("ColdStorage compact eligibility", () => {
++  // #0584：回绕 fixture：old 字典序最低但时间最早，tail 字典序最低中最新；
++  // 验证目标是“冻结权由 tuple 决定”，而不是任何字典序巧合。
++  itCompaction.instance("uses persisted Message chronology for a completed Compaction boundary", () =>
++    Effect.gen(function* () {
++      const ssn = yield* SessionNs.Service
++      // #493：eligibility 走同步 drizzle client，与运行时同连接。
++      const { sync } = yield* Database.Service
++      const session = yield* ssn.create({ title: "compact chronology rollover" })
++      const old = yield* createUserMessage(session.id, "old", { id: MessageID.make("msg_0-old"), created: 500 })
++      const oldPart = yield* addCompletedToolPart({
++        sessionID: session.id,
++        messageID: old.id,
++        tool: "read",
++        output: "old-output-".repeat(512),
++      })
++      const head = yield* createUserMessage(session.id, "head", { id: MessageID.make("msg_z-head"), created: 1_000 })
++      const headPart = yield* addCompletedToolPart({
++        sessionID: session.id,
++        messageID: head.id,
++        tool: "read",
++        output: "head-output-".repeat(512),
++      })
++      const tail = yield* createUserMessage(session.id, "tail", { id: MessageID.make("msg_a-tail"), created: 2_000 })
++      const marker = yield* ssn.updatePart({
++        id: PartID.ascending(),
++        messageID: head.id,
++        sessionID: session.id,
++        type: "compaction",
++        auto: false,
++        tail_start_id: tail.id,
++        recent_user_messages: [{ id: head.id, text: "memento" }],
++      })
++      const summary = yield* createSummaryAssistantMessage(session.id, head.id, "/tmp", "summary")
++      // summary 时间必须晚于 boundary，否则 boundary query 不会选中本次 marker/Part 对。
++      yield* ssn.updateMessage({ ...summary, time: { ...summary.time, created: 3_000 } })
 +
-+        // 未知 metadata 不能被解释为过期；通过 remove 的外部可观察结果锁定保留语义。
-+        expect(removedAfterStatFailure).toEqual([])
-+      }),
-+    )
++      // recent Session 下：早于 tail 的 owner 可冻，晚于 tail 的不可冻。
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: oldPart.id })).toBe(true)
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: headPart.id })).toBe(true)
++      // 公开删除 present tail 后，边界不可解析：recent 分支必须 fail closed，
++      // 不得回退 marker 或把全部 owner 当作可冻结。
++      yield* ssn.removeMessage({ sessionID: session.id, messageID: tail.id })
++      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: oldPart.id })).toBe(false)
++      yield* ssn.remove(session.id)
++      // marker 断言防止 fixture 意外丢失 boundary 结构而不被发现。
++      expect(marker.id).toBeTruthy()
++    }),
++  )
 +
-+    it.live("uses file mtime when IDs wrap", () =>
-       Effect.gen(function* () {
-         const svc = yield* Truncate.Service
-         const fs = yield* FileSystem.FileSystem
- 
-         yield* fs.makeDirectory(Truncate.DIR, { recursive: true })
- 
--        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 10 * DAY_MS))
--        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
-+        // 两个文件名固定跨越 2^36 ms 回绕边界，避免测试结果依赖执行当天处于哪个 ID 纪元。
-+        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36 - 1))
-+        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", 2 ** 36 + 1))
- 
-         yield* writeFileStringScoped(old, "old content")
-         yield* writeFileStringScoped(recent, "recent content")
-+        // retention 的独立真值来自文件元数据：旧文件超过七天，新文件只有三天。
-+        yield* fs.utimes(old, new Date(), new Date(Date.now() - 10 * DAY_MS))
-+        yield* fs.utimes(recent, new Date(), new Date(Date.now() - 3 * DAY_MS))
-         yield* svc.cleanup()
- 
-+        // lexical-low 的回绕后 ID 仍必须按 recent mtime 保留，不能被当成远古时间。
-         expect(yield* fs.exists(old)).toBe(false)
-         expect(yield* fs.exists(recent)).toBe(true)
-       }),
+   itCompaction.instance("freezes only the compacted head when the session is still recent", () =>
+     Effect.gen(function* () {
+       // recent+completed boundary 先证明 head eligible、tail ineligible，再把同 session 变老证明 age 规则覆盖 tail。

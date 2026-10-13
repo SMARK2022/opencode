@@ -1,27 +1,26 @@
 From 14b3177908247785cc36bb2d5f85b5718e5b2897 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Tue, 14 Jul 2026 14:02:22 +0800
-Subject: [PATCH] =?UTF-8?q?fix(image):=20=E4=BF=AE=E5=A4=8DTUI=20Sharp?=
- =?UTF-8?q?=E5=8E=9F=E7=94=9F=E4=BE=9D=E8=B5=96=E9=93=BE=E5=B9=B6=E8=BF=81?=
- =?UTF-8?q?=E7=A7=BB=E5=8E=86=E5=8F=B2=E5=9B=BE=E7=89=87?=
+Subject: [PATCH] fix(image): 修复TUI Sharp原生依赖链并迁移历史图片
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-恢复Bun compiled TUI中Sharp addon与libvips的完整target依赖链，保留官方Linux x64 CPU guard，并移除Read、Prompt、Processor将未处理原图继续发送或落库的fallback。新增compiled真实Image.Service smoke、Prompt/Processor fail-closed回归测试，确保单一Sharp主链不会静默降级。
-
-提供仓库内可分发的图片附件迁移工具：默认dry-run，按完整源格式与hash校验，使用SQLite VACUUM INTO一致快照、validation clone、完整Part CAS和事务完整性检查，覆盖WAL、幂等、MIME边界与错误写入保护。相关测试、typecheck和compiled smoke均已通过。
-
+适配：目标 image 后端为 Photon WASM（非 Sharp），Sharp 打包链（build.ts/image.ts 的 233 行）
+由目标静态嵌入方案等价承载（SATISFIED，不移植）；本 patch 落地 fail-closed 三处反转、
+migrate-image-attachment.ts 维护脚本（Image.layer 导出供复用）、三个测试文件的重表达适配。
 diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Proposal/tui-image-validation-and-history-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..7c232ad17c2abd91f066e406c1eb9bd67636164c
 --- /dev/null
 +++ b/docs/Proposal/tui-image-validation-and-history-repair.md
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,477 @@
 +# TUI Sharp 打包链恢复与历史图片无损迁移方案
 +
 +Status: approved after independent audit; user selected a distributable repository migration script and authorized implementation
 +
++> **适配说明（#485 落地于 v1.18.32 目标谱系）**：本文 A 部分（TUI Sharp 原生打包链）不适用于目标——目标 image 后端为
++> Photon WASM（`photon_rs_bg.wasm` 静态嵌入），compiled 打包问题在目标谱系不存在，Sharp 打包链修复被目标方案等价承载。
++> 本 patch 在目标落地范围为 B（消费端 fail-closed）与 C（`script/migrate-image-attachment.ts` 历史图片迁移工具），
++> 以及下文引用的 fail-closed 回归测试。涉及 `lib/sharp.js` 打包细节的小节仅作源谱系历史记录。
 +Date: 2026-07-14
 +
 +## 0. 推荐方案摘要
@@ -491,233 +490,11 @@ index 0000000000000000000000000000000000000000..7c232ad17c2abd91f066e406c1eb9bd6
 +- 另一位独立subagent仅对C提出2个阻塞意见：唯一物理备份不能被SQLite打开验证；D:到C:无法对2.14 GB DB/WAL/SHM承诺跨盘三文件原子恢复。Sharp/A/B及代码预算没有其他阻塞。
 +
 +方案阶段最终将C收敛为immutable master + disposable validation clone，并删除“跨盘原子物理恢复”承诺。实现阶段第一轮独立复核进一步指出逐文件复制DB/WAL/SHM仍可能跨时间点；实现遂改用SQLite原生`VACUUM INTO`一致快照，删除不必要的commit后反向CAS，补充非图片硬拒绝和CLI集成测试。该变化减少分支并强化数据一致性，不改变Sharp/A/B/C职责边界。
-diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
-index fa4f25b1811144e7e38e0aa95152ac939d860839..db66968f3fa2eed998d5e561089054ee85cf8fd0 100755
---- a/packages/opencode/script/build.ts
-+++ b/packages/opencode/script/build.ts
-@@ -2,11 +2,13 @@
- 
- import { $ } from "bun"
- import fs from "fs"
-+import os from "os"
- import path from "path"
- import { createRequire } from "module"
- import { fileURLToPath } from "url"
- import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
- import { resolveInstallTarget } from "./install-target"
-+import type { BunPlugin } from "bun"
- 
- const __filename = fileURLToPath(import.meta.url)
- const __dirname = path.dirname(__filename)
-@@ -222,6 +224,154 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
-   return [...imports, "export default {", ...entries, "}"].join("\n")
- }
- 
-+async function createSharpNativeFileMap(item: (typeof allTargets)[number]) {
-+  // Sharp用linuxmusl而Bun target用linux+abi描述；资源包和运行时loader必须采用同一个target名。
-+  // baseline与AVX2产物共享同一官方addon；CPU能力仍由Sharp官方loader在运行时判定。
-+  const target = item.os === "linux" ? `${item.abi === "musl" ? "linuxmusl" : "linux"}-${item.arch}` : `${item.os}-${item.arch}`
-+  // Windows把libvips DLL放在addon包内；Linux/macOS则依赖独立的同target libvips包。
-+  // 只收集当前target，避免单个可执行文件携带其他平台永远不可达的native资源。
-+  const packages = [`@img/sharp-${target}`, ...(item.os === "win32" ? [] : [`@img/sharp-libvips-${target}`])]
-+  const files = (
-+    await Promise.all(
-+      packages.map(async (name) => {
-+        const root = path.dirname(require.resolve(`${name}/package`))
-+        return (await Array.fromAsync(new Bun.Glob("lib/**/*").scan({ cwd: root, onlyFiles: true }))).map((file) => ({
-+          absolute: path.join(root, ...file.split("/")),
-+          relative: `${name}/${file.replaceAll("\\", "/")}`,
-+        }))
-+      }),
-+    )
-+  ).flat()
-+  const addons = files.filter((file) => file.relative.endsWith(".node"))
-+  const libraries = files.filter((file) => /\.(?:dll|dylib|so(?:\..*)?)$/.test(file.relative))
-+  // 动态require不会告诉Bun缺了哪个transitive文件；构建时先锁住每个target恰好一个addon和必要shared library。
-+  // addon多于一个同样视为错误，否则运行时选择将依赖文件遍历顺序而失去确定性。
-+  if (addons.length !== 1 || libraries.length === 0)
-+    throw new Error(`Incomplete Sharp native package for ${target}: ${addons.length} addon(s), ${libraries.length} library file(s)`)
-+  const imports = files.map((file, index) => {
-+    // 保留@img包内相对布局，native RPATH/@loader_path才能从addon定位到对应libvips。
-+    const spec = path.relative(dir, file.absolute).replaceAll("\\", "/")
-+    return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
-+  })
-+  return {
-+    source: [
-+      ...imports,
-+      "export default {",
-+      `  target: ${JSON.stringify(target)},`,
-+      `  version: ${JSON.stringify(pkg.optionalDependencies.sharp)},`,
-+      `  addon: ${JSON.stringify(addons[0].relative)},`,
-+      "  files: {",
-+      ...files.map((file, index) => `    ${JSON.stringify(file.relative)}: file_${index},`),
-+      "  },",
-+      "}",
-+    ].join("\n"),
-+  }
-+}
-+
-+function replaceSharpLoader(source: string, before: string, after: string) {
-+  // Sharp升级若改变loader结构必须显式失败；宽松replace会生成“构建成功、运行缺addon”的假产物。
-+  // 精确一次匹配同时防止补丁重复应用，保持打包链只有一个native入口。
-+  if (source.indexOf(before) === -1 || source.indexOf(before) !== source.lastIndexOf(before))
-+    throw new Error(`Sharp 0.34.5 loader changed; expected one occurrence of: ${before}`)
-+  return source.replace(before, after)
-+}
-+
-+const sharpPlugin: BunPlugin = {
-+  name: "opencode-sharp-native",
-+  setup(build) {
-+    build.onLoad({ filter: /[\\/]sharp[\\/]lib[\\/]sharp\.js$/ }, async (args) => ({
-+      // 绝对cache路径会改变path字符串，因此同时把上游CPU guard改为按runtime判断，不能绕过x64-v2检查。
-+      // cache路径放在搜索首位，但其余官方路径仍由Sharp保留用于普通源码运行和诊断。
-+      // 这里不捕获加载错误；addon或libvips缺失必须由唯一主链明确失败。
-+      contents: replaceSharpLoader(
-+        replaceSharpLoader(
-+          await Bun.file(args.path).text(),
-+          "const paths = [",
-+          "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,",
-+        ),
-+        "path.startsWith('@img/sharp-linux-x64')",
-+        "runtimePlatform === 'linux-x64'",
-+      ),
-+      loader: "js",
-+    }))
-+  },
-+}
-+
-+const sharpSmokeSource = `
-+import { Image } from "./src/image/image"
-+import { TestConfig } from "./test/fixture/config"
-+import { Effect, Layer } from "effect"
-+import { PartID, MessageID, SessionID } from "./src/session/schema"
-+
-+const input = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVR4nGP4z8DQAMIMMAYAOOgF/REzMMkAAAAASUVORK5CYII=", "base64")
-+const result = await Effect.runPromise(Effect.gen(function* () {
-+  const image = yield* Image.Service
-+  return yield* image.normalize({
-+    id: PartID.make("prt_sharp_smoke"),
-+    messageID: MessageID.make("msg_sharp_smoke"),
-+    sessionID: SessionID.make("ses_sharp_smoke"),
-+    type: "file",
-+    mime: "image/png",
-+    url: "data:image/png;base64," + input.toString("base64"),
-+  })
-+}).pipe(Effect.provide(Image.layer.pipe(Layer.provide(TestConfig.layer({
-+  get: () => Effect.succeed({ attachment: { image: { auto_resize: true, max_width: 1, max_height: 1, max_base64_bytes: 100000 } } }),
-+}))))))
-+const data = Buffer.from(result.url.slice(result.url.indexOf(",") + 1), "base64")
-+const sharp = (await import("sharp")).default
-+const metadata = await sharp(data).metadata()
-+if (metadata.width !== 1 || metadata.height !== 1 || data.length === 0) throw new Error("Compiled Image.Service smoke failed")
-+console.log(JSON.stringify({ mime: result.mime, width: metadata.width, height: metadata.height, bytes: data.length }))
-+`
-+
-+async function runSharpSmoke(item: (typeof allTargets)[number], name: string, sharpFiles: string) {
-+  // 交叉架构只能做上面的静态资源断言；native smoke仅在当前宿主可执行的target运行。
-+  // 不尝试模拟异构native ABI，因为那会制造“测试通过”但目标机器无法加载的伪信号。
-+  if (item.os !== process.platform || item.arch !== process.arch || item.abi) return
-+  const extension = item.os === "win32" ? ".exe" : ""
-+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-sharp-smoke-"))
-+  const outfile = path.join(root, `sharp-smoke${extension}`)
-+  const cache = path.join(root, "cache")
-+  await fs.promises.mkdir(cache)
-+  try {
-+    // Smoke复用正式Image.Service和同一虚拟资源表，禁止用裸sharp示例掩盖生产loader接线错误。
-+    // 强制2x2缩到1x1，使测试必经metadata、resize、encode，而非命中小图原样返回。
-+    const result = await Bun.build({
-+      conditions: ["browser"],
-+      tsconfig: "./tsconfig.json",
-+      plugins: [sharpPlugin],
-+      compile: { target: name.replace(pkg.name, "bun") as any, outfile, autoloadBunfig: false, autoloadDotenv: false },
-+      files: { "opencode-sharp.gen.ts": sharpFiles, "opencode-sharp-smoke.gen.ts": sharpSmokeSource },
-+      entrypoints: ["opencode-sharp-smoke.gen.ts", "opencode-sharp.gen.ts"],
-+      define: { OPENCODE_COMPILED: "true", OPENCODE_VERSION: `'${Script.version}'` },
-+    })
-+    if (!result.success) throw new AggregateError(result.logs, "Failed to build compiled Sharp smoke")
-+    const run = async () => {
-+      // 独立cache确保每次build都覆盖首次释放，而不是误用开发机以前留下的native文件。
-+      // 子进程不共享内存，两个run才能真实覆盖跨进程同时创建同一cache文件的竞争。
-+      const proc = Bun.spawn([outfile], {
-+        cwd: cache,
-+        env: { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache },
-+        stdout: "pipe",
-+        stderr: "pipe",
-+      })
-+      const [stdout, stderr, code] = await Promise.all([
-+        new Response(proc.stdout).text(),
-+        new Response(proc.stderr).text(),
-+        proc.exited,
-+      ])
-+      if (code !== 0) throw new Error(stderr || stdout || `Sharp smoke exited ${code}`)
-+    }
-+    // 两个首次启动进程锁住Windows rename loser路径；第三次运行验证已落盘cache可复用。
-+    // 任一子进程失败都会拒绝整个构建，发布物不会退化为运行时才发现缺少Sharp。
-+    await Promise.all([run(), run()])
-+    await run()
-+  } finally {
-+    // Windows可能在子进程退出后短暂保留exe/DLL句柄；smoke位于系统tmp，清理失败不能污染release目录或误判产品构建。
-+    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {})
-+  }
-+}
-+
- await $`rm -rf dist`
- 
- const binaries: Record<string, string> = {}
-@@ -261,15 +411,16 @@ for (const item of targets) {
-   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
-   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
-   const workerPath = "./src/cli/cmd/tui/worker.ts"
-+  const sharpFiles = (await createSharpNativeFileMap(item)).source
- 
-   // Use platform-specific bunfs root path based on target OS
-   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
-   const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
- 
--  await Bun.build({
-+  const result = await Bun.build({
-     conditions: ["browser"],
-     tsconfig: "./tsconfig.json",
--    plugins: [plugin],
-+    plugins: [plugin, sharpPlugin],
-     external: ["node-gyp"],
-     format: "esm",
-     minify: true,
-@@ -289,6 +440,8 @@ for (const item of targets) {
-       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
-       // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
-       "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
-+      // Sharp 的动态 addon/libvips require无法被Bun静态发现，必须按target显式嵌入完整native布局。
-+      "opencode-sharp.gen.ts": sharpFiles,
-     },
-     entrypoints: [
-       "./src/index.ts",
-@@ -297,6 +450,7 @@ for (const item of targets) {
-       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
-       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
-       "opencode-pvrecorder.gen.ts",
-+      "opencode-sharp.gen.ts",
-     ],
-     define: {
-       OPENCODE_VERSION: `'${Script.version}'`,
-@@ -309,6 +463,11 @@ for (const item of targets) {
-       OPENCODE_COMPILED: "true",
-     },
-   })
-+  // 异构target无法在当前宿主执行，但编译失败仍必须阻止发布该target的空壳目录。
-+  // 只把success交给后续smoke会掩盖跨架构解析错误，因此这里是生产构建的硬门槛。
-+  if (!result.success) throw new AggregateError(result.logs, `Failed to build ${name}`)
-+
-+  await runSharpSmoke(item, name, sharpFiles)
- 
-   // Smoke test: only run if binary is for current platform
-   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
 diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/opencode/script/migrate-image-attachment.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454ec38339a
 --- /dev/null
 +++ b/packages/opencode/script/migrate-image-attachment.ts
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,300 @@
 +#!/usr/bin/env bun
 +
 +import { Image } from "../src/image/image"
@@ -786,12 +563,14 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +  sourceSha: required("expected-source-sha", values["expected-source-sha"]).toLowerCase(),
 +  newSha: values["expected-new-sha"]?.toLowerCase(),
 +  attachmentIndex: finiteInteger("attachment-index", values["attachment-index"]),
++  // tokenBudget限制单图base64规模，与运行时写入共享同一约束。
 +  tokenBudget: finiteInteger("token-budget", values["token-budget"]),
 +  apply: values.apply ?? false,
 +  backupDir: values["backup-dir"] ? path.resolve(values["backup-dir"]) : undefined,
 +}
 +
 +if (options.apply && (!options.newSha || !options.backupDir))
++  // --apply必须携带new hash与备份目录：缺少任一项都无法保证可回滚恢复。
 +  throw new Error("--apply requires --expected-new-sha and --backup-dir")
 +if (options.newSha === options.oldSha) throw new Error("--expected-new-sha must differ from --expected-old-sha")
 +
@@ -808,15 +587,18 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +    const state = isRecord(part) && part.type === "tool" && isRecord(part.state) ? part.state : undefined
 +    const value = state?.status === "completed" && Array.isArray(state.attachments) ? state.attachments[input.attachmentIndex] : undefined
 +    if (!isRecord(value) || value.type !== "file" || typeof value.mime !== "string" || typeof value.url !== "string")
++      // 结构校验先行：status/attachments/index都符合预期才继续，避免把任意Part当附件修复。
 +      throw new Error(`Completed Tool attachment ${input.attachmentIndex} was not found`)
 +    // 维护工具只能修复图片；即使调用者提供了匹配hash，也不能把PDF或任意文件替换成Sharp输出。
 +    if (!value.mime.startsWith("image/")) throw new Error(`Attachment ${input.attachmentIndex} is not an image`)
 +    const attachment = value as FileAttachment
 +    if (!attachment.url.startsWith(`data:${attachment.mime};base64,`))
++      // data URL前缀与MIME必须互证，防止损坏记录的媒体类型误导解码器。
 +      throw new Error("Attachment MIME does not match its data URL")
 +    const oldSha = digest(dataUrlBytes(attachment.url))
 +    // oldSha描述数据库当前收到的payload；它不是文件名、MIME或source的替代品。
 +    // 三个身份分别校验，避免把“内容看似正确”的错误记录当作已修复记录。
++    // newSha命中即进入幂等分支，但仍按完整路径重验source与输出。
 +    const migrated = input.newSha !== undefined && oldSha === input.newSha
 +    if (!migrated && oldSha !== input.oldSha) throw new Error(`Attachment SHA mismatch: expected ${input.oldSha}, found ${oldSha}`)
 +
@@ -826,12 +608,14 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +    // 脚本不截断、拼接或尝试修补旧bytes；唯一新内容来自调用者确认的完整源文件。
 +    // 即使当前记录已经命中新hash，也必须重新确认source，保证幂等结果仍可审计。
 +    if (sourceSha !== input.sourceSha) throw new Error(`Source SHA mismatch: expected ${input.sourceSha}, found ${sourceSha}`)
++    // sharp仅在真正解码时加载；dry-run同样依赖它产出确定性输出hash。
 +    const sharp = (await import("sharp")).default
 +    const format = (await sharp(source).metadata()).format
 +    // Sharp的format是解码器识别出的实际格式，不信任原记录的扩展名或MIME声明。
 +    const sourceMime = format === "svg" ? "image/svg+xml" : format ? `image/${format}` : undefined
 +    // 小图可能由Image.Service原样返回，因此必须用实际源格式而不是损坏附件声明的MIME。
 +    if (!sourceMime) throw new Error(`Unsupported source image format: ${format ?? "unknown"}`)
++    // normalize走完整生产链，使迁移输出与运行时写入完全同构。
 +    const normalized = await normalize(row, sourceMime, source, input.tokenBudget)
 +    const output = dataUrlBytes(normalized.url)
 +    // normalized.url再次按其自报MIME校验，防止服务实现返回bytes与metadata不一致。
@@ -846,6 +630,7 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +      // 幂等只表示同一份完整附件已存在，不表示可以修复错误的媒体声明。
 +      if (attachment.mime !== normalized.mime || !attachment.url.startsWith(`data:${normalized.mime};base64,`))
 +        throw new Error("Migrated attachment metadata does not match its bytes")
++      // 幂等出口只回显现有hash，不创建备份也不触碰任何数据行。
 +      console.log(JSON.stringify({ status: "already migrated", part: input.part, sha256: oldSha }, null, 2))
 +      return
 +    }
@@ -866,6 +651,7 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +    }
 +    if (!input.apply) {
 +      // Dry-run只给出确定的新hash，供第二次--apply形成old/source/new三重前置条件。
++      // 报告中的new_sha256是下一次--apply的第三前置条件，先打印再退出。
 +      console.log(JSON.stringify(report, null, 2))
 +      return
 +    }
@@ -873,6 +659,7 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +    // 写事务前再次确认master没有被验证过程或外部程序改动。
 +    // 备份hash失配时在UPDATE前终止，live数据库仍保持原值。
 +    await verifyBackupManifest(backup!)
++    // structuredClone隔离原始JSON；只有附件槽位被替换，其余字段保持原样序列化。
 +    const next = structuredClone(part)
 +    next.state.attachments[input.attachmentIndex] = { ...attachment, mime: normalized.mime, url: normalized.url }
 +    const nextData = JSON.stringify(next)
@@ -885,11 +672,13 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +      const stored = db.query<{ data: string }, [string]>("SELECT data FROM part WHERE id = ?").get(input.part)
 +      if (stored?.data !== nextData) throw new Error("Stored Part does not match the intended JSON")
 +      if (db.query("PRAGMA foreign_key_check").all().length !== 0) throw new Error("foreign_key_check failed")
++      // 写后完整性检查在事务内执行，任一失败都会回滚UPDATE而不是留下半迁移状态。
 +      const integrity = db.query<{ integrity_check: string }, []>("PRAGMA integrity_check").get()
 +      if (integrity?.integrity_check !== "ok") throw new Error("integrity_check failed")
 +    })()
 +    console.log(JSON.stringify({ ...report, status: "migrated" }, null, 2))
 +  } finally {
++    // finally保证只读与写连接都释放，避免WAL文件被迁移进程长期持有。
 +    db.close()
 +  }
 +}
@@ -900,6 +689,7 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.succeed({}) })),
 +  )
 +  return Effect.runPromise(
++    // runPromise把Effect桥接回CLI同步流程；normalize错误沿rejection冒泡为非零退出。
 +    Effect.gen(function* () {
 +      return yield* (yield* Image.Service).normalize(
 +        {
@@ -1006,121 +796,27 @@ index 0000000000000000000000000000000000000000..96a335695a7565eac39677af03676454
 +  return result
 +}
 diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
-index 5a25e0dd4f2e922d17ab0d1ff97e05f504617498..3dc7c66e1311b4be327c81ca949841cdbbc9ed32 100644
 --- a/packages/opencode/src/image/image.ts
 +++ b/packages/opencode/src/image/image.ts
-@@ -1,7 +1,13 @@
- import { Config } from "@/config/config"
- import type { MessageV2 } from "@/session/message-v2"
-+import { Global } from "@opencode-ai/core/global"
- import * as Log from "@opencode-ai/core/util/log"
- import { Context, Effect, Layer, Schema } from "effect"
-+import { createHash, randomUUID } from "node:crypto"
-+import fs from "node:fs/promises"
-+import path from "node:path"
-+
-+declare const OPENCODE_COMPILED: boolean | undefined
+@@ -64,7 +64,8 @@ export interface Interface {
  
- const MAX_BASE64_BYTES = 5 * 1024 * 1024
- const MAX_WIDTH = 2000
-@@ -15,6 +21,12 @@ const JPEG_QUALITIES = [85, 70, 55, 40]
- const log = Log.create({ service: "image" })
- type Sharp = typeof import("sharp")
- type SharpMetadata = import("sharp").Metadata
-+type EmbeddedSharp = {
-+  target: string
-+  version: string
-+  addon: string
-+  files: Record<string, string>
-+}
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
  
- export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
-   "ImageResizerUnavailableError",
-@@ -72,10 +84,13 @@ export const layer = Layer.effect(
-     const loadSharp = yield* Effect.cached(
-       Effect.tryPromise({
-         try: async () => {
-+          // compiled和源码路径只区别Sharp的装载位置，后续metadata/resize/encode始终共用同一Sharp实现。
-+          // compiled资源准备失败直接映射为ResizerUnavailable，不允许绕过Sharp返回输入附件。
-+          if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) await prepareCompiledSharp()
-           const mod = await import("sharp")
-           const value: unknown = Reflect.get(mod, "default")
-+          // Sharp 0.34.5的动态import契约是default callable；其他形状不是可支持的第二后端。
-           if (isSharp(value)) return value
--          if (isSharp(mod)) return mod
-           throw new Error("sharp module did not expose a callable export")
-         },
-         catch: (error) => {
-@@ -171,6 +186,62 @@ function isSharp(value: unknown): value is Sharp {
-   return typeof value === "function"
- }
- 
-+async function prepareCompiledSharp() {
-+  // build.ts 同时把虚拟模块放入files/entrypoints；compiled缺失时直接失败，不猜测开发机node_modules位置。
-+  // @ts-expect-error generated at build time
-+  const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
-+  // Sharp版本和target共同隔离cache，升级或切换libc时不能复用ABI不兼容的addon。
-+  const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
-+  // addon加载前必须等待所有DLL/dylib/so完成校验，避免并发看到“node存在但依赖库未就绪”的半状态。
-+  // Promise并行只影响释放速度；全量完成前不会向官方loader公开addon绝对路径。
-+  await Promise.all(
-+    Object.entries(embedded.files).map(([relative, source]) =>
-+      ensureExtractedNativeFile(source, path.join(root, ...relative.split("/"))),
-+    ),
-+  )
-+  // Sharp 的动态 package require 无法从 bunfs 找到 addon；build plugin 只让官方 loader优先读取该绝对路径。
-+  // 全局值只承载打包产物确定的路径，不暴露配置入口，也不接受外部覆盖。
-+  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH = path.join(
-+    root,
-+    ...embedded.addon.split("/"),
-+  )
-+}
-+
-+async function ensureExtractedNativeFile(source: string, target: string) {
-+  // 已验证文件直接复用；只看存在/大小不足以防止崩溃遗留或同名错误native资源。
-+  // source来自Bun内嵌只读资源，因此与target内容hash相等即可作为完整提交标志。
-+  if (await sameFileContent(source, target)) return
-+  await fs.mkdir(path.dirname(target), { recursive: true })
-+  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
-+  try {
-+    // 临时文件和目标同目录，使rename保持同卷原子替换语义。
-+    // PID和UUID避免同进程任务及不同进程之间复用未完成的临时文件。
-+    await Bun.write(temp, Bun.file(source))
-+    try {
-+      await fs.rename(temp, target)
-+    } catch (error) {
-+      // Windows会锁住已加载的node/DLL；并发loser只在winner内容完全一致时复用，不能覆盖未知文件。
-+      // 内容不同则保留原错误，防止用删除或覆盖绕过正在使用的ABI冲突文件。
-+      if (await sameFileContent(source, target)) return
-+      throw error
-+    }
-+    if (!(await sameFileContent(source, target))) throw new Error(`Extracted Sharp resource failed verification: ${target}`)
-+  } finally {
-+    await fs.rm(temp, { force: true }).catch(() => {})
-+  }
-+}
-+
-+async function sameFileContent(source: string, target: string) {
-+  if (!(await Bun.file(target).exists())) return false
-+  // 先比较大小避免每次图片请求都无条件hash较大的libvips文件。
-+  if (Bun.file(source).size !== Bun.file(target).size) return false
-+  return (await fileDigest(source)) === (await fileDigest(target))
-+}
-+
-+async function fileDigest(file: string) {
-+  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
-+}
-+
- function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata, DecodeError> {
-   return Effect.tryPromise({
-     try: () => sharp(buffer).metadata(),
+-const layer = Layer.effect(
++// #485：导出 layer 供离线维护脚本（script/migrate-image-attachment.ts）复用生产 normalize 链
++export const layer = Layer.effect(
+   Service,
+   Effect.gen(function* () {
+     const config = yield* Config.Service
+
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 7aa134bd8816799f77f8b4a61940c22974e01c00..267bc5ecd64d59f68f4af73e86dcccec3b5b2dee 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -571,13 +571,7 @@ export const layer = Layer.effect(
-             )
-             const normalized = yield* Effect.forEach(toolAttachments, (attachment) =>
+@@ -624,14 +624,9 @@ const layer = Layer.effect(
+             }
+             const rawOutput = toolResultOutput(value)
+             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
++              // #485：fail-closed——resizer 不可用时该附件失败省略（omitted 计数），不再回退原图
                attachment.mime.startsWith("image/")
 -                ? image.normalize(attachment).pipe(
 -                    Effect.catchIf(
@@ -1130,16 +826,18 @@ index 7aa134bd8816799f77f8b4a61940c22974e01c00..267bc5ecd64d59f68f4af73e86dcccec
 -                    Effect.exit,
 -                  )
 +                ? image.normalize(attachment).pipe(Effect.exit)
-                 : Effect.succeed(Exit.succeed<MessageV2.FilePart>(attachment)),
+                 : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
              )
              const omitted = normalized.filter(Exit.isFailure).length
+
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index e24214de21d9d7f8e5dbf272dc3a8ee3e93f5058..cbf9c18d57fd6e0c97e9f359f3e5c3eed9ed6318 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1925,12 +1925,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -1414,13 +1414,9 @@ const layer = Layer.effect(
+       )
  
        const parts = yield* Effect.forEach(resolvedParts, (part) =>
++        // #485：fail-closed——resizer 不可用时 normalize 失败直接向上传播，Part 不入库
          part.type === "file" && part.mime.startsWith("image/")
 -          ? image.normalize(part).pipe(
 -              Effect.catchIf(
@@ -1151,50 +849,93 @@ index e24214de21d9d7f8e5dbf272dc3a8ee3e93f5058..cbf9c18d57fd6e0c97e9f359f3e5c3ee
            : Effect.succeed(part),
        )
  
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 5bdb607cfe8505242485e6d69ba538a633b5f965..9a8b7722d074098bc78e76d72d388222891c8b76 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -632,12 +632,6 @@ export const ReadTool = Tool.define(
-             input,
-             // `read` results enter the model immediately, so keep its payload near the existing image token cap.
-             { tokenBudget: 1600 },
--          ).pipe(
--            // If the native resizer cannot load, preserve the old read behavior: attach the original bytes instead of failing.
--            Effect.catchIf(
--              (error) => error instanceof Image.ResizerUnavailableError,
--              () => Effect.succeed(input),
--            ),
-           )
+@@ -790,13 +790,8 @@ export const ReadTool = Tool.define<
+               // #277：read 结果立即进入模型上下文，预算对齐既有图片 token 上限
+               { tokenBudget: 1600 },
+             )
+-            .pipe(
+-              // #277：resizer 不可用时保留原始图片字节，维持既有 read 行为而不是让读取失败
+-              Effect.catchIf(
+-                (error) => error instanceof Image.ResizerUnavailableError,
+-                () => Effect.succeed(input),
+-              ),
+-            )
++          // #485：fail-closed 反转 #277 的回退决策——resizer 不可用时读取直接失败，
++          // 不再把未经压缩的原始字节交给模型
            const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
            return {
+             title,
+
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
-index c65168bd0cdc6e736b6db9639ff467668aee5ccb..453520687fd819089901c9109fdd9bd4d39eb0fb 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -194,8 +194,18 @@ const env = Layer.mergeAll(
-     Layer.provideMerge(deps),
-   ),
- )
-+const unavailableEnv = Layer.mergeAll(
-+  TestLLMServer.layer,
-+  SessionProcessor.layer.pipe(
-+    Layer.provide(summary),
-+    Layer.provide(Layer.succeed(Image.Service, Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }))),
-+    Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
-+    Layer.provideMerge(deps),
-+  ),
-+)
+@@ -11,6 +11,8 @@ import type { Agent } from "../../src/agent/agent"
+ import { Provider } from "@/provider/provider"
+ 
+ import { Session } from "@/session/session"
++// #485：Image.Service 供 resizer 不可用环境注入
++import { Image } from "@/image/image"
+ import { LLM } from "../../src/session/llm"
+ import { MessageV2 } from "../../src/session/message-v2"
+ import { SessionProcessor } from "../../src/session/processor"
+@@ -188,6 +190,18 @@ const env = LayerNode.compile(
  
  const it = testEffect(env)
-+const unavailable = testEffect(unavailableEnv)
  
- const boot = Effect.fn("test.boot")(function* () {
-   const processors = yield* SessionProcessor.Service
-@@ -204,6 +214,46 @@ const boot = Effect.fn("test.boot")(function* () {
-   return { processors, session, provider }
++// #485：resizer 不可用环境——Image.Service 注入必然失败的 normalize，验证 fail-closed 省略语义
++const failingImageLayer = Layer.succeed(
++  Image.Service,
++  Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
++)
++const unavailableEnv = LayerNode.compile(
++  // TestLLMServer必须保留在环境中：工具循环仍需要一次完整的provider往返。
++  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
++  [...replacements, [Image.node, failingImageLayer]],
++)
++const unavailable = testEffect(unavailableEnv)
++
+ const providerErrorLLM = Layer.succeed(
+   LLM.Service,
+   LLM.Service.of({
+@@ -252,6 +266,28 @@ const failingRead = aiTool({
+   },
  })
  
++// #485：携带图片附件的 read 工具工厂——附件携带完整 FilePart 三 ID，
++// 与生产 session/tools.ts 注册适配器同形；否则会被 processor 的 Schema 过滤丢弃，
++// 使 omitted 分支不可达（回归测试空转）。
++const makeImageRead = (sessionID: SessionID, messageID: MessageID) =>
++  aiTool({
++    description: "image read",
++    inputSchema: z.object({ path: z.string() }),
++    execute: async (): Promise<{ output: string; attachments: Array<Record<string, string>> }> => ({
++      output: "tool output",
++      attachments: [
++        {
++          id: PartID.ascending(),
++          sessionID,
++          messageID,
++          type: "file",
++          mime: "image/png",
++          url: "data:image/png;base64,AA==",
++        },
++      ],
++    }),
++  })
++
+ // [local-smark] 构造并行工具调用的 SSE chunks。
+ // reply().tool() 硬编码 index=0（llm-server.ts toolStartLine），无法脚本并行调用——
+ // OpenAI Chat protocol 用 tool.index 作为 stream key（openai-chat.ts:334），
+@@ -1623,3 +1659,52 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
+     { config: cfg },
+   ),
+ )
++
++// #485：resizer 不可用时图片附件被省略（fail-closed），工具文本保留且不回退原图
 +unavailable.live("omits an image attachment when normalization is unavailable", () =>
 +  provideTmpdirServer(
 +    ({ dir, llm }) =>
@@ -1214,94 +955,65 @@ index c65168bd0cdc6e736b6db9639ff467668aee5ccb..453520687fd819089901c9109fdd9bd4
 +            time: parent.time,
 +            agent: parent.agent,
 +            model: { providerID: ref.providerID, modelID: ref.modelID },
-+          } satisfies MessageV2.User,
++          } satisfies SessionV1.User,
 +          sessionID: chat.id,
 +          model,
 +          agent: agent(),
 +          system: [],
 +          messages: [{ role: "user", content: "read image" }],
-+          tools: { image_read: imageRead },
++          tools: { image_read: makeImageRead(chat.id, msg.id) },
 +        })
-+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
++        const part = (yield* MessageV2.parts(msg.id)).find((item): item is MessageV2.ToolPart => item.type === "tool")
 +        expect(result).toBe("continue")
++        // fail-closed不能把工具执行也取消：循环仍继续，工具part按正常completed落库
 +        expect(part?.state.status).toBe("completed")
 +        if (part?.state.status === "completed") {
-+          // 失败图片不能回到provider，但工具文本仍需保留，避免丢失非图片结果。
++          // 失败图片不能回到 provider，但工具文本仍需保留，且必须携带省略说明——
++          // 该断言钉住 omitted 分支真实可达（附件已过 FilePart Schema 过滤）
 +          expect(part.state.attachments).toBeUndefined()
-+          expect(part.state.output).toContain("image omitted")
++          expect(part.state.output).toContain("tool output")
++          expect(part.state.output).toContain(
++            "[1 image omitted: could not be resized below the image size limit.]",
++          )
 +        }
++        // 直接回读MessageV2而不是相信内存结果，确认附件确实未随part持久化
++        const stored = yield* MessageV2.parts(msg.id)
++        expect(stored.some((item) => item.type === "file")).toBe(false)
 +      }),
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
 +)
-+
- // ---------------------------------------------------------------------------
- // consecutive-error breaker 测试工具
- // ---------------------------------------------------------------------------
-@@ -221,6 +271,14 @@ const failingRead = aiTool({
-     throw new Error("File not found")
-   },
- })
-+const imageRead = aiTool({
-+  description: "image read",
-+  inputSchema: z.object({ path: z.string() }),
-+  execute: async (): Promise<{ output: string; attachments: Array<{ type: "file"; mime: string; url: string }> }> => ({
-+    output: "tool output",
-+    attachments: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
-+  }),
-+})
- 
- // [local-smark] 构造并行工具调用的 SSE chunks。
- // reply().tool() 硬编码 index=0（llm-server.ts toolStartLine），无法脚本并行调用——
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index d7e5fd3e5c4776ffb635909157abf79964353f6f..b3b18527c0af7d73928a507335dc619d20387b0a 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -170,6 +170,10 @@ const registryImage = Layer.succeed(
-     normalize: (input) => Effect.succeed(input),
-   }),
- )
-+const unavailableImage = Layer.succeed(
-+  Image.Service,
-+  Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
-+)
+@@ -249,13 +249,19 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
+   return LayerNode.compile(promptRoot, replacements)
+ }
  
- const processorCreateStarted: Array<() => void> = []
- const blockingProcessor = Layer.succeed(
-@@ -179,7 +183,7 @@ const blockingProcessor = Layer.succeed(
-   }),
+-function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
++function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; image?: "unavailable" }) {
+   const root = LayerNode.group([promptRoot, testLLMServerNode])
++  // #485：resizer 不可用注入——normalize 必然失败，验证 prompt 在持久化前 fail-closed
++  const unavailableImage = Layer.succeed(
++    Image.Service,
++    Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
++  )
+   const replacements = [
+     [SessionSummary.node, summary],
+     [LSP.node, lsp],
+     [MCP.node, makeMcp(input?.mcpInstructions)],
+     [RuntimeFlags.node, runtimeFlags],
++    ...(input?.image === "unavailable" ? [[Image.node, unavailableImage] as const] : []),
+   ] as const
+   if (input?.processor === "blocking") {
+     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
+@@ -283,6 +289,30 @@ const withMcpInstructions = testEffect(
  )
- 
--function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
-+function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "unavailable" }) {
-   const deps = Layer.mergeAll(
-     Session.defaultLayer,
-     Snapshot.defaultLayer,
-@@ -225,7 +229,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
-       ? blockingProcessor
-       : SessionProcessor.layer.pipe(
-           Layer.provide(summary),
--          Layer.provide(Image.defaultLayer),
-+          Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
-           Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
-           Layer.provideMerge(deps),
-         )
-@@ -238,7 +242,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
-     TestLLMServer.layer,
-     SessionPrompt.layer.pipe(
-       Layer.provide(SessionRevert.defaultLayer),
--      Layer.provide(Image.defaultLayer),
-+       Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
-       Layer.provide(Reference.defaultLayer),
-       Layer.provide(summary),
-       Layer.provideMerge(run),
-@@ -257,8 +261,32 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
- const it = testEffect(makeHttp())
- const race = testEffect(makeHttp({ processor: "blocking" }))
- const accounting = testEffect(makeHttp({ usage: true }))
-+const unavailable = testEffect(makeHttp({ image: "unavailable" }))
  const unix = process.platform !== "win32" ? it.instance : it.instance.skip
- 
+ const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
++// #485：resizer 不可用环境——验证 prompt 在持久化前 fail-closed
++const unavailable = testEffect(makeHttp({ image: "unavailable" }))
 +unavailable.instance(
 +  "fails before persisting an image when the resizer is unavailable",
 +  () =>
@@ -1319,41 +1031,42 @@ index d7e5fd3e5c4776ffb635909157abf79964353f6f..b3b18527c0af7d73928a507335dc619d
 +        }),
 +      )
 +      expect(Exit.isFailure(result)).toBe(true)
-+      // normalize失败发生在updateMessage/updatePart之前，数据库中不应留下半个用户请求。
++      // normalize 失败发生在 updateMessage/updatePart 之前，数据库中不应留下半个用户请求
 +      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
 +    }),
 +  { git: true },
 +)
-+
+ 
  // Config that registers a custom "test" provider with a "test-model" model
  // so provider model lookup succeeds inside the loop.
- const cfg = {
+
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e855864fa5 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -1,4 +1,5 @@
+@@ -1,5 +1,6 @@
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 -import { afterEach, describe, expect } from "bun:test"
 +import { afterEach, describe, expect, test } from "bun:test"
 +import { Database as SQLite } from "bun:sqlite"
- import { Cause, Effect, Exit, Layer } from "effect"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Cause, Effect, Exit, Layer, Stream } from "effect"
  import path from "path"
- import { Agent } from "../../src/agent/agent"
-@@ -19,12 +20,28 @@ import { readOutline } from "../../src/tool/read-outline"
- import { Truncate } from "@/tool/truncate"
- import { Tool } from "@/tool/tool"
- import { Filesystem } from "@/util/filesystem"
--import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
-+import { disposeAllInstances, provideInstance, TestInstance, tmpdir, tmpdirScoped } from "../fixture/fixture"
+@@ -24,6 +25,7 @@ import {
+   provideInstance,
+   testInstanceStoreLayer,
+   TestInstance,
++  tmpdir,
+   tmpdirScoped,
+ } from "../fixture/fixture"
  import { testEffect } from "../lib/effect"
- import { Reference } from "@/reference/reference"
+@@ -31,6 +33,22 @@ import { testEffect } from "../lib/effect"
  import { Image } from "@/image/image"
  
  const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
++// #485：迁移脚本路径——子进程跑真实 CLI 边界，覆盖参数校验、只读模式与退出码
 +const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
 +
 +async function migrateImageAttachment(args: string[]) {
-+  // 子进程覆盖用户实际调用的CLI边界，避免测试绕过参数校验、只读模式或进程退出码。
 +  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], {
 +    cwd: path.join(import.meta.dir, "../.."),
 +    stdout: "pipe",
@@ -1369,37 +1082,40 @@ index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e8
  
  afterEach(async () => {
    await disposeAllInstances()
-@@ -645,7 +662,7 @@ describe("tool.read truncation", () => {
+@@ -586,8 +604,9 @@ describe("tool.read truncation", () => {
      }),
    )
  
+-  // #277：resizer 不可用时回退为附加原始图片字节，保持 read 的可用性而不是失败
 -  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
++  // #485：fail-closed 反转 #277 回退契约——处理器不可用时终止本次 Read，
++  // 不再把未经主处理链确认的原始字节继续交给模型
 +  noResizer.live("fails closed when the image resizer is unavailable", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
        const png = Buffer.from(
-@@ -654,13 +671,9 @@ describe("tool.read truncation", () => {
+@@ -596,14 +615,9 @@ describe("tool.read truncation", () => {
        )
        yield* put(path.join(dir, "image.png"), png)
  
 -      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+-      // #277：stub 使 normalize 必然失败，此时附件必须逐字节等于原始输入而非压缩产物
 -      expect(result.output).toStartWith("Image read successfully")
 -      expect(result.attachments?.[0]).toMatchObject({
 -        type: "file",
 -        mime: "image/png",
 -        url: `data:image/png;base64,${png.toString("base64")}`,
 -      })
-+      // 原图回退会把未经主处理链确认的数据继续交给模型；处理器不可用时必须终止本次 Read。
 +      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
++      // 错误必须指向resizer本身，而不是被上层包装成通用读取失败
 +      expect(error.message).toBe("Image resizer is unavailable")
      }),
    )
  
-@@ -1143,3 +1156,116 @@ describe("tool.read binary detection", () => {
-     }),
+@@ -1381,3 +1395,119 @@ describe("tool.read visible context stubs", () => {
    )
  })
-+
+ 
 +describe("image attachment migration", () => {
 +  test(
 +    "dry-runs, migrates once, remains idempotent, and rejects non-images",
@@ -1407,6 +1123,7 @@ index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e8
 +      await using tmp = await tmpdir()
 +      const dbPath = path.join(tmp.path, "opencode.db")
 +      const backupDir = path.join(tmp.path, "backups")
++      // 大图fixture确保Sharp真实执行缩放路径，而不是小图原样旁路。
 +      const source = path.join(FIXTURES_DIR, "large-image.png")
 +      const sourceBytes = Buffer.from(await Bun.file(source).arrayBuffer())
 +      const oldBytes = Buffer.from("known truncated image bytes")
@@ -1420,6 +1137,7 @@ index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e8
 +        },
 +      })
 +      const db = new SQLite(dbPath)
++      // WAL模式与生产库一致：备份快照必须包含未checkpoint的已提交页。
 +      db.run("PRAGMA journal_mode = WAL")
 +      // 最小真实SQLite表保留脚本依赖的四列，让测试聚焦Part行为而非复制生产schema。
 +      db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL)")
@@ -1463,6 +1181,7 @@ index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e8
 +
 +      // Apply将dry-run产出的hash变成第三个前置条件，防止Sharp版本或编码结果漂移后静默写库。
 +      const applyArgs = [...args, "--expected-new-sha", report.new_sha256, "--backup-dir", backupDir, "--apply"]
++      // RAISE(IGNORE)让UPDATE静默零行生效，模拟并发竞争而不需要真实多进程。
 +      db.run("CREATE TRIGGER reject_part_update BEFORE UPDATE OF data ON part BEGIN SELECT RAISE(IGNORE); END")
 +      const casRejected = await migrateImageAttachment(applyArgs)
 +      expect(casRejected.exitCode).not.toBe(0)
@@ -1512,3 +1231,59 @@ index 18984bcc7573cdf1f423b7f8de921b1f92ccd1b1..e9f7406a14b292b149bdb9404d7bb3e8
 +    120_000,
 +  )
 +})
++
+
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -84,9 +84,9 @@ const layer = Layer.effectDiscard(
+                 limit: input.limit,
+               })
+               if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
+-                return yield* image
+-                  .normalize(resource, { ...content, encoding: "base64" })
+-                  .pipe(Effect.catchTag("Image.ResizerUnavailableError", () => Effect.succeed(content)))
++                // #485：与 V1 read 工具同语义反转——resizer 不可用时读取失败，
++                // 不再把未经主处理链确认的原始字节回退给模型（V2 路径与 V1 保持一致）。
++                return yield* image.normalize(resource, { ...content, encoding: "base64" })
+               }
+               if ("encoding" in content && content.encoding === "base64")
+                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
+@@ -94,7 +94,9 @@ const layer = Layer.effectDiscard(
+             }).pipe(
+               Effect.mapError((error) => {
+                 const message =
+-                  error instanceof ReadToolFileSystem.BinaryFileError ||
++                  error instanceof Image.ResizerUnavailableError
++                    ? "Image resizer is unavailable"
++                    : error instanceof ReadToolFileSystem.BinaryFileError ||
+                   error instanceof ReadToolFileSystem.MediaIngestLimitError ||
+                   error instanceof Image.DecodeError ||
+                   error instanceof Image.SizeError
+
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -310,7 +310,8 @@ describe("ReadTool", () => {
+     }),
+   )
+ 
+-  itWithoutResizer.effect("returns the original image when the resizer is unavailable", () =>
++  // #485：反转旧回退契约——resizer 不可用时 fail-closed，与 V1 read 工具行为一致
++  itWithoutResizer.effect("fails closed when the resizer is unavailable", () =>
+     Effect.gen(function* () {
+       const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+       readResult = {
+@@ -328,10 +329,7 @@ describe("ReadTool", () => {
+           ...toolIdentity,
+           call: { type: "tool-call", id: "call-image-fallback", name: "read", input: { path: "pixel.png" } },
+         }),
+-      ).toMatchObject({
+-        type: "content",
+-        value: [{ type: "text" }, { type: "file", uri: `data:image/png;base64,${png}`, mime: "image/png" }],
+-      })
++      ).toEqual({ type: "error", value: "Image resizer is unavailable" })
+     }),
+   )
+ 
+

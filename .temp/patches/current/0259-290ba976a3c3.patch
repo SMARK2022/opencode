@@ -168,16 +168,17 @@ index d7c826708..2562da749 100644
  export const TuiThreadCommand = cmd({
    command: "$0 [project]",
    describe: "start opencode tui",
-@@ -554,7 +577,28 @@
-         unguard?.()
-       } catch {}
-     }
+@@ -551,9 +574,29 @@
+      await electionLease?.release().catch(() => undefined)
+      try {
+        unguard?.()
+      } catch {}
+    }
 +    // #259：退出前提示 daemon 状态——仅当有活跃连接/会话时显示 stop 命令
 +    await printDaemonExitHint()
-     process.exit(0)
-   },
+    process.exit()
+  },
  })
-+
 +// #259：退出时查询 daemon 状态并提示 stop 命令——仅在有活跃 TUI/会话时显示
 +export async function printDaemonExitHint() {
 +  const s = await status()

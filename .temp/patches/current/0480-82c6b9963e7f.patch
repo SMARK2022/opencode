@@ -8,6 +8,11 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
+适配：owner 迁移 packages/tui/src/prompt-voice-recorder.ts 与 test/prompt/prompt-voice-recorder
+.test.ts；0359 引入的 [local-smark] 注释前缀随改写延续；测试动态 import 重映射。链前瞻：
+后续 0558 以独立 Worker 架构整体移除 drainBufferedFrames（删除面与本项新增一一对应）——
+本项按源顺序落位以满足后继删除前像。
+
 drainBufferedFrames 遇到单次慢读（wall-clock ≥28ms）时直接终止，
 丢弃全部剩余 queued 帧。OS 调度抢占导致的单次 wall-clock 膨胀
 即可触发此缺陷，造成 CI 测试间歇性失败（wavFrameCount < 121）。
@@ -17,20 +22,20 @@ drainBufferedFrames 遇到单次慢读（wall-clock ≥28ms）时直接终止，
 测试侧移除不真实的 queuedReadDelayMs=4（真实 queued read 是亚毫秒级
 memcpy），新增 slowOnReadCount 确定性模拟单次抢占的行为级测试。
 
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
 index b6c187c2d2190b821edc9ae03bf2e779e265161d..6d284805b2cbf6a8dc3aeea9a69375a528dc332e 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+--- a/packages/tui/src/prompt-voice-recorder.ts
++++ b/packages/tui/src/prompt-voice-recorder.ts
 @@ -44,10 +44,11 @@ const VOICE_RECORDER_DEVICE_INDEX = -1
  // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
  const VOICE_RECORDER_BUFFERED_FRAMES = 250
  // queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
--// macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
+-// [local-smark] macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
 -// 导致 drainBufferedFrames 误判缓冲耗尽而提前终止（丢失尾部 queued 帧）。
 -// 0.9 系数给出 28ms 阈值：queued read（~5ms）留 23ms 余量，live read（~32ms 帧周期）仍可正确区分。
 -// 28ms 距 32ms 仅 4ms，但调度抖动只会膨胀测量值、不会缩短，因此 4ms 间隙不可被抖动闭合。
 +// 生产环境中 queued read 是亚毫秒级 memcpy，live read 阻塞约一个帧周期（32ms）。
-+// 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
++// [local-smark] 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
 +// 调度抖动只会膨胀 wall-clock 测量值、不会缩短，因此 live read 不会被误判为 queued。
 +// drainBufferedFrames 对首次慢读做二次确认（再读一帧），防止单次抢占膨胀的 queued read
 +// 被误判为 live 而丢失全部尾部帧；只有连续两帧都慢才认定缓冲耗尽。
@@ -60,10 +65,10 @@ index b6c187c2d2190b821edc9ae03bf2e779e265161d..6d284805b2cbf6a8dc3aeea9a69375a5
    }
  }
  
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 index 2e3449438de88e4d612e27237624494c2d698288..af9831cb8bb2937c3b51886c3b6718dabfd9cd5e 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 @@ -14,6 +14,9 @@ class FakePvRecorder {
    static queuedReadDelayMs = 0
    static liveReadDelayMs = 0
@@ -106,7 +111,7 @@ index 2e3449438de88e4d612e27237624494c2d698288..af9831cb8bb2937c3b51886c3b6718da
    // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
    // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
 -  // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
--  // macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
+-  // [local-smark] macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
 -  // 导致 drainBufferedFrames 误判缓冲耗尽而提前终止。
 -  // 生产代码的 DRAIN_BLOCKED_READ_MS 阈值需留出足够余量（28ms = 0.9×32ms）。
 +  // queued read 不引入 busyWait：真实 PvRecorder queued read 是亚毫秒级 memcpy，
@@ -114,7 +119,7 @@ index 2e3449438de88e4d612e27237624494c2d698288..af9831cb8bb2937c3b51886c3b6718da
 +  // drainBufferedFrames 误判缓冲耗尽而提前终止，丢失尾部 queued 帧。
 +  // live read 用 40ms busyWait 模拟帧周期，远超 28ms 阈值，确保被 drain 正确丢弃。
    test("writes audio buffered during a stalled TUI tick before stopping", async () => {
-     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+     const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
  
 @@ -183,7 +193,35 @@ describe("prompt voice recorder", () => {
      try {
@@ -141,7 +146,7 @@ index 2e3449438de88e4d612e27237624494c2d698288..af9831cb8bb2937c3b51886c3b6718da
 +  // 判定第 50 帧为抢占而非缓冲耗尽，两帧都保留，继续 drain 直到真正的 live read。
 +  // 最终 WAV 帧数仍为 121（1 bg + 120 drain），live 帧（9999）被两阶段确认正确丢弃。
 +  test("recovers queued frames after a single slow read via drain confirmation", async () => {
-+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++    const { startPromptVoiceRecorder } = await import("../../src/prompt-voice-recorder")
 +
 +    const recorder = await startPromptVoiceRecorder()
 +    try {
@@ -153,3 +158,4 @@ index 2e3449438de88e4d612e27237624494c2d698288..af9831cb8bb2937c3b51886c3b6718da
        FakePvRecorder.liveReadDelayMs = 40
        FakePvRecorder.liveFrameValue = 9_999
        await recorder.stop()
+

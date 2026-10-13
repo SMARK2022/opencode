@@ -1,18 +1,20 @@
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -7,3 +7,5 @@
+@@ -7,5 +7,7 @@
  import { MessageV2 } from "@/session/message-v2"
 +import { Auth } from "@/auth"
 +import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
  import { SessionRetry } from "@/session/retry"
+ import { Database } from "@opencode-ai/core/database/database"
+ 
  import { MessageID, PartID, SessionID } from "@/session/schema"
 @@ -101,3 +103,5 @@
-     const config = yield* Config.Service
+    const config = yield* Config.Service
 +    // #250：auth.get(providerID) 判定凭据类型——只有 openai+oauth 才走 instructions 提升
 +    const auth = yield* Auth.Service
-     const provider = yield* Provider.Service
-     // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
+    const provider = yield* Provider.Service
+    // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
 @@ -372,12 +374,32 @@
            Effect.gen(function* () {
 -            const language = yield* provider.getLanguage(model)
@@ -54,25 +56,27 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 -              messages: [...messages],
 +              messages: [...reviewerMessages],
                tools: {
-@@ -904,4 +930,6 @@
+@@ -904,5 +930,7 @@
  // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
--export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node] })
+ // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
+-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Database.node] })
 +// #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
 +// node deps 显式加入 Auth.node，LayerNode 依赖图在编译期保持完整
-+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node] })
++export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node] })
  
  export * as PermissionReviewer from "./service"
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,269 @@
 +import { describe, expect } from "bun:test"
 +import { Effect, Layer } from "effect"
 +import { createOpenAI } from "@ai-sdk/openai"
 +import { ModelV2 } from "@opencode-ai/core/model"
 +import { ProviderV2 } from "@opencode-ai/core/provider"
 +import { Auth } from "../../src/auth"
++import { Database } from "@opencode-ai/core/database/database"
 +import { Config } from "../../src/config/config"
 +import { PermissionReviewer } from "../../src/permission/reviewer/service"
 +import { Session } from "../../src/session/session"
@@ -218,6 +222,8 @@ new file mode 100644
 +      Layer.provide(provider.layer),
 +      Layer.provide(authLayer(authInfo)),
 +      Layer.provide(sessionLayer),
++      // #250：Database 仅类型层需要——review 无 sessionID 时不触 transcript 查询
++      Layer.provide(Layer.mock(Database.Service)({ db: undefined as never })),
 +    ),
 +  }
 +}

@@ -156,9 +156,9 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 index 444d164..27b87ae 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -363,12 +363,27 @@
-       setStore("session_status", reconcile(x.data ?? {}))
-     }
+@@ -306,12 +306,27 @@
+      .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+    }
  
 +    // #273：提前获取 exit，供 global.disposed 事件处理中调用
 +    const exit = useExit()
@@ -184,12 +184,10 @@ index 444d164..27b87ae 100644
            void bootstrap()
            break
          case "server.connected":
-@@ -682,8 +696,7 @@
-       pendingPartDeltas = []
-       loggedPartDeltaApplications.clear()
-     })
+@@ -625,6 +640,5 @@
+      pendingPartDeltas = []
+      loggedPartDeltaApplications.clear()
+    })
  
 -    const exit = useExit()
      const args = useArgs()
- 
-     async function bootstrap(input: { fatal?: boolean } = {}) {

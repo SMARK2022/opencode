@@ -175,15 +175,13 @@ diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool
 index 436762d1c..c1139f110 100644
 --- a/packages/opencode/src/tool/registry.ts
 +++ b/packages/opencode/src/tool/registry.ts
-@@ -55,6 +55,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
+@@ -55,4 +55,6 @@
  import { MCP } from "@/mcp"
  import { PermissionV1 } from "@opencode-ai/core/v1/permission"
  import { McpCatalog } from "@/mcp/catalog"
 +// #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖
 +import { Image } from "@/image/image"
  
- export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
-   return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
 @@ -444,6 +446,8 @@ export const node = LayerNode.make({
      Skill.node,
      Session.node,

@@ -13,23 +13,23 @@ rebase 同时合并 maintenance recovery 的共享 stage worker 与 Windows hidd
 绕过后续的类型检查，同时不改变 recovery marker 与 gate 时序。
 
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index 2c35fe7631b39d414b6b6e11505ccde3343bef01..41fef43eb40c3a99f09a2ecd8312425b87ca4a94 100644
+index 846556cbe..fdc28fb9b 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -472,7 +472,8 @@ function maintenanceStageWorkerSource(leaseDir: string) {
+@@ -496,7 +496,7 @@ function maintenanceStageWorkerSource(leaseDir: string) {
  
- // stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
+ // #539：stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
  function spawnStageWorker(lockPath: string, leaseDir: string) {
 -  const proc = spawnBackground([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
-+  // 专用 pipe overload 保留 stdin/stdout 静态类型；windowsHide 直接落在同一真实 spawn。
 +  const proc = Bun.spawn([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
      env: {
        ...isolatedDaemonEnv(lockPath),
        OPENCODE_PROCESS_ROLE: "worker",
-@@ -481,6 +482,7 @@ function spawnStageWorker(lockPath: string, leaseDir: string) {
+@@ -505,6 +505,8 @@ function spawnStageWorker(lockPath: string, leaseDir: string) {
      stdin: "pipe",
      stdout: "pipe",
      stderr: "ignore",
++    // #548：脱离 spawnBackground 统一注入后，hide 在直连 spawn 显式携带（等值）。
 +    windowsHide: process.platform === "win32",
    })
    return { proc, reader: proc.stdout.pipeThrough(new TextDecoderStream()).getReader() }

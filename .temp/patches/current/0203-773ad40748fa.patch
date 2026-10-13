@@ -655,22 +655,233 @@ index d973b5d..33288d0 100644
    { git: true },
  )
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 0040f99..2d1f8c2 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -506,6 +506,15 @@ each("asks for external_directory permission for wildcard external paths", () =>
-         const extDirReq = requests.find((r) => r.permission === "external_directory")
-         expect(extDirReq).toBeDefined()
-         expect(extDirReq!.patterns).toContain(want)
-+        // #203：Auto 模式下 external_directory 需使用同一次 shell 命令证据做 deterministic
-+        // #203：预审；否则项目外路径会先退回普通 ask，绕开 bash auto 路由
-+        expect(extDirReq!.metadata).toMatchObject({
-+          action_kind: "shell",
-+          command: `cat ${file}`,
-+          cwd: projectRoot,
-+          agent: "build",
-+        })
-+        expect(typeof extDirReq!.metadata.shell).toBe("string")
-       }),
-     ),
+@@ -10,7 +10,13 @@ import { Shell } from "@opencode-ai/core/shell"
+ import { ShellTool } from "../../src/tool/shell"
+ import { Filesystem } from "@/util/filesystem"
+ import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
+-import type { Permission } from "../../src/permission"
++import { Permission } from "../../src/permission"
++import { PermissionReviewer } from "../../src/permission/reviewer/service"
++import { PermissionSessionCache } from "../../src/permission/cache/session-cache"
++import { PermissionCircuitBreaker } from "../../src/permission/reviewer/circuit-breaker"
++import { EventV2Bridge } from "../../src/event-v2-bridge"
++import { InstanceBootstrap } from "../../src/project/bootstrap"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { Agent } from "../../src/agent/agent"
+ import { Truncate } from "@/tool/truncate"
+ import { SessionID, MessageID } from "../../src/session/schema"
+@@ -37,6 +43,47 @@ const shellLayer = Layer.mergeAll(
+   testInstanceStoreLayer,
+ )
+ const it = testEffect(shellLayer)
++// #203：带确定性 deny reviewer 的 shell env——恢复 original 三组 PowerShell SSH/gci 回归：
++// #203：Auto 敏感访问须端到端经 reviewer fail-closed，而非仅 precheck 单测覆盖。
++let reviewedCalls = 0
++const reviewedShellEnv = Layer.mergeAll(
++  AppNodeBuilder.build(
++    LayerNode.group([
++      Permission.node,
++      PermissionReviewer.node,
++      PermissionSessionCache.node,
++      PermissionCircuitBreaker.node,
++      EventV2Bridge.node,
++      CrossSpawnSpawner.node,
++      InstanceStore.node,
++    ]),
++    [
++      // #203：noop bootstrap 阻止测试环境启动完整实例生命周期
++      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))],
++      [
++        PermissionReviewer.node,
++        Layer.succeed(
++          PermissionReviewer.Service,
++          PermissionReviewer.Service.of({
++            review: () =>
++              Effect.sync(() => {
++                reviewedCalls++
++                return {
++                  action: "deny" as const,
++                  reason: "reviewer rejected sensitive shell access",
++                  reviewID: "review_shell_sensitive",
++                  risk_level: "high" as const,
++                  user_authorization: "unknown" as const,
++                }
++              }),
++          }),
++        ),
++      ],
++    ],
++  ),
++  testInstanceStoreLayer,
++)
++const reviewed = testEffect(reviewedShellEnv)
+ type ShellTestServices =
+   | (typeof shellLayer extends Layer.Layer<infer ROut, infer _E, infer _RIn> ? ROut : never)
+   | InstanceStore.Service
+@@ -495,6 +542,163 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
    )
+ 
+ 
++  // #203：恢复 original 三组 PowerShell 回归——SSH 私钥路径门禁、gci 目录列举门禁、
++  // #203：Auto 端到端 reviewer fail-closed（适配：PermissionV1 类型/Bun.write 建目录/两空格缩进）。
++  for (const item of ps) {
++    it.live(`asks for bash permission after PowerShell SSH private key path gate [${item.label}]`, () =>
++      withShell(
++        item,
++        Effect.gen(function* () {
++          const fakeHome = yield* tmpdirScoped()
++          // #203：Bun.write 自动建父目录，替代 original 的 fs.mkdir 依赖
++          yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_rsa"), "fake private key"))
++          yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_ed25519"), "fake private key"))
++          yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_ecdsa"), "fake private key"))
++          // #203：USERPROFILE 环境切换必须经 acquireUseRelease 还原，防止污染后续用例
++          yield* Effect.acquireUseRelease(
++            Effect.sync(() => {
++              const prev = process.env.USERPROFILE
++              process.env.USERPROFILE = fakeHome
++              return prev
++            }),
++            () =>
++              runIn(
++                projectRoot,
++                Effect.gen(function* () {
++                  const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++                  yield* run(
++                    {
++                      // #203：三条私钥读命令一次执行，覆盖 id_rsa/ed25519/ecdsa 全部敏感文件名模式
++                      command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`,
++                    },
++                    capture(requests),
++                  )
++
++                  const extDirReq = requests.find((r) => r.permission === "external_directory")
++                  const bashReq = requests.find((r) => r.permission === "bash")
++                  expect(extDirReq).toBeDefined()
++                  // #203：extDir 证据须携带完整 shell 上下文——precheck 的 shell-origin 分支依赖 command/cwd
++                  expect(extDirReq!.metadata).toMatchObject({ action_kind: "shell", command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`, cwd: projectRoot, agent: "build" })
++                  // #203：shell 字段记录实际解释器，供证据回放与审计定位
++                  expect(typeof extDirReq!.metadata.shell).toBe("string")
++                  expect(extDirReq!.patterns).toContain(glob(path.join(fakeHome, ".ssh", "*")))
++                  expect(bashReq).toBeDefined()
++                  expect(bashReq!.metadata).toMatchObject({ action_kind: "shell", agent: "build" })
++                  expect(bashReq!.patterns.some((pattern) => pattern.includes("id_rsa"))).toBe(true)
++                }),
++              ),
++            (prev) =>
++              Effect.sync(() => {
++                if (prev === undefined) delete process.env.USERPROFILE
++                else process.env.USERPROFILE = prev
++              }),
++          )
++        }),
++      ),
++    )
++  }
++
++  for (const item of ps) {
++    // #203：gci/Get-ChildItem 在 FILES 集内，目录列举须触发 bash 门禁（precheck 单测不覆盖工具层）
++    it.live(`asks for bash permission for PowerShell SSH directory listing [${item.label}]`, () =>
++      withShell(
++        item,
++        runIn(
++          projectRoot,
++          Effect.gen(function* () {
++            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++            yield* run(
++              {
++                command: String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`,
++              },
++              capture(requests),
++            )
++            const extDirReq = requests.find((r) => r.permission === "external_directory")
++            const bashReq = requests.find((r) => r.permission === "bash")
++            expect(extDirReq).toBeDefined()
++            expect(bashReq).toBeDefined()
++            // #203：bash pattern 携带原始命令文本，证明门禁见到的是未改写的 PowerShell 命令
++            expect(bashReq!.patterns.some((pattern) => pattern.includes("Get-ChildItem"))).toBe(true)
++          }),
++        ),
++      ),
++    )
++  }
++
++  for (const item of ps) {
++    reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
++      withShell(
++        item,
++        Effect.gen(function* () {
++          const fakeHome = yield* tmpdirScoped()
++          yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_rsa"), "fake private key"))
++          const permission = yield* Permission.Service
++          const ruleset: PermissionV1.Ruleset = [
++            { permission: "external_directory", pattern: "*", action: "auto" },
++            { permission: "bash", pattern: "*", action: "auto" },
++          ]
++
++          yield* Effect.acquireUseRelease(
++            Effect.sync(() => {
++              const prev = process.env.USERPROFILE
++              process.env.USERPROFILE = fakeHome
++              reviewedCalls = 0
++              return prev
++            }),
++            () =>
++              // #203：permission.ask 经 InstanceState 读项目配置，runIn 提供 InstanceRef
++              runIn(
++                projectRoot,
++                Effect.gen(function* () {
++                // #203：与 shell 工具产出的证据同构（上一组已锁定该 metadata 形状）；
++                // #203：组1 锁定工具产出形状，本组用同构输入验证 Auto 链路（Tool.Context.ask 跨 env 类型不可行，分段覆盖）
++                // #203：此处验证同一证据在 Auto 路由下经 precheck→reviewer 端到端 fail-closed。
++                const err = yield* permission
++                  .ask({
++                    sessionID: ctx.sessionID,
++                    // #203：目标 Request.tool 为 messageID/callID 对象（original 为字符串 tool 名），always 必填空集
++                    tool: {
++                      messageID: ctx.messageID,
++                      callID: "call_auto_ssh_gate",
++                    },
++                    permission: "bash",
++                    patterns: [String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`],
++                    metadata: {
++                      action_kind: "shell",
++                      agent: "Auto",
++                      command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
++                      cwd: projectRoot,
++                      shell: item.shell,
++                    },
++                    always: [],
++                    ruleset,
++                  })
++                  .pipe(
++                    // #203：2 秒超时防 reviewer 挂起导致用例悬挂；超时即失败而非跳过
++                    Effect.timeoutOrElse({
++                      duration: "2 seconds",
++                      orElse: () => Effect.fail(new Error("timed out waiting for reviewer denial")),
++                    }),
++                    Effect.flip,
++                  )
++
++                expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
++                expect(reviewedCalls).toBe(1)
++                // #203：deny 不留 pending 项——fail-closed 不得以挂起请求形式等待用户
++                expect(yield* permission.list()).toHaveLength(0)
++                }),
++              ),
++            (prev) =>
++              Effect.sync(() => {
++                if (prev === undefined) delete process.env.USERPROFILE
++                else process.env.USERPROFILE = prev
++              }),
++          )
++        }),
++      ),
++    )
++  }
++
+   each("asks for external_directory permission for wildcard external paths", () =>
+     runIn(
+       projectRoot,
+                 if (prev === undefined) delete process.env.USERPROFILE

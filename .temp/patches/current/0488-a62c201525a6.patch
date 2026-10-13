@@ -1,28 +1,39 @@
 From a62c201525a6ed659dddb0149f1810d792f72c19 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Wed, 15 Jul 2026 02:54:31 +0800
-Subject: [PATCH] =?UTF-8?q?fix(image):=20=E8=87=AA=E5=8A=A8=E8=A7=84?=
- =?UTF-8?q?=E8=8C=83=E5=8C=96=E5=8E=86=E5=8F=B2=E5=9B=BE=E7=89=87=E9=99=84?=
- =?UTF-8?q?=E4=BB=B6?=
+Subject: [PATCH] fix(image): 自动规范化历史图片附件
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-统一以 Sharp-backed Image Service 扫描并规范化全库历史图片，正常附件保持原值，损坏的 completed Tool 图片按授权标记不可用。
-
-提供路径只读预览和 --apply 原子事务，使用完整旧 JSON CAS 避免部分写入，并移除 single/source/hash/backup 等旧协议。
-
+适配：源后像经 0485 适配基线重建（docs 头部保留 4 行 Photon WASM 等价承载适配注；
+migrate 脚本 imports 与目标一致——Image.layer 目标已由 #485 导出；read.test 块替换
+保留 #485 的 imports 与 noResizer 反转，仅换 migration describe 块）。
 diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Proposal/tui-image-validation-and-history-repair.md
-index 7c232ad17c2abd91f066e406c1eb9bd67636164c..19bbe490dd92614e23ae3aa86da2fad00a2d61b1 100644
 --- a/docs/Proposal/tui-image-validation-and-history-repair.md
 +++ b/docs/Proposal/tui-image-validation-and-history-repair.md
-@@ -1,473 +1,404 @@
+@@ -1,477 +1,408 @@
 -# TUI Sharp 打包链恢复与历史图片无损迁移方案
 +# Canonical Implementation Plan: TUI 历史图片自动规范化
  
 -Status: approved after independent audit; user selected a distributable repository migration script and authorized implementation
+-
+-> **适配说明（#485 落地于 v1.18.32 目标谱系）**：本文 A 部分（TUI Sharp 原生打包链）不适用于目标——目标 image 后端为
 +> Status: verified
 +>
++> **适配说明（#485/#488 落地于 v1.18.32 目标谱系）**：本文 A 部分（TUI Sharp 原生打包链）不适用于目标——目标 image 后端为
+ > Photon WASM（`photon_rs_bg.wasm` 静态嵌入），compiled 打包问题在目标谱系不存在，Sharp 打包链修复被目标方案等价承载。
+-> 本 patch 在目标落地范围为 B（消费端 fail-closed）与 C（`script/migrate-image-attachment.ts` 历史图片迁移工具），
++> 本 patch 在目标落地范围为 B（消费端 fail-closed）与 C（`script/migrate-image-attachment.ts` 历史图片自动规范化工具），
+ > 以及下文引用的 fail-closed 回归测试。涉及 `lib/sharp.js` 打包细节的小节仅作源谱系历史记录。
+-Date: 2026-07-14
+-
+-## 0. 推荐方案摘要
+-
+-本次只做两件事：
+-
+-1. **生产端 A**：继续使用现有 Sharp 0.34.5，不引入 Bun.Image 或第二图片后端。修复 Bun compiled executable 对 Sharp native addon/libvips 的打包、释放和加载链，并删除三处会在 Sharp 不可用时发送原图的 fallback。
+-2. **存储端 C**：在 TUI 再次消费目标 Session 前，事务化地把唯一损坏的 Tool attachment 替换为从已确认完整原件经过现有 Sharp 管线生成的有效附件。迁移前由SQLite生成包含已提交WAL页面的一致数据库快照，不删除任何不可恢复数据。
 +> Revision: R7
 +>
 +> Approved revision: R7
@@ -35,34 +46,20 @@ index 7c232ad17c2abd91f066e406c1eb9bd67636164c..19bbe490dd92614e23ae3aa86da2fad0
 +>
 +> Last updated: 2026-07-15
  
--Date: 2026-07-14
+-**消费端 B 不修改。** C 完成迁移后，现有数据库读取和 `MessageV2.toModelMessagesEffect()` 自然只会读到修复后的有效附件。
 +本文是当前follow-up的唯一实现规范。R2-R6均已被后续用户要求或审计修订取代，不再具有实现权限。
  
--## 0. 推荐方案摘要
+-不修改图片格式支持、metadata fast path、GIF行为、base64规则、MIME策略、Provider转换、plugin、compaction、Assistant生命周期、数据库schema或通用日志。
 +## 1. Verbatim Requirement
  
--本次只做两件事：
+-最终 Git 修改 **10个文件（包含本文）以内**，预计代码增删 **低于800行**；当前实现为9个任务文件，新增Processor定向回归测试后为10个。
 +> “我要能apply的，你说现在的有截断处理不了，请注意脚本的意义就是处理这个的”
  
--1. **生产端 A**：继续使用现有 Sharp 0.34.5，不引入 Bun.Image 或第二图片后端。修复 Bun compiled executable 对 Sharp native addon/libvips 的打包、释放和加载链，并删除三处会在 Sharp 不可用时发送原图的 fallback。
--2. **存储端 C**：在 TUI 再次消费目标 Session 前，事务化地把唯一损坏的 Tool attachment 替换为从已确认完整原件经过现有 Sharp 管线生成的有效附件。迁移前由SQLite生成包含已提交WAL页面的一致数据库快照，不删除任何不可恢复数据。
+-## 1. 已重新阅读和确认的文件
 +> “我要的是自动处理的F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\script\migrate-image-attachment.ts，也就是我就会执行这个，没别的”
  
--**消费端 B 不修改。** C 完成迁移后，现有数据库读取和 `MessageV2.toModelMessagesEffect()` 自然只会读到修复后的有效附件。
-+> “同时实在获取不到的图片，那么就把对应消息改成图片不可用或者其他一些当前链路允许的消息即可（也就是允许弃用图片并返回不可用的消息等方式）”
- 
--不修改图片格式支持、metadata fast path、GIF行为、base64规则、MIME策略、Provider转换、plugin、compaction、Assistant生命周期、数据库schema或通用日志。
-+> “也就是命令只需要提供： \"C:\Users\Lenovo\.local\share\opencode\opencode.db\" 不需要其他任何额外信息”
- 
--最终 Git 修改 **10个文件（包含本文）以内**，预计代码增删 **低于800行**；当前实现为9个任务文件，新增Processor定向回归测试后为10个。
-+> “只处理那些比较不妥的需要处理的，基本上大小正常的不需要二次处理或者压缩”
- 
--## 1. 已重新阅读和确认的文件
-+> “主要是规范化、统一化（不要不同路径来源的，不同来源的都要规整同意），同时过大的也需要处理，压缩是其次”
- 
 -### 1.1 Sharp生产与调用链
-+> “也就是我希望最终是可以自处理解决这种截断问题的”
- 
+-
 -| 文件 | 为什么相关 |
 -| --- | --- |
 -| `packages/opencode/src/image/image.ts` | 当前唯一图片处理实现，动态加载Sharp，执行metadata、resize和encode |
@@ -98,17 +95,22 @@ index 7c232ad17c2abd91f066e406c1eb9bd67636164c..19bbe490dd92614e23ae3aa86da2fad0
 -| `packages/opencode/src/session/session.sql.ts` | `part.data`是ToolPart JSON的真实持久化位置 |
 -| `packages/opencode/src/data-migration.ts` | 现有通用后台迁移框架；经确认不适合本次用户特定文件恢复 |
 -| `packages/opencode/src/effect/app-runtime.ts` | DataMigration异步启动，无法保证在B首次消费前完成 |
--
++> “同时实在获取不到的图片，那么就把对应消息改成图片不可用或者其他一些当前链路允许的消息即可（也就是允许弃用图片并返回不可用的消息等方式）”
+ 
 -### 1.4 Git历史
--
++> “也就是命令只需要提供： \"C:\Users\Lenovo\.local\share\opencode\opencode.db\" 不需要其他任何额外信息”
+ 
 -已确认：
--
++> “只处理那些比较不妥的需要处理的，基本上大小正常的不需要二次处理或者压缩”
+ 
 -- `981e00971a`：原Photon WASM打包修复，使用嵌入资源和运行时路径。
 -- `edae95237e`：将Image.Service从Photon改成Sharp，并引入三处ResizerUnavailable原图fallback。
 -- `1efc5c8a2a`：把Sharp 0.34.5加入optionalDependencies。
--
++> “主要是规范化、统一化（不要不同路径来源的，不同来源的都要规整同意），同时过大的也需要处理，压缩是其次”
+ 
 -Sharp业务实现已经存在；缺失的是compiled TUI的native dependency packaging，而不是图片后端能力。
--
++> “也就是我希望最终是可以自处理解决这种截断问题的”
+ 
 -## 2. 通过搜索和实验确认的调用点
 +> “不要很臃肿，不要假设不存在或者未出现的情况”
  
@@ -784,11 +786,16 @@ index 7c232ad17c2abd91f066e406c1eb9bd67636164c..19bbe490dd92614e23ae3aa86da2fad0
  
 -方案阶段最终将C收敛为immutable master + disposable validation clone，并删除“跨盘原子物理恢复”承诺。实现阶段第一轮独立复核进一步指出逐文件复制DB/WAL/SHM仍可能跨时间点；实现遂改用SQLite原生`VACUUM INTO`一致快照，删除不必要的commit后反向CAS，补充非图片硬拒绝和CLI集成测试。该变化减少分支并强化数据一致性，不改变Sharp/A/B/C职责边界。
 +以上均未显示当前实现存在可达行为缺陷，不构成阻塞。R7实现已完成并verified；任何后续material behavior change必须新建revision并重新全范围审计。
+
 diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/opencode/script/migrate-image-attachment.ts
-index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667fe59a9e9 100644
 --- a/packages/opencode/script/migrate-image-attachment.ts
 +++ b/packages/opencode/script/migrate-image-attachment.ts
-@@ -5,244 +5,215 @@ import { Config } from "../src/config/config"
+@@ -1,300 +1,264 @@
+ #!/usr/bin/env bun
+ 
+ import { Image } from "../src/image/image"
++// Image.layer由#485导出供本脚本复用生产normalize链，不复制第二套缩放实现。
+ import { Config } from "../src/config/config"
  import { MessageID, PartID, SessionID } from "../src/session/schema"
  import { Database } from "bun:sqlite"
  import { Effect, Layer } from "effect"
@@ -798,6 +805,7 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
  import { parseArgs } from "node:util"
  
 +const unavailableNote = "[Image unavailable: stored image data could not be decoded.]"
++// 弃用说明字符串是产品契约：TUI与provider都会原样看到它，不能改写或本地化。
  const usage = `Usage:
 -  bun script/migrate-image-attachment.ts --db <opencode.db> --part <part-id> --source <complete-image> \\
 -    --expected-old-sha <sha256> --expected-source-sha <sha256> [--expected-new-sha <sha256>] \\
@@ -822,12 +830,14 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -}
 +The default mode is a read-only preview. --apply updates the current database in one transaction.`
  
++// PartRow镜像part表四列；data是完整JSON文本，所有判断都在其结构上进行。
  type PartRow = { id: string; message_id: string; session_id: string; data: string }
  type FileAttachment = { type: "file"; mime: string; url: string; [key: string]: unknown }
  
 -const values = parseArgs({
 -  // 所有恢复依据都由调用者显式提供；脚本不扫描目录或根据文件名猜测完整原件。
 +// 数据库路径使用唯一位置参数，避免重新引入part/source/hash等需要人工拼装的旧协议。
++// allowPositionals是全库扫描语义的入口：旧协议的散装参数不再存在。
 +const args = parseArgs({
    args: Bun.argv.slice(2),
    options: {
@@ -853,7 +863,9 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
    console.log(usage)
    process.exit(0)
  }
--
++// 参数个数硬失败：多路径或无路径都是调用方错误，不猜默认值。
++if (args.positionals.length !== 1) throw new Error(`Exactly one database path is required\n\n${usage}`)
+ 
 -const options: Options = {
 -  db: path.resolve(required("db", values.db)),
 -  part: required("part", values.part),
@@ -862,17 +874,49 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -  sourceSha: required("expected-source-sha", values["expected-source-sha"]).toLowerCase(),
 -  newSha: values["expected-new-sha"]?.toLowerCase(),
 -  attachmentIndex: finiteInteger("attachment-index", values["attachment-index"]),
+-  // tokenBudget限制单图base64规模，与运行时写入共享同一约束。
 -  tokenBudget: finiteInteger("token-budget", values["token-budget"]),
 -  apply: values.apply ?? false,
 -  backupDir: values["backup-dir"] ? path.resolve(values["backup-dir"]) : undefined,
 -}
--
++const dbPath = path.resolve(args.positionals[0])
++const apply = args.values.apply ?? false
++// 仅在正式生效前解析绝对路径，防止相对路径随CWD漂移指向错误的库存文件。
++// Preview从连接权限开始就是只读；apply则在第一条SELECT前锁住写入，库存与提交之间不留并发窗口。
++const db = apply ? new Database(dbPath) : new Database(dbPath, { readonly: true })
+ 
 -if (options.apply && (!options.newSha || !options.backupDir))
+-  // --apply必须携带new hash与备份目录：缺少任一项都无法保证可回滚恢复。
 -  throw new Error("--apply requires --expected-new-sha and --backup-dir")
 -if (options.newSha === options.oldSha) throw new Error("--expected-new-sha must differ from --expected-old-sha")
--
++try {
++  // BEGIN IMMEDIATE而非延迟事务：写锁在扫描前就持有，杜绝扫描结果与提交之间被并发插入。
++  if (apply) db.run("BEGIN IMMEDIATE")
++  else db.run("PRAGMA query_only=ON")
++  // query_only在数据库层面挡写：比依赖应用层纪律更强，preview副作用无从发生。
+ 
 -await main(options)
--
++  // SQL只做已观察数据库形态的低成本预筛，真正图片边界仍由Part结构和声明MIME决定。
++  const rows = db
++    .query<PartRow, []>("SELECT id, message_id, session_id, data FROM part WHERE instr(data, 'image/') > 0 ORDER BY id")
++    .all()
++  // Effect.runPromise桥接CLI顶层；gen内的错误沿rejection进入catch统一回滚。
++  const result = await Effect.runPromise(
++    Effect.gen(function* () {
++      // 单次解析Image.Service：整批共享同一实例与内部缓存，避免每行重复装载。
++      const image = yield* Image.Service
++      const changes: Array<{ row: PartRow; nextData: string }> = []
++      // 计划与统计分离：changes只存待写行，报告字段由四组计数器推导，避免双重真相。
++      const normalizedItems: Array<Record<string, unknown>> = []
++      const unavailableItems: Array<Record<string, unknown>> = []
++      let imageAttachments = 0
++      // 四组计数器互相独立：unchanged是fast-path命中数，normalized是实际重写数。
++      let unchanged = 0
++      let oldPayloadBytes = 0
++      let newPayloadBytes = 0
++      let oldPartJsonBytes = 0
++      let newPartJsonBytes = 0
+ 
 -async function main(input: Options) {
 -  // Dry-run以只读方式打开数据库；任何写权限和备份成本都只在显式--apply后启用。
 -  const db = input.apply ? new Database(input.db) : new Database(input.db, { readonly: true })
@@ -884,30 +928,66 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -    const state = isRecord(part) && part.type === "tool" && isRecord(part.state) ? part.state : undefined
 -    const value = state?.status === "completed" && Array.isArray(state.attachments) ? state.attachments[input.attachmentIndex] : undefined
 -    if (!isRecord(value) || value.type !== "file" || typeof value.mime !== "string" || typeof value.url !== "string")
+-      // 结构校验先行：status/attachments/index都符合预期才继续，避免把任意Part当附件修复。
 -      throw new Error(`Completed Tool attachment ${input.attachmentIndex} was not found`)
 -    // 维护工具只能修复图片；即使调用者提供了匹配hash，也不能把PDF或任意文件替换成Sharp输出。
 -    if (!value.mime.startsWith("image/")) throw new Error(`Attachment ${input.attachmentIndex} is not an image`)
 -    const attachment = value as FileAttachment
 -    if (!attachment.url.startsWith(`data:${attachment.mime};base64,`))
+-      // data URL前缀与MIME必须互证，防止损坏记录的媒体类型误导解码器。
 -      throw new Error("Attachment MIME does not match its data URL")
 -    const oldSha = digest(dataUrlBytes(attachment.url))
 -    // oldSha描述数据库当前收到的payload；它不是文件名、MIME或source的替代品。
 -    // 三个身份分别校验，避免把“内容看似正确”的错误记录当作已修复记录。
+-    // newSha命中即进入幂等分支，但仍按完整路径重验source与输出。
 -    const migrated = input.newSha !== undefined && oldSha === input.newSha
 -    if (!migrated && oldSha !== input.oldSha) throw new Error(`Attachment SHA mismatch: expected ${input.oldSha}, found ${oldSha}`)
--
++      for (const row of rows) {
++        // JSON.parse失败会让整批失败：损坏到无法解析的Part不属于本工具的授权范围。
++        // clone后只修改已授权的图片字段，Part未来新增的未知字段不会因迁移丢失。
++        const part = JSON.parse(row.data)
++        const next = structuredClone(part)
++        const attachments: Array<{ location: "part" | "tool"; index: number; value: FileAttachment }> = []
++        // location区分两类持久化位置；写回路径按它分派，报告也用它让用户定位修改点。
++        // 顶层FilePart是当前Prompt持久化形态，与Tool attachment必须进入同一Sharp策略。
++        if (
++          part?.type === "file" &&
++          typeof part.mime === "string" &&
++          part.mime.startsWith("image/") &&
++          typeof part.url === "string"
++        )
++          attachments.push({ location: "part", index: 0, value: part })
++        if (part?.type === "tool" && part.state?.status === "completed" && Array.isArray(part.state.attachments))
++          // 只有completed的Tool才可能携带真实输出；running/failed状态的图片不在授权范围内。
++          part.state.attachments.forEach((value: unknown, index: number) => {
++            if (
++              isRecord(value) &&
++              value.type === "file" &&
++              typeof value.mime === "string" &&
++              value.mime.startsWith("image/") &&
++              typeof value.url === "string"
++          )
++              // 原数组index必须保留到写回和报告，过滤非图片后不能重排定位。
++              attachments.push({ location: "tool", index, value: value as FileAttachment })
++          })
++        // SQL可能命中普通文本中的image/，结构筛选确保这类行不进入空间统计或UPDATE计划。
++        // attachments为空说明只是文本命中image/：不计空间也不进UPDATE计划。
++        if (attachments.length === 0) continue
+ 
 -    const source = Buffer.from(await Bun.file(input.source).arrayBuffer())
 -    const sourceSha = digest(source)
 -    // 完整源hash是恢复的数据来源契约，必须在调用Sharp之前确认。
 -    // 脚本不截断、拼接或尝试修补旧bytes；唯一新内容来自调用者确认的完整源文件。
 -    // 即使当前记录已经命中新hash，也必须重新确认source，保证幂等结果仍可审计。
 -    if (sourceSha !== input.sourceSha) throw new Error(`Source SHA mismatch: expected ${input.sourceSha}, found ${sourceSha}`)
+-    // sharp仅在真正解码时加载；dry-run同样依赖它产出确定性输出hash。
 -    const sharp = (await import("sharp")).default
 -    const format = (await sharp(source).metadata()).format
 -    // Sharp的format是解码器识别出的实际格式，不信任原记录的扩展名或MIME声明。
 -    const sourceMime = format === "svg" ? "image/svg+xml" : format ? `image/${format}` : undefined
 -    // 小图可能由Image.Service原样返回，因此必须用实际源格式而不是损坏附件声明的MIME。
 -    if (!sourceMime) throw new Error(`Unsupported source image format: ${format ?? "unknown"}`)
+-    // normalize走完整生产链，使迁移输出与运行时写入完全同构。
 -    const normalized = await normalize(row, sourceMime, source, input.tokenBudget)
 -    const output = dataUrlBytes(normalized.url)
 -    // normalized.url再次按其自报MIME校验，防止服务实现返回bytes与metadata不一致。
@@ -922,10 +1002,39 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -      // 幂等只表示同一份完整附件已存在，不表示可以修复错误的媒体声明。
 -      if (attachment.mime !== normalized.mime || !attachment.url.startsWith(`data:${normalized.mime};base64,`))
 -        throw new Error("Migrated attachment metadata does not match its bytes")
+-      // 幂等出口只回显现有hash，不创建备份也不触碰任何数据行。
 -      console.log(JSON.stringify({ status: "already migrated", part: input.part, sha256: oldSha }, null, 2))
 -      return
 -    }
--
++        // JSON字节数按原始data文本计量，避免二次序列化引入编码偏差。
++        oldPartJsonBytes += Buffer.byteLength(row.data)
++        // unavailable按原数组index收集，先规范化后统一移除，保证写回次序与扫描次序无关。
++        const unavailable = new Set<number>()
++        let rowChanged = false
++        for (const attachment of attachments) {
++          // 每个附件独立normalize：一个坏图不能阻断同Part内其他正常图片的修复。
++          imageAttachments++
++          // 坏图的旧载荷也计入总量，弃用后new bytes为零，报告才能体现真实释放空间。
++          const oldBytes = dataUrlBytes(attachment.value.url).length
++          oldPayloadBytes += oldBytes
++          // 所有来源共用默认Image.Service，不传token budget，保证正常图片走metadata fast-path而不被二次压缩。
++          const normalized = yield* image
++            .normalize({
++              id: PartID.make(row.id),
++              messageID: MessageID.make(row.message_id),
++              sessionID: SessionID.make(row.session_id),
++              type: "file",
++              mime: attachment.value.mime,
++              url: attachment.value.url,
++            })
++            .pipe(
++              // match把失败变成数据：同一循环内区分弃用与终止，而不是中断整个扫描。
++              Effect.match({
++                onFailure: (error) => ({ ok: false as const, error }),
++                onSuccess: (value) => ({ ok: true as const, value }),
++              }),
++            )
+ 
 -    // 只有所有内容前置条件通过后才生成2GB级备份；错误参数和幂等重跑不会制造无用副本。
 -    // backup返回后master已通过独立clone校验，后续代码不得打开或修改master本身。
 -    const backup = input.apply ? await backupDatabase(db, input.db, input.backupDir!) : undefined
@@ -942,13 +1051,27 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -    }
 -    if (!input.apply) {
 -      // Dry-run只给出确定的新hash，供第二次--apply形成old/source/new三重前置条件。
+-      // 报告中的new_sha256是下一次--apply的第三前置条件，先打印再退出。
 -      console.log(JSON.stringify(report, null, 2))
 -      return
 -    }
--
++          if (!normalized.ok) {
++            // 非Tool位置或非DecodeError都向上传播：迁移工具绝不掩盖授权范围之外的失败。
++            // 用户只授权弃用真实存在的completed Tool坏图；Sharp装载失败或顶层失败绝不能转成成功。
++            if (attachment.location !== "tool" || normalized.error._tag !== "ImageDecodeError")
++              return yield* normalized.error
++            // DecodeError说明数据库bytes自身不可恢复；移除附件并保留Tool文本比猜外部源更符合当前持久化链。
++            unavailable.add(attachment.index)
++            // 弃用决策同时进入报告明细，preview阶段用户可逐条审计后再--apply。
++            unavailableItems.push({ part: row.id, location: attachment.location, index: attachment.index })
++            rowChanged = true
++            continue
++          }
+ 
 -    // 写事务前再次确认master没有被验证过程或外部程序改动。
 -    // 备份hash失配时在UPDATE前终止，live数据库仍保持原值。
 -    await verifyBackupManifest(backup!)
+-    // structuredClone隔离原始JSON；只有附件槽位被替换，其余字段保持原样序列化。
 -    const next = structuredClone(part)
 -    next.state.attachments[input.attachmentIndex] = { ...attachment, mime: normalized.mime, url: normalized.url }
 -    const nextData = JSON.stringify(next)
@@ -961,38 +1084,33 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -      const stored = db.query<{ data: string }, [string]>("SELECT data FROM part WHERE id = ?").get(input.part)
 -      if (stored?.data !== nextData) throw new Error("Stored Part does not match the intended JSON")
 -      if (db.query("PRAGMA foreign_key_check").all().length !== 0) throw new Error("foreign_key_check failed")
+-      // 写后完整性检查在事务内执行，任一失败都会回滚UPDATE而不是留下半迁移状态。
 -      const integrity = db.query<{ integrity_check: string }, []>("PRAGMA integrity_check").get()
 -      if (integrity?.integrity_check !== "ok") throw new Error("integrity_check failed")
 -    })()
 -    console.log(JSON.stringify({ ...report, status: "migrated" }, null, 2))
 -  } finally {
+-    // finally保证只读与写连接都释放，避免WAL文件被迁移进程长期持有。
 -    db.close()
 -  }
 -}
--
++          const newBytes = dataUrlBytes(normalized.value.url).length
++          // 新载荷先计量再写回，saved_payload_bytes才能在报告里反映真实的存储收益。
++          newPayloadBytes += newBytes
++          if (normalized.value.mime === attachment.value.mime && normalized.value.url === attachment.value.url) {
++            // fast-path以MIME和URL双重相等为准，正常图片不能仅因被扫描就产生数据库写入。
++            unchanged++
++            continue
++          }
+ 
 -async function normalize(row: PartRow, mime: string, source: Buffer, tokenBudget: number) {
 -  // 迁移复用生产Image.Service；空Config只采用现有默认限制，不复制另一份resize算法。
 -  const layer = Image.layer.pipe(
 -    Layer.provide(Layer.mock(Config.Service, { get: () => Effect.succeed({}) })),
 -  )
 -  return Effect.runPromise(
-+if (args.positionals.length !== 1) throw new Error(`Exactly one database path is required\n\n${usage}`)
-+
-+const dbPath = path.resolve(args.positionals[0])
-+const apply = args.values.apply ?? false
-+// Preview从连接权限开始就是只读；apply则在第一条SELECT前锁住写入，库存与提交之间不留并发窗口。
-+const db = apply ? new Database(dbPath) : new Database(dbPath, { readonly: true })
-+
-+try {
-+  if (apply) db.run("BEGIN IMMEDIATE")
-+  else db.run("PRAGMA query_only=ON")
-+
-+  // SQL只做已观察数据库形态的低成本预筛，真正图片边界仍由Part结构和声明MIME决定。
-+  const rows = db
-+    .query<PartRow, []>("SELECT id, message_id, session_id, data FROM part WHERE instr(data, 'image/') > 0 ORDER BY id")
-+    .all()
-+  const result = await Effect.runPromise(
-     Effect.gen(function* () {
+-    // runPromise把Effect桥接回CLI同步流程；normalize错误沿rejection冒泡为非零退出。
+-    Effect.gen(function* () {
 -      return yield* (yield* Image.Service).normalize(
 -        {
 -          id: PartID.make(row.id),
@@ -1001,90 +1119,8 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -          type: "file",
 -          mime,
 -          url: `data:${mime};base64,${source.toString("base64")}`,
-+      const image = yield* Image.Service
-+      const changes: Array<{ row: PartRow; nextData: string }> = []
-+      const normalizedItems: Array<Record<string, unknown>> = []
-+      const unavailableItems: Array<Record<string, unknown>> = []
-+      let imageAttachments = 0
-+      let unchanged = 0
-+      let oldPayloadBytes = 0
-+      let newPayloadBytes = 0
-+      let oldPartJsonBytes = 0
-+      let newPartJsonBytes = 0
-+
-+      for (const row of rows) {
-+        // clone后只修改已授权的图片字段，Part未来新增的未知字段不会因迁移丢失。
-+        const part = JSON.parse(row.data)
-+        const next = structuredClone(part)
-+        const attachments: Array<{ location: "part" | "tool"; index: number; value: FileAttachment }> = []
-+        // 顶层FilePart是当前Prompt持久化形态，与Tool attachment必须进入同一Sharp策略。
-+        if (
-+          part?.type === "file" &&
-+          typeof part.mime === "string" &&
-+          part.mime.startsWith("image/") &&
-+          typeof part.url === "string"
-+        )
-+          attachments.push({ location: "part", index: 0, value: part })
-+        if (part?.type === "tool" && part.state?.status === "completed" && Array.isArray(part.state.attachments))
-+          part.state.attachments.forEach((value: unknown, index: number) => {
-+            if (
-+              isRecord(value) &&
-+              value.type === "file" &&
-+              typeof value.mime === "string" &&
-+              value.mime.startsWith("image/") &&
-+              typeof value.url === "string"
-+          )
-+              // 原数组index必须保留到写回和报告，过滤非图片后不能重排定位。
-+              attachments.push({ location: "tool", index, value: value as FileAttachment })
-+          })
-+        // SQL可能命中普通文本中的image/，结构筛选确保这类行不进入空间统计或UPDATE计划。
-+        if (attachments.length === 0) continue
-+
-+        oldPartJsonBytes += Buffer.byteLength(row.data)
-+        const unavailable = new Set<number>()
-+        let rowChanged = false
-+        for (const attachment of attachments) {
-+          imageAttachments++
-+          // 坏图的旧载荷也计入总量，弃用后new bytes为零，报告才能体现真实释放空间。
-+          const oldBytes = dataUrlBytes(attachment.value.url).length
-+          oldPayloadBytes += oldBytes
-+          // 所有来源共用默认Image.Service，不传token budget，保证正常图片走metadata fast-path而不被二次压缩。
-+          const normalized = yield* image
-+            .normalize({
-+              id: PartID.make(row.id),
-+              messageID: MessageID.make(row.message_id),
-+              sessionID: SessionID.make(row.session_id),
-+              type: "file",
-+              mime: attachment.value.mime,
-+              url: attachment.value.url,
-+            })
-+            .pipe(
-+              Effect.match({
-+                onFailure: (error) => ({ ok: false as const, error }),
-+                onSuccess: (value) => ({ ok: true as const, value }),
-+              }),
-+            )
-+
-+          if (!normalized.ok) {
-+            // 用户只授权弃用真实存在的completed Tool坏图；Sharp装载失败或顶层失败绝不能转成成功。
-+            if (attachment.location !== "tool" || normalized.error._tag !== "ImageDecodeError")
-+              return yield* normalized.error
-+            // DecodeError说明数据库bytes自身不可恢复；移除附件并保留Tool文本比猜外部源更符合当前持久化链。
-+            unavailable.add(attachment.index)
-+            unavailableItems.push({ part: row.id, location: attachment.location, index: attachment.index })
-+            rowChanged = true
-+            continue
-+          }
-+
-+          const newBytes = dataUrlBytes(normalized.value.url).length
-+          newPayloadBytes += newBytes
-+          if (normalized.value.mime === attachment.value.mime && normalized.value.url === attachment.value.url) {
-+            // fast-path以MIME和URL双重相等为准，正常图片不能仅因被扫描就产生数据库写入。
-+            unchanged++
-+            continue
-+          }
-+
 +          rowChanged = true
++          // 明细记录old/new bytes：重编码收益需要逐条可见，而不是只有聚合计数。
 +          normalizedItems.push({
 +            part: row.id,
 +            location: attachment.location,
@@ -1099,6 +1135,7 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 +            continue
 +          }
 +          next.state.attachments[attachment.index] = {
++            // 展开原附件再覆盖两个字段：type与未来新增的附件元数据原样保留。
 +            ...attachment.value,
 +            mime: normalized.value.mime,
 +            url: normalized.value.url,
@@ -1106,19 +1143,23 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 +        }
 +
 +        if (unavailable.size > 0) {
++          // filter重建数组后重新赋值：原数组可能被同Part其他写回路径共享引用。
 +          // 先完成同一ToolPart内其他图片的规范化，再按原index统一移除坏附件，避免数组位移写错对象。
 +          next.state.attachments = next.state.attachments.filter((_: unknown, index: number) => !unavailable.has(index))
 +          if (next.state.attachments.length === 0) delete next.state.attachments
++          // 空attachments字段直接删除而不是留空数组，保持与运行时持久化形态一致。
 +          // 固定说明是用户可见的弃用凭据；包含检查保证异常中断后的重跑也不会重复追加。
 +          if (!next.state.output.includes(unavailableNote)) next.state.output = `${next.state.output}\n\n${unavailableNote}`
 +        }
 +
 +        const nextData = rowChanged ? JSON.stringify(next) : row.data
++        // 未变更的Part也计入new bytes：逻辑节省量必须以全库为分母才有意义。
 +        newPartJsonBytes += Buffer.byteLength(nextData)
 +        // changed_parts按Part而非附件计数，同一Part有多图时仍只执行一次CAS UPDATE。
 +        if (rowChanged) changes.push({ row, nextData })
 +      }
 +
++      // 返回值聚合计划与报告：apply段只消费changes，输出段只消费report。
 +      return {
 +        changes,
 +        report: {
@@ -1149,7 +1190,7 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 +    ),
    )
 -}
--
+ 
 -async function backupDatabase(db: Database, dbPath: string, parent: string) {
 -  // Master是SQLite生成的完整一致数据库，不依赖外部进程是否正在checkpoint WAL。
 -  // VACUUM INTO由SQLite持有读快照，已提交WAL页面会被合并进单一可恢复数据库。
@@ -1190,13 +1231,15 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -  await verifyBackupManifest(root)
 -  return root
 -}
- 
+-
 -async function verifyBackupManifest(root: string) {
 -  // Manifest不接受“文件仍存在”作为成功，必须逐个验证原始物理内容。
 -  const manifest = JSON.parse(await fs.readFile(path.join(root, "manifest.json"), "utf8")) as Record<string, string>
 -  for (const [name, expected] of Object.entries(manifest)) {
 -    if ((await fileDigest(path.join(root, "master", name))) !== expected) throw new Error(`Master backup changed: ${name}`)
 +  if (apply) {
++    // 写段在Effect之外：计划生成与落库执行严格分离，便于审查各自的失败语义。
++    // CAS循环不做批量预备语句：错误在第一行失配时立即抛出并回滚整批。
 +    // 完整旧JSON参与CAS；即使未来改变锁策略，也不能覆盖同一Part的未知并发字段。
 +    result.changes.forEach((change) => {
 +      const updated = db
@@ -1208,17 +1251,20 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 +    // 报告只在COMMIT成功后输出，调用方不会把已回滚计划误认为已应用结果。
 +    db.run("COMMIT")
    }
++  // preview与apply共用同一份报告结构：调用方可以用同一解析器处理两种模式。
 +  console.log(JSON.stringify(result.report, null, 2))
 +} catch (error) {
 +  // apply中任何Sharp、解析或CAS错误都回滚整批；preview连接没有事务也没有写权限。
 +  if (db.inTransaction) db.run("ROLLBACK")
 +  throw error
 +} finally {
++  // finally释放连接：query_only与WAL状态都随连接销毁，不污染后续进程。
 +  db.close()
  }
  
  function isRecord(value: unknown): value is Record<string, unknown> {
-@@ -250,38 +221,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
++  // 排除数组：附件必须是对象，数组形态的payload视为结构损坏。
+   return typeof value === "object" && value !== null && !Array.isArray(value)
  }
  
  function dataUrlBytes(url: string) {
@@ -1228,6 +1274,7 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
    const marker = ";base64,"
    const start = url.indexOf(marker)
 -  if (!url.startsWith("data:") || start === -1) throw new Error("Attachment is not a base64 data URL")
++  // 允许自定义MIME前缀但拒绝非base64形态：字节计量错误不能静默归零。
 +  if (!url.startsWith("data:") || start === -1) throw new Error("Image attachment is not a base64 data URL")
    return Buffer.from(url.slice(start + marker.length), "base64")
  }
@@ -1259,11 +1306,11 @@ index 96a335695a7565eac39677af03676454ec38339a..d54754c4632a0909ccaced9e23ed3667
 -  if (!Number.isSafeInteger(result) || result < 0) throw new Error(`--${name} must be a non-negative integer`)
 -  return result
 -}
+
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3f38423ad 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -1158,114 +1158,132 @@ describe("tool.read binary detection", () => {
+@@ -1396,118 +1396,146 @@ describe("tool.read visible context stubs", () => {
  })
  
  describe("image attachment migration", () => {
@@ -1273,12 +1320,14 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 -      await using tmp = await tmpdir()
 -      const dbPath = path.join(tmp.path, "opencode.db")
 -      const backupDir = path.join(tmp.path, "backups")
+-      // 大图fixture确保Sharp真实执行缩放路径，而不是小图原样旁路。
 -      const source = path.join(FIXTURES_DIR, "large-image.png")
 -      const sourceBytes = Buffer.from(await Bun.file(source).arrayBuffer())
 -      const oldBytes = Buffer.from("known truncated image bytes")
 -      // 旧bytes刻意不可解码：迁移不应读取或“修补”坏数据，只将其hash作为CAS前置条件。
 -      const hash = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
 -      const original = JSON.stringify({
++  // fixture集中构造四类库存形态：正常小图/正常大图/Tool大图/Tool坏图。
 +  async function fixture(dbPath: string) {
 +    // 小WebP作为正常图片基线，能够证明全库扫描不会自动触发重编码。
 +    const small = "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA"
@@ -1287,9 +1336,11 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    // 保留合法PNG data URL外形，确保迁移面对的是Sharp DecodeError而非参数错误。
 +    const broken = Buffer.from("truncated image bytes").toString("base64")
 +    const rows = [
++      // preserved字段是未知字段哨兵：迁移后必须原样存在，证明局部更新而非重建对象。
 +      JSON.stringify({ type: "file", mime: "image/webp", url: `data:image/webp;base64,${small}`, preserved: "small" }),
 +      JSON.stringify({ type: "file", mime: "image/png", url: `data:image/png;base64,${large}`, preserved: "large" }),
 +      JSON.stringify({
++        // Tool行携带output与metadata，锁定重编码不会波及非图片字段。
          type: "tool",
 +        tool: "read",
          state: {
@@ -1301,6 +1352,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
          },
 -      })
 -      const db = new SQLite(dbPath)
+-      // WAL模式与生产库一致：备份快照必须包含未checkpoint的已提交页。
 -      db.run("PRAGMA journal_mode = WAL")
 -      // 最小真实SQLite表保留脚本依赖的四列，让测试聚焦Part行为而非复制生产schema。
 -      db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL)")
@@ -1344,6 +1396,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 -
 -      // Apply将dry-run产出的hash变成第三个前置条件，防止Sharp版本或编码结果漂移后静默写库。
 -      const applyArgs = [...args, "--expected-new-sha", report.new_sha256, "--backup-dir", backupDir, "--apply"]
+-      // RAISE(IGNORE)让UPDATE静默零行生效，模拟并发竞争而不需要真实多进程。
 -      db.run("CREATE TRIGGER reject_part_update BEFORE UPDATE OF data ON part BEGIN SELECT RAISE(IGNORE); END")
 -      const casRejected = await migrateImageAttachment(applyArgs)
 -      expect(casRejected.exitCode).not.toBe(0)
@@ -1394,6 +1447,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 -  )
 +      }),
 +      JSON.stringify({
++        // 坏图行是弃用授权的唯一来源：bytes损坏但MIME与URL形态合法。
 +        type: "tool",
 +        tool: "read",
 +        state: {
@@ -1408,9 +1462,11 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    // 最小真实表只保留脚本使用的Part列，测试不复制无关生产schema。
 +    db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL)")
 +    rows.forEach((data, index) =>
++      // prt_N有序ID让ORDER BY比对稳定，报告里的part定位可读。
 +      db.query("INSERT INTO part VALUES (?, ?, ?, ?)").run(`prt_${index}`, `msg_${index}`, "ses_migrate", data),
 +    )
 +    db.close()
++    // 返回原始bytes供空间断言独立重算，不依赖脚本自身的统计。
 +    return { rows, small: Buffer.from(small, "base64"), large: Buffer.from(large, "base64"), broken: Buffer.from(broken, "base64") }
 +  }
 +
@@ -1422,6 +1478,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    // 路径参数默认必须只读，但仍实际经过Sharp，才能准确识别规范化和不可用图片。
 +    const preview = await migrateImageAttachment([dbPath])
 +    expect(preview.exitCode).toBe(0)
++    // lastIndexOf定位JSON报告起点，前导日志不会破坏解析。
 +    const previewReport = JSON.parse(preview.stdout.slice(preview.stdout.lastIndexOf('{\n  "status"')))
 +    // 四张图覆盖不变、两处规范化和一处弃用，计数变化能直接暴露漏扫或重复扫描。
 +    expect(previewReport).toMatchObject({
@@ -1439,6 +1496,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    expect(previewDb.query<{ data: string }, []>("SELECT data FROM part ORDER BY id").all().map((row) => row.data)).toEqual(input.rows)
 +    previewDb.close()
 +
++    // apply复用同一fixture库：验证preview→apply的两阶段流转而非两个孤例。
 +    const applied = await migrateImageAttachment([dbPath, "--apply"])
 +    expect(applied.exitCode).toBe(0)
 +    const report = JSON.parse(applied.stdout.slice(applied.stdout.lastIndexOf('{\n  "status"')))
@@ -1451,6 +1509,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +
 +    // 正常小图必须保持字节级不变；两种来源的同一大图必须得到完全相同的统一输出。
 +    expect(storedText[0]).toBe(input.rows[0])
++    // URL改变证明真实重编码发生，而不是只改报告计数。
 +    expect(stored[1].url).not.toBe(JSON.parse(input.rows[1]).url)
 +    expect(stored[1].mime).toBe(stored[2].state.attachments[0].mime)
 +    expect(stored[1].url).toBe(stored[2].state.attachments[0].url)
@@ -1466,6 +1525,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    expect(stored[3].state.metadata).toEqual({ preserved: true })
 +
 +    // 空间值由实际输入和落库结果独立计算，不能只相信CLI自己的聚合字段。
++    // 期望来自fixture输入，实际来自回读，两侧互不引用CLI内部状态。
 +    const oldPayload = input.small.length + input.large.length * 2 + input.broken.length
 +    const newPayload = input.small.length + Buffer.from(stored[1].url.split(",")[1], "base64").length * 2
 +    expect(report.old_payload_bytes).toBe(oldPayload)
@@ -1476,6 +1536,7 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    expect(report.new_part_json_bytes).toBe(storedText.reduce((total, data) => total + Buffer.byteLength(data), 0))
 +
 +    // 已规范化和已标记不可用的数据再次preview必须完全幂等，不重复有损编码或追加说明。
++    // 幂等计数为0同时证明弃用标记的contains检查生效。
 +    const repeated = await migrateImageAttachment([dbPath])
 +    expect(repeated.exitCode).toBe(0)
 +    expect(JSON.parse(repeated.stdout.slice(repeated.stdout.lastIndexOf('{\n  "status"')))).toMatchObject({
@@ -1483,9 +1544,11 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +      unavailable: 0,
 +      changed_parts: 0,
 +    })
++    // 120s上限覆盖Sharp首次装载与四次真实解码的完整链路。
 +  }, 120_000)
 +
 +  test("rolls back every row when a later CAS update fails", async () => {
++    // 回滚用例与主用例共享fixture，唯一差异是触发器。
 +    await using tmp = await tmpdir()
 +    const dbPath = path.join(tmp.path, "opencode.db")
 +    const input = await fixture(dbPath)
@@ -1502,3 +1565,5 @@ index e9f7406a14b292b149bdb9404d7bb3e855864fa5..55e6154f07f5da8e5475142f1b68f8f3
 +    check.close()
 +  }, 120_000)
  })
+ 
+

@@ -14,10 +14,16 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 58ec5022bd..ffb15f8370 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -261,6 +261,18 @@ export function Session() {
+@@ -261,12 +261,24 @@ export function Session() {
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
    // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
-   const streamingActive = createMemo(() => hasStreamingAssistant(messages() as any))
+   const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
+  const messagesBeforeRevert = () => {
+    const messageID = session()?.revert?.messageID
+    if (!messageID) return messages()
+    const index = messages().findIndex((message) => message.id === messageID)
+    return index === -1 ? messages() : messages().slice(0, index)
+  }
 +  // #212：内容增长信号——跟踪 part 文本/tool-raw 长度（非仅 part 数量），确保 text delta 触发贴底跟随
 +  // #212：applyPartDelta 原地修改 part 文本不改 part 数组长度——仅计 part.length 会漏 text delta
 +  const contentGrowthKey = createMemo(() => {

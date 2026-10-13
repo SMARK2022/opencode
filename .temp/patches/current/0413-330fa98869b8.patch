@@ -747,7 +747,7 @@ diff --git a/packages/core/src/filesystem/search.ts b/packages/core/src/filesyst
                Effect.map((result) =>
 -                result.map((entry) =>
 +                result.files.map((entry) =>
-                   FileSystem.Entry.make({
+                   Entry.make({
                      ...entry,
                      path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
 diff --git a/packages/core/src/tool/glob.ts b/packages/core/src/tool/glob.ts

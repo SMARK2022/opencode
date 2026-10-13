@@ -12,6 +12,7 @@ child/task 与 auto reviewer 共用底部栏，原先只显示 usage/导航，
 retry 状态已写入 session_status 却无 chrome。在同一行优先渲染
 红字摘要+(details)+meta，再显示 token usage，对齐主 Prompt 诊断契约。
 
+
 diff --git a/docs/plans/subagent-footer-retry-error-display.md b/docs/plans/subagent-footer-retry-error-display.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..f3ae7895b3c3c50ab5623d6f0791aa53456df327
@@ -290,59 +291,52 @@ index 0000000000000000000000000000000000000000..f3ae7895b3c3c50ab5623d6f0791aa53
 +Chinese comments: E=180 C=29 need=27 PASS
 +Blocking findings: none
 +```
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index a43a6d877695c452d938167c2b03744fd0e4a617..2c1064b47a92d57fb0aca5ba4018cfbc057e6e79 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -2,12 +2,13 @@ import { createEffect, createMemo, createSignal, Show } from "solid-js"
- import { useRouteData } from "@tui/context/route"
- import { useSync } from "@tui/context/sync"
- import { useTheme } from "@tui/context/theme"
-+import { useDialog } from "@tui/ui/dialog"
-+import { DialogAlert } from "@tui/ui/dialog-alert"
- import { SplitBorder } from "@tui/component/border"
--// [local-smark] UserMessage type needed for token accounting
--import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { Locale } from "@/util/locale"
-+import { formatDuration } from "@/util/format"
- import { tokenAccounting } from "@/token/accounting"
+
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+index a8e5aa4b5..ebbc2631a 100644
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -7,13 +7,19 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+ import { Locale } from "../../util/locale"
+ import { tokenAccounting } from "../../util/token-accounting"
+ // #122：subagent footer 共用 accounting
 -import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++// #550：retry 门控刷新时钟——只在 retry 态驱动 now 重算，非 retry 不持 interval。
 +import { createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++import { useDialog } from "../../ui/dialog"
++import { DialogAlert } from "../../ui/dialog-alert"
++import { formatDuration } from "../../util/format"
  import { activeTurnPair } from "../../util/session-pending"
- import { useCommandPalette } from "../../context/command-palette"
- import { useCommandShortcut } from "../../keymap"
-@@ -15,6 +16,7 @@ import { useCommandShortcut } from "../../keymap"
+ import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
+ 
  export function SubagentFooter() {
    const route = useRouteData("session")
    const sync = useSync()
++  // #550：DialogAlert 经全局 dialog 上下文展示 retry 原文。
 +  const dialog = useDialog()
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
    const session = createMemo(() => sync.session.get(route.sessionID))
  
-@@ -37,6 +39,17 @@ export function SubagentFooter() {
-   })
+@@ -37,6 +43,14 @@ export function SubagentFooter() {
  
+   // 获取会话状态，用于判断是否正在运行
    const status = createMemo(() => sync.data.session_status?.[route.sessionID])
-+  // child 无 Prompt；retry 诊断必须挂在本 footer，不能依赖主会话输入栏。
-+  // task / general / permission-reviewer（auto reviewer）共用此栏，禁止再挂第二套 chrome。
-+  // 只认当前 route.sessionID 的 status，禁止回读 parent 的 retry 以免串会话。
++  // #550：仅认当前 child 的 retry 态——禁止回读 parent 的 status 造成跨会话串味。
 +  const retry = createMemo(() => {
 +    const s = status()
 +    if (s?.type !== "retry") return
 +    return s
 +  })
-+  // countdown 只驱动 UI 重算“现在”；attempt/next 边界仍来自 session_status。
-+  // 不在此模块持有业务计时起点，避免重挂载后与 processor 倒计时分叉。
++  // #550：countdown 只驱动 UI 重算；attempt/next 边界来自 session_status 的 durable 事件。
 +  const now = createRefreshClock(() => !!retry())
  
+   // 将 money 提升到组件作用域，避免每次 memo 求值时重建
    const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
- 
-@@ -91,6 +104,30 @@ export function SubagentFooter() {
+@@ -100,6 +114,30 @@ export function SubagentFooter() {
    const nextShortcut = useCommandShortcut("session.child.next")
    const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
  
-+  // 展示层压平空白；DialogAlert 仍拿 status.message 原文。
-+  // gemini quota 特例与主 Prompt footer 同条件，避免两处摘要语义漂移。
++  // #550：压平摘要——与主 Prompt footer 同款（含 gemini quota 特例），原文只进详情对话框。
 +  const retrySummary = createMemo(() => {
 +    const r = retry()
 +    if (!r) return
@@ -350,15 +344,16 @@ index a43a6d877695c452d938167c2b03744fd0e4a617..2c1064b47a92d57fb0aca5ba4018cfbc
 +      return "gemini is way too hot right now"
 +    return r.message.replace(/\s+/g, " ").trim()
 +  })
-+  // attempt/next 来自 SessionStatus.retry；formatDuration 与 Prompt 共用 util。
++  // #550：倒计时元数据——next 差值不足 1s 显示 0，不向上取整（与 Prompt seconds 同口径）。
++  // attempt/next 均来自 durable session_status；本组件不猜测重试调度。
 +  const retryMeta = createMemo(() => {
 +    const r = retry()
 +    if (!r) return ""
-+    const seconds = Math.round((r.next - now()) / 1000)
++    const seconds = r.next ? Math.round((r.next - now()) / 1000) : 0
 +    const duration = formatDuration(seconds)
 +    return duration ? `retry in ${duration} · #${r.attempt}` : `retry · #${r.attempt}`
 +  })
-+  // details 必须走 DialogAlert 原文路径，禁止把压平后的摘要写回 status。
++  // details 对所有 retry 稳定可用——与 #491 的无阈值合同一致。
 +  const openRetryDetails = () => {
 +    const r = retry()
 +    if (!r) return
@@ -368,223 +363,92 @@ index a43a6d877695c452d938167c2b03744fd0e4a617..2c1064b47a92d57fb0aca5ba4018cfbc
    return (
      <box flexShrink={0}>
        <box
-@@ -104,28 +141,66 @@ export function SubagentFooter() {
-         flexShrink={0}
+@@ -114,18 +152,33 @@ export function SubagentFooter() {
          backgroundColor={theme.backgroundPanel}
        >
--        <box flexDirection="row" justifyContent="space-between" gap={1}>
+         <box flexDirection="row" justifyContent="space-between" gap={1}>
 -          <box flexDirection="row" gap={1}>
--            <text fg={theme.text}>
-+        {/* 单行 chrome：label → retry 红字 → usage → 导航；与用户截图同一 footer 行。 */}
-+        <box flexDirection="row" justifyContent="space-between" gap={1} minWidth={0} overflow="hidden">
-+          <box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
-+            <text fg={theme.text} flexShrink={0}>
++          <box flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+             <text fg={theme.text}>
                <b>{subagentInfo().label}</b>
              </text>
++            {/* 计数标签不参与收缩——它是身份信息而非诊断数据。 */}
              <Show when={subagentInfo().total > 0}>
--              <text style={{ fg: theme.textMuted }}>
-+              <text style={{ fg: theme.textMuted }} flexShrink={0}>
+               <text style={{ fg: theme.textMuted }}>
                  ({subagentInfo().index} of {subagentInfo().total})
                </text>
              </Show>
-+            {/* 红字诊断优先于 usage：宽度不足时先挤 usage，不能把 error 簇挤没。 */}
-+            {/* theme.error + truncate：对齐主 Prompt retry 契约，摘要可缩 details/meta 不缩。 */}
++            {/* #550：retry 红字簇优先于 usage——宽度不足先挤 usage 不挤诊断。 */}
 +            <Show when={retry()}>
-+              <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
-+                <box
-+                  minWidth={0}
-+                  flexShrink={1}
-+                  flexDirection="row"
-+                  gap={1}
-+                  overflow="hidden"
-+                  onMouseUp={openRetryDetails}
-+                >
-+                  <text
-+                    minWidth={0}
-+                    flexShrink={1}
-+                    fg={theme.error}
-+                    wrapMode="none"
-+                    truncate
-+                    onMouseUp={openRetryDetails}
-+                  >
-+                    {retrySummary()}
-+                  </text>
-+                  {/* (details) 与摘要同色且不 truncate，保证窄宽下入口仍可点。 */}
-+                  <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>
-+                    (details)
-+                  </text>
-+                </box>
-+                {/* retry meta 固定展示 attempt；倒计时文案可随 now 刷新。 */}
++              <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={openRetryDetails}>
++                <text minWidth={0} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={openRetryDetails}>
++                  {retrySummary()}
++                </text>
++                <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>
++                  (details)
++                </text>
 +                <text flexShrink={0} fg={theme.error} wrapMode="none">
 +                  {retryMeta()}
 +                </text>
 +              </box>
 +            </Show>
-+            {/* usage 在 error 之后：retry 时仍可显示，但不得抢在诊断前占用左簇。 */}
              <Show when={usage()}>
                {(item) => (
 -                <text fg={theme.textMuted} wrapMode="none">
--                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
--                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
 +                <text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>
-+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span>{" "}
-+                  {Locale.number(item().input)}{" "}
-+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span>{" "}
-+                  {Locale.number(item().output)}
-                   {item().context ? ` · ${item().context}` : ""}
-                   {item().cost ? ` · ${item().cost}` : ""}
-                 </text>
+                   {/* #506：箭头空格与主面板 compact 同构；只显示当前 step，不再追加 request 累计括号。
+                       ↑↓ 之间用空格内聚（不用 ·）——与主面板 live flow 及 formatUsageStats 的 flow.join(" ") 一致。 */}
+                   <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
+@@ -136,7 +189,8 @@ export function SubagentFooter() {
                )}
              </Show>
            </box>
 -          <box flexDirection="row" gap={2}>
-+          {/* 导航固定不收缩，避免长错误把 Parent/Prev/Next 挤出视口。 */}
++          {/* #550：nav 不被挤出视口——先由 usage/retry 收缩。 */}
 +          <box flexDirection="row" gap={2} flexShrink={0}>
              <box
                onMouseOver={() => setHover("parent")}
                onMouseOut={() => setHover(null)}
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index d831bd2fcd178e83e6680fc6cf99cbac504566d7..8b0a967cf7a8f7c5be9952859ec7aa7b5159782e 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -257,6 +257,140 @@ test("subagent footer shows compact step flow without request cumulative parenth
-   )
+
+diff --git a/packages/tui/test/routes/session/subagent-footer-flow.test.ts b/packages/tui/test/routes/session/subagent-footer-flow.test.ts
+index 520cf6c62..77b70452a 100644
+--- a/packages/tui/test/routes/session/subagent-footer-flow.test.ts
++++ b/packages/tui/test/routes/session/subagent-footer-flow.test.ts
+@@ -24,3 +24,37 @@ describe("SubagentFooter usage flow template", () => {
+     expect(source).toContain("{item().context ? ` · ${item().context}` : \"\"}")
+   })
  })
- 
-+// child 底部只有 SubagentFooter（无 Prompt）；retry 红字必须挂在同一行，并覆盖 auto reviewer 等所有 parentID 子会话。
-+// 本测用 permission-reviewer title：既锁 task 入口，也锁 auto reviewer 共用 footer 路径。
-+test("child subagent footer shows red retry summary before usage", async () => {
-+  const childID = "ses_child_retry_footer"
-+  await withRenderedSession(
-+    [assistantMessage("msg_task_retry_footer", 1)],
-+    {
-+      msg_task_retry_footer: [
-+        completedToolPart(
-+          "part_task_retry_footer",
-+          "msg_task_retry_footer",
-+          "task",
-+          { description: "retry footer child", subagent_type: "permission-reviewer" },
-+          { sessionId: childID },
-+        ),
-+      ],
-+    },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Permission-Reviewer Task") && line.includes("retry footer child")),
-+      )
-+      const raw = app.captureCharFrame().split("\n")
-+      const y = raw.findIndex(
-+        (line) => line.includes("Permission-Reviewer Task") && line.includes("retry footer child"),
-+      )
-+      expect(y).toBeGreaterThanOrEqual(0)
-+      // 点击 task 行导航 child：与生产 Task tool onMouse 入口一致，不直接 route.navigate 绕过。
-+      await app.mockMouse.click(35, y + 1)
 +
-+      await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("retry footer visible")) &&
-+          lines.some((line) => line.includes("Permission-Reviewer")),
-+      )
-+
-+      // 通过公开 session.status 事件进入 Sync，覆盖真实 child sessionID 的 retry 消费链。
-+      // 禁止直接写 store：必须证明 bus → Sync → SubagentFooter 全链路。
-+      emit({
-+        directory,
-+        project: "proj_test",
-+        payload: {
-+          id: "evt-child-footer-retry",
-+          type: "session.status",
-+          properties: {
-+            sessionID: childID,
-+            status: {
-+              type: "retry",
-+              attempt: 3,
-+              next: Date.now() + 9_000,
-+              message: "Short error",
-+            },
-+          },
-+        },
-+      })
-+
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) => lines.some((line) => line.includes("Short error") && line.includes("(details)")),
-+      )
-+      const footer = frame.find((line) => line.includes("Short error") && line.includes("(details)")) ?? ""
-+      // 摘要与 details 左起成组；retry meta 与 agent 名同在 footer 行。
-+      // 连续 token 证明未用 flexGrow 把 (details) 推到行尾制造假两端对齐。
-+      expect(footer).toContain("Short error (details)")
-+      // #3 来自 emit 的 attempt，锁定 meta 读 session_status 而非硬编码 UI。
-+      expect(footer).toMatch(/retry(?: in .+)? · #3/)
-+      expect(footer).toContain("Permission-Reviewer")
-+      // 红字摘要在 token usage 之前（usage 可能仍出现在右侧，但不得插在 Short error 之前把诊断挤没）。
-+      const errorAt = footer.indexOf("Short error")
-+      const usageAt = footer.search(/[↑↓]/)
-+      if (usageAt >= 0) expect(errorAt).toBeLessThan(usageAt)
-+
-+      const spans = app.captureSpans()
-+      const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
-+      const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
-+      const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
-+      expect(errorSpan).toBeDefined()
-+      expect(detailsSpan).toBeDefined()
-+      // 详情入口与错误摘要同色，避免 muted 弱化可点击诊断入口。
-+      // 用 renderer span 实色比较，不绑定具体 theme hex，覆盖自定义主题。
-+      expect(detailsSpan!.fg.toInts()).toEqual(errorSpan!.fg.toInts())
-+
-+      // INV-03：点击 (details) 打开 DialogAlert，正文保留原始 message。
-+      // 点击坐标取自最终字符帧可见令牌，覆盖用户真实可点区域。
-+      const detailsToken = "(details)"
-+      const charLines = app.captureCharFrame().split("\n")
-+      const detailsY = charLines.findIndex((row) => row.includes(detailsToken))
-+      const detailsX = charLines[detailsY]?.indexOf(detailsToken) ?? -1
-+      expect(detailsY).toBeGreaterThanOrEqual(0)
-+      expect(detailsX).toBeGreaterThanOrEqual(0)
-+      app.renderer.clearSelection()
-+      await app.mockMouse.moveTo(detailsX + Math.floor(detailsToken.length / 2), detailsY)
-+      await app.renderOnce()
-+      await app.mockMouse.click(detailsX + Math.floor(detailsToken.length / 2), detailsY)
-+      const dialog = await waitForFrame(app, (rows) => rows.some((row) => row.includes("Retry Error")))
-+      expect(dialog.some((row) => row.includes("Short error"))).toBe(true)
-+    },
-+    {},
-+    { width: 140, height: 24 },
-+    {
-+      [childID]: {
-+        info: sessionInfo({
-+          id: childID,
-+          parentID: sessionID,
-+          title: "retry footer child (@permission-reviewer subagent)",
-+        }),
-+        messages: [
-+          {
-+            ...userMessage("msg_child_retry_user", 1),
-+            sessionID: childID,
-+            agent: "permission-reviewer",
-+          },
-+          {
-+            ...assistantMessage("msg_child_retry_asst", 2, "msg_child_retry_user"),
-+            sessionID: childID,
-+            finish: "stop",
-+            agent: "permission-reviewer",
-+            cost: 0.005,
-+          },
-+        ],
-+        parts: {
-+          msg_child_retry_asst: [
-+            textPart("part_child_retry", "msg_child_retry_asst", "retry footer visible", { sessionID: childID }),
-+            {
-+              ...stepFinishPart("part_child_retry_finish", "msg_child_retry_asst", 6_000, 100, 0, 0.005),
-+              sessionID: childID,
-+            },
-+          ],
-+        },
-+      },
-+    },
-+  )
++// #550：retry 红字簇合同——摘要压平 + (details) 独立入口 + retry in/attempt 元数据 + 优先级。
++describe("SubagentFooter retry display contract", () => {
++  test("flattens retry message for the inline summary only", () => {
++    // 摘要压平空白；gemini quota 特例与主 Prompt footer 同文案，避免两个 footer 分叉。
++    expect(source).toContain('r.message.replace(/\\s+/g, " ").trim()')
++    expect(source).toContain('"gemini is way too hot right now"')
++  })
++  test("renders details entry and retry meta with error color", () => {
++    // (details) 与摘要/meta 同 theme.error；两层 onMouseUp 与 Prompt 同款（子 text 冒泡不可靠）。
++    expect(source).toContain('<text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>')
++    expect(source).toContain("(details)")
++    // 元数据模板与 prompt/index.tsx retryInfo 逐字对齐（retry in X · #n / retry · #n）。
++    expect(source).toContain("`retry in ${duration} · #${r.attempt}`")
++    expect(source).toContain("`retry · #${r.attempt}`")
++  })
++  test("opens the original message in a Retry Error dialog", () => {
++    expect(source).toContain('DialogAlert.show(dialog, "Retry Error", r.message)')
++  })
++  test("scopes retry to the child session status only", () => {
++    // retry memo 只读当前 route.sessionID 的 status——禁止串到 parent 的 retry 态。
++    expect(source).toContain("const s = status()")
++    expect(source).toContain('if (s?.type !== "retry") return')
++  })
++  test("usage yields width before the retry cluster", () => {
++    // usage text 可收缩（flexShrink/minWidth/truncate）；nav 外层不收缩。
++    expect(source).toContain('<text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>')
++    expect(source).toContain('flexDirection="row" gap={2} flexShrink={0}')
++  })
++  test("counts down via a retry-gated refresh clock", () => {
++    // createRefreshClock 以 retry 态门控——非 retry 不持 interval（组件首个计时器）。
++    expect(source).toContain("createRefreshClock(() => !!retry())")
++  })
 +})
-+
- test("non-shell auto review status opens the reviewer child session", async () => {
-   const childID = "ses_reviewer_child"
-   await withRenderedSession(

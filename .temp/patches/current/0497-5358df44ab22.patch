@@ -1,20 +1,19 @@
-From 5358df44ab2258b4dff4c1f26fdd86ea98ef23ae Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 19 Jul 2026 19:47:54 +0800
-Subject: [PATCH] =?UTF-8?q?fix(session):=20=E7=BB=9F=E4=B8=80=E8=BF=90?=
- =?UTF-8?q?=E8=A1=8C=E6=89=80=E6=9C=89=E6=9D=83=E5=B9=B6=E9=97=AD=E5=90=88?=
- =?UTF-8?q?=E5=AE=A1=E6=9F=A5=E5=B7=A5=E5=85=B7?=
+From 5358df44ab22 Mon Sep 17 00:00:00 2001
+From: SMARK <smark@local>
+Date: Fri, 17 Jul 2026 18:55:03 +0800
+Subject: [PATCH] fix(session): 统一运行所有权并闭合审查工具
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-让带 Session ID 的请求始终回到持久化目录，避免同一会话因 caller hint 分裂出多个 Runner，并使 foreground Task 与 abort 命中同一 owner。
-
-Reviewer 在持久化前登记稳定 Part identity，退出时重读权威状态并闭合开放 Tool，同时保留已提交的 terminal winner。
-
+适配：workspace-routing 两 hunk 在目标已按 session.directory 路由（160-163/181-184/232）
+= SATISFIED。落地：reviewer/service.ts 工具闭合（toolParts→PartID identity 注册先于首写、
+finalizeOpenToolParts 终态闭合、三 handler getPart 权威化、RunForEach onInterrupt/tapError +
+post-drain finalize）；reviewer-service.test 三 closure .live 用例 + closureFixture + sessionPartStore
+retrofit（3 echo fixture + token-capture getPart）+ openAIReviewPendingStream；httpapi-session.test
+ownership 用例（per-test provide 模式 + TestLLMServer）。
 diff --git a/docs/plans/session-runner-ownership-tool-closure.md b/docs/plans/session-runner-ownership-tool-closure.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..344a55d4cb564f20d47b69d76e1f1b6004a137a8
 --- /dev/null
 +++ b/docs/plans/session-runner-ownership-tool-closure.md
 @@ -0,0 +1,777 @@
@@ -796,28 +795,26 @@ index 0000000000000000000000000000000000000000..344a55d4cb564f20d47b69d76e1f1b60
 +`No blocking findings` for the current implementation and approved plan
 +revision.
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 56240f81af317c2feaf346424ca5d0f755ced606..60dfbf0c4701dfd945bd9cc72310dc0c2d1eb795 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -611,9 +611,47 @@ export const layer = Layer.effect(
-             let textPart: MessageV2.TextPart | undefined
-             let textOutput = ""
-             let reasoningPart: MessageV2.ReasoningPart | undefined
--            const toolParts = new Map<string, MessageV2.ToolPart>()
-+            // Map 只表达 attempt 对 Part identity 的 ownership，不缓存可变 state；
+@@ -636,8 +636,45 @@ export const layer = Layer.effect(
+ // #227：textOutput 累积所有 text-delta——JSON 回退解析需要完整文本而非首个分片
+             let reasoningPart: ReasoningPart | undefined
+             // #209：toolParts/toolInput 按 callID 索引——一个 tool-call 的 input-start/delta/end/call 共享同一 callID
+-            const toolParts = new Map<string, ToolPart>()
++            // #497：Map 只表达 attempt 对 Part identity 的 ownership，不缓存可变 state；
 +            // durable state 的单一真相留在 Session.Service，避免发布窗口产生双重 winner。
 +            const toolParts = new Map<string, PartID>()
              const toolInput = new Map<string, string>()
- 
 +            const finalizeOpenToolParts = Effect.fnUntraced(function* (error: string, interrupted: boolean) {
 +              if (!persist) return
 +              const end = Date.now()
 +              yield* Effect.forEach(
 +                toolParts.values(),
 +                Effect.fnUntraced(function* (partID) {
-+                  // registry 只保存首次 durable write 前分配的稳定 identity；退出时必须
++                  // #497：registry 只保存首次 durable write 前分配的稳定 identity；退出时必须
 +                  // 重读存储，才能同时覆盖 commit 后 return 前中断并尊重 completed winner。
-+                  const part = yield* sessions.getPart({
++                  const part = yield* session.getPart({
 +                    sessionID: persist.sessionID,
 +                    messageID: persist.messageID,
 +                    partID,
@@ -826,81 +823,98 @@ index 56240f81af317c2feaf346424ca5d0f755ced606..60dfbf0c4701dfd945bd9cc72310dc0c
 +                  if (part.state.status !== "pending" && part.state.status !== "running") return
 +                  const start = part.state.status === "running" ? part.state.time.start : end
 +                  const metadata = part.state.status === "running" ? part.state.metadata : undefined
-+                  yield* sessions.updatePart({
++                  yield* session.updatePart({
 +                    ...part,
 +                    state: {
 +                      status: "error",
 +                      input: part.state.input,
 +                      error,
-+                      // interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
++                      // #497：interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
 +                      // 保持原错误语义，不能让 Provider replay 把协议失败误判成用户取消。
 +                      metadata: interrupted
 +                        ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
 +                        : metadata,
 +                      time: { start, end },
 +                    },
-+                  } satisfies MessageV2.ToolPart)
++                  } satisfies ToolPart)
 +                }),
 +                { discard: true },
 +              )
 +            })
-+
+ 
              yield* Stream.runForEach(
-               Stream.fromAsyncIterable(result.fullStream, (error) => error),
-               Effect.fnUntraced(function* (event) {
-@@ -678,7 +716,7 @@ export const layer = Layer.effect(
-                   return
+               // #209：fullStream 聚合 reasoning/text/tool 全部事件——逐事件持久化使子会话 transcript 实时可审计
+@@ -712,7 +749,7 @@ export const layer = Layer.effect(
                  }
                  if (event.type === "tool-input-start") {
--                  const part = yield* sessions.updatePart({
+                   // #209：工具输入先建 pending 壳——delta 缓冲到 toolInput Map，end 时回填 raw
+-                  const part = yield* session.updatePart({
 +                  const part = {
                      id: PartID.ascending(),
                      sessionID: persist.sessionID,
                      messageID: persist.messageID,
-@@ -686,8 +724,11 @@ export const layer = Layer.effect(
+@@ -720,8 +757,11 @@ export const layer = Layer.effect(
                      callID: event.id,
                      tool: event.toolName,
                      state: { status: "pending", input: {}, raw: "" },
--                  } satisfies MessageV2.ToolPart)
+-                  } satisfies ToolPart)
 -                  toolParts.set(event.id, part)
-+                  } satisfies MessageV2.ToolPart
-+                  // identity 必须先于 updatePart 注册：SQLite commit 早于事件发布和返回，
++                  } satisfies ToolPart
++                  // #497：identity 必须先于 updatePart 注册：SQLite commit 早于事件发布和返回，
 +                  // 中断若落在其间，attempt cleanup 仍能通过 PartID 找到 durable pending。
 +                  toolParts.set(event.id, part.id)
-+                  yield* sessions.updatePart(part)
++                  yield* session.updatePart(part)
                    return
                  }
                  if (event.type === "tool-input-delta") {
-@@ -695,28 +736,50 @@ export const layer = Layer.effect(
-                   return
+@@ -731,14 +771,20 @@ export const layer = Layer.effect(
                  }
                  if (event.type === "tool-input-end") {
+ // #227：input 聚合完成时回填 state.input——running 状态先持久化保证 UI 及时
 -                  const part = toolParts.get(event.id)
+-                  // #209：part 不存在或已非 pending 时跳过——tool-call 可能先于 tool-input-end 到达导致状态已 completed
 -                  if (!part || part.state.status !== "pending") return
 -                  const next = {
 +                  const partID = toolParts.get(event.id)
 +                  if (!partID) return
-+                  // raw 参数更新也必须从 durable Part 起步；创建写入可能已经 commit，
++                  // #497：raw 参数更新也必须从 durable Part 起步；创建写入可能已经 commit，
 +                  // 但调用返回与内存 snapshot 更新并不构成持久化顺序保证。
-+                  const part = yield* sessions.getPart({
++                  const part = yield* session.getPart({
 +                    sessionID: persist.sessionID,
 +                    messageID: persist.messageID,
 +                    partID,
 +                  })
 +                  if (!part || part.type !== "tool" || part.state.status !== "pending") return
-+                  yield* sessions.updatePart({
++                  yield* session.updatePart({
                      ...part,
                      state: { ...part.state, raw: toolInput.get(event.id) ?? "" },
--                  } satisfies MessageV2.ToolPart
--                  toolParts.set(event.id, yield* sessions.updatePart(next))
-+                  } satisfies MessageV2.ToolPart)
+-                  } satisfies ToolPart
+-                  toolParts.set(event.id, yield* session.updatePart(next))
++                  } satisfies ToolPart)
                    return
                  }
                  if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+@@ -746,17 +792,31 @@ export const layer = Layer.effect(
                    assessment = assessmentFromUnknown(event.input)
                    if (!assessment) return
+                   // #209：toolCallId 可能与 tool-input-start 的 event.id 不同——无 existing 时新建 part 壳
 -                  const existing = toolParts.get(event.toolCallId)
--                  const part = yield* sessions.updatePart({
+-// #227：toolCallId 与 input-start 的 event.id 可能不同——无 existing 时新建 part
++                  const registered = toolParts.get(event.toolCallId)
++                  const partID = registered ?? PartID.ascending()
++                  // #497：部分 Provider 直接发 tool-call；该路径同样在首次 durable write 前登记，
++                  // 保持所有 attempt-owned Tool Part 只有一个 closure 所有者。
++                  if (!registered) toolParts.set(event.toolCallId, partID)
++                  // #497：completed 转换基于存储中的最新 ID/raw/metadata，避免先前 pending 写入
++                  // 已提交但尚未返回时，旧对象重新成为后续 terminal write 的来源。
++                  const current = registered
++                    ? yield* session.getPart({
++                        sessionID: persist.sessionID,
++                        messageID: persist.messageID,
++                        partID,
++                      })
++                    : undefined
+                   const part = yield* session.updatePart({
 -                    ...(existing ?? {
 -                      id: PartID.ascending(),
 -                      sessionID: persist.sessionID,
@@ -909,21 +923,6 @@ index 56240f81af317c2feaf346424ca5d0f755ced606..60dfbf0c4701dfd945bd9cc72310dc0c
 -                      callID: event.toolCallId,
 -                      tool: event.toolName,
 -                    }),
-+                  const registered = toolParts.get(event.toolCallId)
-+                  const partID = registered ?? PartID.ascending()
-+                  // 部分 Provider 直接发 tool-call；该路径同样在首次 durable write 前登记，
-+                  // 保持所有 attempt-owned Tool Part 只有一个 closure 所有者。
-+                  if (!registered) toolParts.set(event.toolCallId, partID)
-+                  // completed 转换基于存储中的最新 ID/raw/metadata，避免先前 pending 写入
-+                  // 已提交但尚未返回时，旧对象重新成为后续 terminal write 的来源。
-+                  const current = registered
-+                    ? yield* sessions.getPart({
-+                        sessionID: persist.sessionID,
-+                        messageID: persist.messageID,
-+                        partID,
-+                      })
-+                    : undefined
-+                  yield* sessions.updatePart({
 +                    ...(current?.type === "tool"
 +                      ? current
 +                      : {
@@ -937,26 +936,27 @@ index 56240f81af317c2feaf346424ca5d0f755ced606..60dfbf0c4701dfd945bd9cc72310dc0c
                      state: {
                        status: "completed",
                        input: assessment,
-@@ -730,7 +793,6 @@ export const layer = Layer.effect(
+@@ -768,7 +828,6 @@ export const layer = Layer.effect(
                        time: { start: Date.now(), end: Date.now() },
                      },
-                   } satisfies MessageV2.ToolPart)
+                   })
 -                  toolParts.set(event.toolCallId, part)
                    return
                  }
                  if (event.type === "tool-error") {
-@@ -778,8 +840,27 @@ export const layer = Layer.effect(
+@@ -819,7 +878,26 @@ export const layer = Layer.effect(
                    return yield* Effect.fail(event.error)
                  }
                }),
 +            ).pipe(
 +              Effect.onInterrupt(() =>
++                // #497：真实 abort 的 open tool part 闭合为 error+interrupted marker。
 +                finalizeOpenToolParts("Tool execution aborted", true).pipe(
 +                  Effect.catch(() => Effect.void),
 +                  Effect.catchDefect(() => Effect.void),
 +                ),
 +              ),
-+              // Provider failure 的原始 shape 仍交给 SessionRetry；cleanup 失败不能把
++              // #497：Provider failure 的原始 shape 仍交给 SessionRetry；cleanup 失败不能把
 +              // status/header 等诊断替换成第二个错误，也不能伪造 reviewer 成功结果。
 +              Effect.tapError(() =>
 +                finalizeOpenToolParts("Tool execution did not complete before stream ended", false).pipe(
@@ -965,58 +965,14 @@ index 56240f81af317c2feaf346424ca5d0f755ced606..60dfbf0c4701dfd945bd9cc72310dc0c
 +                ),
 +              ),
              )
- 
-+            // 正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
++            // #497：正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
 +            // retry/fallback 接管前先闭合本 attempt，防止每次重试累积 pending Part。
 +            yield* finalizeOpenToolParts("Tool execution did not complete before stream ended", false)
-+
+ 
+             // #209：流结束后收尾未关闭的 text/reasoning part——provider 可能不发 *-end 事件，避免 part 残留无结束时间
              if (textPart)
-               yield* sessions.updatePart({
-                 ...textPart,
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/middleware/workspace-routing.ts b/packages/opencode/src/server/routes/instance/httpapi/middleware/workspace-routing.ts
-index cd9376f7f9d8da57b1cfa6d7aa434310d486e658..e60215799699243696552a3e25ba81b9e6593135 100644
---- a/packages/opencode/src/server/routes/instance/httpapi/middleware/workspace-routing.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/middleware/workspace-routing.ts
-@@ -144,12 +144,12 @@ function planWorkspaceRequest(
- 
- function planRequest(
-   request: HttpServerRequest.HttpServerRequest,
--  sessionWorkspaceID?: WorkspaceID,
-+  session?: Session.Info,
- ): Effect.Effect<RequestPlan, never, Workspace.Service> {
-   return Effect.gen(function* () {
-     const url = requestURL(request)
-     const envWorkspaceID = configuredWorkspaceID()
--    const workspaceID = selectedWorkspaceID(url, sessionWorkspaceID)
-+    const workspaceID = selectedWorkspaceID(url, session?.workspaceID)
-     const workspace = yield* resolveWorkspace(workspaceID, envWorkspaceID)
- 
-     if (workspaceID && workspace === undefined && !envWorkspaceID) {
-@@ -160,7 +160,12 @@ function planRequest(
-       return yield* planWorkspaceRequest(request, url, workspace)
-     }
- 
--    return RequestPlan.Local({ directory: defaultDirectory(request, url), workspaceID: envWorkspaceID ?? workspaceID })
-+    // Workspace forwarding 先保留既有执行目标；只有最终留在本地的 Session 请求
-+    // 才以持久化目录覆盖 caller hint，确保 prompt、Task 与 abort 共享同一 Runner owner。
-+    return RequestPlan.Local({
-+      directory: session?.directory ?? defaultDirectory(request, url),
-+      workspaceID: envWorkspaceID ?? workspaceID,
-+    })
-   })
- }
- 
-@@ -194,7 +199,7 @@ function routeHttpApiWorkspace<E>(
-           Effect.catchDefect(() => Effect.succeed(undefined)),
-         )
-       : undefined
--    const plan = yield* planRequest(request, session?.workspaceID)
-+    const plan = yield* planRequest(request, session)
-     return yield* routeWorkspace(client, effect, plan)
-   })
- }
+
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
-index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530d84358bb 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
 @@ -1,5 +1,5 @@
@@ -1024,26 +980,43 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 -import { Effect, Layer } from "effect"
 +import { Effect, Fiber, Layer } from "effect"
  import { createOpenAI } from "@ai-sdk/openai"
- import { Auth } from "../../src/auth"
- import { Config } from "../../src/config/config"
-@@ -78,6 +78,12 @@ describe("permission reviewer service", () => {
-   const customOauth = testEffect(customOauthFixture.layer)
-   const oauthHook = testEffect(oauthHookFixture.layer)
-   const implicitAuto = testEffect(implicitAutoFixture.layer)
-+  const pendingClosureFixture = reviewerClosureFixture("pending")
-+  const pendingClosure = testEffect(pendingClosureFixture.layer)
-+  const completedClosureFixture = reviewerClosureFixture("completed")
-+  const completedClosure = testEffect(completedClosureFixture.layer)
-+  const drainedClosureFixture = reviewerClosureFixture("drain")
-+  const drainedClosure = testEffect(drainedClosureFixture.layer)
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+@@ -12,6 +12,7 @@ import { Provider } from "../../src/provider/provider"
+ import { SessionID } from "../../src/session/schema"
+ import { ProjectV2 } from "@opencode-ai/core/project"
+ import { Session } from "../../src/session/session"
++import { MessageV2 } from "../../src/session/message-v2"
+ import { Exit, Option } from "effect"
+ import { testEffect } from "../lib/effect"
+ import { TestConfig } from "../fixture/config"
+@@ -69,7 +70,18 @@ const emptyReviewerDb = (() => {
+   return { db: { select: () => ({ from: () => ({ where: () => chain }) }) } as never, sync: undefined as never }
+ })()
  
-   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
-     Effect.gen(function* () {
-@@ -288,8 +294,152 @@ describe("permission reviewer service", () => {
-     }),
-   )
-   // [local-smark] reviewer token/breakdown 持久化测试结束
++// #497：closure 用例的 fixture 注册表——it 实例与 body 共享同一 fixture（单一实例，committed barrier 才可观测）。
++const closureFixtures = new Map<"pending" | "completed" | "drain", ReturnType<typeof reviewerClosureFixture>>([
++  ["pending", reviewerClosureFixture("pending")],
++  ["completed", reviewerClosureFixture("completed")],
++  ["drain", reviewerClosureFixture("drain")],
++])
 +
+ describe("permission reviewer service", () => {
++  // #497：closure 三用例经真实 barrier 覆盖 commit→return 中断窗口、completed winner 保留与 drain 闭合。
++  const pendingClosure = testEffect(closureFixtures.get("pending")!.layer)
++  const completedClosure = testEffect(closureFixtures.get("completed")!.layer)
++  const drainedClosure = testEffect(closureFixtures.get("drain")!.layer)
+   const oauthFixture = reviewerFixture(oauthAuth(), { requireInstructions: true })
+   const apiKeyFixture = reviewerFixture({ type: "api", key: "test-key" }, { requireInstructions: false })
+   // OAuth 凭据本身不是 Codex 契约；这个 fixture 防止未来把条件误放宽成
+@@ -319,6 +331,73 @@ describe("permission reviewer service", () => {
+       expect(typeof request.body.instructions).toBe("string")
+       expectPreservedShellEvidence(inputText(request.body))
+     }),
++
++  )
++  // #497：三个 closure 行为用例——durable Part identity 注册先于首次写、
++  // completed winner 不被 cleanup 覆盖、协议失败前 drain 闭合 open tools。
 +  pendingClosure.live("closes a pending decision Tool committed before updatePart returns", () =>
 +    Effect.gen(function* () {
 +      const reviewer = yield* PermissionReviewer.Service
@@ -1053,14 +1026,13 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +
 +      // readiness 在 durable store 写入后、updatePart 返回前发布，精确覆盖 SQLite
 +      // 已提交但 attempt registry 尚不可见的生产窗口；固定 sleep 无法证明这一边界。
-+      yield* Effect.promise(() => pendingClosureFixture.committed.promise).pipe(Effect.timeout("2 seconds"))
++      const fixture = closureFixtures.get("pending")!
++      yield* Effect.promise(() => fixture.committed.promise).pipe(Effect.timeout("2 seconds"))
 +      yield* Fiber.interrupt(fiber)
 +
 +      // 断言读取独立持久化副本，而非被中断调用的返回值；只有 attempt cleanup
 +      // 通过稳定 Part identity 重读并写终态，才能把这里的 pending 改成 error。
-+      const decision = [...pendingClosureFixture.parts.values()].find(
-+        (part): part is MessageV2.ToolPart => part.type === "tool",
-+      )
++      const decision = [...fixture.parts.values()].find((part): part is MessageV2.ToolPart => part.type === "tool")
 +      expect(decision?.state.status).toBe("error")
 +      if (decision?.state.status !== "error") return
 +      expect(decision.state.error).toBe("Tool execution aborted")
@@ -1077,12 +1049,11 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +
 +      // 该 barrier 位于 completed durable write 与调用返回之间，正好与 pending 用例
 +      // 形成竞态两侧；中断 cleanup 若信任旧 snapshot 就会错误覆盖已提交 winner。
-+      yield* Effect.promise(() => completedClosureFixture.committed.promise).pipe(Effect.timeout("2 seconds"))
++      const fixture = closureFixtures.get("completed")!
++      yield* Effect.promise(() => fixture.committed.promise).pipe(Effect.timeout("2 seconds"))
 +      yield* Fiber.interrupt(fiber)
 +
-+      const decision = [...completedClosureFixture.parts.values()].find(
-+        (part): part is MessageV2.ToolPart => part.type === "tool",
-+      )
++      const decision = [...fixture.parts.values()].find((part): part is MessageV2.ToolPart => part.type === "tool")
 +      // completed 是协议决策的权威终态；cleanup 只能重读后跳过，不能为了统一
 +      // abort 外观把已经成功持久化的 allow/deny 降级成 error。
 +      expect(decision?.state.status).toBe("completed")
@@ -1101,28 +1072,96 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +        reviewer.review(reviewInput("review_drained_closure", undefined, SessionID.make("session_parent_closure"))),
 +      )
 +
-+      const decisions = [...drainedClosureFixture.parts.values()].filter(
-+        (part): part is MessageV2.ToolPart => part.type === "tool",
-+      )
++      const fixture = closureFixtures.get("drain")!
++      const decisions = [...fixture.parts.values()].filter((part): part is MessageV2.ToolPart => part.type === "tool")
 +      // 至少一个 Tool 证明测试确实越过 tool-input-start；开放集合为空才对应 TUI
 +      // spinner 的生产输入，不能用 reviewer 最终失败本身替代 Part 终态断言。
 +      expect(decisions.length).toBeGreaterThan(0)
 +      expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
 +      expect(decisions.every((part) => part.state.status === "error")).toBe(true)
 +    }),
-+  )
+   )
  })
  
+@@ -385,13 +464,14 @@ function parentSessionModelFixture() {
+     agent: "permission-reviewer",
+     title: "Auto permission review",
+   }
++  const partStore = sessionPartStore()
+   const sessionLayer = Layer.mock(Session.Service)({
+     get: () => Effect.succeed(parentSession),
+     messages: () => Effect.succeed([]),
+     children: () => Effect.succeed([]),
+     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
+     updateMessage: (msg) => Effect.succeed(msg),
+-    updatePart: (part) => Effect.succeed(part),
++    ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
+     // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
+     // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
+     findMessage: () => Effect.succeed(Option.none()),
+@@ -471,13 +551,14 @@ function explicitModelOverrideFixture() {
+     agent: "permission-reviewer",
+     title: "Auto permission review",
+   }
++  const partStore = sessionPartStore()
+   const sessionLayer = Layer.mock(Session.Service)({
+     get: () => Effect.succeed(parentSession),
+     messages: () => Effect.succeed([]),
+     children: () => Effect.succeed([]),
+     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
+     updateMessage: (msg) => Effect.succeed(msg),
+-    updatePart: (part) => Effect.succeed(part),
++    ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
+     // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
+     // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
+     findMessage: () => Effect.succeed(Option.none()),
+@@ -577,13 +658,14 @@ function staleParentModelFixture() {
+     agent: "permission-reviewer",
+     title: "Auto permission review",
+   }
++  const partStore = sessionPartStore()
+   const sessionLayer = Layer.mock(Session.Service)({
+     get: () => Effect.succeed(parentSession),
+     messages: () => Effect.succeed([]),
+     children: () => Effect.succeed([]),
+     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
+     updateMessage: (msg) => Effect.succeed(msg),
+-    updatePart: (part) => Effect.succeed(part),
++    ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
+     // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
+     // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
+     findMessage: () => Effect.succeed(Option.none()),
+@@ -666,7 +748,12 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
+     children: () => Effect.succeed([]),
+     create: (input?: any) => Effect.succeed({ ...childSession, ...input } as Session.Info),
+     updateMessage: (msg) => Effect.succeed(msg),
+-    // 捕获所有 updatePart 调用，用于断言 step-finish part 的 tokens 和 inputBreakdown
++    // #497：捕获仍推 parts 数组供断言；getPart/updatePart 共享同一 durable store——
++    // 生产代码新增的权威读取边界（getPart）在该 fixture 同样生效。
++    getPart: (input) =>
++      Effect.succeed(
++        [...parts].reverse().find((part) => part.id === input.partID),
++      ),
+     updatePart: (part) => {
+       parts.push(part)
+       return Effect.succeed(part)
+@@ -922,3 +1009,141 @@ function openAIReviewDecisionStream() {
+     .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+     .join("")
+ }
++
++
 +function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
 +  const parts = new Map<string, MessageV2.Part>()
 +  const committed = Promise.withResolvers<void>()
 +  const model = reviewerModel(OPENAI_PROVIDER_ID)
 +  const fetch = Object.assign(
-+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
-+      new Response(block === "completed" ? openAIReviewDecisionStream() : openAIReviewPendingStream(), {
++    async (_input: RequestInfo | URL, _init?: RequestInit) => {
++      return new Response(block === "completed" ? openAIReviewDecisionStream() : openAIReviewPendingStream(), {
 +        status: 200,
 +        headers: { "content-type": "text/event-stream" },
-+      }),
++      })
++    },
 +    { preconnect: () => {} },
 +  )
 +  const provider = ProviderTest.fake({
@@ -1135,7 +1174,7 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +  const parentSession: Session.Info = {
 +    id: SessionID.make("session_parent_closure"),
 +    slug: "parent-closure",
-+    projectID: ProjectID.make("project_reviewer_closure"),
++    projectID: ProjectV2.ID.make("project_reviewer_closure"),
 +    directory: "/tmp",
 +    title: "Parent closure",
 +    model: { id: model.id, providerID: model.providerID },
@@ -1151,18 +1190,21 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +    agent: "permission-reviewer",
 +    title: "Auto permission review",
 +  }
++  // #497：review 带 sessionID 时 resolveImplicitReviewerModel 会走 findMessage——mock none。
 +  const sessionLayer = Layer.mock(Session.Service)({
 +    get: () => Effect.succeed(parentSession),
++    messages: () => Effect.succeed([]),
 +    children: () => Effect.succeed([]),
-+    create: (input) => Effect.succeed({ ...childSession, ...input }),
++    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (message) => Effect.succeed(message),
++    findMessage: () => Effect.succeed(Option.none()),
 +    getPart: (input) => Effect.succeed(parts.get(input.partID)),
 +    updatePart: (part) =>
 +      Effect.gen(function* () {
 +        // structuredClone 模拟 projector 的持久化快照，防止生产代码随后修改同一引用
 +        // 让测试误以为发生了第二次 durable write。
 +        parts.set(part.id, structuredClone(part))
-+        // pending barrier 验证 cleanup 能发现“已提交、未返回”的新 Part；completed barrier
++        // pending barrier 验证 cleanup 能发现"已提交、未返回"的新 Part；completed barrier
 +        // 验证同一窗口内的 terminal winner 不会被 registry 中的旧阶段覆盖。
 +        if (
 +          part.type === "tool" &&
@@ -1185,21 +1227,17 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +      Layer.provide(authLayer({ type: "api", key: "test-key" })),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}
 +
- function reviewerFixture(
-   authInfo: Auth.Info | undefined,
-   options: {
-@@ -358,6 +508,22 @@ function reviewerFixture(
-   }
- }
- 
++// #497：既有 fixture 的 durable store 语义 retrofit——getPart 与 updatePart 共享同一 store，
++// 保证旧测试也经过生产新增的权威读取边界；若仍只回显 update 参数，completed 测试会绕过
++// 本次修复真正依赖的持久化语义。
 +function sessionPartStore(captured?: MessageV2.Part[]) {
 +  const parts = new Map<string, MessageV2.Part>()
-+  // getPart 与 updatePart 共享同一 store，保证旧测试也经过生产新增的权威读取边界；
-+  // 若仍只回显 update 参数，completed 测试会绕过本次修复真正依赖的持久化语义。
 +  const getPart: Session.Interface["getPart"] = (input) => Effect.succeed(parts.get(input.partID))
 +  const updatePart: Session.Interface["updatePart"] = (part) =>
 +    Effect.sync(() => {
@@ -1212,151 +1250,67 @@ index a2a490600900386e1d73145dac47e15e95171328..41607782df221e11425c22334d460530
 +  return { getPart, updatePart }
 +}
 +
- // [local-smark] parentSessionModelFixture 开始
- // 这个 fixture 模拟真实 bug 的触发条件：全局 defaultModel 返回一个未注册的
- // provider（zhipuai），而父会话实际使用的是 openai/gpt-5。当前实现会让
-@@ -421,12 +587,13 @@ function parentSessionModelFixture() {
-     agent: "permission-reviewer",
-     title: "Auto permission review",
-   }
-+  const partStore = sessionPartStore()
-   const sessionLayer = Layer.mock(Session.Service)({
-     get: () => Effect.succeed(parentSession),
-     children: () => Effect.succeed([]),
-     create: (input) => Effect.succeed({ ...childSession, ...input }),
-     updateMessage: (msg) => Effect.succeed(msg),
--    updatePart: (part) => Effect.succeed(part),
-+    ...partStore,
-   })
-   return {
-     bodies,
-@@ -501,12 +668,13 @@ function explicitModelOverrideFixture() {
-     agent: "permission-reviewer",
-     title: "Auto permission review",
-   }
-+  const partStore = sessionPartStore()
-   const sessionLayer = Layer.mock(Session.Service)({
-     get: () => Effect.succeed(parentSession),
-     children: () => Effect.succeed([]),
-     create: (input) => Effect.succeed({ ...childSession, ...input }),
-     updateMessage: (msg) => Effect.succeed(msg),
--    updatePart: (part) => Effect.succeed(part),
-+    ...partStore,
-   })
-   return {
-     bodies,
-@@ -601,12 +769,13 @@ function staleParentModelFixture() {
-     agent: "permission-reviewer",
-     title: "Auto permission review",
-   }
-+  const partStore = sessionPartStore()
-   const sessionLayer = Layer.mock(Session.Service)({
-     get: () => Effect.succeed(parentSession),
-     children: () => Effect.succeed([]),
-     create: (input) => Effect.succeed({ ...childSession, ...input }),
-     updateMessage: (msg) => Effect.succeed(msg),
--    updatePart: (part) => Effect.succeed(part),
-+    ...partStore,
-   })
-   return {
-     bodies,
-@@ -679,16 +848,14 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
-     agent: "permission-reviewer",
-     title: "Auto permission review",
-   }
-+  const partStore = sessionPartStore(parts)
-   const sessionLayer = Layer.mock(Session.Service)({
-     get: () => Effect.succeed(parentSession),
-     children: () => Effect.succeed([]),
-     create: (input) => Effect.succeed({ ...childSession, ...input }),
-     updateMessage: (msg) => Effect.succeed(msg),
--    // 捕获所有 updatePart 调用，用于断言 step-finish part 的 tokens 和 inputBreakdown
--    updatePart: (part) => {
--      parts.push(part)
--      return Effect.succeed(part)
--    },
-+    // capture 与 durable map 共用一次 update，token 断言和 reviewer 状态机看到同一事实。
-+    ...partStore,
-   })
-   return {
-     parts,
-@@ -847,3 +1014,24 @@ function openAIReviewDecisionStream() {
-     .map((event) => `data: ${JSON.stringify(event)}\n\n`)
-     .join("")
- }
-+
++// #497：pending-only 流——完整复刻目标 decision 流骨架（created/added/delta/done/completed，
++// 目标 SDK 需 completed 才发布 tool 事件），但 function-call arguments 为不完整 JSON：
++// tool-input-start 已发布、Part 已持久化，而 Assessment 永远无法完成——reviewer 停在
++// 真实中断位置（协议失败转 fallback 前，open tool 由 finalize 闭合）。
 +function openAIReviewPendingStream() {
-+  // output_item.added 足以让 AI SDK 发布 tool-input-start；刻意不发送 done/completed，
-+  // 使 reviewer 停在已创建 pending Part、尚无合法 Assessment 的真实中断位置。
 +  return [
 +    { type: "response.created", response: { id: "resp_pending", created_at: 0, model: "gpt-5", service_tier: null } },
 +    {
 +      type: "response.output_item.added",
++      output_index: 0,
++      item: { type: "function_call", id: "fc_pending", call_id: "call_pending", name: "permission_review_decision", arguments: "" },
++    },
++    { type: "response.function_call_arguments.delta", item_id: "fc_pending", output_index: 0, delta: JSON.stringify({ outcome: "bogus", rationale: 42 }).slice(0, 12) },
++    {
++      type: "response.output_item.done",
 +      output_index: 0,
 +      item: {
 +        type: "function_call",
 +        id: "fc_pending",
 +        call_id: "call_pending",
 +        name: "permission_review_decision",
-+        arguments: "",
++        arguments: JSON.stringify({ outcome: "bogus", rationale: 42 }),
++        status: "completed",
++      },
++    },
++    {
++      type: "response.completed",
++      response: {
++        incomplete_details: null,
++        usage: { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null },
++        service_tier: null,
 +      },
 +    },
 +  ]
 +    .map((event) => `data: ${JSON.stringify(event)}\n\n`)
 +    .join("")
 +}
+
 diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
-index bfdc42d9960b55679988bca7c951e8e951e6b86e..43fafc517a8e9e421b5b68c7a1ab4452592937d3 100644
 --- a/packages/opencode/test/server/httpapi-session.test.ts
 +++ b/packages/opencode/test/server/httpapi-session.test.ts
-@@ -1,7 +1,7 @@
- import { afterEach, describe, expect } from "bun:test"
+@@ -4,10 +4,12 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
  import { mkdir } from "node:fs/promises"
  import path from "node:path"
--import { Effect, Layer } from "effect"
-+import { Effect, Fiber, Layer } from "effect"
+-import { Cause, Config, Effect, Exit, Layer } from "effect"
++import { Cause, Config, Effect, Exit, Fiber, Layer } from "effect"
+ import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
+ import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++// #497：ownership 用例经 filterCompactedEffect 读取公共持久化投影。
++import { MessageV2 } from "@/session/message-v2"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { Flag } from "@opencode-ai/core/flag/flag"
- import { registerAdapter } from "../../src/control-plane/adapters"
- import type { WorkspaceAdapter } from "../../src/control-plane/types"
-@@ -22,12 +22,14 @@ import { SessionMessageTable, SessionTable } from "@/session/session.sql"
- import { SessionMessage } from "@opencode-ai/core/session-message"
- import { ModelV2 } from "@opencode-ai/core/model"
- import { ProviderV2 } from "@opencode-ai/core/provider"
-+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import * as DateTime from "effect/DateTime"
- import * as Log from "@opencode-ai/core/util/log"
- import { eq } from "drizzle-orm"
- import { resetDatabase } from "../fixture/db"
--import { disposeAllInstances, TestInstance } from "../fixture/fixture"
--import { testEffect } from "../lib/effect"
-+import { disposeAllInstances, TestInstance, tmpdirScoped } from "../fixture/fixture"
-+import { pollWithTimeout, testEffect } from "../lib/effect"
-+import { TestLLMServer } from "../lib/llm-server"
- 
- void Log.init({ print: false })
- 
-@@ -41,7 +43,16 @@ const instanceStoreLayer = InstanceStore.defaultLayer.pipe(
-     Layer.succeed(InstanceBootstrapService.Service, InstanceBootstrapService.Service.of({ run: Effect.void })),
-   ),
- )
--const it = testEffect(Layer.mergeAll(instanceStoreLayer, Project.defaultLayer, Session.defaultLayer, workspaceLayer))
-+const it = testEffect(
-+  Layer.mergeAll(
-+    instanceStoreLayer,
-+    Project.defaultLayer,
-+    Session.defaultLayer,
-+    workspaceLayer,
-+    TestLLMServer.layer,
-+    CrossSpawnSpawner.defaultLayer,
-+  ),
-+)
- 
- function app() {
-   return Server.Default().app
-@@ -401,6 +412,147 @@ describe("session HttpApi", () => {
+@@ -792,6 +794,146 @@ describe("session HttpApi", () => {
      { git: true, config: { formatter: false, lsp: false, share: "disabled" } },
    )
  
++  // #497：Session.directory 成为 local plan 权威后，prompt/foreground Task/abort 必须
++  // 命中同一 per-directory Runner——错误 caller hint 不能再分叉出第二个 Runner。
 +  it.instance(
 +    "keeps foreground Task execution and abort on the persisted Session owner",
 +    () =>
@@ -1387,7 +1341,7 @@ index bfdc42d9960b55679988bca7c951e8e951e6b86e..43fafc517a8e9e421b5b68c7a1ab4452
 +                  options: {},
 +                },
 +              },
-+              options: { apiKey: "test-key", baseURL: llm.url },
++              options: { apiKey: "test", baseURL: llm.url },
 +            },
 +          },
 +        }
@@ -1415,7 +1369,6 @@ index bfdc42d9960b55679988bca7c951e8e951e6b86e..43fafc517a8e9e421b5b68c7a1ab4452
 +              parts: [{ type: "text", text }],
 +            }),
 +          })
-+
 +        // 第一轮由主 Agent 产生真实 foreground task，child 的 Provider 流保持挂起；
 +        // 父 Tool 因而稳定停在 running，形成与生产事故相同的阻塞边界。
 +        yield* llm.tool("task", {
@@ -1426,7 +1379,6 @@ index bfdc42d9960b55679988bca7c951e8e951e6b86e..43fafc517a8e9e421b5b68c7a1ab4452
 +        yield* llm.hang
 +        // 该第三个响应只会被错误目录创建的第二个 Runner 消费；正确 join 不会触碰它。
 +        yield* llm.hang
-+
 +        const first = yield* sendPrompt(callerA, "start foreground task").pipe(Effect.forkChild)
 +        const runningTask = yield* pollWithTimeout(
 +          Effect.gen(function* () {
@@ -1488,12 +1440,11 @@ index bfdc42d9960b55679988bca7c951e8e951e6b86e..43fafc517a8e9e421b5b68c7a1ab4452
 +        // abort 到达真实子 fiber，而非只在另一个 InstanceState 中修补 SQLite 外观。
 +        expect(parentTask?.state.status).toBe("error")
 +        const childAssistants = (yield* MessageV2.filterCompactedEffect(childID)).filter(
-+          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } =>
-+            message.info.role === "assistant",
++          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } => message.info.role === "assistant",
 +        )
 +        expect(childAssistants.length).toBeGreaterThan(0)
 +        expect(childAssistants.every((message) => message.info.time.completed !== undefined)).toBe(true)
-+      }),
++      }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
 +    { git: true, config: { formatter: false, lsp: false, share: "disabled" } },
 +    30_000,
 +  )
@@ -1501,3 +1452,4 @@ index bfdc42d9960b55679988bca7c951e8e951e6b86e..43fafc517a8e9e421b5b68c7a1ab4452
    it.instance(
      "persists selected workspace id when creating a session",
      () =>
+

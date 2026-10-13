@@ -12,9 +12,16 @@ Content-Transfer-Encoding: 8bit
 
 升级 OpenTUI 生命周期修复并加入当前源码 target-liveness 验证，覆盖正文、Thinking、Commands 恢复和 Ctrl+C 取消。
 
+
+适配说明（v1.18.32 重放）：
+TUI 已迁 packages/tui：sync.tsx 两个守卫落 tui/src/context/sync.tsx（message.removed 的
+findIndex 与 part.removed 的 search——part.removed 早退分支保留 #186 orphanPartDeltas 清理，
+不因 no-op 跳过 Map 收敛）；hidden message.updated 守卫目标 #98 已有等价 if(messages) 包裹，
+裁记不重复落地。smoke fixture 改动态 import ../../tui/test/cli/cmd/tui/sync-fixture
+（跨包 .tsx 测试源不进静态图）；pty import 维持目标 @opencode-ai/core 形态。gitlink 原样。
+
 diff --git a/docs/plans/opentui-tree-sitter-request-lifecycle-repair.md b/docs/plans/opentui-tree-sitter-request-lifecycle-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4f5dc0d66a7d97a11b35e825f3b4ad09cba529a
 --- /dev/null
 +++ b/docs/plans/opentui-tree-sitter-request-lifecycle-repair.md
 @@ -0,0 +1,2873 @@
@@ -2891,19 +2898,19 @@ index 0000000000000000000000000000000000000000..c4f5dc0d66a7d97a11b35e825f3b4ad0
 +The historical aggregate recount found `C=139` against `E_total=885`, but R30 explicitly rejects that aggregate as acceptance evidence. Final evidence must recompute and pass all six independent `E_i/C_i` rows. No alternate success path, retry, watchdog, second parser, or production telemetry was added. The existing parser-error plain-text behavior remains shipped compatibility; the only new diagnostic path is correlated request rejection.
 +
 +R22 implementation audit returned the archival BLOCK above。R31 must receive exact-revision plan approval，then implement/verify ownership、both Code consumers、spinner/core identity、HEAD/current comparator、production raw≤600和per-file E/C，最后通过full-scope implementation audit before `Status: verified`。
+
 diff --git a/packages/opencode/script/smoke-opentui-artifact.ts b/packages/opencode/script/smoke-opentui-artifact.ts
-index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c800643a96af3 100644
 --- a/packages/opencode/script/smoke-opentui-artifact.ts
 +++ b/packages/opencode/script/smoke-opentui-artifact.ts
-@@ -5,15 +5,84 @@ import path from "node:path"
- import os from "node:os"
+@@ -9,15 +9,92 @@ import os from "node:os"
  import { Terminal } from "@xterm/headless"
- import { spawn, type Proc } from "../src/pty/pty.bun"
-+import { mount, wait } from "../test/cli/cmd/tui/sync-fixture"
+ // 目标谱系 pty owner 在 core；经其 exports 通配子路径消费（./* → src/*.ts）。
+ import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun"
 +import type { GlobalEvent } from "@opencode-ai/sdk/v2"
  
  const binaryArg = process.argv[process.argv.indexOf("--binary") + 1]
 +const scenarioIndex = process.argv.indexOf("--scenario")
++// #567：scenario 是公开 CLI 约定——normal 保持既有断言面不变，未知值显式拒绝。
 +const scenario = scenarioIndex >= 0 ? process.argv[scenarioIndex + 1] : "normal"
  if (!binaryArg || process.argv.indexOf("--binary") === -1) {
    console.error("Usage: bun run script/smoke-opentui-artifact.ts --binary <absolute-path>")
@@ -2917,9 +2924,14 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
  
  const binary = path.resolve(binaryArg)
  if (!(await Bun.file(binary).exists())) throw new Error(`Compiled OpenCode binary not found: ${binary}`)
++// #567：preflight 在无 rootReport 的主进程侧执行一次；Windows child 重入时跳过避免双跑。
 +if (targetLiveness && !process.env.OPENCODE_SMOKE_ROOT_REPORT) await runSyncProjectionPreflight()
 +
 +async function runSyncProjectionPreflight() {
++  // #567：TUI 已迁包——fixture 经动态 import 指向 tui 包（mount/emit/wait 是公开 seam），
++  // 避免脚本静态依赖跨包 .tsx 测试源。
++  // mount() 使用 tui 包真实 provider 树——守卫在真实 SyncProvider reducer 内验证。
++  const { mount, wait } = await import("../../tui/test/cli/cmd/tui/sync-fixture")
 +  const fixture = await mount()
 +  try {
 +    const unloadedSession = "ses_unloaded_smoke"
@@ -2955,6 +2967,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +      },
 +    ] as unknown as GlobalEvent[]
 +
++    // 三个事件都指向未加载 Session——正是会击穿无守卫 reducer 的事件形状。
 +    for (const event of events) fixture.emit(event)
 +    fixture.emit({
 +      directory: "/tmp/opencode/packages/opencode",
@@ -2972,28 +2985,32 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +        },
 +      },
 +    } as unknown as GlobalEvent)
++    // 合法事件进入 store 才证明消费链存活：这是 INV-01/02 的行为级断言。
 +    await wait(() => fixture.sync.data.message.ses_loaded_smoke?.[0]?.id === "msg_loaded_smoke")
 +  } finally {
++    // preflight 挂载即销毁——不把 fixture 生命周期泄漏进后续 scenario。
 +    fixture.app.renderer.destroy()
 +  }
 +}
  
  // rootReport同时是scenario-child标记和唯一IPC路径，避免outer误递归启动第二层child。
  const rootReport = process.env.OPENCODE_SMOKE_ROOT_REPORT
-@@ -61,7 +130,12 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-opentui-smoke-"))
+@@ -67,7 +144,14 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-opentui-smoke-"))
  if (rootReport) await Bun.write(rootReport, root)
  const lockPath = path.join(root, "tui-server.json")
  const project = path.join(root, "project")
++// #567：ready 文件由 worker fixture 在隔离 root 内创建——路径本身即 IPC 契约，随 root 删除。
 +const highlightReadyPath = path.join(root, "highlight-pending.ready")
 +const workerFixturePath = path.join(root, "tree-sitter-smoke-worker.js")
 +if (targetLiveness) await Bun.write(workerFixturePath, createPendingWorkerSource(highlightReadyPath))
  let modelRequests = 0
++// target 模式哨兵经真实 SSE 下发；normal 模式保持 ok，不改变既有断言面。
 +const thinkingMarker = targetLiveness ? "THINKING-SENTINEL" : ""
 +const bodyMarker = targetLiveness ? "BODY-SENTINEL" : "ok"
  // fixture只实现OpenAI-compatible chat completion的必要SSE，不访问外网或真实账号。
  // request计数是独立的readiness信号，比固定sleep更能证明prompt真正到达provider。
  // 响应先保持busy窗口，再发送ok和DONE，覆盖spinner和完成态的顺序不变量。
-@@ -72,12 +146,33 @@ const fixture = Bun.serve({
+@@ -80,12 +164,35 @@ const fixture = Bun.serve({
        return new Response("not found", { status: 404 })
      }
      modelRequests += 1
@@ -3012,10 +3029,12 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +              ? { reasoning_content: thinkingMarker }
 +              : { content: bodyMarker }
 +          const secondDelta = targetLiveness && requestNumber === 1 ? { content: bodyMarker } : {}
++          // 首 delta 已足以驱动 Thinking cell；body 等待窗口后再发，保证两哨兵可分帧断言。
 +          // 先发一个真实part delta，再等待abort，才能让Code进入高亮在途窗口。
 +          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: firstDelta }] })}\n\n`))
 +          if (targetLiveness && requestNumber > 1) {
 +            // 第二次目标请求在首个 delta 后保持打开，Ctrl+C 才会覆盖真实 highlight 在途窗口。
++            // 保持打开的是响应流本身：fixture 不模拟超时，abort 即真实网络层取消。
 +            await new Promise<void>((resolve) => {
 +              const release = () => resolve()
 +              // abort是正常Ctrl+C完成信号，10秒只防止fixture本身阻塞cleanup。
@@ -3029,10 +3048,11 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
            controller.enqueue(encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'))
            controller.enqueue(encoder.encode("data: [DONE]\n\n"))
            controller.close()
-@@ -108,6 +203,12 @@ const env = {
+@@ -117,6 +224,13 @@ const env = {
    OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
    OPENCODE_DISABLE_AUTOUPDATE: "1",
    OPENCODE_DISABLE_SHARE: "1",
++  // #567：公开 worker seam 注入 fixture——只有真实 compiled fenced-Code 请求才会发布 ready。
 +  ...(targetLiveness
 +    ? {
 +        OTUI_TREE_SITTER_WORKER_PATH: workerFixturePath,
@@ -3042,10 +3062,11 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
    OPENCODE_CONFIG_CONTENT: JSON.stringify({
      $schema: "https://opencode.ai/config.json",
      model: "test/test-model",
-@@ -148,6 +249,20 @@ let tuiData: { dispose(): void } | undefined
+@@ -158,6 +272,21 @@ let tuiData: { dispose(): void } | undefined
  // scenario与cleanup错误分槽保存，finally阶段不能通过抛出较晚错误篡改first divergence。
  let scenarioError: unknown
  let cleanupError: unknown
++// 只解引用判定所需字段；完整 envelope 解析由 SDK 层承担，smoke 不重建事件 schema。
 +type TargetEvent = {
 +  directory?: string
 +  project?: string
@@ -3063,7 +3084,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
  
  try {
    await Promise.all([
-@@ -234,6 +349,50 @@ try {
+@@ -245,6 +374,52 @@ try {
    const session = await sessionResponse.json()
    if (typeof session?.id !== "string") throw new Error(`Session creation returned no id: ${JSON.stringify(session)}`)
    sessionID = session.id
@@ -3078,12 +3099,14 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +    targetProjectID = currentProject.id
 +    targetEventAbort = new AbortController()
 +    // SSE reader在创建Session后才启动，避免错过目标事件又不订阅全局历史回放。
++    // reader 以独立 promise 运行：scenario 主线不 await，错误经 targetEventError 在断言点 surfaced。
 +    targetEventTask = (async () => {
 +      const response = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: targetEventAbort!.signal })
 +      if (!response.ok || !response.body) throw new Error(`target global event stream failed: ${response.status}`)
 +      const reader = response.body.getReader()
 +      const decoder = new TextDecoder()
 +      let pending = ""
++      // 读循环只被 abort 或流结束终止；半条记录跨 chunk 保留到下次 read 再解析。
 +      while (!targetEventAbort!.signal.aborted) {
 +        const chunk = await reader.read()
 +        if (chunk.done) break
@@ -3114,7 +3137,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
  
    stage = "create Goal"
    console.error(`[opentui-smoke] ${stage}`)
-@@ -376,13 +535,123 @@ try {
+@@ -389,13 +564,127 @@ try {
    if (spinnerGlyphs.some((indicator) => completed.includes(indicator))) {
      throw new Error("compiled TUI retained spinner glyph after model completion")
    }
@@ -3191,6 +3214,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
    stage = "stop Session TUI"
    console.error(`[opentui-smoke] ${stage}`)
 -  await requestTuiExit(tui, "compiled TUI did not exit after the exit request")
++  // false 时退出路径与既有 normal 场景完全一致——不承担在途取消断言。
 +  let shutdownWhileHighlighting = false
 +  if (targetLiveness) {
 +    const previousEventCount = targetEvents.length
@@ -3206,6 +3230,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +    })
 +    if (!cancelPrompt.ok) throw new Error(`target cancellation prompt failed: ${cancelPrompt.status}`)
 +    // prompt_async返回只证明producer接受输入，后续target delta才证明它进入TUI consumer链。
++    // 断言取 slice(previousEventCount)：旧消息的 delta 不能充当本次在途证据。
 +    await waitFor(
 +      () => targetEvents.slice(previousEventCount).find(isPartTimingEvent),
 +      "target cancellation request did not publish a delta",
@@ -3219,6 +3244,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +    )
 +    shutdownWhileHighlighting = true
 +    // requestTuiExit随后发送真实Ctrl+C，shutdown日志必须覆盖这次在途请求。
++    // ready 文件不是遥测：它是 worker 收到目标请求的唯一可观察事实。
 +  }
 +  await requestTuiExit(tui, "compiled TUI did not exit after the exit request", shutdownWhileHighlighting)
    tuiData?.dispose()
@@ -3227,6 +3253,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +  if (targetLiveness) {
 +    const shutdownLog = await readIsolatedLogs(root)
 +    // 这些字符串只统计预期destroy取消噪声，不把live worker故障伪装成成功。
++    // 零容忍是刻意选择：任何一条都意味着在途请求未被安静收敛。
 +    const shutdownPatterns = [
 +      "TreeSitter client destroyed",
 +      "Code highlighting failed",
@@ -3239,10 +3266,11 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
  
    stage = "stop daemon"
    console.error(`[opentui-smoke] ${stage}`)
-@@ -401,10 +670,12 @@ try {
+@@ -414,10 +703,13 @@ try {
    console.log(
      JSON.stringify({
        binary,
++      // scenario/targetEventCount 进入 artifact JSON，CI 可区分两种运行的证据面。
 +      scenario,
        sessionID: session.id,
        sourceCount: count(objective, "查"),
@@ -3252,10 +3280,11 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
      }),
    )
  } catch (error) {
-@@ -476,6 +747,10 @@ try {
-   scenarioError = error
+@@ -483,6 +775,11 @@ try {
  } finally {
-   // 某个资源清理失败后仍继续关闭其余owner；最终只报告首个cleanup错误且不覆盖scenario first divergence。
+   // finally无条件释放terminal、fixture、PTY和daemon；成功路径也不能依赖进程退出时的OS清理。
+   // #495：某个资源清理失败后仍继续关闭其余owner；最终只报告首个cleanup错误且不覆盖scenario first divergence。
++  // #567：target SSE reader 先 abort 并等待退出，防止后续 renderer 销毁后 reader 仍在写证据集合。
 +  await cleanupStep(async () => {
 +    targetEventAbort?.abort()
 +    await targetEventTask
@@ -3263,12 +3292,15 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
    for (const subscription of [launcherData, launcherExited, tuiData, terminalData]) {
      await cleanupStep(() => subscription?.dispose())
    }
-@@ -543,6 +818,76 @@ function count(value: string, needle: string) {
+@@ -552,6 +849,80 @@ function count(value: string, needle: string) {
    return value.split(needle).length - 1
  }
  
++// #567：协议完整的 worker fixture——对含哨兵的 STREAMING/ONESHOT 请求写 ready 文件并扣留终态响应，
++// 其余请求正常完成，保证普通高亮路径不被 fixture 自身污染。
 +function createPendingWorkerSource(readyPath: string) {
 +  return `
++// 哨兵命中后 held 永久置位：一次扣留即可覆盖后续所有目标请求，避免重复写 ready。
 +const readyPath = ${JSON.stringify(readyPath)}
 +const sentinel = "CANCEL-HIGHLIGHT-SENTINEL"
 +let held = false
@@ -3327,6 +3359,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
 +}
 +
 +async function readIsolatedLogs(root: string) {
++  // 只扫隔离 root 内的日志文件；宿主全局日志不进入 shutdown 断言语料。
 +  const files = await Array.fromAsync(new Bun.Glob("**/*.log").scan({ cwd: root, onlyFiles: true }))
 +  return (await Promise.all(files.map((file) => Bun.file(path.join(root, file)).text().catch(() => "")))).join("\n")
 +}
@@ -3340,7 +3373,7 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
  async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, message: string, timeout = 10_000) {
    // 轮询只接受显式非undefined readiness，false或空frame不会被truthy转换误判。
    // 每个调用方提供行为级错误信息，使CI artifact能标识准确失败阶段。
-@@ -565,7 +910,7 @@ function alive(pid: number) {
+@@ -574,7 +945,7 @@ function alive(pid: number) {
    }
  }
  
@@ -3349,48 +3382,47 @@ index c18f0f5aa15f7a56ff2a16f9c7a13cc7981cce1e..b97e1726d8a2478c598c0a24b72c8006
    // 调用方已观察公开input-ready frame，此函数只负责subscribe-before-action和同一进程退出，不补发输入。
    const exited = Promise.withResolvers<void>()
    // 先订阅再触发退出，避免快速renderer cleanup发生在onExit注册前而被误报成超时。
-@@ -575,8 +920,8 @@ async function requestTuiExit(proc: Proc, message: string) {
+@@ -584,8 +955,8 @@ async function requestTuiExit(proc: Proc, message: string) {
        // Unix直接向真实child PID发送SIGINT，走ExitProvider的production signal handler；adapter.kill会忽略传入signal。
        process.kill(proc.pid, "SIGINT")
      } else {
 -      // Ctrl+C会广播给共享console中的daemon；input-ready后使用同步内建命令，只关闭当前TUI且不依赖autocomplete。
 -      proc.write("exit\r")
-+      // target-liveness必须覆盖用户现场的Ctrl+C；普通smoke仍使用公开exit命令避免广播到bootstrap daemon。
++      // #567：target-liveness 必须覆盖用户现场的 Ctrl+C；普通 smoke 仍用公开 exit 命令避免广播 bootstrap daemon。
 +      proc.write(interrupt ? "\x03" : "exit\r")
      }
      await Promise.race([
        exited.promise,
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 1dbd687ed20fcd522cebb657c9a1fb898ce0714f..8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -770,6 +770,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           const info = event.properties.info
-           if ((info as Record<string, unknown>).hidden) {
-             const messages = store.message[info.sessionID]
-+            // 同Project事件可能属于未加载Session；本地没有可删除的投影时必须保持消费链继续。
-+            if (!messages) break
-             const result = Binary.search(messages, info.id, (m) => m.id)
-             if (result.found) {
-               setStore(
-@@ -822,6 +824,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-         }
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -785,6 +785,10 @@ export const {
          case "message.removed": {
+           touchMessage(event.properties.sessionID, event.properties.messageID)
            const messages = store.message[event.properties.sessionID]
-+          // daemon的删除事实仍有效，但未加载Session的TUI投影只能安全地no-op。
++          // #567：同 Project 事件可能属于未加载 Session——daemon 的删除事实仍有效，
++          // 但本地没有投影可删时必须 no-op 保持消费链，否则 reducer 抛错切断后续事件。
++          // touchMessage 只登记 hydrating ID，不为未加载 Session 创建数组，守卫不可省。
 +          if (!messages) break
-           const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
-           if (result.found) {
+           const index = messages.findIndex((message) => message.id === event.properties.messageID)
+           if (index !== -1) {
              setStore(
-@@ -885,6 +889,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
- 
+@@ -855,6 +859,13 @@ export const {
          case "message.part.removed": {
+           touchPart(event.properties.sessionID, event.properties.partID)
            const parts = store.part[event.properties.messageID]
-+          // Part同样可能先于本地bootstrap到达；缺失集合不应中断后续正文事件。
-+          if (!parts) break
-           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
++          // #567：Part 同样可能先于本地 bootstrap 到达；缺失集合不应中断后续正文事件。
++          // 早退前先收敛 #186 缓冲：守护与清理是两个独立责任，不能因 no-op 跳过 Map 收敛。
++          if (!parts) {
++            // 缓冲 delta 的清理不随早退跳过：part 已在 daemon 侧移除，Map 不得无界驻留。
++            orphanPartDeltas.delete(event.properties.partID)
++            break
++          }
+           const result = search(parts, event.properties.partID, (part) => part.id)
            if (result.found) {
              setStore(
+
 diff --git a/thirdparty/opentui b/thirdparty/opentui
 index afd11de829e5745de83695d877b98833219a2f8c..80a46c4d4cf0cb357f353cd52f8e9192f11e5157 160000
 --- a/thirdparty/opentui

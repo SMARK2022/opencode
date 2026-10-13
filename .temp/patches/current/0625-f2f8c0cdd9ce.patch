@@ -13,8 +13,9 @@ Content-Transfer-Encoding: 8bit
 
 Task 卡片 acquisition 跟随 metadata.sessionId 响应式出现（pending 阶段无 ID）；高度失效签名补齐 Shell 的 metadata.output；渲染容量记账统一为挂载计入/壳化减出的单一口径，覆盖重测批进出与 stale 清理顺序；插件显式 release 经 scope.track 包装注销卸载记录；PartView 投影仅限已证实重复的 edit 生产者，未知工具原样保留。红测先行：8 个新用例在缺陷基线上全部失败，修复后转绿；实现审计第 3 轮 APPROVE。
 
+适配说明：八项正确性返工完整重锚。sync：releasedTerminalParts 改 Session→Message→PartID 嵌套归属（释放边界不再依赖 store 反查）；完成事件清扫用稳定快照（防 splice 跳项）；终态工具替换先 releasePart 移除已驻留 running 旧正文；同 Session sync 经 syncChains 串行门排队（去重移至门外防 gate 逃逸；目标 sync 主体在内层 task 闭包——await task 后才放行 gate，与源内联结构等价）；acquireParts 后验 fullSynced（早退路径不产生虚假就绪）。plugin runtime：插件 release 暴露 scope.track 包装（显式释放从卸载列表注销）。session/index：markMessageDirty 对驻留消息做估算差额更新；accountMounted/accountShelled 单一记账口径覆盖重测批进出与 stale 先减后删；Shell metadata.output 补入 contentVersion 签名；markMessageDirty 调用去 mounted 门控（差额路径自身判驻留）；Task acquisition 改 createEffect 响应式跟随 metadata.sessionId（pending 阶段无 ID）+catch 静默。PartView：tool==='edit' 门控（唯一已证实重复生产者）。测试：lifetime 增 4 红测（全量释放/终态替换移除旧正文/窗口淘汰遗忘事实/并发 acquire 串行就绪）；plugin-lifecycle 增显式释放幂等；part-view 增第三方工具原样保留；session-message-render 三用例按 #506/#520 先例以 residency-contract 模板合同承载（目标无 withRenderedSession harness）。
+
 diff --git a/docs/plans/opencode-memory-residency-successor.md b/docs/plans/opencode-memory-residency-successor.md
-index 6bf117271190a9e5aee2af3070efd932b7281f45..bc28701677294a5c6de7a0c7cabb27a6530ec4d6 100644
 --- a/docs/plans/opencode-memory-residency-successor.md
 +++ b/docs/plans/opencode-memory-residency-successor.md
 @@ -2,9 +2,9 @@
@@ -200,173 +201,74 @@ index 6bf117271190a9e5aee2af3070efd932b7281f45..bc28701677294a5c6de7a0c7cabb27a6
 +- R4 不改变 T11 已实测的内存与流畅性结论；返工后需重跑涉及面测试与渲染几何断言，内存复测仅在返工触及驻留/释放路径的行为变化超出测试可证明范围时才需要。
  
 -本计划已实施并通过独立实现审计（第2轮 APPROVE）。提交范围仅限本计划列出的生产与测试路径。
+\ No newline at end of file
 +R3 已实施并提交为 `45ba8f0c29`；R6 返工已实施并通过实现审计第 3 轮（APPROVE），当前 `Status: verified`。提交范围：返工的 4 个生产文件、4 个测试文件与本计划。
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 5ca90bb611dc2c83d79f8a76cb1273784c203f64..90729288b2257b23b989253626a9c0ac63d634fa 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -195,9 +195,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // [正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
-     // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
-     const partConsumers = new Map<string, number>()
--    // 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文；
--    // 随 Message 窗口淘汰、删除与 Provider cleanup 释放，不保存正文或无限历史。
--    const releasedTerminalParts = new Set<string>()
-+    // 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文。
-+    // 按 Session→Message→PartID 嵌套归属：被释放的 Part 已不在 store，窗口淘汰/删除边界
-+    // 不能靠 store 反查 ID，必须持有自有轻量归属关系；随淘汰、删除与 Provider cleanup 释放。
-+    const releasedTerminalParts = new Map<string, Map<string, Set<string>>>()
-     // remove event 只有 ID，且公开 caller 可提供非单调 ID；索引保存已有 Message 的 chronology key。
-     // Map 只引用 bounded store 中的对象，不复制正文，也不引入 ID 排序或失败后的扫描路径。
-     const messageByID = new Map<string, Map<string, Message>>()
-@@ -242,6 +243,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // 每 Session 只有最新 sync 请求可提交；删除或更新的 force 请求使在途旧请求失效。
-     let syncRequestSeq = 0
-     const syncRequests = new Map<string, number>()
-+    // 同 Session 的 sync 请求串行排队：并发取代会让被取代请求“成功返回但没有提交”，
-+    // acquireParts 会把空 store 误当正文就绪。排队后每个 await sync 对应真实执行；跨 Session 仍并行。
-+    const syncChains = new Map<string, Promise<void>>()
-     // 请求期间只登记变化 ID（不复制正文）；提交时并入最终投影，HTTP 页不能抹掉 live 流式。
-     const syncChanges = new Map<string, { messages: Set<string>; parts: Set<string> }>()
+\ No newline at end of file
+
+diff --git a/packages/core/src/session/part-view.ts b/packages/core/src/session/part-view.ts
+--- a/packages/core/src/session/part-view.ts
++++ b/packages/core/src/session/part-view.ts
+@@ -1,16 +1,17 @@
+ export * as PartView from "./part-view"
  
-@@ -274,7 +278,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-       // 两条入口共用 searchMessage 的 BINARY 语义，不引入第三条定位路径。
-       const target = messageByID.get(sessionID)?.get(messageID) ?? info
-       // Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
--      for (const part of store.part[messageID] ?? []) releasedTerminalParts.delete(part.id)
-+      releasedTerminalParts.get(sessionID)?.delete(messageID)
-       const messages = store.message[sessionID]
-       batch(() => {
-         if (messages && target) {
-@@ -320,7 +324,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // 释放单个终态 Part：记录 ID 事实、清掉其缓冲 delta、从 store 移除。
-     // 正文终值已持久在 DB，重新进入时由 HTTP sync 恢复。
-     function releasePart(sessionID: string, part: Part) {
--      releasedTerminalParts.add(part.id)
-+      let byMessage = releasedTerminalParts.get(sessionID)
-+      if (!byMessage) {
-+        byMessage = new Map()
-+        releasedTerminalParts.set(sessionID, byMessage)
-+      }
-+      let ids = byMessage.get(part.messageID)
-+      if (!ids) {
-+        ids = new Set()
-+        byMessage.set(part.messageID, ids)
-+      }
-+      ids.add(part.id)
-       dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.partID === part.id)
-       const parts = store.part[part.messageID]
-       if (!parts) return
-@@ -386,11 +400,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-       messageByID.delete(sessionID)
-       dropBufferedDeltas((event) => event.properties.sessionID === sessionID)
-       // 删除边界同时忘掉终态 ID 事实：同一 Session 重建后新 Part 需要能正常准入。
--      for (const parts of Object.values(store.part)) {
--        for (const part of parts) {
--          if (part.sessionID === sessionID) releasedTerminalParts.delete(part.id)
--        }
--      }
-+      releasedTerminalParts.delete(sessionID)
-       batch(() => {
-         setStore(
-           produce((draft) => {
-@@ -1069,7 +1079,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           // Message 内容持久的到达边界：user 写完即持久，assistant 以 time.completed 为准。
-           // 覆盖 part-first 乱序（Part 先于父 Message 到达时已按未知状态准入）。
-           if (!partConsumers.has(info.sessionID) && (info.role !== "assistant" || info.time.completed !== undefined)) {
--            const doomed = store.part[info.id] ?? []
-+            // 拷贝出稳定快照再逐个释放：releasePart 会 splice 同一个 store 数组，
-+            // 直接在原数组上迭代会跳过相邻元素。
-+            const doomed = [...(store.part[info.id] ?? [])]
-             batch(() => {
-               for (const part of doomed) releasePart(info.sessionID, part)
-             })
-@@ -1102,7 +1114,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-             // 300 条窗口删除 chronology 首项；索引必须在同一事件调用栈移除相同 Message。
-             unindexMessage(oldest)
-             // 窗口淘汰同时忘掉终态 ID 事实：淘汰后重新加载的 Part 需要能正常准入。
--            for (const part of store.part[oldest.id] ?? []) releasedTerminalParts.delete(part.id)
-+            releasedTerminalParts.get(info.sessionID)?.delete(oldest.id)
-             batch(() => {
-               setStore(
-                 "message",
-@@ -1152,15 +1164,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           trackSyncChange(part.sessionID, part.messageID, part.id)
-           if (!partConsumers.has(part.sessionID)) {
-             // 无消费者 Session 的终态正文不入 store；已释放 Part 的迟到 progress/update 直接拒绝。
--            if (releasedTerminalParts.has(part.id)) break
-+            if (releasedTerminalParts.get(part.sessionID)?.get(part.messageID)?.has(part.id)) break
-             if (isTerminalAdmission(part)) {
--              releasedTerminalParts.add(part.id)
--              dropBufferedDeltas((event) => event.properties.partID === part.id)
-+              // running→completed 的持久替换先移除已驻留的旧版本，再拒绝新正文准入；
-+              // 只拒绝事件不删旧值会把 running 正文留在 store。
-+              releasePart(part.sessionID, part)
-               break
-             }
-           } else {
-             // 有消费者时新的合法 durable 更新可以覆盖已释放事实。
--            releasedTerminalParts.delete(part.id)
-+            releasedTerminalParts.get(part.sessionID)?.get(part.messageID)?.delete(part.id)
-           }
-           const parts = store.part[part.messageID]
-           if (!parts) {
-@@ -1189,7 +1202,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+ // TUI viewer 专用纯投影：删除与同 Part 其他字段逐字重复的大字段，减少 wire/store 的重复驻留。
+-// 当前唯一覆盖 edit 类工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串）。
+-// 完整 SDK、Provider、daemon SummaryCache 都走原数据路径，不经过这里；
+-// 不同值、未知工具与非重复字段必须原样保留。
++// [0625] 当前唯一覆盖内建 edit 工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串，
++// 全仓库唯一生产者是 tool/edit.ts）。完整 SDK、Provider、daemon SummaryCache 都走原数据路径；
++// 不同值、未知/第三方工具与非重复字段必须原样保留——按字段形状猜测裁剪属于范围扩大。
+ // 归属 core：daemon HTTP 投影（opencode）与 TUI store 投影（tui）共用同一实现，
+ // 两包互不依赖，共享 owner 只能在共同依赖 core 中。
  
-         case "message.part.delta": {
-           // 已释放终态 Part 的迟到 delta 直接丢弃；其余按原缓冲/应用路径。
--          if (!releasedTerminalParts.has(event.properties.partID)) enqueuePartDelta(event)
-+          const released = releasedTerminalParts.get(event.properties.sessionID)?.get(event.properties.messageID)
-+          if (!released?.has(event.properties.partID)) enqueuePartDelta(event)
-           break
-         }
+ // 结构最小约束：daemon 的 MessageV2.Part 与 TUI 的 SDK Part 共用同一 wire 形状，
+-// 但品牌 ID 类型不同；投影只读 type/status/metadata，不改写其余字段。
++// 但品牌 ID 类型不同；投影只读 type/tool/status/metadata，不改写其余字段。
+ type Projectable = {
+   type: string
++  tool?: string
+   state?: {
+     status: string
+     metadata?: Record<string, unknown>
+@@ -19,6 +20,8 @@ type Projectable = {
  
-@@ -1390,6 +1404,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           return last.time.completed ? "idle" : "working"
-         },
-         async sync(sessionID: string, options?: { force?: boolean }) {
-+          // 同 Session 的请求经串行门排队进入：并发取代会让被取代请求“成功返回但没有提交”，
-+          // acquireParts 会把空 store 误当正文就绪。gate 在本体结束时放行下一个；跨 Session 仍并行。
-+          const previous = syncChains.get(sessionID) ?? Promise.resolve()
-+          let gate!: () => void
-+          const current = previous.catch(() => {}).then(() => new Promise<void>((resolve) => (gate = resolve)))
-+          syncChains.set(sessionID, current)
-+          await previous.catch(() => {})
-+          try {
-           if (!options?.force && fullSyncedSessions.has(sessionID)) return
-           if (deletedSessionIDs.has(sessionID)) return
-           const token = ++syncRequestSeq
-@@ -1524,6 +1546,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-             }),
-           )
-           fullSyncedSessions.add(sessionID)
-+          } finally {
-+            // 本体无论提交、早退还是失败都必须放行队列；只有后继者已接管时才保留其队首位置。
-+            gate()
-+            if (syncChains.get(sessionID) === current) syncChains.delete(sessionID)
-+          }
-         },
-         // 显式正文消费：Task 卡片与插件用它持有 Session 正文，release 后无消费者即释放。
-         // acquire 成功后 await 现有 sync；返回的 release 幂等由调用方/插件 scope 保证。
-@@ -1531,6 +1558,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           acquireParts(sessionID)
-           try {
-             await result.session.sync(sessionID)
-+            // 早退路径（Session 删除竞态等）不提交正文：获取承诺必须观察到 fullSynced，
-+            // 否则调用方会把空 store 当作已加载成功。
-+            if (!fullSyncedSessions.has(sessionID)) throw new Error(`session parts unavailable: ${sessionID}`)
-           } catch (error) {
-             // sync 失败（Session 删除竞态/守护进程重启）必须回滚计数：没有句柄返回，
-             // 不回滚会让该 Session 的正文使用权永久泄漏，后台完成事件持续补入。
-diff --git a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-index 49fa6a76e04abfc9c07142945aa0912d999e5862..de22e3aee5298e59bdb8884b28f02fb423a7a7b8 100644
---- a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-+++ b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-@@ -606,12 +606,14 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
+ export function project<T extends Projectable>(part: T): T {
+   if (part.type !== "tool") return part
++  // [0625] 只对已证实重复的 edit 生产者投影；未知/第三方工具原样保留。
++  if (part.tool !== "edit") return part
+   if (part.state?.status !== "completed") return part
+   const metadata = part.state.metadata
+   if (!metadata) return part
+
+diff --git a/packages/core/test/session/part-view.test.ts b/packages/core/test/session/part-view.test.ts
+--- a/packages/core/test/session/part-view.test.ts
++++ b/packages/core/test/session/part-view.test.ts
+@@ -38,6 +38,16 @@ describe("PartView.project", () => {
+     expect(PartView.project(part)).toBe(part)
+   })
+ 
++  test("keeps unknown third-party tools with same-shaped fields untouched", () => {
++    // [0625] 投影只覆盖已证实重复生产的内建 edit；第三方工具恰好提供同名 diff/filediff
++    // 字段时语义未知，必须原样保留，不能按字段形状猜测裁剪。
++    const custom = {
++      ...editPart({ diff: patch, filediff: { file: "a.ts", patch, additions: 1, deletions: 0 } }),
++      tool: "third_party_custom",
++    } as const
++    expect(PartView.project(custom)).toBe(custom)
++  })
++
+   test("keeps non-tool, non-completed and metadata-less parts untouched", () => {
+     const text = { id: "prt_2", messageID: "msg_1", sessionID: "ses_1", type: "text", text: "hello" } as const
+     expect(PartView.project(text)).toBe(text)
+
+diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src/plugin/tui/runtime.ts
+--- a/packages/opencode/src/plugin/tui/runtime.ts
++++ b/packages/opencode/src/plugin/tui/runtime.ts
+@@ -609,12 +609,14 @@ function pluginApi(runtime: RuntimeState, plugin: PluginEntry, scope: PluginScop
          released = true
          raw?.()
        }
-+      // 暴露给插件的 release 必须是 track 的包装函数：显式释放同时从卸载列表注销，
++      // [0625] 暴露给插件的 release 必须是 track 的包装函数：显式释放同时从卸载列表注销，
 +      // 直接暴露原始闭包会让每次正常释放都在 scope 里留下一条死记录直到插件卸载。
 +      const tracked = scope.track(release)
        const pending = api.state.acquireParts(sessionID).then((handle) => {
@@ -379,507 +281,17 @@ index 49fa6a76e04abfc9c07142945aa0912d999e5862..de22e3aee5298e59bdb8884b28f02fb4
        return pending
      },
    })
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 7e84fb66dd0e899f671dd4abb52e550caa332bf4..797e6593e10d5e932a00b6289409a014cbe9c8c7 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -514,10 +514,19 @@ export function Session() {
-   }
- 
-   function markMessageDirty(id: string) {
--    // 流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压；
--    // 驻留中的 Message 本来就是 auto 高度，无需标脏。
-+    // 驻留中的 Message 本来就是 auto 高度，无需重测；但正文增长必须同步进容量估算，
-+    // 否则挂载中的流式输出逃出预算（估算差额更新，不重复计入）。
-+    if (messageView[id]?.mounted !== false) {
-+      const cached = estimateBytes.get(id)
-+      if (cached !== undefined) {
-+        const next = estimateMessageBytes(id)
-+        residentBytesTotal += next - cached
-+        estimateBytes.set(id, next)
-+      }
-+      return
-+    }
-+    // 壳化消息的流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压。
-     estimateBytes.delete(id)
--    if (messageView[id]?.mounted !== false) return
-     remeasureQueue = [id, ...remeasureQueue.filter((queued) => queued !== id)]
-     setRemeasuring(true)
-   }
-@@ -568,6 +577,19 @@ export function Session() {
-   // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
-   const estimateBytes = new Map<string, number>()
-   let residentBytesTotal = 0
-+
-+  // 驻留记账口径：false→true 计入、true→false 减出。驻留重建、重测批进出、
-+  // stale 清理与内容标脏的差额刷新都经由这两个入口；首次见到已挂载消息的补账
-+  // 由下方带 estimateBytes.has 守卫的循环直接加总（每 ID 只计一次，不会双计）。
-+  function accountMounted(id: string) {
-+    const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
-+    estimateBytes.set(id, estimate)
-+    residentBytesTotal += estimate
-+  }
-+  function accountShelled(id: string) {
-+    residentBytesTotal -= estimateBytes.get(id) ?? 0
-+  }
-+
-   function syncMessageResidency() {
-     if (!scroll || scroll.isDestroyed) return
-     queueMicrotask(() => {
-@@ -630,9 +652,11 @@ export function Session() {
-         let finalized = false
-         batch(() => {
-           // 驻留窗口内的壳立即重建，不等批轮次：用户滚动优先于后台重测。
-+          // false→true 的唯一记账口径同样适用于重测路径，否则重测期间的重建只进不出。
-           for (const id of desired) {
-             const record = messageView[id]
-             if (record && !record.mounted) {
-+              accountMounted(id)
-               setMessageView(id, { mounted: true, height: "auto" })
-               remeasureQueue = remeasureQueue.filter((queued) => queued !== id)
-               remeasureBatch = remeasureBatch.filter((queued) => queued !== id)
-@@ -649,6 +673,7 @@ export function Session() {
-               rows += typeof record.height === "number" ? record.height : 0
-               remeasureBatch.push(id)
-               batchHeights.delete(id)
-+              accountMounted(id)
-               setMessageView(id, { mounted: true, height: "auto" })
-             }
-             if (remeasureBatch.length === 0 && remeasureQueue.length === 0) finalized = true
-@@ -669,9 +694,12 @@ export function Session() {
-                 batchHeights.delete(id)
-                 if (!child) continue
-                 lastSeenHeights.set(id, child.height)
--                // 批处理期间滚入驻留窗口的不再壳化，auto 高度继续跟随内容。
-+                // 批处理期间滚入驻留窗口的不再壳化（批次进队时已记账），auto 高度继续跟随内容。
-                 if (desired.has(id)) setMessageView(id, { mounted: true, height: "auto" })
--                else setMessageView(id, { mounted: false, height: child.height })
-+                else {
-+                  accountShelled(id)
-+                  setMessageView(id, { mounted: false, height: child.height })
-+                }
-               }
-               remeasureBatch = []
-               batchStablePasses = 0
-@@ -700,9 +728,7 @@ export function Session() {
-           const record = messageView[id]
-           if (record && !record.mounted) {
-             // 重建挂载计入驻留容量；估算缓存在标脏时已删除，这里取到新内容的真实量级。
--            const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
--            estimateBytes.set(id, estimate)
--            residentBytesTotal += estimate
-+            accountMounted(id)
-             setMessageView(id, { mounted: true, height: "auto" })
-           }
-         }
-@@ -746,26 +772,26 @@ export function Session() {
-                 continue
-               }
-               // 冻结值直接读当前布局（内容本帧仍挂载），不需要额外测量通道。
-+              accountShelled(id)
-               setMessageView(id, { mounted: false, height: child.height })
--              residentBytesTotal -= estimateBytes.get(id) ?? 0
-             }
-           }
-         }
-         // 300 窗口淘汰、会话切换或 revert 隐藏后清理无主记录，不随会话时长累积。
-         const stale = Object.keys(messageView).filter((id) => !byId.has(id))
-         if (stale.length) {
--          setMessageView(
--            produce((state) => {
--              for (const id of stale) delete state[id]
--            }),
--          )
-           for (const id of stale) {
--            const record = messageView[id]
--            if (record?.mounted) residentBytesTotal -= estimateBytes.get(id) ?? 0
-+            // 先减账再删记录：删除后 mounted 状态不可读，顺序颠倒会让容量只进不出。
-+            if (messageView[id]?.mounted) accountShelled(id)
-             lastSeenHeights.delete(id)
-             lastRenderedAt.delete(id)
-             estimateBytes.delete(id)
-           }
-+          setMessageView(
-+            produce((state) => {
-+              for (const id of stale) delete state[id]
-+            }),
-+          )
-         }
-       })
-       // 有候选高度还在收敛时主动预约下一帧，否则两条稳定观察规则永远等不到第二帧。
-@@ -2050,7 +2076,7 @@ function UserMessage(props: {
-     on(
-       contentVersion,
-       () => {
--        if (!mounted()) ctx.markMessageDirty(props.message.id)
-+        ctx.markMessageDirty(props.message.id)
-       },
-       { defer: true },
-     ),
-@@ -2309,6 +2335,10 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-               "output" in part.state ? part.state.output : undefined,
-               "title" in part.state ? part.state.title : undefined,
-               "error" in part.state ? part.state.error : undefined,
-+              // Shell 等工具的流式 progress 经 metadata.output 落地，状态字段不变；
-+              // 壳化后缺这个签名会让冻结高度与 scrollbar 落后于持续增长的真实正文。
-+              // pending 的 schema 没有 metadata 字段，in 守卫是类型与行为的双重边界。
-+              "metadata" in part.state ? part.state.metadata?.output : undefined,
-             ]
-           return part.type
-         }),
-@@ -2318,7 +2348,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-     on(
-       contentVersion,
-       () => {
--        if (!mounted()) ctx.markMessageDirty(props.message.id)
-+        ctx.markMessageDirty(props.message.id)
-       },
-       { defer: true },
-     ),
-@@ -3737,21 +3767,28 @@ function Task(props: ToolProps<typeof TaskTool>) {
-   const { navigate } = useRoute()
-   const sync = useSync()
- 
--  onMount(() => {
-+  // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
-+  // 子 Session ID 在工具执行后才写入 metadata（pending 阶段不存在），acquisition 必须
-+  // 跟随 metadata 响应式出现而不是只在 mount 取样一次；ID 变化先释放旧消费者。
-+  // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关。
-+  createEffect(() => {
-     const child = props.metadata.sessionId
-     if (!child) return
--    // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
--    // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关：
--    // 正文被释放后重新挂载必须能按 acquisition 恢复，而不是看到非空 metadata 就跳过。
-     let release: (() => void) | undefined
-     let released = false
--    void sync.session.acquireParts(child).then((handle) => {
--      if (released) {
--        handle.release()
--        return
--      }
--      release = handle.release
--    })
-+    void sync.session
-+      .acquireParts(child)
-+      .then((handle) => {
-+        if (released) {
-+          handle.release()
-+          return
-+        }
-+        release = handle.release
-+      })
-+      .catch(() => {
-+        // 子 Session 删除竞态或守护进程失败：计数已在 acquireParts 内回滚，
-+        // 卡片没有正文可展示时保持现状，不重试不合成。
-+      })
-     onCleanup(() => {
-       released = true
-       release?.()
-diff --git a/packages/opencode/src/session/part-view.ts b/packages/opencode/src/session/part-view.ts
-index 952c9205609eb4ac0dc7150047484065bc9db866..4759f757637e26ba437d3a7daed6123a5520a6c1 100644
---- a/packages/opencode/src/session/part-view.ts
-+++ b/packages/opencode/src/session/part-view.ts
-@@ -1,12 +1,13 @@
- // TUI viewer 专用纯投影：删除与同 Part 其他字段逐字重复的大字段，减少 wire/store 的重复驻留。
--// 当前唯一覆盖 edit 类工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串）。
--// 完整 SDK、Provider、daemon SummaryCache 都走原数据路径，不经过这里；
--// 不同值、未知工具与非重复字段必须原样保留。
-+// 当前唯一覆盖内建 edit 工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串，
-+// 全仓库唯一生产者是 tool/edit.ts）。完整 SDK、Provider、daemon SummaryCache 都走原数据路径；
-+// 不同值、未知/第三方工具与非重复字段必须原样保留——按字段形状猜测裁剪属于范围扩大。
- 
- // 结构最小约束：daemon 的 MessageV2.Part 与 TUI 的 SDK Part 共用同一 wire 形状，
--// 但品牌 ID 类型不同；投影只读 type/status/metadata，不改写其余字段。
-+// 但品牌 ID 类型不同；投影只读 type/tool/status/metadata，不改写其余字段。
- type Projectable = {
-   type: string
-+  tool?: string
-   state?: {
-     status: string
-     metadata?: Record<string, unknown>
-@@ -15,6 +16,7 @@ type Projectable = {
- 
- export function project<T extends Projectable>(part: T): T {
-   if (part.type !== "tool") return part
-+  if (part.tool !== "edit") return part
-   if (part.state?.status !== "completed") return part
-   const metadata = part.state.metadata
-   if (!metadata) return part
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 96d25fe1ebfb0ee5924970aaec2c2c6f9415ab7a..ecd11ea23dd3fbea7dc9026eaaaabc04d362f50e 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -4429,6 +4429,116 @@ test("content beyond the residency byte budget is evicted least-recently-rendere
-   )
- })
- 
-+// T03 Task 生命周期切片：子 Session ID 在工具执行后才写入 metadata。首次 mount 时
-+// 没有 ID 可读，acquisition 必须跟随 metadata 出现，否则实时卡片的工具计数永远缺失。
-+test("task card acquires the child session when its id arrives after mount", async () => {
-+  const childID = "ses_task_late_child"
-+  const assistant = assistantMessage("msg_task_late", 1)
-+  const task = runningToolPart("part_task_late", assistant.id, "task", { description: "late child" })
-+  const childUser = { ...userMessage("msg_task_late_child_user", 1), sessionID: childID }
-+  const childBase = completedToolPart("part_task_late_child_tool", childUser.id, "bash", { command: "echo hi" }, {}, "hi")
-+  const childTool = { ...childBase, sessionID: childID, state: { ...childBase.state, title: "child work" } }
-+  await withRenderedSession(
-+    [assistant],
-+    { [assistant.id]: [task] },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("late child")))
-+      expect(app.captureCharFrame().includes("child work")).toBe(false)
-+      // sessionId 后到达：卡片必须在此处取得子 Session 正文使用权并加载工具列表。
-+      emit(partUpdatedEvent("evt_task_late_id", { ...task, state: { ...task.state, metadata: { sessionId: childID } } }))
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("child work")))
-+    },
-+    {},
-+    {},
-+    {
-+      [childID]: {
-+        info: sessionInfo({ id: childID }),
-+        messages: [childUser],
-+        parts: { [childUser.id]: [childTool] },
-+      },
-+    },
-+  )
-+})
-+
-+// T05 Shell 流式切片：Shell 的输出经 metadata.output 更新（status 保持 running）。
-+// 已壳化的消息必须按 metadata 变化重测，否则冻结高度落后于持续增长的真实正文。
-+test("offscreen shell output growth re-measures the frozen height", async () => {
-+  const count = 24
-+  const { messages, parts } = windowFixture(count, "shellgrow")
-+  const target = messages[1].id
-+  // progressVersion 是 durable shell 输出的单调版本：缺它时 merge 守卫会把更新当作旧快照丢弃。
-+  const shell = runningToolPart("part_shell_grow", target, "bash", {
-+    command: "echo growing",
-+    metadata: { output: "shellgrow initial", progressVersion: 1 },
-+  })
-+  parts[target] = [shell]
-+  await withRenderedSession(
-+    messages,
-+    parts,
-+    async (app, emit) => {
-+      const tailID = messages.at(-1)!.id
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes(`shellgrow assistant ${String(count - 1).padStart(2, "0")}`)))
-+      const scroll = sessionScrollBox(app, tailID)
-+      await withFakeNow(async (advance) => {
-+        advance(RESIDENCY_AGE_TEST_MS)
-+        await pumpFrames(app, 8)
-+        expect(messageContentReleased(app, target)).toBe(true)
-+      })
-+      const before = await stableScrollHeight(app, scroll)
-+      const heightBefore = messageRoot(app, target).height
-+
-+      emit(
-+        partUpdatedEvent("evt_shell_grow", {
-+          ...shell,
-+          state: {
-+            ...shell.state,
-+            metadata: { output: "shellgrow initial\nsecond added line\nthird added line\nfourth added line", progressVersion: 2 },
-+          },
-+        }),
-+      )
-+
-+      // 输出 +3 行，冻结高度与 scrollbar 全长恰好 +3；不监听 metadata.output 会保持旧值。
-+      await waitForFrame(app, () => scroll.scrollHeight === before + 3)
-+      expect(messageRoot(app, target).height).toBe(heightBefore + 3)
-+    },
-+    {},
-+    { width: 80, height: 24 },
-+  )
-+})
-+
-+// T05 容量记账切片：挂载中的正文增长必须同步进驻留估算。旧记账只在挂载时取样，
-+// 流式增长到超预算也不会触发驱逐，容量上限形同虚设。
-+test("mounted content growth counts toward the residency byte budget", async () => {
-+  const count = 24
-+  const { messages, parts } = windowFixture(count, "growth")
-+  const target = messages[1].id
-+  const growing = completedToolPart("part_growth_big", target, "bash", { command: "grow" }, {}, "small")
-+  parts[target] = [growing]
-+  await withRenderedSession(
-+    messages,
-+    parts,
-+    async (app, emit) => {
-+      const tailID = messages.at(-1)!.id
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes(`growth assistant ${String(count - 1).padStart(2, "0")}`)))
-+      await pumpFrames(app, 3)
-+      // 预算内：所有屏外内容保持挂载。
-+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(false)
-+      // 挂载中的 Part 增长到超过 64MiB 驻留容量；不推进时钟，唯一驱逐理由是容量。
-+      emit(
-+        partUpdatedEvent("evt_growth_big", {
-+          ...growing,
-+          state: { ...growing.state, output: "growth payload row\n".repeat(6_000_000) },
-+        }),
-+      )
-+      await waitForFrame(app, () => messageContentReleased(app, "msg_window_user_00"))
-+      expect(messageContentReleased(app, "msg_window_user_00")).toBe(true)
-+      expect(messageContentReleased(app, "msg_window_assistant_23")).toBe(false)
-+    },
-+    {},
-+    { width: 80, height: 24 },
-+  )
-+})
-+
- async function withRenderedSession(
-   messages: Array<AssistantMessage | SDKUserMessage>,
-   parts: Record<string, Part[]>,
-diff --git a/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
-index 7e830de8c012f557a6671fec74ca2385afd93b39..3abb6865910d4a0ccec688d1ea3d657be1ddcb32 100644
---- a/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
-@@ -132,6 +132,137 @@ test("acquireParts rolls back the consumer count when sync rejects", async () =>
-   }
- })
- 
-+test("assistant completion releases all already-admitted parts, not just alternating ones", async () => {
-+  const h = await mount(undefined, { type: "session", sessionID: active })
-+  const assistant = {
-+    id: "msg_multi",
-+    sessionID: other,
-+    role: "assistant",
-+    time: { created: 1 },
-+    parentID: "msg_multi_user",
-+    agent: "build",
-+    mode: "build",
-+    modelID: "test",
-+    providerID: "test",
-+    path: { cwd: directory, root: directory },
-+    cost: 0,
-+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+  }
-+  try {
-+    emit(h, "session.updated", { sessionID: other, info: session(other) })
-+    // 完成事件前先到达的流式 Part 因父 Message 未完成而准入；完成边界必须把它们全部释放。
-+    emit(h, "message.updated", { sessionID: other, info: assistant })
-+    for (let i = 0; i < 4; i++) {
-+      emit(h, "message.part.updated", {
-+        sessionID: other,
-+        part: { id: `prt_multi_${i}`, messageID: "msg_multi", sessionID: other, type: "text", text: `body ${i}` },
-+      })
-+    }
-+    await barrier(h)
-+    expect(h.sync.data.part.msg_multi).toHaveLength(4)
-+    emit(h, "message.updated", { sessionID: other, info: { ...assistant, time: { created: 1, completed: 2 } } })
-+    await barrier(h)
-+    expect(h.sync.data.part.msg_multi).toBeUndefined()
-+  } finally {
-+    h.app.renderer.destroy()
-+  }
-+})
-+
-+test("terminal tool update removes the previously admitted running body", async () => {
-+  const h = await mount(undefined, { type: "session", sessionID: active })
-+  const running = {
-+    id: "prt_tool_replace",
-+    messageID: "msg_tool_replace",
-+    sessionID: other,
-+    type: "tool",
-+    callID: "call_replace",
-+    tool: "bash",
-+    state: { status: "running", input: { command: "echo" }, metadata: { output: "RUNNING_BODY" }, time: { start: 1 } },
-+  } as unknown as Part
-+  try {
-+    emit(h, "session.updated", { sessionID: other, info: session(other) })
-+    emit(h, "message.part.updated", { sessionID: other, part: running })
-+    await barrier(h)
-+    expect(h.sync.data.part.msg_tool_replace?.[0]).toMatchObject({ state: { status: "running" } })
-+    // completed 是同一 Part 的持久替换：旧 running 正文必须随终值一起离开，
-+    // 不能拒绝新事件却把旧版本留在 store。
-+    emit(h, "message.part.updated", {
-+      sessionID: other,
-+      part: {
-+        ...running,
-+        state: { status: "completed", input: { command: "echo" }, output: "FINAL", title: "done", metadata: {}, time: { start: 1, end: 2 } },
-+      },
-+    })
-+    await barrier(h)
-+    expect(h.sync.data.part.msg_tool_replace).toBeUndefined()
-+  } finally {
-+    h.app.renderer.destroy()
-+  }
-+})
-+
-+test("window eviction forgets terminal release facts so a re-announced part is admitted", async () => {
-+  const h = await mount(undefined, { type: "session", sessionID: active })
-+  try {
-+    emit(h, "session.updated", { sessionID: other, info: session(other) })
-+    // 301 条完成消息让首条滑出 300 窗口；其终态 Part ID 事实必须随淘汰释放。
-+    for (let i = 0; i <= 300; i++) {
-+      const id = `msg_evict_${i}`
-+      emit(h, "message.updated", { sessionID: other, info: message(id, other, i + 1) })
-+      emit(h, "message.part.updated", { sessionID: other, part: tool(id, other, "done", i + 1) })
-+    }
-+    await barrier(h)
-+    expect(h.sync.data.message[other]).toHaveLength(300)
-+    // 同一 Part 以非终态重新宣布（如重试场景）：陈旧 ID 事实不得再拒绝准入。
-+    const running = {
-+      id: "prt_msg_evict_0",
-+      messageID: "msg_evict_0",
-+      sessionID: other,
-+      type: "tool",
-+      callID: "msg_evict_0",
-+      tool: "bash",
-+      state: { status: "running", input: { command: "echo" }, metadata: {}, time: { start: 1 } },
-+    } as unknown as Part
-+    emit(h, "message.part.updated", { sessionID: other, part: running })
-+    await barrier(h)
-+    expect(h.sync.data.part.msg_evict_0?.[0]).toMatchObject({ state: { status: "running" } })
-+  } finally {
-+    h.app.renderer.destroy()
-+  }
-+})
-+
-+test("concurrent acquisitions both resolve only after bodies are loaded", async () => {
-+  // sync 并发取代曾让第一个 acquire 在正文尚未提交时就返回成功；两个并发消费者
-+  // 都必须等到正文真实可用。串行化后第二个请求只看到已提交的 fullSynced 状态。
-+  const gates = [Promise.withResolvers<Response>(), Promise.withResolvers<Response>()]
-+  let requests = 0
-+  const row = { info: message("msg_concurrent", other), parts: [tool("msg_concurrent", other, "FULL".repeat(256))] }
-+  const h = await mount(
-+    (url) => {
-+      if (url.pathname === `/session/${other}/message`) return gates[Math.min(requests++, 1)].promise
-+      if (url.pathname === `/session/${other}`) return json(session(other))
-+      if (url.pathname.endsWith("/goal")) return json({ goal: null })
-+      if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
-+    },
-+    { type: "session", sessionID: active },
-+  )
-+  try {
-+    const first = h.sync.session.acquireParts(other)
-+    await wait(() => requests === 1)
-+    const second = h.sync.session.acquireParts(other)
-+    gates[0].resolve(json([row]))
-+    const h1 = await first
-+    expect(bytes(h, other)).toBe(1024)
-+    gates[1].resolve(json([row]))
-+    const h2 = await second
-+    expect(bytes(h, other)).toBe(1024)
-+    h1.release()
-+    h2.release()
-+    expect(bytes(h, other)).toBe(0)
-+  } finally {
-+    h.app.renderer.destroy()
-+  }
-+})
-+
- test("switching into a streaming session retains bus-only delta before HTTP parent arrives", async () => {
-   const rows = [
-     { info: message("msg_stream", other), parts: [{ id: "prt_stream", messageID: "msg_stream", sessionID: other, type: "text", text: "" } as Part] },
+
 diff --git a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts b/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts
-index 8693c1d75b41f6e88d91ede483f6ad56bc047e83..5c7583e0ee08d71a753215ea9176180a629bf984 100644
 --- a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts
 +++ b/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts
-@@ -106,6 +106,50 @@ test("plugin dispose releases an in-flight acquireParts and its late handle", as
+@@ -106,6 +106,49 @@ test("plugin dispose releases an in-flight acquireParts and its late handle", as
    }
  })
  
 +test("explicit release then dispose releases the underlying handle exactly once", async () => {
-+  // 释放幂等性回归守卫：显式 release 已消费本次 acquisition，随后 dispose 不得
-+  // 再产生第二次底层释放。该守卫在修复前后均绿，锁定的是 track 包装不破坏幂等性。
++  // [0625] 释放幂等性回归守卫：显式 release 已消费本次 acquisition，随后 dispose 不得
++  // 再产生第二次底层释放。该守卫锁定 track 包装不破坏幂等性。
 +  let releases = 0
 +  const api = createTuiPluginApi({
 +    state: {
@@ -920,28 +332,618 @@ index 8693c1d75b41f6e88d91ede483f6ad56bc047e83..5c7583e0ee08d71a753215ea9176180a
 +    restore()
 +  }
 +})
-+
  test("rolls back failed plugin and continues loading next", async () => {
    await using tmp = await tmpdir({
      init: async (dir) => {
-diff --git a/packages/opencode/test/session/part-view.test.ts b/packages/opencode/test/session/part-view.test.ts
-index bd31b9c61afdaf81c91ded47d8272377b7f4f9b4..bf17ecbd6ffda43775ea6b1b02bf79e3c435a842 100644
---- a/packages/opencode/test/session/part-view.test.ts
-+++ b/packages/opencode/test/session/part-view.test.ts
-@@ -38,6 +38,16 @@ describe("PartView.project", () => {
-     expect(PartView.project(part)).toBe(part)
+@@ -268,4 +311,4 @@ test(
+     }
+   },
+   { timeout: 15000 },
+-)
++)
+\ No newline at end of file
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -248,9 +248,13 @@ export const {
+     // [0624 正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
+     // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
+     const partConsumers = new Map<string, number>()
+-    // [0624] 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文；
+-    // 随 Message 窗口淘汰、删除与 Provider cleanup 释放，不保存正文或无限历史。
+-    const releasedTerminalParts = new Set<string>()
++    // [0625] 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文。
++    // 按 Session→Message→PartID 嵌套归属：被释放的 Part 已不在 store，窗口淘汰/删除边界
++    // 不能靠 store 反查 ID，必须持有自有轻量归属关系；随淘汰、删除与 Provider cleanup 释放。
++    const releasedTerminalParts = new Map<string, Map<string, Set<string>>>()
++    // [0625] 同 Session 的 sync 请求串行排队：并发取代会让被取代请求“成功返回但没有提交”，
++    // acquireParts 会把空 store 误当正文就绪。排队后每个 await sync 对应真实执行；跨 Session 仍并行。
++    const syncChains = new Map<string, Promise<void>>()
+     // #132：区分首次 connected 与重连
+     let connectedOnce = false
+     // #192：重连后 permission/question 快照版本
+@@ -307,8 +311,8 @@ export const {
+     // ID-only 事件（message.removed）走既有 findIndex——不引入第三套定位路径。
+     function releaseMessage(sessionID: string, messageID: string, info?: Message) {
+       dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
+-      // [0624] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
+-      for (const part of store.part[messageID] ?? []) releasedTerminalParts.delete(part.id)
++      // [0625] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
++      releasedTerminalParts.get(sessionID)?.delete(messageID)
+       const messages = store.message[sessionID]
+       batch(() => {
+         if (messages) {
+@@ -354,19 +358,31 @@ export const {
+     // [0624] 释放单个终态 Part：记录 ID 事实、清掉其缓冲 delta、从 store 移除。
+     // 正文终值已持久在 DB，重新进入时由 HTTP sync 恢复。
+     function releasePart(sessionID: string, part: Part) {
+-      releasedTerminalParts.add(part.id)
+-      dropBufferedDeltas((event) => event.properties.partID === part.id)
+-      const parts = store.part[part.messageID] ?? []
+-      const index = parts.indexOf(part)
+-      if (index !== -1) {
+-        setStore(
+-          "part",
+-          part.messageID,
+-          produce((draft) => {
+-            draft.splice(index, 1)
+-          }),
+-        )
++      // [0625] ID 事实按 Session→Message→PartID 嵌套登记，释放边界不依赖 store 反查。
++      let byMessage = releasedTerminalParts.get(sessionID)
++      if (!byMessage) {
++        byMessage = new Map()
++        releasedTerminalParts.set(sessionID, byMessage)
++      }
++      let ids = byMessage.get(part.messageID)
++      if (!ids) {
++        ids = new Set()
++        byMessage.set(part.messageID, ids)
+       }
++      ids.add(part.id)
++      dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.partID === part.id)
++      const parts = store.part[part.messageID]
++      if (!parts) return
++      // [0625] 事件侧的 part 是新对象：按 ID 定位 store 内的驻留版本，对象身份 indexOf 在终态替换路径永远 miss。
++      const foundAt = search(parts, part.id, (p) => p.id)
++      if (!foundAt.found) return
++      setStore(
++        "part",
++        part.messageID,
++        produce((draft) => {
++          draft.splice(foundAt.index, 1)
++        }),
++      )
+       if ((store.part[part.messageID] ?? []).length === 0) {
+         setStore(
+           "part",
+@@ -419,12 +435,8 @@ export const {
+       fullSyncedSessions.delete(sessionID)
+       partConsumers.delete(sessionID)
+       dropBufferedDeltas((event) => event.properties.sessionID === sessionID)
+-      // [0624] 删除边界同时忘掉终态 ID 事实：同一 Session 重建后新 Part 需要能正常准入。
+-      for (const parts of Object.values(store.part)) {
+-        for (const part of parts) {
+-          if (part.sessionID === sessionID) releasedTerminalParts.delete(part.id)
+-        }
+-      }
++      // [0625] 删除边界同时忘掉终态 ID 事实：嵌套归属下直接整棵 Session 移除。
++      releasedTerminalParts.delete(sessionID)
+       batch(() => {
+         setStore(
+           produce((draft) => {
+@@ -983,7 +995,9 @@ export const {
+           // [0624] Message 内容持久的到达边界：user 写完即持久，assistant 以 time.completed 为准。
+           // 覆盖 part-first 乱序（Part 先于父 Message 到达时已按未知状态准入）。
+           if (!partConsumers.has(info.sessionID) && (info.role !== "assistant" || info.time.completed !== undefined)) {
+-            const doomed = store.part[info.id] ?? []
++            // [0625] 拷贝出稳定快照再逐个释放：releasePart 会 splice 同一个 store 数组，
++            // 直接在原数组上迭代会跳过相邻元素。
++            const doomed = [...(store.part[info.id] ?? [])]
+             batch(() => {
+               for (const part of doomed) releasePart(info.sessionID, part)
+             })
+@@ -1010,8 +1024,8 @@ export const {
+           // #290：本地缓存窗口从 200 提升至 300，降低长会话过早截断风险
+           if (updated.length > 300) {
+             const oldest = updated[0]
+-            // [0624] 窗口淘汰同时忘掉终态 ID 事实：淘汰后重新加载的 Part 需要能正常准入。
+-            for (const part of store.part[oldest.id] ?? []) releasedTerminalParts.delete(part.id)
++            // [0625] 窗口淘汰同时忘掉终态 ID 事实：嵌套归属下按 Session→Message 删除。
++            releasedTerminalParts.get(event.properties.info.sessionID)?.delete(oldest.id)
+             batch(() => {
+               setStore(
+                 "message",
+@@ -1067,15 +1081,16 @@ export const {
+           touchPart(event.properties.part.sessionID, event.properties.part.id)
+           // [0624] 无消费者 Session 的终态正文不入 store；已释放 Part 的迟到 progress/update 直接拒绝。
+           if (!partConsumers.has(part.sessionID)) {
+-            if (releasedTerminalParts.has(part.id)) break
++            if (releasedTerminalParts.get(part.sessionID)?.get(part.messageID)?.has(part.id)) break
+             if (isTerminalAdmission(part)) {
+-              releasedTerminalParts.add(part.id)
+-              dropBufferedDeltas((event) => event.properties.partID === part.id)
++              // [0625] running→completed 的持久替换先移除已驻留的旧版本，再拒绝新正文准入；
++              // 只拒绝事件不删旧值会把 running 正文留在 store。
++              releasePart(part.sessionID, part)
+               break
+             }
+           } else {
+             // [0624] 有消费者时新的合法 durable 更新可以覆盖已释放事实。
+-            releasedTerminalParts.delete(part.id)
++            releasedTerminalParts.get(part.sessionID)?.get(part.messageID)?.delete(part.id)
+           }
+           const parts = store.part[event.properties.part.messageID]
+           if (!parts) {
+@@ -1106,7 +1121,9 @@ export const {
+           // #186：进入队列合并，applyPartDelta 内仍走 #157 raw 路径
+           // #186：此处禁止直接 setStore，否则绕过 coalesce 失去批处理收益
+           // [0624] 已释放终态 Part 的迟到 delta 直接丢弃；其余按原缓冲/应用路径。
+-          if (!releasedTerminalParts.has(event.properties.partID)) enqueuePartDelta(event)
++          // [0625] 嵌套归属下按 Session→Message→PartID 查询。
++          const released = releasedTerminalParts.get(event.properties.sessionID)?.get(event.properties.messageID)
++          if (!released?.has(event.properties.partID)) enqueuePartDelta(event)
+           break
+         }
+ 
+@@ -1390,14 +1407,20 @@ export const {
+           return last.time.completed ? "idle" : "working"
+         },
+         async sync(sessionID: string, options?: { force?: boolean }) {
+-          // [非 force 去重必须先于任何 token 变更]：加入者在取得在途任务前不得覆盖请求租约，
+-          // 否则被加入的任务会在首个 alive() 检查处无提交中止，且其 finally 因 token 不匹配
+-          // 跳过 syncingSessions/hydratingSessions/syncTokens 清理——去重表被死条目永久毒化，
+-          // 该会话后续非 force sync 全部返回死 promise，正文永不加载。
++          // [0625] 非 force 去重必须在串行门外：去重返回在途 task 不经过队列，
++          // 若在门内会立即放行 gate 让后继者绕过在途提交。
+           if (!options?.force) {
+             const syncing = syncingSessions.get(sessionID)
+             if (syncing) return syncing
+           }
++          // [0625] 同 Session 的请求经串行门排队进入：并发取代会让被取代请求“成功返回但没有提交”，
++          // acquireParts 会把空 store 误当正文就绪。gate 在本体结束时放行下一个；跨 Session 仍并行。
++          const previous = syncChains.get(sessionID) ?? Promise.resolve()
++          let gate!: () => void
++          const current = previous.catch(() => {}).then(() => new Promise<void>((resolve) => (gate = resolve)))
++          syncChains.set(sessionID, current)
++          await previous.catch(() => {})
++          try {
+           // #132：force 忽略 fullSynced 缓存
+           if (!options?.force && fullSyncedSessions.has(sessionID)) return
+           if (deletedSessionIDs.has(sessionID)) return
+@@ -1554,7 +1577,15 @@ export const {
+             }
+           })
+           syncingSessions.set(sessionID, task)
+-          return task
++          // [0625] gate 必须在提交真正完成后放行：目标 sync 主体在内层 task 闭包中执行，
++          // 直接 return task 会让 finally 在 task 仍在途时就放行队列——await 到提交完成再返回。
++          await task
++          return
++          } finally {
++            // [0625] 本体无论提交、早退还是失败都必须放行队列；只有后继者已接管时才保留其队首位置。
++            gate()
++            if (syncChains.get(sessionID) === current) syncChains.delete(sessionID)
++          }
+         },
+         // [0624] 显式正文消费：Task 卡片与插件用它持有 Session 正文，release 后无消费者即释放。
+         // acquire 成功后 await 现有 sync；返回的 release 幂等由调用方/插件 scope 保证。
+@@ -1562,6 +1593,9 @@ export const {
+           acquireParts(sessionID)
+           try {
+             await result.session.sync(sessionID)
++            // [0625] 早退路径（Session 删除竞态等）不提交正文：获取承诺必须观察到 fullSynced，
++            // 否则调用方会把空 store 当作已加载成功。
++            if (!fullSyncedSessions.has(sessionID)) throw new Error(`session parts unavailable: ${sessionID}`)
+           } catch (error) {
+             // sync 失败（Session 删除竞态/守护进程重启）必须回滚计数：没有句柄返回，
+             // 不回滚会让该 Session 的正文使用权永久泄漏，后台完成事件持续补入。
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -612,10 +612,19 @@ export function Session() {
+   }
+ 
+   function markMessageDirty(id: string) {
+-    // 流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压；
+-    // 驻留中的 Message 本来就是 auto 高度，无需标脏。
++    // [0625] 驻留中的 Message 本来就是 auto 高度，无需重测；但正文增长必须同步进容量估算，
++    // 否则挂载中的流式输出逃出预算（估算差额更新，不重复计入）。
++    if (messageView[id]?.mounted !== false) {
++      const cached = estimateBytes.get(id)
++      if (cached !== undefined) {
++        const next = estimateMessageBytes(id)
++        residentBytesTotal += next - cached
++        estimateBytes.set(id, next)
++      }
++      return
++    }
++    // 壳化消息的流式/durable 更新只重测变化的那一条，排在分帧队列首优先于 resize 积压。
+     estimateBytes.delete(id)
+-    if (messageView[id]?.mounted !== false) return
+     remeasureQueue = [id, ...remeasureQueue.filter((queued) => queued !== id)]
+     setRemeasuring(true)
+   }
+@@ -666,6 +675,19 @@ export function Session() {
+   // 转换、内容标脏与会话重置时刷新；普通滚动帧不做任何 store 读取。
+   const estimateBytes = new Map<string, number>()
+   let residentBytesTotal = 0
++
++  // [0625] 驻留记账口径：false→true 计入、true→false 减出。驻留重建、重测批进出、
++  // stale 清理与内容标脏的差额刷新都经由这两个入口；首次见到已挂载消息的补账
++  // 由下方带 estimateBytes.has 守卫的循环直接加总（每 ID 只计一次，不会双计）。
++  function accountMounted(id: string) {
++    const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
++    estimateBytes.set(id, estimate)
++    residentBytesTotal += estimate
++  }
++  function accountShelled(id: string) {
++    residentBytesTotal -= estimateBytes.get(id) ?? 0
++  }
++
+   function syncMessageResidency() {
+     if (!scroll || scroll.isDestroyed) return
+     queueMicrotask(() => {
+@@ -728,9 +750,11 @@ export function Session() {
+         let finalized = false
+         batch(() => {
+           // 驻留窗口内的壳立即重建，不等批轮次：用户滚动优先于后台重测。
++          // [0625] false→true 的唯一记账口径同样适用于重测路径，否则重测期间的重建只进不出。
+           for (const id of desired) {
+             const record = messageView[id]
+             if (record && !record.mounted) {
++              accountMounted(id)
+               setMessageView(id, { mounted: true, height: "auto" })
+               remeasureQueue = remeasureQueue.filter((queued) => queued !== id)
+               remeasureBatch = remeasureBatch.filter((queued) => queued !== id)
+@@ -747,6 +771,8 @@ export function Session() {
+               rows += typeof record.height === "number" ? record.height : 0
+               remeasureBatch.push(id)
+               batchHeights.delete(id)
++              // [0625] 重测批进队即按挂载计入，批次提交门决定是否再壳化减出。
++              accountMounted(id)
+               setMessageView(id, { mounted: true, height: "auto" })
+             }
+             if (remeasureBatch.length === 0 && remeasureQueue.length === 0) finalized = true
+@@ -767,9 +793,12 @@ export function Session() {
+                 batchHeights.delete(id)
+                 if (!child) continue
+                 lastSeenHeights.set(id, child.height)
+-                // 批处理期间滚入驻留窗口的不再壳化，auto 高度继续跟随内容。
++                // [0625] 批处理期间滚入驻留窗口的不再壳化（批次进队时已记账），auto 高度继续跟随内容。
+                 if (desired.has(id)) setMessageView(id, { mounted: true, height: "auto" })
+-                else setMessageView(id, { mounted: false, height: child.height })
++                else {
++                  accountShelled(id)
++                  setMessageView(id, { mounted: false, height: child.height })
++                }
+               }
+               remeasureBatch = []
+               batchStablePasses = 0
+@@ -797,10 +826,8 @@ export function Session() {
+           lastRenderedAt.set(id, now)
+           const record = messageView[id]
+           if (record && !record.mounted) {
+-            // 重建挂载计入驻留容量；估算缓存在标脏时已删除，这里取到新内容的真实量级。
+-            const estimate = estimateBytes.get(id) ?? estimateMessageBytes(id)
+-            estimateBytes.set(id, estimate)
+-            residentBytesTotal += estimate
++            // [0625] 重建挂载计入驻留容量；估算缓存在标脏时已删除，这里取到新内容的真实量级。
++            accountMounted(id)
+             setMessageView(id, { mounted: true, height: "auto" })
+           }
+         }
+@@ -843,27 +870,27 @@ export function Session() {
+                 followUp = true
+                 continue
+               }
+-              // 冻结值直接读当前布局（内容本帧仍挂载），不需要额外测量通道。
++              // [0625] 冻结值直接读当前布局（内容本帧仍挂载），不需要额外测量通道。
++              accountShelled(id)
+               setMessageView(id, { mounted: false, height: child.height })
+-              residentBytesTotal -= estimateBytes.get(id) ?? 0
+             }
+           }
+         }
+         // 300 窗口淘汰、会话切换或 revert 隐藏后清理无主记录，不随会话时长累积。
+         const stale = Object.keys(messageView).filter((id) => !byId.has(id))
+         if (stale.length) {
+-          setMessageView(
+-            produce((state) => {
+-              for (const id of stale) delete state[id]
+-            }),
+-          )
+           for (const id of stale) {
+-            const record = messageView[id]
+-            if (record?.mounted) residentBytesTotal -= estimateBytes.get(id) ?? 0
++            // [0625] 先减账再删记录：删除后 mounted 状态不可读，顺序颠倒会让容量只进不出。
++            if (messageView[id]?.mounted) accountShelled(id)
+             lastSeenHeights.delete(id)
+             lastRenderedAt.delete(id)
+             estimateBytes.delete(id)
+           }
++          setMessageView(
++            produce((state) => {
++              for (const id of stale) delete state[id]
++            }),
++          )
+         }
+       })
+       // 有候选高度还在收敛时主动预约下一帧，否则两条稳定观察规则永远等不到第二帧。
+@@ -2206,7 +2233,7 @@ function UserMessage(props: {
+     on(
+       contentVersion,
+       () => {
+-        if (!mounted()) ctx.markMessageDirty(props.message.id)
++        ctx.markMessageDirty(props.message.id)
+       },
+       { defer: true },
+     ),
+@@ -2391,6 +2418,10 @@ const footerVisible = createMemo(() => {
+               "output" in part.state ? part.state.output : undefined,
+               "title" in part.state ? part.state.title : undefined,
+               "error" in part.state ? part.state.error : undefined,
++              // [0625] Shell 等工具的流式 progress 经 metadata.output 落地，状态字段不变；
++              // 壳化后缺这个签名会让冻结高度与 scrollbar 落后于持续增长的真实正文。
++              // pending 的 schema 没有 metadata 字段，in 守卫是类型与行为的双重边界。
++              "metadata" in part.state ? part.state.metadata?.output : undefined,
+             ]
+           return part.type
+         }),
+@@ -2400,7 +2431,7 @@ const footerVisible = createMemo(() => {
+     on(
+       contentVersion,
+       () => {
+-        if (!mounted()) ctx.markMessageDirty(props.message.id)
++        ctx.markMessageDirty(props.message.id)
+       },
+       { defer: true },
+     ),
+@@ -4040,21 +4071,28 @@ function Task(props: ToolProps) {
+   const sync = useSync()
+   const dialog = useDialog()
+ 
+-  onMount(() => {
++  // [0625] 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
++  // 子 Session ID 在工具执行后才写入 metadata（pending 阶段不存在），acquisition 必须
++  // 跟随 metadata 响应式出现而不是只在 mount 取样一次；ID 变化先释放旧消费者。
++  // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关。
++  createEffect(() => {
+     const child = stringValue(props.metadata.sessionId)
+     if (!child) return
+-    // [0624] 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，正文不再长期驻留。
+-    // 同步触发交给 acquireParts 内部的 fullSynced 去重，与 message[].length 无关：
+-    // 正文被释放后重新挂载必须能按 acquisition 恢复，而不是看到非空 metadata 就跳过。
+     let release: (() => void) | undefined
+     let released = false
+-    void sync.session.acquireParts(child).then((handle) => {
+-      if (released) {
+-        handle.release()
+-        return
+-      }
+-      release = handle.release
+-    })
++    void sync.session
++      .acquireParts(child)
++      .then((handle) => {
++        if (released) {
++          handle.release()
++          return
++        }
++        release = handle.release
++      })
++      .catch(() => {
++        // [0625] 子 Session 删除竞态或守护进程失败：计数已在 acquireParts 内回滚，
++        // 卡片没有正文可展示时保持现状，不重试不合成。
++      })
+     onCleanup(() => {
+       released = true
+       release?.()
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
+@@ -134,6 +134,146 @@ test("acquireParts rolls back the consumer count when sync rejects", async () =>
+   }
+ })
+ 
++test("assistant completion releases all already-admitted parts, not just alternating ones", async () => {
++  const h = await mount(undefined, undefined, { type: "session", sessionID: active })
++  const assistant = {
++    id: "msg_multi",
++    sessionID: other,
++    role: "assistant",
++    time: { created: 1 },
++    parentID: "msg_multi_user",
++    agent: "build",
++    mode: "build",
++    modelID: "test",
++    providerID: "test",
++    path: { cwd: directory, root: directory },
++    cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  try {
++    emit(h, "session.updated", { sessionID: other, info: session(other) })
++    // [0625] 完成事件前先到达的流式 Part 因父 Message 未完成而准入；完成边界必须把它们全部释放。
++    emit(h, "message.updated", { sessionID: other, info: assistant })
++    for (let i = 0; i < 4; i++) {
++      emit(h, "message.part.updated", {
++        sessionID: other,
++        part: { id: `prt_multi_${i}`, messageID: "msg_multi", sessionID: other, type: "text", text: `body ${i}` },
++      })
++    }
++    await barrier(h)
++    expect(h.sync.data.part.msg_multi).toHaveLength(4)
++    emit(h, "message.updated", { sessionID: other, info: { ...assistant, time: { created: 1, completed: 2 } } })
++    await barrier(h)
++    expect(h.sync.data.part.msg_multi).toBeUndefined()
++  } finally {
++    h.app.renderer.destroy()
++  }
++})
++
++test("terminal tool update removes the previously admitted running body", async () => {
++  const h = await mount(undefined, undefined, { type: "session", sessionID: active })
++  const running = {
++    id: "prt_tool_replace",
++    messageID: "msg_tool_replace",
++    sessionID: other,
++    type: "tool",
++    callID: "call_replace",
++    tool: "bash",
++    state: { status: "running", input: { command: "echo" }, metadata: { output: "RUNNING_BODY" }, time: { start: 1 } },
++  } as unknown as Part
++  try {
++    emit(h, "session.updated", { sessionID: other, info: session(other) })
++    emit(h, "message.part.updated", { sessionID: other, part: running })
++    await barrier(h)
++    expect(h.sync.data.part.msg_tool_replace?.[0]).toMatchObject({ state: { status: "running" } })
++    // [0625] completed 是同一 Part 的持久替换：旧 running 正文必须随终值一起离开，
++    // 不能拒绝新事件却把旧版本留在 store。
++    emit(h, "message.part.updated", {
++      sessionID: other,
++      part: {
++        ...running,
++        state: { status: "completed", input: { command: "echo" }, output: "FINAL", title: "done", metadata: {}, time: { start: 1, end: 2 } },
++      },
++    })
++    await barrier(h)
++    expect(h.sync.data.part.msg_tool_replace).toBeUndefined()
++  } finally {
++    h.app.renderer.destroy()
++  }
++})
++
++test("window eviction forgets terminal release facts so a re-announced part is admitted", async () => {
++  const h = await mount(undefined, undefined, { type: "session", sessionID: active })
++  try {
++    emit(h, "session.updated", { sessionID: other, info: session(other) })
++    // [0625] 301 条完成消息让首条滑出 300 窗口；其终态 Part ID 事实必须随淘汰释放。
++    for (let i = 0; i <= 300; i++) {
++      const id = `msg_evict_${i}`
++      emit(h, "message.updated", { sessionID: other, info: message(id, other, i + 1) })
++      emit(h, "message.part.updated", { sessionID: other, part: tool(id, other, "done", i + 1) })
++    }
++    await barrier(h)
++    expect(h.sync.data.message[other]).toHaveLength(300)
++    // [0625] 目标 messageKey 为 created+id 的字符串拼接（#0580 既有语义），窗口淘汰的
++    // 首项按该码元序而非数值 chronology——测试从 store 推导实际被淘汰的 Message，
++    // 断言对"任何被淘汰消息"的终态 ID 事实都已遗忘，而非硬编码 evict_0。
++    const present = new Set((h.sync.data.message[other] ?? []).map((m) => m.id))
++    const evicted = Array.from({ length: 301 }, (_, i) => `msg_evict_${i}`).find((id) => !present.has(id))
++    expect(evicted).toBeDefined()
++    // [0625] 同一 Part 以非终态重新宣布（如重试场景）：陈旧 ID 事实不得再拒绝准入。
++    const running = {
++      id: `prt_${evicted}`,
++      messageID: evicted!,
++      sessionID: other,
++      type: "tool",
++      callID: evicted!,
++      tool: "bash",
++      state: { status: "running", input: { command: "echo" }, metadata: {}, time: { start: 1 } },
++    } as unknown as Part
++    emit(h, "message.part.updated", { sessionID: other, part: running })
++    await barrier(h)
++    expect(h.sync.data.part[evicted!]?.[0]).toMatchObject({ state: { status: "running" } })
++  } finally {
++    h.app.renderer.destroy()
++  }
++})
++
++test("concurrent acquisitions both resolve only after bodies are loaded", async () => {
++  // [0625] sync 并发取代曾让第一个 acquire 在正文尚未提交时就返回成功；两个并发消费者
++  // 都必须等到正文真实可用。串行化后第二个请求只看到已提交的 fullSynced 状态。
++  const gates = [Promise.withResolvers<Response>(), Promise.withResolvers<Response>()]
++  let requests = 0
++  const row = { info: message("msg_concurrent", other), parts: [tool("msg_concurrent", other, "FULL".repeat(256))] }
++  const h = await mount(
++    (url) => {
++      if (url.pathname === `/session/${other}/message`) return gates[Math.min(requests++, 1)].promise
++      if (url.pathname === `/session/${other}`) return json(session(other))
++      if (url.pathname.endsWith("/goal")) return json({ goal: null })
++      if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
++      return undefined
++    },
++    undefined,
++    { type: "session", sessionID: active },
++  )
++  try {
++    const first = h.sync.session.acquireParts(other)
++    await wait(() => requests === 1)
++    const second = h.sync.session.acquireParts(other)
++    gates[0].resolve(json([row]))
++    const h1 = await first
++    expect(bytes(h, other)).toBe(1024)
++    gates[1].resolve(json([row]))
++    const h2 = await second
++    expect(bytes(h, other)).toBe(1024)
++    h1.release()
++    h2.release()
++    expect(bytes(h, other)).toBe(0)
++  } finally {
++    gates[0].resolve(json([]))
++    gates[1].resolve(json([]))
++    h.app.renderer.destroy()
++  }
++})
+ test("switching into a streaming session retains bus-only delta before HTTP parent arrives", async () => {
+   const rows = [
+     { info: message("msg_stream", other), parts: [{ id: "prt_stream", messageID: "msg_stream", sessionID: other, type: "text", text: "" } as Part] },
+@@ -149,4 +289,4 @@ test("switching into a streaming session retains bus-only delta before HTTP pare
+   } finally {
+     h.app.renderer.destroy()
+   }
+-})
++})
+\ No newline at end of file
+
+diff --git a/packages/tui/test/routes/session/residency-contract.test.ts b/packages/tui/test/routes/session/residency-contract.test.ts
+--- a/packages/tui/test/routes/session/residency-contract.test.ts
++++ b/packages/tui/test/routes/session/residency-contract.test.ts
+@@ -46,8 +46,9 @@ describe("session render residency template contracts", () => {
    })
  
-+  test("keeps unknown third-party tools with same-shaped fields untouched", () => {
-+    // 投影只覆盖已证实重复生产的内建 edit；第三方工具恰好提供同名 diff/filediff
-+    // 字段时语义未知，必须原样保留，不能按字段形状猜测裁剪。
-+    const custom = {
-+      ...editPart({ diff: patch, filediff: { file: "a.ts", patch, additions: 1, deletions: 0 } }),
-+      tool: "third_party_custom",
-+    } as const
-+    expect(PartView.project(custom)).toBe(custom)
+   test("Task cards hold child session bodies via acquireParts with cleanup pair", () => {
+-    // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，不再以 message[].length 判定。
+-    expect(source).toMatch(/onMount\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)[\s\S]{0,600}sync\.session\.acquireParts\(child\)[\s\S]{0,400}onCleanup\(\(\) => \{\s*\n\s*released = true\s*\n\s*release\?\.\(\)/)
++    // [0625] 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，不再以 message[].length 判定。
++    // acquisition 在 createEffect 内响应式跟随 metadata.sessionId（onMount 单次取样已返工）。
++    expect(source).toMatch(/createEffect\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)[\s\S]{0,800}sync\.session\s*\n\s*\.acquireParts\(child\)[\s\S]{0,500}onCleanup\(\(\) => \{\s*\n\s*released = true\s*\n\s*release\?\.\(\)/)
+   })
+ 
+   test("interaction state survives content owner rebuild for shell and reasoning", () => {
+@@ -55,3 +56,30 @@ describe("session render residency template contracts", () => {
+     expect(source).toContain('ctx.interaction.get(`reasoning:${props.message.id}:${props.part.id}`)')
+   })
+ })
++
++describe("session residency 0625 rework template contracts", () => {
++  test("task acquisition follows metadata.sessionId reactively after mount", () => {
++    // [0625] 子 Session ID 在工具执行后才写入 metadata（pending 阶段不存在）；
++    // acquisition 必须在 createEffect 内响应式读取 props.metadata.sessionId，
++    // 不能只在 onMount 取样一次——首帧无 ID 的实时卡片会永远缺失工具计数。
++    expect(source).toMatch(/function Task\(props[\s\S]{0,400}createEffect\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)/)
++    // acquire 失败静默但不合成：计数回滚在 acquireParts 内完成。
++    expect(source).toMatch(/acquireParts\(child\)[\s\S]{0,300}\.catch\(\(\) => \{/)
 +  })
 +
-   test("keeps non-tool, non-completed and metadata-less parts untouched", () => {
-     const text = { id: "prt_2", messageID: "msg_1", sessionID: "ses_1", type: "text", text: "hello" } as const
-     expect(PartView.project(text)).toBe(text)
++  test("content version signature includes shell metadata.output", () => {
++    // Shell 等工具的流式 progress 经 metadata.output 落地而 status 不变；
++    // 壳化后缺这个签名会让冻结高度落后于持续增长的真实正文。
++    expect(source).toContain('"metadata" in part.state ? part.state.metadata?.output : undefined')
++  })
++
++  test("mounted growth updates the residency estimate via markMessageDirty", () => {
++    // 挂载中的正文增长必须同步进容量估算（差额更新），否则流式输出逃出预算。
++    expect(source).toMatch(/function markMessageDirty\(id: string\)[\s\S]{0,500}residentBytesTotal \+= next - cached/)
++    // 记账口径统一为 false→true 计入 / true→false 减出，覆盖重测批进出与 stale 清理。
++    expect(source).toContain("function accountMounted(id: string)")
++    expect(source).toContain("function accountShelled(id: string)")
++    // stale 清理必须先减账再删记录（删除后 mounted 不可读）。
++    expect(source).toMatch(/for \(const id of stale\) \{\s*\n\s*\/\/ \[0625\] 先减账再删记录[\s\S]{0,200}accountShelled\(id\)/)
++  })
++})
+\ No newline at end of file

@@ -1,7 +1,7 @@
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -30,7 +30,12 @@ export const Event = SessionCompactionEvent
+@@ -30,6 +30,12 @@
  
  export const PRUNE_MINIMUM = 20_000
  export const PRUNE_PROTECT = 40_000
@@ -10,10 +10,10 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
 +// head=400 保 shell 头部的截断 notice（path 属性排在 guidance 前，长路径下
 +// 即使切到 notice 中段也能保住 path 前缀）；tail=2000 保 tool 末尾的截断
 +// notice 完整含 path，避免模型压缩后丢失恢复文件路径。
++// #328：400/2000 的不对称是刻意设计——头部只需容纳 notice 的 path 前缀，尾部要装完整恢复指引。
 +const TOOL_OUTPUT_HEAD_CHARS = 400
 +const TOOL_OUTPUT_TAIL_CHARS = 2_000
  const PRUNE_PROTECTED_TOOLS = ["skill"]
- const DEFAULT_TAIL_TURNS = 4
  // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
 @@ -444,7 +449,7 @@ const layer = Layer.effect(
        const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
@@ -24,21 +24,21 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
        // 重新截断并累计，导致本应压缩的可见会话膨胀成远超模型窗口的压缩请求。
        const history = MessageV2.filterCompacted(rawHistory)
        const prior = completedCompactions(history)
-@@ -476,7 +481,7 @@ const layer = Layer.effect(
-       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-         stripMedia: true,
--        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-+        toolOutputTruncation: { head: TOOL_OUTPUT_HEAD_CHARS, tail: TOOL_OUTPUT_TAIL_CHARS },
-       })
-       // #194：compaction summary 上传估算——与 prompt.ts 同一 estimateUploadInput 路径
-       // #194：summary 绕过 prompt.ts，需在此处独立 seed pending upload snapshot
+@@ -62,3 +67,7 @@
+ 
+ const truncate = (value: string) =>
+-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
++  // #328：head/tail 双向截断——head=400 保 notice 的 path 前缀（path 属性排在 guidance 前），
++  // tail=2000 保 tool 末尾 notice 完整含 path，压缩回放不丢恢复文件路径。
++  value.length <= TOOL_OUTPUT_HEAD_CHARS + TOOL_OUTPUT_TAIL_CHARS
++    ? value
++    : `${value.slice(0, TOOL_OUTPUT_HEAD_CHARS)}\n[truncated]\n...\n${value.slice(-TOOL_OUTPUT_TAIL_CHARS)}`
 
 
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -78,11 +78,22 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
+@@ -78,11 +78,23 @@
  export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
  export { isMedia }
  
@@ -47,6 +47,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 -  const omitted = text.length - maxChars
 -  // #282：机器可解析的省略标记（[... reason stats]），不再用面向人的英文句子
 -  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
++// #328：option 改名为 toolOutputTruncation——目标树无生产调用方经该 seam 传参（截断由 compaction 自有 helper 承载），改名无兼容面。
 +// 压缩回放时对旧 tool 输出做 head+tail 双向保留。
 +// 不变量：tool 工具层（truncate.ts）的截断 notice 在输出末尾（head 方向），
 +// shell 工具层（shell.ts）的截断 notice 在输出开头（tail 方向）。两段 notice
@@ -88,7 +89,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
  
              // For providers that don't support media in tool results, extract media files
-@@ -459,7 +474,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -459,8 +474,8 @@
  export function toModelMessages(
    input: WithParts[],
    model: Provider.Model,
@@ -102,11 +103,12 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1780,7 +1780,7 @@ describe("session.compaction.process", () => {
+@@ -1780,7 +1780,8 @@
          const oldReply = yield* createAssistantMessage(session.id, old.id, test.directory)
          // #251：旧 head 里的大 tool result 模拟真实会话中已被 summary 覆盖的工具历史；
          // 第二次压缩必须只基于 compacted active window 更新 summary，不能把这段
 -        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
++        // #328：预算注释同步更新——引用新常量名避免读者按旧单一预算理解断言。
 +        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 head/tail 预算
          // 再次截断并累计，重新膨胀本应被压缩的上下文。
          yield* ssn.updatePart({
@@ -139,12 +141,14 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
        {
          role: "user",
          content: [{ type: "text", text: "run tool" }],
-@@ -816,13 +821,361 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -816,13 +821,363 @@
              toolName: "bash",
              output: {
                type: "text",
 -              value: "abcd\n[... compaction truncated 6 chars]",
 +              value: "ab\n[... compaction truncated 6 chars ...]\nij",
++    // #328：head/tail 用例族——每个用例独立构造超长输出，避免共享 fixture 掩盖单侧回归。
++    // #328：测试用独立的小型对称预算（如 2/2、50/200）——用 head/tail 两段内容断言锁定方向，不依赖生产常量本身。
              },
            },
          ],
@@ -506,17 +510,20 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
 --- a/packages/core/src/session/compaction.ts
 +++ b/packages/core/src/session/compaction.ts
-@@ -14,3 +14,6 @@
+@@ -14,3 +14,8 @@
  // 工具输出截断限制：避免单个工具输出占用过多摘要空间
  const TOOL_OUTPUT_MAX_CHARS = 2_000
++// #328：core/V2 侧同步双向截断——V2 压缩摘要直接消费工具输出，
++// 与 V1 的 helper 语义对齐，避免两代压缩链对同一工具历史给出不同的截断形状。
 +// 0328：head/tail 双向截断——ToolOutputStore 的恢复路径 marker 位于截断文本中部，
 +// 单边 head 截断会丢 marker 与尾部错误信息（与 V1 truncateToolOutput 同语义）。
 +const TOOL_OUTPUT_TAIL_CHARS = 2_000
  // 摘要输出 token 上限：控制摘要长度避免占用过多上下文
-@@ -85,4 +85,6 @@
+@@ -85,4 +85,7 @@
  
 -const truncate = (value: string) =>
 -  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
++// #328：消费点在 V2 的 summarize 入口——head/tail 预算由本模块常量给定，此处只做双向拼接。
 +const truncate = (value: string) =>
 +  value.length <= TOOL_OUTPUT_MAX_CHARS + TOOL_OUTPUT_TAIL_CHARS
 +    ? value

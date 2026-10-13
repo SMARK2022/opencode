@@ -180,6 +180,13 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
 --- a/packages/tui/test/util/session-pending.test.ts
 +++ b/packages/tui/test/util/session-pending.test.ts
+@@ -3,5 +3,6 @@ import { describe, expect, test } from "bun:test"
+ import {
+   activeTurnDuration,
++  activeTurnPair,
+   assistantTurnDuration,
+   hasStreamingAssistant,
+   pendingAssistantIndex,
 @@ -78,12 +78,26 @@ test("finds the active assistant only while the session is non-idle", () => {
    })
  
@@ -209,8 +216,55 @@ diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/
    test("derives active turn duration from the latest user's streaming assistant", () => {
      const messages: Message[] = [
        user("first", 1_000),
-
-
+@@ -134,3 +135,48 @@
+     expect(activeTurnDuration(messages, { type: "idle" }, 8_000)).toBe(0)
+   })
+ })
++
++// activeTurnPair 是 footer/sidebar/timer 共用的"当前活跃轮次"解析口径。
++// 它必须跳过尚未派生 assistant 的 queued orphan user，否则 footer usage、sidebar context
++// 和左下角计时器都会在 orphan 窗口期内归零或漂移到错误的 user 时间戳。
++describe("activeTurnPair", () => {
++  test("returns the latest paired user and assistant when all turns are paired", () => {
++    const messages: Message[] = [
++      user("u1", 1),
++      assistant("a2", 2, "u1"),
++      user("u3", 3),
++      assistant("a4", 4, "u3"),
++    ]
++
++    const pair = activeTurnPair(messages)
++    expect(pair?.user.id).toBe("u3")
++    expect(pair?.assistant?.id).toBe("a4")
++  })
++
++  test("skips queued orphan user and returns the latest assistant's parent pair", () => {
++    // orphan user3 无 assistant 子节点：应跳过它，回退到最新 assistant 的 parent user，
++    // 让 widget 继续展示正在运行/已完成的 A 轮次，而不是 orphan B 的空数据。
++    const messages: Message[] = [
++      user("u1", 1),
++      assistant("a2", 2, "u1", "stop"),
++      user("u3", 3),
++    ]
++
++    const pair = activeTurnPair(messages)
++    expect(pair?.user.id).toBe("u1")
++    expect(pair?.assistant?.id).toBe("a2")
++  })
++
++  test("falls back to the latest user with undefined assistant before any assistant exists", () => {
++    // 首次 prompt 空窗：返回 assistant: undefined，让调用点维持既有 fail-closed 显示。
++    const messages: Message[] = [user("only", 1)]
++
++    const pair = activeTurnPair(messages)
++    expect(pair?.user.id).toBe("only")
++    expect(pair?.assistant).toBeUndefined()
++  })
++
++  test("returns undefined when there are no messages", () => {
++    expect(activeTurnPair([])).toBeUndefined()
++  })
++})
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts

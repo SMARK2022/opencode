@@ -12,19 +12,27 @@ Content-Transfer-Encoding: 8bit
 
 保留实施阶段的注释约束，区分实现要求与独立审计判定，并同步当前第三方 OpenCode 目录的忽略规则。
 
-diff --git a/.gitignore b/.gitignore
-index 58cbc65624b8d9d7de895539424d0caaf5168431..0fe329b37eb07dc41dc56975a79a93f0e967ab55 100644
+
+适配说明（v1.18.32 重放）：
+仅 .gitignore hunk 适配：state 累计态在被删行前已有「隔离迁移专用 clone」注释行（上下文错位），
+且源用反斜杠目录名在 gitignore 中是转义、无法忽略目标目录（源仓库手写瑕疵）——替换值为
+正斜杠 /thirdparty/opencode-11720/，与同段 telegram-bot 条目风格一致；另加一行 # 注释
+记录更名与正斜杠原因（本文件类型注释语法为 #）。其余四段（agent/policy/skill/workflow
+文档）pre-image 与 state 累计态逐字匹配，原样落地。
+
 --- a/.gitignore
 +++ b/.gitignore
-@@ -27,7 +27,7 @@ target
- 
+@@ -30,7 +30,8 @@ target
  # Local dev files
  opencode-dev
+ # 隔离迁移专用 clone：与目标工作区解耦，避免递归污染
 -/thirdparty/opencode-v1.17.18-smark/
-+/thirdparty\opencode-11720/
++# 0566：目录名随目标基线 11720 更名；正斜杠才是 gitignore 的目录分隔（源反斜杠是转义不生效）
++/thirdparty/opencode-11720/
  /thirdparty/opencode-telegram-bot/
  UPCOMING_CHANGELOG.md
  logs/
+
 diff --git a/.opencode/agent/adversarial-auditor.md b/.opencode/agent/adversarial-auditor.md
 index 49d11cf8e3322c5ac5e6850ba2bdfcfefbbdf88e..1f0d7e815b0991747a8c9780cd19206ab50b8a0f 100644
 --- a/.opencode/agent/adversarial-auditor.md
@@ -87,6 +95,8 @@ index 49d11cf8e3322c5ac5e6850ba2bdfcfefbbdf88e..1f0d7e815b0991747a8c9780cd19206a
 +issue your own verdict; primary disagreement alone must not cause convergence,
 +downgrade, or withdrawal.
 diff --git a/.opencode/policy/first-principles-engineering.md b/.opencode/policy/first-principles-engineering.md
+
+diff --git a/.opencode/policy/first-principles-engineering.md b/.opencode/policy/first-principles-engineering.md
 index c4285c986ca26abf48b85f8dec907f99e1a94bb9..777fd5f5db7f33e26693ca76fe02e416250d1e68 100644
 --- a/.opencode/policy/first-principles-engineering.md
 +++ b/.opencode/policy/first-principles-engineering.md
@@ -112,6 +122,7 @@ index c4285c986ca26abf48b85f8dec907f99e1a94bb9..777fd5f5db7f33e26693ca76fe02e416
  
  The canonical plan must commit to the minimum and provide a feasible `E`/`C`
  estimate. Estimate arithmetic or line-scope drift is non-blocking when it does
+
 diff --git a/.opencode/skills/adversarial-audit/SKILL.md b/.opencode/skills/adversarial-audit/SKILL.md
 index f1d1456a1d6f873f2537bbe10d26f5d9d4ab39d5..29dcc9f98799e497b064a692b1484b13918962ed 100644
 --- a/.opencode/skills/adversarial-audit/SKILL.md
@@ -244,6 +255,7 @@ index f1d1456a1d6f873f2537bbe10d26f5d9d4ab39d5..29dcc9f98799e497b064a692b1484b13
  
  ## Finding Format
  
+
 diff --git a/docs/workflow.md b/docs/workflow.md
 index 2190a4d7ea665f65dc077a2c0c412965d553068e..84690511a7a99ba7e8e4adc96a5ed70721a28b99 100644
 --- a/docs/workflow.md

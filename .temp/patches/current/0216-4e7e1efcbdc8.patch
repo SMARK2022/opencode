@@ -62,11 +62,11 @@ index b2b30c49b6..fc75739aa9 100644
 @@ -682,9 +700,10 @@ const layer = Layer.effect(
                  : {}),
                status: "error",
-               // #153：流正常结束未完成 vs 用户中断
+               // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
+               // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
 -              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
 +              // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
 +              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
-               // #153：仅 cancel 路径标记 interrupted
 -              metadata: aborted ? { ...metadata, interrupted: true } : metadata,
 +              metadata: aborted ? interruptedToolMetadata(metadata) : metadata,
                time: { start: "time" in part.state ? part.state.time.start : end, end },
@@ -95,16 +95,16 @@ index d5d78fb956..cf8c3e62ee 100644
 @@ -281,14 +282,19 @@ const layer = Layer.effect(
      })
  
-     // #153：cancel 收口所有未完成 assistant（含空 dangling）
 -    const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
 +    // #216：显式类型标注使 abortPendingAssistants 可在 abortChildren 中递归自引用
-+    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-       // #153：用 Session.messages 枚举，避免 MessageV2.stream 泄漏 Database.Service 到 cancel 的 R
-       const msgs = yield* sessions.messages({ sessionID }).pipe(
-         Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
-       )
-       // #153：过滤未完成 assistant（含空 parts dangling）
-       const pending = msgs.filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
++    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
+      // #153：cancel 必须覆盖全部可见未完成 assistant，而非仅 findMessage 命中的第一条
+      // sessions.messages 返回 chronological 顺序且默认过滤 hidden，取消只需覆盖可见项
+      const visible = yield* sessions.messages({ sessionID })
+      const pending = visible.filter(
+        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
+          msg.info.role === "assistant" && !msg.info.time.completed,
+      )
 -      if (pending.length === 0) return
 +      // #216：递归中止子会话——auto-review 创建的 permission-reviewer 子会话也需终态化
 +      const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
@@ -112,12 +112,14 @@ index d5d78fb956..cf8c3e62ee 100644
 +      })
 +      if (pending.length === 0) return yield* abortChildren
  
-       const now = Date.now()
-       // #153：cancel 终态化绕过 processor，必须在此补记 request-usage
-@@ -320,6 +326,8 @@ const layer = Layer.effect(
-       )
-       // #173：无 active runner 时仍终态化 open tool（#149 工具 handler 路径保留给 live tool）
-       yield* abortPendingToolParts(sessionID, pending, now)
+      // 同一时间戳保证同批被取消的 assistant 时间线一致
+      const now = Date.now()
+@@ -313,8 +319,10 @@ const layer = Layer.effect(
+      )
+ 
+      // #173：无 active runner 时仍终态化 open tool（#149 工具 handler 路径保留给 live tool）
+ 
+      yield* abortPendingToolParts(sessionID, pending, now)
 +      // #216：子会话在父 assistant 终态化后递归中止——保证 reviewer 子会话不残留 active assistant
 +      yield* abortChildren
      })

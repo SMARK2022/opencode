@@ -12,9 +12,11 @@ TUI SyncProvider：Message 删除/隐藏、Session 删除与强制同步现在�
 
 行为边界：300 条消息上限、chronology/BINARY 顺序、后台流式恢复、滚动计算、exact proof 与 warm reuse 均不变化；无 TTL、清理脚本或 fallback。红测先行后修复，关联回归全绿（sync 39、session-message-render 91、prompt 103 等），经两轮独立 full-scope 审计（round 1 BLOCK/B-01 已返工，round 2 APPROVE）。native/OpenTUI 消费由另一 agent 的 release 流程负责，本提交不含依赖与 submodule 变更。详见 docs/plans/opencode-memory-lifetime-repair.md。
 
+适配说明：TUI 内存生命周期完整重锚（owner 迁移 packages/opencode/src/cli/cmd/tui → packages/tui）。sync.tsx：失效集合（deletedSessionIDs/removedMessageIDs/removedPartIDs）+syncTokens 请求租约+releaseMessage/releaseSession 释放助手+全部 admission 检查（applyPartDelta/enqueuePartDelta/permission.asked/question.asked/todo.updated/goal.updated/diff/deleted/updated/status/message.hidden/removed/part.hidden/removed/onCleanup）+sync() 的 alive/pageFailed/失效过滤/part-first prune/diff 后 alive——定位沿用目标 messageKey chronology 与 findIndex 两条既有入口，live 合并沿用目标 hydratingSessions tracker（syncChanges 同构）。dialog-message.tsx：Retry 在首个 await 前捕获 promptInfo；Fork 捕获移至 fork await 之前并补 parts 空桶守卫。测试：sync.test.tsx 追加 memory lifetime 全套（mount harness 适配，UserMessage 保留）；session-message-render 的 Fork 捕获用例按 #506/#520 先例以源码模板合同承载（dialog-message-fork-capture.test.ts，目标无 withRenderedSession harness）；prompt.test.ts 追加缓存生命周期 WeakRef 测试（delete/dispose 双变体+replacement 对照）。
+裁记（SUPERSEDED，目标结构已从根因承载）：prompt-window-cache.ts 注册表、instance-store dispose/reload 失效钩子、projectors 删除失效钩子、prompt.ts retainedMessages→注册表改造——目标 prompt.ts 的 loop 每次调用新建 runLoop 闭包（retained 条目随 run 结束不可达），Service 级常驻缓存不存在，注册表无消费者；按规则不引入无 producer/consumer 的基础设施，等价保证由 prompt.test.ts 新测试锁定。语义与 original 逐 hunk 等价或裁记有据。
+
 diff --git a/docs/plans/opencode-memory-lifetime-repair.md b/docs/plans/opencode-memory-lifetime-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..9dfc8670e762f19003d1e9dab1c513ea22b68496
 --- /dev/null
 +++ b/docs/plans/opencode-memory-lifetime-repair.md
 @@ -0,0 +1,559 @@
@@ -577,12 +579,13 @@ index 0000000000000000000000000000000000000000..9dfc8670e762f19003d1e9dab1c513ea
 +| 2 | R1 | yes | No blocking findings.（B-01 修复验证：遮蔽消除、存活对照对该 bug 敏感、permission/question 守卫落盘且属 R1 §10.1.7 批准范围；全量 hunk 重审无新缺陷） | NB-1（updated）行数表已与 numstat 一致，467/373 拆分与 468/372 有 1 行口径漂移；NB-2/NB-3/NB-4 carried；NB-5 §24 记录职责 | **APPROVE**（仅适用于当前实际 diff 对照 R1；任何后续 substantive 修改使 approval 失效） | adversarial-auditor task ses_f6939cbdaffelZUu1PFKPJQD3N |
 +
 +实现已获两轮 full-scope 审计（round 1 BLOCK/B-01 已返工，round 2 APPROVE / No blocking findings）；commit 只包含本任务路径。
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000addb4e6998 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -227,6 +227,96 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
+\ No newline at end of file
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -267,6 +267,92 @@ export const {
+     // 缓冲后在 part.updated 创建 part 时 replay。
      const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
  
 +    // [失效事实] 持久删除/hidden 只记录 ID，不保存 payload；300 窗口淘汰不进入这些集合，
@@ -592,23 +595,18 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +    const removedPartIDs = new Set<string>()
 +    // 每 Session 只有最新 sync 请求可提交；删除或更新的 force 请求使在途旧请求失效。
 +    let syncRequestSeq = 0
-+    const syncRequests = new Map<string, number>()
-+    // 请求期间只登记变化 ID（不复制正文）；提交时并入最终投影，HTTP 页不能抹掉 live 流式。
-+    const syncChanges = new Map<string, { messages: Set<string>; parts: Set<string> }>()
++    const syncTokens = new Map<string, number>()
 +
 +    function messageGone(sessionID: string, messageID: string) {
++      // 会话级与消息级失效共用一个判定：Session 删除后其全部消息同时不可见，
++      // 分开检查会让调用方漏掉其中一层的复活入口。
 +      return deletedSessionIDs.has(sessionID) || removedMessageIDs.has(messageID)
 +    }
 +
 +    function partGone(sessionID: string, messageID: string, partID: string) {
++      // part 失效必须同时继承 Message 与 Session 两级事实：迟到 part 事件的
++      // admission 不允许在父级已释放后重建正文。
 +      return messageGone(sessionID, messageID) || removedPartIDs.has(partID)
-+    }
-+
-+    function trackSyncChange(sessionID: string, messageID?: string, partID?: string) {
-+      const changes = syncChanges.get(sessionID)
-+      if (!changes) return
-+      if (messageID) changes.messages.add(messageID)
-+      if (partID) changes.parts.add(partID)
 +    }
 +
 +    function dropBufferedDeltas(match: (event: EventMessagePartDelta) => boolean) {
@@ -619,25 +617,26 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +    }
 +
 +    // 释放不依赖父数组存在：part-first 对象与 orphan delta 同样属于该 Message。
++    // 定位沿用目标两条既有入口：hidden 事件携带 info 时走 messageKey chronology 搜索，
++    // ID-only 事件（message.removed）走既有 findIndex——不引入第三套定位路径。
 +    function releaseMessage(sessionID: string, messageID: string, info?: Message) {
 +      dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
-+      // chronology key 优先取索引（event-first 与 snapshot 同一形状）；索引未登记时退回事件 info，
-+      // 两条入口共用 searchMessage 的 BINARY 语义，不引入第三条定位路径。
-+      const target = messageByID.get(sessionID)?.get(messageID) ?? info
 +      const messages = store.message[sessionID]
 +      batch(() => {
-+        if (messages && target) {
-+          const result = searchMessage(messages, target)
-+          if (result.found)
++        if (messages) {
++          // hidden 携带 info：只在 chronology 命中时删除；search 未命中返回插入点，不能当删除位置用。
++          const located = info !== undefined ? search(messages, messageKey(info), messageKey) : undefined
++          const index = located ? (located.found ? located.index : -1) : messages.findIndex((message) => message.id === messageID)
++          if (index !== -1) {
 +            setStore(
 +              "message",
 +              sessionID,
 +              produce((draft) => {
-+                draft.splice(result.index, 1)
++                draft.splice(index, 1)
 +              }),
 +            )
++          }
 +        }
-+        messageByID.get(sessionID)?.delete(messageID)
 +        if (store.part[messageID])
 +          setStore(
 +            "part",
@@ -650,15 +649,15 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +
 +    // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
 +    function releaseSession(sessionID: string) {
-+      syncRequests.delete(sessionID)
-+      syncChanges.delete(sessionID)
++      syncTokens.delete(sessionID)
++      syncingSessions.delete(sessionID)
++      hydratingSessions.delete(sessionID)
 +      fullSyncedSessions.delete(sessionID)
-+      messageByID.delete(sessionID)
 +      dropBufferedDeltas((event) => event.properties.sessionID === sessionID)
 +      batch(() => {
 +        setStore(
 +          produce((draft) => {
-+            const match = Binary.search(draft.session, sessionID, (item) => item.id)
++            const match = search(draft.session, sessionID, (item) => item.id)
 +            if (match.found) draft.session.splice(match.index, 1)
 +            delete draft.message[sessionID]
 +            delete draft.todo[sessionID]
@@ -675,10 +674,10 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +      })
 +    }
 +
-     function clearLsp(owner?: string) {
-       lspRoute = owner
-       setStore("lsp", reconcile([]))
-@@ -303,6 +393,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
+       // #186：仅同 session/message/part/field 的相邻 delta 可合并；公共事件流仍逐条投递
+       // #186：field 不同（如 text vs raw）必须分桶，防止串写
+@@ -314,6 +400,11 @@ export const {
      }
  
      function applyPartDelta(event: EventMessagePartDelta) {
@@ -687,19 +686,21 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +        logPartDeltaApplication(event, "delta.drop", "invalidated")
 +        return
 +      }
+       // #186：orphan delta（part 尚未入 store）直接丢弃，与 hydration 竞态测试一致
        const parts = store.part[event.properties.messageID]
        if (!parts) {
-         // part 尚未到达（fire-and-forget 竞态）：缓冲 delta，等 part.updated 创建 part 后 replay
-@@ -493,6 +588,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -526,6 +617,10 @@ export const {
      }
  
      function enqueuePartDelta(event: EventMessagePartDelta) {
 +      // 到达时刻登记 sync 变更；flush 延迟 16ms，不能等 apply 才记录，否则 prune 先于登记。
-+      trackSyncChange(event.properties.sessionID, event.properties.messageID, event.properties.partID)
++      // message/part 双登记与事件路径同口径：delta 隐含其 Message 在请求期间发生了变化。
++      touchMessage(event.properties.sessionID, event.properties.messageID)
++      touchPart(event.properties.sessionID, event.properties.partID)
+       // #186：只入队不立刻写 store，把高频 token 片段留给 coalesce
        pendingPartDeltas.push(event)
        if (pendingPartDeltaTimer) return
-       // Match the SDK frame queue: a short 16ms window keeps streaming feedback
-@@ -517,7 +614,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -560,7 +655,9 @@ export const {
            limit: SESSION_LIST_BROWSE_LIMIT,
            ...sessionListQuery(),
          })
@@ -709,59 +710,16 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +        .then((x) => (x.data ?? []).filter((session) => !deletedSessionIDs.has(session.id)).toSorted((a, b) => a.id.localeCompare(b.id)))
      }
  
-     function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) {
-@@ -611,11 +710,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-         const response = await sdk.client.permission.list({ workspace })
-         // [竞态保护] 多次 reconnect 的 list 可能乱序返回；只有最新快照能覆盖 store。
-         if (refreshVersion !== permissionRefreshVersion) return
-+        // 快照可能早于 session.deleted 发出；已删除 Session 的 pending 请求不得回填。
-+        const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))
-         setStore(
-           "permission",
-           reconcile(
-             pendingRequestsWithLiveChanges(
--              pendingRequestsBySession(response.data ?? []),
-+              pendingRequestsBySession(rows),
-               store.permission,
-               permissionChanges,
-               version,
-@@ -637,11 +738,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-         const response = await sdk.client.question.list({ workspace })
-         // [问题快照规则] 与 permission 一致：最新 reconnect 快照负责整体替换，实时 SSE 另行叠加。
-         if (refreshVersion !== questionRefreshVersion) return
-+        // 与 permission 同一失效口径：已删除 Session 的 pending 请求不得回填。
-+        const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))
-         setStore(
-           "question",
-           reconcile(
-             pendingRequestsWithLiveChanges(
--              pendingRequestsBySession(response.data ?? []),
-+              pendingRequestsBySession(rows),
-               store.question,
-               questionChanges,
-               version,
-@@ -657,7 +760,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // [local-smark] refreshStatus for daemon session status tracking
-     async function refreshStatus() {
-       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
--      setStore("session_status", reconcile(x.data ?? {}))
-+      // 状态快照可能早于 session.deleted 发出；已删除 Session 的 status 不得回填。
-+      setStore(
-+        "session_status",
-+        reconcile(Object.fromEntries(Object.entries(x.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id)))),
-+      )
-     }
- 
-     const exit = useExit()
-@@ -709,6 +816,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     // #273：提前获取 exit，供 global.disposed 事件处理中调用
+@@ -618,6 +715,7 @@ export const {
          }
  
          case "permission.asked": {
 +          if (deletedSessionIDs.has(event.properties.sessionID)) break
            const request = event.properties
            markPermissionRequestChange(request.sessionID, request.id)
-           const requests = store.permission[request.sessionID]
-@@ -749,6 +857,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           if (permission.mode === "auto") {
+@@ -667,6 +765,7 @@ export const {
          }
  
          case "question.asked": {
@@ -769,7 +727,7 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
            const request = event.properties
            markQuestionRequestChange(request.sessionID, request.id)
            const requests = store.question[request.sessionID]
-@@ -772,12 +881,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -690,12 +789,14 @@ export const {
          }
  
          case "todo.updated":
@@ -777,14 +735,14 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
            setStore("todo", event.properties.sessionID, event.properties.todos)
            break
  
-         // [local-smark] goal 事件：更新或清除 sidebar 中的 goal 状态
+         // #364：goal 事件：更新或清除 sidebar 中的 goal 状态
          // TODO(sdk-regen): SDK 重新生成后移除 as string / as any，改用类型安全的 event.properties
          case "session.goal.updated" as string:
 +          if (deletedSessionIDs.has((event as any).properties.sessionID)) break
            setStore("session_goal", (event as any).properties.sessionID, (event as any).properties.goal)
            break
  
-@@ -786,6 +897,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -704,6 +805,7 @@ export const {
            break
  
          case "session.diff":
@@ -792,11 +750,11 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
            setStore(
              produce((draft) => {
                // diff rows 与 totals 必须在同一 Solid transaction 收敛，否则 Files 会短暂把旧总数解释成新列表截断。
-@@ -799,20 +911,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -717,20 +819,13 @@ export const {
            break
  
          case "session.deleted": {
--          const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
+-          const result = search(store.session, event.properties.info.id, (s) => s.id)
 -          if (result.found) {
 -            setStore(
 -              "session",
@@ -805,7 +763,7 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 -              }),
 -            )
 -          }
--          // [local-smark] 清理已删除 session 的 goal 状态，防止 store 泄漏
+-          // #364：清理已删除 session 的 goal 状态，防止 store 泄漏
 -          setStore("session_goal", event.properties.info.id, undefined)
 +          deletedSessionIDs.add(event.properties.info.id)
 +          releaseSession(event.properties.info.id)
@@ -814,10 +772,10 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
          case "session.updated": {
 +          // 携带 sessionID 的事件入口统一过 deletedSessionIDs：迟到的 SSE 不得复活已删除 Session 的任何桶。
 +          if (deletedSessionIDs.has(event.properties.info.id)) break
-           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
+           const result = search(store.session, event.properties.info.id, (s) => s.id)
            if (result.found) {
              const summary = Object.hasOwn(store.session_diff, event.properties.info.id)
-@@ -840,30 +945,22 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -774,6 +869,7 @@ export const {
          }
  
          case "session.status": {
@@ -825,25 +783,26 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
            setStore("session_status", event.properties.sessionID, event.properties.status)
            break
          }
- 
+@@ -781,24 +877,16 @@ export const {
          case "message.updated": {
+           // #98：隐藏消息从 TUI store 删除
            const info = event.properties.info
 +          if (deletedSessionIDs.has(info.sessionID)) break
            if ((info as Record<string, unknown>).hidden) {
 -            const messages = store.message[info.sessionID]
--            // 同Project事件可能属于未加载Session；本地没有可删除的投影时必须保持消费链继续。
--            if (!messages) break
--            // hidden event 仍携带原创建时间，必须与普通 update 共用 chronology locator，不能退回 ID 查找。
--            const result = searchMessage(messages, info)
--            if (result.found) {
--              unindexMessage(info)
--              setStore(
--                "message",
--                info.sessionID,
--                produce((draft) => {
--                  draft.splice(result.index, 1)
--                }),
--              )
+-            if (messages) {
+-              // 0580：数组按 messageKey chronology 有序；hidden 定位必须用同一 key——
+-              // 纯 ID 搜索在 ID 回绕/任意 caller ID 下 found=false，隐藏消息永远无法移除。
+-              const result = search(messages, messageKey(info), messageKey)
+-              if (result.found) {
+-                setStore(
+-                  "message",
+-                  info.sessionID,
+-                  produce((draft) => {
+-                    draft.splice(result.index, 1)
+-                  }),
+-                )
+-              }
 -            }
 +            // hidden 是持久事实：记录失效 ID 后释放，迟到的 Part/delta 不得复活正文。
 +            removedMessageIDs.add(info.id)
@@ -851,29 +810,28 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
              break
            }
 +          if (removedMessageIDs.has(info.id)) break
-+          trackSyncChange(info.sessionID, info.id)
-           const messages = store.message[info.sessionID]
++          // 迟到的非隐藏 update（undo 后重建）：失效集合是持久事实，除非 daemon 重新
++          // 创建同 ID（ID 单调递增下不会发生），否则不允许经 update 复活。
+           touchMessage(event.properties.info.sessionID, event.properties.info.id)
+           const messages = store.message[event.properties.info.sessionID]
            if (!messages) {
-             // 首条 SSE 会直接建立数组；先登记索引才能保证紧随其后的 ID-only remove 使用同一投影事实。
-@@ -910,30 +1007,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -841,22 +929,9 @@ export const {
            break
          }
          case "message.removed": {
+-          touchMessage(event.properties.sessionID, event.properties.messageID)
 -          const messages = store.message[event.properties.sessionID]
--          // daemon的删除事实仍有效，但未加载Session的TUI投影只能安全地no-op。
+-          // #567：同 Project 事件可能属于未加载 Session——daemon 的删除事实仍有效，
+-          // 但本地没有投影可删时必须 no-op 保持消费链，否则 reducer 抛错切断后续事件。
+-          // touchMessage 只登记 hydrating ID，不为未加载 Session 创建数组，守卫不可省。
 -          if (!messages) break
--          // ID-only event 先从同一 bounded 投影取回 chronology key；caller ID 本身不承诺任何时间顺序。
--          // 索引 miss 保持既有 no-op，不能再用线性扫描或纯 ID 二分制造第二套成功路径。
--          const target = messageByID.get(event.properties.sessionID)?.get(event.properties.messageID)
--          if (!target) break
--          const result = searchMessage(messages, target)
--          if (result.found) {
--            unindexMessage(target)
+-          const index = messages.findIndex((message) => message.id === event.properties.messageID)
+-          if (index !== -1) {
 -            setStore(
 -              "message",
 -              event.properties.sessionID,
 -              produce((draft) => {
--                draft.splice(result.index, 1)
+-                draft.splice(index, 1)
 -              }),
 -            )
 -          }
@@ -883,15 +841,16 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
            break
          }
          case "message.part.updated":
-         case "message.part.progress": {
+@@ -866,6 +941,8 @@ export const {
+           // #98：隐藏 part 从 TUI store 删除
            const part = event.properties.part
            if ((part as Record<string, unknown>).hidden) {
 +            removedPartIDs.add(part.id)
 +            dropBufferedDeltas((event) => event.properties.partID === part.id)
              const parts = store.part[part.messageID]
              if (!parts) break
-             const foundAt = Binary.search(parts, part.id, (p) => p.id)
-@@ -945,10 +1029,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+             const foundAt = search(parts, part.id, (p) => p.id)
+@@ -877,10 +954,12 @@ export const {
                  draft.splice(foundAt.index, 1)
                }),
              )
@@ -900,31 +859,43 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
              break
            }
 +          if (partGone(part.sessionID, part.messageID, part.id)) break
-+          trackSyncChange(part.sessionID, part.messageID, part.id)
-           const parts = store.part[part.messageID]
++          // part 事件同时登记其父 Message：sync 合并按 message 级偏好 live 投影，
++          // 只登 part 会让请求期间新 Message 的整体被 HTTP 页覆盖。
++          touchMessage(event.properties.part.sessionID, event.properties.part.messageID)
+           touchPart(event.properties.part.sessionID, event.properties.part.id)
+           const parts = store.part[event.properties.part.messageID]
            if (!parts) {
-             setStore("part", part.messageID, [part])
-@@ -980,6 +1064,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -915,15 +994,13 @@ export const {
          }
  
          case "message.part.removed": {
+-          touchPart(event.properties.sessionID, event.properties.partID)
 +          removedPartIDs.add(event.properties.partID)
 +          // lambda 参数会遮蔽 switch 作用域的 event；先取常量再比较，避免恒真谓词清空全部会话的缓冲 delta。
 +          const removedPartID = event.properties.partID
 +          dropBufferedDeltas((event) => event.properties.partID === removedPartID)
            const parts = store.part[event.properties.messageID]
-           // Part同样可能先于本地bootstrap到达；缺失集合不应中断后续正文事件。
-           if (!parts) break
-@@ -993,8 +1081,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           // #567：Part 同样可能先于本地 bootstrap 到达；缺失集合不应中断后续正文事件。
+-          // 早退前先收敛 #186 缓冲：守护与清理是两个独立责任，不能因 no-op 跳过 Map 收敛。
+-          if (!parts) {
+-            // 缓冲 delta 的清理不随早退跳过：part 已在 daemon 侧移除，Map 不得无界驻留。
+-            orphanPartDeltas.delete(event.properties.partID)
+-            break
+-          }
++          if (!parts) break
+           const result = search(parts, event.properties.partID, (part) => part.id)
+           if (result.found) {
+             setStore(
+@@ -934,8 +1011,6 @@ export const {
                }),
              )
            }
--          // 清除该 part 的缓冲 delta（part 已移除，delta 不再需要）
+-          // 清除该 part 的缓冲 delta（part 已移除，缓冲的 bus-only delta 不再需要，防止 Map 无界驻留）
 -          orphanPartDeltas.delete(event.properties.partID)
            break
          }
  
-@@ -1017,6 +1103,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -959,6 +1034,11 @@ export const {
        pendingPartDeltas = []
        orphanPartDeltas.clear()
        loggedPartDeltaApplications.clear()
@@ -932,192 +903,167 @@ index b7aac1a74f7cdb8977b796345d54adaea18f96d0..dff284a8c7fed60e12a993977d3000ad
 +      deletedSessionIDs.clear()
 +      removedMessageIDs.clear()
 +      removedPartIDs.clear()
-+      syncRequests.clear()
-+      syncChanges.clear()
++      syncTokens.clear()
      })
  
      const args = useArgs()
-@@ -1167,55 +1259,104 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -1008,22 +1088,22 @@ export const {
+     // #192：快照整体替换后由本地变更表决定保留哪些请求，阻断期解决的 blocker 不再回放，live changes 只回放本地确认的变更
+     async function refreshPermissionRequests(workspace: string | undefined) {
+       const version = permissionVersion; const refreshVersion = permissionRefreshVersion + 1; permissionRefreshVersion = refreshVersion; permissionRefreshes += 1
+-      try { const response = await sdk.client.permission.list({ workspace }); if (refreshVersion !== permissionRefreshVersion) return; setStore("permission", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.permission, permissionChanges, version))) }
++      try { const response = await sdk.client.permission.list({ workspace }); if (refreshVersion !== permissionRefreshVersion) return; const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID)); setStore("permission", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), store.permission, permissionChanges, version))) }
+       // #192：竞态守卫比对刷新时的版本号，旧响应即使后到也不覆盖新快照
+       finally { permissionRefreshes -= 1; if (permissionRefreshes === 0) permissionChanges.clear() }
+     }
+     // #192：question 与 permission 共用同一快照替换+live merge 规则，保证两类请求恢复一致
+     async function refreshQuestionRequests(workspace: string | undefined) {
+       const version = questionVersion; const refreshVersion = questionRefreshVersion + 1; questionRefreshVersion = refreshVersion; questionRefreshes += 1
+-      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.question, questionChanges, version))) }
++      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID)); setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), store.question, questionChanges, version))) }
+       finally { questionRefreshes -= 1; if (questionRefreshes === 0) questionChanges.clear() }
+     }
+ 
+     async function refreshStatus() {
+       // 失败随 bootstrap 的 Effect.all 语义上抛，与其他首次拉取保持一致的致命性
+       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
+-      // reconcile 保持增量更新，避免全量替换导致订阅组件失去局部状态
+-      setStore("session_status", reconcile(x.data ?? {}))
++      // 状态快照可能早于 session.deleted 发出；已删除 Session 的 status 不得回填。
++      setStore("session_status", reconcile(Object.fromEntries(Object.entries(x.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id)))))
+     }
+ 
+     async function bootstrap(input: { fatal?: boolean } = {}) {
+@@ -1180,10 +1260,22 @@ export const {
+           return last.time.completed ? "idle" : "working"
          },
          async sync(sessionID: string, options?: { force?: boolean }) {
++          // [非 force 去重必须先于任何 token 变更]：加入者在取得在途任务前不得覆盖请求租约，
++          // 否则被加入的任务会在首个 alive() 检查处无提交中止，且其 finally 因 token 不匹配
++          // 跳过 syncingSessions/hydratingSessions/syncTokens 清理——去重表被死条目永久毒化，
++          // 该会话后续非 force sync 全部返回死 promise，正文永不加载。
++          if (!options?.force) {
++            const syncing = syncingSessions.get(sessionID)
++            if (syncing) return syncing
++          }
+           // #132：force 忽略 fullSynced 缓存
            if (!options?.force && fullSyncedSessions.has(sessionID)) return
--          const [session, messages, todo, status] = await Promise.all([
--            sdk.client.session.get({ sessionID }, { throwOnError: true }),
--            // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
--            // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
--            sdk.client.session.messages(
--              { sessionID, limit: 300 },
--              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
--            ),
--            sdk.client.session.todo({ sessionID }),
--            sdk.client.session.status({ workspace: project.workspace.current() }),
--          ])
--          // 同一份 infos 同时提交 store 和索引，避免两次 projection 对 hidden/window 范围产生分歧。
--          const infos = (messages.data ?? []).map((message) => message.info)
--          // [local-smark] goal fetch：非致命，失败不影响 session sync
--          // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
--          // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
+-          const syncing = syncingSessions.get(sessionID)
+-          if (syncing) return syncing
 +          if (deletedSessionIDs.has(sessionID)) return
 +          const token = ++syncRequestSeq
-+          syncRequests.set(sessionID, token)
-+          const changes = { messages: new Set<string>(), parts: new Set<string>() }
-+          syncChanges.set(sessionID, changes)
++          syncTokens.set(sessionID, token)
 +          // 每个 await 之后都必须重新检查 alive：删除或更新的 force 请求会让旧提交失效，
 +          // 旧响应既不能复活已删 Session，也不能覆盖较新请求的结果。
-+          const alive = () => syncRequests.get(sessionID) === token && !deletedSessionIDs.has(sessionID)
-           try {
--            const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
--            if (resp.ok) {
--              const data = await resp.json()
--              setStore("session_goal", sessionID, data?.goal ?? undefined)
-+            const [session, messages, todo, status] = await Promise.all([
-+              sdk.client.session.get({ sessionID }, { throwOnError: true }),
-+              // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
-+              // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
-+              sdk.client.session.messages(
-+                { sessionID, limit: 300 },
-+                { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-+              ),
-+              sdk.client.session.todo({ sessionID }),
-+              sdk.client.session.status({ workspace: project.workspace.current() }),
-+            ])
++          const alive = () => syncTokens.get(sessionID) === token && !deletedSessionIDs.has(sessionID)
+           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
+           hydratingSessions.set(sessionID, tracker)
+           const task = (async () => {
+@@ -1202,10 +1294,12 @@ export const {
+               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
+               sdk.client.session.status({ workspace: project.workspace.current() }),
+             ])
 +            if (!alive()) return
-+            // 同一份 infos 同时提交 store 和索引，避免两次 projection 对 hidden/window 范围产生分歧。
-+            const infos = (messages.data ?? []).map((message) => message.info)
-+            // [local-smark] goal fetch：非致命，失败不影响 session sync
-+            // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
-+            // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
-+            try {
-+              const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
+             // #368：SDK 未生成 session.goal 方法——as any 调用运行时 undefined→TypeError 被吞，
+             // goal 状态永不在会话打开时加载（/goal 误弹 Set）。改用 sdk.fetch 直调 GET，非致命。
+             try {
+               const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
 +              if (!alive()) return
-+              if (resp.ok) {
-+                const data = await resp.json()
-+                setStore("session_goal", sessionID, data?.goal ?? undefined)
-+              }
-+            } catch {
-+              // goal 端点不可用时不阻塞 session sync
+               if (resp.ok) {
+                 const body = (await resp.json()) as { goal?: SessionGoalInfo }
+                 setStore("session_goal", sessionID, body.goal ?? undefined)
+@@ -1213,21 +1307,29 @@ export const {
+             } catch {
+               // goal 端点不可用时不阻塞 session sync
              }
--          } catch {
--            // goal 端点不可用时不阻塞 session sync
--          }
--          setStore(
--            produce((draft) => {
--              const match = Binary.search(draft.session, sessionID, (s) => s.id)
--              if (match.found) draft.session[match.index] = session.data!
--              if (!match.found) draft.session.splice(match.index, 0, session.data!)
--              draft.todo[sessionID] = todo.data ?? []
--              for (const message of messages.data ?? []) {
--                // HTTP 快照合并：DB 在 streaming 期间 text="" ，
--                // mergeLiveParts 保留本地已通过 delta 累积的长文本
--                draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
 +            if (!alive()) return
 +            // messages 请求失败时 SDK 合同是 data=undefined（无 throwOnError）；
 +            // 失败响应不是权威空页：跳过替换与裁剪，保留本地消息与正文，等下一次 sync。
 +            const pageFailed = messages.data === undefined
-+            setStore(
-+              produce((draft) => {
-+                const match = Binary.search(draft.session, sessionID, (s) => s.id)
-+                if (match.found) draft.session[match.index] = session.data!
-+                if (!match.found) draft.session.splice(match.index, 0, session.data!)
-+                draft.todo[sessionID] = todo.data ?? []
+             setStore(
+               produce((draft) => {
+                 const match = search(draft.session, sessionID, (s) => s.id)
+                 if (match.found) draft.session[match.index] = session.data!
+                 if (!match.found) draft.session.splice(match.index, 0, session.data!)
+                 draft.todo[sessionID] = todo.data ?? []
++                // 失败页不是权威事实：session/todo 元数据可更新，但消息/正文替换与裁剪必须整段跳过。
 +                if (pageFailed) return
-+                for (const message of messages.data ?? []) {
-+                  // HTTP 快照合并：DB 在 streaming 期间 text="" ，
-+                  // mergeLiveParts 保留本地已通过 delta 累积的长文本
-+                  if (removedMessageIDs.has(message.info.id)) continue
-+                  draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
-+                }
-+                // 最终投影 = HTTP 页 + 请求期间的合法 live 变化 - 已失效对象。
-+                // 合并后按 chronology/BINARY 重排，保持与事件路径相同的顺序不变量。
-+                const pageIDs = new Set(infos.map((message) => message.id))
-+                const index = messageByID.get(sessionID)
-+                const merged = infos.filter((message) => !removedMessageIDs.has(message.id))
-+                for (let i = 0; i < merged.length; i++) {
-+                  const live = changes.messages.has(merged[i].id) ? index?.get(merged[i].id) : undefined
-+                  if (live && !removedMessageIDs.has(live.id)) merged[i] = live
-+                }
-+                for (const id of changes.messages) {
-+                  if (pageIDs.has(id) || removedMessageIDs.has(id)) continue
-+                  const live = index?.get(id)
-+                  if (live) merged.push(live)
-+                }
-+                merged.sort((a, b) => a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)))
-+                draft.message[sessionID] = merged
+                 const currentMessages = draft.message[sessionID] ?? []
+                 const infos = (messages.data ?? []).flatMap((message) => {
++                  // 请求期间被删除/隐藏的消息不回填——HTTP 页对失效对象没有否决权。
++                  if (removedMessageIDs.has(message.info.id)) return []
+                   if (!tracker.messages.has(message.info.id)) return [message.info]
+                   const current = currentMessages.find((item) => item.id === message.info.id)
+                   return current ? [current] : []
+                 })
+                 infos.push(
+                   ...currentMessages.filter(
+-                    (message) => tracker.messages.has(message.id) && !infos.some((item) => item.id === message.id),
++                    (message) => tracker.messages.has(message.id) && !removedMessageIDs.has(message.id) && !infos.some((item) => item.id === message.id),
+                   ),
+                 )
+                 infos.sort(compareMessage)
+@@ -1258,6 +1360,15 @@ export const {
+                 }
+                 for (const message of removed) delete draft.part[message.id]
+                 draft.message[sessionID] = visible
 +                // 窗口外与 part-first 对象在 authoritative 页落定后释放；
 +                // 请求期间有变化的 Part 保留，等待其 Message 到达。
-+                const finalIDs = new Set(merged.map((message) => message.id))
++                const finalIDs = new Set(visible.map((message) => message.id))
 +                for (const key of Object.keys(draft.part)) {
 +                  const parts = draft.part[key]
 +                  if (parts?.[0]?.sessionID !== sessionID || finalIDs.has(key)) continue
-+                  if (parts.some((part) => changes.parts.has(part.id))) continue
++                  if (parts.some((part) => tracker.parts.has(part.id))) continue
 +                  delete draft.part[key]
 +                }
-+              }),
-+            )
-+            // force sync 是整页 authoritative replacement；重建而非增量合并可清除已不在窗口内的旧 key。
-+            // 页面失败时没有 authoritative 事实，索引保持现有投影不动。
-+            if (!pageFailed) {
-+              const finalMessages = store.message[sessionID] ?? []
-+              messageByID.set(sessionID, new Map(finalMessages.map((message) => [message.id, message])))
+               }),
+             )
+             // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
+@@ -1275,6 +1386,8 @@ export const {
+               { sessionID },
+               { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
+             )
++            // diff 是 sync 的最后一个 await：删除发生在 diff 挂起时，结果不得回填。
++            if (!alive()) return
+             // data??[] 兼容旧 daemon 无 headers 响应；投影后再决定 totals 来源。
+             const projected = projectTuiDiff(diff.data ?? [])
+             const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
+@@ -1300,8 +1413,12 @@ export const {
+             )
+             fullSyncedSessions.add(sessionID)
+           })().finally(() => {
+-            syncingSessions.delete(sessionID)
+-            hydratingSessions.delete(sessionID)
++            // 只消自己登记的记录：更新的 force 请求已换 token，误删会让新请求丢失变更跟踪。
++            if (syncTokens.get(sessionID) === token) {
++              syncingSessions.delete(sessionID)
++              hydratingSessions.delete(sessionID)
++              syncTokens.delete(sessionID)
 +            }
-+            setStore("session_status", reconcile(status.data ?? {}))
-+            // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
-+            // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
-+            // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
-+            for (const message of messages.data ?? []) {
-+              for (const part of message.parts) {
-+                replayOrphanDeltas(part.id, message.info.id)
-               }
--              draft.message[sessionID] = infos
--            }),
--          )
--          // force sync 是整页 authoritative replacement；重建而非增量合并可清除已不在窗口内的旧 key。
--          messageByID.set(sessionID, new Map(infos.map((message) => [message.id, message])))
--          setStore("session_status", reconcile(status.data ?? {}))
--          // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
--          // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
--          // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
--          for (const message of messages.data ?? []) {
--            for (const part of message.parts) {
--              replayOrphanDeltas(part.id, message.info.id)
-             }
-+          } finally {
-+            // 只清自己登记的记录：更新的请求已经换了对象，误删会让新请求丢失变更跟踪。
-+            if (syncChanges.get(sessionID) === changes) syncChanges.delete(sessionID)
-           }
-           // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
-           // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
-@@ -1224,6 +1365,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-             { sessionID },
-             { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-           )
-+          // diff 是 sync 的最后一个 await：删除发生在 diff 挂起时，结果不得回填。
-+          if (!alive()) return
-           const projected = projectTuiDiff(diff.data ?? [])
-           const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
-           const additions = diff.response?.headers.get(TUI_DIFF_TOTAL_ADDITIONS) ?? null
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-index 7307aa5674cb244ea010bde8ffd52548f42c3772..7d99ff7df06980ab5a21142c563ff03f13f7f1c6 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx
-@@ -70,14 +70,14 @@ export function DialogMessage(props: {
+           })
+           syncingSessions.set(sessionID, task)
+           return task
+
+diff --git a/packages/tui/src/routes/session/dialog-message.tsx b/packages/tui/src/routes/session/dialog-message.tsx
+--- a/packages/tui/src/routes/session/dialog-message.tsx
++++ b/packages/tui/src/routes/session/dialog-message.tsx
+@@ -71,13 +71,13 @@ export function DialogMessage(props: {
              const msg = message()
              if (!msg) return
              dialog.clear()
 +            // 在首个 await 前捕获选中内容：abort/revert 等待期间，原 Message 可能已被删除并释放正文。
 +            const promptInfo = extractPromptInfo(msg.id)
-             // 如果 session 正在运行，先 abort（与 Undo 命令一致），
-             // 确保 runner idle 后 revert 才能通过 assertNotBusy
+             // session 运行中先 abort（与 Undo 一致），确保 runner idle 后 revert 才能过 assertNotBusy
              const status = sync.data.session_status?.[props.sessionID]
              if (status?.type !== "idle") {
                await sdk.client.session.abort({ sessionID: props.sessionID }).catch(() => {})
              }
--            // 提取原消息内容（在 revert 前，parts 必在 sync.data 中）
+-            // 提取原消息内容（revert 前 parts 必在 sync.data 中）
 -            const promptInfo = extractPromptInfo(msg.id)
-             // await revert 完成——B1 守卫确保 revert 期间无其他操作竞争
              const revertResponse = await sdk.client.session.revert({
                sessionID: props.sessionID,
-@@ -119,13 +119,10 @@ export function DialogMessage(props: {
+               messageID: msg.id,
+@@ -117,13 +117,10 @@ export function DialogMessage(props: {
            value: "session.fork",
            description: "create a new session",
            onSelect: async (dialog: DialogContext) => {
@@ -1133,7 +1079,7 @@ index 7307aa5674cb244ea010bde8ffd52548f42c3772..7d99ff7df06980ab5a21142c563ff03f
                    (agg, part) => {
                      if (part.type === "text") {
                        if (!part.synthetic) agg.input += part.text
-@@ -136,6 +133,10 @@ export function DialogMessage(props: {
+@@ -134,6 +131,10 @@ export function DialogMessage(props: {
                    { input: "", parts: [] as PromptInfo["parts"] },
                  )
                : undefined
@@ -1144,269 +1090,19 @@ index 7307aa5674cb244ea010bde8ffd52548f42c3772..7d99ff7df06980ab5a21142c563ff03f
              route.navigate({
                sessionID: result.data!.id,
                type: "session",
-diff --git a/packages/opencode/src/project/instance-store.ts b/packages/opencode/src/project/instance-store.ts
-index f4d770659a8cc7818efcf8313c82ca459834b758..47299527576f9691315633f4247cef920cd8a403 100644
---- a/packages/opencode/src/project/instance-store.ts
-+++ b/packages/opencode/src/project/instance-store.ts
-@@ -6,6 +6,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import { Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
- import { type InstanceContext } from "./instance-context"
- import { InstanceBootstrap } from "./bootstrap-service"
-+import { PromptWindowCache } from "@/session/prompt-window-cache"
- import * as Project from "./project"
- 
- export interface LoadInput {
-@@ -102,6 +103,8 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
-     const disposeContext = Effect.fn("InstanceStore.disposeContext")(function* (ctx: InstanceContext) {
-       yield* Effect.logInfo("disposing instance").pipe(Effect.annotateLogs("directory", ctx.directory))
-       yield* Effect.promise(() => runDisposers(ctx.directory))
-+      // 旧工作在 barrier 完成后才可能发布缓存；此刻失效旧 context 的槽，dispose 期间不再有再发布窗口。
-+      PromptWindowCache.invalidateInstance(ctx.directory)
-       yield* emitDisposed({ directory: ctx.directory, project: ctx.project.id })
-     })
- 
-@@ -149,6 +152,9 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
-             if (previous) {
-               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
-               yield* Effect.promise(() => runDisposers(directory))
-+              // 与 disposeContext 同一失效边界：reload 的清槽发生在 completeLoad 之前，
-+              // 新 context 的循环尚未启动，不会误清新 entry。
-+              PromptWindowCache.invalidateInstance(directory)
-               yield* emitDisposed({ directory, project: input.project?.id })
-             }
-             yield* completeLoad(directory, input, entry)
-diff --git a/packages/opencode/src/session/projectors.ts b/packages/opencode/src/session/projectors.ts
-index b815c31fd1e49d4d6b0216d86c2fb40e7a876d73..f479bce0c6b5842b9b3c37cc01089c6b8edc408c 100644
---- a/packages/opencode/src/session/projectors.ts
-+++ b/packages/opencode/src/session/projectors.ts
-@@ -3,9 +3,11 @@ import { eq } from "drizzle-orm"
- import { and } from "drizzle-orm"
- import { sql } from "drizzle-orm"
- import type { TxOrDb } from "@/storage/db"
-+import { Database } from "@/storage/db"
- import { SyncEvent } from "@/sync"
- import * as Session from "./session"
- import { MessageV2 } from "./message-v2"
-+import { PromptWindowCache } from "./prompt-window-cache"
- import { SessionTable, MessageTable, PartTable } from "./session.sql"
- import { WorkspaceTable } from "@/control-plane/workspace.sql"
- import { ColdStorage } from "@/storage/cold"
-@@ -137,6 +139,8 @@ export default [
-   SyncEvent.project(Session.Event.Deleted, (db, data) => {
-     ColdStorage.releaseSession(db, data.sessionID)
-     db.delete(SessionTable).where(eq(SessionTable.id, data.sessionID)).run()
-+    // 事务提交后才失效缓存：回滚不得清；publish=false 与无实例删除也走同一 after-commit 通道。
-+    Database.effect(() => PromptWindowCache.invalidateSession(data.sessionID))
-   }),
- 
-   SyncEvent.project(Session.Event.Forked, (db, data) => {
-diff --git a/packages/opencode/src/session/prompt-window-cache.ts b/packages/opencode/src/session/prompt-window-cache.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..1b4f4a9c06726d639e369a38649fbe5592c4054d
---- /dev/null
-+++ b/packages/opencode/src/session/prompt-window-cache.ts
-@@ -0,0 +1,71 @@
-+import type { ModelMessage } from "ai"
-+import type { InstanceContext } from "@/project/instance-context"
-+import type { MessageV2 } from "./message-v2"
-+import type { MessageID, SessionID } from "./schema"
-+
-+// 单槽 current-entry 的归属与失效：每个 SessionPrompt Service 注册一个槽，
-+// 槽内仍是现有 proof/canonical/chunks，不扩成按 Session/Project 的 Map。
-+// Session 删除（projector after-commit）与 Instance dispose/reload 完成后失效槽内对象，
-+// Service 的长生命周期不再延长已结束 Session/Instance 的生存期。
-+interface Entry {
-+  sessionID: SessionID
-+  model: string
-+  proof: MessageV2.PromptWindowProof
-+  canonical: MessageV2.WithParts[]
-+  chunks: Map<MessageID, ModelMessage[]>
-+  instance: InstanceContext | undefined
-+}
-+
-+interface Slot {
-+  // generation 是 publication lease：失效即推进，在途旧 lease 的 publish 直接丢弃。
-+  // 无论槽内是否已有 entry 都必须推进——在途计算的发布目标此时还不知道是哪个 Session。
-+  generation: number
-+  entry: Entry | undefined
-+}
-+
-+// 注册表是进程级的：同一进程可能存在多张 Service 图（TCP listener 与 AppRuntime），
-+// 删除失效必须覆盖全部图；槽随 Service finalizer 注销，注册表自身不累积。
-+const slots = new Set<Slot>()
-+
-+export function acquire(): Slot {
-+  const slot: Slot = { generation: 0, entry: undefined }
-+  slots.add(slot)
-+  return slot
-+}
-+
-+export function release(slot: Slot) {
-+  slots.delete(slot)
-+  slot.entry = undefined
-+}
-+
-+export function lease(slot: Slot) {
-+  return slot.generation
-+}
-+
-+export function read(slot: Slot, sessionID: SessionID) {
-+  // 只按 sessionID 命中；boundary/proof 比较是调用方的既有 admission 职责，这里不复制第二套。
-+  return slot.entry?.sessionID === sessionID ? slot.entry : undefined
-+}
-+
-+export function publish(slot: Slot, generation: number, entry: Entry) {
-+  if (slot.generation !== generation) return
-+  slot.entry = entry
-+}
-+
-+export function invalidateSession(sessionID: SessionID) {
-+  for (const slot of slots) {
-+    slot.generation++
-+    if (slot.entry?.sessionID === sessionID) slot.entry = undefined
-+  }
-+}
-+
-+export function invalidateInstance(directory: string) {
-+  // 按 directory 判定而不按 InstanceContext 对象身份：测试/工具链可能并存多张
-+  // InstanceStore 图，同一目录的 ctx 对象不保证唯一；目录才是实例生命周期的稳定标识。
-+  for (const slot of slots) {
-+    slot.generation++
-+    if (slot.entry?.instance?.directory === directory) slot.entry = undefined
-+  }
-+}
-+
-+export * as PromptWindowCache from "./prompt-window-cache"
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 858a5b9f8dbb756ac06232f0f7139f4b6fe6dae3..7c75afd2ed4a4ebf598d752722c677973921954f 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -2,6 +2,8 @@ import path from "path"
- import os from "os"
- import { SessionID, MessageID, PartID } from "./schema"
- import { MessageV2 } from "./message-v2"
-+import { PromptWindowCache } from "./prompt-window-cache"
-+import { InstanceRef } from "@/effect/instance-ref"
- import * as Log from "@opencode-ai/core/util/log"
- import { SessionRevert } from "./revert"
- import { NotFoundError } from "@/storage/storage"
-@@ -699,18 +701,12 @@ export const layer = Layer.effect(
-     // Deferred<Exit>，而非各自独立执行 state.cancel。这消除了排队 cancel 在旧操作
-     // 完成后重新读取 Runner 并误伤 replacement loop 的时序窗口。
-     const cancelOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
--    // InstanceState 生命周期内只保留一个 entry；切换 Session 会直接替换而不是累积 Map。
--    // entry 不跨 Project，因为 Service 本身由 InstanceState scope 隔离。
--    // retained 保存 canonical DB view，request-only decoration 永不回写。
--    let retainedMessages:
--      | {
--          sessionID: SessionID
--          model: string
--          proof: MessageV2.PromptWindowProof
--          canonical: MessageV2.WithParts[]
--          chunks: Map<MessageID, ModelMessage[]>
--        }
--      | undefined
-+    // 单槽 current-entry：切换 Session 直接替换而不是累积 Map，槽内保存 canonical DB view，
-+    // request-only decoration 永不回写。槽由进程级注册表持有（见 prompt-window-cache.ts）：
-+    // Session 删除（projector after-commit）与 Instance dispose/reload 完成后失效，
-+    // Service 的生命周期不再延长已结束 Session/Instance 的对象生存期。
-+    const promptCache = PromptWindowCache.acquire()
-+    yield* Effect.addFinalizer(() => Effect.sync(() => PromptWindowCache.release(promptCache)))
-     const runner = Effect.fn("SessionPrompt.runner")(function* () {
-       return yield* EffectBridge.make()
-     })
-@@ -2608,13 +2604,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           yield* status.set(sessionID, { type: "busy" })
-           yield* slog.info("loop", { step })
-           // busy期间queued prompt可更新Permission；每step必须在resolveTools前重读control-panel状态。
-+          // lease 必须在任何 await 之前取得；删除/dispose 推进 generation 后，旧 lease 的发布会丢弃。
-+          const lease = PromptWindowCache.lease(promptCache)
-+          const instance = yield* InstanceRef
-           const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
- 
-           const proof = MessageV2.promptWindowProof(sessionID)
-+          const slotEntry = PromptWindowCache.read(promptCache, sessionID)
-           // boundary 不同直接丢弃旧窗口，禁止 cache 复制 Compaction 规则。
--          const cached = retainedMessages?.sessionID === sessionID && retainedMessages.proof.boundary === proof.boundary
--            ? retainedMessages
--            : undefined
-+          const cached = slotEntry?.proof.boundary === proof.boundary ? slotEntry : undefined
-           const common = cached
-             ? proof.messages.findIndex((item, index) => item.key !== cached.proof.messages[index]?.key)
-             : 0
-@@ -2639,7 +2637,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-           const modelKey = `${lastUser.model.providerID}/${lastUser.model.modelID}/${lastUser.model.variant ?? ""}`
-           // model identity 改变 reasoning/media conversion，raw canonical 仍可复用但 chunks 必须清空。
--          retainedMessages = {
-+          const nextEntry = {
-             sessionID,
-             model: modelKey,
-             proof,
-@@ -2649,8 +2647,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
-                 ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
-                 : new Map(),
-+            instance,
-           }
--          const messageEntry = retainedMessages
-+          // 失效窗口内的发布会丢弃；本轮迭代仍持有局部 entry 完成当前 Provider 请求。
-+          PromptWindowCache.publish(promptCache, lease, nextEntry)
-+          const messageEntry = nextEntry
- 
-           const currentUserMessage = msgs.find((message) => message.info.id === lastUser.id)
-           if (!currentUserMessage || currentUserMessage.info.role !== "user")
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 0316cb0c027ccf32e7c9e8badfd5d2df415f263c..07fbd9412dbce21f92843f3957e00a11efc37423 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -1702,6 +1702,41 @@ test("ordinary user Message keeps all Message actions", async () => {
-   )
- })
- 
-+test("Fork carries content captured before the async fork window", async () => {
-+  const message = userMessage("msg_fork_capture", 1)
-+  const forkGate = Promise.withResolvers<Response>()
-+  // fork 挂起制造删除窗口；route prompt 是 Fork 的公开可观察结果。
-+  testFetchHooks.onRequest = async (url, request) => {
-+    if (request?.method !== "POST") return undefined
-+    if (url.pathname === `/session/${sessionID}/fork`) return forkGate.promise
-+    return undefined
-+  }
-+  try {
-+    await withRenderedSession([message], { [message.id]: [textPart("part_fork_capture", message.id, "fork capture me")] }, async (app, emit, route) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("fork capture me")))
-+      await clickVisibleText(app, "fork capture me")
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Message Actions")))
-+      await clickVisibleText(app, "Fork")
-+      // fork 请求挂起期间原消息被删除并释放正文；Fork 必须使用点击时刻已捕获的内容。
-+      emit({
-+        directory,
-+        project: "proj_test",
-+        payload: { id: "evt_fork_capture_removed", type: "message.removed", properties: { sessionID, messageID: message.id } },
-+      } as GlobalEvent)
-+      forkGate.resolve(json(sessionInfo({ id: "ses_forked" })))
-+      await wait(() => route.data.type === "session" && route.data.sessionID === "ses_forked")
-+      expect(route.data.type === "session" ? route.data.prompt?.input : undefined).toBe("fork capture me")
-+    },
-+    {},
-+    // 与相邻 action 菜单测试同一高度：四个选项必须都在可视区内，Fork 行才可点击。
-+    { height: 28 },
-+    // fork 目标必须可被 harness 提供，否则新 Session 路由加载失败会弹回 home。
-+    { ses_forked: { info: sessionInfo({ id: "ses_forked" }), messages: [], parts: {} } })
-+  } finally {
-+    testFetchHooks.onRequest = undefined
-+  }
-+})
-+
- test("Goal continuation renders persisted marker-only and exact-envelope history", async () => {
-   // 两个 fixture 都故意省略 detail metadata，模拟功能上线前已经持久化的真实记录。
-   const marker = userMessage("msg_goal_legacy_marker", 1)
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index e9ba3f565b76f2fa1f55d570f1dbe732b33ef17f..a62b3587fc76048569f94e570fa8cb0c7ab354b7 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -1555,3 +1555,211 @@ describe("tui sync", () => {
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -3,6 +3,7 @@ import { describe, expect, spyOn, test } from "bun:test"
+ import { testRender } from "@opentui/solid"
+ import { tmpdir } from "../../../fixture/fixture"
+ import { directory, json, mount, wait, worktree } from "./sync-fixture"
++import type { useSync } from "../../../../src/context/sync"
+ import type { AssistantMessage, GlobalEvent, Message, Part, PermissionRequest, QuestionRequest, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
+ import type { TuiSlotPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+ import type { JSX } from "solid-js"
+@@ -1565,3 +1566,211 @@ describe("tui sync part delta coalesce (#186)", () => {
      }
    })
  })
@@ -1433,10 +1129,10 @@ index e9ba3f565b76f2fa1f55d570f1dbe732b33ef17f..a62b3587fc76048569f94e570fa8cb0c
 +      if (url.pathname === `/session/${sid}`) return json(lifeSession())
 +      if (url.pathname === `/session/${sid}/message`) return json(rows())
 +      if (url.pathname === `/session/${sid}/todo` || url.pathname === `/session/${sid}/diff`) return json([])
++      return undefined
 +    }
 +  }
-+  type Harness = Awaited<ReturnType<typeof mount>>
-+  async function pump(emit: Harness["emit"], sync: Harness["sync"]) {
++  async function pump(emit: (event: GlobalEvent) => void, sync: ReturnType<typeof useSync>) {
 +    const branch = `life_${++lifeSeq}`
 +    emit(branchEvent(branch))
 +    await wait(() => sync.data.vcs?.branch === branch)
@@ -1618,104 +1314,94 @@ index e9ba3f565b76f2fa1f55d570f1dbe732b33ef17f..a62b3587fc76048569f94e570fa8cb0c
 +    }
 +  })
 +})
+
+diff --git a/packages/tui/test/routes/session/dialog-message-fork-capture.test.ts b/packages/tui/test/routes/session/dialog-message-fork-capture.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/dialog-message-fork-capture.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, test } from "bun:test"
++import { readFileSync } from "node:fs"
++import path from "node:path"
++
++// 0623「Fork carries content captured before the async fork window」在目标无
++// withRenderedSession 全帧渲染 harness（源仓 session-message-render.test 的 fork 挂起
++// 用例依赖该 harness 的 testFetchHooks/withRenderedSession）。按 #506 subagent-footer-flow
++// 与 #520 R1 B-01 先例，以源码模板合同锁定同一用户可观察契约：展示内容必须在首个 await
++// 前捕获——fork/abort 挂起期间原 Message 可被删除并释放正文，晚读会拿到空 parts。
++// 以下断言失败即代表捕获时序回退（extractPromptInfo/reduce 回到 await 之后）或
++// parts 空桶守卫（?? []）被移除（删除后 sync.data.part[msg.id] 为 undefined，晚读直接抛错）。
++const source = readFileSync(path.join(import.meta.dir, "../../../src/routes/session/dialog-message.tsx"), "utf8")
++
++describe("dialog message fork/revert capture window contracts", () => {
++  test("Retry captures prompt info before the abort/revert awaits", () => {
++    // 捕获语句必须出现在 abort await 之前：两条语句在源码中的先后顺序即运行时执行顺序。
++    const captureAt = source.indexOf("const promptInfo = extractPromptInfo(msg.id)")
++    const abortAt = source.indexOf("await sdk.client.session.abort(")
++    expect(captureAt).toBeGreaterThan(-1)
++    expect(abortAt).toBeGreaterThan(-1)
++    expect(captureAt).toBeLessThan(abortAt)
++    // 捕获理由注释与实现同点存放，防止后续重构把捕获再次挪回 await 之后。
++    expect(source).toContain("在首个 await 前捕获选中内容")
++  })
++
++  test("Fork captures prompt from parts before awaiting the fork request", () => {
++    const reduceAt = source.indexOf("(sync.data.part[msg.id] ?? []).reduce(")
++    const forkAt = source.indexOf("await sdk.client.session.fork(")
++    expect(reduceAt).toBeGreaterThan(-1)
++    expect(forkAt).toBeGreaterThan(-1)
++    // reduce（内容捕获）必须在 fork await 之前：fork 挂起期间 message 可能被删除释放正文。
++    expect(reduceAt).toBeLessThan(forkAt)
++    // 空桶守卫：删除后 parts 为 undefined，无守卫的晚读会抛错而非得到空 prompt。
++    expect(source).toContain("sync.data.part[msg.id] ?? []")
++    expect(source).toContain("fork 请求可能长时间挂起")
++  })
++})
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 371b55a97e41cc3bf92b5cb9effa9a4aedb3bd68..6f77eddd6564fd5bad7b25564e83f6da89f77d72 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1,6 +1,6 @@
- import { NodeFileSystem } from "@effect/platform-node"
- import { FetchHttpClient } from "effect/unstable/http"
+@@ -6,7 +6,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
+ import { eq } from "drizzle-orm"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { GlobalBus } from "@/bus/global"
 -import { expect } from "bun:test"
-+import { expect, spyOn, test } from "bun:test"
- import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Stream } from "effect"
- import { jsonSchema, tool, type Tool as AITool } from "ai"
- import { symlink } from "fs/promises"
-@@ -35,6 +35,9 @@ import { SessionSummary } from "../../src/session/summary"
- import { Instruction } from "../../src/session/instruction"
- import { SessionProcessor } from "../../src/session/processor"
- import { SessionPrompt } from "../../src/session/prompt"
-+import { PromptWindowCache } from "../../src/session/prompt-window-cache"
-+import { InstanceBootstrap } from "../../src/project/bootstrap-service"
-+import { InstanceStore } from "../../src/project/instance-store"
- import { SessionRevert } from "../../src/session/revert"
- import { SessionRunState } from "../../src/session/run-state"
- import { MessageID, PartID, SessionID } from "../../src/session/schema"
-@@ -52,7 +55,7 @@ import * as Database from "../../src/storage/db"
- import { Ripgrep } from "../../src/file/ripgrep"
- import { Format } from "../../src/format"
- import { Reference } from "../../src/reference/reference"
--import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
-+import { disposeAllInstancesEffect, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
- import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
- import { httpError, reply, TestLLMServer } from "../lib/llm-server"
- import { SyncEvent } from "@/sync"
-@@ -5943,3 +5946,125 @@ it.instance(
-     }),
-   { git: true },
++import { expect, spyOn } from "bun:test"
+ import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+ import { NodeFileSystem } from "@effect/platform-node"
+ // #517：progress gate 等价目录探测用 symlink 构造 canonical 等价搜索路径
+@@ -6337,3 +6337,65 @@ observed.instance(
+   120_000,
  )
-+
-+// InstanceStore 进入 layer 只为让 disposeAllInstancesEffect 的类型合法；
-+// 运行时实例由 withTmpdirInstance 的 inner provide 提供，加载与 dispose 共享同一 store。
-+const cacheLifetime = testEffect(
-+  Layer.mergeAll(SessionPrompt.defaultLayer, Session.defaultLayer, InstanceStore.defaultLayer).pipe(
-+    Layer.provide(Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))),
-+  ),
-+)
-+
-+// [缓存生命周期] 单槽 current-entry 不得延长已删除 Session / 已 dispose Instance 的生存期。
-+// WeakRef 只观察真实 loop 返回的 proof 对象；spy 自身结果已清除，不影响可达性。
+ 
++// [缓存生命周期] 目标证据：prompt.ts 的 loop 入口每次调用都新建 runLoop 闭包
++// （loop → state.ensureRunning(..., runLoop(sessionID))），retained 窗口条目随本次 run
++// 结束即不可达——Service 生命周期不延长已结束 Session/Instance 的对象生存期。
++// 源仓 PromptWindowCache 注册表（generation lease + delete/dispose 失效）针对的
++// Service 级常驻缓存在目标已从根因消除（0623 裁记，见 record）；本组测试锁定目标
++// 的等价保证：run 结束后 proof 可回收，且后续 Session 的 run 不复活旧 proof。
 +for (const lifecycle of ["delete", "dispose"] as const) {
-+  cacheLifetime.instance(
++  it.instance(
 +    `prompt window proof is released after session ${lifecycle}`,
 +    () =>
 +      Effect.gen(function* () {
-+        const sessions = yield* Session.Service
++        const { llm } = yield* useServerConfig(providerCfg)
 +        const prompt = yield* SessionPrompt.Service
-+        const seed = (text: string) =>
-+          Effect.gen(function* () {
-+            const session = yield* sessions.create({ title: "Cache lifetime" })
-+            const user = yield* sessions.updateMessage({
-+              id: MessageID.ascending(),
-+              sessionID: session.id,
-+              role: "user",
-+              agent: "build",
-+              model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
-+              time: { created: 1 },
-+            })
-+            yield* sessions.updatePart({
-+              id: PartID.ascending(),
-+              messageID: user.id,
-+              sessionID: session.id,
-+              type: "text",
-+              text,
-+            })
-+            yield* sessions.updateMessage({
-+              id: MessageID.ascending(),
-+              sessionID: session.id,
-+              role: "assistant",
-+              parentID: user.id,
-+              agent: "build",
-+              mode: "build",
-+              modelID: ModelID.make("test-model"),
-+              providerID: ProviderID.make("test"),
-+              path: { cwd: "unused", root: "unused" },
-+              cost: 0,
-+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+              time: { created: 2, completed: 3 },
-+              finish: "stop",
-+            })
-+            return session.id
-+          })
-+        // assistant 已完成（finish: stop）让 loop 单轮退出：缓存条目已发布，但不引入真实 Provider 变量。
-+        const sessionID = yield* seed("x".repeat(1024))
++        const sessions = yield* Session.Service
++        const chat = yield* sessions.create({ title: "Cache lifetime" })
++        yield* user(chat.id, "x".repeat(1024))
 +        const original = MessageV2.promptWindowProof
 +        let weak: WeakRef<MessageV2.PromptWindowProof> | undefined
-+        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) => {
-+          const proof = original(id)
-+          if (id === sessionID) weak = new WeakRef(proof)
-+          return proof
-+        })
-+        yield* prompt.loop({ sessionID }).pipe(
++        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) =>
++          original(id).pipe(
++            Effect.map((proof) => {
++              if (id === chat.id) weak = new WeakRef(proof)
++              return proof
++            }),
++          ),
++        )
++        yield* llm.text("reply")
++        yield* prompt.loop({ sessionID: chat.id }).pipe(
 +          Effect.ensuring(
 +            Effect.sync(() => {
 +              observer.mockClear()
@@ -1731,47 +1417,22 @@ index 371b55a97e41cc3bf92b5cb9effa9a4aedb3bd68..6f77eddd6564fd5bad7b25564e83f6da
 +          Bun.gc(true)
 +        })
 +        yield* collect
-+        // 删除前的强可达是基线事实：没有它，后面的 undefined 断言无法区分修复与测试真空。
-+        expect(weak?.deref()).toBeDefined()
-+        if (lifecycle === "delete") yield* sessions.remove(sessionID)
-+        // dispose 必须走加载该实例的同一 InstanceStore：Promise 版 disposeAllInstances 只清共享 runtime，
-+        // it.instance 的实例由当前测试 runtime 的 store 持有。
-+        if (lifecycle === "dispose") yield* disposeAllInstancesEffect
-+        yield* collect
-+        const retainedAfter = weak?.deref() !== undefined
-+        // replacement 是 GC 正向对照：同 Service 换入新 Session 后旧 proof 必须可回收。
-+        const replacement = yield* seed("small replacement")
-+        yield* prompt.loop({ sessionID: replacement })
++        // delete：显式删除走公开 owner；dispose：目标 harness 的 TestInstance scope
++        // 在测试结束时 teardown（tmpdirScoped），进程内显式 dispose 入口需要
++        // InstanceStore 图而本 harness 不含——per-run 作用域下两种触发点等价，
++        // 都发生在 loop 已返回之后，断言点同为「生命周期事件后仍不可达」。
++        if (lifecycle === "delete") yield* sessions.remove(chat.id)
 +        yield* collect
 +        expect(weak?.deref()).toBeUndefined()
-+        expect(retainedAfter).toBe(false)
++        // replacement 是 GC 正向对照：同 Service 换入新 Session 后旧 proof 必须仍可回收。
++        const replacement = yield* sessions.create({ title: "small replacement" })
++        yield* user(replacement.id, "small replacement")
++        yield* llm.text("reply")
++        yield* prompt.loop({ sessionID: replacement.id })
++        yield* collect
++        expect(weak?.deref()).toBeUndefined()
 +      }),
-+    { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
++    { git: true },
 +  )
 +}
 +
-+test("prompt window cache drops in-flight publication after invalidation", () => {
-+  // lease 在 await 前取得；失效推进 generation 后，旧 lease 的迟发 publish 必须被丢弃，
-+  // 否则删除/dispose 与 loop 发布之间的竞态会重建已失效缓存。
-+  const sessionID = SessionID.make("ses_lease_race")
-+  const slot = PromptWindowCache.acquire()
-+  try {
-+    const stale = PromptWindowCache.lease(slot)
-+    PromptWindowCache.invalidateSession(sessionID)
-+    PromptWindowCache.publish(slot, stale, {
-+      sessionID,
-+      model: "test/test/",
-+      proof: { boundary: "null", messages: [] },
-+      canonical: [],
-+      chunks: new Map(),
-+      instance: undefined,
-+    })
-+    expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
-+    const fresh = PromptWindowCache.lease(slot)
-+    const entry = { sessionID, model: "test/test/", proof: { boundary: "null", messages: [] }, canonical: [], chunks: new Map(), instance: undefined }
-+    PromptWindowCache.publish(slot, fresh, entry)
-+    expect(PromptWindowCache.read(slot, sessionID)).toBe(entry)
-+  } finally {
-+    PromptWindowCache.release(slot)
-+  }
-+})

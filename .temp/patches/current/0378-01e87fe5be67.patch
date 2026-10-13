@@ -505,14 +505,6 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
      selectKernelInvoked = true
    } catch (error) {
      selectKernelError = error instanceof Error ? error.message : String(error)
-@@ -371,6 +388,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
-   )
- 
-   return configureResult({
-+    notebook,
-     path: primaryPath,
-     reason,
-     status,
 @@ -444,9 +462,9 @@ function resolveConfigureStatus(
        // selection-requested：无明确 boolean，勿当 selected
        status: "selection-requested",

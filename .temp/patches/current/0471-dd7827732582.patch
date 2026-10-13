@@ -1,20 +1,19 @@
 From dd7827732582f11fa01dcc033ed45b7a6f29d326 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 5 Jul 2026 13:20:28 +0800
-Subject: [PATCH] =?UTF-8?q?fix(thirdparty):=20=E6=9B=B4=E6=96=B0=20chatgpt?=
- =?UTF-8?q?-browser-agent=20=E4=BF=AE=E5=A4=8D=20daemon=20=E7=99=BB?=
- =?UTF-8?q?=E5=BD=95=E6=80=81=E5=8F=8A=20voice=20=E8=B7=AF=E5=BE=84?=
- =?UTF-8?q?=E6=A0=A1=E9=AA=8C?=
+Date: Sat, 4 Jul 2026 15:33:53 +0800
+Subject: [PATCH] =?UTF-8?q?fix(thirdparty):=20=E6=9B=B4=E6=96=B0?=
+ =?UTF-8?q?20chatgpt-browser-agent=20=E4=BF=AE=E5=A4=8D=20daemon=20=E7=99=?=
+ =?UTF-8?q?BB=E5=BD=95=E6=80=81=E5=8F=8A=20voice=20=E8=B7=AF=E5=BE=84=E6=?=
+ =?UTF-8?q?A1=E9=AA=8C?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-
-子模块更新：spawn+CDP 代替 puppeteer.launch 避免自动化检测；disconnect 代替 close 防 cookie 丢失；realpath 修复 macOS 符号链接路径校验；mcp-server.js 权限 755；安装 puppeteer-core 依赖。
-
+适配：五项行为（spawn+CDP attach、disconnect 防 cookie 丢失、realpath 路径校验、mcp-server.js
+可执行位、puppeteer-core 依赖）全部由子模块 commit b3e79c5d 自身承载，外层零文件改动；
+仅 gitlink 旧值按链实际改写（源 8144b3de → 链值 f4de5136），新值保留源终态 b3e79c5d。
 diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
-index 8144b3de709d7cf3c6194036f4f65ab8c774b5d1..b3e79c5d1846da0b4dc604f4864e90d071c443e7 160000
 --- a/thirdparty/chatgpt-browser-agent
 +++ b/thirdparty/chatgpt-browser-agent
 @@ -1 +1 @@
--Subproject commit 8144b3de709d7cf3c6194036f4f65ab8c774b5d1
+-Subproject commit f4de5136bf122ba450a26887b27e1f3fbfa51f6d
 +Subproject commit b3e79c5d1846da0b4dc604f4864e90d071c443e7

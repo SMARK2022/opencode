@@ -354,7 +354,7 @@ new file mode 100644
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -133,6 +133,78 @@
+@@ -133,6 +133,80 @@
      DAEMON_START_TIMEOUT_MS + 5_000,
    )
  
@@ -368,6 +368,8 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +      const { proc } = await spawnDaemon(lockPath, {
 +        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
 +        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
++        // #235：显式清零 launcher——宿主 opencode 会话注入的 LAUNCHER_PID 会让 startup idle 永久 skip
++        OPENCODE_DAEMON_LAUNCHER_PID: "0",
 +      })
 +
 +      try {

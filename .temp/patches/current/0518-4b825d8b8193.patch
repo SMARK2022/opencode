@@ -10,19 +10,27 @@ Content-Transfer-Encoding: 8bit
 edit/write/apply_patch 共享 process-local coordinator：提案耦合读版本、Permission 后再持锁、提交前 recheck。
 拒绝过期 proposal，保留不同文件并发，formatter 留在 commit critical section，不扩展到跨进程 CAS。
 
+
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec6a667138 100644
+index 5a511bb71..da9f2ca36 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -18,6 +18,7 @@ import { File } from "../file"
+@@ -18,11 +18,11 @@ import { FileSystem } from "@opencode-ai/core/filesystem"
  import { Format } from "../format"
  import * as Bom from "@/util/bom"
  import { normalizeLineEndings } from "@/util/line-ending"
++// #518：apply_patch 加入共享 file-mutation coordinator（多文件一次性 commit + 提交前全量 recheck）
 +import * as Mutation from "./file-mutation-coordinator"
+ // #131：diff 展示归一行尾，隐藏纯换行变更
  
- // [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
- // 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
-@@ -32,82 +33,153 @@ type FileChange = {
+-// [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
+-// 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
+-// 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界；diff 统计前先归一行尾（#131）。
++// [local-smark] #518：hunk 按 canonicalPath 分组，一组 = 一个 FileChange/proposal。
+ type FileChange = {
+   filePath: string
+   oldContent: string
+@@ -33,83 +33,170 @@ type FileChange = {
    additions: number
    deletions: number
    bom: boolean
@@ -34,13 +42,16 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 -  filePath: string,
 +type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
 +
-+// group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
++// #518：canonicalPath 是 coordinator 的锁键；filePath 保留 patchText 原始解析结果用于错误与 diff 展示。
++// 两者分离后 symlink alias 不会生成第二个锁，展示路径也不被 realpath 改写。
++
++// #518：group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
 +// 这样既能一次 commit，也能保留每个 entry 的 Patch owner 语义。
 +
 +const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* (
 +  group: HunkGroup,
    instance: InstanceContext,
-   afs: AppFileSystem.Interface,
+   afs: FSUtil.Interface,
 -  ctx: Tool.Context,
 -  patchText: string,
  ) {
@@ -48,12 +59,14 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +  const first = group.hunks[0]
 +  switch (first.type) {
      case "add": {
++      // #518：重复 Add File entry 没有可组合语义（不同于 update 的 cursor 链），拒绝而不是 last-wins 覆盖。
 +      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
 +      const snapshot = yield* Mutation.read(afs, group.filePath)
-+      // add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
++      // #518：add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
 +      if (snapshot.version.state === "other") throw new Error(`Path is not a file: ${group.filePath}`)
        const oldContent = ""
 -      const newContent = hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
++      // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
 +      const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
        const next = Bom.split(newContent)
        const diffOld = normalizeLineEndings(oldContent)
@@ -68,7 +81,7 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 -      return { filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom }
 +      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
 +      const { additions, deletions } = countDiff(diffOld, diffNew)
-+      // add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
++      // #518：add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
 +      return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
      }
      case "update": {
@@ -78,13 +91,14 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 -      }
 -      const source = yield* Bom.readFile(afs, filePath)
 +      const snapshot = yield* Mutation.read(afs, group.filePath)
++      // #518：proposal 阶段就拒绝 missing/目录；不能等 commit recheck 才报错，否则错误会混入 Permission 后失败路径。
 +      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
-+      // update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
++      // #518：update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
 +      const source = Bom.split(Mutation.decode(snapshot))
-+      // source BOM 随 working copy 传给 Patch owner，最终 BOM 仍由既有 Bom contract 决定。
        const oldContent = source.text
 -      let newContent = oldContent
 -      let bom = source.bom
++      // #518：working 是同 source 多 entry 的唯一共享状态；首个 entry 的输入必须来自锁外的同一次 proposal read。
 +      let working = Bom.join(source.text, source.bom)
 +      let movePath: string | undefined
 +      let moveCanonicalPath: string | undefined
@@ -92,7 +106,7 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 -        const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks, Bom.join(source.text, source.bom))
 -        newContent = fileUpdate.content
 -        bom = fileUpdate.bom
-+        // 每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
++        // #518：每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
 +        // 下一 entry 只接收上一 entry 的最终 content，entry 内部生成文本仍由 Patch owner 隔离。
 +        for (const hunk of group.hunks) {
 +          if (hunk.type !== "update") throw new Error(`Conflicting operations for ${group.filePath}`)
@@ -100,7 +114,8 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +          working = Bom.join(fileUpdate.content, fileUpdate.bom)
 +          if (hunk.move_path) {
 +            const nextMovePath = path.resolve(instance.directory, hunk.move_path)
-+            const nextMoveCanonicalPath = AppFileSystem.resolve(nextMovePath)
++            const nextMoveCanonicalPath = FSUtil.resolve(nextMovePath)
++            // #518：相同 destination 允许重复声明（canonical 等价即可）；不同 destination 无法用单次 move 表达。
 +            if (moveCanonicalPath && moveCanonicalPath !== nextMoveCanonicalPath) {
 +              throw new Error(`Conflicting move destinations for ${group.filePath}`)
 +            }
@@ -109,10 +124,12 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +          }
 +        }
        } catch (error) {
+-        // context 匹配失败时附带 actual content 摘录，帮助模型自纠正
 -        // Patch owner 仍持有失败 chunk 身份与 persisted text；Tool 只聚合其错误，不能运行第二套 matcher。
-+        // 每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
++        // #518：每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
          return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
        }
++      // #518：最终 BOM 以末 entry 的输出为准；diff 只展示文本部分，BOM 变化由 commit 写盘保留。
 +      const next = Bom.split(working)
        const diffOld = normalizeLineEndings(oldContent)
 -      const diffNew = normalizeLineEndings(newContent)
@@ -127,12 +144,13 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +      const diffNew = normalizeLineEndings(next.text)
 +      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
 +      const { additions, deletions } = countDiff(diffOld, diffNew)
++      // #518：expected 只包含 source；update 未声明 move 时不锁任何 destination 路径。
 +      const expected = [snapshot]
        if (movePath) {
 -        yield* assertExternalDirectoryEffect(ctx, movePath, {
 -          metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText },
 -        })
-+        // move destination 也是 proposal 的 expected state，不能只锁 source。
++        // #518：move destination 也是 proposal 的 expected state，不能只锁 source。
 +        // destination 既要参与 version recheck，也要参与 canonical key 排序。
 +        const destination = yield* Mutation.read(afs, movePath)
 +        if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
@@ -151,6 +169,7 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 -        if (change.removed) deletions += change.count || 0
 -      }
 -      return { filePath, oldContent: contentToDelete, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom }
++      // #518：delete 与 add 同理不聚合；重复 Delete entry 无法像 update 那样链式消费。
 +      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
 +      const snapshot = yield* Mutation.read(afs, group.filePath)
 +      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
@@ -158,16 +177,18 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +      const diffOld = normalizeLineEndings(source.text)
 +      const deleteDiff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, ""))
 +      const { deletions } = countDiff(diffOld, "")
-+      // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
++      // #518：delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
 +      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom, expected: [snapshot] }
      }
      default:
 -      return yield* Effect.fail(new Error(`Unknown hunk type: ${(hunk as { type: string }).type}`))
++      // 未知 hunk 类型来自 parser 版本差异；拒绝而不是跳过，避免静默丢 hunk。
 +      return yield* Effect.fail(new Error(`Unknown hunk type: ${(first as { type: string }).type}`))
    }
  })
  
 +function countDiff(oldContent: string, newContent: string) {
++  // #518：计数与展示用同一对归一后文本（#131），保证 additions/deletions 与用户看到的 diff 一致。
 +  let additions = 0
 +  let deletions = 0
 +  for (const change of diffLines(oldContent, newContent)) {
@@ -178,13 +199,15 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +}
 +
 +function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
++  // #518：分组先于 Permission 与 proposal；Map 保持首次出现顺序，fileChanges 顺序与 patchText 一致。
 +  const groups = new Map<string, HunkGroup>()
 +  for (const hunk of hunks) {
++    // hunk path 是 instance.directory 相对路径；解析后才能做 canonical 比较。
 +    const filePath = path.resolve(instance.directory, hunk.path)
-+    const canonicalPath = AppFileSystem.resolve(filePath)
++    const canonicalPath = FSUtil.resolve(filePath)
 +    const group = groups.get(canonicalPath)
-+    // realpath alias 归并到同一 source proposal，避免同一文件生成两个完整-file writes。
-+    // missing leaf 继续使用 resolved fallback，保持 AppFileSystem.resolve 的既有边界。
++    // #518：realpath alias 归并到同一 source proposal，避免同一文件生成两个完整-file writes。
++    // missing leaf 继续使用 resolved fallback，保持 FSUtil.resolve 的既有边界。
 +    if (group) group.hunks.push(hunk)
 +    else groups.set(canonicalPath, { filePath, canonicalPath, hunks: [hunk] })
 +  }
@@ -193,25 +216,28 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +
 +function validateOwnership(groups: HunkGroup[], instance: InstanceContext) {
 +  const sources = new Set(groups.map((group) => group.canonicalPath))
++  // #518：destinations 跨 group 全局去重；两个不同 source 指向同一 destination 时没有无损顺序。
 +  const destinations = new Set<string>()
-+  // source/destination ownership 在 Permission 前解析；锁排序不能替代语义冲突判断。
++  // #518：source/destination ownership 在 Permission 前解析；锁排序不能替代语义冲突判断。
 +  for (const group of groups) {
 +    const first = group.hunks[0]
 +    const compatible = group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1)
-+    // ownership conflict 在 Permission 前拒绝；锁排序只能避免死锁，不能选择语义。
++    // #518：ownership conflict 在 Permission 前拒绝；锁排序只能避免死锁，不能选择语义。
 +    // 同 source 的 update entry 是唯一允许聚合的组合；add/delete 不凭猜测重建新语义。
 +    if (!compatible) throw new Error(`Conflicting operations for ${group.filePath}`)
++    // add/delete 没有 cursor 链可依赖，聚合只会引入实现猜测；只有 update 进入 destination 检查。
 +    if (first.type !== "update") continue
 +    const groupDestinations = new Set<string>()
 +    for (const hunk of group.hunks) {
 +      if (hunk.type !== "update") continue
 +      if (!hunk.move_path) continue
-+      // move 同时消费 source 并产生 destination，任何交叉 ownership 都会改变另一个操作的结果。
-+      const destination = AppFileSystem.resolve(path.resolve(instance.directory, hunk.move_path))
++      // #518：move 同时消费 source 并产生 destination，任何交叉 ownership 都会改变另一个操作的结果。
++      const destination = FSUtil.resolve(path.resolve(instance.directory, hunk.move_path))
 +      if (
 +        destination === group.canonicalPath ||
 +        sources.has(destination) ||
 +        destinations.has(destination) ||
++        // #518：同 group 内允许重复声明同一 destination（含 canonical 等价 alias），但不得切换目标。
 +        (groupDestinations.size > 0 && !groupDestinations.has(destination))
 +      ) {
 +        throw new Error(`Conflicting mutation ownership for ${group.filePath}`)
@@ -225,7 +251,7 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
  export const Parameters = Schema.Struct({
    patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
  })
-@@ -148,17 +220,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -150,17 +237,7 @@ export const ApplyPatchTool = Tool.define(
        const instance = yield* InstanceState.context
  
        // Validate file paths and check permissions
@@ -243,24 +269,29 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +      const fileChanges: FileChange[] = []
  
        let totalDiff = ""
- 
-@@ -168,17 +230,27 @@ export const ApplyPatchTool = Tool.define(
+       // [local-smark] per-file atomicity：收集每个 hunk 的错误而非在第一个失败时立即返回。
+@@ -169,18 +246,31 @@ export const ApplyPatchTool = Tool.define(
        // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
        const hunkErrors: string[] = []
  
 -      for (const hunk of hunks) {
 -        const filePath = path.resolve(instance.directory, hunk.path)
+-        // #210：external_directory 门禁先于最终 edit 权限，携带 patch 意图让 Auto reviewer 判断的不仅是路径
 -        yield* assertExternalDirectoryEffect(ctx, filePath, {
 -          metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
 -        })
++      // #518：先按 canonicalPath 分组并在 Permission 前拒绝 ownership 冲突。
++      // 冲突 patch 不得进入 ask；被批准后再失败会浪费一次审批并污染 always 授权记录。
 +      const groups = groupHunks(hunks, instance)
 +      validateOwnership(groups, instance)
 +      for (const group of groups) {
 +        for (const hunk of group.hunks) {
 +          const filePath = path.resolve(instance.directory, hunk.path)
++          // #210：external_directory 门禁先于最终 edit 权限，携带 patch 意图让 Auto reviewer 判断的不仅是路径
 +          yield* assertExternalDirectoryEffect(ctx, filePath, {
 +            metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
 +          })
++          // #518：move 断言从 processSingleHunk 内移到调用方循环，proposal 阶段不再持 ctx。
 +          if (hunk.type === "update" && hunk.move_path) {
 +            const movePath = path.resolve(instance.directory, hunk.move_path)
 +            yield* assertExternalDirectoryEffect(ctx, movePath, {
@@ -271,7 +302,7 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
  
 -        // 用 Effect.exit 捕获 hunk 处理的成功/失败
 -        const exit = yield* Effect.exit(processSingleHunk(hunk, filePath, instance, afs, ctx, params.patchText))
-+        // 同一 source 的所有 entry 共享一次 proposal；失败时只丢弃 working copy。
++        // #518：同一 source 的所有 entry 共享一次 proposal；失败时只丢弃 working copy。
 +        const exit = yield* Effect.exit(processHunkGroup(group, instance, afs))
          if (Exit.isFailure(exit)) {
            const err = Cause.squash(exit.cause)
@@ -280,11 +311,33 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
            continue
          }
          const change = exit.value
-@@ -219,48 +291,60 @@ export const ApplyPatchTool = Tool.define(
+@@ -196,6 +286,7 @@ export const ApplyPatchTool = Tool.define(
+       }
+ 
+       // Build per-file metadata for UI rendering (used for both permission and result)
++      // #518：move 的展示路径指向 destination；UI 与 permission 看到的是最终落盘位置。
+       const files = fileChanges.map((change) => ({
+         filePath: change.filePath,
+         relativePath: path.relative(instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/"),
+@@ -207,6 +298,7 @@ export const ApplyPatchTool = Tool.define(
+       }))
+ 
+       // Check permissions if needed
++      // #518：patterns 仍按 source 相对路径授权；move 的 destination 已通过 external gate 单独校验。
+       const relativePaths = fileChanges.map((c) => path.relative(instance.worktree, c.filePath).replaceAll("\\", "/"))
+       yield* ctx.ask({
+         permission: "edit",
+@@ -220,49 +312,68 @@ export const ApplyPatchTool = Tool.define(
+       })
  
        // Apply the changes
++      // #518：updates/editedFiles 在 execute 内填充、commit 成功后才发布；冲突路径不会留下半套事件。
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
--
++      const editedFiles: string[] = []
++      const expected = fileChanges.flatMap((change) => change.expected)
++      // #518：所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
++      // expected 保持 proposal 顺序；coordinator 内部按 canonical 字典序加锁，顺序不影响正确性。
+ 
 -      for (const change of fileChanges) {
 -        const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
 -        switch (change.type) {
@@ -308,10 +361,9 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 -              yield* afs.remove(change.filePath)
 -              updates.push({ file: change.filePath, event: "unlink" })
 -              updates.push({ file: change.movePath, event: "add" })
-+      const editedFiles: string[] = []
-+      const expected = fileChanges.flatMap((change) => change.expected)
-+      // 所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
-+
+-            }
+-            break
++      // #518：commit 失败只能是 MutationConflict（orDie 转为 defect）；错误工具语义仍由 run 外层统一呈现。
 +      yield* Mutation.commit({
 +        fs: afs,
 +        expected,
@@ -321,11 +373,20 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +            switch (change.type) {
 +              case "add":
 +                // Create parent directories (recursive: true is safe on existing/root dirs)
-+
+ 
+-          case "delete":
+-            yield* afs.remove(change.filePath)
+-            updates.push({ file: change.filePath, event: "unlink" })
+-            break
+-        }
++                // #518：写盘在全部 target recheck 之后才发生；任一 target 冲突时这里一步都不会执行。
 +                yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
 +                updates.push({ file: change.filePath, event: "add" })
 +                break
-+
+ 
+-        if (edited) {
+-          if (yield* format.file(edited)) {
+-            yield* Bom.syncFile(afs, edited, change.bom)
 +              case "update":
 +                yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
 +                updates.push({ file: change.filePath, event: "change" })
@@ -335,6 +396,7 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +                if (change.movePath) {
 +                  // Create parent directories (recursive: true is safe on existing/root dirs)
 +
++                  // #518：move 的 source/destination 都在 expected 内；两键全部 recheck 通过后才先写后删。
 +                  yield* afs.writeWithDirs(change.movePath, Bom.join(change.newContent, change.bom))
 +                  yield* afs.remove(change.filePath)
 +                  updates.push({ file: change.filePath, event: "unlink" })
@@ -346,65 +408,68 @@ index 70e48ba7155e73bc4e96cc6af641910d67f44261..7905a0bdd82ddd8449420068079b54ec
 +                yield* afs.remove(change.filePath)
 +                updates.push({ file: change.filePath, event: "unlink" })
 +                break
-             }
--            break
--
--          case "delete":
--            yield* afs.remove(change.filePath)
--            updates.push({ file: change.filePath, event: "unlink" })
--            break
--        }
- 
--        if (edited) {
--          if (yield* format.file(edited)) {
--            yield* Bom.syncFile(afs, edited, change.bom)
++            }
++
 +            if (edited) {
++              // #518：formatter 与 BOM 回写留在 commit critical section 内，避免另一 mutation 在格式化中途读盘。
 +              if (yield* format.file(edited)) {
 +                yield* Bom.syncFile(afs, edited, change.bom)
 +              }
 +              editedFiles.push(edited)
 +            }
            }
--          yield* bus.publish(File.Event.Edited, { file: edited })
+-          yield* events.publish(FileSystem.Event.Edited, { file: edited })
 -        }
 -      }
 +        }),
 +      }).pipe(Effect.orDie)
  
        // Publish file change events
++      // #518：事件在 commit 成功后发布，version conflict 不产生成功事件。
 +      for (const file of editedFiles) {
-+        yield* bus.publish(File.Event.Edited, { file })
++        yield* events.publish(FileSystem.Event.Edited, { file })
 +      }
        for (const update of updates) {
-         yield* bus.publish(FileWatcher.Event.Updated, update)
+         yield* events.publish(Watcher.Event.Updated, update)
        }
+@@ -286,6 +397,7 @@ export const ApplyPatchTool = Tool.define(
+       const afterAll = yield* lsp.diagnostics()
+ 
+       // Generate output summary
++      // summary 标记与 git status 一致：A/D/M；move 显示 destination，删除不显示 target。
+       const summaryLines = fileChanges.map((change) => {
+         if (change.type === "add") {
+           return `A ${path.relative(instance.worktree, change.filePath).replaceAll("\\", "/")}`
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 0ce596da196f31bb9222f45d9c873bfe5912af42..ba3113e13071bc90de54e6c3b9a369fd5c15df7c 100644
+index 951bbb583..1cd72f9e9 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -1,5 +1,5 @@
+@@ -1,5 +1,6 @@
  import * as path from "path"
 -import { Effect, Schema, Semaphore } from "effect"
++// #518：私有 Semaphore 锁移除——edit/write/apply_patch 共享 file-mutation-coordinator
 +import { Effect, Schema } from "effect"
  import * as Tool from "./tool"
  import { LSP } from "@/lsp/lsp"
  import { createTwoFilesPatch, diffLines } from "diff"
-@@ -16,6 +16,7 @@ import * as Bom from "@/util/bom"
- import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+@@ -17,6 +18,8 @@ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/u
  import { closestWindow } from "@/patch/match"
+ // #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
  import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
++// #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
 +import * as Mutation from "./file-mutation-coordinator"
+ // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
  
  /**
-  * 兼容导出：单点替换 = applyEdits 单元素，保证测试与外部调用仍见 replace API。
-@@ -25,18 +26,6 @@ export function replace(content: string, oldString: string, newString: string, r
+@@ -27,18 +30,6 @@ export function replace(content: string, oldString: string, newString: string, r
    return applyExactReplace(content, oldString, newString, replaceAll)
  }
  
 -const locks = new Map<string, Semaphore.Semaphore>()
 -
 -function lock(filePath: string) {
--  const resolvedFilePath = AppFileSystem.resolve(filePath)
+-  const resolvedFilePath = FSUtil.resolve(filePath)
 -  const hit = locks.get(resolvedFilePath)
 -  if (hit) return hit
 -
@@ -416,26 +481,27 @@ index 0ce596da196f31bb9222f45d9c873bfe5912af42..ba3113e13071bc90de54e6c3b9a369fd
  const EditItem = Schema.Struct({
    oldString: Schema.String.annotate({
      description:
-@@ -182,36 +171,46 @@ export const EditTool = Tool.define(
-           let contentNew = ""
+@@ -189,57 +180,69 @@ export const EditTool = Tool.define(
+           // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
            let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
  
 -          yield* lock(filePath).withPermits(1)(
 -            Effect.gen(function* () {
 -              if (isCreate(edits)) {
+-                // 目标基线语义：已存在文件禁止空 oldString 覆盖（比源 overwrite 更强的防盲写边界）
 -                const existed = yield* afs.existsSafe(filePath)
--                const source = existed ? yield* Bom.readFile(afs, filePath) : { bom: false, text: "" }
+-                if (existed) {
+-                  throw new Error(
+-                    "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+-                  )
+-                }
 -                const next = Bom.split(edits[0].newString)
--                const desiredBom = source.bom || next.bom
--                contentOld = source.text
+-                const desiredBom = next.bom
+-                contentOld = ""
 -                contentNew = next.text
 -                diff = trimDiff(
--                  createTwoFilesPatch(
--                    filePath,
--                    filePath,
--                    normalizeLineEndings(contentOld),
--                    normalizeLineEndings(contentNew),
--                  ),
+-                  // #131：ask 元数据 diff 忽略纯行尾差异
+-                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
 -                )
 -                yield* ctx.ask({
 -                  permission: "edit",
@@ -446,199 +512,54 @@ index 0ce596da196f31bb9222f45d9c873bfe5912af42..ba3113e13071bc90de54e6c3b9a369fd
 -                    diff,
 -                  },
 -                })
-+          // 先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
+-                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-                if (yield* format.file(filePath)) {
+-                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-                }
+-                // #514 create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
+-                const finalLF = normalizeLineEndings(contentNew)
+-                const wroteLF = normalizeLineEndings(next.text)
+-                syncInput = {
+-                  filePath,
+-                  edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
+-                }
+-                yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+-                yield* events.publish(Watcher.Event.Updated, {
+-                  file: filePath,
+-                  event: "add",
+-                })
+-                return
+-              }
++          // #518：先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
++          // #518：锁不覆盖 ask：同文件第二个 proposal 仍可完成审批，冲突在 commit recheck 显式化。
 +          const proposal = yield* Mutation.read(afs, filePath)
-+          const source = Bom.split(Mutation.decode(proposal))
 +          // source.text 只供当前 edit-apply owner 使用；coordinator 不知道 edits[] 的匹配规则。
++          const source = Bom.split(Mutation.decode(proposal))
 +          if (proposal.version.state === "other") {
 +            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
 +            throw new Error(`Path is not a file: ${filePath}`)
 +          }
-+
-+          if (isCreate(edits)) {
-+            const next = Bom.split(edits[0].newString)
-+            const desiredBom = source.bom || next.bom
-+            const existed = proposal.version.state === "file"
-+            // create/overwrite 继续允许覆盖 unchanged existing file；只有 Permission 后的变化产生 conflict。
-+            contentOld = source.text
-+            contentNew = next.text
-+            diff = trimDiff(
-+              createTwoFilesPatch(
-+                filePath,
-+                filePath,
-+                normalizeLineEndings(contentOld),
-+                normalizeLineEndings(contentNew),
-+              ),
-+            )
-+            yield* ctx.ask({
-+              permission: "edit",
-+              patterns: [path.relative(instance.worktree, filePath)],
-+              always: ["*"],
-+              metadata: {
-+                filepath: filePath,
-+                diff,
-+              },
-+            })
-+            // 旧 edit 的 create/overwrite 语义保留，只有 commit 阶段新增 state recheck。
-+            yield* Mutation.commit({
-+              fs: afs,
-+              expected: [proposal],
-+              execute: Effect.gen(function* () {
-                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
--                if (yield* format.file(filePath)) {
--                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
--                }
-+                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
-                 // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
-                 const finalLF = normalizeLineEndings(contentNew)
-                 const wroteLF = normalizeLineEndings(next.text)
-@@ -219,101 +218,105 @@ export const EditTool = Tool.define(
-                   filePath,
-                   edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
-                 }
--                yield* bus.publish(File.Event.Edited, { file: filePath })
--                yield* bus.publish(FileWatcher.Event.Updated, {
--                  file: filePath,
--                  event: existed ? "change" : "add",
--                })
--                return
--              }
--
+ 
 -              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
 -              if (!info) throw new Error(`File ${filePath} not found`)
 -              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
 -              const source = yield* Bom.readFile(afs, filePath)
 -              contentOld = source.text
--
--              // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
--              const ending = detectLineEnding(contentOld)
--              const baseLF = normalizeLineEndings(contentOld)
--              const editsLF = edits.map((edit) => ({
--                oldString: normalizeLineEndings(edit.oldString),
--                newString: normalizeLineEndings(edit.newString),
--                replaceAll: edit.replaceAll,
--              }))
--
--              let applied
--              try {
--                // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
--                applied = applyEdits(baseLF, editsLF, filePath)
--              } catch (error) {
--                const message = error instanceof Error ? error.message : String(error)
--                if (message.includes("Could not find") || message.includes("Could not find oldString")) {
--                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
--                  const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
--                  throw new Error(
--                    message +
--                      (closest
--                        ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
--                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
--                  )
--                }
--                throw error
-+              }),
-+            }).pipe(Effect.orDie)
-+            // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
-+            yield* bus.publish(File.Event.Edited, { file: filePath })
-+            yield* bus.publish(FileWatcher.Event.Updated, {
-+              file: filePath,
-+              event: existed ? "change" : "add",
-+            })
-+          } else {
-+            if (proposal.version.state === "absent") throw new Error(`File ${filePath} not found`)
-+            contentOld = source.text
-+
-+            // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
-+            const ending = detectLineEnding(contentOld)
-+            const baseLF = normalizeLineEndings(contentOld)
-+            // normalize 只属于 edit-apply owner 的 proposal 阶段，commit 不会重新解释模型输入。
-+            const editsLF = edits.map((edit) => ({
-+              oldString: normalizeLineEndings(edit.oldString),
-+              newString: normalizeLineEndings(edit.newString),
-+              replaceAll: edit.replaceAll,
-+            }))
-+
-+            let applied
-+            try {
-+              // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
-+              applied = applyEdits(baseLF, editsLF, filePath)
-+            } catch (error) {
-+              const message = error instanceof Error ? error.message : String(error)
-+              if (message.includes("Could not find") || message.includes("Could not find oldString")) {
-+                const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
-+                const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
-+                throw new Error(
-+                  message +
-+                    (closest
-+                      ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
-+                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
-+                )
-               }
-+              throw error
++          if (isCreate(edits)) {
++            // 目标基线语义保留：已存在文件禁止空 oldString 覆盖（上游比源 overwrite 更强的防盲写边界，
++            // 0514 record 已裁定；#518 只在 create 分支叠加 coordinator recheck，不放宽该边界）。
++            if (proposal.version.state === "file") {
++              throw new Error(
++                "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
++              )
 +            }
- 
--              contentNew = convertToLineEnding(applied.contentNew, ending)
--              const desiredBom = source.bom || Bom.split(contentNew).bom
--              contentNew = Bom.split(contentNew).text
-+            contentNew = convertToLineEnding(applied.contentNew, ending)
-+            const desiredBom = source.bom || Bom.split(contentNew).bom
-+            contentNew = Bom.split(contentNew).text
- 
--              diff = trimDiff(
--                createTwoFilesPatch(
--                  filePath,
--                  filePath,
--                  normalizeLineEndings(contentOld),
--                  normalizeLineEndings(contentNew),
--                ),
--              )
--              yield* ctx.ask({
--                permission: "edit",
--                patterns: [path.relative(instance.worktree, filePath)],
--                always: ["*"],
--                metadata: {
--                  filepath: filePath,
--                  diff,
--                },
--              })
--
--              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
--              if (yield* format.file(filePath)) {
--                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
--              }
--              yield* bus.publish(File.Event.Edited, { file: filePath })
--              yield* bus.publish(FileWatcher.Event.Updated, {
--                file: filePath,
--                event: "change",
--              })
--              diff = trimDiff(
--                createTwoFilesPatch(
--                  filePath,
--                  filePath,
--                  normalizeLineEndings(contentOld),
--                  normalizeLineEndings(contentNew),
--                ),
--              )
--
--              // INV-16：成功后始终发完整参数面 { filePath, edits }，
--              // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
--              // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
--              syncInput = {
++            const next = Bom.split(edits[0].newString)
++            const desiredBom = next.bom
++            contentOld = ""
++            contentNew = next.text
 +            diff = trimDiff(
-+              createTwoFilesPatch(
-                 filePath,
--                edits: applied.syncEdits.map((edit) => ({
--                  oldString: convertToLineEnding(edit.oldString, ending),
--                  newString: convertToLineEnding(edit.newString, ending),
--                  ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
--                })),
--              }
--            }).pipe(Effect.orDie),
--          )
-+                filePath,
-+                normalizeLineEndings(contentOld),
-+                normalizeLineEndings(contentNew),
-+              ),
++              // #131：ask 元数据 diff 忽略纯行尾差异
++              createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
 +            )
 +            yield* ctx.ask({
 +              permission: "edit",
@@ -649,63 +570,97 @@ index 0ce596da196f31bb9222f45d9c873bfe5912af42..ba3113e13071bc90de54e6c3b9a369fd
 +                diff,
 +              },
 +            })
-+
-+            // applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
++            // #518：Permission 后才进入 commit；absent→已存在等中途变化由 recheck 拒绝。
++            // #518：create 的 expected 是 absent 标签；外部在 ask 窗口内创建空文件也会触发 version 冲突。
 +            yield* Mutation.commit({
 +              fs: afs,
 +              expected: [proposal],
 +              execute: Effect.gen(function* () {
++                // #518：写盘与 formatter 回写都在锁内；中途失败由 ensuring 释放锁而不是留下半写状态。
 +                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
 +                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
 +              }),
 +            }).pipe(Effect.orDie)
-+            // diagnostics 在 commit 后执行，LSP 观察到的是已经完成 formatter 的磁盘内容。
-+            yield* bus.publish(File.Event.Edited, { file: filePath })
-+            yield* bus.publish(FileWatcher.Event.Updated, {
-+              file: filePath,
-+              event: "change",
-+            })
-+            diff = trimDiff(
-+              createTwoFilesPatch(
-+                filePath,
-+                filePath,
-+                normalizeLineEndings(contentOld),
-+                normalizeLineEndings(contentNew),
-+              ),
-+            )
-+
-+            // INV-16：成功后始终发完整参数面 { filePath, edits }，
-+            // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-+            // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
++            // #514 create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
++            const finalLF = normalizeLineEndings(contentNew)
++            const wroteLF = normalizeLineEndings(next.text)
 +            syncInput = {
 +              filePath,
-+              edits: applied.syncEdits.map((edit) => ({
-+                oldString: convertToLineEnding(edit.oldString, ending),
-+                newString: convertToLineEnding(edit.newString, ending),
-+                ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
-+              })),
++              edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
 +            }
-+          }
++            // commit 成功后才发布 Edited/Updated；Permission reject 或 version conflict 不产生成功事件。
++            yield* events.publish(FileSystem.Event.Edited, { file: filePath })
++            yield* events.publish(Watcher.Event.Updated, {
++              file: filePath,
++              event: "add",
++            })
++          } else {
++            // #518：absent 只允许 create 分支；edit 分支要求 proposal 时已是文件。
++            if (proposal.version.state === "absent") throw new Error(`File ${filePath} not found`)
++            contentOld = source.text
+ 
+               // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
+               const ending = detectLineEnding(contentOld)
+@@ -292,15 +295,24 @@ export const EditTool = Tool.define(
+                 },
+               })
+ 
+-              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-              if (yield* format.file(filePath)) {
+-                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-              }
++              // #518：applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
++              // #518：匹配基于 proposal bytes；另一 mutation 先提交时这里整体失败，绝不重新匹配新内容。
++              yield* Mutation.commit({
++                fs: afs,
++                expected: [proposal],
++                execute: Effect.gen(function* () {
++                  // #518：写盘沿用既有顺序（内容→format→BOM 回写）；锁内完成才发布 change 事件。
++                  yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
++                  if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
++                }),
++              }).pipe(Effect.orDie)
++              // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
+               yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+               yield* events.publish(Watcher.Event.Updated, {
+                 file: filePath,
+                 event: "change",
+               })
++              // #518：成功后 diff 用锁内最终内容生成；与 write 一致，不展示 proposal 时的中间估计。
+               diff = trimDiff(
+                 createTwoFilesPatch(
+                   filePath,
+@@ -322,8 +334,7 @@ export const EditTool = Tool.define(
+                   ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
+                 })),
+               }
+-            }).pipe(Effect.orDie),
+-          )
++            }
  
            const diffOld = normalizeLineEndings(contentOld)
            const diffNew = normalizeLineEndings(contentNew)
-@@ -373,7 +376,7 @@ export const EditTool = Tool.define(
+@@ -393,7 +404,9 @@ export const EditTool = Tool.define(
              title: `${path.relative(instance.worktree, filePath)}`,
              output,
            }
 -        }),
++          // #518：MutationConflict 等错误通道统一 orDie——coordinator 冲突是诊断性 fail，
++          // 与既有 IO 错误同一处理面，不扩大 Tool.define 的 error 泛型。
 +        }).pipe(Effect.orDie),
      }
    }),
  )
+
 diff --git a/packages/opencode/src/tool/file-mutation-coordinator.ts b/packages/opencode/src/tool/file-mutation-coordinator.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf9db6a6b6
+index 0000000000000000000000000000000000000000..112640e4c8c319fed1a47b1599d179a353fb6fca
 --- /dev/null
 +++ b/packages/opencode/src/tool/file-mutation-coordinator.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,161 @@
 +import { Effect, Semaphore } from "effect"
-+import { AppFileSystem } from "@opencode-ai/core/filesystem"
++// #518：目标无 AppFileSystem——共享协调器消费 FSUtil.Service 同一 FS 接口（stat/readFile/writeWithDirs 均可达）
++import { FSUtil } from "@opencode-ai/core/fs-util"
 +import { Hash } from "@opencode-ai/core/util/hash"
 +
 +export type FileVersion =
@@ -713,7 +668,7 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +  | { state: "file"; fingerprint: string }
 +  | { state: "other"; kind: string }
 +
-+// coordinator 只保存一次 execute 内的短生命周期事实，不把 version 放进 Tool schema、Message 或 DB。
++// #518：coordinator 只保存一次 execute 内的短生命周期事实，不把 version 放进 Tool schema、Message 或 DB。
 +// `file` 的 fingerprint 覆盖完整 raw bytes，避免 size/mtime 或 head sample 把变化隐藏起来。
 +// `absent`/`file` 的区分只解决可观测的状态变化，不扩展成 inode generation 或跨进程事务。
 +// 这使 coordinator 保持在 built-in Tool seam，而不是吸收 filesystem 全局治理职责。
@@ -746,12 +701,14 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +// users 是引用计数而非 permit 数：等待者尚未取得 permit，也必须阻止历史 entry 被删除。
 +// 这避免新调用创建第二个 semaphore 后与旧 waiter 并行写入同一 canonical path。
 +
++// #518：queues 是 process-local；跨进程/跨主机的并发写不在这里协调，也不引入跨进程 CAS。
 +const queues = new Map<string, QueueEntry>()
 +
-+export function read(fs: AppFileSystem.Interface, filePath: string) {
++export function read(fs: FSUtil.Interface, filePath: string) {
++  // #518：stat 与 readFile 必须相邻；中间插入其它读取会破坏 version↔bytes 的同源不变量。
 +  return Effect.gen(function* () {
-+    const canonicalPath = AppFileSystem.resolve(filePath)
-+    // canonicalization 只复用既有 realpath/resolved fallback，不扩展 hard-link 或 lstat identity。
++    // #518：canonicalization 只复用 FSUtil.resolve 的 realpath/resolved fallback，不扩展 hard-link 或 lstat identity。
++    const canonicalPath = FSUtil.resolve(filePath)
 +    const info = yield* fs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
 +    if (!info) {
 +      // 缺失路径保留 resolved fallback key；后续路径变成 existing file 会在 commit recheck 冲突。
@@ -774,6 +731,7 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +      }
 +    }
 +    // fingerprint 与 proposal 消费的 bytes 来自同一次读取，禁止在 proposal 后补读版本。
++    // Hash.fast 只要求变更可检测，不承诺密码学碰撞阻力；完整 raw bytes 保证 head-sample 隐藏不了差异。
 +    const bytes = yield* fs.readFile(filePath)
 +    return {
 +      path: filePath,
@@ -785,12 +743,13 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +}
 +
 +export function decode(readResult: MutationRead) {
-+  // decoder 与原 Bom.readFile 保持 UTF-8/ignoreBOM 语义，coordinator 不接管文本匹配。
++  // #518：decoder 与原 Bom.readFile 保持 UTF-8/ignoreBOM 语义，coordinator 不接管文本匹配。
++  // BOM 拆分交给调用方的 Bom.split；这里只负责 bytes→text 的单一映射。
 +  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(readResult.bytes)
 +}
 +
 +export type CommitInput<A, E> = {
-+  fs: AppFileSystem.Interface
++  fs: FSUtil.Interface
 +  expected: readonly MutationRead[]
 +  execute: Effect.Effect<A, E>
 +}
@@ -804,6 +763,7 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +    entries,
 +    Effect.gen(function* () {
 +      for (const expected of input.expected) {
++        // #518：recheck 重新走完整 read（含 canonicalize）；不信任 proposal 里的绝对路径缓存。
 +        const current = yield* read(input.fs, expected.path)
 +        // 所有 expected state 都在第一笔写入前检查；冲突不触发 retry 或 stale partial commit。
 +        if (!sameVersion(expected.version, current.version)) {
@@ -818,6 +778,7 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +}
 +
 +function register(reads: readonly MutationRead[]) {
++  // #518：register 在 Permission 后才调用；等待 ask 的 proposal 不占用任何 semaphore 容量。
 +  const entries = new Map<string, QueueEntry>()
 +  // 同一次多文件 commit 只注册每个 canonical key 一次，避免重复 permit 与错误 cleanup。
 +  for (const readResult of reads) {
@@ -835,10 +796,12 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +
 +function withLocks<A, E>(entries: Array<[string, QueueEntry]>, effect: Effect.Effect<A, E>) {
 +  // 所有 key 按 canonical 字典序嵌套，既保持不同文件并发，也避免 multi-file deadlock。
++  // Semaphore 不可重入；同一次 commit 内重复 key 已在 register 去重，否则这里会自等死锁。
 +  return entries.reduceRight((next, [, entry]) => entry.semaphore.withPermits(1)(next), effect)
 +}
 +
 +function unregister(entries: Array<[string, QueueEntry]>) {
++  // #518：unregister 是唯一删除点；中断路径经由 ensuring 到达这里，waiter 不会永久占用 Map。
 +  for (const [key, entry] of entries) {
 +    entry.users--
 +    // 已经有 successor 时 users 不会归零；旧 entry 继续服务原有 waiter。
@@ -849,48 +812,55 @@ index 0000000000000000000000000000000000000000..d4dc59c1924eb2573713397a9d94daaf
 +
 +function sameVersion(expected: FileVersion, current: FileVersion) {
 +  // state 先比较，只有两个 file state 才比较 fingerprint；empty file 不会等同 absent。
++  // other（目录/特殊文件）比较 kind 字符串；这里不展开新状态类型，避免 coordinator 吸收 fs 语义。
 +  if (expected.state !== current.state) return false
 +  // absent -> empty 是状态变化；file -> same bytes 的 ABA 则保持明确的不可观测边界。
 +  if (expected.state === "other" && current.state === "other") return expected.kind === current.kind
 +  if (expected.state !== "file" || current.state !== "file") return true
 +  return expected.fingerprint === current.fingerprint
 +}
+
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index acf5f244fee14e3b1b57950921110e0d9c02b739..107efde032d394d46d70ec702015bfe380c13630 100644
+index 5329d2455..fbc1db0f3 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -15,6 +15,7 @@ import { trimDiff } from "./edit"
+@@ -15,6 +15,8 @@ import { trimDiff } from "./edit"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import * as Bom from "@/util/bom"
  import { normalizeLineEndings } from "@/util/line-ending"
++// #518：write 参与共享 file-mutation coordinator——proposal 版本耦合 + Permission 后持锁 + 提交前 recheck
 +import * as Mutation from "./file-mutation-coordinator"
+ // #131：write 元数据 diff 归一行尾
  
  export const Parameters = Schema.Struct({
-   content: Schema.String.annotate({ description: "The content to write to the file" }),
-@@ -46,12 +47,20 @@ export const WriteTool = Tool.define(
+@@ -46,8 +48,16 @@ export const WriteTool = Tool.define(
              metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
            })
  
 -          const exists = yield* fs.existsSafe(filepath)
 -          const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
-+          // write proposal 使用同一次 raw read 捕获 expected state，避免 Permission 后提交旧内容。
++          // #518：write proposal 使用同一次 raw read 捕获 expected state，避免 Permission 后提交旧内容。
 +          const proposal = yield* Mutation.read(fs, filepath)
++          // #518：目录等 other 状态在 Permission 前拒绝；让 ask 展示这类错误只会制造必然失败的审批。
 +          if (proposal.version.state === "other") {
 +            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filepath}`)
 +            throw new Error(`Path is not a file: ${filepath}`)
 +          }
 +          const exists = proposal.version.state === "file"
 +          const source = Bom.split(Mutation.decode(proposal))
-+          // exists 只表示 proposal 时的 file state；commit recheck 仍以 tagged version 为准。
++          // #518：exists 只表示 proposal 时的 file state；commit recheck 仍以 tagged version 为准。
            const next = Bom.split(params.content)
            const desiredBom = source.bom || next.bom
            const contentOld = source.text
-           const contentNew = next.text
-+          // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
+@@ -55,6 +65,7 @@ export const WriteTool = Tool.define(
  
            const diff = trimDiff(
+             // #131：permission 元数据忽略纯行尾 diff
++            // #518：diff 基于proposal 时的旧内容；ask 展示的是本次写入的意图而非磁盘实时状态。
              createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
-@@ -66,12 +75,20 @@ export const WriteTool = Tool.define(
+           )
+           yield* ctx.ask({
+@@ -67,12 +78,25 @@ export const WriteTool = Tool.define(
              },
            })
  
@@ -901,39 +871,59 @@ index acf5f244fee14e3b1b57950921110e0d9c02b739..107efde032d394d46d70ec702015bfe3
 -            yield* Bom.syncFile(fs, filepath, desiredBom)
 -          }
 +          let formatted = false
-+          let finalSource = source
-+          // formatter 仍在同一 commit critical section，避免第二个 mutation 看到半完成内容。
++          let finalSource: { bom: boolean; text: string } | undefined
++          // #518：formatter 仍在同一 commit critical section，避免第二个 mutation 看到半完成内容。
++          // #518：expected 只带一个 proposal；write 的 expected state 就是目标路径本身的 tagged version。
 +          yield* Mutation.commit({
 +            fs,
 +            expected: [proposal],
 +            execute: Effect.gen(function* () {
++              // #518：recheck 通过后写盘；外部 writer 在 ask 窗口内创建/修改文件会在这里被拒绝。
 +              yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
 +              // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
 +              formatted = yield* format.file(filepath)
-+              if (formatted) yield* Bom.syncFile(fs, filepath, desiredBom)
++              if (formatted) {
++                yield* Bom.syncFile(fs, filepath, desiredBom)
++              }
++              // #518：finalSource 在锁内读取，metadata 不会引用另一个 mutation 的中间内容。
 +              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
 +            }),
 +          }).pipe(Effect.orDie)
            // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
-           let metadataDiff: string | undefined
+           // 格式化后的最终内容：格式化可能改变文件内容，因此基于最终落盘内容生成 diff
            // [local-smark] 当 auto-format 改变了写入内容时，将格式化后的内容
-@@ -83,7 +100,7 @@ export const WriteTool = Tool.define(
+@@ -84,9 +108,8 @@ export const WriteTool = Tool.define(
            // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
+           let metadataDiff: string | undefined
            let formattedContent: string | undefined
-           if (exists || formatted) {
+-          if (exists || formatted) {
+-            // 最终内容读取：格式化后重新读取文件，确保 diff 反映实际落盘内容
 -            const finalSource = yield* Bom.readFile(fs, filepath)
-+            // finalSource 在 commit lock 内读取，metadata 不会引用另一个 mutation 的中间内容。
-             if (exists) {
-               metadataDiff = trimDiff(
-                 createTwoFilesPatch(
++          // #518：finalSource 只在锁内赋值；冲突失败时保持 undefined，不生成误导性 metadata。
++          if (finalSource) {
+             // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
+             metadataDiff = trimDiff(
+               createTwoFilesPatch(
+@@ -101,7 +124,7 @@ export const WriteTool = Tool.define(
+             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
+               formattedContent = finalSource.text
+             }
+-          } else if (!exists) {
++          } else {
+             // #477：新文件且未格式化：用写入前算好的 diff（""→contentNew），
+             // git 兜底移除后这是新文件入工具流的唯一路径。
+             metadataDiff = diff
+
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 2182fa57deecba2b36e0b891af67b9fc5e131976..218754c05e4db34577a31934eacb7f0efa77ea4e 100644
+index 0208701af..67bdb7fb1 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -580,6 +580,46 @@ describe("tool.apply_patch freeform", () => {
+@@ -599,6 +599,49 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
++  // #518：同 source 重复声明同一 move destination 是合法输入；分组后两个 entry 共享一次 proposal。
++  // 预期内容由两次 entry 的手工推导值叠加，验证 cursor 链而不是最后一个 entry 生效。
 +  it.instance("accepts repeated identical move declarations for one source", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -952,6 +942,7 @@ index 2182fa57deecba2b36e0b891af67b9fc5e131976..218754c05e4db34577a31934eacb7f0e
 +    }),
 +  )
 +
++  // #518：symlink alias 与真实目录 canonical 等价；同一 destination 不得被误判为 ownership 冲突。
 +  it.instance("accepts canonical-equivalent repeated move destinations", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -977,13 +968,14 @@ index 2182fa57deecba2b36e0b891af67b9fc5e131976..218754c05e4db34577a31934eacb7f0e
    it.instance("moves file overwriting existing destination", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
+
 diff --git a/packages/opencode/test/tool/file-mutation-concurrency.test.ts b/packages/opencode/test/tool/file-mutation-concurrency.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290be882489
+index 0000000000000000000000000000000000000000..de800c4b1f7ee6ed99c0aabc6a75094a430753af
 --- /dev/null
 +++ b/packages/opencode/test/tool/file-mutation-concurrency.test.ts
-@@ -0,0 +1,575 @@
-+import { describe, expect } from "bun:test"
+@@ -0,0 +1,585 @@
++import { afterEach, describe, expect } from "bun:test"
 +import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 +import path from "path"
 +import { EditTool } from "../../src/tool/edit"
@@ -991,27 +983,30 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +import { ApplyPatchTool } from "../../src/tool/apply_patch"
 +import * as Tool from "../../src/tool/tool"
 +import { LSP } from "@/lsp/lsp"
-+import { AppFileSystem } from "@opencode-ai/core/filesystem"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { FSUtil } from "@opencode-ai/core/fs-util"
 +import { Format } from "../../src/format"
 +import { Agent } from "../../src/agent/agent"
-+import { Bus } from "../../src/bus"
++import { EventV2Bridge } from "../../src/event-v2-bridge"
 +import { Truncate } from "@/tool/truncate"
 +import { MessageID, PartID, SessionID } from "../../src/session/schema"
 +import { MessageV2 } from "../../src/session/message-v2"
-+import { ModelID, ProviderID } from "../../src/provider/schema"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
 +import { awaitWithTimeout, testEffect } from "../lib/effect"
-+import { TestInstance } from "../fixture/fixture"
++import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 +
-+const layer = Layer.mergeAll(
-+  LSP.defaultLayer,
-+  AppFileSystem.defaultLayer,
-+  Format.defaultLayer,
-+  Bus.layer,
-+  Truncate.defaultLayer,
-+  Agent.defaultLayer,
++// #518：目标 v1.18.32 用 LayerNode/FSUtil/EventV2Bridge 取代源补丁的 AppFileSystem/Bus 装配。
++const layer = LayerNode.compile(
++  LayerNode.group([LSP.node, FSUtil.node, Format.node, EventV2Bridge.node, Truncate.node, Agent.node]),
 +)
 +
 +const it = testEffect(layer)
++
++// #518：instance 缓存跨测试泄漏会叠加 InstanceState；每个用例后强制清空。
++afterEach(async () => {
++  await disposeAllInstances()
++})
 +
 +const executeEdit = Effect.fn("FileMutationConcurrencyTest.executeEdit")(function* (
 +  params: Tool.InferParameters<typeof EditTool>,
@@ -1042,6 +1037,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  return yield* tool.execute(params, ctx)
 +})
 +
++// #518：prior read 用目标 ModelV2/ProviderV2 品牌 ID 构造，fixture 漂移时由 satisfies 直接暴露。
 +function priorRead(filePath: string): MessageV2.WithParts[] {
 +  // 当前 edit 的 blind-edit 门闩要求 completed read；这里构造最小完整 MessageV2 part。
 +  // prior read 是 Session contract 证据，proposal version 仍由 coordinator 从磁盘重新读取。
@@ -1058,8 +1054,8 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +        path: { cwd: ".", root: "." },
 +        cost: 0,
 +        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        modelID: ModelID.make("test"),
-+        providerID: ProviderID.make("test"),
++        modelID: ModelV2.ID.make("test"),
++        providerID: ProviderV2.ID.make("test"),
 +        time: { created: 0 },
 +      } satisfies MessageV2.Assistant,
 +      parts: [
@@ -1098,6 +1094,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  }
 +}
 +
++// #518：以下用例均从真实 Tool.execute seam 观察； Deferred 只控制 Permission 时序，不 mock 文件系统。
 +describe("built-in file mutation coordination", () => {
 +  // 这些测试统一从真实 Tool.execute seam 观察磁盘内容；permission Deferred 控制顺序，避免依赖固定 sleep。
 +  // expected content 都是手写字面量，测试不会复制 coordinator 的匹配或版本逻辑。
@@ -1112,7 +1109,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +      // fixture 顺序与 patch entry 顺序故意相反，确保测试能区分 entry boundary 和单一 chunks cursor。
 +      // 预期值由原始四行文本手工推导，不调用 Patch 或 coordinator 生成 expected。
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const filePath = path.join(test.directory, "repeated-entry.txt")
 +      yield* fs.writeWithDirs(filePath, "line1\nline2\nline3\nline4\n")
 +
@@ -1143,7 +1140,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +      // 两个 move 都来自 public patchText 输入，测试 ownership guard 的真实信任边界。
 +      // 只检查失败和原始字节，避免把错误消息格式当成成功条件。
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const first = path.join(test.directory, "first.txt")
 +      const second = path.join(test.directory, "second.txt")
 +      yield* fs.writeWithDirs(first, "first\n")
@@ -1181,10 +1178,11 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +      // proposal 读取到 absent 后，测试在真实 ask 阻塞窗口中创建 empty file。
 +      // 这是 state tag 回归，不依赖 mtime 分辨率或 filesystem timing。
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const filePath = path.join(test.directory, "created-during-ask.txt")
 +      const asked = yield* Deferred.make<void>()
 +      const release = yield* Deferred.make<void>()
++      // #518：目标 harness 的 ask 是同步记录；阻塞窗口仍由真实 Permission Deferred 语义控制。
 +      const writeCtx = context(() =>
 +        Effect.gen(function* () {
 +          yield* Deferred.succeed(asked, undefined)
@@ -1213,7 +1211,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +      // 两个 edit 的 oldString 都来自同一个初始文件，但只允许先取得 commit lock 的版本成功。
 +      // 失败的第二 proposal 必须保持诊断性质，不能被当成部分成功。
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const filePath = path.join(test.directory, "permission-before-lock.txt")
 +      yield* fs.writeWithDirs(filePath, "a\nb\n")
 +      const firstAsked = yield* Deferred.make<void>()
@@ -1264,6 +1262,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  // 两个 Permission gate 同时开放，验证并发边界位于 canonical key 而非 Tool 全局。
 +  it.instance("keeps different-file mutations concurrent", () =>
 +    Effect.gen(function* () {
++      // formatter barrier 是这里唯一的 overlap 探针；两个不同 key 必须同时处于 commit 内。
 +      const formatReady = [yield* Deferred.make<void>(), yield* Deferred.make<void>()]
 +      const formatRelease = yield* Deferred.make<void>()
 +      const formatLayer = Layer.succeed(Format.Service, {
@@ -1281,7 +1280,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +      const run = Effect.gen(function* () {
 +        // 两个 path 没有共享 content 或 expected state，formatter barrier 直接观察不同 key 的 commit overlap。
 +        const test = yield* TestInstance
-+        const fs = yield* AppFileSystem.Service
++        const fs = yield* FSUtil.Service
 +        const firstPath = path.join(test.directory, "parallel-a.txt")
 +        const secondPath = path.join(test.directory, "parallel-b.txt")
 +        const firstAsked = yield* Deferred.make<void>()
@@ -1346,7 +1345,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +
 +      const run = Effect.gen(function* () {
 +        const test = yield* TestInstance
-+        const fs = yield* AppFileSystem.Service
++        const fs = yield* FSUtil.Service
 +        const filePath = path.join(test.directory, "formatter-lock.txt")
 +        const first = yield* executeWrite({ content: "A\n", filePath }, context(() => Effect.void)).pipe(Effect.exit, Effect.forkScoped)
 +        yield* Deferred.await(formatterStarted)
@@ -1378,6 +1377,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  // interrupt 发生在 commit 等待阶段，覆盖 waiter 而不是 Permission reject 的简单路径。
 +  it.instance("releases a cancelled waiter without blocking the next mutation", () =>
 +    Effect.gen(function* () {
++      // #518：interrupt 检验 ensuring 清理路径；第三个 write 证明 queue tail 未被死锁占用。
 +      const formatterStarted = yield* Deferred.make<void>()
 +      const formatterRelease = yield* Deferred.make<void>()
 +      const secondAsked = yield* Deferred.make<void>()
@@ -1398,7 +1398,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +
 +      const run = Effect.gen(function* () {
 +        const test = yield* TestInstance
-+        const fs = yield* AppFileSystem.Service
++        const fs = yield* FSUtil.Service
 +        const filePath = path.join(test.directory, "cancelled-waiter.txt")
 +        const first = yield* executeWrite({ content: "A\n", filePath }, context(() => Effect.void)).pipe(Effect.exit, Effect.forkScoped)
 +        yield* Deferred.await(formatterStarted)
@@ -1431,8 +1431,9 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  // 该测试只要求可观察的 pre-check conflict，不把文件系统误称为 CAS。
 +  it.instance("rejects an external change after apply_patch permission", () =>
 +    Effect.gen(function* () {
++      // #518：外部写入绕过 coordinator 直改磁盘；recheck 必须在写盘前发现 fingerprint 漂移。
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const filePath = path.join(test.directory, "patch-external.txt")
 +      yield* fs.writeWithDirs(filePath, "base\n")
 +      const asked = yield* Deferred.make<void>()
@@ -1463,8 +1464,9 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  // firstPath 保持原文是关键断言，证明没有出现 stale partial commit。
 +  it.instance("checks every apply_patch target before the first multi-file write", () =>
 +    Effect.gen(function* () {
++      // #518：任一 target 冲突时所有 target 都不落盘；该断言锁死无 stale partial commit 语义。
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const firstPath = path.join(test.directory, "patch-first.txt")
 +      const secondPath = path.join(test.directory, "patch-second.txt")
 +      yield* fs.writeWithDirs(firstPath, "first\n")
@@ -1510,7 +1512,7 @@ index 0000000000000000000000000000000000000000..2f0dfc0fef7a14827de5142d08b30290
 +  it.instance("rejects a stale edits[] proposal after write commits first", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      const fs = yield* AppFileSystem.Service
++      const fs = yield* FSUtil.Service
 +      const filePath = path.join(test.directory, "target.txt")
 +      yield* fs.writeWithDirs(filePath, "base\n")
 +

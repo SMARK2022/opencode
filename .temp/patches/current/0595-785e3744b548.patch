@@ -7,16 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(test):=20ripgrep=20=E8=B6=85=E6=97=B6?=
  =?UTF-8?q?=E5=86=99=E5=AE=88=E5=8D=AB=E4=BF=AE=E5=A4=8D=E5=8F=8C=E5=B9=B3?=
  =?UTF-8?q?=E5=8F=B0=E7=BA=A2=E6=B5=8B?=
 MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-A（macOS 腿 file.ripgrep search timeout）：32MB 单文件语料在 Apple Silicon memmem 吞吐下可 <1ms 扫完，timeout:1 的竞速中 rg 先于 sleep+kill 完成（CI 实测 timedOut=undefined）。语料扩为 512×1MB：512MB 即使按 100GB/s 理论上限 ≥5.1ms ≫ 1ms 预算，且 512 < MAX_SEARCH_FILES=5000 不触发预过滤；断言/pattern/timeout 不变。B（Linux 腿 daemon db compress）：reconcileMaintenanceTask 在 owner 缺失/死亡时无条件把 queued/running 降级 interrupted，覆写首读与 owner 检查之间落地的 terminal checkpoint——runner 的 terminal 写严格早于 lease release，owner 消失即 terminal 已持久可见；修复为降级前重读，terminal 则原样返回。空库快完成任务的毫秒级 straddle 曾以 ~17-30% 概率把 CLI 观察者打成 exit 1（CI 33312613383 Linux、33292110169 attempt 1、WSL 复现 2/≤12）。
+适配说明：B 守卫原样落地——源路径 packages/opencode/src/cli/cmd/tui/server-lock.ts 重锚至 packages/opencode/src/cli/tui/server-lock.ts（目标 v1.18.32 目录迁移，偏移 +11），重读+terminal 短路与 settled 副本降级逐字保留。A 语料扩容移植至 packages/core/test/ripgrep.test.ts（上游已把 ripgrep 移入 core；0244 适配版超时用例原为 4MB 单文件，本 patch 升为 512×1MB，64B 行×16384=1MiB×512 < MAX_SEARCH_FILES=5000；Effect.acquireUseRelease 形态不变，pattern/timeout/三断言不动）。plan 文档 verbatim（文中行号引用为源谱系，重放路径以 record 为准）。
 
-验证：WSL 独立副本 red→green 22/22 + 审计独立 10/10（联合 P(绿|缺陷)≈3e-5）；WSL/Windows ripgrep 全文件 22/0；WSL daemon 全文件 39 pass/6 skip/0 fail；typecheck 0；经计划审计 APPROVE 与实施审计 VERIFIED，详见 docs/plans/ci-red-ripgrep-timeout-daemon-reconcile.md。Windows 本机 daemon 全文件当前受宿主 8 个并发 opencode 进程负载影响（stash 对照已排除本 diff 因果），终局门为提交后 CI 三腿。
 
 diff --git a/docs/plans/ci-red-ripgrep-timeout-daemon-reconcile.md b/docs/plans/ci-red-ripgrep-timeout-daemon-reconcile.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..96fdf961a33703b5d2eddc07844922341226bd46
 --- /dev/null
 +++ b/docs/plans/ci-red-ripgrep-timeout-daemon-reconcile.md
 @@ -0,0 +1,70 @@
@@ -90,17 +86,17 @@ index 0000000000000000000000000000000000000000..96fdf961a33703b5d2eddc0784492234
 +- WSL 复现环境：bun 1.3.13 / ext4 / Linux 5.x（WSL2），仓库副本 tar 排除 node_modules 后 `bun install`（2348 包，54s），与 Windows 工作区隔离。
 +- B 竞态时序（fail-plain-1788103654137）：task 创建 → daemon runner 空库扫描 0 owner → terminal checkpoint + release（≈400ms 内）→ CLI 观察者 reconcile straddle → interrupted 覆写 → db.ts:391 抛错。
 +- CI run 33292110169 attempt 1（@57d1fe064）Linux 腿同名失败为同一缺陷的历史实例（attempt 2 绿 = 竞态未命中，非修复）。
-diff --git a/packages/opencode/src/cli/cmd/tui/server-lock.ts b/packages/opencode/src/cli/cmd/tui/server-lock.ts
-index 9f00f7bd9a4ca97e09f6ba064141e802c43751df..f6680b08b1aa5ebbff484a5e0a9843c9499c04a9 100644
---- a/packages/opencode/src/cli/cmd/tui/server-lock.ts
-+++ b/packages/opencode/src/cli/cmd/tui/server-lock.ts
-@@ -298,12 +298,19 @@ export async function reconcileMaintenanceTask(taskID: string, dbPath = Database
+
+diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/src/cli/tui/server-lock.ts
+--- a/packages/opencode/src/cli/tui/server-lock.ts
++++ b/packages/opencode/src/cli/tui/server-lock.ts
+@@ -309,12 +309,19 @@ export async function reconcileMaintenanceTask(taskID: string, dbPath = Database
      return task
    }
  
 +  // owner 缺失/死亡只证明此刻无 live lease；runner 的 terminal checkpoint 严格早于
 +  // lease release（同进程顺序 await），owner 消失 ⇒ completed/failed 已持久可见。
-+  // 重读避免把首读与 owner 检查之间落地的 terminal 状态覆写成 interrupted——
++  // 595：重读避免把首读与 owner 检查之间落地的 terminal 状态覆写成 interrupted——
 +  // 空库快完成任务的毫秒级 straddle 竞态曾以 ~17-30% 概率摧毁 Linux CLI 观察者。
 +  const settled = await readMaintenanceTask(taskID, dbPath)
 +  if (!settled || (settled.status !== "queued" && settled.status !== "running")) return settled
@@ -118,22 +114,22 @@ index 9f00f7bd9a4ca97e09f6ba064141e802c43751df..f6680b08b1aa5ebbff484a5e0a9843c9
  }
  
  // 同一 DB 只允许一个 nonterminal task；多个 record 代表外部复制/损坏，必须由用户先检查而非任意挑选。
-diff --git a/packages/opencode/test/file/ripgrep.test.ts b/packages/opencode/test/file/ripgrep.test.ts
-index dc2900b7e09fafb25819f20a40aa2ca079d8b7cc..2b47d20dba836d9276d12f0f6bf7c4122b63e8c7 100644
---- a/packages/opencode/test/file/ripgrep.test.ts
-+++ b/packages/opencode/test/file/ripgrep.test.ts
-@@ -335,7 +335,13 @@ describe("file.ripgrep", () => {
+
+diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
+--- a/packages/core/test/ripgrep.test.ts
++++ b/packages/core/test/ripgrep.test.ts
+@@ -123,7 +123,13 @@ describe("Ripgrep", () => {
+       Effect.promise(() => tmpdir()),
+       (tmp) =>
          Effect.gen(function* () {
-           // 真实 rg 进程需要足够大的输入才能稳定越过 1ms 预算；该测试验证公开
-           // Ripgrep.search 行为，不断言内部 kill 调用形状，避免和进程实现耦合。
--          yield* write(path.join(dir, "large.txt"), "x".repeat(32 * 1024 * 1024))
-+          // 512×1MB：32MB 单文件在 Apple Silicon memmem 吞吐下可 <1ms 扫完（CI 实测
+-          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "large.txt"), "x".repeat(4 * 1024 * 1024)))
++          // #595：512×1MB——4MB 单文件在 Apple Silicon memmem 吞吐下可 <1ms 扫完（CI 实测
 +          // timedOut=undefined）；512MB 即使按 100GB/s 理论上限也 ≥5ms，且 512 <
 +          // MAX_SEARCH_FILES=5000，不会触发 broad-scope 预过滤。
 +          const chunk = `${"x".repeat(63)}\n`.repeat(16 * 1024)
 +          for (let i = 0; i < 512; i++) {
-+            yield* write(path.join(dir, `large-${i}.txt`), chunk)
++            yield* Effect.promise(() => Bun.write(path.join(tmp.path, `large-${i}.txt`), chunk))
 +          }
-         }),
-       )
  
+           const result = yield* (yield* Ripgrep.Service).search({
+             cwd: tmp.path,

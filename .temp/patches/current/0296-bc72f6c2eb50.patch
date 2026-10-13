@@ -342,3 +342,74 @@ index 0ec89b8..00886ac 100644
        reviewID: "review_8",
        precheck: { level: "general", reason: "unknown" },
      })
+diff --git a/packages/tui/test/context/sdk-reconnect.test.tsx b/packages/tui/test/context/sdk-reconnect.test.tsx
+--- a/packages/tui/test/context/sdk-reconnect.test.tsx
++++ b/packages/tui/test/context/sdk-reconnect.test.tsx
+@@ -8,8 +8,9 @@
+ // #139：等待生产 SSE rebind 完成
+ async function wait(fn: () => boolean, timeout = 4000) {
+-  const start = Date.now()
++  // #296：单调时钟防墙钟跳变（NTP 回拨会使 Date 差值为负、等待永不超时）
++  const start = performance.now()
+   while (!fn()) {
+-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
++    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
+     await Bun.sleep(10)
+   }
+ }
+diff --git a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+@@ -15,7 +15,8 @@
+ export async function wait(fn: () => boolean, timeout = 2000) {
+-  const start = Date.now()
++  // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
++  const start = performance.now()
+   while (!fn()) {
+-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
++    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
+     await Bun.sleep(10)
+   }
+ }
+diff --git a/packages/tui/test/cli/tui/data.test.tsx b/packages/tui/test/cli/tui/data.test.tsx
+--- a/packages/tui/test/cli/tui/data.test.tsx
++++ b/packages/tui/test/cli/tui/data.test.tsx
+@@ -27,7 +27,8 @@
+ async function wait(fn: () => boolean, timeout = 2000) {
+-  const start = Date.now()
++  // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
++  const start = performance.now()
+   while (!fn()) {
+-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
++    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
+     await Bun.sleep(10)
+   }
+ }
+diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cli/tui/use-event.test.tsx
+--- a/packages/tui/test/cli/tui/use-event.test.tsx
++++ b/packages/tui/test/cli/tui/use-event.test.tsx
+@@ -14,7 +14,8 @@
+ async function wait(fn: () => boolean, timeout = 2000) {
+-  const start = Date.now()
++  // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
++  const start = performance.now()
+   while (!fn()) {
+-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
++    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
+     await Bun.sleep(10)
+   }
+ }
+diff --git a/packages/tui/test/cli/tui/dialog-prompt.test.tsx b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+--- a/packages/tui/test/cli/tui/dialog-prompt.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+@@ -13,7 +13,8 @@
+ async function wait(fn: () => boolean, timeout = 2000) {
+-  const start = Date.now()
++  // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
++  const start = performance.now()
+   while (!fn()) {
+-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
++    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
+     await Bun.sleep(10)
+   }
+ }

@@ -8,125 +8,17 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E4=BC=9A=E8=AF=9D?=
  =?UTF-8?q?=E7=90=86=E9=80=BB=E8=BE=91?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-index 78c82301a6e70660333359f4202793f1feed91e1..76d95c51547138533063d364496fd598480dfe3d 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-@@ -1,13 +1,14 @@
- import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
- import type { InternalTuiPlugin } from "../../plugin/internal"
- import { useSyncV2 } from "@tui/context/sync-v2"
-+import { shouldCullSessionViewport } from "@tui/util/session-pending"
- import { SplitBorder } from "@tui/component/border"
- import { Spinner } from "@tui/component/spinner"
- import { useTheme } from "@tui/context/theme"
- import { useLocal } from "@tui/context/local"
- import { reasoningTitle, useThinkingMode } from "@tui/context/thinking"
- import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
--import { TextAttributes, type BoxRenderable, type SyntaxStyle } from "@opentui/core"
-+import { TextAttributes, type BoxRenderable, type ScrollBoxRenderable, type SyntaxStyle } from "@opentui/core"
- // [local-smark] Flag needed for markdown experimental check
- import { Flag } from "@opencode-ai/core/flag/flag"
- import { useBindings } from "../../keymap"
-@@ -31,7 +32,7 @@ import type {
-   ToolFileContent,
-   ToolTextContent,
- } from "@opencode-ai/sdk/v2"
--import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
-+import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack } from "solid-js"
+融合适配：源 session-v2 调试视图在目标不存在（实验性 V2 视图未进入 v1.18.32），该段语义由
+V1 主视口（routes/session）同一 invariant 承载；util/helper/四组 hunk/两测试宿主全量落位。
+diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/session-pending.ts
+--- a/packages/tui/src/util/session-pending.ts
++++ b/packages/tui/src/util/session-pending.ts
+@@ -3,5 +3,31 @@
+ export function hasStreamingAssistant(messages: Message[]) {
+   return messages.some((message) => message.role === "assistant" && !message.time.completed)
+ }
  
- const id = "internal:session-v2-debug"
- const route = "session.v2.messages"
-@@ -50,9 +51,17 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
-   const messages = createMemo(() => sync.data.messages[props.sessionID] ?? [])
-   const renderedMessages = createMemo(() => messages().toReversed())
-   const lastAssistant = createMemo(() => renderedMessages().findLast((message) => message.type === "assistant"))
--  const streamingActive = createMemo(() =>
--    messages().some((message) => message.type === "assistant" && !message.time.completed),
-+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
-+  const viewportCulling = createMemo(() =>
-+    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
-   )
-+  let scroll: ScrollBoxRenderable | undefined
-+  function syncSessionViewportStuckToBottom() {
-+    if (!scroll || scroll.isDestroyed) return
-+    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
-+    if (stuckToBottom === untrack(viewportStuckToBottom)) return
-+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
-+  }
-   const lastUserCreated = (index: number) =>
-     renderedMessages()
-       .slice(0, index)
-@@ -80,7 +89,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
-       <box flexDirection="row">
-         <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
-           <scrollbox
--            viewportCulling={!streamingActive()}
-+            ref={(r) => (scroll = r)}
-+            viewportCulling={viewportCulling()}
-+            renderAfter={syncSessionViewportStuckToBottom}
-             viewportOptions={{ paddingRight: 0 }}
-             verticalScrollbarOptions={{ visible: false }}
-             stickyScroll={true}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 3cd852e606f6eea23212a230a1e5859a426b1843..2ff78724fb9c9c6ec81d88b76a78ff2ca0d32cc2 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -106,7 +106,7 @@ import { PathFormatterProvider, usePathFormatter } from "../../context/path-form
- // [local-smark] Local TUI features
- import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
- import { previewDiff } from "@tui/util/preview-diff"
--import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
-+import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
- import { ConnectionError } from "../../util/connection-error"
- import { ContextUsagePanel } from "./context-usage"
- 
-@@ -230,7 +230,10 @@ export function Session() {
-     const status = sync.data.session_status?.[route.sessionID]
-     return pendingAssistantID(messages(), status)
-   })
--  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
-+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
-+  const viewportCulling = createMemo(() =>
-+    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
-+  )
- 
-   const lastAssistant = createMemo(() => {
-     return messages().findLast((x) => x.role === "assistant")
-@@ -384,6 +387,13 @@ export function Session() {
-   const dialog = useDialog()
-   const renderer = useRenderer()
- 
-+  function syncSessionViewportStuckToBottom() {
-+    if (!scroll || scroll.isDestroyed) return
-+    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
-+    if (stuckToBottom === untrack(viewportStuckToBottom)) return
-+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
-+  }
-+
-   event.on("session.status", (evt) => {
-     if (evt.properties.sessionID !== route.sessionID) return
-     if (evt.properties.status.type !== "retry") return
-@@ -1190,7 +1200,8 @@ export function Session() {
-             <Show when={session()}>
-               <scrollbox
-                 ref={(r) => (scroll = r)}
--                viewportCulling={!streamingActive()}
-+                viewportCulling={viewportCulling()}
-+                renderAfter={syncSessionViewportStuckToBottom}
-                 viewportOptions={{
-                   paddingRight: showScrollbar() ? 1 : 0,
-                 }}
-diff --git a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-index 587aeb84509fed5a49c56546ddc2165615a74fb0..73680b4d06f7330508ae75a8cd7657a61b678a93 100644
---- a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-@@ -1,9 +1,36 @@
- import type { Message, SessionStatus } from "@opencode-ai/sdk/v2"
- 
++// #458：视口裁剪判定接受宽化消息形状——V2 调试视图与 V1 主视口共用同一语义。
 +type SessionViewportMessage = {
 +  role?: string
 +  type?: string
@@ -140,16 +32,11 @@ index 587aeb84509fed5a49c56546ddc2165615a74fb0..73680b4d06f7330508ae75a8cd7657a6
 +  stuckToBottom?: boolean
 +}
 +
- export function hasStreamingAssistant(messages: Message[]) {
-   return messages.some((message) => message.role === "assistant" && !message.time.completed)
- }
- 
 +export function shouldCullSessionViewport(
 +  messages: readonly SessionViewportMessage[],
 +  state: SessionViewportState = {},
 +) {
-+  // Keep the hot sticky-bottom streaming path culled, but let off-screen
-+  // streaming code blocks continue measuring when the user scrolls into history.
++  // 保持 sticky-bottom 流式热路径裁剪，但用户滚入历史时让屏外流式代码块继续测量。
 +  if (!messages.some(isStreamingViewportAssistant)) return true
 +  return state.stuckToBottom ?? true
 +}
@@ -157,50 +44,62 @@ index 587aeb84509fed5a49c56546ddc2165615a74fb0..73680b4d06f7330508ae75a8cd7657a6
 +function isStreamingViewportAssistant(message: SessionViewportMessage) {
 +  return (message.role ?? message.type) === "assistant" && !message.time.completed
 +}
-+
- export function pendingAssistantID(messages: Message[], status: SessionStatus | undefined) {
-   if (!status || status.type === "idle") return undefined
-   return messages.findLast((message) => message.role === "assistant" && !message.time.completed)?.id
-diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-index 9011025c5163a977093765022fce45db9348eb6a..211fd2ecea3aca06dfccfd9b3267bc4354b29bf7 100644
---- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-@@ -45,8 +45,11 @@ describe("Session route integration points", () => {
-       expect(sessionSource).toContain('"scrollbar_enabled"')
-     })
- 
--    test("scrollbox has viewportCulling tied to streamingActive", () => {
--      expect(sessionSource).toContain("viewportCulling={!streamingActive()}")
-+    test("scrollbox uses session viewport culling helper", () => {
-+      expect(sessionSource).toContain("shouldCullSessionViewport")
-+      expect(sessionSource).toContain("stuckToBottom: viewportStuckToBottom()")
-+      expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
-+      expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
-     })
- 
-     test("scrollbox has contentOptions paddingRight for scrollbar", () => {
-diff --git a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-index 230bbdf86eec6464963a942a691fc3901378b420..91cb9ca746b8ceebd5d14c29052cc62069374cce 100644
---- a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-@@ -1,6 +1,11 @@
- import { describe, expect, test } from "bun:test"
- import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
--import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "../../../../src/cli/cmd/tui/util/session-pending"
-+import {
-+  hasStreamingAssistant,
-+  pendingAssistantID,
+ export function pendingAssistantIndex(messages: Message[], status: SessionStatus | undefined) {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -78,5 +104,6 @@
+   assistantTurnDuration,
+-  hasStreamingAssistant,
+   pendingAssistantIndex,
+-  shouldRefreshStaleBusyStatus,
 +  shouldCullSessionViewport,
 +  shouldRefreshStaleBusyStatus,
-+} from "../../../../src/cli/cmd/tui/util/session-pending"
++  // 裁剪判定收敛到 util：V1 主视口与 helper 单测共用同一语义；流式判定随 streamingActive 一并移交 helper。
+ } from "../../util/session-pending"
+@@ -271,4 +299,8 @@
+   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+-  // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
+-  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
++  // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
++  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
++  // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
++  const viewportCulling = createMemo(() =>
++    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
++  )
+   const messagesBeforeRevert = () => {
+@@ -517,3 +549,11 @@
+   const dialog = useDialog()
+   const renderer = useRenderer()
++
++  // #458：渲染后读取 scroll 位置同步粘底信号；queueMicrotask 避免在渲染帧内写信号。
++  function syncSessionViewportStuckToBottom() {
++    if (!scroll || scroll.isDestroyed) return
++    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
++    if (stuckToBottom === untrack(viewportStuckToBottom)) return
++    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
++  }
  
- const assistant = (id: string, completed?: number): AssistantMessage => ({
-   id,
-@@ -31,4 +36,16 @@ describe("session pending helpers", () => {
-     expect(shouldRefreshStaleBusyStatus([assistant("open")], { type: "busy" })).toBe(false)
-     expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "idle" })).toBe(false)
+@@ -1397,4 +1437,5 @@
+                 ref={(r) => (scroll = r)}
+-                // #135：流式时禁用 viewportCulling，避免裁剪抖动
+-                viewportCulling={!streamingActive()}
++                // #458：粘底流式仍裁剪；滚入历史时保留屏外块测量，renderAfter 同步粘底信号
++                viewportCulling={viewportCulling()}
++                renderAfter={syncSessionViewportStuckToBottom}
+                 viewportOptions={{
+diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
+--- a/packages/tui/test/util/session-pending.test.ts
++++ b/packages/tui/test/util/session-pending.test.ts
+@@ -8,3 +49,4 @@
+   pendingAssistantIndex,
+   shouldRefreshStaleBusyStatus,
++  shouldCullSessionViewport,
+ } from "../../src/util/session-pending"
+@@ -181,2 +223,15 @@
    })
 +
++  // #458：视口裁剪三态——流式+默认粘底裁剪；流式+离底不裁；完成后恒裁
 +  test("keeps session viewport culling enabled while an assistant message streams", () => {
 +    expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
 +  })
@@ -213,3 +112,17 @@ index 230bbdf86eec6464963a942a691fc3901378b420..91cb9ca746b8ceebd5d14c29052cc620
 +    expect(shouldCullSessionViewport([assistant("done", 2)])).toBe(true)
 +  })
  })
+diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+--- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
++++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+@@ -26,1 +81,9 @@
++
++  // #458：继承源 session-integration 断言——scrollbox 视口裁剪由 helper 与粘底信号驱动
++  test("scrollbox uses session viewport culling helper", () => {
++    expect(sessionSource).toContain("shouldCullSessionViewport")
++    expect(sessionSource).toContain("stuckToBottom: viewportStuckToBottom()")
++    expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
++    expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
++  })
+ })
+\ No newline at end of file

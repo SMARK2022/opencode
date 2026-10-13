@@ -1,20 +1,18 @@
-From 0962337249774aa4bebbd0110ff1bffed623bac6 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 20 Jul 2026 19:27:35 +0800
-Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E6=94=AF=E6=8C=81=20/goal=20?=
- =?UTF-8?q?=E5=86=85=E8=81=94=E5=8F=82=E6=95=B0=E4=B8=8E=E4=BF=9D=E7=95=99?=
- =?UTF-8?q?=E5=8A=A8=E8=AF=8D?=
+From 096233724977 Mon Sep 17 00:00:00 2001
+From: SMARK <smark@local>
+Date: Sat, 18 Jul 2026 21:47:03 +0800
+Subject: [PATCH] feat(tui): /goal 内联参数
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-在 Prompt 提交路径识别 local /goal 控制面：空格后多词文本整段写入 objective，
-resume/pause/clear/start/set 等动词映射既有 Goal HTTP，零参数仍开 dialog。
-避免误走聊天 prompt，并复用成功尾以在 home 新建 session 后正确导航。
-
+适配：owner 迁移（opencode/src/cli/cmd/tui → packages/tui/src；util 同级）。goal-http
+不 import server 内部模块（tui 独立分层）——本地 MAX_OBJECTIVE_CHARS 常量与结构化
+GoalHttpGoal 镜像类型。prompt submit 用目标既有 sessionID（home 先 create）；
+FetchHandler/createFetch 增加 init 第三参转发（mutation 断言依赖）；transport 三用例
+按目标 withPrompt 4 参形态适配（tmp.path state 参数，无 Global.Path 全局切换）。
 diff --git a/docs/plans/goal-slash-inline-arguments.md b/docs/plans/goal-slash-inline-arguments.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..4fd8aaa30e0e3e23b3c1d021b8a376ba20281137
 --- /dev/null
 +++ b/docs/plans/goal-slash-inline-arguments.md
 @@ -0,0 +1,646 @@
@@ -664,47 +662,53 @@ index 0000000000000000000000000000000000000000..4fd8aaa30e0e3e23b3c1d021b8a376ba
 +- 词切会破坏自然语言任务描述
 +
 +故 parser 明确：**最多一次切分（命令名 | rest）**；动词层最多再切 **一个** 前导 verb token，其后再次全部一体。
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index cc386799fdbf74a6b8a6571884ff592d8f1eebc1..fee5e562fef0aa9d1f34737d651632ed7135ba28 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -565,7 +565,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -705,7 +705,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
            dialog.replace(() => <DialogSessionList />)
          },
        },
--      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单
+-      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单。
 +      // [local-smark] /goal 命令：命令面板/快捷键直接开 dialog；prompt 中 `/goal <text>` 走 submit 解析
+       // goal 功能 0367 起始终可用（不再需要 experimental.goals 开关）
        {
          name: "goal.manage",
-         title: "Set or manage goal",
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-index d5cb4071b00ea2d9c860c794d6cbf269e4ab4eee..c0986a2b4887f5bbfa389c45dad33735c7a837a6 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
-@@ -6,8 +6,8 @@ import { useSDK } from "@tui/context/sdk"
- import { useToast } from "@tui/ui/toast"
- import { useTheme } from "@tui/context/theme"
+
+diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
+--- a/packages/tui/src/component/dialog-goal.tsx
++++ b/packages/tui/src/component/dialog-goal.tsx
+@@ -7,21 +7,17 @@ import { useToast } from "../ui/toast"
  import { createMemo, createSignal, onMount } from "solid-js"
--import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
- import { Locale } from "@/util/locale"
-+import { goalEndpointUrl, goalHttpClear, goalHttpSet } from "@tui/util/goal-http"
+ import { useTheme } from "../context/theme"
+ import { Locale } from "../util/locale"
+-
+-// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（6400）对齐：
+-// tui 不依赖 server 包内部模块，本地常量保持同一上限，两处需同步修改
+-const MAX_OBJECTIVE_CHARS = 6400
++import { goalEndpointUrl, goalHttpClear, goalHttpSet } from "../util/goal-http"
  
  // [local-smark] goal 管理 dialog
  // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
-@@ -17,72 +17,40 @@ interface DialogGoalProps {
+ // POST/DELETE 需手动设置 directory query param（sdk.fetch 的 rewrite 仅处理 GET/HEAD）
+-// 修复 Enter 无响应：as any 调用运行时为 undefined 导致 TypeError 静默失败
+ 
+ interface DialogGoalProps {
    sessionID: string
  }
  
 -// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭
 +// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭；实现落到 shared goal-http
+ // #368：goal 生命周期走 sdk.fetch 而非 as-any SDK 方法——生成物没有 goalSet/goalClear，
+ // as-any 调用在运行时是 undefined(...) 同步 TypeError；显式 fetch 保证类型与运行时一致。
  function useGoalApi(sessionID: string) {
-   const sdk = useSDK()
-   const sync = useSync()
+@@ -30,65 +26,34 @@ function useGoalApi(sessionID: string) {
    const toast = useToast()
    const dialog = useDialog()
  
 -  // 构建带 directory query param 的 URL
--  // workspace routing 中间件通过 directory 定位实例
++  // #0503：directory query param 由 shared goalEndpointUrl 统一构建，
+   // workspace routing 中间件通过 directory 定位实例（多实例 daemon 模式）
    const goalUrl = () => {
 -    const url = new URL(`/session/${sessionID}/goal`, sdk.url)
      const dir = sync.path.directory || sdk.directory
@@ -712,15 +716,14 @@ index d5cb4071b00ea2d9c860c794d6cbf269e4ab4eee..c0986a2b4887f5bbfa389c45dad33735
 -    return url
 +    return goalEndpointUrl(sdk.url, sessionID, dir || undefined)
    }
- 
 +  const deps = () => ({
 +    url: goalUrl(),
 +    fetch: (input: string | URL, init?: RequestInit) => sdk.fetch(input, init),
 +    onError: (message: string) => toast.show({ message, variant: "error" as const }),
 +  })
-+
+ 
    // POST /session/:id/goal — 设置或更新 goal
--  // [local-smark] 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
+   // [local-smark] 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
 -  const setGoal = async (input: { objective?: string; status?: string; continueOnError?: boolean }, close = true) => {
 -    // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
 -    // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
@@ -753,7 +756,6 @@ index d5cb4071b00ea2d9c860c794d6cbf269e4ab4eee..c0986a2b4887f5bbfa389c45dad33735
 -    } catch {
 -      toast.show({ message: "Failed to update goal", variant: "error" })
 -    }
-+  // 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
 +  const setGoal = async (
 +    input: { objective?: string; status?: string; continueOnError?: boolean },
 +    close = true,
@@ -783,12 +785,15 @@ index d5cb4071b00ea2d9c860c794d6cbf269e4ab4eee..c0986a2b4887f5bbfa389c45dad33735
    }
  
    return { setGoal, clearGoal }
-@@ -240,3 +208,17 @@ function DialogGoalEdit(props: DialogGoalProps) {
+@@ -247,4 +212,18 @@ function DialogGoalEdit(props: DialogGoalProps) {
+       onCancel={() => dialog.clear()}
      />
    )
- }
+-}
+\ No newline at end of file
++}
 +
-+// 供 prompt `/goal` 零参数路径使用：直接用 submit 权威 sessionID 打开 dialog，
++// #0503：供 prompt `/goal` 零参数路径使用：直接用 submit 权威 sessionID 打开 dialog，
 +// 不走 goal.manage 的 route.type===session 守卫（home 上 create 后路由可能尚未切换）
 +export function openGoalDialog(input: {
 +  sessionID: string
@@ -801,19 +806,19 @@ index d5cb4071b00ea2d9c860c794d6cbf269e4ab4eee..c0986a2b4887f5bbfa389c45dad33735
 +  }
 +  input.replace(() => <DialogGoal sessionID={input.sessionID} />)
 +}
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/autocomplete.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/autocomplete.tsx
-index 3f7604653c563420ace68b41eab24474d2fbdbf3..582606352f4c2a115d9e2263e206dab392f0697d 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/autocomplete.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/autocomplete.tsx
-@@ -536,7 +536,32 @@ export function Autocomplete(props: {
+
+diff --git a/packages/tui/src/component/prompt/autocomplete.tsx b/packages/tui/src/component/prompt/autocomplete.tsx
+--- a/packages/tui/src/component/prompt/autocomplete.tsx
++++ b/packages/tui/src/component/prompt/autocomplete.tsx
+@@ -445,7 +445,32 @@ export function Autocomplete(props: {
    )
  
    const commands = createMemo((): AutocompleteOption[] => {
--    const results: AutocompleteOption[] = [...command.slashes()]
-+    // local slash 默认立即 run（开 dialog 等）；
+-    const results: AutocompleteOption[] = [...slashes()]
++    // #0503：local slash 默认立即 run（开 dialog 等）；
 +    // /goal 特判插入 "/goal "：与 server command 参数输入一致，
 +    // 让用户可继续键入含空格的长 objective 再 Enter 提交（INV-01 UX）
-+    const results: AutocompleteOption[] = command.slashes().map((entry) => {
++    const results: AutocompleteOption[] = slashes().map((entry) => {
 +      if (entry.display === "/goal") {
 +        return {
 +          display: entry.display,
@@ -839,85 +844,112 @@ index 3f7604653c563420ace68b41eab24474d2fbdbf3..582606352f4c2a115d9e2263e206dab3
  
      for (const serverCommand of sync.data.command) {
        if (serverCommand.source === "skill") continue
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 4267cabd06082b9cc40188e70151c26a3cf64d00..4c2e9bd6f25aa104d0ffc135f6736acf96bc8475 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -68,6 +68,9 @@ import { useTuiConfig } from "../../context/tui-config"
- import { promptOffsetWidth } from "@/cli/cmd/prompt-display"
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -38,6 +38,9 @@ import { usePromptStash } from "../../prompt/stash"
+ import { DialogStash } from "../dialog-stash"
  import { PromptVoiceInput } from "../../prompt-voice-input"
  import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
 +import { parseGoalSlashInput } from "../../util/parse-goal-slash"
 +import { executeGoalSlashIntent } from "../../util/goal-http"
 +import { openGoalDialog } from "../dialog-goal"
- 
- export type PromptProps = {
-   sessionID?: string
-@@ -1368,6 +1371,33 @@ export function Prompt(props: PromptProps) {
-         })
+ import { type AutocompleteRef, Autocomplete } from "./autocomplete"
+ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
+@@ -1282,6 +1285,40 @@ export function Prompt(props: PromptProps) {
+         .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
          .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
        setStore("mode", "normal")
 +    } else if (
-+      // local Goal 控制面优先于 server template slash：避免未来同名 command 误进 LLM
-+      iife(() => parseGoalSlashInput(inputText) !== undefined)
++      // #0503：local Goal 控制面优先于 server template slash：避免未来同名 command 误进 LLM
++      parseGoalSlashInput(inputText) !== undefined
 +    ) {
++      // #0503：sessionID 是 submit 头部 create 后的权威值——home 提交 /goal 也能命中正确实例
 +      const intent = parseGoalSlashInput(inputText)!
-+      // 失败 early-return 保留草稿；成功 fall-through 共享尾（含 home navigate，INV-11）
++      // #0503：失败 early-return 保留草稿；成功 fall-through 共享尾（含 home navigate，INV-11）
 +      const ok = await executeGoalSlashIntent({
 +        intent,
-+        sessionID: sessionID!,
++        sessionID,
 +        sdkUrl: sdk.url,
 +        directory: sync.path.directory || sdk.directory,
 +        fetch: (input, init) => sdk.fetch(input, init),
 +        onError: (message) => toast.show({ message, variant: "error" }),
 +        onReconcile: (goal) => {
-+          // Schema optional tokenBudget 与 TUI store 必填 null 的窄化对齐
-+          if (goal) sync.goal.reconcile(sessionID!, { ...goal, tokenBudget: goal.tokenBudget ?? null, reason: goal.reason ?? null })
++          // #0503：Schema optional tokenBudget/reason 与 TUI store 必填 null 的窄化对齐
++          sync.goal.reconcile(sessionID, {
++            ...goal,
++            tokenBudget: goal.tokenBudget ?? null,
++            reason: goal.reason ?? null,
++          })
 +        },
 +        openDialog: (hasGoal) => {
 +          openGoalDialog({
-+            sessionID: sessionID!,
++            sessionID,
 +            hasGoal,
 +            replace: (view) => dialog.replace(view),
 +          })
 +        },
-+        hasGoal: !!sync.data.session_goal[sessionID!],
++        // #0503：hasGoal 在提交时读取快照——零参数 dialog 的菜单/编辑分支由此决定
++        hasGoal: !!sync.data.session_goal[sessionID],
 +      })
++      // #0503：失败 return false——上层 stopPropagation 语义保持，草稿仍在输入框
 +      if (!ok) return false
      } else if (
        inputText.startsWith("/") &&
-       iife(() => {
-@@ -1433,7 +1463,10 @@ export function Prompt(props: PromptProps) {
+       sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
+@@ -1334,7 +1371,10 @@ export function Prompt(props: PromptProps) {
        ...store.prompt,
        mode: currentMode,
      })
 -    input.extmarks.clear()
-+    // await 的 control 路径（如 /goal HTTP）返回时 textarea 可能已销毁；清草稿以 store 为准
++    // #0503：await 的 control 路径（如 /goal HTTP）返回时 textarea 可能已销毁；清草稿以 store 为准
 +    if (input && !input.isDestroyed) {
 +      input.extmarks.clear()
 +    }
      setStore("prompt", {
        input: "",
        parts: [],
-@@ -1453,7 +1486,9 @@ export function Prompt(props: PromptProps) {
-         })
+@@ -1351,7 +1391,10 @@ export function Prompt(props: PromptProps) {
+         route.navigate({ type: "session", sessionID })
        }, 50)
      }
 -    input.clear()
++    // #0503：同上——销毁后的 clear 调用会在旧 renderer 上复活幽灵状态
 +    if (input && !input.isDestroyed) {
 +      input.clear()
 +    }
+     if (finishMoveProgress) move.finishSubmit()
      return true
    }
-   const exit = useExit()
-diff --git a/packages/opencode/src/cli/cmd/tui/util/goal-http.ts b/packages/opencode/src/cli/cmd/tui/util/goal-http.ts
+
+diff --git a/packages/tui/src/util/goal-http.ts b/packages/tui/src/util/goal-http.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e86115e1510f232151d40ce509a494cdae3f985b
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/util/goal-http.ts
-@@ -0,0 +1,116 @@
-+import { MAX_OBJECTIVE_CHARS, type Goal as SessionGoalInfo } from "@/session/goal"
++++ b/packages/tui/src/util/goal-http.ts
+@@ -0,0 +1,140 @@
 +import type { GoalSlashIntent } from "./parse-goal-slash"
++
++// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（6400）对齐：
++// tui 包不依赖 server 内部模块，本地常量保持同一上限，两处需同步修改
++const MAX_OBJECTIVE_CHARS = 6400
++
++// #0503：结构化 Goal 镜像——与 context/sync.tsx 内联 SessionGoalInfo、
++// src/session/goal.ts schema 三方对齐；SDK 重新生成 goal 类型前以此承载 reconcile 载荷。
++export type GoalHttpGoal = {
++  sessionID: string
++  id: string
++  objective: string
++  status: "active" | "paused" | "complete" | "blocked"
++  tokenBudget?: number | null
++  tokensUsed: number
++  timeUsedSeconds: number
++  continueOnError: boolean
++  generation: number
++  reason?: string | null
++  time: { created: number; updated: number }
++}
 +
 +export type GoalHttpSetInput = {
 +  objective?: string
@@ -946,6 +978,8 @@ index 0000000000000000000000000000000000000000..e86115e1510f232151d40ce509a494cd
 +      body: JSON.stringify(input),
 +    })
 +    if (!resp.ok) {
++      // 服务器返回 NamedError 形态 {name, data:{message}}；提取 data.message
++      // 让用户看到具体原因（如 budget/无goal 等 client 未预判的拒绝）
 +      const body = await resp.json().catch(() => null)
 +      deps.onError(body?.data?.message ?? "Failed to update goal")
 +      return undefined
@@ -957,6 +991,7 @@ index 0000000000000000000000000000000000000000..e86115e1510f232151d40ce509a494cd
 +  }
 +}
 +
++// #0503：DELETE 无 body——clear 失败即整体失败，不区分网络错误与 4xx（均为可重试用户动作）。
 +export async function goalHttpClear(deps: GoalHttpDeps) {
 +  try {
 +    const resp = await deps.fetch(deps.url, { method: "DELETE" })
@@ -971,6 +1006,7 @@ index 0000000000000000000000000000000000000000..e86115e1510f232151d40ce509a494cd
 +  }
 +}
 +
++// #0503：directory query param 统一在此构建——workspace routing 中间件靠它定位实例
 +export function goalEndpointUrl(base: string, sessionID: string, directory?: string) {
 +  const url = new URL(`/session/${sessionID}/goal`, base)
 +  if (directory) url.searchParams.set("directory", directory)
@@ -985,7 +1021,7 @@ index 0000000000000000000000000000000000000000..e86115e1510f232151d40ce509a494cd
 +  fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
 +  onError: (message: string) => void
 +  // HTTP body.goal → 调用方 sync.goal.reconcile
-+  onReconcile: (goal: SessionGoalInfo) => void
++  onReconcile: (goal: GoalHttpGoal) => void
 +  openDialog: (hasGoal: boolean) => void
 +  hasGoal: boolean
 +}
@@ -1025,19 +1061,19 @@ index 0000000000000000000000000000000000000000..e86115e1510f232151d40ce509a494cd
 +  const result = await goalHttpSet(deps, body)
 +  // undefined = 预检失败或 HTTP 错误；调用方不得清草稿/navigate
 +  if (result === undefined) return false
-+  // response 形状 { goal }；reconcile 供 TUI store 立即更新（不等 SSE）
++  // response 形状 { goal }；reconcile 供 TUI store 立即更新（不等 SSE）。
++  // #0503：服务器 envelope 缺 goal 字段（如空删除响应）不算失败——mutation 本身已成功
 +  if (result && typeof result === "object" && result !== null && "goal" in result) {
-+    const goal = (result as { goal?: SessionGoalInfo | null }).goal
++    const goal = (result as { goal?: GoalHttpGoal | null }).goal
 +    if (goal) input.onReconcile(goal)
 +  }
 +  return true
 +}
-diff --git a/packages/opencode/src/cli/cmd/tui/util/parse-goal-slash.ts b/packages/opencode/src/cli/cmd/tui/util/parse-goal-slash.ts
+diff --git a/packages/tui/src/util/parse-goal-slash.ts b/packages/tui/src/util/parse-goal-slash.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a36a59e26e52b93eda241c1ca11f7e4bcfd3189
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/util/parse-goal-slash.ts
-@@ -0,0 +1,67 @@
++++ b/packages/tui/src/util/parse-goal-slash.ts
+@@ -0,0 +1,68 @@
 +// Goal 输入框 slash 解析：只在命令名处切一刀，rest 整串保留空格（INV-01）
 +// 禁止 argv/$1 词切——objective 是自然语言整段，domain 字段也是单 string。
 +
@@ -1059,6 +1095,7 @@ index 0000000000000000000000000000000000000000..1a36a59e26e52b93eda241c1ca11f7e4
 +}
 +
 +// clear 同义整段匹配；不得对 payload 再切词
++// #0503：clear 同义词整段匹配——与 resume/pause 同一精确动词纪律，防止误删带文本的任务
 +const CLEAR_ALIASES = new Set(["clear", "delete", "remove"])
 +
 +export function parseGoalSlashInput(raw: string): GoalSlashIntent | undefined {
@@ -1105,16 +1142,15 @@ index 0000000000000000000000000000000000000000..1a36a59e26e52b93eda241c1ca11f7e4
 +  // 默认 free-objective：整 rest 即 objective（含首词碰巧是保留词但带后续文本）
 +  return { type: "set-objective", objective: restTrimmed }
 +}
-diff --git a/packages/opencode/test/cli/cmd/tui/parse-goal-slash.test.ts b/packages/opencode/test/cli/cmd/tui/parse-goal-slash.test.ts
+diff --git a/packages/tui/test/cli/cmd/tui/parse-goal-slash.test.ts b/packages/tui/test/cli/cmd/tui/parse-goal-slash.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..67779c82a6e910f5519bba38c29ab2ebb094fe60
 --- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/parse-goal-slash.test.ts
++++ b/packages/tui/test/cli/cmd/tui/parse-goal-slash.test.ts
 @@ -0,0 +1,111 @@
 +import { describe, expect, test } from "bun:test"
-+import { parseGoalSlashInput } from "../../../../src/cli/cmd/tui/util/parse-goal-slash"
++import { parseGoalSlashInput } from "../../../../src/util/parse-goal-slash"
 +
-+// 表驱动行为规格：objective 含空格时必须整串保留，不得 argv 切碎（INV-01）
++// #0503：表驱动行为规格：objective 含空格时必须整串保留，不得 argv 切碎（INV-01）
 +// 期望值均为独立字面量，不复述 parser 实现算法
 +// 覆盖：dialog / free-objective / exact verb / set|start 消歧 / continue / 大小写
 +describe("parseGoalSlashInput", () => {
@@ -1222,21 +1258,18 @@ index 0000000000000000000000000000000000000000..67779c82a6e910f5519bba38c29ab2eb
 +    expect(parseGoalSlashInput("/Goal RESUME")).toEqual({ type: "resume" })
 +  })
 +})
-diff --git a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-index 3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd..4bd1196c4af2bcb388c5ec25a4fcf6400a82a61a 100644
---- a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-@@ -292,6 +292,173 @@ test("accepted TUI slash-command submission clears without waiting for completio
-   })
+diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+@@ -303,6 +303,167 @@ test("accepted TUI slash-command submission clears without waiting for completio
+   )
  })
  
-+// INV-01 + INV-04：多词 objective 必须整串 POST body.objective，
++// #0503：INV-01 + INV-04：多词 objective 必须整串 POST body.objective，
 +// 且不得误走 prompt_async（控制面 mutation ≠ 聊天消息）
 +// 期望值 "fix the login bug" 为独立规格字面量，证明未 argv 切碎
 +test("TUI /goal multi-word objective posts whole string without prompt_async", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let goalPosts = 0
 +  let promptAsync = 0
@@ -1249,7 +1282,7 @@ index 3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd..4bd1196c4af2bcb388c5ec25a4fcf640
 +      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
 +      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
 +      if (url.pathname === "/agent") return json([agent])
-+      // 仅统计 Goal 控制面 POST；方法可能在 init 或 Request 上
++      // 仅统计 Goal 控制面 POST；init 由 #0503 fixture 转发，方法可能在 init 或 Request 上
 +      if (url.pathname === `/session/${sessionID}/goal` && (init?.method === "POST" || _request?.method === "POST")) {
 +        goalPosts += 1
 +        const body = typeof init?.body === "string" ? JSON.parse(init.body) : {}
@@ -1288,17 +1321,14 @@ index 3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd..4bd1196c4af2bcb388c5ec25a4fcf640
 +      expect(promptAsync).toBe(0)
 +      expect(prompt.current.input).toBe("")
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
-+// INV-05：Goal HTTP 失败时不得清草稿、不得降级为 prompt_async 发出原文
++// #0503：INV-05：Goal HTTP 失败时不得清草稿、不得降级为 prompt_async 发出原文
 +// 400 模拟 domain 拒绝（如空 objective）；用户应能就地改字重试
 +test("failed TUI /goal submission keeps the draft text", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let goalPosts = 0
 +  const draft = "/goal fix the login bug"
@@ -1322,18 +1352,15 @@ index 3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd..4bd1196c4af2bcb388c5ec25a4fcf640
 +      await Bun.sleep(20)
 +      expect(prompt.current.input).toBe(draft)
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
-+// INV-11 / plan B-01：home 无 sessionID 时先 create，再 goal POST，
++// #0503：INV-11 / plan B-01：home 无 sessionID 时先 create，再 goal POST，
 +// 成功必须 fall-through 共享尾 delayed navigate，不能 early-return 丢路由
 +// 同时断言多词 objective "a b c" 仍整串写入（与 INV-01 叠加）
 +test("home TUI /goal creates session posts objective and navigates", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  // 固定 create 返回 id，便于断言 navigate 目标 session
 +  const createdID = "ses_goal_home_nav"
@@ -1349,7 +1376,8 @@ index 3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd..4bd1196c4af2bcb388c5ec25a4fcf640
 +      if (url.pathname === "/agent") return json([agent])
 +      // submit 在 props.sessionID 为空时创建 session
 +      if (url.pathname === "/session" && (init?.method === "POST" || _request?.method === "POST")) {
-+        return json({ id: createdID, slug: "x", version: "1", projectID: "proj_test", directory, title: "t", time: { created: 1, updated: 1 } })
++        // #0503：directory 回显 fixture 常量——create 后 sync bootstrap 依赖它判定工作区
++        return json({ id: createdID, slug: "x", version: "1", projectID: "proj_test", directory, title: "t", time: { created: 1 } })
 +      }
 +      // Goal 必须写到刚创建的 session，而不是旧常量 sessionID
 +      if (url.pathname === `/session/${createdID}/goal` && (init?.method === "POST" || _request?.method === "POST")) {
@@ -1384,19 +1412,49 @@ index 3ea8ed0f821bad368f72cf330ab2f2a8821cd2dd..4bd1196c4af2bcb388c5ec25a4fcf640
 +      expect(postedObjective).toBe("a b c")
 +      expect(promptAsync).toBe(0)
 +      // 共享尾 setTimeout(50) navigate；等到 route 进入新 session
-+      await wait(() => route.data.type === "session" && (route.data as { sessionID?: string }).sessionID === createdID)
++      await wait(
++        () => route.data.type === "session" && (route.data as { sessionID?: string }).sessionID === createdID,
++      )
 +      expect(route.data).toEqual({ type: "session", sessionID: createdID })
 +    },
++    tmp.path,
 +    {
 +      // 显式 home + 无 promptSessionID，复现 create-then-send 生产路径
 +      initialRoute: { type: "home" },
 +      promptSessionID: undefined,
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++  )
 +})
 +
- test("TUI prompt keeps pasted text summary highlighted after wide text is inserted before it", async () => {
-   const previous = Global.Path.state
-   await using tmp = await tmpdir()
+ // #491：三态单行矩阵——160 列终端内限制真实 Prompt 为 75 列，锁定“终端宽但 Prompt 窄”的偏差。
+ // IDE registry 腿经 env 播种确定化（不依赖宿主 IDE 会话）；voice 交互腿依赖宿主转写子进程，
+ // 由 prompt-voice-input 单测覆盖 compact 文案矩阵。
+
+diff --git a/packages/tui/test/fixture/tui-sdk.ts b/packages/tui/test/fixture/tui-sdk.ts
+--- a/packages/tui/test/fixture/tui-sdk.ts
++++ b/packages/tui/test/fixture/tui-sdk.ts
+@@ -63,14 +63,20 @@ export function createEventSource() {
+ }
+ 
+ // #237：扩展 request 参数，让 /log 等端点测试能截获请求体验证日志契约
+-export type FetchHandler = (url: URL, request?: Request) => Response | Promise<Response> | undefined
++// #0503：init 第三参转发 method/body——goal POST 等控制面 mutation 断言依赖它；
++// 既有 handler 忽略额外参数不受影响
++export type FetchHandler = (
++  url: URL,
++  request?: Request,
++  init?: RequestInit,
++) => Response | Promise<Response> | undefined
+ 
+ export function createFetch(override?: FetchHandler, events?: ReturnType<typeof createEventSource>) {
+   const session = [] as URL[]
+-  const fetch = (async (input: RequestInfo | URL) => {
++  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+     const url = new URL(input instanceof Request ? input.url : String(input))
+     if (url.pathname === "/session") session.push(url)
+-    const overridden = await override?.(url, input instanceof Request ? input : undefined)
++    const overridden = await override?.(url, input instanceof Request ? input : undefined, init)
+     if (overridden) return overridden
+     if (url.pathname === "/api/event" && events) return events.response()
+ 
+

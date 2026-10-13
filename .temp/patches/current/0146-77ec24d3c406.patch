@@ -9,10 +9,11 @@ diff --git a/package.json b/package.json
 index 3c36b2255a..7430f2d9f8 100644
 --- a/package.json
 +++ b/package.json
-@@ -135,9 +135,14 @@
+@@ -136,10 +136,15 @@
      "electron"
    ],
    "overrides": {
+     "@ai-sdk/anthropic": "3.0.111",
 +    // #146：OpenTUI 运行时必须经 catalog 钉死，禁止嵌套依赖漂移
      "@opentui/core": "catalog:",
 +    // #146：keymap 与 core 同批 catalog（tip 更强覆盖，保留）

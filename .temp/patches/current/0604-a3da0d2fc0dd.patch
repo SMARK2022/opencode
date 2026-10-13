@@ -7,17 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(tool):=20bash=20=E8=BE=93=E5=87=BA=E5=8E=8B?=
  =?UTF-8?q?=E5=A4=8D?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-- 修复 compressVisibleOutput applied 谓词漏计 secretsRedacted：仅脱敏命中时不再回退未脱敏原文
-- CLIXML 解码改为前置无包装步骤（gate-on-decoded），与 win32 normalizePowerShellOutput 消除平台分叉
-- 行内/脱敏/摘录标记统一为设计文档方言：[... reason stats] ASCII、[redacted ...] 保留键名并对 >=16 字符原值保留 7 字符识别头、opencode_excerpt 替代 bash_high_signal_excerpt
-- shell 工具描述新增 harness 标记图例，声明标记来源与省略语义，防模型误判或关闭压缩
-- 删除死代码：4 个命令适配器及 enableCommandAdapters 配置/env、shell.txt 与 prompt.ts 死占位符
+适配说明：核心语义全量落地（WSL patch --fuzz=3 应用 20/23 hunk+3 个 .rej 手工重锚：transformPowerShellClixml 纯解码注释+decodePowerShellClixmlPlain 直调、删 decodePowerShellClixmlBlock 包装函数、compressVisibleOutput 移除旧 0a 早退并改 source 求值；目标 #129/#130 注释保留）。shell.ts 图例按目标 join(" ") 无前缀数组形态追加第三条（句文逐字保留）。prompt.ts/shell.txt 两 hunk 裁记：目标更早重放已删除死占位符（no-op）。测试按目标 #129 注释位移重锚（fuzz 自动吸收）。
+
 
 diff --git a/docs/plans/bash-output-compression-marker-unification.md b/docs/plans/bash-output-compression-marker-unification.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..4b979dd017837cc31305fbc4b0a6067b7cffe279
 --- /dev/null
 +++ b/docs/plans/bash-output-compression-marker-unification.md
 @@ -0,0 +1,449 @@
@@ -470,8 +465,8 @@ index 0000000000000000000000000000000000000000..4b979dd017837cc31305fbc4b0a6067b
 +| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R3 | yes | 无 | N-01 设计文档同步用状态注记而非删除已完成阶段段落（已补做折叠；无重审触发）；N-02 §23 设计文档 numstat 漂移（+8/−6 实为 +7/−7，已修正）；N-03 transformPowerShellClixml 与 normalizePowerShellOutput 为 8 行同构包装（plan 批准形态，解码算法单一源）；N-04 context-usage.ts 存在既有死占位符替换（改动前即 no-op，非本 GOAL 路径与预算内） | **No blocking findings. APPROVE**（R3 实现审计，round 1/3，full scope；E≈270/C≈48-50/比值≈0.18 独立复算达标） | task ses_f8a36957bffee1bob7qThLp6yF |
+
 diff --git a/docs/tool-output-notice-format-design.md b/docs/tool-output-notice-format-design.md
-index 375c12e9e2feb6e4f282f8b06791037b6f5bf95c..6141836333292841845f634512b6ca3684bab04f 100644
 --- a/docs/tool-output-notice-format-design.md
 +++ b/docs/tool-output-notice-format-design.md
 @@ -208,7 +208,7 @@ message: Command exceeded timeout. Retry with a larger timeout only if it is exp
@@ -541,8 +536,8 @@ index 375c12e9e2feb6e4f282f8b06791037b6f5bf95c..6141836333292841845f634512b6ca36
  
  ## 测试要求
  
+
 diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b07f88b24 100644
 --- a/packages/opencode/src/tool/bash-compress.ts
 +++ b/packages/opencode/src/tool/bash-compress.ts
 @@ -9,8 +9,7 @@
@@ -697,9 +692,9 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
    return { text: result, redacted }
  }
  
-@@ -601,7 +578,8 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig): { tex
-   
-   if (frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable)) {
+@@ -625,7 +602,8 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig): { tex
+   // #283：frame 计数来自终端重绘，光标定位 CSI 也会计入；
+   // 与渲染稳定文本比较，避免把普通输出误报成 progress collapse
      return {
 -      text: `... [terminal progress collapsed: ${frames} frames]\n${stable}`,
 +      // 行内省略标记（设计文档方言）：ASCII、短于被替换内容，保终端最终帧。
@@ -707,7 +702,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
        frames
      }
    }
-@@ -736,268 +714,6 @@ function collapseCarriageReturns(text: string, config: CompressionConfig): { tex
+@@ -760,268 +738,6 @@ function collapseCarriageReturns(text: string, config: CompressionConfig): { tex
    return { text, groups: 0 }
  }
  
@@ -976,7 +971,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
  // 计算行哈希（用于加速块比较）
  function computeLineHashes(lines: string[]): number[] {
    return lines.map(line => {
-@@ -1068,7 +784,7 @@ function findRepeatedBlockAt(
+@@ -1092,7 +808,7 @@ function findRepeatedBlockAt(
      // 替换内容：只留第一遍块，然后加上总结语
      const replacementLines = [
        ...block,
@@ -985,7 +980,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
      ]
  
      // 评估是否划算
-@@ -1136,7 +852,7 @@ function compressSameLines(lines: string[], config: CompressionConfig): { lines:
+@@ -1160,7 +876,7 @@ function compressSameLines(lines: string[], config: CompressionConfig): { lines:
      // 如果达到了阈值且不是纯空白行
      if (count >= config.minSameLineRepeats && !isBlankLine(line)) {
        const originalLines = lines.slice(i, j)
@@ -994,7 +989,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
        const score = scoreReplacement(serializeLines(originalLines), serializeLines(replacementLines), config)
  
        // 只有省下了足够字节才应用
-@@ -1206,7 +922,7 @@ function compressInlineLine(line: string, config: CompressionConfig): { line: st
+@@ -1230,7 +946,7 @@ function compressInlineLine(line: string, config: CompressionConfig): { line: st
        if (byteLen(original) < config.minInlineRunBytes) continue
  
        // 替换文案，明确指出是什么模式重复了多少次
@@ -1003,16 +998,16 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
        const score = scoreReplacement(original, replacement, config)
        if (!score.profitable) continue
  
-@@ -1246,7 +962,7 @@ function compressWholeLineRepeat(line: string, config: CompressionConfig): { lin
+@@ -1272,7 +988,7 @@ function compressWholeLineRepeat(line: string, config: CompressionConfig): { lin
        break
      }
      if (!ok) continue
 -    const replacement = `[repeated ${quotePattern(pattern)} ×${repeats}]`
 +    const replacement = `[... repeated ${quotePattern(pattern)} x${repeats}]`
+     // #283：整体替换仅在 score 判定盈利时生效，避免长 pattern 平替造成的上下文膨胀
      const score = scoreReplacement(line, replacement, config)
      if (score.profitable) return { line: replacement, applied: true }
-   }
-@@ -1365,7 +1081,7 @@ function compressTemplateRuns(lines: string[], config: CompressionConfig): { lin
+@@ -1394,7 +1110,7 @@ function compressTemplateRuns(lines: string[], config: CompressionConfig): { lin
      if (count >= config.minTemplateRepeats && template !== line && !hasErrorKeywords) {
        const originalLines = lines.slice(i, j)
        const replacementLines = [
@@ -1021,7 +1016,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
          `    first: ${lines[i]}`,
          `    last:  ${lines[j - 1]}`
        ]
-@@ -1397,14 +1113,13 @@ function compressHighEntropyLines(lines: string[], config: CompressionConfig): {
+@@ -1426,14 +1142,13 @@ function compressHighEntropyLines(lines: string[], config: CompressionConfig): {
    
    const next = lines.map(line => {
      if (!isHighEntropyLine(line, config)) return line
@@ -1040,7 +1035,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
      
      const score = scoreReplacement(line, replacement, config)
      if (score.profitable) {
-@@ -1432,9 +1147,8 @@ function compressProgressBars(line: string, config: CompressionConfig): { line:
+@@ -1461,9 +1176,8 @@ function compressProgressBars(line: string, config: CompressionConfig): { line:
    for (const { regex, name } of patterns) {
      const match = regex.exec(line)
      if (match) {
@@ -1051,7 +1046,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
        
        const score = scoreReplacement(match[0], replacement, config)
        if (score.profitable) {
-@@ -1459,7 +1173,7 @@ function compressLongLists(line: string, config: CompressionConfig): { line: str
+@@ -1488,7 +1202,7 @@ function compressLongLists(line: string, config: CompressionConfig): { line: str
    if (totalBytes < 200) return { line, applied: false }
    
    // 保留前 3 个和后 3 个
@@ -1060,7 +1055,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
    const replacement = kept.join(', ')
    
    const score = scoreReplacement(line, replacement, config)
-@@ -1540,13 +1254,14 @@ const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
+@@ -1583,15 +1297,16 @@ const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
   * CLIXML is PowerShell's XML-based error/info serialization format that usually
   * starts with `#< CLIXML` and wraps visible text inside `<Objs>...<S ...>...`.
   *
@@ -1071,29 +1066,33 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
 + * Returns decoded plain text if the input is recognized CLIXML, or null otherwise.
   */
  function transformPowerShellClixml(text: string): string | null {
+   // #129：按块替换纯 CLIXML，混合 stdout 块保持原样
+   // #129：整段扫描所有 CLIXML 块并替换
    let changed = false
    const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
 -    const decoded = decodePowerShellClixmlBlock(block)
 +    const decoded = decodePowerShellClixmlPlain(block)
+     // #129：非纯块返回原文
      if (!decoded) return block
      changed = true
-     return decoded
-@@ -1555,13 +1270,6 @@ function transformPowerShellClixml(text: string): string | null {
+@@ -1602,15 +1317,6 @@ function transformPowerShellClixml(text: string): string | null {
    return changed ? next : null
  }
  
+-// #129：单块 CLIXML → high-entropy 包装纯文本
+-// #130：compress 仍走包装，normalize 走 plain
 -function decodePowerShellClixmlBlock(block: string): string | null {
+-  // #130：压缩路径包装；normalize 走 plain
 -  const plain = decodePowerShellClixmlPlain(block)
 -  if (!plain) return null
--
 -  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
 -}
 -
+ // #130：纯文本 CLIXML 解码（无 high-entropy 包装）
+ // #130：plain 返回值不含 high-entropy 标签
  function decodePowerShellClixmlPlain(block: string): string | null {
-   if (!isPurePowerShellClixmlBlock(block)) return null
+@@ -1714,11 +1420,17 @@ function clixmlDecodeHexEscapes(value: string): string {
  
-@@ -1656,11 +1364,17 @@ function clixmlDecodeHexEscapes(value: string): string {
-  */
  export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>): CompressResult {
    const config = configOf(configInput)
 +
@@ -1111,11 +1110,11 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
      savedBytes: 0,
      savingRatio: 0,
      carriageReturnGroups: 0,
-@@ -1673,30 +1387,14 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
+@@ -1731,30 +1443,14 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
      applied: false,
    }
  
--  // 0a: PowerShell CLIXML — decode back to plain text before the main pipeline.
+-  // 步骤 0a：PowerShell CLIXML 解码 — 在主压缩流程之前将 CLIXML 转换为纯文本
 -  const clixml = transformPowerShellClixml(text)
 -  if (clixml) {
 -    const compressedBytes = byteLen(clixml)
@@ -1135,7 +1134,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
 -  // 禁用或不值得压缩时直接返回
 -  if (!config.enabled || !shouldCompressOutput(text)) {
 -    return { text, stats: emptyStats }
-+  // 禁用或不值得压缩时返回解码文本；解码后 <200B 的输出按用户接受的绑定
++  // 604：禁用或不值得压缩时返回解码文本；解码后 <200B 的输出按用户接受的绑定
 +  // 策略跳过脱敏（显式接受边界，见 canonical plan INV-02，非缺陷）。
 +  if (!config.enabled || !shouldCompressOutput(source)) {
 +    return { text: source, stats: emptyStats }
@@ -1147,7 +1146,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
  
    // 第一步：虚拟终端渲染（处理 ANSI 控制序列和回车）
    const cr = collapseCarriageReturns(redactedText, config)
-@@ -1740,13 +1438,16 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
+@@ -1798,13 +1494,16 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
      inlinePatternGroups: inline.groups,
      highEntropyLines: highEntropy.groups,
      secretsRedacted,
@@ -1167,7 +1166,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
      stats: stats.applied ? stats : emptyStats,
    }
  }
-@@ -2048,17 +1749,18 @@ export class BashDiagnosticCollector {
+@@ -2106,17 +1805,18 @@ export class BashDiagnosticCollector {
    }
  }
  
@@ -1191,7 +1190,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
      out.push("")
      out.push(`[L${first}-L${last}]${priorityLabel}`)
  
-@@ -2069,7 +1771,6 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
+@@ -2127,7 +1827,6 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
      }
    }
  
@@ -1199,7 +1198,7 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
    return out.join("\n")
  }
  
-@@ -2110,10 +1811,12 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options:
+@@ -2191,10 +1890,12 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options:
      return ''
    }
  
@@ -1215,54 +1214,22 @@ index 30ed3e244dcb4ac0c6f2714014ce9c7bcd87f044..b95bdb418910bb31e6f8cd6ee4d0d29b
  }
  
  /**
+
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index b37469786f5de63b4330661660367703cad5ee81..2a1e2b430f9f91b95755c899ee050af3c1da5e3d 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1430,6 +1430,9 @@ export const ShellTool = Tool.define(
+@@ -1516,6 +1516,9 @@ export const ShellTool = Tool.define(
            ? [
-               "  - Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
-               "  - Strongly prefer leaving `compress_output` omitted; set false only for exact raw formatting. Truncated output includes a compact notice and recovery path.",
-+              // 图例三要素：标记由 harness 插入（命令未打印）、首现/错误行保留、
+               "Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
+               "Strongly prefer leaving `compress_output` omitted; set false only for exact raw formatting. Truncated output includes a compact notice and recovery path.",
++              // 604 图例三要素：标记由 harness 插入（命令未打印）、首现/错误行保留、
 +              // 省略是有意的——防止模型把标记当异常排查或因此关闭压缩（INV-04）。
-+              "  - Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate.",
-             ].join("\n")
++              "Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate.",
+             ].join(" ")
            : ""
- 
-diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
-index 89e1c033d337366320d221dd1e9c7a56ebafb24a..9f560e74870c2bc7db8f54b14205ffd17173074f 100644
---- a/packages/opencode/src/tool/shell/prompt.ts
-+++ b/packages/opencode/src/tool/shell/prompt.ts
-@@ -285,8 +285,6 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits)
-       intro: selected.intro,
-       os: platform,
-       shell: name,
--      shellGuidance: "",
--      compressionGuidance: "",
-       tmp: Global.Path.tmp,
-       workdirSection: selected.workdirSection,
-       commandSection: selected.commandSection,
-diff --git a/packages/opencode/src/tool/shell/shell.txt b/packages/opencode/src/tool/shell/shell.txt
-index f07bb2707cb78e0eaaa8f68456c9010ca723685d..c16ae0e0a3081e944ac2cc9b70a36469790599e5 100644
---- a/packages/opencode/src/tool/shell/shell.txt
-+++ b/packages/opencode/src/tool/shell/shell.txt
-@@ -6,14 +6,10 @@ ${workdirSection}
- 
- Use `${tmp}` for temporary work outside the workspace. This directory has already been created, already exists, and is pre-approved for external directory access.
- 
--${shellGuidance}
--
- IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
- 
- ${commandSection}
- 
--${compressionGuidance}
--
- # Git repository state changes
- 
- Read-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.
+         // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
+
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
-index 399ca5d0ffccacc95cbac93b7d94001672ad4d7a..3dc45f1b0a3c14fe4a7854db4fbef9cad6d7e108 100644
 --- a/packages/opencode/test/tool/bash-compress.test.ts
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
 @@ -1,5 +1,5 @@
@@ -1270,9 +1237,9 @@ index 399ca5d0ffccacc95cbac93b7d94001672ad4d7a..3dc45f1b0a3c14fe4a7854db4fbef9ca
 -import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern } from "../../src/tool/bash-compress"
 +import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern, renderDiagnosticAppendix } from "../../src/tool/bash-compress"
  
+ // #129：CLIXML 纯块解码与混合块保留
  describe("tool.bash-compress", () => {
-   test("renders split terminal clear-line sequences without leaking partial escapes", () => {
-@@ -44,7 +44,10 @@ describe("tool.bash-compress", () => {
+@@ -54,7 +54,10 @@ describe("tool.bash-compress", () => {
      const result = compressVisibleOutput(clixml)
  
      expect(result.text).toContain("Saved b64_raw.txt (2664 chars)")
@@ -1284,7 +1251,7 @@ index 399ca5d0ffccacc95cbac93b7d94001672ad4d7a..3dc45f1b0a3c14fe4a7854db4fbef9ca
      expect(result.text).not.toContain("omitted")
    })
  
-@@ -58,7 +61,7 @@ describe("tool.bash-compress", () => {
+@@ -76,7 +79,7 @@ describe("tool.bash-compress", () => {
      const result = compressVisibleOutput(clixml)
  
      expect(result.text).toContain("  1/4  BUILD")
@@ -1293,16 +1260,16 @@ index 399ca5d0ffccacc95cbac93b7d94001672ad4d7a..3dc45f1b0a3c14fe4a7854db4fbef9ca
      expect(result.text).not.toContain("ForegroundColor")
      expect(result.text).not.toContain("H:\\FRCheck\\scripts\\deploy.ps1")
      expect(result.text.match(/============================================================/g)?.length).toBeGreaterThanOrEqual(2)
-@@ -80,7 +83,7 @@ describe("tool.bash-compress", () => {
- 
+@@ -101,7 +104,7 @@ describe("tool.bash-compress", () => {
      expect(result.text).toContain("  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb")
      expect(result.text).toContain("  DONE")
+     // #129：若 pure 失效会把块收成仅 TRANSFER 的 high-entropy
 -    expect(result.text).not.toBe("<high-entropy powershell-clixml>  3/4  TRANSFER</high-entropy>")
 +    expect(result.text).not.toContain("high-entropy")
+     expect(result.text).toContain("  4/4  RUN")
    })
  
-   test("normalizes plain PowerShell CLIXML to visible text", () => {
-@@ -106,14 +109,14 @@ describe("tool.bash-compress", () => {
+@@ -129,14 +132,14 @@ describe("tool.bash-compress", () => {
      const result = compressVisibleOutput(text)
  
      expect(result.text).toContain("repeat-me-repeat-me-repeat-me")
@@ -1320,7 +1287,7 @@ index 399ca5d0ffccacc95cbac93b7d94001672ad4d7a..3dc45f1b0a3c14fe4a7854db4fbef9ca
      expect(result.stats.inlinePatternGroups).toBe(1)
    })
  
-@@ -131,4 +134,188 @@ describe("tool.bash-compress", () => {
+@@ -154,4 +157,188 @@ describe("tool.bash-compress", () => {
      expect(quotePattern('a"b')).toBe('"a\\"b"')
      expect(quotePattern("a\\b")).toBe('"a\\\\b"')
    })
@@ -1509,11 +1476,11 @@ index 399ca5d0ffccacc95cbac93b7d94001672ad4d7a..3dc45f1b0a3c14fe4a7854db4fbef9ca
 +    expect(output).toContain("> 4 | Error: first failure")
 +  })
  })
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 5ee1e88d233e112269a2c1b162fbfb64a7682acd..aeea9f05f415e4e7dc3a38527f13e9fa70f876f7 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -372,6 +372,34 @@ describe("tool.shell", () => {
+@@ -448,6 +448,34 @@ it.live("falls back from terminal-only configured shell", () =>
        )
      }),
    )
@@ -1548,20 +1515,20 @@ index 5ee1e88d233e112269a2c1b162fbfb64a7682acd..aeea9f05f415e4e7dc3a38527f13e9fa
  })
  
  describe("tool.shell permissions", () => {
-@@ -2318,7 +2346,8 @@ describe("tool.shell abort", () => {
+@@ -2186,7 +2214,8 @@ describe("tool.shell abort", () => {
          })
  
          expect(result.metadata.exit).toBe(9)
 -        expect(result.output).toContain("<bash_high_signal_excerpt>")
 +        expect(result.output).toContain('<opencode_excerpt type="shell_high_signal"')
 +        expect(result.output).toContain("fatal: hidden root cause")
+         // #293：隐藏诊断不再抑制 exit notice——只有真正的空输出才省略退出码
          expect(result.output).toContain(
            '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
-         )
-@@ -2345,8 +2374,8 @@ describe("tool.shell abort", () => {
+@@ -2213,8 +2242,8 @@ describe("tool.shell abort", () => {
          expect(result.metadata.exit).toBe(9)
          expect(result.output).toContain("fatal: visible root cause")
-         // 诊断摘录只来自最终输出隐藏掉的文本；可见 fatal 行本身不需要再复制到
+         // #293：诊断摘录只来自最终输出隐藏掉的文本；可见 fatal 行本身不需要再复制到
 -        // <bash_high_signal_excerpt>，但执行状态 notice 仍然独立保留 exit code。
 -        expect(result.output).not.toContain("<bash_high_signal_excerpt>")
 +        // <opencode_excerpt>，但执行状态 notice 仍然独立保留 exit code。

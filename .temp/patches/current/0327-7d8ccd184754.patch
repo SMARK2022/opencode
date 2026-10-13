@@ -1,9 +1,11 @@
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -10,10 +10,12 @@ import { Plugin } from "@/plugin"
+@@ -10,12 +10,14 @@ import { Plugin } from "@/plugin"
  import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
  import { SessionRetry } from "@/session/retry"
+ import { Database } from "@opencode-ai/core/database/database"
+ 
  import { MessageID, PartID, SessionID } from "@/session/schema"
 +import { ModelV2 } from "@opencode-ai/core/model"
 +import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -30,7 +32,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
            // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
            const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
            // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
-@@ -266,6 +262,76 @@ export const layer = Layer.effect(
+@@ -263,3 +263,73 @@
  
      return Service.of({ review })
  
@@ -104,30 +106,37 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +    // [local-smark] 隐式 reviewer 模型解析结束
 +
 +
-     // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
-     function getReviewerSession(parentID: SessionID, model: Provider.Model) {
-       return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
-
-
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -7,6 +7,9 @@ import { Auth } from "../../src/auth"
- import { Config } from "../../src/config/config"
+@@ -7,5 +7,9 @@
  import { PermissionReviewer } from "../../src/permission/reviewer/service"
  import { Plugin } from "../../src/plugin"
 +import { Provider } from "../../src/provider/provider"
 +import { SessionID } from "../../src/session/schema"
 +import { ProjectV2 } from "@opencode-ai/core/project"
  import { Session } from "../../src/session/session"
++import { Exit, Option } from "effect"
  import { testEffect } from "../lib/effect"
  import { TestConfig } from "../fixture/config"
-@@ -158,6 +161,67 @@ describe("permission reviewer service", () => {
+@@ -54,3 +54,12 @@
+ const REVIEWER_HOOK_HEADER = "x-reviewer-hook"
+ const sessionLayer = Layer.mock(Session.Service)({})
++// #327：带 sessionID 的 review 会经 MessageV2.page 读 transcript——最小 drizzle 链 mock；
++// 空消息窗 + 存在的 session 行让 reviewer 视为空历史并正常返回决策。
++const emptyReviewerDb = (() => {
++  const chain = {
++    orderBy: () => ({ limit: () => ({ all: () => Effect.succeed([]) }) }),
++    get: () => Effect.succeed({ id: SessionID.make("session_parent") }),
++  }
++  return { db: { select: () => ({ from: () => ({ where: () => chain }) }) } as never }
++})()
+ 
+@@ -158,6 +169,66 @@
      }),
    )
  
 +
-+  // [local-smark] reviewer 默认模型来源回归开始
 +  // 以下测试验证：未配置 permission.auto_review.model 时，hidden reviewer 应当
 +  // 跟随父会话当前模型，而不是受全局 state/model.json recent 漂移到另一个 provider。
 +  // 这直接复现了 zhipuai/glm-5.2 401 → “身份验证失败。” 的根因。
@@ -190,7 +199,7 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
    // #261：验证 reviewer 路径经过 chat.params/chat.headers hook——max_output_tokens 被清理、header 被注入
    oauthHook.effect("applies chat provider hooks before sending OpenAI OAuth reviewer requests", () =>
      Effect.gen(function* () {
-@@ -176,6 +240,284 @@ describe("permission reviewer service", () => {
+@@ -176,6 +240,299 @@
    )
  })
  
@@ -264,6 +273,9 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (msg) => Effect.succeed(msg),
 +    updatePart: (part) => Effect.succeed(part),
++    // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
++    // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
++    findMessage: () => Effect.succeed(Option.none()),
 +  })
 +  return {
 +    bodies,
@@ -285,6 +297,8 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +      Layer.provide(authLayer({ type: "api", key: "test-key" })),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // #327：reviewer layer 依赖 Database（#206 谱系）——与旧 fixture 相同的空 mock，测试不触真实库
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}
@@ -345,6 +359,9 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (msg) => Effect.succeed(msg),
 +    updatePart: (part) => Effect.succeed(part),
++    // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
++    // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
++    findMessage: () => Effect.succeed(Option.none()),
 +  })
 +  return {
 +    bodies,
@@ -369,6 +386,8 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +      Layer.provide(authLayer({ type: "api", key: "test-key" })),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // #327：reviewer layer 依赖 Database（#206 谱系）——与旧 fixture 相同的空 mock，测试不触真实库
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}
@@ -446,6 +465,9 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (msg) => Effect.succeed(msg),
 +    updatePart: (part) => Effect.succeed(part),
++    // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
++    // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
++    findMessage: () => Effect.succeed(Option.none()),
 +  })
 +  return {
 +    bodies,
@@ -467,6 +489,8 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +      Layer.provide(authLayer({ type: "api", key: "test-key" })),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // #327：reviewer layer 依赖 Database（#206 谱系）——与旧 fixture 相同的空 mock，测试不触真实库
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}

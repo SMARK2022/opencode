@@ -12,6 +12,7 @@ timeout 与 stream 退出时 message 已 Aborted 但 permission_review_decision 
 pending。对齐 SessionProcessor ensuring 收口：map∪durable 扫描、先闭 tool 再写
 message，finalize 失败可观测且不伪造 allow/deny。
 
+
 diff --git a/docs/plans/permission-reviewer-tool-terminal-closure.md b/docs/plans/permission-reviewer-tool-terminal-closure.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..b6cbb746679c2439f62d15a6dda9cae4d7ec9db1
@@ -467,105 +468,90 @@ index 0000000000000000000000000000000000000000..b6cbb746679c2439f62d15a6dda9cae4
 +Audited plan revision: R1
 +Full original scope: yes
 +```
+
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 008fe4d720e867e6f7a2ce24408f4c5205fb4bc7..09e5cf2ee1661bcc3515bb0af1cfc1eb546f672a 100644
+index 48127c9c4..b0af25151 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -14,11 +14,20 @@ import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } fr
- import { Context, Effect, Exit, Layer, Option, Schema, Semaphore } from "effect"
- import * as Stream from "effect/Stream"
- import { mergeDeep } from "remeda"
-+import * as Log from "@opencode-ai/core/util/log"
- import { PermissionReviewerPrompt } from "./prompt"
- import { Assessment, ReviewerRequest } from "./schema"
+@@ -25,6 +25,12 @@ import { Assessment, ReviewerRequest } from "./schema"
  import { PermissionReviewerTranscript } from "./transcript"
  import type { PermissionAuto } from "../auto"
  
-+// 与 SessionProcessor.TOOL_ABORTED_ERROR 字面量对齐。
-+// 故意不 import processor：reviewer 安全边界禁止并入主会话管道，只共享终态文案合同。
++// #546：错误文案与 SessionProcessor.TOOL_ABORTED_ERROR 字面量对齐（跨模块合同：aborted 与
++// incomplete 必须区分，防 Provider replay 把协议失败误判成用户取消）；故意不 import
++// processor——reviewer 失败路径不得把 session 模块拉进加载图。
 +const TOOL_ABORTED_ERROR = "Tool execution aborted"
-+// incomplete 与 aborted 必须区分：Provider replay 不能把协议未完成误判成用户取消。
-+// 两常量是跨模块合同字符串，改字面量必须同步 processor 与本文件测试期望。
 +const TOOL_INCOMPLETE_ERROR = "Tool execution did not complete before stream ended"
-+const log = Log.create({ service: "permission.reviewer" })
 +
+ // #198：reviewer 不可用——服务已禁用，回退到用户审批
+ // #198：Disabled 是配置信号——approvals_reviewer 非 auto_review 时抛出，auto.ts 将其转为 ask
  export class ReviewerDisabled extends Schema.TaggedErrorClass<ReviewerDisabled>()("PermissionReviewerDisabled", {}) {
-   override get message() {
-     return "auto reviewer is disabled"
-@@ -421,6 +430,35 @@ export const layer = Layer.effect(
+@@ -441,6 +447,19 @@ export const layer = Layer.effect(
            time: { created: Date.now() },
          }
-         yield* sessions.updateMessage(message)
-+        // INV-02：message 标 completed 前必须先收同 message 下 open tool，避免 Aborted+pending 半写。
-+        // 外层 handler 无 toolParts map：依赖 closeOpenReviewerTools 的 durable 补扫 + stream ensuring 已跑路径。
-+        // 首次 finalize 写失败时，此处第二次 close 是共终态的关键重试点（与生产半写同形）。
+         yield* session.updateMessage(message)
++        // #546：message 终态写入前先闭协议 tool（tool→message 顺序，INV-02）——Aborted
++        // message + pending tool 的僵尸形态会逃过 abortPendingToolParts（其只扫未 completed 的 assistant）。
++        // finalize 失败只可观测，不产生第二个业务错误（INV-04）。
 +        const closeMessageTools = (error: string, interrupted: boolean) =>
-+          closeOpenReviewerTools(sessions, {
-+            sessionID: session.id,
++          closeOpenReviewerTools(session, {
++            sessionID: sessionInfo!.id,
 +            messageID: message.id,
 +            error,
 +            interrupted,
 +          }).pipe(
-+            Effect.catch((cause) =>
-+              Effect.sync(() =>
-+                log.warn("reviewer tool finalize failed", {
-+                  sessionID: session.id,
-+                  messageID: message.id,
-+                  error: String(cause),
-+                }),
-+              ),
-+            ),
-+            Effect.catchDefect((cause) =>
-+              Effect.sync(() =>
-+                log.warn("reviewer tool finalize defect", {
-+                  sessionID: session.id,
-+                  messageID: message.id,
-+                  error: String(cause),
-+                }),
-+              ),
-+            ),
++            Effect.catch(() => Effect.logWarning("reviewer closeMessageTools failed")),
++            Effect.catchDefect(() => Effect.logWarning("reviewer closeMessageTools defect")),
 +          )
          const assessment = yield* runReviewerStream(input.messages, input.model, {
-           sessionID: session.id,
+           sessionID: sessionInfo.id,
            messageID: message.id,
-@@ -430,16 +468,17 @@ export const layer = Layer.effect(
+@@ -450,18 +469,20 @@ export const layer = Layer.effect(
+           message,
          }).pipe(
+           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
++          // #546：先闭 tool 再写 message——顺序颠倒会重现「error message + pending tool」僵尸（INV-02）。
            Effect.tapError((error) =>
              Effect.gen(function* () {
 +              yield* closeMessageTools(TOOL_INCOMPLETE_ERROR, false)
                message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
                message.time.completed = Date.now()
-               yield* sessions.updateMessage(message)
+               yield* session.updateMessage(message)
              }),
            ),
 -          // 超时中断不会触发 tapError（中断不是 failure）；onInterrupt 确保子会话
 -          // assistant 消息始终写入终态，避免 repair-empty-dangling-assistant 延迟修复。
 -          // 复用 prompt.ts finalizeInterruptedAssistant 的相同模式。
-+          // 超时中断不会触发 tapError（中断不是 failure）；先闭 tool 再写 message 终态。
-+          // 顺序固定：tool → message；颠倒会重现库内 Aborted message + pending tool。
++          // #546：超时中断不会触发 tapError（中断不是 failure）；onInterrupt 先闭 tool 再确保子会话
++          // assistant 消息写入终态，避免 repair-empty-dangling-assistant 延迟修复（对齐 prompt.ts 模式）。
            Effect.onInterrupt(() =>
              Effect.gen(function* () {
 +              yield* closeMessageTools(TOOL_ABORTED_ERROR, true)
                if (message.time.completed) return
                message.error ??= MessageV2.fromError(
                  new DOMException("Aborted", "AbortError"),
-@@ -615,43 +654,47 @@ export const layer = Layer.effect(
+@@ -640,40 +661,26 @@ export const layer = Layer.effect(
              // durable state 的单一真相留在 Session.Service，避免发布窗口产生双重 winner。
              const toolParts = new Map<string, PartID>()
              const toolInput = new Map<string, string>()
-+            // 中断路径优先 aborted 文案；ensuring 复用该标志避免二次闭合写成 incomplete。
-+            // 标志必须在 onInterrupt 内同步置位：ensuring 与 onInterrupt 的相对顺序不能假定。
++            // #546：stream 退出方式标志——onInterrupt 置位，ensuring 兜底据此选择终态文案。
 +            let streamInterrupted = false
- 
++            // #546：safeFinalize——cleanup 失败降级为可观测日志，绝不让 finalize 错误覆盖
++            // provider 原始错误或伪装 reviewer 成功（INV-04）。
++            const safeFinalize = (error: string, interrupted: boolean) =>
++              finalizeOpenToolParts(error, interrupted).pipe(
++                Effect.catch(() => Effect.logWarning("reviewer finalizeOpenToolParts failed")),
++                Effect.catchDefect(() => Effect.logWarning("reviewer finalizeOpenToolParts defect")),
++              )
              const finalizeOpenToolParts = Effect.fnUntraced(function* (error: string, interrupted: boolean) {
                if (!persist) return
 -              const end = Date.now()
 -              yield* Effect.forEach(
 -                toolParts.values(),
 -                Effect.fnUntraced(function* (partID) {
--                  // registry 只保存首次 durable write 前分配的稳定 identity；退出时必须
+-                  // #497：registry 只保存首次 durable write 前分配的稳定 identity；退出时必须
 -                  // 重读存储，才能同时覆盖 commit 后 return 前中断并尊重 completed winner。
--                  const part = yield* sessions.getPart({
+-                  const part = yield* session.getPart({
 -                    sessionID: persist.sessionID,
 -                    messageID: persist.messageID,
 -                    partID,
@@ -574,26 +560,26 @@ index 008fe4d720e867e6f7a2ce24408f4c5205fb4bc7..09e5cf2ee1661bcc3515bb0af1cfc1eb
 -                  if (part.state.status !== "pending" && part.state.status !== "running") return
 -                  const start = part.state.status === "running" ? part.state.time.start : end
 -                  const metadata = part.state.status === "running" ? part.state.metadata : undefined
--                  yield* sessions.updatePart({
+-                  yield* session.updatePart({
 -                    ...part,
 -                    state: {
 -                      status: "error",
 -                      input: part.state.input,
 -                      error,
--                      // interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
+-                      // #497：interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
 -                      // 保持原错误语义，不能让 Provider replay 把协议失败误判成用户取消。
 -                      metadata: interrupted
 -                        ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
 -                        : metadata,
 -                      time: { start, end },
 -                    },
--                  } satisfies MessageV2.ToolPart)
+-                  } satisfies ToolPart)
 -                }),
 -                { discard: true },
 -              )
-+              // map ∪ durable：内存 ownership 加速；SQLite/message 真相兜底漏登记 part。
-+              // 幂等：已 error/completed 的 part 在 getPart 后跳过，双跑 ensuring/onInterrupt 安全。
-+              yield* closeOpenReviewerTools(sessions, {
++              // #546：委托 map∪durable 双扫描（closeOpenReviewerTools）——只扫内存 Map 会漏
++              // commit 后 return 前中断的 part；#497 的 getPart 重读语义在委托内完整保留。
++              yield* closeOpenReviewerTools(session, {
 +                sessionID: persist.sessionID,
 +                messageID: persist.messageID,
 +                knownPartIDs: toolParts.values(),
@@ -602,83 +588,57 @@ index 008fe4d720e867e6f7a2ce24408f4c5205fb4bc7..09e5cf2ee1661bcc3515bb0af1cfc1eb
 +              })
              })
  
-+            // safeFinalize：cleanup 失败可观测，但不升级为第二个业务错误、不伪造决策成功。
-+            // catch + catchDefect 都要盖：写失败可能是 typed error，测试夹具也用 throw defect 模拟。
-+            const safeFinalize = (error: string, interrupted: boolean) =>
-+              finalizeOpenToolParts(error, interrupted).pipe(
-+                Effect.catch((cause) =>
-+                  Effect.sync(() =>
-+                    log.warn("reviewer stream tool finalize failed", {
-+                      sessionID: persist?.sessionID,
-+                      messageID: persist?.messageID,
-+                      error: String(cause),
-+                    }),
-+                  ),
-+                ),
-+                Effect.catchDefect((cause) =>
-+                  Effect.sync(() =>
-+                    log.warn("reviewer stream tool finalize defect", {
-+                      sessionID: persist?.sessionID,
-+                      messageID: persist?.messageID,
-+                      error: String(cause),
-+                    }),
-+                  ),
-+                ),
-+              )
-+
              yield* Stream.runForEach(
-               Stream.fromAsyncIterable(result.fullStream, (error) => error),
-               Effect.fnUntraced(function* (event) {
-@@ -842,24 +885,30 @@ export const layer = Layer.effect(
+@@ -880,24 +887,27 @@ export const layer = Layer.effect(
                }),
              ).pipe(
                Effect.onInterrupt(() =>
+-                // #497：真实 abort 的 open tool part 闭合为 error+interrupted marker。
 -                finalizeOpenToolParts("Tool execution aborted", true).pipe(
 -                  Effect.catch(() => Effect.void),
 -                  Effect.catchDefect(() => Effect.void),
 -                ),
-+                Effect.gen(function* () {
++                Effect.suspend(() => {
++                  // #546：同步标志在 onInterrupt 第一时间置位——ensuring 兜底据此区分 aborted/incomplete。
 +                  streamInterrupted = true
-+                  yield* safeFinalize(TOOL_ABORTED_ERROR, true)
++                  // #497：真实 abort 的 open tool part 闭合为 error+interrupted marker。
++                  return safeFinalize(TOOL_ABORTED_ERROR, true)
 +                }),
                ),
-               // Provider failure 的原始 shape 仍交给 SessionRetry；cleanup 失败不能把
+               // #497：Provider failure 的原始 shape 仍交给 SessionRetry；cleanup 失败不能把
                // status/header 等诊断替换成第二个错误，也不能伪造 reviewer 成功结果。
 -              Effect.tapError(() =>
 -                finalizeOpenToolParts("Tool execution did not complete before stream ended", false).pipe(
 -                  Effect.catch(() => Effect.void),
 -                  Effect.catchDefect(() => Effect.void),
 +              Effect.tapError(() => safeFinalize(TOOL_INCOMPLETE_ERROR, false)),
-+              // 对齐 SessionProcessor.ensuring(cleanup)：interrupt/error/success 退出都再扫一次。
-+              // 这是相对「仅 onInterrupt」的根修：timeout 与旁路失败时仍保证至少再尝试一次闭合。
++              // #546：ensuring 兜底——interrupt/error/success 全部退出路径至少再扫一次
++              // （对齐 SessionProcessor 的 Effect.ensuring(cleanup())；幂等由非 open 跳过保证）。
 +              Effect.ensuring(
 +                Effect.suspend(() =>
-+                  safeFinalize(
-+                    streamInterrupted ? TOOL_ABORTED_ERROR : TOOL_INCOMPLETE_ERROR,
-+                    streamInterrupted,
-+                  ),
++                  safeFinalize(streamInterrupted ? TOOL_ABORTED_ERROR : TOOL_INCOMPLETE_ERROR, streamInterrupted),
                  ),
                ),
              )
- 
-             // 正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
+             // #497：正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
              // retry/fallback 接管前先闭合本 attempt，防止每次重试累积 pending Part。
 -            yield* finalizeOpenToolParts("Tool execution did not complete before stream ended", false)
-+            // ensuring 已跑过后此处幂等；保留显式调用使「drain 成功但无 assessment」路径语义自解释。
-+            yield* safeFinalize(TOOL_INCOMPLETE_ERROR, false)
++            yield* finalizeOpenToolParts(TOOL_INCOMPLETE_ERROR, false)
  
+             // #209：流结束后收尾未关闭的 text/reasoning part——provider 可能不发 *-end 事件，避免 part 残留无结束时间
              if (textPart)
-               yield* sessions.updatePart({
-@@ -1160,6 +1209,67 @@ function assessmentFromUnknown(input: unknown) {
+@@ -1208,6 +1218,60 @@ function assessmentFromUnknown(input: unknown) {
    }
  }
  
-+// attempt 退出时的 tool 终态收口主路径（INV-01/02）。
-+// knownPartIDs = 本 attempt 内存 ownership；durable = SQLite/message 真相补扫。
-+// 并集后仍 getPart 重读：覆盖 commit 后 return 前中断窗口，并跳过 completed winner（INV-03）。
-+// 写失败向上抛出：caller 只 log，绝不把 cleanup 失败变成 allow/deny 成功（INV-04）。
++// #546：map∪durable 双扫描闭合协议 tool——attempt 以 interrupt/timeout/stream 失败/drain
++// 不完整退出后，permission_review_decision Part 不得停留 pending/running（INV-01）。
++// knownPartIDs 只覆盖首次 durable write 前分配的 identity（#497）；commit 后中断的 part
++// 只能从存储读到，故 durable 全集经 sessions.messages 补齐（#208 同因：避免 MessageV2.parts
++// 的 Database.Service 泄漏进本模块）。getPart 逐个重读后非 open 跳过——幂等且尊重
++// completed winner（INV-03）；写失败上抛交由调用方降级（INV-04）。
 +function closeOpenReviewerTools(
-+  sessions: Session.Interface,
++  session: Session.Interface,
 +  input: {
 +    sessionID: SessionID
 +    messageID: MessageID
@@ -689,76 +649,68 @@ index 008fe4d720e867e6f7a2ce24408f4c5205fb4bc7..09e5cf2ee1661bcc3515bb0af1cfc1eb
 +) {
 +  return Effect.gen(function* () {
 +    const end = Date.now()
-+    const partIDs = new Set<PartID>(input.knownPartIDs ?? [])
-+    // durable 失败（无 DB / mock）降级为仅 map，避免拖垮整个 finalize。
-+    // MessageV2.parts 走 SQLite；单元 mock 无库时 catch 后 partIDs 仅含 knownPartIDs。
-+    const durable = yield* Effect.try({
-+      try: () => MessageV2.parts(input.messageID),
-+      catch: (cause) => cause,
-+    }).pipe(Effect.catch(() => Effect.succeed([] as MessageV2.Part[])))
++    const known = new Set(input.knownPartIDs ?? [])
++    const messages = yield* session.messages({ sessionID: input.sessionID, limit: 100 })
++    const durable = messages.find((m) => m.info.id === input.messageID)?.parts ?? []
++    // durable 只补 tool 类型——text/reasoning 的收尾走既有 drain 路径，不在闭合范围
 +    for (const part of durable) {
-+      // 只收 open tool；text/reasoning/step-finish 不参与 tool 终态合同。
-+      if (part.type !== "tool") continue
-+      if (part.state.status !== "pending" && part.state.status !== "running") continue
-+      partIDs.add(part.id)
++      if (part.type === "tool") known.add(part.id)
 +    }
-+    yield* Effect.forEach(
-+      partIDs,
-+      Effect.fnUntraced(function* (partID) {
-+        // registry/map 只持有 identity；终态前必须重读，尊重已 completed 的 decision winner。
-+        const part = yield* sessions.getPart({
-+          sessionID: input.sessionID,
-+          messageID: input.messageID,
-+          partID,
-+        })
-+        if (!part || part.type !== "tool") return
-+        if (part.state.status !== "pending" && part.state.status !== "running") return
-+        const start = part.state.status === "running" ? part.state.time.start : end
-+        const metadata = part.state.status === "running" ? part.state.metadata : undefined
-+        yield* sessions.updatePart({
-+          ...part,
-+          state: {
-+            status: "error",
-+            input: part.state.input,
-+            error: input.error,
-+            // interrupted 仅用于真实 abort/timeout；incomplete stream 保持原错误语义。
-+            metadata: input.interrupted
-+              ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
-+              : metadata,
-+            time: { start, end },
-+          },
-+        } satisfies MessageV2.ToolPart)
-+      }),
-+      { discard: true },
-+    )
++    for (const partID of known) {
++      // #497：重读而非读缓存——退出时刻的 durable state 才是唯一真相
++      const part = yield* session.getPart({
++        sessionID: input.sessionID,
++        messageID: input.messageID,
++        partID,
++      })
++      if (!part || part.type !== "tool") continue
++      if (part.state.status !== "pending" && part.state.status !== "running") continue
++      const start = part.state.status === "running" ? part.state.time.start : end
++      const metadata = part.state.status === "running" ? part.state.metadata : undefined
++      yield* session.updatePart({
++        ...part,
++        state: {
++          status: "error",
++          input: part.state.input,
++          error: input.error,
++          // #497：interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
++          // 保持原错误语义，不能让 Provider replay 把协议失败误判成用户取消。
++          metadata: input.interrupted
++            ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
++            : metadata,
++          time: { start, end },
++        },
++      } satisfies ToolPart)
++    }
 +  })
 +}
 +
- function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: SessionID, requestID: MessageID) {
+ function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: SessionID, requestID: MessageID): Effect.Effect<void, ReviewerRunError, never> {
+ // #227：隐藏请求与畸形 assistant 回复——重试后只保留最终可见尝试
    return Effect.gen(function* () {
-     const hidden = { time: Date.now(), reason: PROTOCOL_RETRY_HIDDEN_REASON as typeof PROTOCOL_RETRY_HIDDEN_REASON }
+
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
-index fd11d3fdfbeb67a2984bae637abd5adbbf31114b..941bc15771a3f249a534f0db640329bf314d14b1 100644
+index 03f4b54df..009b3f283 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts
 +++ b/packages/opencode/test/permission/reviewer-service.test.ts
-@@ -89,6 +89,12 @@ describe("permission reviewer service", () => {
-   const completedClosure = testEffect(completedClosureFixture.layer)
-   const drainedClosureFixture = reviewerClosureFixture("drain")
-   const drainedClosure = testEffect(drainedClosureFixture.layer)
-+  // timeout 共终态夹具：短 timeout_ms + 挂起 SSE（tool-input-start 后不关流）。
+@@ -82,6 +82,12 @@ describe("permission reviewer service", () => {
+   const pendingClosure = testEffect(closureFixtures.get("pending")!.layer)
+   const completedClosure = testEffect(closureFixtures.get("completed")!.layer)
+   const drainedClosure = testEffect(closureFixtures.get("drain")!.layer)
++  // #546：timeout 共终态夹具——短 timeout_ms + 挂起 SSE（tool-input-start 后不关流）。
 +  // 覆盖生产路径：timeoutOrElse 中断 attempt，而非 drain incomplete。
 +  // 回归锁：decision tool 必须 error，assistant 必须 time.completed（INV-01/02）。
 +  // 不断言私有 toolParts map；只读 fixture 持久化 parts/messages 快照。
 +  const timeoutClosureFixture = reviewerTimeoutClosureFixture()
 +  const timeoutClosure = testEffect(timeoutClosureFixture.layer)
- 
-   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
-     Effect.gen(function* () {
-@@ -368,6 +374,64 @@ describe("permission reviewer service", () => {
+   const oauthFixture = reviewerFixture(oauthAuth(), { requireInstructions: true })
+   const apiKeyFixture = reviewerFixture({ type: "api", key: "test-key" }, { requireInstructions: false })
+   // OAuth 凭据本身不是 Codex 契约；这个 fixture 防止未来把条件误放宽成
+@@ -400,6 +406,64 @@ describe("permission reviewer service", () => {
      }),
    )
  
-+  // 用户症状：timeout 后 message 已 Aborted/completed，permission_review_decision 不得仍 pending。
++  // #546：用户症状——timeout 后 message 已 Aborted/completed，permission_review_decision 不得仍 pending。
 +  // 独立期望：error 文案与 SessionProcessor.TOOL_ABORTED_ERROR 一致；不依赖私有 map。
 +  timeoutClosure.live("timeout after tool-input-start closes decision Tools before message completes", () =>
 +    Effect.gen(function* () {
@@ -786,8 +738,8 @@ index fd11d3fdfbeb67a2984bae637abd5adbbf31114b..941bc15771a3f249a534f0db640329bf
 +    }),
 +  )
 +
-+  // 复现生产半写：stream finalize 写 error 首次失败时，不得只留下 completed message + pending tool。
-+  // 旧路径：单次 finalize + catch void → message 仍 completed、tool 仍 pending（库内 3 僵尸同形）。
++  // #546：复现生产半写——stream finalize 写 error 首次失败时，不得只留下 completed message + pending tool。
++  // 旧路径：单次 finalize + catch void → message 仍 completed、tool 仍 pending。
 +  // 修复后：ensuring / 外层 finalize-before-message 再扫一次，第二次写成功即共终态。
 +  // 期望字面量独立于实现：status=error 且 error==="Tool execution aborted"。
 +  const timeoutWriteFailFixture = reviewerTimeoutClosureFixture({ failErrorWrites: true })
@@ -816,38 +768,49 @@ index fd11d3fdfbeb67a2984bae637abd5adbbf31114b..941bc15771a3f249a534f0db640329bf
 +    }),
 +  )
 +
-   // durable 必红夹具：MessageV2.get 读到仍为 pending 的父 ToolPart 时，promote 必须用
+   // #531：durable 必红夹具：session.messages 读到仍为 pending 的父 ToolPart 时，promote 必须用
    // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
    // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
-@@ -533,6 +597,112 @@ function parentToolPartReviewFixture() {
-   }
+@@ -1071,6 +1135,118 @@ function openAIReviewDecisionStream() {
  }
  
+ 
++// #546：timeout 共终态夹具——SSE 发出 tool-input-start 后永不关流，per-attempt timeout_ms=80
++// 触发 timeoutOrElse 中断（而非 drain incomplete）；messages/parts 内存快照供终态断言。
 +function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = {}) {
 +  const parts = new Map<string, MessageV2.Part>()
-+  const messages = new Map<string, MessageV2.Info>()
++  const messages = new Map<string, MessageV2.Assistant>()
 +  let errorWriteFailures = 0
 +  const model = reviewerModel(OPENAI_PROVIDER_ID)
-+  // SSE 发出 tool-input-start 后故意不结束 body。
-+  // 与「有限 Response 立刻 drain」不同：保持连接挂起才能命中 timeoutOrElse 中断路径，
-+  // 而不是 drain 后的 incomplete finalize（生产僵尸 lag≈90s 对应前者）。
-+  const fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => {
-+    const encoder = new TextEncoder()
-+    const body = new ReadableStream<Uint8Array>({
-+      start(controller) {
-+        controller.enqueue(encoder.encode(openAIReviewPendingStream()))
-+      },
-+      cancel() {},
-+    })
-+    return new Response(body, {
-+      status: 200,
-+      headers: { "content-type": "text/event-stream" },
-+    })
-+  }, { preconnect: () => {} })
++  // 挂起 body 命中中断路径：与「有限 Response 立刻 drain」不同，保持连接挂起才对应
++  // 生产僵尸 lag≈90s 的 timeout 窗口（timeoutOrElse interrupt 而非 incomplete finalize）。
++  const fetch = Object.assign(
++    async (_input: RequestInfo | URL, _init?: RequestInit) => {
++      const encoder = new TextEncoder()
++      const body = new ReadableStream<Uint8Array>({
++        start(controller) {
++          controller.enqueue(encoder.encode(openAIReviewPendingStream()))
++        },
++        cancel() {},
++      })
++      return new Response(body, {
++        status: 200,
++        headers: { "content-type": "text/event-stream" },
++      })
++    },
++    { preconnect: () => {} },
++  )
++  const provider = ProviderTest.fake({
++    model,
++    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
++    getLanguage: Effect.fn("ReviewerTimeoutClosureTest.getLanguage")(() =>
++      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
++    ),
++  })
 +  const parentSession: Session.Info = {
 +    id: SessionID.make("session_parent_closure"),
 +    slug: "parent-closure",
-+    projectID: ProjectID.make("project_reviewer_closure"),
++    projectID: ProjectV2.ID.make("project_reviewer_closure"),
 +    directory: "/tmp",
 +    title: "Parent closure",
 +    model: { id: model.id, providerID: model.providerID },
@@ -865,18 +828,19 @@ index fd11d3fdfbeb67a2984bae637abd5adbbf31114b..941bc15771a3f249a534f0db640329bf
 +  }
 +  const sessionLayer = Layer.mock(Session.Service)({
 +    get: () => Effect.succeed(parentSession),
++    // #546：closeOpenReviewerTools 的 durable 补扫走 messages——空列表使 known set 为唯一来源
++    messages: () => Effect.succeed([]),
 +    children: () => Effect.succeed([]),
-+    create: (input) => Effect.succeed({ ...childSession, ...input }),
++    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (message) =>
 +      Effect.sync(() => {
-+        messages.set(message.id, structuredClone(message))
++        messages.set(message.id, structuredClone(message) as MessageV2.Assistant)
 +        return message
 +      }),
++    findMessage: () => Effect.succeed(Option.none()),
 +    getPart: (input) => Effect.succeed(parts.get(input.partID)),
-+    // 正常返回：pending 必须已 commit 且 attempt 仍挂在 open stream 上，才能命中 timeout 窗口。
-+    // failErrorWrites：首次 error 终态写以 defect 失败。
-+    // 对应旧实现 catch void：stream finalize 失败后外层仍写 message.completed，tool 留 pending。
-+    // 计数器只失败一次：验证 ensuring/外层二次 finalize 能写成功（不是无限重试）。
++    // #546：failErrorWrites——首次 error 终态写以 defect 失败，对应旧实现 catch void 后
++    // message 仍 completed、tool 仍 pending 的半写；计数器只失败一次，验证二次 finalize 写成功。
 +    updatePart: (part) =>
 +      Effect.sync(() => {
 +        if (
@@ -913,18 +877,12 @@ index fd11d3fdfbeb67a2984bae637abd5adbbf31114b..941bc15771a3f249a534f0db640329bf
 +            ),
 +        }),
 +      ),
-+      Layer.provide(
-+        ProviderTest.fake({
-+          model,
-+          info: ProviderTest.info({ id: model.providerID, options: {} }, model),
-+          getLanguage: Effect.fn("ReviewerTimeoutClosureTest.getLanguage")(() =>
-+            Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
-+          ),
-+        }).layer,
-+      ),
++      Layer.provide(provider.layer),
 +      Layer.provide(authLayer({ type: "api", key: "test-key" })),
 +      Layer.provide(pluginLayer()),
 +      Layer.provide(sessionLayer),
++      // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
++      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
 +    ),
 +  }
 +}

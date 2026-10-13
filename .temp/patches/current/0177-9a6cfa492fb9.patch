@@ -110,9 +110,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
        addUsage(total, event)
 @@ -1059,11 +1074,13 @@ const filteredAggregates =
-     statusSeries: finalizeSeries(statusSeries, sortedDaily),
-     projectSeries: finalizeSeries(projectSeries, sortedDaily),
-     tokenPartSeries: tokenPartSeries(sortedDaily),
+     statusSeries: finalizeSeries(statusSeries, completeDaily),
+     projectSeries: finalizeSeries(projectSeries, completeDaily),
+     tokenPartSeries: tokenPartSeries(completeDaily),
 -    sessions: sessionsWithUsage.sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total),
 +    sessions: sessionsWithUsage.sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost),
      // #176：默认按 contextTokens 再按 count
@@ -120,7 +120,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      toolUsage: Object.values(toolUsage).sort((a, b) => b.contextTokens - a.contextTokens || b.count - a.count),
      // #176：模型×供应矩阵供热图/对比
 +    // #177：输出 toolSeries 供渲染
-+    toolSeries: finalizeSeries(toolSeries, sortedDaily),
++    toolSeries: finalizeSeries(toolSeries, completeDaily),
      modelProviderTokens: Array.from(modelProviderTokens, ([key, tokens]) => {
        const [providerID, modelID] = key.split("\0")
        return { providerID, modelID, tokens }

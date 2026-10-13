@@ -8,159 +8,8 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
+适配说明：CI 构建依赖准备优化完整重锚（fuzz 13/13 全成功，行号漂移 setup-bun +7/+8、build-opencode +23~+35）。setup-bun action 增加 bun 依赖缓存与共享缓存键；build-opencode 各平台 job 复用依赖准备产物。无生产代码。
 
-diff --git a/.github/actions/setup-bun/action.yml b/.github/actions/setup-bun/action.yml
-index 9f099ec046c636b933b9bb8f1ca7000910a2dcfe..ff5298ce8151f5cbc261f0e3b55a133b65dd2875 100644
---- a/.github/actions/setup-bun/action.yml
-+++ b/.github/actions/setup-bun/action.yml
-@@ -5,6 +5,11 @@ inputs:
-     description: "Additional flags to pass to 'bun install'"
-     required: false
-     default: ""
-+  # CLI 的过滤安装不能继承全仓缓存；默认 scope 保留现有调用方的完整依赖范围。
-+  cache-scope:
-+    description: "Dependency cache scope for the selected workspace graph"
-+    required: false
-+    default: "workspace"
- runs:
-   using: "composite"
-   steps:
-@@ -37,7 +42,9 @@ runs:
-       id: cache
-       if: runner.os != 'Windows'
-       shell: bash
--      run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-+      run: |
-+        echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
-+        echo "version=$(bun --version)" >> "$GITHUB_OUTPUT"
- 
-     - name: Restore Bun dependencies
-       id: bun-cache
-@@ -45,9 +52,11 @@ runs:
-       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-       with:
-         path: ${{ steps.cache.outputs.dir }}
--        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-+        # v2 截断历史全仓缓存前缀，过滤安装才能从自己的依赖材料开始积累。
-+        # 宿主架构和 Bun 版本限定原生包材料；根安装不消费 VSIX 或 submodule 的锁文件。
-+        key: ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-${{ hashFiles('bun.lock', 'bunfig.toml', 'patches/**') }}
-         restore-keys: |
--          ${{ runner.os }}-bun-
-+          ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-
- 
-     - name: Install setuptools for distutils compatibility
-       run: python3 -m pip install setuptools || pip install setuptools || true
-@@ -84,4 +93,5 @@ runs:
-       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-       with:
-         path: ${{ steps.cache.outputs.dir }}
--        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-+        # install 可重写 lock；保存必须复用恢复时的请求身份，不能重算成已存在的 matched key。
-+        key: ${{ steps.bun-cache.outputs.cache-primary-key }}
-diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index a4fa0f4d1259cb0790d27596fca40b66b28e5aa2..86c2350d7b3b111360000d1c7a747f929593f1a7 100644
---- a/.github/workflows/build-opencode.yml
-+++ b/.github/workflows/build-opencode.yml
-@@ -70,6 +70,10 @@ jobs:
-       - uses: actions/checkout@v4
- 
-       - uses: ./.github/actions/setup-bun
-+        with:
-+          cache-scope: cli
-+          # 两个发布架构都在首次安装中准备，编译阶段复用同一依赖图。
-+          install-flags: --filter './packages/opencode' --os=darwin --cpu='*'
- 
-       - name: Build macOS binaries
-         shell: bash
-@@ -79,6 +83,7 @@ jobs:
-           bun run script/build.ts \
-             --version=${{ needs.version.outputs.version }} \
-             --os=darwin \
-+            --skip-install \
-             --skip-embed-web-ui
- 
-       - name: Sign and package macOS assets
-@@ -137,6 +142,10 @@ jobs:
-       - uses: actions/checkout@v4
- 
-       - uses: ./.github/actions/setup-bun
-+        with:
-+          cache-scope: cli
-+          # ARM64 资源也由此安装；后面的 x64 宿主编译无需再次扩大 workspace 范围。
-+          install-flags: --filter './packages/opencode' --os=linux --cpu='*'
- 
-       - name: Install Linux packaging tools
-         shell: bash
-@@ -153,6 +162,7 @@ jobs:
-           bun run script/build.ts \
-             --version=${{ needs.version.outputs.version }} \
-             --os=linux \
-+            --skip-install \
-             --skip-embed-web-ui
- 
-       - name: Package Linux assets
-@@ -274,14 +284,16 @@ jobs:
-             python -m pip install setuptools
-           }
- 
--          bun install --linker hoisted
-+          # 使用路径区分同名根包；只准备当前发布的 Windows x64 依赖闭包。
-+          bun install --linker hoisted --filter './packages/opencode' --os=win32 --cpu=x64
- 
-       - name: Build Windows x64 binary
-         shell: pwsh
-         run: |
-           $ErrorActionPreference = "Stop"
-           cd packages/opencode
--          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
-+          # 原生包已由首次安装准备，避免 build.ts 再进入未过滤的 workspace 安装。
-+          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-install --skip-embed-web-ui
- 
-       - name: Package Windows assets
-         shell: pwsh
-@@ -340,6 +352,10 @@ jobs:
-       - uses: actions/checkout@v4
- 
-       - uses: ./.github/actions/setup-bun
-+        with:
-+          cache-scope: cli
-+          # fixture 静态加载 Solid/Core，保留 CLI 声明的 dev、peer 与 optional 依赖。
-+          install-flags: --filter './packages/opencode'
- 
-       - name: Download macOS archive
-         uses: actions/download-artifact@v4
-@@ -367,6 +383,10 @@ jobs:
-       - uses: actions/checkout@v4
- 
-       - uses: ./.github/actions/setup-bun
-+        with:
-+          cache-scope: cli
-+          # 从与构建相同的 CLI 闭包准备 harness，验证对象仍是下载后的归档。
-+          install-flags: --filter './packages/opencode'
- 
-       - name: Download Linux archives
-         uses: actions/download-artifact@v4
-@@ -394,6 +414,10 @@ jobs:
-       - uses: actions/checkout@v4
- 
-       - uses: ./.github/actions/setup-bun
-+        with:
-+          cache-scope: cli
-+          # ARM runner 按自身架构安装 harness；不复用 x64 的 node_modules。
-+          install-flags: --filter './packages/opencode'
- 
-       - name: Download Linux archives
-         uses: actions/download-artifact@v4
-@@ -433,7 +457,8 @@ jobs:
-           PUPPETEER_SKIP_DOWNLOAD: "1"
-           CYPRESS_INSTALL_BINARY: "0"
-           HUSKY: "0"
--        run: bun install --linker hoisted
-+        # 独立 runner 保留干净产物验证，只减少源码 harness 的安装范围。
-+        run: bun install --linker hoisted --filter './packages/opencode'
- 
-       - name: Download Windows archive
-         uses: actions/download-artifact@v4
 diff --git a/docs/plans/ci-build-dependency-preparation-optimization.md b/docs/plans/ci-build-dependency-preparation-optimization.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..f2193c3a57c405b91cc26a81607fe150ae46738d
@@ -844,3 +693,154 @@ index 0000000000000000000000000000000000000000..f2193c3a57c405b91cc26a81607fe150
 +审计期间未编辑文件、未提交、未推送、未触发 workflow。
 +
 +独立复核元数据：全 workflow actionlint exit 0；`bun test ./test/ci ./test/script/install-target.test.ts` 为 9 pass、0 fail、37 expects；package `bun typecheck` 成功；两 YAML `git diff --check` exit 0；E=30、C=12、40%。审计通过的范围是配置实现与已执行的本地验证，`verified` 不代表远端性能测量完成。
+diff --git a/.github/actions/setup-bun/action.yml b/.github/actions/setup-bun/action.yml
+--- a/.github/actions/setup-bun/action.yml
++++ b/.github/actions/setup-bun/action.yml
+@@ -5,6 +5,11 @@ inputs:
+     description: "Additional flags to pass to 'bun install'"
+     required: false
+     default: ""
++  # CLI 的过滤安装不能继承全仓缓存；默认 scope 保留现有调用方的完整依赖范围。
++  cache-scope:
++    description: "Dependency cache scope for the selected workspace graph"
++    required: false
++    default: "workspace"
+ runs:
+   using: "composite"
+   steps:
+@@ -44,7 +49,9 @@ runs:
+       id: cache
+       if: runner.os != 'Windows'
+       shell: bash
+-      run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
++      run: |
++        echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
++        echo "version=$(bun --version)" >> "$GITHUB_OUTPUT"
+ 
+     - name: Restore Bun dependencies
+       id: bun-cache
+@@ -52,9 +59,11 @@ runs:
+       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+       with:
+         path: ${{ steps.cache.outputs.dir }}
+-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
++        # v2 截断历史全仓缓存前缀，过滤安装才能从自己的依赖材料开始积累。
++        # 宿主架构和 Bun 版本限定原生包材料；根安装不消费 VSIX 或 submodule 的锁文件。
++        key: ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-${{ hashFiles('bun.lock', 'bunfig.toml', 'patches/**') }}
+         restore-keys: |
+-          ${{ runner.os }}-bun-
++          ${{ runner.os }}-${{ runner.arch }}-bun-v2-${{ steps.cache.outputs.version }}-${{ inputs.cache-scope }}-
+ 
+     - name: Install setuptools for distutils compatibility
+       run: python3 -m pip install setuptools || pip install setuptools || true
+@@ -92,4 +101,5 @@ runs:
+       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+       with:
+         path: ${{ steps.cache.outputs.dir }}
+-        key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
++        # install 可重写 lock；保存必须复用恢复时的请求身份，不能重算成已存在的 matched key。
++        key: ${{ steps.bun-cache.outputs.cache-primary-key }}
+
+diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
+--- a/.github/workflows/build-opencode.yml
++++ b/.github/workflows/build-opencode.yml
+@@ -93,6 +93,10 @@ jobs:
+ 
+       # #156：composite action 单一来源：本地 workflow 与上游工具链升级自动同步
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # 两个发布架构都在首次安装中准备，编译阶段复用同一依赖图。
++          install-flags: --filter './packages/opencode' --os=darwin --cpu='*'
+ 
+       - name: Build macOS binaries
+         shell: bash
+@@ -103,6 +107,7 @@ jobs:
+           bun run script/build.ts \
+             --version=${{ needs.version.outputs.version }} \
+             --os=darwin \
++            --skip-install \
+             --skip-embed-web-ui
+ 
+       - name: Sign and package macOS assets
+@@ -165,6 +170,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # ARM64 资源也由此安装；后面的 x64 宿主编译无需再次扩大 workspace 范围。
++          install-flags: --filter './packages/opencode' --os=linux --cpu='*'
+ 
+       - name: Install Linux packaging tools
+         shell: bash
+@@ -181,6 +190,7 @@ jobs:
+           bun run script/build.ts \
+             --version=${{ needs.version.outputs.version }} \
+             --os=linux \
++            --skip-install \
+             --skip-embed-web-ui
+ 
+       - name: Package Linux assets
+@@ -306,14 +316,16 @@ jobs:
+           if ($LASTEXITCODE -ne 0) {
+             python -m pip install --upgrade setuptools
+           }
+-          bun install --linker hoisted
++          # 使用路径区分同名根包；只准备当前发布的 Windows x64 依赖闭包。
++          bun install --linker hoisted --filter './packages/opencode' --os=win32 --cpu=x64
+ 
+       - name: Build Windows x64 binary
+         shell: pwsh
+         run: |
+           $ErrorActionPreference = "Stop"
+           cd packages/opencode
+-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
++          # 原生包已由首次安装准备，避免 build.ts 再进入未过滤的 workspace 安装。
++          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-install --skip-embed-web-ui
+ 
+       - name: Package Windows assets
+         shell: pwsh
+@@ -373,6 +385,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # fixture 静态加载 Solid/Core，保留 CLI 声明的 dev、peer 与 optional 依赖。
++          install-flags: --filter './packages/opencode'
+ 
+       - name: Download macOS archive
+         uses: actions/download-artifact@v4
+@@ -401,6 +417,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # 从与构建相同的 CLI 闭包准备 harness，验证对象仍是下载后的归档。
++          install-flags: --filter './packages/opencode'
+ 
+       - name: Download Linux archives
+         uses: actions/download-artifact@v4
+@@ -428,6 +448,10 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - uses: ./.github/actions/setup-bun
++        with:
++          cache-scope: cli
++          # ARM runner 按自身架构安装 harness；不复用 x64 的 node_modules。
++          install-flags: --filter './packages/opencode'
+ 
+       - name: Download Linux archives
+         uses: actions/download-artifact@v4
+@@ -468,7 +492,8 @@ jobs:
+           PUPPETEER_SKIP_DOWNLOAD: "1"
+           CYPRESS_INSTALL_BINARY: "0"
+           HUSKY: "0"
+-        run: bun install --linker hoisted
++        # 独立 runner 保留干净产物验证，只减少源码 harness 的安装范围。
++        run: bun install --linker hoisted --filter './packages/opencode'
+ 
+       - name: Download Windows archive
+         uses: actions/download-artifact@v4

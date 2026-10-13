@@ -6,42 +6,29 @@ Subject: [PATCH] feat(install): multi-profile PATH, sudo gate, reinstall, tests 
 diff --git a/install b/install
 --- a/install
 +++ b/install
-@@ -31,6 +31,16 @@ Options:
+@@ -29,3 +29,10 @@ Options:
      -b, --binary <path>     Install from a local binary instead of downloading
-         # #156：受限环境可跳过 shell rc 改写
          --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
-+        # #167：可重复指定要改写的 profile，覆盖默认全量扫描
+ 
 +        --path-profile <path>
 +                            Add opencode to this shell config file. Can be repeated.
-+        # #167：显式要求扫描全部支持的 shell profile
 +        --all-shell-profiles
 +                            Add opencode to all existing supported shell config files.
-+        # #167：交互选择 profile；无 TTY 时回退默认全量
 +        --interactive       Ask which shell config files to update.
-+        # #167：默认拒绝 sudo；系统安装需显式放行
 +        --allow-sudo        Allow running under sudo. Not needed for user installs.
- 
- Environment variables:
-     OPENCODE_REPO           GitHub repo to download from. Default: SMARK2022/opencode
-@@ -40,12 +50,16 @@ Environment variables:
-     XDG_BIN_DIR             Used as install directory when OPENCODE_INSTALL_DIR is not set
++
+@@ -36,7 +44,9 @@ Environment variables:
      VERSION                 Same as --version
  
-+# #167：默认改写“已存在的全部支持 profile”，而非仅当前 shell 第一个
 +By default, the installer updates every existing supported shell profile it finds.
 +
  Examples:
-     # #156：下载失败（非 2xx）视为错误
      curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
      curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash -s -- --version 1.14.41-smark
 -    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
 -    ./install --binary /path/to/opencode
-+    # #167：env 必须传到 bash，不能只包在 curl 外
-+    curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && env OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash /tmp/opencode-install
++    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
 +    ./install --binary /path/to/opencode --path-profile "$HOME/.bash_profile"
- EOF_USAGE
- }
- 
 @@ -91,6 +105,14 @@ sha256_file() {
  requested_version=${VERSION:-}
  no_modify_path=false
@@ -90,7 +77,7 @@ diff --git a/install b/install
  }
  
  INSTALL_DIR=$(resolve_install_dir)
--# #156：确保安装目录存在
+-# #156：mkdir -p 幂等：已存在时保留既有安装不中断
 -mkdir -p "$INSTALL_DIR"
 +
 +# #167：uid=0 且带 SUDO_USER 时默认拒绝，避免 root 改用户 profile
@@ -117,7 +104,7 @@ diff --git a/install b/install
 +
 +check_sudo
 +
-+# #156：确保安装目录存在；#167：mkdir 失败 fail-closed
++# #156：mkdir -p 幂等：已存在时保留既有安装不中断；#167：mkdir 失败 fail-closed
 +if ! mkdir -p "$INSTALL_DIR"; then
 +    print_message error "Error: cannot create install directory: $INSTALL_DIR"
 +    exit 1
@@ -218,12 +205,13 @@ diff --git a/install b/install
      elif [[ -w $config_file ]]; then
          echo -e "\n# opencode" >> "$config_file"
          echo "$command" >> "$config_file"
-@@ -546,51 +653,272 @@ add_to_path() {
+@@ -546,53 +653,273 @@ add_to_path() {
      fi
  }
  
 -XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 -current_shell=$(basename "${SHELL:-sh}")
+-# SHELL 未导出时回退 sh：cron/CI 等非交互环境不保证设置 SHELL
 +# #167：识别字面路径 / $HOME 相对 / ~ 相对是否已写入
 +profile_has_install_dir() {
 +    # #167：去重必须覆盖三种写法，否则默认全量扫描会双写
@@ -248,6 +236,7 @@ diff --git a/install b/install
 -    sh)
 -        config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
 -    ;;
+-    # 默认分支收敛 bash 语法：rc 差异只在路径，export 语句 POSIX 兼容
 -    *)
 -        config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
 -    ;;
@@ -491,6 +480,7 @@ diff --git a/install b/install
 +
 +XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 +current_shell=$(basename "${SHELL:-sh}")
++# SHELL 未导出时回退 sh：cron/CI 等非交互环境不保证设置 SHELL
 +profile_candidates=()
 +profile_targets=()
 +

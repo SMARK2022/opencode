@@ -11,6 +11,7 @@ Content-Transfer-Encoding: 8bit
 补充意图推断、持续执行及澄清期间独立推进的提示词，保留 GPT 的 apply_patch 和并行调用规则，并纳入人工检查后的 question 工具与工作区保护说明，减少重复表述。
 
 区分检查失败与无法运行，允许及时报告所需输入并明确披露未完成验证；补充提示词合同测试及方案审计记录，避免通过额外续跑 gate 扩大运行时改动。
+适配说明：目标 system.ts 的验证/输出效率两段为内联模板串，本补丁按 source 结构提取为模块级具名导出常量（verificationSection/outputEfficiencySection，置于 layer 定义之前）并替换数组内字面量，语义与 source 逐字一致；测试八个文本合同用例逐字保留，SystemPrompt 命名空间导入可直接消费新导出；gpt-astra.txt 五处合并按 source 逐字应用（107→93 行）。
 
 diff --git a/docs/plans/astra-completion-audit-gate.md b/docs/plans/astra-completion-audit-gate.md
 new file mode 100644
@@ -832,7 +833,6 @@ index 0000000000000000000000000000000000000000..16f99d591b403252e2ffaa5f02518b81
 +`No blocking findings` for the current implementation and approved plan
 +revision.
 diff --git a/packages/opencode/src/session/prompt/gpt-astra.txt b/packages/opencode/src/session/prompt/gpt-astra.txt
-index e3f6d24c88c353e0af823812d0e325f4119cebbf..f72716771c4443cfbf488458e0d215a86300bd47 100644
 --- a/packages/opencode/src/session/prompt/gpt-astra.txt
 +++ b/packages/opencode/src/session/prompt/gpt-astra.txt
 @@ -3,20 +3,24 @@ You are an AI agent powered by OpenCode, a coding agent harness. Help the user a
@@ -934,46 +934,64 @@ index e3f6d24c88c353e0af823812d0e325f4119cebbf..f72716771c4443cfbf488458e0d215a8
 -If the user asks for a code explanation, include code references. For simple tasks, just state the outcome without heavy formatting.
 -
 -For large or complex changes, lead with the solution, then explain what you did and why. For casual chat, just chat. If something couldn’t be done (tests, builds, etc.), say so. Suggest next steps only for work outside the original request; do not offer requested work as suggestions; if you list options, use numbered items.
-+Structure your final response if necessary; the complexity of the answer should match the task, and simple tasks get a one-liner. Order sections from general to specific to supporting. For code explanations, include code references. For large or complex changes, lead with the solution, then explain what you did and why; for casual chat, just chat. If something couldn't be done (tests, builds, etc.), say so. Suggest next steps only for work outside the original request; do not offer requested work as suggestions; if you list options, use numbered items.
++Structure your final response if necessary; the complexity of the answer should match the task, and simple tasks get a one-liner. Order sections from general to specific to supporting. For code explanations, include code references. For large or complex changes, lead with the solution, then explain what you did and why. For casual chat, just chat. If something couldn't be done (tests, builds, etc.), say so. Suggest next steps only for work outside the original request; do not offer requested work as suggestions; if you list options, use numbered items.
+
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index cd4c27f2e223d6f6ddd70fcce05047de7b8f28d6..76776d0a7ac0f42a2f3e6b771c882cebd381349a 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -131,10 +131,11 @@ You may be working in a dirty worktree with user or other-agent changes.
- - If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
- - Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`
+@@ -152,6 +152,23 @@ const getToolUsageSection = (toolIds: string[]) => {
+   return ["# Using your tools", ...items].join("\n")
+ }
  
 +// 已运行的失败检查仍是证据；无法运行时应保留缺失前提和未完成验证，不能降格成假设。
- export const verificationSection = `# Verification
- Before reporting a coding task complete, verify the change when feasible.
- Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
--If you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.`
++export const verificationSection = `# Verification
++Before reporting a coding task complete, verify the change when feasible.
++Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
 +If a check fails, investigate the failure and fix issues within the requested scope. If a required check cannot run, identify the missing prerequisite, report it promptly when user input is needed, and continue independent work within the authorized scope. Before ending the turn because of a blocker, state what remains incomplete, what you tried, and what input or external change is needed. Keep unresolved verification explicit in the final response.`
- 
- export const contextContinuitySection = `# Context continuity
- Treat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.
-@@ -143,13 +144,14 @@ After compaction, resume from the summary and current messages rather than resta
- Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
- Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`
- 
++
 +// 及时报告需要用户输入的阻塞，与继续独立工作并行；汇报本身不代表任务终止。
- export const outputEfficiencySection = `# Output efficiency
- Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
- 
- Focus text output on:
- - Decisions that need the user's input
- - High-level status updates at key milestones (e.g. "build passing", "all tests green")
--- Errors or blockers that change the plan
++export const outputEfficiencySection = `# Output efficiency
++Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
++
++Focus text output on:
++- Decisions that need the user's input
++- High-level status updates at key milestones (e.g. "build passing", "all tests green")
 +- Errors or blockers that change the plan or require user input
++
++If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
++
+ const layer = Layer.effect(
+   Service,
+   Effect.gen(function* () {
+@@ -226,6 +243,7 @@ const layer = Layer.effect(
+       return result
+     })
  
- If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
- 
++
+     return Service.of({
+       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, registeredTools: string[]) {
+         const ctx = yield* InstanceState.context
+@@ -267,11 +285,11 @@ const layer = Layer.effect(
+           `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions within the user's request (editing files, running tests, reading code): proceed freely. Complete already-authorized preparation before requesting approval for the dependent action.\n- Actions that are hard to reverse or affect shared state: confirm with the user first, unless a verbatim user message has already authorized this action and target.\n- If optional clarification remains unanswered, continue using the available evidence and your best judgment.\n- If required input or approval is pending or denied, continue other authorized work on the current request that does not depend on it. Do not treat silence as approval or bypass a refusal.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
+           // 输出效率指引：提醒模型保持简洁高效的输出
+         `# Shared worktree\n\nYou may be working in a dirty worktree with user or other-agent changes.\n- If unknown changes are in files you need to edit, read them first and work with the current contents.\n- If unknown changes are unrelated to your task, ignore them.\n- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.\n- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
+-        // A07：无法验证不是终点——先问同域命令能否代验，仍受阻才陈述 blocker，防止过早放弃可完成的验证。
+-        `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.`,
++        // A07：无法验证不是终点——失败检查是证据，缺失前提及时报告并继续独立工作（见 verificationSection 常量）。
++        verificationSection,
+         // 上下文连续性前置句：新消息是对当前任务的更新而非任务切换，只有明确要求才停换任务（防 compaction 后“幽灵任务”回湖）。
+         `# Context continuity\n\nTreat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
+-          `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
++          outputEfficiencySection,
+           [
+           // 环境信息块移到末尾：避免 env 内容影响 system prompt 前缀
+                       `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+
 diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
-index 8dde67537f24abbb6a359dd65eb4528286cd697b..57c6878de71fd9696ca0f99c5cb7da10898317c1 100644
 --- a/packages/opencode/test/session/system.test.ts
 +++ b/packages/opencode/test/session/system.test.ts
-@@ -233,6 +233,80 @@ const renderEnvironment = (
-   }).pipe(Effect.provide(contextLayer(git)), Effect.provideService(InstanceRef, contextInstance(directory)))
+@@ -90,6 +90,80 @@ const it = testEffect(
+ )
  
  describe("session.system", () => {
 +  test("Astra autonomy infers intent before choosing work", () => {

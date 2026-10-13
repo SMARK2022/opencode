@@ -189,9 +189,9 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      function flushPartDeltas() {
        // #186：先清 timer 再消费队列，防止重入二次调度
        if (pendingPartDeltaTimer) {
-@@ -639,7 +681,8 @@ export const {
+@@ -583,7 +625,8 @@ export const {
            }
-           const result = search(parts, event.properties.part.id, (p) => p.id)
+           const result = search(parts, event.properties.part.id, (part) => part.id)
            if (result.found) {
 -            setStore("part", event.properties.part.messageID, result.index, reconcile(event.properties.part))
 +            // 合并守卫：防止 fire-and-forget 竞态导致短快照覆盖长流式文本

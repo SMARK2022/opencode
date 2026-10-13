@@ -7,16 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(tui):=20session=20=E8=B4=B4=E5=BA=95?=
  =?UTF-8?q?=E5=8F=91=E5=B0=84=E4=BF=AE=E5=A4=8D=20session.last=20=E7=BA=A2?=
  =?UTF-8?q?=E6=B5=8B?=
 MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-applySessionOpenScroll 增加 respectUserScroll 参数：路径 A（sync 完成补滚）传 true，受 viewportStuckToBottom 守卫——用户滚离后 50ms 延迟贴底不得覆盖其位置；路径 B（sessionID/reviewID 显式导航）保持无条件贴底（INV-03/04 切换贴底不回归）并加 on(…, { defer: true }) 跳过 mount 发射。mount 不是导航：mount 期贴底由 stickyStart 初始位置 + 守卫后的路径 A 承担；此前 mount+50ms 的无条件贴底在快速宿主上跨过用户滚动按键存活，是 CI 33295279134 Windows TUI 分片 session.last 红测（本机 5/5 确定性红）的直接根因，R4 诊断插桩定证。
+适配说明：生产四 hunk 全量落地——路径 A 补滚传 respectUserScroll=true；applySessionOpenScroll/schedule 加 intent 参数并以 pinAllowed 守卫覆盖目标全部三个贴底 site（无锚点/锚点 miss/child miss），reviewID 锚点 scrollBy 不受守卫（源单一 fall-through 语义在目标三分支形态下等价展开）；路径 B 改 defer+箭头包装（箭头防止 solid 把 deps 对象注入成首参使 respectUserScroll 意外为真）。源文件路径重锚至 packages/tui。源测试三段（红测 waitForFrame/RouteProbe fixture/B-01 切换锁）裁记：目标无 session-message-render.test.tsx 与 withRenderedSession harness（grep 0 命中，#212/#0583 先例）；INV-05 回归面由同步更新的 #551 wiring-contract 断言（带参签名/pinAllowed/路径 A true/defer 箭头）与既有 session-viewport-follow.test.ts 承担。
 
-测试侧：waitForFrame 离屏信号等待替换立帧捕获；fixture 增加 RouteProbe 暴露 route 上下文；新增行为锁测试——A 会话滚离后切换 B 必须贴底打开（R2 审计 B-01 判别几何）。验证：red-loop 5/5 绿、切换测试 3/3 绿、整文件 89/0、全 test/cli/cmd/tui 321/0、typecheck 0，经 R1-R4 四轮计划审计与实施审计 VERIFIED；详见 docs/plans/tui-session-last-scroll-reachability.md。
 
 diff --git a/docs/plans/tui-session-last-scroll-reachability.md b/docs/plans/tui-session-last-scroll-reachability.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..f28a7e164ef68ba1540919b1787a77a7c4ff4e22
 --- /dev/null
 +++ b/docs/plans/tui-session-last-scroll-reachability.md
 @@ -0,0 +1,104 @@
@@ -124,210 +120,100 @@ index 0000000000000000000000000000000000000000..f28a7e164ef68ba1540919b1787a77a7
 +  - 两枚 pin 均在 scrolled-away 捕获之后发射：`pin respectUserScroll=false signal=false`（路径 B mount，无条件贴底=真凶）→ renderAfter 见底把 signal 翻 true → `pin respectUserScroll=true signal=true`（路径 A，no-op）。toBottom 与 :458 advance 全程未发射（无对应 DIAG）。
 +- defer 实验（临时加 `{ defer: true }` 后回退）：red-loop 5/5 绿、切换行为测试 3/3 绿、整文件 89 测全绿（exit 0）。
 +- 结论：时序模型修正为「快速宿主上两枚 50ms 定时器均跨过 presses 存活；CI 慢速宿主上定时器在 presses 前发射 → 绿」——与腿间漂移、57d1fe064 CI 绿、本机 5/5 确定性红全部相容。
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index c3e368d5deb295e48e729b565947db9a8e172ff6..1328520ea9f976a8ce63f0d67815f906a2f254f2 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -367,8 +367,9 @@ export function Session() {
-       }
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -491,7 +491,9 @@ export function Session() {
        editor.reconnect(result.data.directory)
        await sync.session.sync(sessionID)
--      // sync 后 parts 就绪：与 sessionID→toBottom 共用 applySessionOpenScroll，避免只修贴底路径 A
+       // #551：会话打开滚动统一入口——锚点优先，否则贴底。
 -      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
-+      // sync 后 parts 就绪：与 sessionID→toBottom 共用 applySessionOpenScroll，避免只修贴底路径 A。
-+      // respectUserScroll=true：内容就绪补滚不覆盖同会话内用户已滚离的位置（INV-05）。
++      // 594：路径 A 是同会话 sync 完成后的补滚，必须尊重用户已滚离位置（INV-05）；
++      // 首次打开仍贴底由路径 B defer 后首次发射携带的 stickyStart 初始位置承担。
 +      if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)
      })().catch((error) => {
        if (route.sessionID !== sessionID) return
        toast.show({
-@@ -553,7 +554,8 @@ export function Session() {
-   // session-open 唯一滚动语义：有 reviewID 则锚到返回区，否则贴底（覆盖路径 A/B）。
-   // INV-02：auto review 深链必须停在对应返回区；INV-03/04：无锚点或解析失败时保持今日贴底。
-   // 禁止在此之外再挂无条件贴底成功路径，否则 50ms toBottom 会覆盖已完成的 anchor。
+@@ -629,11 +631,14 @@ export function Session() {
+ 
+   // #551：会话打开的唯一滚动语义——reviewID 锚点定位到对应 reviewer 返回消息，
+   // 无锚点才贴底；defer 50ms 与 toBottom 同拍，防止旧 toBottom 定时器覆盖锚点。
 -  function applySessionOpenScroll() {
-+  // respectUserScroll 区分调用者意图：路径 A（内容就绪补滚）true，路径 B（显式打开导航）false。
 +  function applySessionOpenScroll(respectUserScroll = false) {
      if (!scroll || scroll.isDestroyed) return
++    // 594：贴底前按调用者意图检查——补滚不得覆盖用户已滚离位置（INV-05）；
++    // reviewID 锚点 scrollBy 不经此守卫，导航锚点定位语义保持不变。
++    const pinAllowed = () => !respectUserScroll || untrack(viewportStuckToBottom)
      const reviewID = route.reviewID
-     if (reviewID) {
-@@ -571,14 +573,18 @@ export function Session() {
-         }
-       }
+     if (!reviewID) {
+-      scroll.scrollTo(scroll.scrollHeight)
++      if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
+       return
      }
--    // residual / 普通打开：贴底（不是 try-anchor-then-other-algorithm 的 fallback）
-+    // residual / 普通打开：贴底（不是 try-anchor-then-other-algorithm 的 fallback）。
-+    // INV-05：路径 A（内容就绪补滚）不得覆盖用户已滚离的位置；路径 B（显式切换/打开
-+    // 导航）是导航意图，保持无条件贴底——INV-03/04 切换贴底不因携带的滚离状态回退。
-+    if (respectUserScroll && !untrack(viewportStuckToBottom)) return
-     scroll.scrollTo(scroll.scrollHeight)
+     const target = resolveReviewAnchorMessageID(
+@@ -643,18 +648,18 @@ export function Session() {
+     )
+     if (!target) {
+       // 锚点 miss（300 条窗口裁剪或消息尚未同步）退化为贴底，不阻断导航。
+-      scroll.scrollTo(scroll.scrollHeight)
++      if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
+       return
+     }
+     const child = scroll.getChildren().find((c) => c.id === target)
+     if (child) scroll.scrollBy(child.y - scroll.y - 1)
+-    else scroll.scrollTo(scroll.scrollHeight)
++    else if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
    }
  
-   // 与历史 toBottom 同 50ms defer，对齐 OpenTUI layout；非轮询重试框架。
--  // path A（sync 完成）与 path B（sessionID 变化）都只 schedule 本函数，语义单一。
 -  function scheduleSessionOpenScroll() {
--    setTimeout(() => applySessionOpenScroll(), 50)
-+  // path A（sync 完成，respectUserScroll=true）与 path B（sessionID 变化，显式导航）
-+  // 都只 schedule 本函数，语义单一。
 +  function scheduleSessionOpenScroll(respectUserScroll = false) {
-+    setTimeout(() => applySessionOpenScroll(respectUserScroll), 50)
+     setTimeout(() => {
+       if (!scroll || scroll.isDestroyed) return
+-      applySessionOpenScroll()
++      applySessionOpenScroll(respectUserScroll)
+     }, 50)
    }
  
-   function moveFirstChild() {
-@@ -1286,11 +1292,14 @@ export function Session() {
-     }
+@@ -1425,7 +1430,9 @@ export function Session() {
+ 
+   // snap to bottom when session changes
+   // #551：会话/reviewID 变化统一走 session-open 滚动——reviewID 存在时锚点优先于贴底。
+-  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))
++  // 594：defer 跳过 mount 发射——mount 不是导航，mount 期贴底由 stickyStart 初始位置
++  // 与守卫后的路径 A 承担；dep 变化（真实导航/锚点）仍无条件贴底或锚定（INV-03/04）。
++  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), () => scheduleSessionOpenScroll(), { defer: true }))
+ 
+   // #212：流式内容增长时，若视口原本贴底（一行容差），则跟随到新的底部
+   // #212：OpenTUI sticky scroll 仅从精确最大值跟随；一行偏差时不会自动追尾
+
+diff --git a/packages/tui/test/routes/session/auto-review-deep-link.test.ts b/packages/tui/test/routes/session/auto-review-deep-link.test.ts
+--- a/packages/tui/test/routes/session/auto-review-deep-link.test.ts
++++ b/packages/tui/test/routes/session/auto-review-deep-link.test.ts
+@@ -86,13 +86,20 @@ describe("auto review deep link wiring contract", () => {
+ 
+   test("session-open scroll is anchored before bottom snap", () => {
+     // 统一滚动入口：锚点存在→child.y 对位；miss/无锚点→贴底。
+-    expect(source).toContain("function applySessionOpenScroll()")
+-    expect(source).toContain("function scheduleSessionOpenScroll()")
++    // 594：入口按调用者意图参数化——补滚（路径 A）传 true 尊重用户滚离位置（INV-05），
++    // 贴底统一过 pinAllowed 守卫，锚点 scrollBy 不受守卫（导航锚定语义不变）。
++    expect(source).toContain("function applySessionOpenScroll(respectUserScroll = false)")
++    expect(source).toContain("const pinAllowed = () => !respectUserScroll || untrack(viewportStuckToBottom)")
++    expect(source).toContain("function scheduleSessionOpenScroll(respectUserScroll = false)")
++    expect(source).toContain("applySessionOpenScroll(respectUserScroll)")
+     expect(source).toContain("scrollBy(child.y - scroll.y - 1)")
+-    // 两个贴底路径都改走统一入口；undo/prompt on_submit 的 toBottom 保持原语义。
+-    expect(source).toContain("if (route.sessionID === sessionID) scheduleSessionOpenScroll()")
+-    // useRouteData("session") 已收窄为 SessionRoute——effect 依赖直接读字段。
+-    expect(source).toContain("createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))")
++    // 路径 A（sync 完成补滚）传 true：补滚不得覆盖同会话用户已滚离位置。
++    expect(source).toContain("if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)")
++    // 路径 B defer 跳过 mount 发射（mount 不是导航，贴底由 stickyStart+守卫后路径 A 承担）；
++    // 箭头包装防止 solid 把 deps 对象注入成首参使 respectUserScroll 意外为真。
++    expect(source).toContain(
++      "createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), () => scheduleSessionOpenScroll(), { defer: true }))",
++    )
    })
  
--  // session 切换贴底路径 B：有 reviewID 时不得无条件 toBottom，统一走 applySessionOpenScroll
-+  // session 切换贴底路径 B：有 reviewID 时不得无条件 toBottom，统一走 applySessionOpenScroll。
-+  // defer：mount 不是导航——mount 期贴底由 stickyStart 初始位置 + 路径 A（守卫）承担，
-+  // 否则 mount+50ms 的无条件贴底会在用户已滚离时覆盖其位置（INV-05）。
-   createEffect(
-     on(
-       () => ({ sessionID: route.sessionID, reviewID: route.reviewID }),
-       () => scheduleSessionOpenScroll(),
-+      { defer: true },
-     ),
-   )
- 
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 328e6f41f63722e99021b0483bc92f02793bade7..8e5693b800e7f7e325a7ac04061baeb31bb131d8 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -21,7 +21,8 @@ import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
- import { LocalProvider } from "../../../../src/cli/cmd/tui/context/local"
- import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
- import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
--import { RouteProvider } from "../../../../src/cli/cmd/tui/context/route"
-+import { RouteProvider, useRoute } from "../../../../src/cli/cmd/tui/context/route"
-+import type { RouteContext } from "../../../../src/cli/cmd/tui/context/route"
- import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
- import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
- import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
-@@ -1457,10 +1458,9 @@ test("session keeps latest streamed content reachable via session.last after scr
- 
-       // 越过单行容忍带（4 次 ctrl+alt+y）：viewportStuckToBottom=false；
-       // 恒定 culling 下用户滚离后不得被系统强拉回底部（INV-04 前半）。
-+      // 滚动位移分帧收敛：等待“尾部离屏”这一已发布信号，立帧捕获会在贴底中间帧上误断言。
-       for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
--      await app.renderOnce()
--      const afterScroll = rows(app.captureCharFrame())
--      expect(afterScroll.some((line) => line.includes("OLD_CULL_TAIL"))).toBe(false)
-+      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("OLD_CULL_TAIL")))
- 
-       emit(
-         partDeltaEvent(
-@@ -1490,6 +1490,43 @@ test("session keeps latest streamed content reachable via session.last after scr
-   )
- })
- 
-+test("switching sessions after scrolling away still opens the next session pinned to the bottom", async () => {
-+  // INV-03/04 行为锁（R3 审计 B-01/N-01）：A 会话滚离携带 viewportStuckToBottom=false，
-+  // 但切换到 B 是显式打开导航（路径 B），必须无条件贴底——不得以 A 的滚离状态把 B
-+  // 打开在携带的陈旧偏移上。判别几何：B 的可滚高度必须超过携带偏移（A_max-4），
-+  // 否则携带 scrollTop 被 clamp 到 B 底部会空洞通过。
-+  const userA = userMessage("msg_user_pin_a", 1)
-+  const streamerA = assistantMessage("msg_pin_a", 2, userA.id)
-+  const extraID = "ses_extra_pin_b"
-+  const userB = { ...userMessage("msg_user_pin_b", 1), sessionID: extraID }
-+  const streamerB = { ...assistantMessage("msg_pin_b", 2, "msg_user_pin_b"), sessionID: extraID }
-+  const partB = { ...textPart("part_pin_b", "msg_pin_b", `${"beta content ".repeat(420)}B_PIN_TAIL`), sessionID: extraID }
-+
-+  await withRenderedSession(
-+    [userA, streamerA],
-+    { msg_pin_a: [textPart("part_pin_a", "msg_pin_a", `${"alpha content ".repeat(120)}A_PIN_TAIL`)] },
-+    async (app, _emit, route) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("A_PIN_TAIL")))
-+      // A 内滚离 4 行：viewportStuckToBottom=false 且尾部离屏。
-+      for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
-+      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("A_PIN_TAIL")))
-+
-+      route.navigate({ type: "session", sessionID: extraID })
-+      // 路径 B 贴底打开：B_PIN_TAIL 在正常帧时限内可见，与 A 的滚离状态无关。
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("B_PIN_TAIL")))
-+    },
-+    {},
-+    { width: 100, height: 18 },
-+    {
-+      [extraID]: {
-+        info: sessionInfo({ id: extraID }),
-+        messages: [userB, streamerB],
-+        parts: { msg_pin_b: [partB] },
-+      },
-+    },
-+  )
-+})
-+
- test("narrow viewport keeps the user message cell from collapsing", async () => {
-   await withRenderedSession(
-     [userMessage("msg_user_narrow", 1), assistantMessage("msg_assistant_after_user", 2, "msg_user_narrow")],
-@@ -3842,7 +3879,11 @@ test("messages.copy command copies the last assistant before a wrapped revert bo
- async function withRenderedSession(
-   messages: Array<AssistantMessage | SDKUserMessage>,
-   parts: Record<string, Part[]>,
--  run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
-+  run: (
-+    app: Awaited<ReturnType<typeof testRender>>,
-+    emit: (event: GlobalEvent) => void,
-+    route: RouteContext,
-+  ) => Promise<void>,
-   kv: Record<string, unknown> = {},
-   dimensions: { width?: number; height?: number } = {},
-   extraSessions: Record<
-@@ -3895,6 +3936,8 @@ async function withRenderedSession(
-   // testRender 返回只表示根已挂载；Session 异步 session.get/sync 后才有 transcript。
-   // SyncReadyProbe 观察公开 store，与 frame timeout 分离，避免空白帧被误判为 presentation 回归。
-   let syncReady = false
-+  // 首帧即回写 route holder；run 在 syncReady 泵浦之后执行，holder 必已就绪。
-+  let routeHolder: RouteContext | undefined
-   const messageIDs = messages.map((message) => message.id)
-   const app = await testRender(
-     () => (
-@@ -3905,6 +3948,9 @@ async function withRenderedSession(
-         onSyncReady={() => {
-           syncReady = true
-         }}
-+        onRoute={(route) => {
-+          routeHolder = route
-+        }}
-       />
-     ),
-     {
-@@ -3932,7 +3978,7 @@ async function withRenderedSession(
-       await new Promise((resolve) => process.nextTick(resolve))
-       await new Promise((resolve) => setTimeout(resolve, 0))
-     }
--    await run(app, events.emit)
-+    await run(app, events.emit, routeHolder!)
-   } finally {
-     app.renderer.destroy()
-     Global.Path.state = previous
-@@ -3944,6 +3990,7 @@ function SessionHarness(props: {
-   events: ReturnType<typeof createEventSource>["source"]
-   messageIDs: string[]
-   onSyncReady: () => void
-+  onRoute: (route: RouteContext) => void
- }) {
-   const renderer = useRenderer()
-   // visibility 用例通过真实 binding 进入已注册 command，不给所有测试暴露 keymap 内部对象。
-@@ -3958,6 +4005,7 @@ function SessionHarness(props: {
-           <KVProvider>
-             <ToastProvider>
-               <RouteProvider initialRoute={{ type: "session", sessionID }}>
-+                <RouteProbe onRoute={props.onRoute} />
-                 <TuiConfigProvider config={config}>
-                   <SDKProvider
-                     url="http://test"
-@@ -4000,6 +4048,13 @@ function SessionHarness(props: {
-   )
- }
- 
-+// 暴露 route 上下文（navigate）给测试回调：切换会话的行为测试需要显式导航。
-+// 每次渲染幂等回写 holder；渲染 <box /> 与 SyncReadyProbe 一致，不参与布局。
-+function RouteProbe(props: { onRoute: (route: RouteContext) => void }) {
-+  props.onRoute(useRoute())
-+  return <box />
-+}
-+
- // 观察 Sync 公开 store：session 存在、message 列表已装、每个 fixture message 有 part 数组。
- // 不复制 Session 内部状态机；onReady 只触发一次。
- function SyncReadyProbe(props: { messageIDs: string[]; onReady: () => void }) {
+   test("assistant messages expose a scroll-child id for anchor lookup", () => {

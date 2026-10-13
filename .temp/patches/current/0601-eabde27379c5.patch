@@ -7,15 +7,12 @@ Subject: [PATCH] =?UTF-8?q?fix(permission):=20=E8=BF=9B=E7=A8=8B=E7=BB=88?=
  =?UTF-8?q?=E6=9D=80=20dangerous=EF=BC=89?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-生产事故取证：Stop-Process、kill 指定 pid、pkill、taskkill、tskill 等进程终止形态此前全部 general 直过（另一 agent 的 kill-only 命令零护栏直接执行）。新增 PROCESS_TERMINATION_COMMANDS 词表（kill/pkill/killall/stop-process/spps/taskkill/tskill，跨 Unix/macOS/PowerShell/Windows，官方别名依 ri 先例与主 cmdlet 同级）默认 cautious 进 reviewer；killall5 与 kill 尾操作数为负一（广播全进程语义）判 dangerous 直接拒绝，信号位负一（单进程 SIGHUP 形态）保持 cautious；kill 列信号只读形态豁免（crontab 同构）。既有契约不变：分段 kill general、echo 未知前缀 shadow 语义与既有 echo rm 同构。
+适配说明：三代码 hunk 机械重锚——目标 precheck.ts/test 由 current/0220 以 #220 紧凑注释风格创建（无 original/0220 的 banner 布局），词表插入锚定 USER_ACCOUNT_COMMANDS 后、尾上下文改用目标 #197 行；classifyTokens 进程终止段前导改 #220 全进程终止注释、尾部 #220 定时任务注释；测试插入锚定 kill -9 -1 用例后、尾上下文 #220 定时任务注释。词表/三分支逻辑/测试断言零改动（dangerous 语义维持 0601 版，forbidden 升级留给 0608）。
 
-3 组新行为测试（族 12 断言/批量杀 4/只读豁免与负例锁）；precheck 110/0、permission 281/0、reviewer 8/0、typecheck clean。
 
 diff --git a/docs/plans/precheck-process-termination-vocabulary.md b/docs/plans/precheck-process-termination-vocabulary.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..f7c065a7d3f05f5a1290593d264c2e7e09fdc4fc
 --- /dev/null
 +++ b/docs/plans/precheck-process-termination-vocabulary.md
 @@ -0,0 +1,252 @@
@@ -271,56 +268,55 @@ index 0000000000000000000000000000000000000000..f7c065a7d3f05f5a1290593d264c2e7e
 +| Round | Plan revision | Full original scope? | Blocking | Non-blocking | Result | Invocation |
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R3 | yes | 无 | N-01 §6/§13/§16 `echo kill` 单元格过时（§23 披露成立：wrapper-shadow 启发式为既有语义，`echo rm -rf` 同构，方向保守）；N-02 行引用/估算漂移 | APPROVE（独立复现：precheck 110/0、permission 281/0、reviewer 8/0、typecheck clean；E/C 重算一致 E=10/C=10） | task ses_f9d1bff53ffevcbYyvaV1p3kF3 |
+
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 4461d868f5262f8ef3c88cff4b858b8e374be28d..a32f976226388fefce9d4cbcd49309474014df6c 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -88,6 +88,13 @@ const USER_ACCOUNT_COMMANDS = new Set([
+@@ -123,6 +123,12 @@ const USER_ACCOUNT_COMMANDS = new Set([
    "usermod", "adduser", "deluser", "addgroup", "delgroup",
  ])
  
-+// [local-smark] 进程终止族（R3 计划）：Unix/macOS（kill/pkill/killall）、
-+// PowerShell（stop-process 及其官方别名 kill/spps——依 :72-73 "ri 与 remove-item
-+// 同级"先例，官方别名与主 cmdlet 同级；sp 是 Set-ItemProperty 别名故排除）、
++// [local-smark] 601 进程终止族（R3 计划）：Unix/macOS（kill/pkill/killall）、
++// PowerShell（stop-process 及其官方别名 kill/spps——依 "ri 与 remove-item 同级"
++// 先例，官方别名与主 cmdlet 同级；sp 是 Set-ItemProperty 别名故排除）、
 +// Windows 原生（taskkill/tskill）。族内默认 cautious；杀全部进程形态（kill
 +// 尾操作数 -1、killall5）在前置分支判 dangerous。
 +const PROCESS_TERMINATION_COMMANDS = new Set(["kill", "pkill", "killall", "stop-process", "spps", "taskkill", "tskill"])
-+
- // ============================================================
- // 第三部分：敏感路径模式
- // ============================================================
-@@ -1179,8 +1186,21 @@ function classifyTokens(tokens: string[]): Decision | undefined {
-   }
  
-   // ---- 进程终止 ----
+ // #197：禁止 always-allow 的宽泛前缀——授权后可隐藏未来任意载荷文本，用户点击 Always 时 precheck 从未见过这些未来载荷
+ const BANNED_AUTO_ALLOW_PREFIXES = [
+@@ -1028,8 +1034,21 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+       return { level: "cautious", reason: "service state change requires explicit approval" }
+   }
+   // #220: 全进程终止
 -  if (cmd === "kill" && tokens.includes("-9") && tokens.includes("-1"))
-+  // [local-smark] 危险前置保序（:718 kill -9 -1 契约）：killall5 唯一语义即向
++  // [local-smark] 601 危险前置保序（kill -9 -1 契约）：killall5 唯一语义即向
 +  // 全部进程发信号（sysvinit-utils/busybox）无条件 dangerous；kill 的 -1 必须
 +  // 处于尾操作数位（POSIX `kill -<signum> <pid>` 中信号位 -1 如 `kill -1 1234`
 +  // 是单进程 SIGHUP，属 cautious 档）；-l 只读豁免对齐 crontab -l 先例（flags
 +  // 全为 -l 且有实参，容忍非 flag 实参：kill -l / kill -l 9 仅列信号名）。
 +  if (cmd === "killall5")
-+    return { level: "dangerous", reason: "mass process kill" }
-+  if (cmd === "kill" && tokens.at(-1) === "-1" && !tokens.slice(1).includes("-l"))
      return { level: "dangerous", reason: "mass process kill" }
++  if (cmd === "kill" && tokens.at(-1) === "-1" && !tokens.slice(1).includes("-l"))
++    return { level: "dangerous", reason: "mass process kill" }
 +  if (PROCESS_TERMINATION_COMMANDS.has(cmd)) {
 +    const args = tokens.slice(1)
 +    const flags = args.filter((item) => item.startsWith("-"))
 +    if (args.length > 0 && flags.length > 0 && flags.every((item) => item === "-l")) return
 +    return { level: "cautious", reason: "process termination requires explicit approval" }
 +  }
- 
-   // ---- 定时任务 ----
+   // #220: 定时任务——crontab/schtasks/Register-ScheduledTask
    if (cmd === "crontab") {
+     const args = tokens.slice(1)
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index e7178f042206e2a630f9c6b00b6c85d583fff610..7d04d1309c064695acf1946a8fa7d2c6713a2755 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -718,6 +718,39 @@ describe("permission precheck bash classifier", () => {
+@@ -735,6 +735,39 @@ describe("permission precheck bash classifier", () => {
      expect(bash("kill -9 -1")).toMatchObject({ level: "dangerous" })
    })
  
-+  // [local-smark] 进程终止族词表（R3 计划）：族内默认 cautious、杀全部形态
++  // [local-smark] 601 进程终止族词表（R3 计划）：族内默认 cautious、杀全部形态
 +  // dangerous、-l 只读豁免；红测复现事故形态（kill/Stop-Process 零护栏）。
 +  test("marks process termination family cautious", () => {
 +    expect(bash("kill 23148")).toMatchObject({ level: "cautious" })
@@ -347,12 +343,12 @@ index e7178f042206e2a630f9c6b00b6c85d583fff610..7d04d1309c064695acf1946a8fa7d2c6
 +    expect(bash("kill -l")).toMatchObject({ level: "general" })
 +    expect(bash("kill -l 9")).toMatchObject({ level: "general" })
 +    expect(bash("kill -l -9")).toMatchObject({ level: "cautious" })
-+    // 既有 wrapper-shadow 启发式（:513-533）：未知前缀后的内层危险词升 cautious，
++    // 601：既有 wrapper-shadow 启发式：未知前缀后的内层危险词升 cautious，
 +    // `echo kill` 与既有 `echo rm -rf` 同语义（计划 §6 预测 general 有误，见 §23 披露）
 +    expect(bash("echo kill")).toMatchObject({ level: "cautious" })
 +    expect(bash('git commit -m "kill process"')).toMatchObject({ level: "cautious" })
 +  })
 +
-   // ============================================================
-   // 新增测试：定时任务
-   // ============================================================
+   // #220：定时任务——crontab/schtasks/Register-ScheduledTask
+   test("marks crontab modifications cautious but listing safe-ish", () => {
+     expect(bash("crontab -e")).toMatchObject({ level: "cautious" })

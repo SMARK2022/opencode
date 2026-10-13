@@ -1,4 +1,6 @@
 From 006161d73b3ba896dbbb21c9bd88e71d2ff92495 Mon Sep 17 00:00:00 2001
+ 
+From 006161d73b3ba896dbbb21c9bd88e71d2ff92495 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Tue, 26 May 2026 17:15:19 +0800
 Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E5=A2=9E=E5=BC=BA=E7=AC=94?=
@@ -107,14 +109,42 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
-@@ -329,6 +329,110 @@
+@@ -258,7 +258,7 @@ describe("vscode bridge plugin", () => {
+         dirty: true,
+         language: "python",
+         beforeSource: "",
+-        afterSource: "print('new cell')\n",
++        afterSource: "print('new cell')\n++ legal source prefix\n",
+       },
+     })
+ 
+@@ -275,7 +275,7 @@ describe("vscode bridge plugin", () => {
+         vscodeNotebook: {
+           view: "edit",
+           cellLabel: "c4",
+-          added: 1,
++          added: 2,
+           removed: 0,
+         },
+       },
+@@ -284,6 +284,9 @@ describe("vscode bridge plugin", () => {
+       const metadata = result.metadata as Record<string, unknown>
+       const nb = metadata.vscodeNotebook as Record<string, unknown>
+       expect(nb.diff as string).toContain("#c4")
++      // #233：insertedSourcePreview 保留 ++ 前缀源码行——hunk 作用域 diffStats 计入而非按前缀过滤
++      expect(nb.insertedSourcePreview as string).toContain("print('new cell')")
++      expect(nb.insertedSourcePreview as string).toContain("++ legal source prefix")
+     }
+   })
+ 
+@@ -332,6 +335,110 @@ describe("vscode bridge plugin", () => {
        expect(JSON.stringify(metadata)).not.toContain("new line\nnew line\nnew line")
      }
    })
 +
 +  // #233：超大 insert 有界预览可见但完整源码不持久化
 +  test("keeps oversized notebook insert previews visible without persisting the full cell source", async () => {
-+    const plugin = await VscodeBridgePlugin()
++    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
 +    const filePath = "F:\\project with spaces\\large notebook.ipynb"
 +    const inserted = ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()", ...Array.from({ length: 3000 }, (_, i) => `row_${i}`)].join("\n")
 +    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
@@ -151,7 +181,7 @@ diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/open
 +  // #233：单行超大 insert 预览有界且非空
 +  // #233：4KB 字符上限截断单行——预览保留前缀，完整内容仍走 source 工具
 +  test("keeps oversized single-line notebook insert previews bounded and non-empty", async () => {
-+    const plugin = await VscodeBridgePlugin()
++    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
 +    const filePath = "F:\\project with spaces\\wide notebook.ipynb"
 +    const inserted = `visible-prefix-${"x".repeat(20_000)}-hidden-suffix`
 +    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
@@ -186,7 +216,7 @@ diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/open
 +  // #233：恰好十行且末尾换行的 insert 预览不算截断（尾部空行被剥离）
 +  // #233：diff 构造补的换行不应触发 truncated——否则 10 行内的普通插入也标记截断
 +  test("does not mark exact ten-line notebook insert previews truncated because of the final newline", async () => {
-+    const plugin = await VscodeBridgePlugin()
++    const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
 +    const filePath = "F:\\project with spaces\\ten-line notebook.ipynb"
 +    const inserted = `${Array.from({ length: 10 }, (_, i) => `line_${i + 1}`).join("\n")}\n`
 +    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
@@ -440,35 +470,29 @@ diff --git a/packages/tui/src/util/filetype.ts b/packages/tui/src/util/filetype.
 diff --git a/packages/tui/src/util/preview-diff.ts b/packages/tui/src/util/preview-diff.ts
 --- a/packages/tui/src/util/preview-diff.ts
 +++ b/packages/tui/src/util/preview-diff.ts
-@@ -13,6 +13,9 @@
-   let expectedOld = 0,
-     expectedNew = 0,
-     changed = false
-+  // #233：可见行计数闭包——flush 与消费循环共用同一口径，避免两处 filter 漂移
-+  const oldVisible = () => body.filter((line) => line[0] === " " || line[0] === "-").length
-+  const newVisible = () => body.filter((line) => line[0] === " " || line[0] === "+").length
- 
+@@ -13,14 +13,16 @@ export function previewDiff(input: string, maxLines: number) {
    // Flush each preview hunk as a fresh, parser-valid hunk. The preview may drop
    // trailing body lines, so the original @@ counts must be rewritten to the
-@@ -21,14 +24,10 @@
+   // actual old/new line counts that remain visible to DiffRenderable.
++  // #233：计数改为惰性函数——省略号 context 行 push 后行数变化，重复计数必须实时反映
++  const oldVisible = () => body.filter((line) => line[0] === " " || line[0] === "-").length
++  const newVisible = () => body.filter((line) => line[0] === " " || line[0] === "+").length
    const flush = () => {
      if (!oldStart) return
  
--    // #154：空格与 - 计入旧侧可见行
--  const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
--    // #154：空格与 + 计入新侧可见行
--  const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
-     // #154：元数据行数与可见行不一致则标记 changed
--  const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
-+  const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
-     // #154：中途截断导致行数不足
--  const incomplete = oldVisible < expectedOld || newVisible < expectedNew
-+  const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
+     // 计数重写是本函数的核心契约：截断后 @@ 头若沿用原值，parsePatch 会按虚高行数越界读行
+-    const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
+-    const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
+-    const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
+-    const incomplete = oldVisible < expectedOld || newVisible < expectedNew
++    // #233：计数改为惰性函数——省略号 context 行 push 后行数变化，重复计数必须实时反映
++    const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
++    const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
      // Match previewText's "N visible rows plus one ellipsis row" contract, but
      // keep the ellipsis as a legal context line so parsePatch accepts it. The
      // incomplete branch covers metadata that was already clipped mid-hunk.
-@@ -36,7 +35,7 @@
-   if (cut || incomplete) body.push(" …")
+@@ -28,7 +30,7 @@ export function previewDiff(input: string, maxLines: number) {
+     if (cut || incomplete) body.push(" …")
      changed ||= cut || countMismatch
      out.push(
 -      `@@ -${oldStart},${body.filter((line) => line[0] === " " || line[0] === "-").length} +${newStart},${body.filter((line) => line[0] === " " || line[0] === "+").length} @@${suffix}`,
@@ -476,35 +500,32 @@ diff --git a/packages/tui/src/util/preview-diff.ts b/packages/tui/src/util/previ
        ...body,
      )
      oldStart = newStart = suffix = ""
-@@ -52,6 +51,7 @@
-     // #154：识别 @@ hunk 头
-   const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/)
+@@ -42,6 +44,7 @@ export function previewDiff(input: string, maxLines: number) {
+ 
+     const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/)
      if (hunk) {
 +      // #233：进入新 hunk 先 flush 前一 hunk——输出保持解析器可接受的独立 hunk 形态
        flush()
+       // hunk 头必须精确锚定：宽松匹配会把正文里类 @@ 的行误判为新 hunk 起点
        oldStart = hunk[1]
-       expectedOld = Number(hunk[2] ?? 1)
-@@ -63,6 +63,15 @@
+@@ -58,6 +61,13 @@ export function previewDiff(input: string, maxLines: number) {
+       continue
+     }
  
-     // #154：hunk 外 header 原样透传
-   if (!oldStart) {
-+      out.push(line)
-+      continue
-+    }
-+
 +    // #233：完整 hunk 后可出现新的文件头或 patch 元数据——先 flush 再处理，
 +    // #233：使类头源行只在预期 hunk 体消费期间才合法。
 +    // #233：此处基于可见行数判断完整性——被预算截断的 hunk 不满足计数，继续消费。
 +    if (oldVisible() >= expectedOld && newVisible() >= expectedNew) {
 +      flush()
-       out.push(line)
-       continue
-     }
-@@ -79,25 +88,44 @@
++    }
++
+     if (line[0] === " ") {
+       if (left >= limit || right >= limit) {
+         cut = true
+@@ -69,19 +79,40 @@ export function previewDiff(input: string, maxLines: number) {
        continue
      }
  
--    // #154：成组消费 +/-，避免 split 视图左右预算各自漂移
 -    if ((line[0] === "-" && !line.startsWith("---")) || (line[0] === "+" && !line.startsWith("+++"))) {
 +    // #233：hunk 内 +/- 消费——`+++`/`---` 此时可能是合法源码行，仅按预期
 +    // #233：行数耗尽停止；已满足侧的行触发 flush 而非死循环。
@@ -531,8 +552,8 @@ diff --git a/packages/tui/src/util/preview-diff.ts b/packages/tui/src/util/previ
 +        seenNew++
          j++
        }
--      // #154：成对 +/- 变更按 min 截取
--  const paired = del.length > 0 && add.length > 0
+-      // 成对增删按对齐截取：单侧截断会让 split 视图左右错位
+-      const paired = del.length > 0 && add.length > 0
 -      const take = paired ? Math.min(del.length, add.length, limit - left, limit - right) : 0
 -      const dl = paired ? take : Math.min(del.length, limit - left)
 -      const al = paired ? take : Math.min(add.length, limit - right)
@@ -550,28 +571,12 @@ diff --git a/packages/tui/src/util/preview-diff.ts b/packages/tui/src/util/previ
        body.push(...del.slice(0, dl), ...add.slice(0, al))
        left += dl
        right += al
--      // #154：未取完则标记 cut
--  cut ||= dl < del.length || al < add.length
-+      cut ||= dl < del.length || al < add.length
-       i = j - 1
-     }
-   }
 diff --git a/packages/tui/test/util/preview-diff.test.ts b/packages/tui/test/util/preview-diff.test.ts
 --- a/packages/tui/test/util/preview-diff.test.ts
 +++ b/packages/tui/test/util/preview-diff.test.ts
-@@ -6,9 +6,7 @@
- ===================================================================
- --- /tmp/models.test.ts
- @@ -132,47 +132,26 @@
-- // #154：previewDiff 必须产出合法 patch
--// #154：previewDiff 单元回归
--describe("ModelsDev Service", () => {
-+ describe("ModelsDev Service", () => {
-    it.live("get() returns providers from disk when cache file exists", () =>
-      Effect.gen(function* () {
-        yield* writeCache(fixture)
-@@ -70,6 +68,106 @@
-     expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
+@@ -71,8 +69,108 @@
+    // 小 diff 原样返回，避免无谓重建 Renderable
+    expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
    })
  
 +  // #233：hunk 体内形似文件头的 +/- 行是合法源码——不得被误当 patch 头截断
@@ -675,5 +680,6 @@ diff --git a/packages/tui/test/util/preview-diff.test.ts b/packages/tui/test/uti
 +  })
 +
    test("repairs an already-clipped hunk before diff rendering", () => {
+    // 上游已裁剪的 hunk 头计数失真，按实际可见行修复
      const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]
  

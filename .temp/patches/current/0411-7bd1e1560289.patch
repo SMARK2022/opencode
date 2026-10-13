@@ -684,9 +684,9 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
    time: { created: number; updated: number }
  }
  
-@@ -1075,6 +1077,12 @@ export const {
-       sessionStatus: {
-         refresh: refreshStatus,
+@@ -1079,6 +1081,12 @@ export const {
+           return task
+         },
        },
 +      // [local-smark] goal reconcile：POST 成功后立即更新 store，不等 SSE
 +      goal: {
@@ -780,7 +780,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
          // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
          // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
          // 使后续再次达到 85% 时可以重新提示。
-@@ -1501,16 +1506,33 @@ const layer = Layer.effect(
+@@ -1499,16 +1507,33 @@ const layer = Layer.effect(
                (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
              ) ?? false
  
@@ -801,9 +801,9 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 +          const normalCompletion =
 +            lastAssistant?.finish !== undefined &&
              !lastAssistant.error &&
-             !["tool-calls"].includes(lastAssistant.finish) &&
+             !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
              !hasToolCalls &&
-             lastUser.id < lastAssistant.id
+             lastAssistant.parentID === lastUser.id
 -          ) {
 +
 +          // [local-smark] 错误续跑路径：marker 证明来源是 eligible terminal error，
@@ -1285,3 +1285,9 @@ diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/dat
 +    import("./migration/20260812100000_goal_continue_on_error"),
    ])
  ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
+--- a/packages/core/src/database/schema.gen.ts
++++ b/packages/core/src/database/schema.gen.ts
+@@ -283 +283 @@
+-      yield* tx.run(`CREATE TABLE \`session_goal\` (\`session_id\` text NOT NULL, \`id\` text NOT NULL, \`objective\` text NOT NULL, \`status\` text NOT NULL, \`token_budget\` integer, \`tokens_used\` integer DEFAULT 0 NOT NULL, \`time_used_seconds\` integer DEFAULT 0 NOT NULL, \`time_created\` integer NOT NULL, \`time_updated\` integer NOT NULL, CONSTRAINT \`session_goal_pk\` PRIMARY KEY(\`session_id\`), CONSTRAINT \`fk_session_goal_session_id\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE);`)
++      yield* tx.run(`CREATE TABLE \`session_goal\` (\`session_id\` text NOT NULL, \`id\` text NOT NULL, \`objective\` text NOT NULL, \`status\` text NOT NULL, \`token_budget\` integer, \`tokens_used\` integer DEFAULT 0 NOT NULL, \`time_used_seconds\` integer DEFAULT 0 NOT NULL, \`continue_on_error\` integer DEFAULT false NOT NULL, \`time_created\` integer NOT NULL, \`time_updated\` integer NOT NULL, CONSTRAINT \`session_goal_pk\` PRIMARY KEY(\`session_id\`), CONSTRAINT \`fk_session_goal_session_id\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE);`)

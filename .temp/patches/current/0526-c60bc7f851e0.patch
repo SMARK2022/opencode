@@ -11,10 +11,10 @@ Content-Transfer-Encoding: 8bit
 此前 need-input 为避免打扰被静音，只剩视觉通知；现重新接入内置语义音效槽位。
 question 播 question、permission 播 permission，when 仍为 always；abort 静音与完成/错误音效边界不变。
 
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
-index 53b0cefb6bfd38b0d7945eb4dc8d388fbf438eeb..6dce2f303530da7ff9820f040801f22dfa463547 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts
+diff --git a/packages/tui/src/feature-plugins/system/notifications.ts b/packages/tui/src/feature-plugins/system/notifications.ts
+index c3056fc46..2e47f796c 100644
+--- a/packages/tui/src/feature-plugins/system/notifications.ts
++++ b/packages/tui/src/feature-plugins/system/notifications.ts
 @@ -6,7 +6,7 @@ const id = "internal:notifications"
  
  type SessionError = Extract<Event, { type: "session.error" }>["properties"]["error"]
@@ -56,10 +56,11 @@ index 53b0cefb6bfd38b0d7945eb4dc8d388fbf438eeb..6dce2f303530da7ff9820f040801f22d
    })
  
    api.event.on("permission.replied", (event) => {
-diff --git a/packages/opencode/test/cli/cmd/tui/notifications.test.ts b/packages/opencode/test/cli/cmd/tui/notifications.test.ts
-index 20fb5a4c33830349ff7b396cc7fcee4cfc7360b8..e711f04628a752a501f5043b2e0f5f76656070dc 100644
---- a/packages/opencode/test/cli/cmd/tui/notifications.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/notifications.test.ts
+
+diff --git a/packages/tui/test/cli/cmd/tui/notifications.test.ts b/packages/tui/test/cli/cmd/tui/notifications.test.ts
+index 5667cbdb0..9ff2a2565 100644
+--- a/packages/tui/test/cli/cmd/tui/notifications.test.ts
++++ b/packages/tui/test/cli/cmd/tui/notifications.test.ts
 @@ -117,25 +117,25 @@ function permission(id: string, sessionID = "session"): PermissionRequest {
  }
  

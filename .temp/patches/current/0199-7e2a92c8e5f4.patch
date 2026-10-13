@@ -206,45 +206,6 @@ index 46283379a3..867f26d3cd 100644
    if (pattern.startsWith("~/")) return os.homedir() + pattern.slice(1)
    if (pattern === "~") return os.homedir()
    if (pattern.startsWith("$HOME/")) return os.homedir() + pattern.slice(5)
-@@ -186,17 +297,36 @@ function expand(pattern: string): string {
- export function fromConfig(permission: ConfigPermissionV1.Info) {
-   const ruleset: PermissionV1.Rule[] = []
-   for (const [key, value] of Object.entries(permission)) {
--    if (typeof value === "string") {
-+    // #199：`approvals_reviewer` 和 `auto_review` 是 auto pipeline 的控制字段，
-+    // #199：不是 permission name。将它们视为 rule 会将配置元数据泄漏到评估器中，
-+    // #199：可能意外授权一个以配置键命名的工具。
-+    if (key === "approvals_reviewer" || key === "auto_review") continue
-+    if (isAction(value)) {
-       ruleset.push({ permission: key, action: value, pattern: "*" })
-       continue
-     }
-+    if (!isPermissionObject(value)) continue
-     ruleset.push(
--      ...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
-+      ...Object.entries(value).flatMap(([pattern, action]) =>
-+        isAction(action) ? [{ permission: key, pattern: expand(pattern), action }] : [],
-+      ),
-     )
-   }
-   return ruleset
- }
- 
-+// #199：在扁平化前 guard 动态解析的配置。schema 足够宽松以容纳 auto-review
-+// #199：控制对象，所以运行时转换必须只发出实际的 permission action。
-+function isAction(input: unknown): input is PermissionV1.Action {
-+  return input === "ask" || input === "allow" || input === "deny" || input === "auto"
-+}
-+
-+// #199：数组和 auto_review 对象不是 permission pattern map。每个嵌套值在发出
-+// #199：rule 前由 isAction 检查，防止配置结构漂移产生无效规则。
-+function isPermissionObject(input: unknown): input is Record<string, PermissionV1.Action> {
-+  return Boolean(input && typeof input === "object" && !Array.isArray(input))
-+}
-+
- export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {
-   return rulesets.flat()
- }
 @@ -234,6 +364,9 @@ export function visibleTools<T>(tools: Record<string, T>, ruleset: PermissionV1.
    return Object.fromEntries(Object.entries(tools).filter(([name]) => !hidden.has(name)))
  }
@@ -803,3 +764,25 @@ index c1df7a2936..10869eeb5e 100644
 +  CircuitBroken,
 +  Definitions: inventory(Asked, Replied, ReviewCompleted, ReviewFailed, CircuitBroken),
 +}
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/server.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+@@ -22,2 +22,7 @@ import { Permission } from "@/permission"
+ import { Permission } from "@/permission"
++import { PermissionReviewer } from "@/permission/reviewer/service"
++import { PermissionSessionCache } from "@/permission/cache/session-cache"
++import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
++// #199：auto review 管线三服务需进入生产 app group（见下）
++
+ import { Plugin } from "@/plugin"
+@@ -233,4 +238,10 @@ const app = LayerNode.group([
+   Permission.node,
++  // #199：LayerNode.compile 仅 provide deps 而不注入成员；生产 server runtime
++  // #199：必须把 reviewer/cache/circuit 并列入组，否则 Auto agent 在生产
++  // #199：恒 fail-closed（AutoDeniedError），用户 bash:auto 也退化为普通 ask。
++  PermissionReviewer.node,
++  PermissionSessionCache.node,
++  PermissionCircuitBreaker.node,
+   PermissionSaved.node,
+   Todo.node,
+   Session.node,

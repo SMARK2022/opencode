@@ -26,7 +26,7 @@ index 344a29828..12e33df4a 100644
 +    // #268：filterStatusOk 把 4xx/5xx 转为失败——目录源拉取失败不得以空目录静默成功
      // #150：模型源 HTTP 仅走 NetworkProxy.routedFetch
  
-     const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
+    const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
 @@ -164,23 +167,23 @@
      })
  

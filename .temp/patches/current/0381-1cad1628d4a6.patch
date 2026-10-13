@@ -12,7 +12,7 @@ diff --git a/packages/tui/test/routes/session/session-layout.test.ts b/packages/
  // #184：与 tip index 主列 paddingLeft=2 paddingRight=1、scrollbar paddingRight 0/1 对齐
  // #184：纯函数锁定 docked/overlay 与滚动条组合
 @@ -22,3 +26,125 @@ describe("sessionMessageContentWidth (#184)", () => {
-     expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4 - 2)
+     expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 2)
    })
  })
 +// CJK 全角字符在视觉行尾刚好填满整行时（偶数宽度），OpenTUI 的 native

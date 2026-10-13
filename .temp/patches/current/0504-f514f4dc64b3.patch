@@ -1,16 +1,3 @@
-From f514f4dc64b316d21525df960dd04cebbe516b4f Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 20 Jul 2026 23:24:01 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E7=94=A8=E6=B0=B4=E4=BD=8D?=
- =?UTF-8?q?=E7=BA=BF=E5=88=86=E9=85=8D=20context=20usage=20=E7=BD=91?=
- =?UTF-8?q?=E6=A0=BC=E5=B8=AD=E4=BD=8D?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-独立 Math.round 把亚半格 used 清零并把余数塞给 Free，图标比例系统性偏短。
-改为按类别顺序的累积水位线一次分配固定 total seats，并补齐 Attachments/Pending mass。
-
 diff --git a/docs/plans/context-usage-grid-rounding-diagnosis.md b/docs/plans/context-usage-grid-rounding-diagnosis.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..dfe49c5f8478fcb1888a57a3069b87e460e887eb
@@ -276,6 +263,7 @@ index 0000000000000000000000000000000000000000..dfe49c5f8478fcb1888a57a3069b87e4
 +- categories 组装：同文件 `~760-782`
 +- 渲染：`packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx:207-235`
 +- breakdown 含 attachments/pending：`packages/opencode/src/token/accounting.ts:384-390`
+
 diff --git a/docs/plans/context-usage-grid-rounding-fix.md b/docs/plans/context-usage-grid-rounding-fix.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..f940dcf1f7c780b89a6f5798bd40e3d3efefebca
@@ -761,34 +749,35 @@ index 0000000000000000000000000000000000000000..f940dcf1f7c780b89a6f5798bd40e3d3
 +- **Invocation / task ID:** **ses_context_usage_grid_impl_r4b**  
 +- **Blocking findings:** **0**  
 +- **E=180, C=29, required C≥27, gate PASS**
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-index 9d41209e88185db6cafee3ca79c1f2845c951e68..e20f55d07a2192244ac30fcea447fbc8a31f8151 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-@@ -165,14 +165,18 @@ function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategor
- }
+
+diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
+index 43e685260..a41c27c66 100644
+--- a/packages/tui/src/routes/session/context-usage.tsx
++++ b/packages/tui/src/routes/session/context-usage.tsx
+@@ -204,6 +204,7 @@ function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategor
  
+ // 分类标记符：用不同 Unicode 符号区分系统提示、指令、技能、工具、消息、自由空间
  function categoryMarker(name: string) {
-+  // 新 mass 类别必须有独立 marker，否则列表与网格图例无法区分 Attachments/Pending/Unaccounted。
++  // 新 mass 类别必须有独立 marker，否则列表与网格图例无法区分 Attachments/Unaccounted。
    if (name === "System prompt") return "◆"
    if (name === "Instructions") return "◇"
    if (name === "Skills") return "●"
-   if (name === "Tool definitions") return "◦"
+@@ -211,8 +212,10 @@ function categoryMarker(name: string) {
    if (name === "Input Messages") return "▰"
+   // ▾/▴ 区分工具结果与工具调用，便于扫读 Conversation 组
    if (name === "Tool results") return "▾"
 +  if (name === "Attachments") return "▣"
    if (name === "Output Messages") return "▱"
    if (name === "Tool calls") return "▴"
-+  if (name === "Pending") return "◌"
 +  if (name === "Unaccounted") return "×"
    if (name === "Free space") return "·"
    return "×"
  }
-@@ -239,23 +243,31 @@ function CategoryList(props: { data: ContextUsageData }) {
-   const { theme } = useTheme()
+@@ -292,24 +295,28 @@ function CategoryList(props: { data: ContextUsageData }) {
    const labelWidth = 20
    const valueWidth = 14
-+  // tokens===0 不进列表，避免 Attachments/Pending 等零值噪音；网格 weights 仍可含零（waterline 为 no-op）。
+   // 分类分组：Prompt 组含系统提示/指令/技能/工具定义；Conversation 组含输入/输出消息；Window 组含自由空间/预留/缓冲区
++  // tokens===0 不进列表，避免 Attachments 等零值噪音；网格 weights 仍可含零（waterline 为 no-op）。
    const groups = createMemo(() => [
      {
        title: "Prompt",
@@ -796,20 +785,19 @@ index 9d41209e88185db6cafee3ca79c1f2845c951e68..e20f55d07a2192244ac30fcea447fbc8
 -        ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
 +      categories: props.data.categories.filter(
 +        (item) =>
-+          item.tokens > 0 &&
-+          ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
++          item.tokens > 0 && ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
        ),
      },
      {
        title: "Conversation",
+-      // Conversation 组锁定四类名称，与 computeContextData 分桶一致
 -      categories: props.data.categories.filter((item) =>
 -        ["Input Messages", "Tool results", "Output Messages", "Tool calls"].includes(item.name),
++      // Conversation 组锁定五类名称；Attachments 进入网格与列表的独立桶
 +      categories: props.data.categories.filter(
 +        (item) =>
 +          item.tokens > 0 &&
-+          ["Input Messages", "Tool results", "Attachments", "Output Messages", "Tool calls", "Pending", "Unaccounted"].includes(
-+            item.name,
-+          ),
++          ["Input Messages", "Tool results", "Attachments", "Output Messages", "Tool calls"].includes(item.name),
        ),
      },
      {
@@ -817,23 +805,32 @@ index 9d41209e88185db6cafee3ca79c1f2845c951e68..e20f55d07a2192244ac30fcea447fbc8
 -      categories: props.data.categories.filter((item) =>
 -        ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
 +      categories: props.data.categories.filter(
-+        (item) =>
-+          item.tokens > 0 && ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
++        (item) => item.tokens > 0 && ["Unaccounted", "Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
        ),
      },
    ].filter((group) => group.categories.length > 0))
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index 8935199c7f5cbca84194461196dbde44f1a15541..1aea02bb8c91a203e59faa565d890e0c9b58e1f3 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -602,69 +602,56 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
+
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+index dd5399e18..f0a112a06 100644
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1111,77 +1111,63 @@ function gridSize(contextLimit: number, columns?: number, rows?: number) {
+   }
+ }
+ 
+-// 上下文网格：将 token 分类映射为字符网格行，自由空间和压缩缓冲区分别填充
++// 上下文网格：累积水位线（waterline）分配席位——整数刻度被谁的累积区间跨过格子就归谁。
++// 分母用 Σ weights（非 contextLimit），保证 Σ counts === total，且不把舍入误差整段倒给 Free。
+ export function contextGrid(categories: ContextCategory[], contextLimit: number, options?: { columns?: number; rows?: number }) {
    const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
    const total = gridW * gridH
    const cells: GridSquare[] = []
+-  // 压缩缓冲区放在网格尾部，单独计算其格子数
 -  const tail = categories.find((category) => category.name === "Autocompact buffer")
 -  const body = categories.filter((category) => category.name !== "Autocompact buffer")
- 
+-
 -  const countFor = (category: ContextCategory, remaining: number) => {
+-    // 按比例计算格子数，非延迟分类在占比 ≥0.5 时至少占 1 格
 -    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
 -    let count = Math.round(exact)
 -    if (category.tokens > 0 && !category.isDeferred && count === 0 && exact >= 0.5) count = 1
@@ -842,17 +839,11 @@ index 8935199c7f5cbca84194461196dbde44f1a15541..1aea02bb8c91a203e59faa565d890e0c
 -      count: Math.max(0, Math.min(count, remaining)),
 -    }
 -  }
-+  // 累积水位线（waterline）：按类别顺序叠高，整数刻度被谁的累积区间跨过格子就归谁。
-+  // 分母用 Σ weights（非 contextLimit），保证 Σ counts === total，且不把舍入误差整段倒给 Free。
-+  const weights = categories.map((category) => Math.max(0, category.tokens))
-+  const mass = weights.reduce((sum, weight) => sum + weight, 0)
-+  const counts = waterlineCounts(weights, total)
- 
+-
+-  // 缓冲区优先分配尾部格子：保证压缩缓冲区在网格末尾可视化，与自由空间区分
 -  const tailCount = tail ? countFor(tail, total).count : 0
 -  const bodyLimit = total - tailCount
--
--  // Pre-compute all body category counts so rounding remainder can be given
--  // to Free space at its natural position, not appended after Model reserve.
+-  // #125：先算各 body 分类格子数，余数并入 Free space 原位
 -  const counts = body.map((_) => 0)
 -  let remaining = bodyLimit
 -  for (let ci = 0; ci < body.length; ci++) {
@@ -860,25 +851,34 @@ index 8935199c7f5cbca84194461196dbde44f1a15541..1aea02bb8c91a203e59faa565d890e0c
 -    counts[ci] = count
 -    remaining -= count
 -  }
-+  // Autocompact 只调整序列化贴尾，不二次 round seat（INV-04）。
-+  const body = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [] : [{ category, index }]))
-+  const tail = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [{ category, index }] : []))
- 
--  // Rounding remainder → add to Free space in place
 -  const freeIdx = body.findIndex((c) => c.name === "Free space")
+-  // #125：舍入余数给 Free space，避免尾部追加打乱顺序
 -  if (freeIdx >= 0 && remaining > 0) counts[freeIdx] += remaining
 -
--  // Render in natural category order with pre-computed counts
 -  for (let ci = 0; ci < body.length; ci++) {
 -    const category = body[ci]
 -    const count = counts[ci]
 -    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
+-    for (let k = 0; k < count; k++) {
+-      // 格子饱满度 = 比例余量，用于选择填充字符
+-      const fullness = Math.max(0, Math.min(1, exact - k))
++  // 负 token 不参与水位：max(0,·) 钳制保证 Σ weights 与累积区间单调不减。
++  const weights = categories.map((category) => Math.max(0, category.tokens))
++  const mass = weights.reduce((sum, weight) => sum + weight, 0)
++  const counts = waterlineCounts(weights, total)
++
++  // Autocompact 只调整序列化贴尾，不二次 round seat（INV-04）。
++  const body = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [] : [{ category, index }]))
++  const tail = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [{ category, index }] : []))
++
 +  for (const item of [...body, ...tail]) {
 +    const count = counts[item.index] ?? 0
 +    // fullness 用连续 exact（tokens/mass*total），与 waterline 整数 count 对齐边界半格符号。
 +    const exact = mass > 0 ? (weights[item.index] / mass) * total : 0
-     for (let i = 0; i < count; i++) {
-       const fullness = Math.max(0, Math.min(1, exact - i))
++    for (let i = 0; i < count; i++) {
++      const fullness = Math.max(0, Math.min(1, exact - i))
++      // 单格字形契约：reserve=U+26DD、低饱满=U+26C0 必须保持单码点——双码点 CJK 或组合附加符
++      // 会把行宽撑开或渲染为空，破坏网格列对齐；码点级断言见下方 symbol 契约测试。
 +      const isFree = item.category.name === "Free space"
 +      const isReserve = item.category.name === "Model reserve" || item.category.name === "Autocompact buffer"
        cells.push({
@@ -892,6 +892,8 @@ index 8935199c7f5cbca84194461196dbde44f1a15541..1aea02bb8c91a203e59faa565d890e0c
        })
      }
    }
+-
+-  // 尾部填充压缩缓冲区格子
 -  if (tail) {
 -    const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
 -    while (cells.length < total) {
@@ -904,7 +906,8 @@ index 8935199c7f5cbca84194461196dbde44f1a15541..1aea02bb8c91a203e59faa565d890e0c
 -      })
 -    }
 -  }
- 
+-
+   // 按行宽切分为二维网格
    const rows: GridSquare[][] = []
    for (let i = 0; i < cells.length; i += gridW) rows.push(cells.slice(i, i + gridW))
    return rows
@@ -927,78 +930,114 @@ index 8935199c7f5cbca84194461196dbde44f1a15541..1aea02bb8c91a203e59faa565d890e0c
 +  })
 +}
 +
- export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
-   // 以活跃轮次取 user，跳过尚未派生 assistant 的 queued orphan user，让 model/tool
-   // 解析对齐实际运行的 assistant 而非 orphan。computeContextData 不因无 assistant 早退——
-@@ -679,6 +666,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-   let instructionTokens = 0
-   let skillTokens = 0
-   let toolDefTokens = 0
-+  let pendingTokens = 0
-   let instructionDetails: Array<{ path: string; tokens: number }> = []
-   let skillDetails: Array<{ name: string; tokens: number; path: string }> = []
-   let toolDefs: Array<{ name: string; tokens: number }> = []
-@@ -692,6 +680,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     instructionTokens = bd.instructions
-     skillTokens = bd.skills
-     toolDefTokens = bd.tools
-+    // pending 与 attachments 必须进入网格 weights，否则 used mass 无色块、席位被 Free 吞掉（INV-03）。
-+    pendingTokens = bd.pending
- 
-     msgDetails = {
-       userText: bd.userMessages,
-@@ -757,21 +747,36 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-   const used = acc.step.input + acc.step.output
-   const free = maxTokens ? Math.max(0, wind.usableInput - used) : 0
++
+ // 计算上下文使用数据：汇总消息、指令、技能、工具定义的 token 分类与网格
+ function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
+   const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
+@@ -1289,8 +1275,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+     // 服务端细分：toolInput 记调用，toolOutput 记结果
+     toolCallTokens = Math.round(bd.messages.toolInput / ratio)
+     toolResultTokens = Math.round(bd.messages.toolOutput / ratio)
+-    // 附件用视觉估算 tokens，不混入文本 chars/ratio 桶
+-    inputMessageTokens = Math.round(bd.messages.userText / ratio) + msg.details.attachments
++    // 附件 tokens 不混入文本 chars/ratio 桶——由 Attachments 独立桶承载并进入网格 weights
++    inputMessageTokens = Math.round(bd.messages.userText / ratio)
+     outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning) / ratio)
+   } else {
+     skillTokens = estimate(skillListing, ratio)
+@@ -1303,8 +1289,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+     toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+     toolCallTokens = msg.details.toolCalls
+     toolResultTokens = msg.details.toolResults
+-    // 本地重建：工具结果/调用从输入输出中拆出
+-    inputMessageTokens = msg.details.userText + msg.details.attachments
++    // 本地重建路径同样把附件交给独立桶，两条路径的网格 weights 不分叉
++    inputMessageTokens = msg.details.userText
+     outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.compactionSummary
+   }
+   // bd 路径：instructions 直接用服务端细分字符/ratio，禁止再与 system 双计
+@@ -1345,32 +1331,46 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+       }))
+     }
+   }
+-  // used 代数：输入 + 工具结果 + 输出 + 工具调用
+-  const messageTotal = inputMessageTokens + toolResultTokens + outputMessageTokens + toolCallTokens
++  // used 代数：输入 + 工具结果 + 输出 + 工具调用 + 附件（附件已拆独立桶，但仍占用窗口）
++  const messageTotal = inputMessageTokens + toolResultTokens + outputMessageTokens + toolCallTokens + msg.details.attachments
+   const window = windowDetails(input, modelInfo.model)
+   // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息
+   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
+   // 自由空间 = 可用输入 - 已用（无模型限制时为 0）
+   const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
  
 -  const categories: ContextCategory[] = [
-+  // 权重向量顺序钉死：全部 used mass（含 Attachments/Pending/Unaccounted）连续且位于 Free/reserve/buffer 之前。
-+  // category.tokens 保持 accounting 真值；gap>0 才插入 Unaccounted，gap<=0 禁止扣减 used 桶。
-+  const usedCategories: ContextCategory[] = [
-     { name: "System prompt", tokens: envTokens, color: "primary" },
-     { name: "Instructions", tokens: instructionTokens, color: "info" },
-     { name: "Skills", tokens: skillTokens, color: "success" },
-     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-     { name: "Input Messages", tokens: msgDetails.userText, color: "warning" },
-     { name: "Tool results", tokens: msgDetails.toolResults, color: "warning" },
-+    { name: "Attachments", tokens: msgDetails.attachments, color: "warning" },
-     { name: "Output Messages", tokens: msgDetails.assistantText + msgDetails.reasoning, color: "accent" },
-     { name: "Tool calls", tokens: msgDetails.toolCalls, color: "accent" },
-+    { name: "Pending", tokens: pendingTokens, color: "warning" },
-+  ]
-+  // Window 段永远在 used mass 之后，保证水位先淹没真实占用再画 Free/reserve/buffer。
-+  const windowCategories: ContextCategory[] = [
-     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
-     ...(wind.providerReserve > 0
-       ? [{ name: "Model reserve", tokens: wind.providerReserve, color: "textMuted" as const, isDeferred: true }]
-       : []),
-     { name: "Autocompact buffer", tokens: wind.compactionBuffer, color: "textMuted", isDeferred: true },
-   ]
-+  const painted = [...usedCategories, ...windowCategories].reduce((sum, category) => sum + category.tokens, 0)
-+  // gap>0：欠账 mass 用 Unaccounted 补到 contextLimit，禁止静默增大 Free。
-+  // gap<=0（含超窗）：不改写任何 accounting 桶的 tokens，waterline 分母允许 > contextLimit。
-+  const gap = maxTokens > 0 ? maxTokens - painted : 0
-+  const unaccounted: ContextCategory[] =
-+    gap > 0 ? [{ name: "Unaccounted", tokens: gap, color: "textMuted" }] : []
-+  // Unaccounted 插在 Free 之前，避免把未知 mass 画成“空闲”。
-+  const categories: ContextCategory[] = [...usedCategories, ...unaccounted, ...windowCategories]
+-    { name: "System prompt", tokens: envTokens, color: "primary" },
+-    { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
+-    { name: "Skills", tokens: skillTokens, color: "success" },
+-  // 049 source 语义：Tool definitions 与 Input Messages 需视觉区分（secondary，非同色 warning）
+-    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
+-    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
+-    // Conversation 组细分为四桶：工具结果/调用单独可见
+-    { name: "Tool results", tokens: toolResultTokens, color: "warning" },
+-    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
+-    { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
+-    // 自由空间和缓冲区标记为延迟计算，网格中按比例填充
+-    { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
+-    ...(window.providerReserve > 0
+-      ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
+-      : []),
+-    { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
+-  ]
++  const categories: ContextCategory[] = (() => {
++    // 权重向量顺序钉死：全部 used mass（含 Attachments）连续且位于 Free/reserve/buffer 之前。
++    // category.tokens 保持 accounting 真值；gap>0 才插入 Unaccounted，gap<=0 禁止扣减 used 桶。
++    const usedCategories: ContextCategory[] = [
++      { name: "System prompt", tokens: envTokens, color: "primary" },
++      { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
++      { name: "Skills", tokens: skillTokens, color: "success" },
++      // 049 source 语义：Tool definitions 与 Input Messages 需视觉区分（secondary，非同色 warning）
++      { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
++      { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
++      // Conversation 组细分：工具结果/调用单独可见；Attachments 独立成桶进入网格 weights
++      { name: "Tool results", tokens: toolResultTokens, color: "warning" },
++      { name: "Attachments", tokens: msg.details.attachments, color: "warning" },
++      { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
++      { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
++    ]
++    // Window 段永远在 used mass 之后，保证水位先淹没真实占用再画 Free/reserve/buffer。
++    const windowCategories: ContextCategory[] = [
++      { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
++      ...(window.providerReserve > 0
++        ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
++        : []),
++      { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
++    ]
++    const painted = [...usedCategories, ...windowCategories].reduce((sum, category) => sum + category.tokens, 0)
++    // gap>0：欠账 mass 用 Unaccounted 补到 contextLimit，禁止静默增大 Free。
++    // gap<=0（含超窗）：不改写任何 accounting 桶的 tokens，waterline 分母允许 > contextLimit。
++    const gap = maxTokens > 0 ? maxTokens - painted : 0
++    const unaccounted: ContextCategory[] = gap > 0 ? [{ name: "Unaccounted", tokens: gap, color: "textMuted" }] : []
++    // Unaccounted 插在 Free 之前，避免把未知 mass 画成“空闲”。
++    return [...usedCategories, ...unaccounted, ...windowCategories]
++  })()
  
-   return {
-     model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
-index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2420269e1 100644
---- a/packages/opencode/test/cli/tui/context-usage.test.ts
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
- import { createMemo, createRoot } from "solid-js"
- import { createStore, produce } from "solid-js/store"
+   // #136：主 total = 最近 step 上下文窗口；footer 的 details.usage 仍是会话累计
+   // #136：step 窗口优先于 used 重建，对齐模型当前上下文占用
+
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+index e027cc15a..c215dd7da 100644
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -3,7 +3,7 @@ import { createMemo, createRoot } from "solid-js"
+ import { createStore } from "solid-js/store"
+ import { describe, expect, test } from "bun:test"
  import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
--import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
-+import { computeContextData, contextGrid, filterCompactedMessages, type ContextCategory } from "@/cli/cmd/tui/util/context-usage"
- import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
+-import { computeContextData, filterCompactedMessages } from "../src/util/context-usage"
++import { computeContextData, contextGrid, filterCompactedMessages, type ContextCategory } from "../src/util/context-usage"
+ import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey } from "../src/routes/session/context-usage"
  
- const provider: Provider = {
-@@ -659,4 +659,153 @@ describe("context usage", () => {
+ // 测试用 Provider：上下文 20k、输入 19.9k、输出 100，用于验证窗口与缓冲区计算
+@@ -688,3 +688,187 @@ test("snapshot tracks streaming tool input deltas", () => {
      // totalTokens 取自活跃 assistantA 的 step（17000 input + 600 output），不受 queued user 影响
      expect(data.totalTokens).toBe(17_600)
    })
@@ -1025,7 +1064,7 @@ index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2
 +      cat("Input Messages", 3_000),
 +      cat("Free space", 16_000),
 +    ]
-+    // contextLimit 仅影响 gridSize；<100k → width 10；rows 10 → total 100
++    // contextLimit 仅影响 gridSize；这里显式钉 100 列 × 10 行 → total 100
 +    const rows = contextGrid(categories, 20_000, { columns: 100, rows: 10 })
 +    expect(rows.flat()).toHaveLength(100)
 +    const counts = countByCategory(rows)
@@ -1046,7 +1085,7 @@ index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2
 +  })
 +
 +  test("waterline assigns seats by cumulative stack order, not largest-remainder frac race", () => {
-+    // 顺序敏感：LRM 会按 frac 抢席给 B，水位线按栈序跨刻度使 B=0——锁死用户要的叠高语义。
++    // 顺序敏感：LRM 会按 frac 抢席给 B，水位线按栈序跨刻度使 B=0——锁死叠高语义。
 +    // 手算 waterline seats=100, weights [2300,400,97300] → A=2,B=0,Free=98
 +    const categories = [cat("A", 2_300), cat("B", 400), cat("Free space", 97_300)]
 +    const rows = contextGrid(categories, 50_000, { columns: 100, rows: 10 })
@@ -1089,9 +1128,19 @@ index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2
 +    // INV-03：attachments 已计入 used 却无色块时 Free 会吞席；必须出现 Attachments 类别与格子。
 +    const messages = [user("1"), assistant("2", "1")]
 +    const parts: Record<string, Part[]> = {
-+      "1": [text("1", "hello")],
++      "1": [
++        {
++          id: "att",
++          sessionID: "s",
++          messageID: "1",
++          type: "file",
++          time: { created: 1 },
++          mime: "image/png",
++          url: `data:image/png;base64,${"x".repeat(150_000)}`,
++          state: { status: "completed" },
++        } as unknown as Part,
++      ],
 +      "2": [
-+        text("2", "world"),
 +        {
 +          id: "sf",
 +          sessionID: "s",
@@ -1116,14 +1165,22 @@ index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2
 +              total: 700,
 +            },
 +          },
-+        } as Part,
++        } as unknown as Part,
 +      ],
 +    }
 +    const data = await computeContextData({
 +      messages,
 +      parts,
-+      providers: [provider],
-+      config: { compaction: { reserved: 0 } },
++      // 附件色块需要 attachment 能力为 true 的 provider；顶层 fixture 为 false（其余字段一致）
++      providers: [
++        {
++          ...provider,
++          models: {
++            model: { ...provider.models["model"], capabilities: { ...provider.models["model"].capabilities, attachment: true } },
++          },
++        },
++      ],
++      config: {},
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
@@ -1131,10 +1188,27 @@ index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2
 +      skills: [],
 +      toolDefinitions: [],
 +    })
-+    // provider context=20000；attachments 应按比例分到 confirmed input 并进入色块
++    // attachments 应作为独立类别进入网格 weights 并获得色块
 +    expect(data.categories.find((c) => c.name === "Attachments")?.tokens).toBeGreaterThan(0)
 +    const flat = data.gridRows.flat()
 +    expect(flat.filter((c) => c.categoryName === "Attachments").length).toBeGreaterThan(0)
++  })
++
++  test("grid symbols are single-cell glyphs matching the source contract", () => {
++    // 码点级断言：字形必须与源一致且为单码点，防止管线把 Unicode 损坏成双码点 CJK 或
++    // 组合附加符——此类损坏不会被 categoryName 计数断言或 typecheck 捕获。
++    // 低饱满构造：前置 Tail(5) 把 cum 抬过 1 席刻度，Input Messages(6) exact=0.6<0.7 → U+26C0
++    const flat = contextGrid([cat("Tail", 5), cat("Input Messages", 6), cat("Free space", 989)], 50_000, { columns: 100, rows: 10 }).flat()
++    const low = flat.find((c) => c.categoryName === "Input Messages")!
++    expect(low.symbol).toBe("⛀")
++    expect([...low.symbol].length).toBe(1)
++    const free = flat.find((c) => c.categoryName === "Free space")!
++    expect(free.symbol).toBe("⛶")
++    const reserveRows = contextGrid([cat("Model reserve", 100, "textMuted"), cat("Free space", 900)], 50_000, { columns: 100, rows: 10 }).flat()
++    const reserve = reserveRows.find((c) => c.categoryName === "Model reserve")!
++    // reserve/buffer 固定 U+26DD 单码点，与源网格图例逐字形一致
++    expect(reserve.symbol).toBe("⛝")
++    expect([...reserve.symbol].length).toBe(1)
 +  })
 +
 +  test("autocompact buffer seats remain a contiguous tail after waterline", () => {
@@ -1151,4 +1225,3 @@ index 7f5a35782f8e6a4ae36bcc82f8a66ccbc2d7b1f1..5adb21ad9e13d62cd9f4b9431322fdd2
 +    expect(tail.every((c) => c.categoryName === "Autocompact buffer")).toBe(true)
 +    expect(flat.filter((c) => c.categoryName === "Autocompact buffer")).toHaveLength(20)
 +  })
- })

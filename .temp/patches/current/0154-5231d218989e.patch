@@ -1,81 +1,87 @@
-From 5231d218989ed333922d89aedf09a832592e893e Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sat, 16 May 2026 19:33:47 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E9=A2=84=E8=A7=88?=
- =?UTF-8?q?=E5=B7=AE=E5=BC=82=E5=8A=9F=E8=83=BD=E5=92=8C=E4=BC=9A=E8=AF=9D?=
- =?UTF-8?q?=E5=8A=A9=E6=89=8B=E7=8A=B6=E6=80=81=E7=AE=A1=E7=90=86=EF=BC=8C?=
- =?UTF-8?q?=E4=BC=98=E5=8C=96diff=E6=98=BE=E7=A4=BA=E5=92=8C=E7=8A=B6?=
-
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index 1111111111..2222222222 100644
+index 1120443e20c7793075c4575b7a472536b8d80469..553c243f6a7102e983ea43abc154c55aaaa7a9f3 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -38,6 +38,12 @@
+@@ -37,6 +37,9 @@ import {
  import { Prompt, type PromptRef } from "../../component/prompt"
  import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
  import { ConnectionError } from "../../util/connection-error"
 +import { previewDiff } from "../../util/preview-diff"
-+import {
-+  hasStreamingAssistant,
-+  pendingAssistantID,
-+  shouldRefreshStaleBusyStatus,
-+} from "../../util/session-pending"
++// #154：pending/streaming 判定抽到 util，便于单测与去重
++import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
  import type {
    AssistantMessage,
    Part,
-@@ -228,7 +234,7 @@
+@@ -227,7 +230,7 @@ export function Session() {
    })
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
    // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
 -  const streamingActive = createMemo(() => messages().some((x: any) => x.role === "assistant" && !x.time?.completed))
-+  const streamingActive = createMemo(() => hasStreamingAssistant(messages() as any))
-   const foregroundTasks = createMemo(() =>
-     sync.data.capabilities.experimentalBackgroundSubagents
-       ? messages().flatMap((message) =>
-@@ -258,12 +264,22 @@
++  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
+   const messagesBeforeRevert = () => {
+     const messageID = session()?.revert?.messageID
+     if (!messageID) return messages()
+@@ -263,16 +266,37 @@ export function Session() {
    const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
  
    const pending = createMemo(() => {
 -    // 会话空闲时不查找待处理消息，避免不必要的重渲染
-+    // #154：pending 抽取；仍保留 completed 游标过滤
++    // #154：算法沉淀到 session-pending util（含 completed 游标），此处只保留状态读取
      const status = sync.data.session_status?.[route.sessionID]
 -    if (!status || status.type === "idle") return undefined
--    const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
--    return messages().findLast((x) => x.role === "assistant" && !x.time.completed && (!completed || x.id > completed))
--      ?.id
-+    return pendingAssistantID(messages() as any, status)
-+  })
-+
-+  // #154：busy 但无 streaming assistant 时延迟 force sync 一次
-+  createEffect(() => {
-+    const status = sync.data.session_status?.[route.sessionID]
-+    const msgs = messages() as any
-+    if (!shouldRefreshStaleBusyStatus(msgs, status)) return
-+    const sessionID = route.sessionID
-+    const timer = // #154：1.5s 延迟避免瞬时 busy 误触发
-+setTimeout(() => {
-+      void sync.session.sync(sessionID, { force: true })
-+    }, 1500)
-+    onCleanup(() => clearTimeout(timer))
+-    const completed = messages().findLastIndex((message) => message.role === "assistant" && message.time.completed)
+-    const pending = messages().findLastIndex(
+-      (message, index) => index > completed && message.role === "assistant" && !message.time.completed,
+-    )
+-    return pending === -1 ? undefined : pending
++    return pendingAssistantIndex(messages(), status)
    })
  
++  // #154：busy 却没有流式 assistant，说明 SSE 状态更新丢失而 DB 已有完成消息；
++  // 延迟 1.5s 强制一次全量 sync，避免 prompt 因状态陈旧被永久禁用
++  createEffect(
++    on(
++      () => {
++        // 依赖键只取末条消息的 id/role/completed：流式 delta 不应反复重启定时器
++        const last = messages().at(-1)
++        return [
++          route.sessionID,
++          sync.data.session_status?.[route.sessionID]?.type,
++          last?.id,
++          last?.role,
++          last?.role === "assistant" ? last.time.completed : undefined,
++        ] as const
++      },
++      ([sessionID]) => {
++        if (!shouldRefreshStaleBusyStatus(messages(), sync.data.session_status?.[sessionID])) return
++        // 1.5s 容忍短暂竞态，超时才认定状态更新丢失
++        const timer = setTimeout(() => {
++          void sync.session.sync(sessionID, { force: true })
++        }, 1_500)
++        onCleanup(() => clearTimeout(timer))
++      },
++    ),
++  )
++
    const lastAssistant = createMemo(() => {
-@@ -2329,6 +2345,51 @@
+     return messages().findLast((x) => x.role === "assistant")
+   })
+@@ -2415,6 +2439,48 @@ function Shell(props: ToolProps) {
    )
  }
  
-+// #154：展开态共用 DiffRenderable，避免 Write/Edit/ApplyPatch 重复 props
-+// #154：filetype/syntax/主题色全部集中在此，调用方只传 diff 与 view
++// #154：展开态统一走 DiffView（集中 theme/filetype/syntax props），
++// 折叠态走 DiffPreview：独立挂载裁剪后的短 diff，maxHeight 只作用于预览，
++// 避免旧 maxHeight 内联裁剪把滚轮事件灌进全量 diff、重开时带着 stale offset
 +function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
 +  const ctx = use()
 +  const { theme, syntax } = useTheme()
-+  // #154：syncScroll 默认 true；折叠预览显式 false 防止滚轮改内部 offset
++
 +  return (
 +    <box paddingLeft={1}>
 +      <diff
 +        diff={props.diff}
 +        view={props.view}
-+        // #154：展开态默认同步滚动；预览态关闭
 +        syncScroll={props.syncScroll ?? true}
 +        filetype={filetype(props.filePath)}
 +        syntaxStyle={syntax()}
@@ -97,36 +103,29 @@ index 1111111111..2222222222 100644
 +  )
 +}
 +
-+// #154：折叠预览独立挂载短 diff，maxHeight 裁剪且不泄漏 scrollY 到展开态
-+// #154：必须喂 previewDiff 改写后的短 patch，否则 hunk 头与可见行不一致
 +function DiffPreview(props: { diff: string; filePath?: string; view: "split" | "unified"; maxLines: number }) {
-+  // #154：overflow hidden + maxHeight = 可见预算；与 BlockTool preview 契约对齐
++  // 预览与展开是两个独立 Renderable：syncScroll=false 防止预览回写主滚动位置
 +  return (
 +    <box maxHeight={props.maxLines} overflow="hidden">
-+      {/* #154：syncScroll=false 防止预览滚轮污染展开态 */}
 +      <DiffView diff={props.diff} filePath={props.filePath} view={props.view} syncScroll={false} />
 +    </box>
 +  )
 +}
 +
- function Shell(props: ToolProps) {
-   const { theme } = useTheme()
+ function Write(props: ToolProps) {
+   const { theme, syntax } = useTheme()
    const pathFormatter = usePathFormatter()
-@@ -2486,35 +2547,25 @@
+@@ -2472,38 +2538,19 @@ function Write(props: ToolProps) {
            threshold={20}
            // #144：武装 canCollapse 使 preview 可达
            totalLines={countLines(diff() ?? "")}
 -          preview={diffOverflow() ? <text fg={theme.text}>{previewText(diff() ?? "", 10)}</text> : undefined}
-+          // #154：可折叠时必须提供 DiffPreview，禁止 maxHeight 裁全量 Diff（scrollY 泄漏）
-+          // #154：totalLines 与 preview 共用 countLines 度量，避免 +/- 与全文行数分裂
++          // #154：折叠预览改为真实 DiffRenderable 输出；previewDiff 按行预算截断
++          // 并重写 @@ 计数，解析器看到的是合法短 diff 而非裸切片文本
++          // 行预算与 maxLines 同为 10，折叠预览不会出现二次截断
 +          preview={
-+            countLines(diff() ?? "") > 20 ? (
-+              <DiffPreview
-+                diff={previewDiff(diff() ?? "", 10)}
-+                filePath={stringValue(props.input.filePath)}
-+                view={diffView()}
-+                maxLines={10}
-+              />
++            diffOverflow() ? (
++              <DiffPreview diff={previewDiff(diff() ?? "", 10)} filePath={stringValue(props.input.filePath)} view={diffView()} maxLines={10} />
 +            ) : undefined
 +          }
            title={"← Write " + pathFormatter.format(stringValue(props.input.filePath)) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
@@ -157,26 +156,31 @@ index 1111111111..2222222222 100644
 -              removedLineNumberBg={theme.diffRemovedLineNumberBg}
 -            />
 -          </box>
-+          {/* #154：展开用 DiffView；折叠内容由 preview/DiffPreview 承载 */}
-+          {/* #154：展开态 DiffView；折叠由 BlockTool preview=DiffPreview 承载 */}
+-          <Show when={diffOverflow()}>
+-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+-          </Show>
 +          <DiffView diff={diff()!} filePath={stringValue(props.input.filePath)} view={diffView()} />
-           <Show when={diffOverflow()}>
-             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-           </Show>
-@@ -2856,36 +2907,29 @@
+           {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
+         </BlockTool>
+@@ -2811,8 +2858,6 @@ function Edit(props: ToolProps) {
+     return ctx.width > 120 ? "split" : "unified"
+   })
+ 
+-  const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
+-
+   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
+   // diff 行统计 memo：计算新增/删除/总计行数，用于标题和展开判断
+   const stats = createMemo(() => {
+@@ -2837,39 +2882,15 @@ function Edit(props: ToolProps) {
            threshold={20}
            // #144：武装 canCollapse 使 preview 可达
            totalLines={countLines(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "")}
 -          preview={<text fg={theme.text}>{previewText(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "", 10)}</text>}
-+          // #154：Edit 折叠预览独立 DiffRenderable，避免 scrollY 泄漏
-+          preview={
-+            <DiffPreview
-+              diff={previewDiff(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "", 10)}
-+              filePath={stringValue(props.input.filePath)}
-+              view={view()}
-+              maxLines={10}
-+            />
-+          }
++          // #154：折叠预览独立挂载短 diff，避免旧 maxHeight 裁剪路径把滚轮事件
++          // 灌进全量 diff 改写内部 scrollY、再次展开时带着 stale offset
++          // 截断预算只认真实 diff 行，oldString 回退不参与预览
++          preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={stringValue(props.input.filePath)} view={view()} maxLines={10} />}
            title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
            part={props.part}
            onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
@@ -188,11 +192,7 @@ index 1111111111..2222222222 100644
 -              // 同步滚动：diff 视图与代码视图同步滚动，提升编辑体验
 -              syncScroll={true}
 -              diff={diffContent()}
-+          <Show when={expanded() || !overflow()} fallback={
-+            <DiffPreview
-+              diff={previewDiff(diffContent(), 10)}
-+              filePath={stringValue(props.input.filePath)}
-               view={view()}
+-              view={view()}
 -              filetype={ft()}
 -              syntaxStyle={syntax()}
 -              showLineNumbers={true}
@@ -208,26 +208,25 @@ index 1111111111..2222222222 100644
 -              lineNumberBg={theme.diffContextBg}
 -              addedLineNumberBg={theme.diffAddedLineNumberBg}
 -              removedLineNumberBg={theme.diffRemovedLineNumberBg}
-+              maxLines={10}
-             />
+-            />
 -          </box>
-+          }>
-+            <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
-+          </Show>
-           <Show when={overflow()}>
-             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-           </Show>
-@@ -2963,7 +3007,8 @@
+-          <Show when={overflow()}>
+-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+-          </Show>
++          <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
+         </BlockTool>
+       </Match>
+@@ -2944,7 +2965,7 @@ function ApplyPatch(props: ToolProps) {
                  </text>
                }
              >
 -              <text fg={theme.text}>{previewText(file.patch || "", 10)}</text>
-+              {/* #154：ApplyPatch 单文件折叠预览 */}
 +              <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
              </Show>
            }
                title={title(file)}
-@@ -2978,30 +3023,11 @@
+@@ -2959,30 +2980,8 @@ function ApplyPatch(props: ToolProps) {
                    </text>
                  }
                >
@@ -255,32 +254,25 @@ index 1111111111..2222222222 100644
 -                        removedLineNumberBg={theme.diffRemovedLineNumberBg}
 -                      />
 -                    </box>
-+                <Show when={patchExpanded() || !patchOverflow()} fallback={
-+                  <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
-+                }>
-+                  <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-+                </Show>
++                {/* delete 文件无 patch 内容，保留摘要 fallback 不进 DiffPreview */}
++                <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
                  <Show when={patchOverflow()}>
                    <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
                  </Show>
 diff --git a/packages/tui/src/util/preview-diff.ts b/packages/tui/src/util/preview-diff.ts
 new file mode 100644
-index 0000000000..2222222222
+index 0000000000000000000000000000000000000000..6ddc5ae2a74121e2fc3423733814059981b624c7
 --- /dev/null
 +++ b/packages/tui/src/util/preview-diff.ts
-@@ -0,0 +1,108 @@
-+// #154：截断 diff 预览并重写 @@ 计数，保证 parsePatch/DiffRenderable 可解析
-+// #154：截断 diff 预览并重写 @@ 计数，保证 parsePatch 可解析
-+  export function previewDiff(input: string, maxLines: number) {
-+  // #154：至少保留 1 行可见预算
+@@ -0,0 +1,97 @@
++export function previewDiff(input: string, maxLines: number) {
++  // max(1,...) 防止 0/负预算把整个预览清空
 +  const limit = Math.max(1, maxLines)
-+  // #154：按行扫描；split 保留末行空串语义与 git diff 一致
 +  const src = input.split("\n")
-+  // #154：out 累积 header+已 flush hunk；body 仅当前 hunk
 +  const out: string[] = []
 +  const body: string[] = []
-+  // #154：left/right 是 split-pane 可见行预算；cut 表示预算耗尽
 +  let oldStart = "", newStart = "", suffix = "", left = 0, right = 0, cut = false
++  // left/right 是分栏行预算：split 视图两侧独立计数，任一侧触顶即截断
 +  let expectedOld = 0,
 +    expectedNew = 0,
 +    changed = false
@@ -288,23 +280,19 @@ index 0000000000..2222222222
 +  // Flush each preview hunk as a fresh, parser-valid hunk. The preview may drop
 +  // trailing body lines, so the original @@ counts must be rewritten to the
 +  // actual old/new line counts that remain visible to DiffRenderable.
-+  // #154：flush 时按实际 body 重写 old/new 行数
 +  const flush = () => {
 +    if (!oldStart) return
 +
-+    // #154：空格与 - 计入旧侧可见行
-+  const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
-+    // #154：空格与 + 计入新侧可见行
-+  const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
-+    // #154：元数据行数与可见行不一致则标记 changed
-+  const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
-+    // #154：中途截断导致行数不足
-+  const incomplete = oldVisible < expectedOld || newVisible < expectedNew
++    // 计数重写是本函数的核心契约：截断后 @@ 头若沿用原值，parsePatch 会按虚高行数越界读行
++    const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
++    const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
++    const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
++    const incomplete = oldVisible < expectedOld || newVisible < expectedNew
 +    // Match previewText's "N visible rows plus one ellipsis row" contract, but
 +    // keep the ellipsis as a legal context line so parsePatch accepts it. The
 +    // incomplete branch covers metadata that was already clipped mid-hunk.
-+    // #154：合法 context 省略行（前导空格+省略号）
-+  if (cut || incomplete) body.push(" …")
++    // 省略号必须是合法 context 行（前缀空格）：带 +/- 前缀会破坏 hunk 行数账目
++    if (cut || incomplete) body.push(" …")
 +    changed ||= cut || countMismatch
 +    out.push(
 +      `@@ -${oldStart},${body.filter((line) => line[0] === " " || line[0] === "-").length} +${newStart},${body.filter((line) => line[0] === " " || line[0] === "+").length} @@${suffix}`,
@@ -315,15 +303,14 @@ index 0000000000..2222222222
 +    body.length = 0
 +  }
 +
-+  // #154：逐行扫描源 diff
-+for (let i = 0; i < src.length; i++) {
++  for (let i = 0; i < src.length; i++) {
 +    const line = src[i]
 +    if (cut) continue
 +
-+    // #154：识别 @@ hunk 头
-+  const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/)
++    const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/)
 +    if (hunk) {
 +      flush()
++      // hunk 头必须精确锚定：宽松匹配会把正文里类 @@ 的行误判为新 hunk 起点
 +      oldStart = hunk[1]
 +      expectedOld = Number(hunk[2] ?? 1)
 +      newStart = hunk[3]
@@ -332,14 +319,13 @@ index 0000000000..2222222222
 +      continue
 +    }
 +
-+    // #154：hunk 外 header 原样透传
-+  if (!oldStart) {
++    if (!oldStart) {
++      // 文件头（Index/---/+++）原样透传，预览保持完整 diff 结构
 +      out.push(line)
 +      continue
 +    }
 +
-+    // #154：context 行消耗左右预算
-+  if (line[0] === " ") {
++    if (line[0] === " ") {
 +      if (left >= limit || right >= limit) {
 +        cut = true
 +        continue
@@ -350,7 +336,6 @@ index 0000000000..2222222222
 +      continue
 +    }
 +
-+    // #154：成组消费 +/-，避免 split 视图左右预算各自漂移
 +    if ((line[0] === "-" && !line.startsWith("---")) || (line[0] === "+" && !line.startsWith("+++"))) {
 +      const del: string[] = []
 +      const add: string[] = []
@@ -359,63 +344,59 @@ index 0000000000..2222222222
 +        ;(src[j][0] === "-" ? del : add).push(src[j])
 +        j++
 +      }
-+      // #154：成对 +/- 变更按 min 截取
-+  const paired = del.length > 0 && add.length > 0
++      // 成对增删按对齐截取：单侧截断会让 split 视图左右错位
++      const paired = del.length > 0 && add.length > 0
 +      const take = paired ? Math.min(del.length, add.length, limit - left, limit - right) : 0
 +      const dl = paired ? take : Math.min(del.length, limit - left)
 +      const al = paired ? take : Math.min(add.length, limit - right)
 +      body.push(...del.slice(0, dl), ...add.slice(0, al))
 +      left += dl
 +      right += al
-+      // #154：未取完则标记 cut
-+  cut ||= dl < del.length || al < add.length
++      cut ||= dl < del.length || al < add.length
++      // 一次性消费整组 +/-，外层循环不再重复处理已入账行
 +      i = j - 1
 +    }
 +  }
 +
 +  flush()
-+  // #154：无改动则返回原文，避免无意义重写
++  // 未截断时返回原串引用，调用方可安全做 identity 比较
 +  return changed ? out.join("\n") : input
 +}
 diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/session-pending.ts
 new file mode 100644
-index 0000000000..2222222222
+index 0000000000000000000000000000000000000000..5c88355cb0e2da62a63dd5f91c5b71ec5b3d9930
 --- /dev/null
 +++ b/packages/tui/src/util/session-pending.ts
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,23 @@
 +import type { Message, SessionStatus } from "@opencode-ai/sdk/v2"
 +
-+// #154：是否存在未完成 assistant 流
-+// #154：仅看 assistant.time.completed，不依赖可能 stale 的 session_status
 +export function hasStreamingAssistant(messages: Message[]) {
 +  return messages.some((message) => message.role === "assistant" && !message.time.completed)
 +}
 +
-+// #154：保留 tip 的 completed 游标过滤，避免旧 incomplete assistant 误判 pending
-+// #154：pending 绑定 status+messages，供 prompt 与 force-sync 共用
-+export function pendingAssistantID(messages: Message[], status: SessionStatus | undefined) {
++export function pendingAssistantIndex(messages: Message[], status: SessionStatus | undefined) {
++  // 会话空闲时不查找待处理消息，避免不必要的重渲染
 +  if (!status || status.type === "idle") return undefined
-+  const completed = messages.findLast((message) => message.role === "assistant" && message.time.completed)?.id
-+  return messages.findLast(
-+    (message) =>
-+      message.role === "assistant" &&
-+      !message.time.completed &&
-+      (!completed || message.id > completed),
-+  )?.id
++  // 以最后一条已完成 assistant 为游标，只认其后的未完成 assistant，
++  // 防止重放历史时误把旧消息标记为待处理
++  const completed = messages.findLastIndex((message) => message.role === "assistant" && message.time.completed)
++  const pending = messages.findLastIndex(
++    (message, index) => index > completed && message.role === "assistant" && !message.time.completed,
++  )
++  return pending === -1 ? undefined : pending
 +}
 +
-+// #154：busy 但无 open stream 时强制刷新，避免 prompt 永久禁用
-+// #154：busy 且无 open stream 时触发强制刷新
-+// #154：busy 但消息流已无未完成 assistant 时才 force-sync，避免误刷
 +export function shouldRefreshStaleBusyStatus(messages: Message[], status: SessionStatus | undefined) {
++  // busy 但没有打开的 assistant 流，通常意味着 SSE 更新丢失而 DB 已有完成消息；
++  // 强制一次全量刷新，而不是让 prompt 因状态陈旧被无限禁用
 +  return status?.type === "busy" && !hasStreamingAssistant(messages)
 +}
 diff --git a/packages/tui/test/util/preview-diff.test.ts b/packages/tui/test/util/preview-diff.test.ts
 new file mode 100644
-index 0000000000..2222222222
+index 0000000000000000000000000000000000000000..319c03564c0501757e793c429a37c6715028bd2a
 --- /dev/null
 +++ b/packages/tui/test/util/preview-diff.test.ts
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,82 @@
 +import { describe, expect, test } from "bun:test"
 +import { parsePatch } from "diff"
 +import { previewDiff } from "../../src/util/preview-diff"
@@ -423,10 +404,9 @@ index 0000000000..2222222222
 +const sample = `Index: /tmp/models.test.ts
 +===================================================================
 +--- /tmp/models.test.ts
+++++ /tmp/models.test.ts
 +@@ -132,47 +132,26 @@
-+ // #154：previewDiff 必须产出合法 patch
-+// #154：previewDiff 单元回归
-+describe("ModelsDev Service", () => {
++ describe("ModelsDev Service", () => {
 +   it.live("get() returns providers from disk when cache file exists", () =>
 +     Effect.gen(function* () {
 +       yield* writeCache(fixture)
@@ -442,6 +422,7 @@ index 0000000000..2222222222
 +const partialHunk = `Index: /tmp/prompt.ts
 +===================================================================
 +--- /tmp/prompt.ts
+++++ /tmp/prompt.ts
 +@@ -512,10 +512,10 @@
 + const result = yield* item.execute(args, ctx).pipe(
 +   Effect.catchCauseIf(
@@ -457,6 +438,7 @@ index 0000000000..2222222222
 +const completeSmall = `Index: /tmp/small.ts
 +===================================================================
 +--- /tmp/small.ts
+++++ /tmp/small.ts
 +@@ -1,3 +1,3 @@
 + const value = 1
 +-const oldName = value
@@ -464,9 +446,7 @@ index 0000000000..2222222222
 + export { value }`
 +
 +describe("previewDiff", () => {
-+  // #154：用例
-+// #154：用例
-+test("returns a parseable truncated diff with rewritten hunk counts", () => {
++  test("returns a parseable truncated diff with rewritten hunk counts", () => {
 +    const preview = previewDiff(sample, 5)
 +    const hunk = parsePatch(preview)[0]?.hunks[0]
 +
@@ -480,15 +460,18 @@ index 0000000000..2222222222
 +      " …",
 +    ])
 +    expect(hunk?.oldLines).toBe(6)
++    // 截断必须重写 @@ 计数，parsePatch 才不会越界读行
 +    expect(hunk?.newLines).toBe(6)
 +    expect(preview).not.toContain("\n…")
 +  })
 +
 +  test("keeps small diffs unchanged", () => {
++    // 小 diff 原样返回，避免无谓重建 Renderable
 +    expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
 +  })
 +
 +  test("repairs an already-clipped hunk before diff rendering", () => {
++    // 上游已裁剪的 hunk 头计数失真，按实际可见行修复
 +    const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]
 +
 +    expect(hunk?.lines.at(-1)).toBe(" …")
@@ -498,14 +481,13 @@ index 0000000000..2222222222
 +})
 diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
 new file mode 100644
-index 0000000000..2222222222
+index 0000000000000000000000000000000000000000..9216e08eaec58c5fe2afa846c7b0b9f42184f1da
 --- /dev/null
 +++ b/packages/tui/test/util/session-pending.test.ts
-@@ -0,0 +1,37 @@
-+// #154：行为回归：session-pending.test.ts
+@@ -0,0 +1,36 @@
 +import { describe, expect, test } from "bun:test"
 +import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
-+import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "../../src/util/session-pending"
++import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../src/util/session-pending"
 +
 +const assistant = (id: string, completed?: number): AssistantMessage => ({
 +  id,
@@ -523,22 +505,19 @@ index 0000000000..2222222222
 +})
 +
 +describe("session pending helpers", () => {
-+  // #154：用例
-+// #154：用例
-+test("finds the active assistant only while the session is non-idle", () => {
++  test("finds the active assistant only while the session is non-idle", () => {
 +    const messages: Message[] = [assistant("done", 2), assistant("open")]
 +
 +    expect(hasStreamingAssistant(messages)).toBe(true)
-+    expect(pendingAssistantID(messages, { type: "busy" })).toBe("open")
-+    expect(pendingAssistantID(messages, { type: "idle" })).toBeUndefined()
++    // pending 契约为 messages 数组索引（UserMessage 侧按 index 比较），而非消息 id
++    expect(pendingAssistantIndex(messages, { type: "busy" })).toBe(1)
++    expect(pendingAssistantIndex(messages, { type: "idle" })).toBeUndefined()
 +  })
 +
 +  test("refreshes stale busy state when no assistant is streaming", () => {
++    // busy 无流式是 SSE 丢失的唯一信号；idle 恒不触发强刷
 +    expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "busy" })).toBe(true)
 +    expect(shouldRefreshStaleBusyStatus([assistant("open")], { type: "busy" })).toBe(false)
 +    expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "idle" })).toBe(false)
 +  })
 +})
---
-2.39.0
-

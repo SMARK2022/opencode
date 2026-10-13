@@ -11,15 +11,15 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  function shortShellDelayCommand() {
    // Windows 的默认 shell 会把 `sleep 0.2` 解析成 PowerShell 命令，CI 冷启动时足以吃掉 3s 用例预算。
    // 这里使用测试进程已依赖的 PATH 内 `bun` 执行短延迟脚本，避免 PowerShell 对引号路径需要 `&` 的差异。
-@@ -2154,7 +2157,7 @@ it.instance(
-       yield* Fiber.await(fiber)
-       expect((yield* status.get(chat.id)).type).toBe("idle")
-     }),
+@@ -2237,7 +2240,7 @@ it.instance(
+      expect((yield* status.get(chat.id)).type).toBe("busy")
+      yield* prompt.cancel(chat.id)
+      yield* Fiber.await(fiber)
+      expect((yield* status.get(chat.id)).type).toBe("idle")
+    }),
 -  3_000,
 +  shortSessionTimeout,
  )
- 
- // Cancel semantics
 @@ -2363,7 +2366,7 @@ raceNoLLMServer.instance(
        }
      }),

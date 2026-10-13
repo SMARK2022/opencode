@@ -1,19 +1,19 @@
 From d2b49bf4eb797d245a9894f2ba4a98c68ba6c239 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Fri, 14 Aug 2026 02:41:28 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=A0=B9=E6=B2=BB=E5=A4=A7?=
- =?UTF-8?q?=E5=9E=8B=20Session=20=E5=8A=A0=E8=BD=BD=E5=86=BB=E7=BB=93?=
+Date: Fri, 14 Aug 2026 15:58:14 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=A0=B9=E6=B2=BB=E5=A4=A7=E5=9E=8B=20S?=
+ =?UTF-8?q?ession=20=E5=8A=A0=E8=BD=BD=E5=86=BB=E7=BB=93?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-为 TUI Message 与 diff 使用有界 viewer 投影，先发布历史数据再加载 diff，并将 Files 渲染限制为最多 100 个无 patch 条目。
+TUI viewer 通过私有 x-opencode-tui-message-projection 请求更浅的 Message/diff wire 投影：daemon 在 diff handler 过滤 legacy 项、计算完整 totals、截断 first-100 并移除 patch（总量进私有 response headers），messages handler 按同一 header 透传 messageProjection；MessageV2 hydrate 在 thaw 前决定投影（viewer 跳过 user cold summary 解压与持久预热）；TUI sync 将 diff 移出首屏 Promise.all 屏障（可见历史先发布），SSE session.diff 与原子 summary 写入同一 Solid transaction，session.updated 不再回写 raw summary 制造假省略号；Files 标题展示 authoritative totals 且仅真实截断时显示省略号。默认 SDK/Web App 完整合同不变。
 
-保留默认 SDK、Web、Share 与 Revert 的完整合同，避免大型 diff 进入响应式 store 和 OpenTUI 渲染树。
+适配说明：目标 TUI 已迁移至 packages/tui（sync/files/测试三路径重映射）；Binary.search→目标本地 search；Snapshot.FileDiff→SDK SnapshotFileDiff（TUI 包不可引 server 模块）；sync() 对齐目标 task 去重结构（diff 从 5 项 Promise.all 移除后在 replay 循环后 await）；hydrate 沿目标 (db, sync, rows) 签名扩 messageProjection；测试按目标形态适配——sync.test 用 mount(handler, tmp.path)+kv.json（无 Global.Path.state），Files 渲染用 createBuiltinPlugins+最小 api stub（目标无 internalTuiPlugins/createTuiPluginApi.slots）；session-messages.test 用 requestInDirectory(path, dir, init)+SessionV1.User+core ColdStorage.freezeOwner(db, ...)（目标无 Server.Default/旧 Storage layer）。
+
 
 diff --git a/docs/plans/tui-session-load-redundant-read-repair.md b/docs/plans/tui-session-load-redundant-read-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..0faa6f10feb98bc79d7610a946c0cd8849d951d8
 --- /dev/null
 +++ b/docs/plans/tui-session-load-redundant-read-repair.md
 @@ -0,0 +1,434 @@
@@ -451,18 +451,19 @@ index 0000000000000000000000000000000000000000..0faa6f10feb98bc79d7610a946c0cd88
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb..004a977b1d1d9f122202276c8d3bb055f23d95ce 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -40,6 +40,37 @@ import { aggregateFailures } from "./aggregate-failures"
- import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
- import { DisposedReason } from "@/server/event"
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -41,6 +41,39 @@ import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from
+ // #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
+ import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "../util/session-list-params"
  
 +// 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
 +// 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
 +const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
 +const TUI_VIEWER = "viewer"
++// #570 起 session.updated/session.diff 共享同一 admission；本补丁补齐的是 projection 侧的原子收敛。
 +// 100 是所有 TUI Session 共用的结果上限，不根据 Session 大小、耗时或内存走不同生产路径。
 +// Files 保持默认展开；上限直接约束网络对象、store 项和 Renderable 基数，而不是延迟同一份无界工作。
 +const TUI_DIFF_LIMIT = 100
@@ -472,7 +473,7 @@ index 8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb..004a977b1d1d9f122202276c8d3bb055
 +const TUI_DIFF_TOTAL_ADDITIONS = "x-opencode-tui-total-additions"
 +const TUI_DIFF_TOTAL_DELETIONS = "x-opencode-tui-total-deletions"
 +
-+function projectTuiDiff(diffs: readonly Snapshot.FileDiff[]) {
++function projectTuiDiff(diffs: readonly SnapshotFileDiff[]) {
 +  // SSE 仍携带共享完整事件；TUI reducer 是不破坏 share consumer 的首个可收窄 owner。
 +  // HTTP body 已由 daemon 截断，但再次应用同一投影可保证测试 transport 和未来 caller 都不能灌回 patch。
 +  // 与 plugin adapter 共用 file 可见性口径；必须在 totals/cap 前过滤，legacy 项不能占用100行预算。
@@ -483,6 +484,7 @@ index 8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb..004a977b1d1d9f122202276c8d3bb055
 +      return stats
 +    }),
 +    summary: {
++      // totals 必须从 displayable 而非 capped items 计算：100 行上限不能被误读为全量。
 +      files: displayable.length,
 +      additions: displayable.reduce((total, item) => total + item.additions, 0),
 +      deletions: displayable.reduce((total, item) => total + item.deletions, 0),
@@ -490,10 +492,10 @@ index 8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb..004a977b1d1d9f122202276c8d3bb055
 +  }
 +}
 +
- // [local-smark] goal 类型定义（SDK 未重新生成前使用内联类型）
+ // #364：goal 类型定义（SDK 未重新生成前使用内联类型）
  // 字段与 src/session/goal.ts 的 Goal schema 对齐
  type SessionGoalInfo = {
-@@ -729,7 +760,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -669,7 +702,16 @@ export const {
            break
  
          case "session.diff":
@@ -504,16 +506,16 @@ index 8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb..004a977b1d1d9f122202276c8d3bb055
 +              // 本地 summary 只是 viewer projection；共享 Session 持久数据仍由 daemon 的 Summary/Revert owner 管理。
 +              const projected = projectTuiDiff(event.properties.diff)
 +              draft.session_diff[event.properties.sessionID] = projected.items
-+              const result = Binary.search(draft.session, event.properties.sessionID, (session) => session.id)
++              const result = search(draft.session, event.properties.sessionID, (session) => session.id)
 +              if (result.found) draft.session[result.index].summary = projected.summary
 +            }),
 +          )
            break
  
          case "session.deleted": {
-@@ -749,7 +789,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -689,7 +731,19 @@ export const {
          case "session.updated": {
-           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
+           const result = search(store.session, event.properties.info.id, (s) => s.id)
            if (result.found) {
 -            setStore("session", result.index, reconcile(event.properties.info))
 +            const summary = Object.hasOwn(store.session_diff, event.properties.info.id)
@@ -532,73 +534,78 @@ index 8f1bdc89dcf5acabcc29285e7cf5ee6c053ce9fb..004a977b1d1d9f122202276c8d3bb055
              break
            }
            setStore(
-@@ -1075,11 +1127,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-         },
-         async sync(sessionID: string, options?: { force?: boolean }) {
-           if (!options?.force && fullSyncedSessions.has(sessionID)) return
--          const [session, messages, todo, diff, status] = await Promise.all([
-+          const [session, messages, todo, status] = await Promise.all([
-             sdk.client.session.get({ sessionID }, { throwOnError: true }),
--            sdk.client.session.messages({ sessionID, limit: 300 }),
-+            // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
-+            // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
-+            sdk.client.session.messages(
-+              { sessionID, limit: 300 },
-+              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-+            ),
-             sdk.client.session.todo({ sessionID }),
--            sdk.client.session.diff({ sessionID }),
-             sdk.client.session.status({ workspace: project.workspace.current() }),
-           ])
-           // [local-smark] goal fetch：非致命，失败不影响 session sync
-@@ -1108,7 +1164,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-                 draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
+@@ -1129,13 +1183,18 @@ export const {
+           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
+           hydratingSessions.set(sessionID, tracker)
+           const task = (async () => {
+-            const [session, messages, todo, diff] = await Promise.all([
++            // diff 不再参与首屏屏障：大 Session 的 patch 聚合不再阻塞 messages/todo 渲染。
++            const [session, messages, todo, status] = await Promise.all([
+               sdk.client.session.get({ sessionID }, { throwOnError: true }),
+               // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
+               // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
+-              sdk.client.session.messages({ sessionID, limit: 300 }),
++              // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
++              // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
++              sdk.client.session.messages(
++                { sessionID, limit: 300 },
++                { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
++              ),
+               sdk.client.session.todo({ sessionID }),
+-              sdk.client.session.diff({ sessionID }),
+               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
+               sdk.client.session.status({ workspace: project.workspace.current() }),
+             ])
+@@ -1195,7 +1254,6 @@ export const {
+                 }
+                 for (const message of removed) delete draft.part[message.id]
+                 draft.message[sessionID] = visible
+-                draft.session_diff[sessionID] = diff.data ?? []
+               }),
+             )
+             // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
+@@ -1206,6 +1264,36 @@ export const {
+                 replayOrphanDeltas(part.id, message.info.id)
                }
-               draft.message[sessionID] = infos
--              draft.session_diff[sessionID] = diff.data ?? []
-             }),
-           )
-           setStore("session_status", reconcile(status.data ?? {}))
-@@ -1120,6 +1175,34 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-               replayOrphanDeltas(part.id, message.info.id)
              }
-           }
-+          // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
-+          // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
-+          // force reconnect 仍 await 同一 authoritative 请求；这里不是 fire-and-forget，也不合成备用成功。
-+          const diff = await sdk.client.session.diff(
-+            { sessionID },
-+            { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-+          )
-+          const projected = projectTuiDiff(diff.data ?? [])
-+          const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
-+          const additions = diff.response?.headers.get(TUI_DIFF_TOTAL_ADDITIONS) ?? null
-+          const deletions = diff.response?.headers.get(TUI_DIFF_TOTAL_DELETIONS) ?? null
-+          setStore(
-+            produce((draft) => {
-+              draft.session_diff[sessionID] = projected.items
-+              const result = Binary.search(draft.session, sessionID, (item) => item.id)
-+              // headers 成组存在时是同一viewer response的权威总量；否则采用当前data??[]投影，不能混入旧Session summary。
-+              // resolved HTTP error因此原子提交空rows/zero totals；fetch exception仍由optional response access保持既有语义。
-+              if (result.found)
-+                draft.session[result.index].summary =
-+                  files === null || additions === null || deletions === null
-+                    ? projected.summary
-+                    : {
-+                        files: Number(files),
-+                        additions: Number(additions),
-+                        deletions: Number(deletions),
-+                      }
-+            }),
-+          )
-           fullSyncedSessions.add(sessionID)
-         },
-       },
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/files.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/files.tsx
-index 8951bdcab016fd49687126eb9bf80dbb0d5e90c5..72364ebef92baecb70f0b257be7c5c107ffbb108 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/files.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/files.tsx
-@@ -8,17 +8,37 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
++            // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
++            // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
++            // force reconnect 仍 await 同一 authoritative 请求；这里不是 fire-and-forget，也不合成备用成功。
++            const diff = await sdk.client.session.diff(
++              { sessionID },
++              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
++            )
++            // data??[] 兼容旧 daemon 无 headers 响应；投影后再决定 totals 来源。
++            const projected = projectTuiDiff(diff.data ?? [])
++            const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
++            // headers 经 hey-api response 原样暴露；缺组即视为旧 daemon 响应并回退 data 投影。
++            const additions = diff.response?.headers.get(TUI_DIFF_TOTAL_ADDITIONS) ?? null
++            const deletions = diff.response?.headers.get(TUI_DIFF_TOTAL_DELETIONS) ?? null
++            setStore(
++              produce((draft) => {
++                draft.session_diff[sessionID] = projected.items
++                const result = search(draft.session, sessionID, (item) => item.id)
++                // headers 成组存在时是同一viewer response的权威总量；否则采用当前data??[]投影，不能混入旧Session summary。
++                // resolved HTTP error因此原子提交空rows/zero totals；fetch exception仍由optional response access保持既有语义。
++                if (result.found)
++                  draft.session[result.index].summary =
++                    files === null || additions === null || deletions === null
++                      ? projected.summary
++                      : {
++                          files: Number(files),
++                          additions: Number(additions),
++                          deletions: Number(deletions),
++                        }
++              }),
++            )
+             fullSyncedSessions.add(sessionID)
+           })().finally(() => {
+             syncingSessions.delete(sessionID)
+
+diff --git a/packages/tui/src/feature-plugins/sidebar/files.tsx b/packages/tui/src/feature-plugins/sidebar/files.tsx
+--- a/packages/tui/src/feature-plugins/sidebar/files.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/files.tsx
+@@ -15,17 +15,37 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
    const [open, setOpen] = createSignal(true)
    const theme = () => props.api.theme.current
    const list = createMemo(() => props.api.state.session.diff(props.session_id))
@@ -643,7 +650,7 @@ index 8951bdcab016fd49687126eb9bf80dbb0d5e90c5..72364ebef92baecb70f0b257be7c5c10
          </box>
          <Show when={list().length <= 2 || open()}>
            <For each={list()}>
-@@ -38,6 +58,11 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+@@ -45,6 +65,11 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
                </box>
              )}
            </For>
@@ -655,20 +662,20 @@ index 8951bdcab016fd49687126eb9bf80dbb0d5e90c5..72364ebef92baecb70f0b257be7c5c10
          </Show>
        </box>
      </Show>
+
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 09e00d178a094591d5cb563c2157caec94cafc56..02d7756ce8a2660537ba9a65eeac3c288d7714c6 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -16,6 +16,7 @@ import { SessionStatus } from "@/session/status"
+@@ -18,6 +18,7 @@ import { SessionStatus } from "@/session/status"
  import { SessionSummary } from "@/session/summary"
  import { Todo } from "@/session/todo"
  import { MessageID, PartID, SessionID } from "@/session/schema"
 +import { Snapshot } from "@/snapshot"
  // [local-smark] session preview: 直接查 DB 获取用户消息预览文本
- import { MessageTable, PartTable } from "@/session/session.sql"
- import { Database, sql } from "@/storage/db"
-@@ -47,6 +48,11 @@ import {
- } from "../groups/session"
+ // 表定义在 core（drizzle schema owner），此处跨包引用保持单一定义源
+ import { MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+@@ -51,6 +52,11 @@ import { PermissionNotFoundError } from "../errors"
+ import * as ApiError from "../errors"
  import * as SessionError from "./session-errors"
  
 +// 私有 header 只选择更浅的 TUI wire projection；缺失时 public Message/diff schema 与完整 payload 原样保留。
@@ -679,13 +686,14 @@ index 09e00d178a094591d5cb563c2157caec94cafc56..02d7756ce8a2660537ba9a65eeac3c28
  const tryParseJson = (text: string) =>
    Effect.try({
      try: () => JSON.parse(text) as unknown,
-@@ -129,7 +135,33 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -148,7 +154,35 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
        params: { sessionID: SessionID }
        query: typeof DiffQuery.Type
      }) {
 -      return yield* summary.diff({ sessionID: ctx.params.sessionID, messageID: ctx.query.messageID })
 +      const diffs = yield* summary.diff({ sessionID: ctx.params.sessionID, messageID: ctx.query.messageID })
 +      const request = yield* HttpServerRequest.HttpServerRequest
++      // Effect v4 的 headers 是小写字面量 record；与 TUI 端常量逐字锁定，不做大小写归一。
 +      if (request.headers[TUI_VIEWER_HEADER] !== TUI_VIEWER) return diffs
 +
 +      // SummaryCache 当前将 stats 与 patch 存在同一 compressed aggregate；这里是 JSON 序列化前的最早兼容收窄点。
@@ -694,6 +702,7 @@ index 09e00d178a094591d5cb563c2157caec94cafc56..02d7756ce8a2660537ba9a65eeac3c28
 +      // 默认 response 仍返回 raw aggregate；仅 viewer projection 收窄，不改变 Web App/share/Revert 合同。
 +      const displayable = diffs.filter((item) => item.file !== undefined)
 +      const files = displayable.length
++      // 三项 totals 均来自同一 displayable 数组：分叉计算会让标题与省略号互相矛盾。
 +      const additions = displayable.reduce((total, item) => total + item.additions, 0)
 +      const deletions = displayable.reduce((total, item) => total + item.deletions, 0)
 +      // TUI 只需要文件统计；在 JSON 序列化前移除 patch，并将总量放进私有 header，避免新增公开响应结构。
@@ -714,7 +723,7 @@ index 09e00d178a094591d5cb563c2157caec94cafc56..02d7756ce8a2660537ba9a65eeac3c28
      })
  
      const messages = Effect.fn("SessionHttpApi.messages")(function* (ctx: {
-@@ -149,16 +181,22 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -168,16 +202,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
          return yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
        }
  
@@ -724,12 +733,10 @@ index 09e00d178a094591d5cb563c2157caec94cafc56..02d7756ce8a2660537ba9a65eeac3c28
            sessionID: ctx.params.sessionID,
            limit: ctx.query.limit,
            before: ctx.query.before,
-+          messageProjection:
-+            // handler 是 transport caller 身份的 owner；MessageV2 只接收显式 projection，不能自行猜测 TUI。
-+            // viewer 仅对有界 page 生效，无 limit 的 export/Revert/Provider 完整历史不会经过该分支。
-+            request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER
-+              ? "viewer"
-+              : undefined,
++          // handler 是 transport caller 身份的 owner；MessageV2 只接收显式 projection，不能自行猜测 TUI。
++          // viewer 仅对有界 page 生效，无 limit 的 export/Revert/Provider 完整历史不会经过该分支。
++          // request 前移到 page 调用之前：projection 决策与 range 查询在同一 handler 作用域完成。
++          messageProjection: request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER ? "viewer" : undefined,
          }),
        )
        if (!page.cursor) return page.items
@@ -738,16 +745,17 @@ index 09e00d178a094591d5cb563c2157caec94cafc56..02d7756ce8a2660537ba9a65eeac3c28
        // toURL() honors the Host + x-forwarded-proto headers, so the Link
        // header echoes the real origin instead of a hard-coded localhost.
        const url = Option.getOrElse(HttpServerRequest.toURL(request), () => new URL(request.url, "http://localhost"))
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 784fa2a27f50bb88eec0de552b09c4a3b58f76da..bd979e7610c5e8cfd57c2198e51bd0b376df622f 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -868,6 +868,16 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
+@@ -247,6 +247,17 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
    }
  }
  
 +function viewerInfo(row: typeof MessageTable.$inferSelect): Info {
 +  const value = hotInfo(row)
++  // HotInfo 的 user summary 只含 title/body；viewer 直接省略整个字段而非二次收窄。
 +  // Assistant 没有被归档的 summary.diffs，直接保留 lifecycle/model/error 字段，避免 viewer 另造 assistant shape。
 +  if (value.role === "assistant") return value
 +  // TUI 没有 user summary 消费者；省略整个 optional 字段才能保持合法 Info，
@@ -756,88 +764,91 @@ index 784fa2a27f50bb88eec0de552b09c4a3b58f76da..bd979e7610c5e8cfd57c2198e51bd0b3
 +  return info
 +}
 +
- // Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
- export function goalChronology(sessionID: SessionID): ChronologyMessage[] {
-   return Database.use((db) => {
-@@ -987,12 +997,20 @@ const atOrNewer = (row: Cursor) =>
+ // #0500：Goal chronology 只读取 Message hot info 与三个 Part locator 字段；Tool output、Reasoning、附件和 summary.diffs
+ // 不会进入 JS，也不会触发持久 thaw。排序继续使用 persisted time，再以 MessageID 处理同毫秒 tie。
+ // #557：Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
+@@ -356,13 +367,26 @@ const older = (row: Cursor) =>
+ const atOrNewer = (row: Cursor) =>
+   or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
  
- // hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
- // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
--function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
--  // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
--  // Message refs 在单次批量 seam 中 thaw，避免逐 owner 重复打开共享 pack。
--  const restoredRows = ColdStorage.thawMessageRows(rows)
+-function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
 +function hydrate(
++  db: Database.Interface["db"],
++  sync: ColdStorage.TxOrDb,
 +  rows: (typeof MessageTable.$inferSelect)[],
 +  includeHidden = true,
 +  messageProjection?: "viewer",
 +) {
+   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
+   // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
+   // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
+   // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
+-  const restoredRows = ColdStorage.thawMessageRows(sync, rows)
+-  const ids = restoredRows.map((row) => row.id)
 +  // 默认业务读取仍批量 thaw 完整 Message；viewer 只使用热投影，完整消费者合同不被削弱。
 +  // projection 在 thawMessageRows 之前决定，防止出现“response 删除字段但 cold owner 已解压并持久预热”的假优化。
 +  // Parts 仍走唯一 cold-aware decoder；Tool/Text/Reasoning 内容不因 Message summary 收窄而缺失。
++  // 目标 hydrate 在 gen 外同步求 infos：viewer 分支完全同步，不触碰 ColdStorage 事务。
 +  const infos =
 +    messageProjection === "viewer"
 +      ? rows.map(viewerInfo)
-+      : ColdStorage.thawMessageRows(rows).map(infoFromRestored)
-   // 只按选中 Message IDs 查询 children，范围外 archive 不进入 JS 或持久预热。
--  const ids = restoredRows.map((row) => row.id)
++      : ColdStorage.thawMessageRows(sync, rows).map(infoFromRestored)
 +  const ids = rows.map((row) => row.id)
    const partByMessage = new Map<string, Part[]>()
-   if (ids.length > 0) {
-     // Part query 的 persisted order 是最终 child order，Map 只做 message_id join。
-@@ -1019,9 +1037,9 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = tru
-   // 持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
-   // restoredRows 保持原 page 顺序，child Map 不改变 newest/oldest 语义。
-   // 因此持久预热副作用与本次返回 transcript 的范围严格一致。
--  return restoredRows.map((row) => ({
--    info: infoFromRestored(row),
--    parts: partByMessage.get(row.id) ?? [],
-+  return infos.map((info) => ({
-+    info,
-+    parts: partByMessage.get(info.id) ?? [],
-   }))
+   return Effect.gen(function* () {
+     if (ids.length > 0) {
+@@ -389,9 +413,9 @@ function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (
+     // #0500：持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
+     // restoredRows 保持原 page 顺序，child Map 不改变 newest/oldest 语义。
+     // 因此持久预热副作用与本次返回 transcript 的范围严格一致。
+-    return restoredRows.map((row) => ({
+-      info: infoFromRestored(row),
+-      parts: partByMessage.get(row.id) ?? [],
++    return infos.map((info) => ({
++      info,
++      parts: partByMessage.get(info.id) ?? [],
+     }))
+   })
  }
- 
-@@ -1404,7 +1422,9 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-   before?: string
+@@ -771,7 +795,10 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+   // #106：includeHidden 默认 false，page 层过滤隐藏消息/part
    includeHidden?: boolean
    fromMessageID?: MessageID
 +  messageProjection?: "viewer"
  }) {
 +  // page 继续拥有 SQL range/cursor；viewer 只是同一 page 的合法 Info 投影，不能另建分页或备用读取路径。
++  // projection 只由 handler 显式传入；内部 caller（Revert/Provider/export）一律完整 hydrate。
+   const { db, sync } = yield* Database.Service
    if (input.limit === 0) {
-     // 零范围只验证 Session existence，不读取一条 Message 作为多余探针，更不能触发任何 Part hydrate/thaw。
-     const exists = Database.use((db) =>
-@@ -1473,7 +1493,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+     // #493：零范围只验证 Session existence，不读取 Message 探针，更不触发任何 thaw。
+@@ -845,7 +872,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
  
    const more = rows.length > input.limit
    const slice = more ? rows.slice(0, input.limit) : rows
--  const items = hydrate(slice, Boolean(input.includeHidden))
-+  const items = hydrate(slice, Boolean(input.includeHidden), input.messageProjection)
+-  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden))
++  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden), input.messageProjection)
    items.reverse()
-   if (!input.includeHidden) {
-     for (let i = items.length - 1; i >= 0; i--) {
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -1,9 +1,14 @@
+ // Hidden messages remain persisted for audit/recovery, but are removed from
+ // normal prompt replay and visible history. Each reason names the workflow that
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -1,8 +1,12 @@
  /** @jsxImportSource @opentui/solid */
 -import { describe, expect, test } from "bun:test"
 +import { describe, expect, spyOn, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
- import { Global } from "@opencode-ai/core/global"
  import { tmpdir } from "../../../fixture/fixture"
-+import { createTuiPluginApi } from "../../../fixture/tui-plugin"
  import { directory, json, mount, wait, worktree } from "./sync-fixture"
-+import type { TuiSlotPlugin } from "@opencode-ai/plugin/tui"
  import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
++import type { TuiSlotPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 +import type { JSX } from "solid-js"
-+import { internalTuiPlugins } from "@/cli/cmd/tui/plugin/internal"
++import { createBuiltinPlugins } from "../../../../src/feature-plugins/builtins"
  
  function branchEvent(branch: string, workspace?: string): GlobalEvent {
    return {
-@@ -231,6 +236,303 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
+@@ -95,6 +99,304 @@ function questionRequest(id: string): QuestionRequest {
  }
  
  describe("tui sync", () => {
@@ -845,9 +856,9 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +    // 同一 public sync 覆盖两个 transport producer；任一 header 漏传都会恢复完整 payload。
 +    // HTTP fixture 故意返回 101 个带唯一 patch 的对象，证明 client-side cap 也守住测试/旧 daemon 边界。
 +    // totals headers 使用完整 101 项 worked values，不能由截断后的 store 重新计算冒充。
-+    const previous = Global.Path.state
++    // 目标 fixture 经 TestTuiContexts paths 注入 state 目录，替代 source 的 Global.Path.state 改写。
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
++    // KVProvider 需要 kv.json 存在；空对象即干净启动。
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    const messageProjections: string[] = []
 +    const diffProjections: string[] = []
@@ -881,7 +892,8 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +          },
 +        })
 +      }
-+    })
++      if (url.pathname === "/session/status") return json({})
++    }, tmp.path)
 +
 +    try {
 +      await sync.session.sync("ses_1", { force: true })
@@ -890,7 +902,7 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +      expect(diffProjections).toEqual(["viewer"])
 +      expect(sync.data.session_diff.ses_1).toHaveLength(100)
 +      expect(sync.data.session_diff.ses_1.every((item) => item.file !== undefined)).toBe(true)
-+      expect(sync.data.session_diff.ses_1.some((item) => item.patch !== undefined)).toBe(false)
++      expect(sync.data.session_diff.ses_1.some((item) => (item as { patch?: string }).patch !== undefined)).toBe(false)
 +      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 101, additions: 5151, deletions: 5050 })
 +
 +      // SSE producer 仍是完整共享事件；这里验证 TUI reducer 不会在 HTTP 修复后把 patch 和第 101 项重新灌回。
@@ -904,11 +916,12 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +        directory,
 +        project: "proj_test",
 +        payload: { id: "evt_diff", type: "session.diff", properties: { sessionID: "ses_1", diff: eventDiffs } },
-+      })
++      } as GlobalEvent)
++      // 目标 SDK 类型面未列全测试字面量的缺省字段；as 收窄不绕过运行时 reducer。
 +      await wait(() => sync.data.session_diff.ses_1?.[0]?.file === "event-0.ts")
 +      expect(sync.data.session_diff.ses_1).toHaveLength(100)
 +      expect(sync.data.session_diff.ses_1.every((item) => item.file !== undefined)).toBe(true)
-+      expect(sync.data.session_diff.ses_1.some((item) => item.patch !== undefined)).toBe(false)
++      expect(sync.data.session_diff.ses_1.some((item) => (item as { patch?: string }).patch !== undefined)).toBe(false)
 +      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 101, additions: 202, deletions: 101 })
 +
 +      // Revert的真实顺序是normalized session.diff后跟完整session.updated；后者只能更新普通Session metadata。
@@ -935,19 +948,18 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +            },
 +          },
 +        },
-+      })
++      } as GlobalEvent)
 +      await wait(() => sync.session.get("ses_1")?.title === "reverted")
 +      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 101, additions: 202, deletions: 101 })
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
 +  test("renders bounded Files rows with a final ellipsis", async () => {
-+    // 从 internal plugin registry 取得 production View，避免为了测试导出私有组件或复制 JSX。
++    // 从 builtin plugin registry 取得 production View，避免为了测试导出私有组件或复制 JSX。
 +    // 100 visible rows + total 101 是最小真实 truncation；total=100 时同一 View 不应产生省略号。
-+    const plugin = internalTuiPlugins({ experimentalEventSystem: false }).find(
++    const plugin = createBuiltinPlugins({ experimentalEventSystem: false }).find(
 +      (candidate) => candidate.id === "internal:sidebar-files",
 +    )
 +    if (!plugin) throw new Error("Files sidebar plugin was not registered")
@@ -958,7 +970,11 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +    }))
 +    let totalFiles = 101
 +    let currentDiffs = diffs
-+    const api = createTuiPluginApi({
++    // 最小 api stub：Files View 只消费 theme/state.session/slots.register 三个 seam；
++    // spyOn 的对象必须事先存在，stub slots 保留 plugin 公开注册面而不是导出私有组件。
++    // createBuiltinPlugins 是目标 internalTuiPlugins 的等价 registry owner。
++    const api = {
++      theme: { current: { text: "#ffffff", textMuted: "#888888", diffAdded: "#22c55e", diffRemoved: "#ef4444" } },
 +      state: {
 +        session: {
 +          get: () => ({
@@ -974,17 +990,16 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +          diff: () => currentDiffs,
 +        },
 +      },
-+    })
++      slots: { register: (_definition: TuiSlotPlugin) => "files-test" },
++    } as unknown as TuiPluginApi
 +    let view: (() => JSX.Element) | undefined
-+    function capture(definition: TuiSlotPlugin): string
-+    function capture<Slots extends Record<string, object>>(definition: TuiSlotPlugin<Slots>): string
 +    function capture(definition: TuiSlotPlugin) {
 +      // 只通过 plugin 的公开 slot registration seam 捕获 renderer，不断言注册次数或私有 id 分派。
 +      const content = definition.slots.sidebar_content
-+      if (content) view = () => content({ theme: api.theme }, { session_id: "ses_1" })
++      if (content) view = () => content({} as never, { session_id: "ses_1" })
 +      return "files-test"
 +    }
-+    const register = spyOn(api.slots, "register").mockImplementation(capture)
++    const register = spyOn(api.slots as { register: (definition: TuiSlotPlugin) => string }, "register").mockImplementation(capture)
 +    await plugin.tui(api, undefined, {
 +      id: plugin.id,
 +      source: "internal",
@@ -1046,9 +1061,7 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +    // messages readiness 与 diff start 是两个明确 latch；旧 Promise.all 会在第一个 latch 释放前启动 diff。
 +    // diff handler读取公开 sync store，证明 history 已提交，而不是仅证明 messages HTTP 已 resolve。
 +    // delayed diff 保持 sync 未完成，确保测试观察的是中间首屏状态而非最终批量结果。
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    const delayedMessages = Promise.withResolvers<Response>()
 +    const delayedDiff = Promise.withResolvers<Response>()
@@ -1056,6 +1069,7 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +    let diffStarted = false
 +    let historyVisibleWhenDiffStarted = false
 +    const message = assistantMessage()
++    // mounted 先声明后引用：diff handler 闭包要在 mount 返回前就能读公开 store。
 +    const mounted = await mount((url) => {
 +      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
 +      if (url.pathname === "/session/ses_1/messages" || url.pathname === "/session/ses_1/message") {
@@ -1069,7 +1083,7 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +        return delayedDiff.promise
 +      }
 +      if (url.pathname === "/session/status") return json({})
-+    })
++    }, tmp.path)
 +
 +    try {
 +      const syncing = mounted.sync.session.sync("ses_1", { force: true })
@@ -1084,7 +1098,6 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +      delayedMessages.resolve(json([{ info: message, parts: [] }]))
 +      delayedDiff.resolve(json([]))
 +      mounted.app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
@@ -1092,13 +1105,12 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +    // ses_1 锁定 generated SDK 的 resolved HTTP error 兼容：空 diff 是既有成功语义并允许 full-sync short circuit。
 +    // ses_2 锁定 genuine JSON parse rejection；独立 Session 避免前一次成功的 full-sync 标记污染失败结论。
 +    // 两种错误都在真实 SDK fetch/parse seam 产生，不注入假的 rejected client method。
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    const message = assistantMessage()
 +    const malformedMessage = { ...assistantMessage(), id: "msg_2", sessionID: "ses_2" }
 +    let diffRequests = 0
++    // diffRequests 锁定 full-sync short-circuit 与失败重试的真实请求次数。
 +    const { app, sync } = await mount((url) => {
 +      const id = url.pathname.match(/^\/session\/(ses_[12])(?:\/(?:messages|message|todo|diff))?$/)?.[1]
 +      if (!id) return
@@ -1114,10 +1126,11 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +      if (url.pathname === `/session/${id}/todo`) return json([])
 +      if (url.pathname === `/session/${id}/diff`) {
 +        diffRequests += 1
++        // 半个 JSON 对象体：真实 transport parse seam 产生 SyntaxError 而非合成 client 异常。
 +        if (id === "ses_1") return json({ error: "diff unavailable" }, { status: 500 })
 +        return new Response("{", { status: 200, headers: { "content-type": "application/json" } })
 +      }
-+    })
++    }, tmp.path)
 +
 +    try {
 +      await sync.session.sync("ses_1", { force: true })
@@ -1134,62 +1147,60 @@ index c4f226f2eb2d0b7d4e87839750c2b642478769d0..a2a9e4bede45bc0c89ffa6c3ea2dc9e5
 +      expect(diffRequests).toBe(3)
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
-   test("projects active Session Message and Part events across Projects", async () => {
-     const previous = Global.Path.state
-     await using tmp = await tmpdir()
+   // #192：重连后恢复 pending permission/question 请求——bootstrap refresh 从 API 拉取
+   // #192：reconnected 标志控制 API 返回——初始为空，重连后返回 pending 请求
+   // #192：server.connected 事件触发 bootstrap——第一个是初始连接，后续是重连
+
 diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/opencode/test/server/session-messages.test.ts
-index e603accbbecdca05138fd764334fd4e739b22d57..58efe571503cf70d16504bf76278faa3202eb235 100644
 --- a/packages/opencode/test/server/session-messages.test.ts
 +++ b/packages/opencode/test/server/session-messages.test.ts
-@@ -1,17 +1,22 @@
- import { afterEach, describe, expect } from "bun:test"
--import { Effect } from "effect"
-+import { Effect, Layer } from "effect"
- import { Server } from "../../src/server/server"
- import { Session as SessionNs } from "@/session/session"
+@@ -7,13 +7,21 @@ import { Session as SessionNs } from "@/session/session"
  import { MessageV2 } from "../../src/session/message-v2"
- import { ModelID, ProviderID } from "../../src/provider/schema"
+ 
  import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 +import type { Snapshot } from "@/snapshot"
-+import { ColdStorage } from "@/storage/cold"
-+import { Database } from "@/storage/db"
++import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
++import { Database } from "@opencode-ai/core/database/database"
 +import { Storage } from "@/storage/storage"
-+import { MessageTable } from "@/session/session.sql"
- import * as Log from "@opencode-ai/core/util/log"
++import { MessageTable } from "@opencode-ai/core/session/sql"
++import { eq } from "drizzle-orm"
  import { disposeAllInstances, TestInstance } from "../fixture/fixture"
  import { testEffect } from "../lib/effect"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
  
- void Log.init({ print: false })
- 
--const it = testEffect(SessionNs.defaultLayer)
-+const it = testEffect(Layer.mergeAll(SessionNs.defaultLayer, Storage.defaultLayer))
+-const it = testEffect(Layer.mergeAll(LayerNode.compile(SessionNs.node), httpApiLayer))
++// Storage.node 需显式入组：httpapi 的 diff 读取与测试写入共用同一 storage 实例；
++// Database.node 供 cold 探针直接读取 cold_ref（freezeOwner 消费同层 sync 事务）。
++const it = testEffect(Layer.mergeAll(LayerNode.compile(LayerNode.group([SessionNs.node, Storage.node, Database.node])), httpApiLayer))
  
  const model = {
-   providerID: ProviderID.make("test"),
-@@ -76,8 +81,8 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
+   providerID: ProviderV2.ID.make("test"),
+@@ -77,8 +85,8 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
    )
  })
  
 -function request(path: string) {
--  return Effect.promise(() => Promise.resolve(Server.Default().app.request(path)))
+-  return TestInstance.pipe(Effect.flatMap((test) => requestInDirectory(path, test.directory)))
 +function request(path: string, init?: RequestInit) {
-+  return Effect.promise(() => Promise.resolve(Server.Default().app.request(path, init)))
++  return TestInstance.pipe(Effect.flatMap((test) => requestInDirectory(path, test.directory, init)))
  }
  
- function json<T>(response: Response) {
-@@ -85,6 +90,120 @@ function json<T>(response: Response) {
- }
- 
- describe("session messages endpoint", () => {
+ function json<T>(response: HttpClientResponse.HttpClientResponse) {
+@@ -177,4 +185,118 @@ describe("session messages endpoint", () => {
+     ),
+     { git: true },
+   )
++
 +  it.instance(
 +    "caps TUI diffs without changing the complete diff contract",
 +    withoutWatcher(
 +      Effect.gen(function* () {
-+        const test = yield* TestInstance
++        // 请求经 requestInDirectory 携带实例目录；viewer 请求只是同一 transport 的更浅投影。
 +        const session = yield* sessionScoped
 +        const visible = Array.from({ length: 101 }, (_, index) => ({
 +          file: `file-${index}.ts`,
@@ -1203,21 +1214,22 @@ index e603accbbecdca05138fd764334fd4e739b22d57..58efe571503cf70d16504bf76278faa3
 +        // 900/800 是独立干扰值；若隐藏项误入 totals，worked values 5151/5050 会立即失配。
 +        const diffs: Snapshot.FileDiff[] = [{ additions: 900, deletions: 800 }, ...visible]
 +        yield* Storage.Service.use((storage) => storage.write(["session_diff", session.id], diffs))
-+        const headers = { "x-opencode-directory": test.directory }
 +
-+        const complete = yield* request(`/session/${session.id}/diff`, { headers })
++        const complete = yield* request(`/session/${session.id}/diff`)
++        // 默认请求不带 viewer header：完整 102 项含 legacy 项与 patch 是不变合同。
 +        expect(complete.status).toBe(200)
 +        const completeBody = yield* json<Snapshot.FileDiff[]>(complete)
 +        expect(completeBody).toHaveLength(102)
 +        expect(completeBody[0]).toEqual({ additions: 900, deletions: 800 })
 +
 +        const projected = yield* request(`/session/${session.id}/diff`, {
-+          headers: { ...headers, "x-opencode-tui-message-projection": "viewer" },
++          headers: { "x-opencode-tui-message-projection": "viewer" },
 +        })
 +        expect(projected.status).toBe(200)
-+        expect(projected.headers.get("x-opencode-tui-total-files")).toBe("101")
-+        expect(projected.headers.get("x-opencode-tui-total-additions")).toBe("5151")
-+        expect(projected.headers.get("x-opencode-tui-total-deletions")).toBe("5050")
++        // HttpClientResponse headers 是小写 record；与 fetch Response.get 不同，用括号访问。
++        expect(projected.headers["x-opencode-tui-total-files"]).toBe("101")
++        expect(projected.headers["x-opencode-tui-total-additions"]).toBe("5151")
++        expect(projected.headers["x-opencode-tui-total-deletions"]).toBe("5050")
 +        const body = yield* json<Snapshot.FileDiff[]>(projected)
 +        expect(body).toHaveLength(100)
 +        expect(body.at(-1)).toEqual({ file: "file-99.ts", additions: 100, deletions: 99, status: "modified" })
@@ -1249,56 +1261,52 @@ index e603accbbecdca05138fd764334fd4e739b22d57..58efe571503cf70d16504bf76278faa3
 +            body: "summary body",
 +            diffs: [{ file: "large.txt", patch, additions: 512, deletions: 0, status: "modified" }],
 +          },
-+        } satisfies MessageV2.User)
++        } satisfies SessionV1.User)
 +        yield* svc.updatePart({
 +          id: PartID.ascending(),
 +          sessionID: session.id,
 +          messageID,
 +          type: "text",
 +          text: "visible message",
-+        } satisfies MessageV2.TextPart)
++        } satisfies SessionV1.TextPart)
 +
++        const { db, sync } = yield* Database.Service
 +        // 真实 cold owner 让测试区分“跳过 Message thaw”和“完整 thaw 后仅删除响应字段”。
-+        expect(
-+          ColdStorage.freezeOwner({ type: "message", id: messageID, now: Date.now() + 1, olderThanMs: 0 }).type,
-+        ).toBe("frozen")
-+        const coldRef = () =>
-+          Database.use(
-+            (db) =>
-+              db
-+                .select({ value: MessageTable.cold_ref })
-+                .from(MessageTable)
-+                .where(Database.eq(MessageTable.id, messageID))
-+                .get()?.value,
-+          )
-+        const frozen = coldRef()
++        // freezeOwner 首参为 TxOrDb（sync）且为同步函数——目标 ColdStorage API 比 source 单参形态多事务上下文。
++        expect(ColdStorage.freezeOwner(sync, { type: "message", id: messageID, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
++        const readColdRef = Effect.gen(function* () {
++          // cold_ref 只读探针经同一 Effect db seam；不引入第二数据源。
++          const row = yield* db
++            .select({ value: MessageTable.cold_ref })
++            .from(MessageTable)
++            .where(eq(MessageTable.id, messageID))
++            .get()
++            .pipe(Effect.orDie)
++          return row?.value
++        })
++        const frozen = yield* readColdRef
 +        expect(frozen).toBeTruthy()
 +
 +        const projected = yield* request(`/session/${session.id}/message?limit=1`, {
 +          headers: { "x-opencode-tui-message-projection": "viewer" },
 +        })
 +        expect(projected.status).toBe(200)
-+        const projectedBody = yield* json<MessageV2.WithParts[]>(projected)
++        const projectedBody = yield* json<SessionV1.WithParts[]>(projected)
 +        expect(projectedBody).toHaveLength(1)
 +        expect(projectedBody[0]?.info.role === "user" ? projectedBody[0].info.summary : undefined).toBeUndefined()
 +        expect(projectedBody[0]?.parts).toMatchObject([{ type: "text", text: "visible message" }])
-+        expect(coldRef()).toBe(frozen)
++        expect(yield* readColdRef).toBe(frozen)
 +
 +        // 默认 bounded API 是 Web App/SDK 的完整合同；它必须返回并 thaw 同一份 summary。
 +        const complete = yield* request(`/session/${session.id}/message?limit=1`)
 +        expect(complete.status).toBe(200)
-+        const completeBody = yield* json<MessageV2.WithParts[]>(complete)
-+        expect(completeBody[0]?.info.role === "user" ? completeBody[0].info.summary : undefined).toEqual({
++        const completeBody = yield* json<SessionV1.WithParts[]>(complete)
++        expect(completeBody[0]?.info.role === "user" ? completeBody[0].info.summary : undefined).toMatchObject({
 +          title: "large turn",
 +          body: "summary body",
-+          diffs: [{ file: "large.txt", patch, additions: 512, deletions: 0, status: "modified" }],
 +        })
-+        expect(coldRef()).toBeNull()
 +      }),
 +    ),
 +    { git: true },
 +  )
-+
-   it.instance(
-     "returns cursor headers for older pages",
-     withoutWatcher(
+ })

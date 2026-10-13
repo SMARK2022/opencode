@@ -1,14 +1,13 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -250,6 +250,9 @@
-   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
- 
+@@ -247,5 +251,8 @@
    const pending = createMemo(() => {
 +    // 会话空闲时不查找待处理消息，避免不必要的重渲染
 +    const status = sync.data.session_status?.[route.sessionID]
 +    if (!status || status.type === "idle") return undefined
-     const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
-     return messages().findLast((x) => x.role === "assistant" && !x.time.completed && (!completed || x.id > completed))
-       ?.id
+     const completed = messages().findLastIndex((message) => message.role === "assistant" && message.time.completed)
+     const pending = messages().findLastIndex(
+       (message, index) => index > completed && message.role === "assistant" && !message.time.completed,
+     )
 

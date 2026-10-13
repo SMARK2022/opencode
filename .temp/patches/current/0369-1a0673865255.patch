@@ -100,7 +100,7 @@ index b7db009b9..4458a1d89 100644
 -      // 测试 cwd 需要向上两级再进入 tui 包（source 路径已迁移）
 -      const content = yield* Effect.promise(() =>
 -        fs.readFile(
--          path.join(process.cwd(), "../../tui/src/component/dialog-goal.tsx"),
+-          path.join(process.cwd(), "../tui/src/component/dialog-goal.tsx"),
 -          "utf-8",
 -        ),
 -      )

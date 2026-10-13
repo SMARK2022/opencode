@@ -110,13 +110,17 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index 9958a78e46d0328a5d733f4b8068aa9ce738ab01..7825c95ce6d5357eb3362a4c6ceec4b2456f3835 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -2136,6 +2136,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -2136,6 +2136,10 @@
  
-           if (
-             lastAssistant?.finish &&
+          if (
+            lastAssistant?.finish &&
 +            // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
 +            // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
 +            // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
++            !lastAssistant.error &&
+            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+            !hasToolCalls &&
+            lastAssistant.parentID === lastUser.id
 +            !lastAssistant.error &&
              !["tool-calls"].includes(lastAssistant.finish) &&
              !hasToolCalls &&
@@ -166,7 +170,7 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa1e1238f8 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -1026,3 +1026,189 @@
+@@ -1026,3 +1026,191 @@
      { git: true, config: (url) => denyDoomLoopConfig(url) },
    ),
  )
@@ -175,18 +179,20 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +// [local-smark] provider 空完成检测测试
 +// ---------------------------------------------------------------------------
 +// GLM-5.2 等 provider 在大上下文 + thinking + tool_stream 组合下可能返回
-+// HTTP 200 + SSE 正常关闭，但 finish_reason="network_error"（AI SDK 映射为 "other"），
++// HTTP 200 + SSE 正常关闭，但 finish_reason 为未识别值（AI SDK 归一化为 "unknown"），
 +// 无 content/reasoning/tool delta，无 usage。processor 必须检测这种空完成并抛出
 +// retryable APIError，而不是静默写成 completed 后被 goal continuation 无限循环。
 +
-+// 空完成 SSE：只有 role chunk + finish_reason="network_error"（→ AI SDK "other"），无内容 delta
++// 空完成 SSE：只有 role chunk + finish_reason="unknown"，无内容 delta
++// 注：v1.18 ai-sdk 桥接层对 raw network_error 无条件抛 ResponseStreamError（上游更强语义），
++// 故用 "unknown" 代表同一未知 finish 族，直达 processor 的空完成检测逻辑。
 +function emptyCompletionSse() {
 +  return raw({
 +    head: [
 +      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
 +    ],
 +    tail: [
-+      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "network_error" }] },
++      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "unknown" }] },
 +    ],
 +  })
 +}
@@ -197,7 +203,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +      Effect.gen(function* () {
 +        const { processors, session, provider } = yield* boot()
 +
-+        // 第一次请求：空完成（finish_reason=network_error → AI SDK "other"），应抛 retryable APIError
++        // 第一次请求：空完成（finish_reason=unknown），应抛 retryable APIError
 +        // 第二次请求：正常文本响应，retry 后应成功
 +        yield* llm.push(emptyCompletionSse(), reply().text("recovered").stop())
 +
@@ -249,7 +255,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +      Effect.gen(function* () {
 +        const { processors, session, provider } = yield* boot()
 +
-+        // 有 text delta 但 finish_reason=network_error（→ "other"）
++        // 有 text delta 但 finish_reason=unknown
 +        // hasText=true → 不应触发空完成检测
 +        yield* llm.push(
 +          raw({
@@ -258,7 +264,7 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { content: "partial" } }] },
 +            ],
 +            tail: [
-+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "network_error" }] },
++              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "unknown" }] },
 +            ],
 +          }),
 +        )
@@ -356,52 +362,3 @@ index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
 +)
-diff --git a/packages/opencode/test/cli/run/run-process.test.ts b/packages/opencode/test/cli/run/run-process.test.ts
---- a/packages/opencode/test/cli/run/run-process.test.ts
-+++ b/packages/opencode/test/cli/run/run-process.test.ts
-@@ -84,3 +84,3 @@
--  // The test provider's SSE error item is interpreted by the SDK as an unknown
--  // finish, not a fatal provider/session error. Lock that distinction in so it
--  // is not accidentally used as the failure compatibility oracle.
-+  // A stream ending after partial text is normalized to an unknown finish.
-+  // Keep output and transport failure in the same provider turn to distinguish
-+  // this case from an empty continuation, which intentionally triggers retry.
-@@ -91,10 +91,6 @@
--        yield* llm.push(
--          reply().text("partial response").tool("bash", {
--            command: "printf tool",
--            description: "Print deterministic output",
--          }),
--        )
--        yield* llm.fail("upstream provider exploded mid-stream")
-+        // 当前轮已有正文时必须保留，不应依赖前一工具轮的输出掩盖空完成。
-+        // 将断流放在同一个响应，精确 stdout 断言才能真正防止意外重试。
-+        yield* llm.push(reply().text("partial response").streamError("upstream provider exploded mid-stream"))
-         const result = yield* opencode.run("trigger midstream error", { timeoutMs: 30_000 })
-         expect(result.exitCode).toBe(0)
-         expect(result.stdout).toBe("partial response\n")
-@@ -219,21 +215,14 @@
--        yield* llm.push(
--          reply().text("partial json").tool("bash", {
--            command: "printf tool",
--            description: "Print deterministic output",
--          }),
--        )
--        yield* llm.fail("provider failed")
-+        // JSON 同样锁定单轮 partial；另一个空轮必须重试，不能混作本场景。
-+        // 工具及续轮顺序仍由相邻的完整 tool continuation 测试覆盖。
-+        yield* llm.push(reply().text("partial json").streamError("provider failed"))
-         const result = yield* opencode.run("fail after output", { format: "json" })
- 
-         const events = opencode.parseJsonEvents(result.stdout)
-         expect(result.exitCode).toBe(0)
-         expect(events.map((event) => event.type)).toEqual([
-           "step_start",
-           "text",
--          "tool_use",
-           "step_finish",
--          "step_start",
--          "step_finish",
-         ])
-         expect(events[1]?.part).toEqual(expect.objectContaining({ type: "text", text: "partial json" }))
-         expect(events.at(-1)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))

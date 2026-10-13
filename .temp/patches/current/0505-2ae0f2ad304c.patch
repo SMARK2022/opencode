@@ -1,15 +1,3 @@
-From 2ae0f2ad304cf91aacf4262fb3ccaba067bd2db6 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 20 Jul 2026 23:26:04 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E7=BB=9F=E4=B8=80=E8=AF=AD?=
- =?UTF-8?q?=E9=9F=B3=E7=8A=B6=E6=80=81=E4=B8=8E=20retry=20=E8=AF=A6?=
- =?UTF-8?q?=E6=83=85=E5=B1=95=E7=A4=BA?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-三面板共用 compact 语音文案；retry 使用红色 (details) 并让短错误左起成组。保留默认 formatter 兼容、原始错误对话框与外围控件布局。
-
 diff --git a/docs/plans/prompt-voice-status-unification-and-retry-details.md b/docs/plans/prompt-voice-status-unification-and-retry-details.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..dc5b944b2f211fad7cd7950f3087503b490e18e4
@@ -634,219 +622,212 @@ index 0000000000000000000000000000000000000000..dc5b944b2f211fad7cd7950f3087503b
 +```
 +
 +本结论仅适用于 **R2 计划** 与上述实现 diff。
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 4c2e9bd6f25aa104d0ffc135f6736acf96bc8475..91d5ceb4b07c3a1a599ea227b92624733d7d6d16 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -447,7 +447,7 @@ export function Prompt(props: PromptProps) {
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index a60d64440..182b75e6f 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -387,7 +387,7 @@ export function Prompt(props: PromptProps) {
    const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
    const voiceInputStatusText = createMemo(() =>
      // shortcut 来自 keymap；兜底值只影响展示，不注册额外 keybind。
--    // compact 仅缩短主 Prompt 的展示；dialog/question 继续使用 formatter 的默认完整文案。
-+    // compact 与 DialogPrompt / QuestionPrompt 统一 short profile；默认长文案留给兼容 consumer。
+-    // #491：compact 仅缩短主 Prompt 的展示；dialog/question 继续使用 formatter 的默认完整文案。
++    // #491/#505：compact 与 DialogPrompt / QuestionPrompt 统一 short profile；默认长文案留给兼容 consumer。
      PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), { compact: true }),
    )
    const voiceInput = PromptVoiceInput.createVoiceInputController({
-@@ -1992,15 +1992,17 @@ export function Prompt(props: PromptProps) {
+@@ -1853,15 +1853,17 @@ export function Prompt(props: PromptProps) {
  
                    return (
                      <Show when={retry()}>
--                      {/* 摘要占用剩余空间，details 与 retry 元数据保持固定，形成稳定的信息优先级。 */}
-+                      {/* 外层组可伸展以承接剩余宽度，但摘要文本本身不 grow，避免短错误与 (details) 被拉开。 */}
+-                      {/* #491：摘要占用剩余空间，details 与 retry 元数据保持固定，形成稳定的信息优先级。 */}
++                      {/* #505：外层组可伸展以承接剩余宽度，但摘要文本本身不 grow，避免短错误与 (details) 被拉开。 */}
                        <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
 -                        <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
 +                        <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
                            {/* OpenTUI 命中的子 text 不可靠冒泡到 box；可见摘要本身也必须承接详情点击。 */}
 -                          <text minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={handleMessageClick}>
-+                          {/* content-based shrinkable：minWidth=0+flexShrink，禁止 flexBasis=0 把短文压成零宽。 */}
++                          {/* #505：content-based shrinkable——minWidth=0+flexShrink，禁止 flexBasis=0 把短文压成零宽。 */}
 +                          <text minWidth={0} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={handleMessageClick}>
                              {message()}
                            </text>
 -                          <text flexShrink={0} fg={theme.textMuted} wrapMode="none" onMouseUp={handleMessageClick}>
 -                            details
-+                          {/* 括号化红色入口与错误同色，既短又保持“属于诊断”的视觉归属。 */}
++                          {/* #505：括号化红色入口与错误同色，既短又保持“属于诊断”的视觉归属。 */}
 +                          <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={handleMessageClick}>
 +                            (details)
                            </text>
                          </box>
                          <text flexShrink={0} fg={theme.error} wrapMode="none">
-diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-index d6637c880681899b59f6c6d5e8ce828da6b7973a..4b750e9a82307f13ace34bb0ffeeffac6f4b2e4a 100644
---- a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-+++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
-@@ -221,8 +221,8 @@ export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, prom
+
+diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
+index 31b7fee65..0e334b128 100644
+--- a/packages/tui/src/prompt-voice-input.ts
++++ b/packages/tui/src/prompt-voice-input.ts
+@@ -219,8 +219,8 @@ export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, prom
  }
  
  export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now(), options: { compact?: boolean } = {}) {
 -  // 这些文案直接显示在 prompt footer；保持短文本，避免小终端下挤掉输入区。
--  // compact 只服务主 Prompt 的单行宽度预算；默认值继续保护 dialog/question 的既有文案。
+-  // #491：compact 只服务主 Prompt 的单行宽度预算；默认值继续保护 dialog/question 的既有文案。
 +  // 这些文案直接显示在 footer；compact 是主 Prompt / DialogPrompt / QuestionPrompt 的统一 short profile。
-+  // 默认长文案保留作兼容 profile，避免未来非 UI consumer 被静默改写。
++  // #491/#505：默认长文案保留作兼容 profile，避免未来非 UI consumer 被静默改写。
    if (status.type === "starting") return options.compact ? "Starting..." : "Starting voice..."
    // recording 必须显示停止快捷键，用户不需要记住开始录音时按了哪个绑定。
    if (status.type === "recording") return `${options.compact ? "Rec" : "Recording"} ${formatClock(now - status.startedAt)} · ${shortcut} stop`
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-index 10f52854e7f8b8e118e1fde15784045cf6a0cd8c..222bc053b42c6cad71add68df7d8c3b2c0b37c65 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
-@@ -579,7 +579,10 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
+
+diff --git a/packages/tui/src/routes/session/question.tsx b/packages/tui/src/routes/session/question.tsx
+index dbf35547c..878ee2c5e 100644
+--- a/packages/tui/src/routes/session/question.tsx
++++ b/packages/tui/src/routes/session/question.tsx
+@@ -582,7 +582,10 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
                  <text fg={theme.error}>●</text>
                </Show>
                <text fg={theme.accent}>
 -                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
-+                {/* compact 与主 Prompt 统一 short profile；select/submit/esc 等外围控件保持面板本地布局。 */}
++                {/* #505：compact 与主 Prompt 统一 short profile；select/submit/esc 等外围控件保持面板本地布局。 */}
 +                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), {
 +                  compact: true,
 +                })}
                </text>
              </box>
            </Show>
-diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-index 542372d5eb9d97393a970162331a3aba28b8e40c..bdf313a05ed80d4abd602feb6e43722c97fcc0ec 100644
---- a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
-@@ -163,7 +163,10 @@ export function DialogPrompt(props: DialogPromptProps) {
+
+diff --git a/packages/tui/src/ui/dialog-prompt.tsx b/packages/tui/src/ui/dialog-prompt.tsx
+index 3d58f20d3..2d6757f68 100644
+--- a/packages/tui/src/ui/dialog-prompt.tsx
++++ b/packages/tui/src/ui/dialog-prompt.tsx
+@@ -183,7 +183,10 @@ export function DialogPrompt(props: DialogPromptProps) {
                  <text fg={theme.error}>●</text>
                </Show>
                <text fg={theme.accent}>
 -                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
-+                {/* compact 与主 Prompt 统一 short profile；生命周期/快捷键仍由本面板 footer 承载。 */}
++                {/* #505：compact 与主 Prompt 统一 short profile；生命周期/快捷键仍由本面板 footer 承载。 */}
 +                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), {
 +                  compact: true,
 +                })}
                </text>
              </box>
            </Show>
-diff --git a/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx b/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx
-index 57cb93e73b97ea76a00b4b983403d7e907314b57..22d451724f57c7d8c4b66eeba556836a4e58cdc6 100644
---- a/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx
-@@ -1,5 +1,6 @@
- /** @jsxImportSource @opentui/solid */
- import { expect, test } from "bun:test"
-+import path from "path"
- import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
- import { testRender, useRenderer } from "@opentui/solid"
- import { onCleanup, onMount } from "solid-js"
-@@ -70,3 +71,9 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
+
+diff --git a/packages/tui/test/cli/tui/dialog-prompt.test.tsx b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+index 30779a5a9..32657988a 100644
+--- a/packages/tui/test/cli/tui/dialog-prompt.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+@@ -235,3 +235,9 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
      app.renderer.destroy()
    }
  })
 +
 +// INV-01：Dialog 必须显式选择 compact；formatter 单测无法覆盖该 call site。
 +test("DialogPrompt voice status call site selects compact profile", async () => {
-+  const source = await Bun.file(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/ui/dialog-prompt.tsx")).text()
++  const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/ui/dialog-prompt.tsx")).text()
 +  expect(source).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
 +})
-diff --git a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-index 4bd1196c4af2bcb388c5ec25a4fcf6400a82a61a..9df524d88475f9b3a47bc402f53c901e444e3c36 100644
---- a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-@@ -656,16 +656,19 @@ test("opens the original retry error from the compact details affordance", async
+
+diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+index a57fea51c..df4578fa0 100644
+--- a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+@@ -569,16 +569,19 @@ test("opens the original retry error from the compact details affordance", async
  
-         // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
-         const lines = frame.split("\n")
--        const detailsY = lines.findIndex((line) => line.includes("details"))
-+        const detailsToken = "(details)"
-+        const detailsY = lines.findIndex((line) => line.includes(detailsToken))
-         const footerLine = lines[detailsY] ?? ""
--        expect(footerLine).toContain("Retry provider request f")
-+        // 中间截断保留可辨识后缀与详情入口；不再要求完整前缀连续出现。
-+        expect(footerLine).toContain("Retry provider request")
-         expect(footerLine).toContain("tail-81-to-120")
-+        expect(footerLine).toContain(detailsToken)
-         expect(footerLine).not.toContain("socket   closed")
-         expect(footerLine).not.toContain("click to expand")
--        const detailsX = lines[detailsY]?.indexOf("details") ?? -1
-+        const detailsX = lines[detailsY]?.indexOf(detailsToken) ?? -1
-         expect(detailsX).toBeGreaterThanOrEqual(0)
-         // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
--        const targetX = detailsX + Math.floor("details".length / 2)
-+        const targetX = detailsX + Math.floor(detailsToken.length / 2)
-         app.renderer.clearSelection()
-         await app.mockMouse.moveTo(targetX, detailsY)
-         await app.renderOnce()
-@@ -685,6 +688,47 @@ test("opens the original retry error from the compact details affordance", async
-   }
+       // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
+       const lines = frame.split("\n")
+-      const detailsY = lines.findIndex((line) => line.includes("details"))
++      const detailsToken = "(details)"
++      const detailsY = lines.findIndex((line) => line.includes(detailsToken))
+       const footerLine = lines[detailsY] ?? ""
+-      expect(footerLine).toContain("Retry provider request f")
++      // #505：中间截断保留可辨识后缀与详情入口；不再要求完整前缀连续出现。
++      expect(footerLine).toContain("Retry provider request")
+       expect(footerLine).toContain("tail-81-to-120")
++      expect(footerLine).toContain(detailsToken)
+       expect(footerLine).not.toContain("socket   closed")
+       expect(footerLine).not.toContain("click to expand")
+-      const detailsX = lines[detailsY]?.indexOf("details") ?? -1
++      const detailsX = lines[detailsY]?.indexOf(detailsToken) ?? -1
+       expect(detailsX).toBeGreaterThanOrEqual(0)
+       // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
+-      const targetX = detailsX + Math.floor("details".length / 2)
++      const targetX = detailsX + Math.floor(detailsToken.length / 2)
+       app.renderer.clearSelection()
+       await app.mockMouse.moveTo(targetX, detailsY)
+       await app.renderOnce()
+@@ -596,6 +599,45 @@ test("opens the original retry error from the compact details affordance", async
+   )
  })
  
-+// 短错误必须与红色 (details) 左起成组；flexGrow 会把详情推到行尾并制造“两端对齐”假象。
++// #505：短错误必须与红色 (details) 左起成组；flexGrow 会把详情推到行尾并制造“两端对齐”假象。
 +test("keeps short retry details left-aligned and error-colored", async () => {
-+  const previousState = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
-+  await Bun.write(path.join(tmp.path, "kv.json"), "{}")
++  const stateDir = path.join(tmp.path, "state")
++  await fs.mkdir(stateDir, { recursive: true })
++  await Bun.write(path.join(stateDir, "kv.json"), "{}")
 +
-+  try {
-+    await withPrompt(
-+      () => undefined,
-+      async (_prompt, _route, app, context) => {
-+        emitSessionStatus(context, "evt-prompt-footer-short-details", {
-+          type: "retry",
-+          attempt: 1,
-+          next: Date.now() + 9_000,
-+          message: "Short error",
-+        })
-+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
-+        await settlePromptFrame(app)
++  await withPrompt(
++    () => undefined,
++    async (_prompt, _route, app, context) => {
++      emitSessionStatus(context, "evt-prompt-footer-short-details", {
++        type: "retry",
++        attempt: 1,
++        next: Date.now() + 9_000,
++        message: "Short error",
++      })
++      await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
++      const frame = await settlePromptFrame(app)
 +
-+        const frame = app.captureCharFrame()
-+        const footerLine = frame.split("\n").find((line) => line.includes("(details)")) ?? ""
-+        // 连续 token 证明 summary 未占用剩余空白把 details 推远。
-+        expect(footerLine).toContain("Short error (details)")
++      const footerLine = frame.split("\n").find((line) => line.includes("(details)")) ?? ""
++      // 连续 token 证明 summary 未占用剩余空白把 details 推远。
++      expect(footerLine).toContain("Short error (details)")
 +
-+        const spans = app.captureSpans()
-+        const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
-+        const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
-+        const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
-+        expect(errorSpan).toBeDefined()
-+        expect(detailsSpan).toBeDefined()
-+        // 详情入口与错误摘要同色，避免 muted 弱化可点击诊断入口。
-+        expect(colorKey(detailsSpan!.fg)).toBe(colorKey(errorSpan!.fg))
-+      },
-+      { width: 160, promptWidth: 100 },
-+    )
-+  } finally {
-+    Global.Path.state = previousState
-+  }
++      // 色彩断言走 spans： fg 归一为字符串后比较，两个 span 必须同色（error）。
++      const spans = (app as unknown as { captureSpans: () => { lines: Array<{ spans: Array<{ text: string; fg?: unknown }> }> } }).captureSpans()
++      const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
++      const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
++      const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
++      expect(errorSpan).toBeDefined()
++      expect(detailsSpan).toBeDefined()
++      const colorKey = (fg: unknown) => JSON.stringify(typeof fg === "function" ? fg.name : fg)
++      // 详情入口与错误摘要同色，避免 muted 弱化可点击诊断入口。
++      expect(colorKey(detailsSpan!.fg)).toBe(colorKey(errorSpan!.fg))
++    },
++    stateDir,
++    { width: 160, promptWidth: 100 },
++  )
 +})
 +
  type FetchHandler = Parameters<typeof createFetch>[0]
+ // #491：状态必须经过 SDK event source 进入 SyncProvider，测试不能直接写 store 绕过生产消费链。
  type PromptContext = { emit: ReturnType<typeof createEventSource>["emit"]; sync: ReturnType<typeof useSync> }
- type PromptStatus = NonNullable<PromptContext["sync"]["data"]["session_status"]>[string]
-diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-index 1060d860064345ef9853b14e9cf0503288927ddd..e7f03926723d70d6b4e5bc43ff79d6f0a853a120 100644
---- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-+++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
-@@ -121,11 +121,10 @@ describe("prompt voice input", () => {
-     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
-   })
+
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
+index b46bb838d..f5ee2d74b 100644
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
+@@ -841,8 +841,8 @@ describe("prompt voice input", () => {
+ })
  
--  // 主 Prompt 的底栏需要和文件、命令提示共享 75 列，使用完整文案会挤压成多行。
--  // compact 只改变该消费者的展示，不得改变 DialogPrompt / QuestionPrompt 的默认契约。
-+  // 三面板统一 short profile：主 Prompt / DialogPrompt / QuestionPrompt 共用 compact 文案。
-   // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
-   // 固定 now 继续验证计时值，避免 compact 分支绕过原有录音时钟。
--  test("formats compact main Prompt voice status without losing the stop shortcut", () => {
-+  test("formats compact shared voice status without losing the stop shortcut", () => {
-     const compact = { compact: true }
-     expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, compact)).toBe("Starting...")
-     expect(voiceInputStatusText({ type: "recording", startedAt: 1_000 }, "alt+v", 4_400, compact)).toBe("Rec 00:03 · alt+v stop")
-@@ -133,6 +132,17 @@ describe("prompt voice input", () => {
-     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, compact)).toBe("Transcribing...")
+ describe("voiceInputStatusText compact", () => {
+-  // #491：compact 矩阵锁住主 Prompt 单行预算的四个阶段文案与兜底快捷键提示。
+-  // #491：compact 只缩短主 Prompt 展示；recording 仍保留 stop 快捷键提示。
++  // #491/#505：三面板统一 short profile——主 Prompt / DialogPrompt / QuestionPrompt 共用 compact 文案。
++  // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
+   test("provides compact variants while keeping the stop shortcut visible", () => {
+     const idle = { type: "idle" as const }
+     expect(PromptVoiceInput.voiceInputStatusText(idle, "alt+v")).toBe("")
+@@ -859,4 +859,15 @@ describe("voiceInputStatusText compact", () => {
+       "Transcribing...",
+     )
    })
- 
++
 +  // INV-01 硬门禁：formatter 双 profile 不能证明 call-site 选择；任一 consumer 漏传 compact 必须失败。
 +  // 完整挂载 Question/Dialog 生命周期成本过高，因此对生产 call-site 源码做 fail-capable 契约断言。
 +  test("DialogPrompt and QuestionPrompt call sites select the compact voice profile", async () => {
-+    const root = path.resolve(import.meta.dir, "../../../src/cli/cmd/tui")
++    const root = path.resolve(import.meta.dir, "../../src")
 +    const dialogSource = await Bun.file(path.join(root, "ui/dialog-prompt.tsx")).text()
 +    const questionSource = await Bun.file(path.join(root, "routes/session/question.tsx")).text()
 +    // 必须同时包含 voiceInputStatusText 调用与 compact: true，防止只写注释或死代码。
 +    expect(dialogSource).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
 +    expect(questionSource).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
 +  })
-+
-   // createRefreshClock 是三处组件（主 Prompt / QuestionPrompt / DialogPrompt）录音计时器走数的
-   // 基础设施：recording 期间每秒刷新 now 信号驱动 voiceInputStatusText 重算，idle 时停止。
-   // 该契约此前零测试覆盖——一旦被破坏，question/dialog 组件的计时器会冻结在 00:00
+ })

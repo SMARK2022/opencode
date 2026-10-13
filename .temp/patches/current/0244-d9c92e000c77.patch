@@ -1,4 +1,11 @@
 From d9c92e000c7747f2f3108c1c4e681257cee0582b Mon Sep 17 00:00:00 2001
+     "pattern",
+   "required": [
+-            path: path.resolve(
+-              requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
+-              item.entry.path,
+-            ),
+From d9c92e000c7747f2f3108c1c4e681257cee0582b Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Thu, 28 May 2026 04:08:49 +0800
 Subject: [PATCH] =?UTF-8?q?feat(grep):=20=E6=B7=BB=E5=8A=A0=E8=B6=85?=
@@ -289,13 +296,16 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
                const relative = match.path.text
                  .replace(/^(?:\.[\\/])+/u, "")
                  .replace(/^[\\/]+/u, "")
-@@ -319,6 +344,8 @@ const layer = Layer.effect(
+@@ -319,9 +344,11 @@ const layer = Layer.effect(
                  }),
                  line: match.line_number,
                  offset: match.absolute_offset,
 +                // #244：行预览截断与 timeout 截断独立——超时返回的部分匹配
 +                // 仍按同一线预览上限裁剪，不因截断来源不同而放大单行体积
-                 text: match.lines.text.length > 2_000 ? match.lines.text.slice(0, 2_000) + "..." : match.lines.text,
+                 text:
+                   match.lines.text.length > 2_000
+                     ? match.lines.text.slice(0, 2_000).replace(/[\uD800-\uDBFF]$/, "") + "..."
+                     : match.lines.text,
                  submatches: match.submatches.map((submatch) => ({
                    text: submatch.match.text,
 @@ -327,9 +354,86 @@ const layer = Layer.effect(
@@ -470,7 +480,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
              },
            })
  
-@@ -65,46 +98,80 @@ export const GrepTool = Tool.define(
+@@ -65,49 +98,83 @@
            const search = FSUtil.resolve(requested)
            const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
            const cwd = info?.type === "Directory" ? search : path.dirname(search)
@@ -553,7 +563,10 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +          // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文；
 +          // path.resolve 锚点是 rg 的实际扫描 cwd，两者必须同一基准输出才稳定
 +          const rows = result.items.map((item) => ({
-             path: path.resolve(cwd, item.entry.path),
+             path: path.resolve(
+               requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
+               item.entry.path,
+             ),
              line: item.line,
              text: item.text,
            }))

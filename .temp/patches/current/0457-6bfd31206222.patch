@@ -8,193 +8,148 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=20BlockTool=20?=
  =?UTF-8?q?=E5=AE=B9=E6=8A=98=E5=8F=A0?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 1b7f67a1ef782ca394906ffb5bcf053692fd1fe2..3cd852e606f6eea23212a230a1e5859a426b1843 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1859,10 +1859,16 @@ type ToolProps<T> = {
-   part: ToolPart
+融合适配：owner 迁移 packages/tui；#109 已移除 BlockTool 根 gap（该源 hunk 语义已满足，记录跳过）；
+字符预算/shellPreviewText/五处 totalChars 全量落位；0449 的 preview join 断言同步迁移到新口径。
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2136,9 +2136,15 @@
  }
- 
 -function previewText(input: string, maxLines: number) {
+-  // #144：按行切分，不截断半行字符
+-  const rows = input.split("\n")
+-  if (rows.length <= maxLines) return input
+-  // #144：截断时追加省略提示
+-  return rows.slice(0, maxLines).join("\n") + "\n…"
+-}
++// #457：单行超长（如 bun --eval 大内联脚本）在终端按宽度折行成多个视觉行，
++// 仅按换行计数会漏判；预览统一追加字符预算，命令+输出一起裁。
 +const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
 +
 +function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
-   const lines = input.split("\n")
--  if (lines.length <= maxLines) return input
--  return [...lines.slice(0, maxLines), "…"].join("\n")
++  const lines = input.split("\n")
 +  const lineLimited = lines.length > maxLines
 +  const text = lineLimited ? lines.slice(0, maxLines).join("\n") : input
 +  const charLimited = text.length > maxChars
 +  if (!lineLimited && !charLimited) return input
 +  const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
 +  return preview ? [preview, "…"].join("\n") : "…"
- }
- function GenericTool(props: ToolProps<any>) {
-   const { theme } = useTheme()
-@@ -1884,6 +1890,7 @@ function GenericTool(props: ToolProps<any>) {
-           maxLines={10}
++}
+ 
+@@ -2222,3 +2228,5 @@
            threshold={20}
-           totalLines={output().split("\n").length}
+-          totalLines={output().split(String.fromCharCode(10)).length}
++          totalLines={output().split(String.fromCharCode(10)).length}
 +          totalChars={output().length}
-           preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
-         >
-         <text fg={theme.text}>{output()}</text>
-@@ -1997,6 +2004,8 @@ function BlockTool(props: {
-   maxLines?: number
++          // 行数之外补充字符计数：长单行折行场景由字符预算兜底。
+           // #144：通用工具折叠预览
+@@ -2710,4 +2718,7 @@
    threshold?: number
-   totalLines?: number
++  // #457：字符预算契约——单行超长内容按字符数武装折叠
 +  totalChars?: number
 +  charThreshold?: number
+   totalLines?: number
+   // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
    preview?: JSX.Element
- }) {
-   const { theme } = useTheme()
-@@ -2010,13 +2019,24 @@ function BlockTool(props: {
-   })
+@@ -2730,3 +2741,5 @@
    const previewLines = createMemo(() => props.maxLines ?? 10)
    const threshold = createMemo(() => props.threshold ?? 20)
 +  const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
-   const [canCollapse, setCanCollapse] = createSignal(false)
-   createEffect(() => {
++  // 字符阈值与行阈值同权判定——两个预算任一超限即可武装折叠。
+   // #111：canCollapse 只升不降
+@@ -2736,4 +2749,4 @@
      if (canCollapse()) return
--    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) setCanCollapse(true)
-+    if (previewLines() <= 0) return
-+    // OpenTUI wraps very long single lines at terminal width, so newline counts
-+    // alone miss commands such as `bun --eval "...large inline script..."` that
-+    // occupy many visual rows.  Keep the historic line threshold, but also
-+    // collapse blocks whose command/output text exceeds the preview char budget.
-+    if ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()) setCanCollapse(true)
+-    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) {
++    if (previewLines() > 0 && ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold())) {
+       setCanCollapse(true)
+     }
+@@ -2872,3 +2885,10 @@
+     if (expanded() || !shellCanCollapse()) return output()
+     return collapsed().output
    })
-   const [expanded, setExpanded] = createSignal(false)
-   const collapsed = createMemo(() => canCollapse() && !expanded())
-+  // BlockTool spacing is intentionally owned by the section wrappers below.
-+  // The body, expand affordance, and error rows each use marginTop={1}; adding
-+  // a root gap would stack with those margins and render two blank rows around
-+  // shell/edit/patch/write content. Keep this matching the pre-preview layout
-+  // while preserving the body wrapper needed for collapsed maxHeight clipping.
-   return (
-     <box
-       border={["left"]}
-@@ -2024,7 +2044,6 @@ function BlockTool(props: {
-       paddingBottom={1}
-       paddingLeft={2}
-       marginTop={1}
--      gap={1}
-       backgroundColor={background()}
-       customBorderChars={SplitBorder.customBorderChars}
-       borderColor={props.contextView ? theme.info : theme.background}
-@@ -2087,6 +2106,10 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-     const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
-     return stripAnsi(text?.trim() ?? "")
-   })
++
++  // #457：命令与输出合成一个预览文本——totalLines/totalChars/preview 共用同一口径，
++  // 避免行计数只看输出、字符计数只看命令的分裂判定。
 +  const shellPreviewText = createMemo(() => {
-+    if (!output()) return `$ ${props.input.command ?? ""}`
-+    return [`$ ${props.input.command ?? ""}`, "", output()].join("\n")
++    if (!output()) return `$ ${stringValue(props.input.command) ?? ""}`
++    return [`$ ${stringValue(props.input.command) ?? ""}`, "", output()].join("\n")
 +  })
- 
-   const workdirDisplay = createMemo(() => {
-     const workdir = props.input.workdir
-@@ -2116,18 +2139,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-           spinner={isRunning()}
-           maxLines={isRunning() || showContextOutput() ? 0 : 10}
+@@ -2909,10 +2929,11 @@
            threshold={20}
--          totalLines={1 + output().split("\n").length}
+-          totalLines={output().split(String.fromCharCode(10)).length}
 +          totalLines={shellPreviewText().split("\n").length}
 +          totalChars={shellPreviewText().length}
-           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
-           contextView={showContextOutput()}
-           contextLabel="returned to model"
+           // #144：Shell 折叠预览前 10 行
 -          preview={
--            <box gap={1}>
--              <text fg={theme.text}>$ {props.input.command}</text>
--              <Show when={output()}>
--                <text fg={theme.text}>{previewText(output(), 10)}</text>
--              </Show>
--            </box>
+-            shellCanCollapse() && !showContextOutput() ? (
+-              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
+-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, "", previewText(output(), 10)].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
+-            ) : undefined
 -          }
-+          preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
++          preview={
++            shellCanCollapse() && !showContextOutput() ? (
++              // #457：预览文本改为 previewText(shellPreviewText(), 10)——空行分隔语义由 memo 承载
++              <text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>
++            ) : undefined
++          }
          >
-           <box gap={1}>
-             <text fg={theme.text}>$ {props.input.command}</text>
-@@ -2217,6 +2234,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
-           maxLines={10}
-           threshold={20}
-           totalLines={diffStats().total}
-+          totalChars={diff()!.length}
-           preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
-         >
-           <box gap={1} flexDirection="column">
-@@ -2232,6 +2250,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
-           maxLines={10}
-           threshold={20}
-           totalLines={code().split("\n").length}
+@@ -3059,3 +3080,4 @@
+           // #144：武装 canCollapse 使 preview 可达
+           totalLines={countLines(diff() ?? "")}
++          totalChars={(diff() ?? "").length}
+           // #154：折叠预览改为真实 DiffRenderable 输出；previewDiff 按行预算截断
+@@ -3086,3 +3108,4 @@
+           // #144：武装 canCollapse 使 preview 可达
+           totalLines={countLines(code())}
 +          totalChars={code().length}
-           preview={
-             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
-               <code
-@@ -2447,6 +2466,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
-           maxLines={10}
-           threshold={20}
-           totalLines={stats().total}
+           preview={writeCanCollapse() ? <text fg={theme.text}>{previewText(code(), 10)}</text> : undefined}
+@@ -3467,3 +3490,4 @@
+           // #144：武装 canCollapse 使 preview 可达
+           totalLines={countLines(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "")}
 +          totalChars={diffContent().length}
-           preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
-         >
-           <box gap={1} flexDirection="column">
-@@ -2502,6 +2522,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-                 maxLines={10}
-                 threshold={20}
-                 totalLines={(file.patch ?? "").split("\n").length}
+           // #154：折叠预览独立挂载短 diff，避免旧 maxHeight 裁剪路径把滚轮事件
+@@ -3575,3 +3599,4 @@
+           threshold={20}
+           totalLines={countLines(file.patch ?? "")}
 +                totalChars={(file.patch ?? "").length}
-                 preview={
-                   <Show
-                     when={file.type !== "delete"}
-diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-index ed66112e155f63478c3cb9aa639b1f995d0488f2..9011025c5163a977093765022fce45db9348eb6a 100644
---- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
-@@ -21,6 +21,16 @@ const promptSource = readFileSync(
-   "utf-8",
- )
- 
-+const blockToolSource = sessionSource.slice(
-+  sessionSource.indexOf("function BlockTool("),
-+  sessionSource.indexOf("function Shell("),
-+)
+           preview={
+diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+--- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
++++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+@@ -25,5 +50,6 @@
+     const shellBody = sessionSource.slice(shellStart, shellStart + 6000)
+     expect(shellBody).toContain("gap={1}")
+     // 折叠预览的 join 数组必须显式承载空行元素，filter 只剔除 undefined 不剔除空串。
+-    expect(shellBody).toContain(`"", previewText(output(), 10)]`)
++    // #457：预览口径迁入 shellPreviewText（命令+输出合成文本），空行分隔语义不变。
++    expect(shellBody).toContain('"", output()].join("\\n")')
+   })
+@@ -26,1 +52,27 @@
 +
-+const shellSource = sessionSource.slice(
-+  sessionSource.indexOf("function Shell("),
-+  sessionSource.indexOf("function DiffView("),
-+)
++  // #457：以下三项继承源 session-integration.test 的结构断言（测试宿主随 owner 迁移至 TUI 包）
++  test("BlockTool uses one vertical spacing strategy", () => {
++    const start = sessionSource.indexOf("function BlockTool(")
++    const end = sessionSource.indexOf("function Shell(")
++    const blockToolSource = sessionSource.slice(start, end)
++    expect(blockToolSource).toContain("marginTop={1}")
++    expect(blockToolSource).not.toContain("gap={1}")
++  })
 +
- describe("Session route integration points", () => {
-   describe("scrollbar", () => {
-     test("imports drawSmoothScrollbar", () => {
-@@ -102,6 +112,25 @@ describe("Session route integration points", () => {
-       expect(sessionSource).toContain("canCollapse")
-     })
- 
-+    test("BlockTool uses one vertical spacing strategy", () => {
-+      expect(blockToolSource).toContain("marginTop={1}")
-+      expect(blockToolSource).not.toContain("gap={1}")
-+    })
++  test("BlockTool can collapse long wrapped single-line content", () => {
++    expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
++    expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
++    expect(sessionSource).toContain("totalChars?: number")
++    expect(sessionSource).toContain("charThreshold")
++    expect(sessionSource).toContain("(props.totalChars ?? 0) > charThreshold()")
++  })
 +
-+    test("BlockTool can collapse long wrapped single-line content", () => {
-+      expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
-+      expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
-+      expect(blockToolSource).toContain("totalChars?: number")
-+      expect(blockToolSource).toContain("charThreshold")
-+      expect(blockToolSource).toContain("(props.totalChars ?? 0) > charThreshold()")
-+    })
-+
-+    test("Shell counts command and output characters for collapse", () => {
-+      expect(shellSource).toContain("shellPreviewText")
-+      expect(shellSource).toContain("totalChars={shellPreviewText().length}")
-+      expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
-+    })
-+
-     test("Edit tool shows diff stats in title", () => {
-       expect(sessionSource).toContain("← Edit")
-       expect(sessionSource).toContain("stats().added")
++  test("Shell counts command and output characters for collapse", () => {
++    const start = sessionSource.indexOf("function Shell(")
++    const end = sessionSource.indexOf("function DiffView(")
++    const shellSource = sessionSource.slice(start, end)
++    expect(shellSource).toContain("shellPreviewText")
++    expect(shellSource).toContain("totalChars={shellPreviewText().length}")
++    expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
++  })
+ })
+\ No newline at end of file

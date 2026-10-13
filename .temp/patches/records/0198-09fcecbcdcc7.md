@@ -130,3 +130,14 @@ All files are new — patch is purely additive. Key adaptations:
 - Typecheck: typecheck-0200-2026-07-26T23-48-04-286Z.md
 - Install: bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f
 - Non-blocking N only (do not reopen seal)
+
+## v1.18.32 基线重验（2026-09-26，batch 194-198）
+
+- current 未修改，锚点直接命中（materialize 198 本轮全应用）。
+- 验证：materialize 198 全通过；typecheck 31 workspace 全 passed。
+
+## 双审放行（2026-09-26）
+
+- FORWARD (ses_f25846c3affeV5neNuR8pfzisU): PASS — 5/5，token 域数学逐行同构、B-01 语义正确承载、fromConfig 适配语义正确。
+- REVERSE (ses_f25844e7bfferHG1a4JQ6LG5td): PASS — 5/5，含独立复算三密度期望与 fail-closed 管线核验。
+- 批次 194-198 PASS，无未关闭 B/G。

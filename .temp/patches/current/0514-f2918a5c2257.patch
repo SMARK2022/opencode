@@ -13,6 +13,17 @@ progressve normalize、preserve 写回，以及 _syncInput 历史真值回写。
 避免模型多轮 edit 轮次膨胀，并在弯引号/连字符等复制漂移下提高成功率，
 同时保持 replaceAll/唯一性/closest 诊断与 legacy 入参折叠兼容。
 
+适配说明（v1.18.32 重放）：
+源 acp/agent.ts completedToolContent 的同职责目标 owner 为 acp/tool.ts 的 diffContent
+（completedToolContent→edit kind→diffContent 只读顶层 oldString/newString，活链 acp/event.ts:326→
+acp/service.ts:88→cli/cmd/acp.ts:21），已在该 owner 落地 edits[0] 优先 + legacy 回退双形态并补
+two contract 测试；feature-plugins/system/session-v2.tsx 在目标无对应文件（TUI feature-plugin 体系
+迁移至 packages/tui，tui index 徽标已承载）不落地；routes/session/index.tsx 的 replaceAll 徽标
+重映射到 packages/tui/src/routes/session/index.tsx（legacy 顶层字段回放兼容保留）；processor
+event-strip hunk 依赖的 experimentalEventSystem 双写在 v1.18.32 已移除（事件面统一），
+strip 语义由 completeToolCall 持久化路径的 stripToolTruthMetadata 统一承载。
+
+
 diff --git a/docs/plans/edit-multi-and-normalized-match.md b/docs/plans/edit-multi-and-normalized-match.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..7e74a4a365c6ab0124318086f17c46429c75883e
@@ -944,161 +955,10 @@ index 0000000000000000000000000000000000000000..7e74a4a365c6ab0124318086f17c4642
 +- If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins.
 +- Successful normalized matches may rewrite the recorded `oldString` in tool history
 +  to the actual file text that was replaced (ground truth for later turns).
-diff --git a/packages/opencode/src/acp/agent.ts b/packages/opencode/src/acp/agent.ts
-index 3316bfad6cf52a4941669d10796317d5213eb548..0e8eba41412516448137a08fd01d221df9d0eabe 100644
---- a/packages/opencode/src/acp/agent.ts
-+++ b/packages/opencode/src/acp/agent.ts
-@@ -1669,13 +1669,25 @@ function completedToolContent(part: ToolPart, kind: ToolKind): ToolCallContent[]
-   if (kind === "edit") {
-     const input = part.state.input
-     const filePath = typeof input["filePath"] === "string" ? input["filePath"] : ""
--    const oldText = typeof input["oldString"] === "string" ? input["oldString"] : ""
--    const newText =
--      typeof input["newString"] === "string"
--        ? input["newString"]
--        : typeof input["content"] === "string"
--          ? input["content"]
-+    // ACP diff 展示：优先 edits[0]（新 schema / _syncInput 回写后）；
-+    // 历史会话仍可能只有顶层 oldString/newString，需双形态兼容。
-+    // 完整 multi-edit 统一 diff 非本任务目标，空 multi 体可接受。
-+    const edits = Array.isArray(input["edits"]) ? input["edits"] : []
-+    const first = edits[0] && typeof edits[0] === "object" ? (edits[0] as Record<string, unknown>) : undefined
-+    const oldText =
-+      typeof first?.["oldString"] === "string"
-+        ? first["oldString"]
-+        : typeof input["oldString"] === "string"
-+          ? input["oldString"]
-           : ""
-+    const newText =
-+      typeof first?.["newString"] === "string"
-+        ? first["newString"]
-+        : typeof input["newString"] === "string"
-+          ? input["newString"]
-+          : typeof input["content"] === "string"
-+            ? input["content"]
-+            : ""
-     content.push({
-       type: "diff",
-       path: filePath,
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-index 8502591fd67cd2a985ee334ef09d6b84c8892c5b..02419af5a898fbb30c38824b360e1c7c5685ca54 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
-@@ -952,7 +952,13 @@ function Edit(props: ToolProps) {
-       </Match>
-       <Match when={true}>
-         <InlineTool icon="←" pending="Preparing edit..." complete={filePath()} part={props.part}>
--          Edit {normalizePath(filePath())} {input({ replaceAll: props.input.replaceAll })}
-+          Edit {normalizePath(filePath())}{" "}
-+          {input({
-+            replaceAll:
-+              props.input.replaceAll === true ||
-+              (Array.isArray(props.input.edits) &&
-+                props.input.edits.some((e) => typeof e === "object" && e !== null && (e as { replaceAll?: boolean }).replaceAll === true)),
-+          })}
-         </InlineTool>
-       </Match>
-     </Switch>
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 01ec72546965171fff61fed4a28a54aa5f428f9e..89b02abadfdfc4e0015a398157d41223811c592a 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -3182,7 +3182,12 @@ function Edit(props: ToolProps<typeof EditTool>) {
-       </Match>
-       <Match when={true}>
-         <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
--          Edit {pathFormatter.format(props.input.filePath)} {input({ replaceAll: props.input.replaceAll })}
-+          Edit {pathFormatter.format(props.input.filePath)}{" "}
-+          {input({
-+            replaceAll: Array.isArray(props.input.edits)
-+              ? props.input.edits.some((e) => e?.replaceAll === true)
-+              : false,
-+          })}
-         </InlineTool>
-       </Match>
-     </Switch>
-diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 3701eff98eac44b9ecfc49482efe651eb8b5d85a..397c2577236dce9d50b7c65f6a8a51156abd729a 100644
---- a/packages/opencode/src/session/processor.ts
-+++ b/packages/opencode/src/session/processor.ts
-@@ -39,6 +39,37 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
- export const TOOL_ABORTED_ERROR = "Tool execution aborted"
- const log = Log.create({ service: "session.processor" })
- 
-+/**
-+ * 工具完成时的 input 真值回写（INV-16 / write format 同构）。
-+ * - `_syncInput`：整参数面替换为 { filePath, edits }，丢弃 legacy 顶层替换字段
-+ * - `_formattedContent`：仅覆盖 content（write 旧语义）
-+ * 有 _syncInput 时优先，不做浅合并旧 input。
-+ */
-+export function resolveCompletedToolInput(
-+  prev: Record<string, unknown>,
-+  metadata: Record<string, unknown> | undefined,
-+): Record<string, unknown> {
-+  const meta = metadata ?? {}
-+  const sync = meta._syncInput
-+  if (sync && typeof sync === "object" && Array.isArray((sync as { edits?: unknown }).edits)) {
-+    const body = sync as { filePath?: string; edits: unknown[] }
-+    return {
-+      filePath: typeof body.filePath === "string" ? body.filePath : prev.filePath,
-+      edits: body.edits,
-+    }
-+  }
-+  if (typeof meta._formattedContent === "string") {
-+    return { ...prev, content: meta._formattedContent }
-+  }
-+  return prev
-+}
-+
-+/** 持久化 metadata 前去掉真值临时字段，避免进 DB / event。 */
-+export function stripToolTruthMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
-+  const { _formattedContent: _f, _syncInput: _s, ...rest } = metadata ?? {}
-+  return rest
-+}
-+
- // [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
- // 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
- export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
-@@ -272,18 +303,14 @@ export const layer = Layer.effect(
-                 ...match.part,
-                 state: {
-                   status: "completed",
--                  // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
--                  // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
--                  // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
--                  // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
--                  // 原始 input 不保留——format 后的内容才是真实落盘内容。
--                  input: output.metadata?._formattedContent
--                    ? { ...match.part.state.input, content: output.metadata._formattedContent }
--                    : match.part.state.input,
-+                  input: resolveCompletedToolInput(
-+                    match.part.state.input as Record<string, unknown>,
-+                    output.metadata as Record<string, unknown> | undefined,
-+                  ),
-                   output: output.output,
--                  // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
-+                  // strip 临时真值字段，避免进持久化 metadata
-                   metadata: (() => {
--                    const { _formattedContent, ...rest } = output.metadata ?? {}
-+                    const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
-                     return match.part.state.metadata?.autoReview
-                       ? { ...rest, autoReview: match.part.state.metadata.autoReview }
-                       : rest
-@@ -546,9 +573,8 @@ export const layer = Layer.effect(
-             }
-             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-             if (flags.experimentalEventSystem) {
--              // [local-smark] strip _formattedContent 与持久化保持一致，
--              // 避免 event 消费方看到临时传递字段
--              const { _formattedContent: _strip, ...eventMetadata } = output.metadata ?? {}
-+              // strip 真值临时字段，与持久化 metadata 一致
-+              const eventMetadata = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
-               yield* events.publish(SessionEvent.Tool.Success, {
-                 sessionID: ctx.sessionID,
-                 callID: value.toolCallId,
+
 diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f004fdc4c3e07b307e470c8f23fe3dc0aa29651f
+index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000
 --- /dev/null
 +++ b/packages/opencode/src/tool/edit-apply.ts
 @@ -0,0 +1,507 @@
@@ -1609,8 +1469,9 @@ index 0000000000000000000000000000000000000000..f004fdc4c3e07b307e470c8f23fe3dc0
 +export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
 +  return applyEdits(content, [{ oldString, newString, replaceAll }]).contentNew
 +}
+
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe5912af42 100644
+index 6ca4b061f..951bbb583 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
 @@ -1,8 +1,3 @@
@@ -1622,23 +1483,26 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
  import * as path from "path"
  import { Effect, Schema, Semaphore } from "effect"
  import * as Tool from "./tool"
-@@ -20,6 +15,15 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+@@ -20,8 +15,18 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "@/util/bom"
  import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
  import { closestWindow } from "@/patch/match"
++// #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
 +import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
-+
+ // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
+ 
 +/**
-+ * 兼容导出：单点替换 = applyEdits 单元素，保证测试与外部调用仍见 replace API。
++ * #514 兼容导出：单点替换 = edit-apply 单元素路径，保证既有测试与外部调用仍见 replace API。
 + * 禁止在此重实现第二套匹配算法。
 + */
 +export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
 +  return applyExactReplace(content, oldString, newString, replaceAll)
 +}
- 
++
  const locks = new Map<string, Semaphore.Semaphore>()
  
-@@ -33,17 +37,69 @@ function lock(filePath: string) {
+ function lock(filePath: string) {
+@@ -34,17 +39,69 @@ function lock(filePath: string) {
    return next
  }
  
@@ -1670,7 +1534,7 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
 +export type Parameters = Schema.Schema.Type<typeof Parameters>
 +
 +/**
-+ * decode 前折叠 legacy 入参（Pi #2639 教训）：
++ * #514 decode 前折叠 legacy 入参（Pi #2639 教训）：
 + * - wire JSON Schema 只广告 filePath + edits[]，避免模型混用双形态
 + * - 若 edits 缺失且存在顶层 oldString/newString，折成单元素 edits
 + * - 若 edits 已非空，丢弃顶层字段（edits 权威，不 append）
@@ -1714,7 +1578,7 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
  export const EditTool = Tool.define(
    "edit",
    Effect.gen(function* () {
-@@ -55,44 +111,55 @@ export const EditTool = Tool.define(
+@@ -56,44 +113,57 @@ export const EditTool = Tool.define(
      return {
        description: DESCRIPTION,
        parameters: Parameters,
@@ -1725,7 +1589,7 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
            if (!params.filePath) {
              throw new Error("filePath is required")
            }
--
+ 
 -          if (params.oldString === params.newString) {
 -            throw new Error("No changes to apply: oldString and newString are identical.")
 +          if (!Array.isArray(params.edits) || params.edits.length === 0) {
@@ -1747,7 +1611,7 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
 -          // 遵循 read.ts canonicalReadPath 的同一平台分支范式。
 -          // apply_patch 的 input 是 patchText 而非 filePath，无法简单匹配，不纳入检查。
 -          if (params.oldString !== "") {
-+          // INV-06：multi-edit 中禁止空 oldString；仅 length-1 空串表示 create/overwrite。
++          // #514 INV-06：multi-edit 中禁止空 oldString；仅 length-1 空串表示 create。
 +          // 空白-only 的 oldString 不是 create，会在 applyEdits 的归一化空 needle 检查处失败。
 +          if (edits.some((e, i) => e.oldString === "" && !(edits.length === 1 && i === 0))) {
 +            throw new Error("edits[].oldString must not be empty except for a single create/overwrite edit.")
@@ -1762,8 +1626,9 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
 +            throw new Error("No changes to apply: oldString and newString are identical.")
 +          }
 +
-+          // blind edit 门闩：非 create 时要求 session 内已 read/write/edit 过该路径，
++          // [local-smark] blind edit 门闩：非 create 时要求 session 内已 read/write/edit 过该路径，
 +          // 防止模型基于过期假设构造 oldString 导致误匹配或静默失败。
++          // Windows 下 NTFS 大小写不敏感需 toLowerCase；Linux/macOS 保持大小写敏感。
 +          if (!isCreate(edits)) {
              const resolveForCompare = (p: string) => {
                const r = path.resolve(p)
@@ -1792,19 +1657,16 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
              )
              if (!hasTouched) {
                throw new Error(
-@@ -102,32 +169,35 @@ export const EditTool = Tool.define(
-           }
- 
-           yield* assertExternalDirectoryEffect(ctx, filePath, {
--            // Include the intended edit operation so Auto reviewer decisions are
--            // based on tool evidence, not just the external path glob.
+@@ -107,27 +177,29 @@ export const EditTool = Tool.define(
              metadata: {
                action_kind: "tool",
                tool: "edit",
+-              // #210：oldString 为空表示创建新文件，operation 区分 create/edit
 -              operation: params.oldString === "" ? "create" : "edit",
 -              oldString: params.oldString,
 -              newString: params.newString,
 -              replaceAll: params.replaceAll === true,
++              // #514：operation 由 edits 形态推导；完整 edits 数组随证据传递
 +              operation: isCreate(edits) ? "create" : "edit",
 +              edits,
              },
@@ -1813,49 +1675,44 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
            let diff = ""
            let contentOld = ""
            let contentNew = ""
++          // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
 +          let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
 +
            yield* lock(filePath).withPermits(1)(
              Effect.gen(function* () {
 -              if (params.oldString === "") {
 +              if (isCreate(edits)) {
++                // 目标基线语义：已存在文件禁止空 oldString 覆盖（比源 overwrite 更强的防盲写边界）
                  const existed = yield* afs.existsSafe(filePath)
-                 const source = existed ? yield* Bom.readFile(afs, filePath) : { bom: false, text: "" }
+                 if (existed) {
+                   throw new Error(
+                     "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+                   )
+                 }
 -                const next = Bom.split(params.newString)
 +                const next = Bom.split(edits[0].newString)
-                 const desiredBom = source.bom || next.bom
-                 contentOld = source.text
+                 const desiredBom = next.bom
+                 contentOld = ""
                  contentNew = next.text
-                 diff = trimDiff(
--                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
-+                  createTwoFilesPatch(
-+                    filePath,
-+                    filePath,
-+                    normalizeLineEndings(contentOld),
-+                    normalizeLineEndings(contentNew),
-+                  ),
-                 )
-                 yield* ctx.ask({
-                   permission: "edit",
-@@ -142,6 +212,13 @@ export const EditTool = Tool.define(
+@@ -148,6 +220,13 @@ export const EditTool = Tool.define(
                  if (yield* format.file(filePath)) {
                    contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
                  }
-+                // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
++                // #514 create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
 +                const finalLF = normalizeLineEndings(contentNew)
 +                const wroteLF = normalizeLineEndings(next.text)
 +                syncInput = {
 +                  filePath,
 +                  edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
 +                }
-                 yield* bus.publish(File.Event.Edited, { file: filePath })
-                 yield* bus.publish(FileWatcher.Event.Updated, {
+                 yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+                 yield* events.publish(Watcher.Event.Updated, {
                    file: filePath,
-@@ -156,13 +233,37 @@ export const EditTool = Tool.define(
+@@ -162,13 +241,37 @@ export const EditTool = Tool.define(
                const source = yield* Bom.readFile(afs, filePath)
                contentOld = source.text
  
-+              // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
++              // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
                const ending = detectLineEnding(contentOld)
 -              const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
 -              const replacement = convertToLineEnding(normalizeLineEndings(params.newString), ending)
@@ -1865,13 +1722,10 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
 +                newString: normalizeLineEndings(edit.newString),
 +                replaceAll: edit.replaceAll,
 +              }))
- 
--              const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
--              const desiredBom = source.bom || next.bom
--              contentNew = next.text
++
 +              let applied
 +              try {
-+                // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
++                // #514：单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
 +                applied = applyEdits(baseLF, editsLF, filePath)
 +              } catch (error) {
 +                const message = error instanceof Error ? error.message : String(error)
@@ -1887,21 +1741,33 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
 +                }
 +                throw error
 +              }
-+
+ 
+-              const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
+-              const desiredBom = source.bom || next.bom
+-              contentNew = next.text
 +              contentNew = convertToLineEnding(applied.contentNew, ending)
 +              const desiredBom = source.bom || Bom.split(contentNew).bom
 +              contentNew = Bom.split(contentNew).text
  
                diff = trimDiff(
                  createTwoFilesPatch(
-@@ -199,6 +300,18 @@ export const EditTool = Tool.define(
+@@ -178,6 +281,7 @@ export const EditTool = Tool.define(
                    normalizeLineEndings(contentNew),
                  ),
                )
 +
-+              // INV-16：成功后始终发完整参数面 { filePath, edits }，
+               yield* ctx.ask({
+                 permission: "edit",
+                 patterns: [path.relative(instance.worktree, filePath)],
+@@ -205,6 +309,19 @@ export const EditTool = Tool.define(
+                   normalizeLineEndings(contentNew),
+                 ),
+               )
++
++              // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
 +              // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-+              // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
++              // actualOld 已在 applyEdits.syncEdits 中（历史 needle，非 preserve 整行块）；
++              // 此处只做行尾风格还原便于回放。
 +              syncInput = {
 +                filePath,
 +                edits: applied.syncEdits.map((edit) => ({
@@ -1913,52 +1779,26 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
              }).pipe(Effect.orDie),
            )
  
-@@ -225,15 +338,13 @@ export const EditTool = Tool.define(
+@@ -232,7 +349,8 @@ export const EditTool = Tool.define(
              },
            })
  
 -          let output = "Edit applied successfully."
++          // #514：多块编辑成功回执标注块数，与单块形态区分
 +          let output = `Edit applied successfully${edits.length > 1 ? ` (${edits.length} blocks)` : ""}.`
-           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
--          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
+           const normalizedFilePath = FSUtil.normalizePath(filePath)
+           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
            const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
-           yield* lsp.touchFile(filePath, "document")
-           const afterDiagnostics = yield* lsp.diagnostics()
-           const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
-           const block = LSP.Diagnostic.reportDelta(filePath, currentIssues, beforeIssues)
--          // [local-smark] 计算新错误数组和摘要供 TUI 渲染
-           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
-           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
-           let diagnosticSummary: typeof delta | undefined = delta
-@@ -241,25 +352,23 @@ export const EditTool = Tool.define(
-             output += `\n\nNew LSP errors introduced by this edit:\n${block}`
-             output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
-           } else {
--            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空
-             const clients = yield* lsp.status()
-             if (clients.length === 0) {
-               diagnosticSummary = undefined
-               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
-             } else {
--              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持 edit 反馈高信噪比。
-               output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
-             }
-           }
- 
-           return {
-             metadata: {
--              // [local-smark] metadata.diagnostics 存储新错误数组（delta）+ diagnosticSummary 供 TUI
-               diagnostics: { [normalizedFilePath]: newErrorsArr },
--              // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean。
+@@ -269,6 +387,8 @@ export const EditTool = Tool.define(
                ...(diagnosticSummary ? { diagnosticSummary } : {}),
                diff,
                filediff,
-+              // processor 消费后 strip；覆盖 state.input 为 ground-truth edits
++              // #514：processor 消费后 strip；覆盖 state.input 为 ground-truth edits
 +              ...(syncInput ? { _syncInput: syncInput } : {}),
              },
              title: `${path.relative(instance.worktree, filePath)}`,
              output,
-@@ -304,29 +413,3 @@ export function trimDiff(diff: string): string {
+@@ -314,29 +434,3 @@ export function trimDiff(diff: string): string {
  
    return trimmedLines.join("\n")
  }
@@ -1988,8 +1828,9 @@ index 05840c3443a37c1c505ecb07791a98d583cdfd86..0ce596da196f31bb9222f45d9c873bfe
 -  }
 -  return content.slice(0, first) + newString + content.slice(first + oldString.length)
 -}
+
 diff --git a/packages/opencode/src/tool/edit.txt b/packages/opencode/src/tool/edit.txt
-index d3e7d46cc41a266155824210ce8a1beddfc93a2b..52e555de7f8da848804fe9991c7205ab5a6f59c7 100644
+index d3e7d46cc..52e555de7 100644
 --- a/packages/opencode/src/tool/edit.txt
 +++ b/packages/opencode/src/tool/edit.txt
 @@ -1,10 +1,16 @@
@@ -2015,118 +1856,164 @@ index d3e7d46cc41a266155824210ce8a1beddfc93a2b..52e555de7f8da848804fe9991c7205ab
 +- Create/overwrite: single edit with empty `oldString` only (raw empty string). Whitespace-only oldString is not create and will fail.
 +- If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins when non-empty.
 +- Successful normalized matches may rewrite the recorded `oldString` in tool history to the actual file text that was replaced.
+
 diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
-index 3f096c50a5e6b16d52151245ad89d36a886422df..a258a6415b96316d117e205aac087df47da69e49 100644
+index b44f6de1d..7ea5532de 100644
 --- a/packages/opencode/src/tool/registry.ts
 +++ b/packages/opencode/src/tool/registry.ts
-@@ -385,6 +385,8 @@ export const layer: Layer.Layer<
+@@ -355,6 +355,8 @@ const layer = Layer.effect(
              parameters: output.parameters,
              jsonSchema,
              execute: tool.execute,
-+            // 透传 prepareArguments，使 edit 等工具的 legacy 折叠在 registry 包装后仍生效
++            // #514：透传 prepareArguments，使 edit 等工具的 legacy 折叠在 registry 包装后仍生效
 +            prepareArguments: tool.prepareArguments,
              formatValidationError: tool.formatValidationError,
            }
          }),
+
 diff --git a/packages/opencode/src/tool/tool.ts b/packages/opencode/src/tool/tool.ts
-index 627986358475a5d5f5b1e9af351633bcd3bc0cc1..653703b9fe75983af433108e1e05b1ed859fc494 100644
+index b6b5de539..d695b15ef 100644
 --- a/packages/opencode/src/tool/tool.ts
 +++ b/packages/opencode/src/tool/tool.ts
-@@ -70,6 +70,8 @@ export interface Def<
+@@ -62,6 +62,8 @@ export interface Def<
    description: string
    parameters: Parameters
    jsonSchema?: JSONSchema7
-+  /** 在 Schema.decode 之前折叠兼容入参（如 edit 的 legacy oldString → edits[]）。 */
++  /** #514：在 Schema.decode 之前折叠兼容入参（如 edit 的 legacy oldString → edits[]）。 */
 +  prepareArguments?(args: unknown): unknown
    execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
    formatValidationError?(error: unknown): string
  }
-@@ -128,7 +130,11 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
+@@ -162,7 +164,10 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
            ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
          }
          return Effect.gen(function* () {
 -          const decoded = yield* decode(args).pipe(
-+          // prepareArguments 必须先于 Schema.decode：
-+          // 否则无法在 wire 上只暴露 edits[] 的同时兼容 legacy 顶层 oldString/newString。
-+          // 该钩子只做入参折叠，不改变工具成功语义。
++          // #514：prepareArguments 必须先于 Schema.decode：否则无法在 wire 上只暴露 edits[]
++          // 的同时兼容 legacy 顶层 oldString/newString。该钩子只做入参折叠，不改变成功语义。
 +          const prepared = toolInfo.prepareArguments ? toolInfo.prepareArguments(args) : args
 +          const decoded = yield* decode(prepared).pipe(
-             Effect.mapError((error) =>
-               toolInfo.formatValidationError
-                 ? new Error(toolInfo.formatValidationError(error), { cause: error })
-diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-index 4588534a6046185309cfc305a3f48149697bee1a..42f8eb4db11a4a4d802af7e02aad2081591c6133 100644
---- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-+++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-@@ -69,27 +69,39 @@ exports[`tool parameters JSON Schema (wire shape) edit 1`] = `
- {
-   "$schema": "https://json-schema.org/draft/2020-12/schema",
-   "properties": {
-+    "edits": {
-+      "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
-+      "items": {
-+        "properties": {
-+          "newString": {
-+            "description": "Replacement text for this targeted edit.",
-+            "type": "string",
-+          },
-+          "oldString": {
-+            "description": "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
-+            "type": "string",
-+          },
-+          "replaceAll": {
-+            "description": "Replace all occurrences of oldString for this edit (default false)",
-+            "type": "boolean",
-+          },
-+        },
-+        "required": [
-+          "oldString",
-+          "newString",
-+        ],
-+        "type": "object",
-+      },
-+      "type": "array",
-+    },
-     "filePath": {
-       "description": "The absolute path to the file to modify",
-       "type": "string",
-     },
--    "newString": {
--      "description": "The text to replace it with (must be different from oldString)",
--      "type": "string",
--    },
--    "oldString": {
--      "description": "The text to replace",
--      "type": "string",
--    },
--    "replaceAll": {
--      "description": "Replace all occurrences of oldString (default false)",
--      "type": "boolean",
--    },
-   },
-   "required": [
-     "filePath",
--    "oldString",
--    "newString",
-+    "edits",
-   ],
-   "type": "object",
- }
+             Effect.mapError(
+               (error) =>
+                 new InvalidArgumentsError({
+
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 11be770ce..d0f2f59fb 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -39,6 +39,37 @@ const DOOM_LOOP_THRESHOLD = 3
+ // #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
+ export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+ 
++/**
++ * #514：工具完成时的 input 真值回写（INV-16 / write format 同构）。
++ * - `_syncInput`：整参数面替换为 { filePath, edits }，丢弃 legacy 顶层替换字段
++ * - `_formattedContent`：仅覆盖 content（write 旧语义）
++ * 有 _syncInput 时优先，不做浅合并旧 input。
++ */
++export function resolveCompletedToolInput(
++  prev: Record<string, unknown>,
++  metadata: Record<string, unknown> | undefined,
++): Record<string, unknown> {
++  const meta = metadata ?? {}
++  const sync = meta._syncInput
++  if (sync && typeof sync === "object" && Array.isArray((sync as { edits?: unknown }).edits)) {
++    const body = sync as { filePath?: string; edits: unknown[] }
++    return {
++      filePath: typeof body.filePath === "string" ? body.filePath : prev.filePath,
++      edits: body.edits,
++    }
++  }
++  if (typeof meta._formattedContent === "string") {
++    return { ...prev, content: meta._formattedContent }
++  }
++  return prev
++}
++
++/** #514：持久化 metadata 前去掉真值临时字段，避免进 DB / event。 */
++export function stripToolTruthMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
++  const { _formattedContent: _f, _syncInput: _s, ...rest } = metadata ?? {}
++  return rest
++}
++
+ // [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
+ // 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
+ export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
+@@ -268,14 +299,12 @@ const layer = Layer.effect(
+           ...match.part,
+           state: {
+             status: "completed",
+-            // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
+-            // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
+-            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
+-            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
+-            // 原始 input 不保留——format 后的内容才是真实落盘内容。
+-            input: output.metadata?._formattedContent
+-              ? { ...match.part.state.input, content: output.metadata._formattedContent }
+-              : match.part.state.input,
++            // #514：_syncInput/_formattedContent 真值回写收敛到 resolveCompletedToolInput；
++            // edits 整表替换（丢弃 legacy 顶层字段）优先于旧 content 覆盖语义。
++            input: resolveCompletedToolInput(
++              match.part.state.input as Record<string, unknown>,
++              output.metadata as Record<string, unknown> | undefined,
++            ),
+             // [local-smark] 所有工具 ≥120s 完成时追加中性耗时 Notice：completeToolCall
+             // 是全部工具类型（local/MCP/Task/bash）唯一完成汇聚点。shell 的 outcome
+             // Notice 由 formatShellExecutionNotice 单点承载（单一 outcome 不变量），
+@@ -288,9 +317,9 @@ const layer = Layer.effect(
+                   return longNotice ? `${output.output}\n\n${longNotice}` : output.output
+                 })(),
+             // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
+-            // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
++            // #514：strip 真值临时字段（_formattedContent/_syncInput），避免进持久化 metadata
+             metadata: (() => {
+-              const { _formattedContent, ...rest } = output.metadata ?? {}
++              const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
+               return match.part.state.metadata?.autoReview
+                 ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+                 : rest
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index ed2e0caeb..beb7585eb 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -3590,7 +3590,13 @@ function Edit(props: ToolProps) {
+       </Match>
+       <Match when={true}>
+         <InlineTool icon="←" pending={editPending()} complete={stringValue(props.input.filePath)} part={props.part}>
+-          Edit {pathFormatter.format(stringValue(props.input.filePath))} {input({ replaceAll: props.input.replaceAll })}
++          {/* #514：replaceAll 徽标读 edits[]——任一条目显式 replaceAll 即展示，兼容 legacy 顶层字段回放 */}
++          Edit {pathFormatter.format(stringValue(props.input.filePath))}{" "}
++          {input({
++            replaceAll: Array.isArray(props.input.edits)
++              ? props.input.edits.some((e) => e?.replaceAll === true)
++              : props.input.replaceAll === true,
++          })}
+         </InlineTool>
+       </Match>
+     </Switch>
+
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8239f1b32 100644
+index df67d2f1d..7b2c5ec99 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -1,4 +1,4 @@
+@@ -1,9 +1,9 @@
 -import { afterEach, describe, expect, spyOn } from "bun:test"
 +import { afterEach, describe, expect, spyOn, test } from "bun:test"
  import path from "path"
  import fs from "fs/promises"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
-@@ -43,6 +43,29 @@ const layer = Layer.mergeAll(
+-import { EditTool } from "../../src/tool/edit"
++import { EditTool, prepareEditArguments } from "../../src/tool/edit"
+ import { disposeAllInstances, TestInstance } from "../fixture/fixture"
+ import { LSP } from "@/lsp/lsp"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -40,6 +40,25 @@ const layer = LayerNode.compile(
  
  const it = testEffect(layer)
  
-+// mock format：文件末尾追加换行，用于 create+format 的 _syncInput 真值回写
++// #514 mock format：文件末尾追加换行，用于 create+format 的 _syncInput 真值回写验证
 +const mockFormatLayer = Layer.succeed(Format.Service, {
 +  init: () => Effect.void,
 +  status: () => Effect.succeed([]),
@@ -2138,21 +2025,17 @@ index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8
 +    }),
 +})
 +
++// #514：Format.node 用 mock 覆盖——LayerNode.compile 的 override 槽位保留其余真实服务
 +const itFormatted = testEffect(
-+  Layer.mergeAll(
-+    LSP.defaultLayer,
-+    AppFileSystem.defaultLayer,
-+    Bus.layer,
-+    mockFormatLayer,
-+    Truncate.defaultLayer,
-+    Agent.defaultLayer,
-+  ),
++  LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]), [
++    [Format.node, mockFormatLayer],
++  ]),
 +)
 +
  const init = Effect.fn("EditToolTest.init")(function* () {
    const info = yield* EditTool
    return yield* info.init()
-@@ -96,19 +119,31 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
+@@ -93,19 +112,33 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
    }
  }
  
@@ -2160,7 +2043,8 @@ index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8
 -  args: Tool.InferParameters<typeof EditTool>,
 -  next?: Tool.Context,
 -) {
-+// 测试入参允许 legacy 顶层字段；execute 前由 prepareArguments 折成 edits[]。
++// #514：测试入参允许 legacy 顶层字段；execute 前由 prepareEditArguments 折成 edits[]，
++// 与生产 wrap 链同一折叠语义（不复制折叠逻辑，直接调用被测函数）。
 +type EditTestArgs =
 +  | Tool.InferParameters<typeof EditTool>
 +  | {
@@ -2186,7 +2070,8 @@ index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8
 -  return yield* tool.execute(args, context)
 +  // [local-smark] 非 create 时注入 prior read；兼容 edits[] 与 legacy 顶层 oldString。
 +  const context = next ?? (!isCreateArgs(args) ? ctxWithPriorRead(args.filePath) : ctx)
-+  return yield* tool.execute(args as Tool.InferParameters<typeof EditTool>, context)
++  const prepared = prepareEditArguments(args) as Tool.InferParameters<typeof EditTool>
++  return yield* tool.execute(prepared, context)
  })
  
 -const fail = Effect.fn("EditToolTest.fail")(function* (args: Tool.InferParameters<typeof EditTool>) {
@@ -2194,9 +2079,12 @@ index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8
    const exit = yield* run(args).pipe(Effect.exit)
    if (Exit.isFailure(exit)) {
      const err = Cause.squash(exit.cause)
-@@ -385,7 +420,9 @@ describe("tool.edit", () => {
+@@ -425,9 +458,11 @@ describe("tool.edit", () => {
+         const filepath = path.join(test.directory, "unread.txt")
+         yield* put(filepath, "content")
  
-         // 显式传入 ctx（无 prior read）使 blind edit 检查生效
+-        // 显式传入 ctx（无 prior read）使 blind edit 检查生效
++        // 显式传入 ctx（无 prior read）使 blind edit 检查生效；#514：直接 execute edits[] 形态
          const tool = yield* init()
 -        const exit = yield* tool.execute({ filePath: filepath, oldString: "content", newString: "modified" }, ctx).pipe(Effect.exit)
 +        const exit = yield* tool
@@ -2205,13 +2093,13 @@ index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8
          expect(Exit.isFailure(exit)).toBe(true)
          if (Exit.isFailure(exit)) {
            const err = Cause.squash(exit.cause) as Error
-@@ -828,4 +865,233 @@ describe("tool.edit", () => {
+@@ -909,4 +944,233 @@ describe("tool.edit", () => {
        }),
      )
    })
 +
 +  /**
-+   * multi-edit / 归一化 / 统一主路径行为片：
++   * #514 multi-edit / 归一化 / 统一主路径行为片：
 +   * - 单条与多条 edits 必须共用 applyEdits，禁止按条数分叉算法
 +   * - 期望文件内容用手写字面量，不反向调用 applyEdits 生成
 +   * - 失败路径必须在写盘前拒绝（文件字节不变）
@@ -2439,11 +2327,12 @@ index 51b9c23de402d8133181db90111f19b7d56be405..75bb86eaa867f999657bc884c5fae3d8
 +    expect(stripped).toEqual({ diff: "d" })
 +  })
  })
+
 diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
-index d312afb6e5331c9d946b66373b374382981d2437..f5bed4eb0c1ac4754a54a47d68bc8d579a521142 100644
+index 61709c5b4..469b3def6 100644
 --- a/packages/opencode/test/tool/parameters.test.ts
 +++ b/packages/opencode/test/tool/parameters.test.ts
-@@ -135,20 +135,34 @@ describe("tool parameters", () => {
+@@ -139,20 +139,35 @@ describe("tool parameters", () => {
    })
  
    describe("edit", () => {
@@ -2474,6 +2363,7 @@ index d312afb6e5331c9d946b66373b374382981d2437..f5bed4eb0c1ac4754a54a47d68bc8d57
 -      expect(accepts(Edit, { oldString: "x", newString: "y" })).toBe(false)
 +      expect(accepts(Edit, { edits: [{ oldString: "x", newString: "y" }] })).toBe(false)
 +    })
++    // #514：wire schema 只广告 filePath+edits，legacy 顶层字段不再暴露给模型
 +    test("rejects missing edits", () => {
 +      expect(accepts(Edit, { filePath: "/a" })).toBe(false)
 +    })
@@ -2487,3 +2377,152 @@ index d312afb6e5331c9d946b66373b374382981d2437..f5bed4eb0c1ac4754a54a47d68bc8d57
      })
    })
  
+
+diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
+index 4cfe4f269..923a0c5d0 100644
+--- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
++++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
+@@ -51,27 +51,39 @@ exports[`tool parameters JSON Schema (wire shape) edit 1`] = `
+ {
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "properties": {
++    "edits": {
++      "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
++      "items": {
++        "properties": {
++          "newString": {
++            "description": "Replacement text for this targeted edit.",
++            "type": "string",
++          },
++          "oldString": {
++            "description": "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
++            "type": "string",
++          },
++          "replaceAll": {
++            "description": "Replace all occurrences of oldString for this edit (default false)",
++            "type": "boolean",
++          },
++        },
++        "required": [
++          "oldString",
++          "newString",
++        ],
++        "type": "object",
++      },
++      "type": "array",
++    },
+     "filePath": {
+       "description": "The absolute path to the file to modify",
+       "type": "string",
+     },
+-    "newString": {
+-      "description": "The text to replace it with (must be different from oldString)",
+-      "type": "string",
+-    },
+-    "oldString": {
+-      "description": "The text to replace",
+-      "type": "string",
+-    },
+-    "replaceAll": {
+-      "description": "Replace all occurrences of oldString (default false)",
+-      "type": "boolean",
+-    },
+   },
+   "required": [
+     "filePath",
+-    "oldString",
+-    "newString",
++    "edits",
+   ],
+   "type": "object",
+ }
+
+diff --git a/packages/opencode/src/acp/tool.ts b/packages/opencode/src/acp/tool.ts
+index 309c126d6..d83677f3e 100644
+--- a/packages/opencode/src/acp/tool.ts
++++ b/packages/opencode/src/acp/tool.ts
+@@ -323,8 +323,19 @@ function locationFrom(...values: unknown[]): ToolCallLocation[] {
+ }
+ 
+ function diffContent(input: ToolInput): ToolCallContent[] {
+-  const oldText = stringValue(input.oldString)
+-  const newText = stringValue(input.newString) ?? stringValue(input.content)
++  // #514：edit 参数面已迁移为 edits[]（_syncInput 回写后 state.input 只含 { filePath, edits }）；
++  // ACP diff 展示优先 edits[0]，历史会话仍可能只有顶层 oldString/newString，需双形态兼容。
++  // 完整 multi-edit 统一 diff 非本任务目标，空 multi 体可接受（与源 hunk 同一裁定）。
++  const edits = Array.isArray(input.edits) ? input.edits : []
++  const first = edits[0] && typeof edits[0] === "object" ? (edits[0] as Record<string, unknown>) : undefined
++  const oldText =
++    typeof first?.["oldString"] === "string"
++      ? first["oldString"]
++      : stringValue(input.oldString)
++  const newText =
++    typeof first?.["newString"] === "string"
++      ? first["newString"]
++      : stringValue(input.newString) ?? stringValue(input.content)
+   if (oldText === undefined || newText === undefined) return []
+ 
+   return [
+
+diff --git a/packages/opencode/test/acp/tool.test.ts b/packages/opencode/test/acp/tool.test.ts
+index a243e10cc..410a1b56c 100644
+--- a/packages/opencode/test/acp/tool.test.ts
++++ b/packages/opencode/test/acp/tool.test.ts
+@@ -95,6 +95,57 @@ describe("acp tool conversion", () => {
+     ])
+   })
+ 
++  // #514：edit 参数面迁移 edits[] 后，_syncInput 回写的 state.input 不再含顶层 oldString；
++  // ACP diff 展示必须优先读 edits[0]，否则新会话的 completed edit diff 内容恒空。
++  test("edit diff prefers edits[0] over legacy top-level fields", () => {
++    expect(
++      completedToolContent("edit", {
++        status: "completed",
++        input: {
++          filePath: "/tmp/file.ts",
++          edits: [{ oldString: "“hello”", newString: '"hi"' }],
++        },
++        output: "edited /tmp/file.ts",
++      }),
++    ).toEqual([
++      {
++        type: "content",
++        content: { type: "text", text: "edited /tmp/file.ts" },
++      },
++      {
++        type: "diff",
++        path: "/tmp/file.ts",
++        oldText: "“hello”",
++        newText: '"hi"',
++      },
++    ])
++  })
++
++  test("edit diff falls back to legacy top-level fields for history replay", () => {
++    expect(
++      completedToolContent("edit", {
++        status: "completed",
++        input: {
++          filePath: "/tmp/legacy.ts",
++          oldString: "before",
++          newString: "after",
++        },
++        output: "edited /tmp/legacy.ts",
++      }),
++    ).toEqual([
++      {
++        type: "content",
++        content: { type: "text", text: "edited /tmp/legacy.ts" },
++      },
++      {
++        type: "diff",
++        path: "/tmp/legacy.ts",
++        oldText: "before",
++        newText: "after",
++      },
++    ])
++  })
++
+   test("omits edit diffs until old and new text fields exist", () => {
+     expect(
+       completedToolContent("write", {

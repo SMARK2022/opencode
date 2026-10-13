@@ -47,3 +47,92 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
            {props.children}
          </box>
 
+
+diff --git a/packages/tui/test/routes/session/block-tool-collapse.test.tsx b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
+--- a/packages/tui/test/routes/session/block-tool-collapse.test.tsx
++++ b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
+@@ -14,3 +14,4 @@ import { BlockTool } from "../../../src/routes/session"
+ // 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
+ // 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
+-// 修复方式为 preview/body 常驻 + maxHeight 裁剪隐藏，而非 <Show> 分支卸载。
++// 修复方式为 preview/body 常驻挂载，隐藏态由 #344 起改用 visible 属性整体
++// 不可见（maxHeight=0 会经 Math.max(height,1) 泄漏首行），而非 <Show> 卸载。
+diff --git a/packages/tui/test/routes/session/block-tool-visible-once.test.tsx b/packages/tui/test/routes/session/block-tool-visible-once.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/block-tool-visible-once.test.tsx
+@@ -0,0 +1,74 @@
++import { expect, test } from "bun:test"
++import { randomUUID } from "node:crypto"
++import { mkdir, writeFile } from "node:fs/promises"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { testRender } from "@opentui/solid"
++import { TuiPathsProvider, TuiStartupProvider } from "../../../src/context/runtime"
++import { KVProvider } from "../../../src/context/kv"
++import { TuiConfigProvider } from "../../../src/config"
++import { ThemeProvider } from "../../../src/context/theme"
++import { RouteProvider } from "../../../src/context/route"
++import { BlockTool } from "../../../src/routes/session"
++
++// shell 卡片互斥回归：preview 与 body 都含 "$ <command>"。#344 之前 preview 用
++// maxHeight=0 隐藏，OpenTUI updateFromLayout 的 Math.max(layout.height, 1) 会泄漏
++// 1 行，导致命令行同时出现在 preview 泄漏行与 body 中（双显）。
++
++const stateDir = path.join(tmpdir(), `blocktool-once-kv-${randomUUID()}`)
++await mkdir(stateDir, { recursive: true })
++await writeFile(path.join(stateDir, "kv.json"), "{}")
++
++function ShellCard(props: { command: string; output: string }) {
++  return (
++    <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: stateDir, worktree: "/work" }}>
++      <TuiStartupProvider value={{ skipInitialLoading: true }}>
++        <KVProvider>
++          <TuiConfigProvider config={{ theme: undefined } as never}>
++            <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
++              <RouteProvider>
++                <BlockTool
++                  title="bash"
++                  totalLines={24}
++                  threshold={20}
++                  maxLines={10}
++                  preview={<text>{`$ ${props.command}`}</text>}>
++                  <text>{`$ ${props.command}\n${props.output}`}</text>
++                </BlockTool>
++              </RouteProvider>
++            </ThemeProvider>
++          </TuiConfigProvider>
++        </KVProvider>
++      </TuiStartupProvider>
++    </TuiPathsProvider>
++  )
++}
++
++test("collapsed shell block shows command once", async () => {
++  const app = await testRender(() => <ShellCard command="echo hello" output={"hello\n"} />, { width: 60, height: 40 })
++  try {
++    await new Promise((resolve) => setTimeout(resolve, 100))
++    await app.waitForFrame((frame) => frame.includes("Click to expand"))
++    // 折叠态：preview 可见；body 必须整体隐藏——泄漏首行会让 "$ echo hello" 出现 2 次。
++    const rows = app.captureCharFrame().split("\n")
++    expect(rows.filter((line) => line.includes("$ echo hello")).length).toBe(1)
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("expanded shell block does not leak preview first row", async () => {
++  const longOutput = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n")
++  const app = await testRender(() => <ShellCard command="echo test" output={longOutput} />, { width: 60, height: 40 })
++  try {
++    await new Promise((resolve) => setTimeout(resolve, 100))
++    await app.waitForFrame((frame) => frame.includes("Click to expand"))
++    await app.mockMouse.click(10, 5)
++    await app.waitForFrame((frame) => frame.includes("Click to collapse"))
++    // 展开态：只有 body 可见；preview 首行泄漏会让 "$ echo test" 出现 2 次。
++    const rows = app.captureCharFrame().split("\n")
++    expect(rows.filter((line) => line.includes("$ echo test")).length).toBe(1)
++  } finally {
++    app.renderer.destroy()
++  }
++})

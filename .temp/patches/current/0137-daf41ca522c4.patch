@@ -44,9 +44,9 @@ index ef3c2d981a..8aeeb413a7 100644
                streaming={!isDone()}
                syntaxStyle={syntax()}
                content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
-@@ -1769,16 +1771,36 @@ const renderedContent = createMemo(() => displayContent() || content())
+@@ -1780,16 +1810,36 @@ const renderedContent = createMemo(() => displayContent() || content())
          </Show>
-         <Show when={(!inMinimal() || expanded()) && summary().body}>
+         <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
            <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
 -            <code
 -              filetype="markdown"
@@ -91,63 +91,6 @@ index ef3c2d981a..8aeeb413a7 100644
            </box>
          </Show>
        </box>
-@@ -1835,19 +1857,45 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
-   const { theme, syntax } = useTheme()
-   // #135：assistant 未完成则流式渲染
-   const streaming = createMemo(() => !props.message.time?.completed)
-+  // #137：稳定 content memo，供 completedKey 与渲染共用
-+  const content = createMemo(() => props.part.text.trim())
-+  // #137：完成后按 content+宽度 remount，避免 DB 刷新/侧栏重排沿用过矮 text buffer
-+  const completedKey = createMemo(() => `${ctx.width}@${content()}`)
-   return (
--    <Show when={props.part.text.trim()}>
-+    <Show when={content()}>
-       <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
--        <markdown
--          syntaxStyle={syntax()}
--          streaming={streaming()}
--          internalBlockMode="top-level"
--          content={props.part.text.trim()}
--          tableOptions={{ style: "grid" }}
--          conceal={ctx.conceal()}
--          fg={theme.markdownText}
--          bg={theme.background}
--        />
-+        <Switch>
-+          <Match when={!streaming()}>
-+            <Show keyed when={completedKey()}>
-+              {(_key) => (
-+                <markdown
-+                  syntaxStyle={syntax()}
-+                  streaming={false}
-+                  internalBlockMode="top-level"
-+                  content={content()}
-+                  tableOptions={{ style: "grid" }}
-+                  conceal={ctx.conceal()}
-+                  fg={theme.markdownText}
-+                  bg={theme.background}
-+                />
-+              )}
-+            </Show>
-+          </Match>
-+          <Match when={streaming()}>
-+            <markdown
-+              syntaxStyle={syntax()}
-+              // #137：流式保持 streaming=true；不用 unstyled 闪烁原文
-+              // #137：流式保持 streaming=true，禁用 unstyled 闪烁
-+              streaming={true}
-+              internalBlockMode="top-level"
-+              content={content()}
-+              tableOptions={{ style: "grid" }}
-+              conceal={ctx.conceal()}
-+              fg={theme.markdownText}
-+              bg={theme.background}
-+            />
-+          </Match>
-+        </Switch>
-       </box>
-     </Show>
-   )
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 491ad06aaf..8eba5efd9e 100644
 --- a/packages/opencode/test/session/prompt.test.ts

@@ -576,13 +576,17 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
  import type { Provider } from "@/provider/provider"
  import type { Agent } from "@/agent/agent"
  import { Permission } from "@/permission"
-@@ -45,6 +47,8 @@
+@@ -47,10 +49,12 @@
    if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
    if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
    if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
 +  if (model.api.id.toLowerCase().includes("minimax") || model.api.id.toLowerCase().includes("mini-max")) return [PROMPT_MINIMAX]
 +  if (model.api.id.toLowerCase().includes("deepseek")) return [PROMPT_DEEPSEEK]
-   if (model.api.id.toLowerCase().includes("kimi")) return [PROMPT_KIMI]
+   if (
+     model.api.id.toLowerCase().includes("kimi") ||
+     ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)
+   )
+     return [PROMPT_KIMI]
    return [PROMPT_DEFAULT]
  }
 @@ -110,14 +114,20 @@
@@ -618,8 +622,9 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
 --- a/packages/opencode/src/provider/transform.ts
 +++ b/packages/opencode/src/provider/transform.ts
-@@ -1113,6 +1113,15 @@
-     result["promptCacheKey"] = input.sessionID
+@@ -1232,7 +1232,16 @@
+   if (input.model.api.npm === "@ai-sdk/azure") {
+     result["store"] = false
    }
  
 +  // OpenAI 系列显式启用 parallelToolCalls

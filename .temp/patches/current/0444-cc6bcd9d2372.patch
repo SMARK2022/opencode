@@ -134,7 +134,7 @@ diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/ap
 +      // 终态（time.end 存在）不进入此守卫，正常执行覆盖和 accum_delta 清除。
        if ((part.type === "text" || part.type === "reasoning") && !part.time?.end) {
 @@ -312,5 +311,14 @@ export function applyDirectoryEvent(input: {
-       const result = Binary.search(parts, part.id, (p) => p.id)
+       const result = Binary.search(parts, part.id, (item) => item.id)
        if (result.found) {
 -        input.setStore("part", part.messageID, result.index, reconcile(part))
 +        // monotonic rule 只属于 Tool snapshot；text/reasoning 等 Part 继续走原有

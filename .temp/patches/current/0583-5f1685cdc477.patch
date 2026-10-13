@@ -1,20 +1,18 @@
 From 5f1685cdc477396e21a21aeb007be68600c124ed Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Sat, 22 Aug 2026 00:23:39 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BC=9A=E8=AF=9D=E8=A7=86?=
- =?UTF-8?q?=E5=8F=A3=E6=81=A2=E5=A4=8D=E6=81=92=E5=AE=9A=E8=A3=81=E5=89=AA?=
- =?UTF-8?q?=E7=AD=96=E7=95=A5?=
+Date: Fri, 22 Aug 2026 01:18:22 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=81=92=E5=BC=80=20Session=20?=  =?UTF-8?q?=E8=A7=86=E5=8F=A3=E8=A3=81=E5=89=AA?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-移除 shouldCullSessionViewport 在流式且滚离底部时关闭 viewport culling 的条件分支：当前 OpenTUI fork 在裁剪过滤前已对全部子节点调用 updateFromLayout() 刷新坐标，原条件分支的测量意图已被满足，剩余作用只是解除唯一遍历上界。v1/v2 共享同一 policy owner，行为由反转后的单测合同与真实 seam 导航 liveness 回归锁定。
+shouldCullSessionViewport 恒 return true：OpenTUI fork 在 culling 过滤前已对全部 child 调 updateFromLayout()（Renderable.ts:1443-1450），条件分支的原始测量意图已满足，剩余作用只是解除唯一遍历上界；删除 isStreamingViewportAssistant 谓词；三态测试反转为恒 true 合同；不改 sticky-scroll/加载/渲染预算。
 
-不改变 sticky-scroll、加载机制与渲染预算；A/B 反馈环证明新旧策略在本机各 regime 帧成本无显著差异，修复依据为契约对齐而非性能数字，避免引入 speculative 分支或新退化。
+适配说明：生产 hunk 与测试重录到 packages/tui（目标路径迁移）；H3 +49 行真实 seam liveness 测试裁记——目标无 session-message-render.test.tsx 宿主与 withRenderedSession harness（grep 0 命中，#212 先例记录）；INV-04 由既有 session-viewport-follow 纯函数测试 + shell-output-spacing wiring 断言 + H4 反转单测承载；route 不动（shell 四断言继续成立）。
+
 
 diff --git a/docs/plans/tui-session-viewport-culling-repair.md b/docs/plans/tui-session-viewport-culling-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..1221fd89cfd54ed986dcc687009752a8a7760404
 --- /dev/null
 +++ b/docs/plans/tui-session-viewport-culling-repair.md
 @@ -0,0 +1,440 @@
@@ -458,11 +456,11 @@ index 0000000000000000000000000000000000000000..1221fd89cfd54ed986dcc687009752a8
 +- N-02（记录修正，已折叠入 §23）：审计重算 E≈41/C≈14/≈0.34，高于门禁。
 +- N-03（记录）：`viewportStuckToBottom` 在 v1/v2 均为行为性惰性输入，按接口稳定性 pass-through-by-design 保留（与方案审计 N-03 一致）。
 +- 审计同时拒绝了将冻结复现作为发布门槛、v2 wiring 守卫、temp 文件 DB 漂移失败归因于本 diff 等投机性要求。
-diff --git a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-index 59a4cbdf5dde204940c573160021439a02597827..4f5144359992cda1808de1878b41e663b83b581a 100644
---- a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
-@@ -18,17 +18,13 @@ export function hasStreamingAssistant(messages: Message[]) {
+
+diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/session-pending.ts
+--- a/packages/tui/src/util/session-pending.ts
++++ b/packages/tui/src/util/session-pending.ts
+@@ -19,16 +19,13 @@ type SessionViewportState = {
  }
  
  export function shouldCullSessionViewport(
@@ -471,94 +469,37 @@ index 59a4cbdf5dde204940c573160021439a02597827..4f5144359992cda1808de1878b41e663
 +  _messages: readonly SessionViewportMessage[],
 +  _state: SessionViewportState = {},
  ) {
--  // Keep the hot sticky-bottom streaming path culled, but let off-screen
--  // streaming code blocks continue measuring when the user scrolls into history.
+-  // 保持 sticky-bottom 流式热路径裁剪，但用户滚入历史时让屏外流式代码块继续测量。
 -  if (!messages.some(isStreamingViewportAssistant)) return true
 -  return state.stuckToBottom ?? true
 -}
 -
 -function isStreamingViewportAssistant(message: SessionViewportMessage) {
 -  return (message.role ?? message.type) === "assistant" && !message.time.completed
-+  // 恒定启用视口裁剪：OpenTUI fork 在过滤前已对全部子节点调用 updateFromLayout()
-+  // 刷新坐标，离屏 streaming 内容的测量不再依赖关闭裁剪；stuckToBottom 仍由
-+  // sticky-scroll 消费，不再是第二套裁剪策略的输入（v1/v2 共享本 owner）。
++  // 0583：OpenTUI fork 在 culling 过滤前已对全部 child 调 updateFromLayout()，
++  // 条件分支的原始测量意图已满足，剩余作用只是解除唯一遍历上界——恒裁剪。
++  // 签名保留（v1 caller 与测试按同合同消费），参数改名 _ 前缀标注非使用。
 +  return true
  }
+ export function pendingAssistantIndex(messages: Message[], status: SessionStatus | undefined) {
+   // 会话空闲时不查找待处理消息，避免不必要的重渲染
+
+diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
+--- a/packages/tui/test/util/session-pending.test.ts
++++ b/packages/tui/test/util/session-pending.test.ts
+@@ -181,13 +181,13 @@ describe("activeTurnPair", () => {
+     expect(activeTurnPair([])).toBeUndefined()
+   })
  
- export function pendingAssistantID(messages: Message[], status: SessionStatus | undefined) {
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 5b84fb5fef26e4c2a948a8e42a1d9c060c922722..c4b32e38cbe2a73518e5cfbf0dfc26b0988ef036 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -1400,6 +1400,55 @@ test("session follows streaming growth when the viewport is visually at the bott
-   )
- })
- 
-+test("session keeps latest streamed content reachable via session.last after scrolling away", async () => {
-+  const user = userMessage("msg_user_cull", 1)
-+  // 已完成消息 + delta 增长复用既有 bottom-growth fixture 形态（streaming code
-+  // 分支在测试环境不出内容）；culling 分歧本身由 unit slice 锁定，本测只保护
-+  // 恒定裁剪策略下的导航 liveness。内容保持常规尺寸：超大文本更新会触发
-+  // core sticky 的高度塌缩重贴（新旧 policy 同样存在的既有行为，不在本测范围）。
-+  const streamer = assistantMessage("msg_cull_stream", 2, user.id)
-+
-+  await withRenderedSession(
-+    [user, streamer],
-+    { msg_cull_stream: [textPart("part_cull_stream", "msg_cull_stream", `${"wrapped content ".repeat(180)}OLD_CULL_TAIL`)] },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("OLD_CULL_TAIL")))
-+
-+      // 越过单行容忍带（4 次 ctrl+alt+y）：viewportStuckToBottom=false；
-+      // 恒定 culling 下用户滚离后不得被系统强拉回底部（INV-04 前半）。
-+      for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
-+      await app.renderOnce()
-+      const afterScroll = rows(app.captureCharFrame())
-+      expect(afterScroll.some((line) => line.includes("OLD_CULL_TAIL"))).toBe(false)
-+
-+      emit(
-+        partDeltaEvent(
-+          "evt_cull_growth",
-+          "msg_cull_stream",
-+          "part_cull_stream",
-+          `${" grown tail ".repeat(40)}NEW_CULL_TAIL`,
-+          "text",
-+        ),
-+      )
-+      await app.renderOnce()
-+      await Bun.sleep(20)
-+      await app.renderOnce()
-+      // delta 到达后新尾部在视口下方保持不可见：离屏裁剪不是自动回贴的替代路径。
-+      const afterDelta = rows(app.captureCharFrame())
-+      expect(afterDelta.some((line) => line.includes("NEW_CULL_TAIL"))).toBe(false)
-+
-+      // 公开 session.last（End 键）导航后，最新流式内容必须在正常帧时限内可达
-+      // （INV-04 后半）：这是恒定裁剪策略下离屏内容可达性的行为面验证。
-+      app.mockInput.pressKey("END")
-+      await app.renderOnce()
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("NEW_CULL_TAIL")))
-+      expect(frame.some((line) => line.includes("NEW_CULL_TAIL"))).toBe(true)
-+    },
-+    {},
-+    { width: 100, height: 18 },
-+  )
-+})
-+
- test("narrow viewport keeps the user message cell from collapsing", async () => {
-   await withRenderedSession(
-     [userMessage("msg_user_narrow", 1), assistantMessage("msg_assistant_after_user", 2, "msg_user_narrow")],
-diff --git a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-index dad92e1162766da85690294c92120a95fd30eafe..c75683d2e7538c0d608190e09fe643f37b233806 100644
---- a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
-@@ -59,8 +59,10 @@ describe("session pending helpers", () => {
+-  // #458：视口裁剪三态——流式+默认粘底裁剪；流式+离底不裁；完成后恒裁
++  // 0583：视口裁剪恒开——流式/离底/完成三态统一返回 true（fork 全量 updateFromLayout 已满足测量需求）
+   test("keeps session viewport culling enabled while an assistant message streams", () => {
      expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
    })
  
 -  test("pauses session viewport culling while streaming away from sticky bottom", () => {
 -    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(false)
 +  test("keeps session viewport culling enabled while streaming away from sticky bottom", () => {
-+    // 契约对齐：OpenTUI fork 在裁剪过滤前已对全部子节点调用 updateFromLayout() 刷新坐标，
-+    // 滚离历史的 streaming 内容不再需要关闭视口裁剪来保持测量（Renderable.ts:1443-1450）。
 +    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(true)
    })
  

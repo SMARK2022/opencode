@@ -11,6 +11,7 @@ Content-Transfer-Encoding: 8bit
 空输出保留 (no output) 占位，但不再把 opencode_notice、timeout 诊断等
 模型 harness 回灌进 metadata.output；ShellTool 与 prompt.shell 统一双面板合同。
 
+
 diff --git a/docs/plans/shell-user-model-output-panel-isolation.md b/docs/plans/shell-user-model-output-panel-isolation.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..4a51046c01637883c8d926ba9e7799dd8ddb1541
@@ -454,114 +455,126 @@ index 0000000000000000000000000000000000000000..4a51046c01637883c8d926ba9e7799dd
 +Independent recount: E≈43, C=8, required 7, ratio ≈0.186 PASS.
 +
 +The task may be marked `verified` only after an independent full-scope result of `No blocking findings` for the current implementation and approved plan revision.
+
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 1b55440632816b2d25fbd59ba7091e7cf05c6cc4..1a9eb5ddb337f0e7b4b3b6ec933fc9039c9849e5 100644
+index 053cfbf2f..0a068ffb2 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1703,22 +1703,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-               // 这里用 part.state.time.start 获取原始开始时间（status 可能已被 cancel 改为 error）
-               const shellStart = "time" in part.state ? part.state.time.start : Date.now()
-               const shellElapsedMs = Date.now() - shellStart
-+              // 终态先保留 raw 再拼 notice；metadata.output 仅 raw/"(no output)"，model output 保留 harness。
+@@ -1165,16 +1165,21 @@ const layer = Layer.effect(
+               // [local-smark] direct shell 终态 elapsed；cancel 可能已把 status 改为 error，
+               // 但 time.start 被保留——只要 time 存在就回溯原始开始时间
+               const shellElapsedMs = Date.now() - ("time" in part.state ? part.state.time.start : Date.now())
++              // #536：双面板分离——raw 是流式累计的原始输出，notice/诊断只进模型面板。
 +              const raw = output
 +              let modelOutput = raw
                if (aborted) {
-                 // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
+                 // #282：prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
                  // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
 -                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
-+                modelOutput +=
-+                  "\n\n" +
-+                  formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
++                modelOutput += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
                } else {
-                 // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice
+                 // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice，
+                 // 与 Bash 工具的 formatShellExecutionNotice 阈值/措辞保持一致
                  const notice = formatLongExecutionNotice("shell", shellElapsedMs)
 -                if (notice) output += "\n\n" + notice
 +                if (notice) modelOutput += "\n\n" + notice
                }
++              // #536：空输出的用户面板是精确占位符，不是空串也不是 notice 散文。
 +              const userOutput = raw.length > 0 ? raw : "(no output)"
                const completed = Date.now()
-               if (flags.experimentalEventSystem) {
-                 yield* events.publish(SessionEvent.Shell.Ended, {
-                   sessionID: input.sessionID,
-                   timestamp: DateTime.makeUnsafe(completed),
-                   callID: part.callID,
--                  output,
-+                  output: modelOutput,
-                 })
-               }
                if (!msg.time.completed) {
-@@ -1731,8 +1737,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 msg.time.completed = completed
+@@ -1186,8 +1191,9 @@ const layer = Layer.effect(
                    time: { ...part.state.time, end: completed },
                    input: part.state.input,
                    title: "",
--                  metadata: { output, description: "" },
+-                  metadata: { output },
 -                  output,
-+                  metadata: { output: userOutput, description: "" },
++                  // #536：metadata.output 只承载用户面板；模型 harness 文本在 state.output。
++                  metadata: { output: userOutput },
 +                  output: modelOutput,
                  }
                  yield* sessions.updatePart(part)
                }
+
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 080e808afdadcc4e2fa481ce56c915c42e908d12..731cdb56ea2bf37cf5f036c3e4a69a3f77ec41e1 100644
+index 39f1b49e3..0e52c387c 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1106,7 +1106,6 @@ export const ShellTool = Tool.define(
- 
-       const decoder = createAutoTextDecoder({ encoding: input.encoding })
-       const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
+@@ -1133,9 +1133,8 @@ export const ShellTool = Tool.define(
+       const limits = yield* trunc.limits()
+       const keep = limits.maxBytes * 2
+       let full = ""
+-      // #215：display/displayed 提升至外层完成作用域，供最终元数据读取终端屏幕与渲染标记
++      // #215：display 提升至外层完成作用域，供最终元数据读取终端屏幕
+       let display!: ReturnType<typeof createTerminalDisplay>
 -      let displayed = false
-       let lastVisible = ""
- 
-       const code: number | null = yield* Effect.scoped(
-@@ -1120,7 +1119,6 @@ export const ShellTool = Tool.define(
-           const onChunk = (chunk: string) => {
+       const list: Chunk[] = []
+       let used = 0
+       let file = ""
+@@ -1194,7 +1193,6 @@ export const ShellTool = Tool.define(
              if (!chunk) return Effect.void
+             // #215：display.push 返回终端屏幕快照，preview 仅做最终长度封顶，CR 覆盖与清行已由渲染器吸收
              const visible = preview(display.push(chunk))
 -            displayed = true
              const size = Buffer.byteLength(chunk, "utf-8")
+             // #215：原始环形缓冲仍独立累积喂给模型输出，显示快照不替代也不截断原始字节流
              list.push({ text: chunk, size })
-             used += size
-@@ -1319,7 +1317,9 @@ export const ShellTool = Tool.define(
+@@ -1247,8 +1245,6 @@ export const ShellTool = Tool.define(
+           const decoder = createAutoTextDecoder({ encoding: input.encoding })
+           // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
+           display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
+-          displayed = false
+-          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
+ 
+           // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成
+           const output = yield* Effect.forkScoped(
+@@ -1404,8 +1400,10 @@ export const ShellTool = Tool.define(
+       if (shellNotice) {
          output += "\n\n" + shellNotice
        }
-       const durationMs = Date.now() - started
+-      // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
 -      const displayOutput = preview(display.value())
-+      // 用户面板只反映终端画面；空画面固定 "(no output)"，不得回灌模型 harness（notice/诊断散文）。
++      // #536：用户面板只承载最终终端屏幕；preview 仅做最终长度封顶，不再回退压缩输出。
 +      const displayText = display.value()
++      // #536：空屏幕的精确占位符取代旧方言——静默命令与清屏后空屏统一为 "(no output)"。
 +      const userOutput = displayText.length > 0 ? preview(displayText) : "(no output)"
  
        // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
        // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
-@@ -1337,7 +1337,7 @@ export const ShellTool = Tool.define(
-       return {
-         title: input.description,
-         metadata: {
+@@ -1427,8 +1425,8 @@ export const ShellTool = Tool.define(
+           // UI rendering. The `output` field returned alongside this metadata is
+           // intentionally left on the existing raw/compressed/truncated path so
+           // right-click "model context output" and provider input stay unchanged.
+-          // #215：仅当从未渲染过 chunk 时回退到压缩输出，避免静默命令丢失与已渲染命令泄漏控制字节冲突
 -          output: displayed ? displayOutput : preview(output),
++          // #536：metadata.output 是用户面板唯一事实——终端屏幕或精确占位符，不携带模型侧 notice。
 +          output: userOutput,
            exit: code,
-           description: input.description,
            truncated: cut,
+           ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
+
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 2ac3b1700da59b80d80783c13fad61926d18bc6c..378a8e6a826cd825f6ae4a895d9b177d57e479dc 100644
+index abd1a4e5e..a48867b35 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3127,6 +3127,29 @@ unix(
+@@ -3253,6 +3253,29 @@ unixNoLLMServer(
        expect(tool.state.output).toContain("err")
        expect(tool.state.metadata.output).toContain("out")
        expect(tool.state.metadata.output).toContain("err")
-+      // 有输出时用户面板仍是 raw 终端正文，不得混入 opencode_notice
++      // #536：用户面板不携带模型侧 notice/诊断散文——两侧只共享真实命令字节。
 +      expect(tool.state.metadata.output).not.toContain("opencode_notice")
 +      yield* run.assertNotBusy(chat.id)
 +    }),
-+  { git: true, config: cfg },
++  { config: cfg },
 +)
 +
-+unix(
-+  "shell empty success keeps user panel placeholder without model harness",
++// #536：空成功的用户面板是精确占位符——不是空串，也不携带任何 exit notice。
++unixNoLLMServer(
++  "shell empty success keeps user panel placeholder free of notices",
 +  () =>
 +    Effect.gen(function* () {
 +      const { prompt, run, chat } = yield* boot()
-+      // true 无 stdout/stderr，验证空用户面板必须是 (no output) 而不是空白
 +      const result = yield* prompt.shell({
 +        sessionID: chat.id,
 +        agent: "build",
@@ -574,51 +587,48 @@ index 2ac3b1700da59b80d80783c13fad61926d18bc6c..378a8e6a826cd825f6ae4a895d9b177d
 +      expect(tool.state.metadata.output).not.toContain("opencode_notice")
        yield* run.assertNotBusy(chat.id)
      }),
-   { git: true, config: cfg },
-@@ -3470,6 +3493,9 @@ unix(
+   { config: cfg },
+@@ -3602,6 +3625,9 @@ unixNoLLMServer(
            const tool = completedTool(exit.value.parts)
            if (tool) {
              expect(tool.state.output).toContain('reason="user_abort"')
-+            // 取消 notice 只进模型侧；用户面板不得回灌 harness
++            // #536：取消路径的 notice 只进模型面板；用户面板保持 raw（空输出为精确占位）。
 +            expect(tool.state.metadata.output).not.toContain("opencode_notice")
 +            expect(tool.state.metadata.output).toBe("(no output)")
            }
          }
        }),
+
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 081c76d704a7624d2d7763981451ef95161b9ab8..47a646747f1ee0287b8f34beb187751a0c0a76b3 100644
+index 1cc8f87dc..bead56809 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -2015,6 +2015,9 @@ describe("tool.shell abort", () => {
+@@ -1866,6 +1866,9 @@ describe("tool.shell abort", () => {
          expect(result.output).toContain(
            '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
          )
-+        // 用户面板只展示终端占位，不得回灌模型 execution notice
++        // #536：exit notice 只进模型面板；空成功的用户面板是精确占位符且无 notice。
 +        expect(result.metadata.output).toBe("(no output)")
 +        expect(result.metadata.output).not.toContain("opencode_notice")
        }),
      ),
    )
-@@ -2034,6 +2037,9 @@ describe("tool.shell abort", () => {
+@@ -1886,6 +1889,9 @@ describe("tool.shell abort", () => {
          expect(result.output).toContain(
            '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42"',
          )
-+        // 空失败同样：exit notice 仅模型可见，用户侧仍是 (no output)
++        // #536：失败 notice 同样只进模型面板；用户面板不携带退出码散文。
 +        expect(result.metadata.output).toBe("(no output)")
 +        expect(result.metadata.output).not.toContain("opencode_notice")
        }),
      ),
    )
-@@ -2323,10 +2329,14 @@ describe("tool.shell truncation", () => {
-             })
- 
-             expect(result.output).toContain("(no output)")
--            expect(result.output).toContain("reason=\"timeout\"")
-+            expect(result.output).toContain('reason="timeout"')
+@@ -2465,6 +2471,11 @@ describe("tool.shell windows PS stderr and progress", () => {
              // [local-smark] 诊断提示应包含 block-buffering 说明
              expect(result.output).toContain("block-buffering")
              expect(result.output).toContain("--verbose")
-+            // 用户面板保持空输出占位，不展示 timeout 诊断散文或 notice
++            // #536：timeout notice 与 block-buffering 诊断都只进模型面板；
++            // #536：空输出超时的用户面板是精确占位符，不含任何诊断散文。
 +            expect(result.metadata.output).toBe("(no output)")
 +            expect(result.metadata.output).not.toContain("opencode_notice")
 +            expect(result.metadata.output).not.toContain("block-buffering")

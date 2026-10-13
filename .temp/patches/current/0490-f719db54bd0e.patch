@@ -1,19 +1,19 @@
 From f719db54bd0e399b2dc815d68feacb4905e4de64 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Fri, 17 Jul 2026 10:13:03 +0800
-Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E8=A1=A5=E5=85=85=E4=BC=9A?=
- =?UTF-8?q?=E8=AF=9D=E7=BB=93=E6=9D=9F=E7=94=A8=E9=87=8F=E8=AE=B0=E5=BD=95?=
+Date: Wed, 15 Jul 2026 11:57:06 +0800
+Subject: [PATCH] feat(tui): 补充会话结束用量记录
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-以纯 input 口径在完成 footer 和退出 stdout 提供克制的 token/cost 摘要，同时保留实时 cache-inclusive 统计。
-
-按 parentID 隔离多步请求并共享格式化路径，避免跨 turn 污染和稀疏零值噪声。
-
+适配：token 统计 owner 已迁至 packages/tui/src/util/token-accounting.ts（10 hunk 全量重表达，
+opencode 侧 shim 自动继承）；退出文本走目标 Epilogue 机制（presentation.sessionEpilogue 加可选
+usage Stats 行，源 ExitProvider.message seam 在目标不存在）；完成 footer 的 turnUsage memo 与
+Show 接目标 duration 结构重表达；session-exit stdout 集成与 footer 渲染用例经单元层等价重表达
+（accounting 3 用例 + formatter 矩阵；目标无完整 Session 渲染 harness，render 接线由 typecheck
+与 app-lifecycle exit 用例间接覆盖）。
 diff --git a/docs/plans/session-end-display-enhancement.md b/docs/plans/session-end-display-enhancement.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..767e020f143f1fcf54d3a2411fc8a01c8f5fee7b
 --- /dev/null
 +++ b/docs/plans/session-end-display-enhancement.md
 @@ -0,0 +1,630 @@
@@ -647,733 +647,7 @@ index 0000000000000000000000000000000000000000..767e020f143f1fcf54d3a2411fc8a01c
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/exit-summary.ts b/packages/opencode/src/cli/cmd/tui/routes/session/exit-summary.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..917e164e748d909ae57513031900ff1c30c57b33
---- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/exit-summary.ts
-@@ -0,0 +1,53 @@
-+import { UI } from "@/cli/ui"
-+import { Locale } from "@/util/locale"
-+
-+const money = new Intl.NumberFormat("en-US", {
-+  style: "currency",
-+  currency: "USD",
-+})
-+// 退出文本沿用 sidebar 的 USD 两位小数格式，避免永久记录和实时面板出现不同 cost 文案。
-+// formatter 不负责计算 cost，只接受 accounting 已经归属到 Session 的数值。
-+
-+export type UsageStats = {
-+  input: number
-+  output: number
-+  cost: number
-+}
-+
-+export function formatUsageStats(usage: UsageStats) {
-+  const flow = [
-+    usage.input > 0 ? `↑${Locale.number(usage.input)}` : "",
-+    usage.output > 0 ? `↓${Locale.number(usage.output)}` : "",
-+  ].filter(Boolean)
-+  const cost = usage.cost > 0 ? money.format(usage.cost) : ""
-+
-+  // 每个字段单独门控，避免 input-only 的永久记录出现误导性的零 output/cost。
-+  // input 和 output 属于同一 flow 组，保持既有 footer 的空格分隔；cost 继续用中点隔开。
-+  // 这种拼接顺序让 output-only、cost-only 也能保持合法文本，而不补造零字段。
-+  // 没有 flow 时直接显示 cost，避免产生孤立的分隔符或空 Stats 内容。
-+  return cost ? (flow.length ? `${flow.join(" ")} · ${cost}` : cost) : flow.join(" ")
-+}
-+
-+export function formatSessionExitMessage(input: { title: string; sessionID?: string; usage: UsageStats }) {
-+  const title = Locale.truncate(input.title, 50)
-+  const pad = (text: string) => text.padEnd(10, " ")
-+  const weak = (text: string) => UI.Style.TEXT_DIM + pad(text) + UI.Style.TEXT_NORMAL
-+  const logo = UI.logo("  ").split(/\r?\n/)
-+  const stats = formatUsageStats(input.usage)
-+
-+  // Session/Continue 是原有退出记录；Stats 只作为有实际 usage 时的一行补充。
-+  // 退出发生在 renderer 销毁之后，所以这里必须生成完整文本，不能依赖 TUI 节点继续存在。
-+  // title 只在 formatter 边界截断，避免 route 与 stdout 使用不同的长度规则。
-+  // sessionID 缺失时保留既有命令形状，不把退出路径改成异常或空输出。
-+  return [
-+    `${logo[0] ?? ""}`,
-+    `${logo[1] ?? ""}`,
-+    `${logo[2] ?? ""}`,
-+    `${logo[3] ?? ""}`,
-+    ``,
-+    `  ${weak("Session")}${UI.Style.TEXT_NORMAL_BOLD}${title}${UI.Style.TEXT_NORMAL}`,
-+    ...(stats ? [`  ${weak("Stats")}${UI.Style.TEXT_NORMAL_BOLD}${stats}${UI.Style.TEXT_NORMAL}`] : []),
-+    `  ${weak("Continue")}${UI.Style.TEXT_NORMAL_BOLD}opencode -s ${input.sessionID ?? "undefined"}${UI.Style.TEXT_NORMAL}`,
-+    ``,
-+  ].join("\n")
-+}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 7f0a58e021a670111dfd8ad7a76e38b3d5d377b7..01ec72546965171fff61fed4a28a54aa5f428f9e 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -117,6 +117,8 @@ import {
- } from "@tui/util/session-pending"
- import { ConnectionError } from "../../util/connection-error"
- import { ContextUsagePanel } from "./context-usage"
-+import { tokenAccounting } from "@/token/accounting"
-+import { formatSessionExitMessage, formatUsageStats } from "./exit-summary"
- import {
-   createPendingToolInputParser,
-   PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
-@@ -225,6 +227,9 @@ export function Session() {
-       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-   })
-   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-+  // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
-+  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
-+  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
-   const permissions = createMemo(() => {
-     if (session()?.parentID) return []
-     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
-@@ -471,21 +476,17 @@ export function Session() {
-   const exit = useExit()
- 
-   createEffect(() => {
--    const title = Locale.truncate(session()?.title ?? "", 50)
--    const pad = (text: string) => text.padEnd(10, " ")
--    const weak = (text: string) => UI.Style.TEXT_DIM + pad(text) + UI.Style.TEXT_NORMAL
--    const logo = UI.logo("  ").split(/\r?\n/)
-+    const usage = sessionUsage().session
-+    // ExitProvider 只负责销毁 renderer 和发射已存文本；Session route 在这里保留最终统计快照。
-+    // effect 依赖 messages/parts 的 accounting memo，确保用户退出前 stored message 已反映最新快照。
-+    // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
-+    // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
-     return exit.message.set(
--      [
--        `${logo[0] ?? ""}`,
--        `${logo[1] ?? ""}`,
--        `${logo[2] ?? ""}`,
--        `${logo[3] ?? ""}`,
--        ``,
--        `  ${weak("Session")}${UI.Style.TEXT_NORMAL_BOLD}${title}${UI.Style.TEXT_NORMAL}`,
--        `  ${weak("Continue")}${UI.Style.TEXT_NORMAL_BOLD}opencode -s ${session()?.id}${UI.Style.TEXT_NORMAL}`,
--        ``,
--      ].join("\n"),
-+      formatSessionExitMessage({
-+        title: session()?.title ?? "",
-+        sessionID: session()?.id,
-+        usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
-+      }),
-     )
-   })
- 
-@@ -1684,6 +1685,20 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-     // parent user -> assistant completed 的 transcript 口径，避免两套算法漂移。
-     return assistantTurnDuration(messages(), props.message)
-   })
-+  const turnUsage = createMemo(() => {
-+    if (!footerVisible()) return ""
-+    const usage = tokenAccounting(
-+      messages(),
-+      (id) => sync.data.part[id] ?? [],
-+      undefined,
-+      props.message.parentID,
-+    ).request
-+    // 完成 footer 只记录当前 parent 的永久口径，不读取 prompt/sidebar 的 cache-inclusive total。
-+    // 只在 footerVisible 后计算，避免未完成或不可见的 assistant 为视口中的每条消息重算统计。
-+    // parentID 是 queued/coalesced turn 的归属边界，不能改用全局 latest assistant。
-+    // formatter 返回空字符串时，Show 不会人为添加 Stats 0 或 cost 0。
-+    return formatUsageStats({ input: usage.totalInputPure, output: usage.totalOutput, cost: usage.cost })
-+  })
- 
-   const childShortcut = useCommandShortcut("session.child.first")
- 
-@@ -1792,6 +1807,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
-               <Show when={duration()}>
-                 <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
-               </Show>
-+              <Show when={turnUsage()}>{(usage) => <span style={{ fg: theme.textMuted }}> · {usage()}</span>}</Show>
-               <Show when={props.message.error?.name === "MessageAbortedError"}>
-                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
-               </Show>
-diff --git a/packages/opencode/src/token/accounting.ts b/packages/opencode/src/token/accounting.ts
-index 3ee155c0f57b03398e42399087d5743ba7af94e8..e90342771595db83748afe67ef821037e093708a 100644
---- a/packages/opencode/src/token/accounting.ts
-+++ b/packages/opencode/src/token/accounting.ts
-@@ -34,6 +34,7 @@ export type TokenAccounting = {
-     input: number
-     output: number
-     totalInput: number
-+    totalInputPure: number
-     totalOutput: number
-     cost: number
-   }
-@@ -103,6 +104,7 @@ export function tokenAccounting(
-   messages: ReadonlyArray<Msg>,
-   getParts: (id: string) => ReadonlyArray<Pt>,
-   contextLimit?: number,
-+  requestUserID?: string,
- ): TokenAccounting {
-   // ── 1. lastUser / requestAssistantIDs ──
-   // 以最新 assistant 的 parentID 锁定当前活跃 user，跳过尚未派生 assistant 的 queued user
-@@ -117,26 +119,30 @@ export function tokenAccounting(
-   const lastUser = latestAssistantForUser
-     ? messages.findLast((m) => m.role === "user" && m.id === latestAssistantForUser.parentID)
-     : messages.findLast((m) => m.role === "user")
--  const latestRequestAssistant = lastUser
--    ? messages.findLast((m) => m.role === "assistant" && m.parentID === lastUser.id)
-+  const selectedRequestUserID = requestUserID ?? lastUser?.id
-+  const latestRequestAssistant = selectedRequestUserID
-+    ? messages.findLast((m) => m.role === "assistant" && m.parentID === selectedRequestUserID)
-     : undefined
-   const requestAssistantIDs = new Set<string>()
--  if (lastUser) {
-+  if (selectedRequestUserID) {
-     for (const m of messages) {
--      if (m.role === "assistant" && m.parentID === lastUser.id) requestAssistantIDs.add(m.id)
-+      if (m.role === "assistant" && m.parentID === selectedRequestUserID) requestAssistantIDs.add(m.id)
-     }
-   }
-+  // 历史 request 必须把 latest assistant、parts 和后续 in-flight 判断绑定到同一 parent；
-+  // 否则另一个正在流式的 parent 会把当前永久记录污染成全局 latest 的结果。
-+  // requestUserID 只改变 request projection 的选择，不改变 session projection 的全量遍历。
-+  // 这样 Session stdout 仍能看到全部 assistant，而完成 footer 只看到当前 parent。
-+  // selected latest 与 requestAssistantIDs 必须由同一个 parent 派生，不能各自猜测。
-+  const latestAssistantForRequest = requestUserID ? latestRequestAssistant : latestAssistantForUser
- 
-   // ── 2. 一次遍历 ──
-   const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
--  const confirmedRequest = { input: 0, output: 0, cost: 0 }
-+  const confirmedRequest = { input: 0, inputPure: 0, output: 0, cost: 0 }
-   let outputCharsTotal = 0
-   let outputTokensTotal = 0
--  let latestAssistant: Msg | undefined
--
-   for (const msg of messages) {
-     if (msg.role !== "assistant") continue
--    latestAssistant = msg
-     const parts = getParts(msg.id)
-     const isRequest = requestAssistantIDs.has(msg.id)
-     let msgHasFinish = false
-@@ -155,6 +161,10 @@ export function tokenAccounting(
- 
-       if (isRequest) {
-         confirmedRequest.input += p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
-+        // 纯 input 是永久记录口径；cache 仍只进入既有实时 totalInput，避免改变 prompt/sidebar 的含义。
-+        // cache read/write 仍由 session.cacheRead/cacheWrite 保留，供 /context 的既有显示使用。
-+        // 这里不把 cache 合并进 pure projection，保证完成记录和用户要求的 input 口径一致。
-+        confirmedRequest.inputPure += p.tokens.input
-         confirmedRequest.output += p.tokens.output + p.tokens.reasoning
-         confirmedRequest.cost += p.cost ?? 0
-       }
-@@ -194,8 +204,12 @@ export function tokenAccounting(
-         // and again below as stepInput.  Output and cost stay on the fallback
-         // path because the upload estimate regression is input-only, and legacy
-         // messages without step-finish parts still need their totals preserved.
-+        // 默认 active request 必须保留这条去重规则，否则 Enter 后的预估会被累计两次。
-+        // 显式历史 request 没有当前预估的语义，因此其 message.tokens.input 可作为永久 pure input。
-+        // 两种条件共用同一 fallback owner，避免在 TUI 层再实现一套 legacy 判定。
-         if (msg.id !== latestRequestAssistant?.id)
-           confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
-+        if (msg.id !== latestRequestAssistant?.id || requestUserID) confirmedRequest.inputPure += msg.tokens.input
-         confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
-         confirmedRequest.cost += msg.cost ?? 0
-       }
-@@ -212,10 +226,10 @@ export function tokenAccounting(
-   const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
- 
-   // ── 4. step（基于 latest assistant）───────────────────────────────
--  const lastParts = latestAssistant ? getParts(latestAssistant.id) : []
-+  const lastParts = latestAssistantForRequest ? getParts(latestAssistantForRequest.id) : []
-   const sfIdx = lastParts.findLastIndex((p) => p.type === "step-finish")
-   const stepSF = sfIdx >= 0 ? lastParts[sfIdx] : undefined
--  const msgCompleted = !!latestAssistant?.time?.completed
-+  const msgCompleted = !!latestAssistantForRequest?.time?.completed
- 
-   let stepInput: number
-   let stepConfirmed: boolean
-@@ -223,13 +237,13 @@ export function tokenAccounting(
-     stepInput = stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-     stepConfirmed = true
-   } else if (stepSF && !msgCompleted) {
--    stepInput = latestAssistant?.tokens
--      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
-+    stepInput = latestAssistantForRequest?.tokens
-+      ? latestAssistantForRequest.tokens.input + latestAssistantForRequest.tokens.cache.read + latestAssistantForRequest.tokens.cache.write
-       : stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-     stepConfirmed = false
-   } else {
--    stepInput = latestAssistant?.tokens
--      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
-+    stepInput = latestAssistantForRequest?.tokens
-+      ? latestAssistantForRequest.tokens.input + latestAssistantForRequest.tokens.cache.read + latestAssistantForRequest.tokens.cache.write
-       : 0
-     stepConfirmed = false
-   }
-@@ -278,13 +292,18 @@ export function tokenAccounting(
-   // assistant message may still carry the older pre-stream estimate, so do not
-   // derive pending input by subtracting actual usage from that estimate.  Only
-   // tool results written after the finish are known future input at this point.
-+  // selected historical parent 不是 global latest 时，不能把当前 parent 的 pending input 借给它。
-+  // 只有 selected latest 与全局 latest 是同一 assistant，当前 step 的 pending tool result 才可进入 request。
-+  // 该 gate 保护的是 request 的永久边界，不改变 session 全量统计或实时 prompt 口径。
-   const inFlightInput = stepConfirmed
-     ? 0
--    : stepSF && latestAssistant?.id === latestRequestAssistant?.id
-+    : stepSF && latestAssistantForRequest?.id === latestAssistantForUser?.id
-       ? pendingToolResultTokens + pendingAttachTokens
-       : stepInput
-   const totalInput = confirmedRequest.input + inFlightInput
-   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
-+  // totalInput 继续服务实时上下文；totalInputPure 只服务完成态和退出记录。
-+  // 两个字段同时返回是为了让 consumer 选择语义，而不是让下游重新遍历 Message/Part。
- 
-   // ── 7. breakdown（固定两层语义：input context composition + current step output）───────
-   // 三个固定阶段的输入快照，按权威递进：
-@@ -296,8 +315,8 @@ export function tokenAccounting(
-   const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
-   const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
-   // 取 pending 数据源：assistant message 自身携带的 pre-stream input snapshot
--  const pendingMsg = (latestAssistant?.inputBreakdown && latestAssistant.inputChars)
--    ? latestAssistant
-+  const pendingMsg = (latestAssistantForRequest?.inputBreakdown && latestAssistantForRequest.inputChars)
-+    ? latestAssistantForRequest
-     : undefined
-   const breakdownSrc = stepSF?.inputBreakdown
-     ? stepSF      // confirmed — provider 已返回 token 总量
-@@ -382,6 +401,7 @@ export function tokenAccounting(
-       input: stepInput,
-       output: stepOutput,
-       totalInput,
-+      totalInputPure: confirmedRequest.inputPure,
-       totalOutput,
-       cost: confirmedRequest.cost,
-     },
-diff --git a/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx b/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..4caff260c303024e97fcaaaedd70bbcaf8df1ce7
---- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/session-exit.test.tsx
-@@ -0,0 +1,265 @@
-+/** @jsxImportSource @opentui/solid */
-+import { expect, spyOn, test as baseTest } from "bun:test"
-+import { Global } from "@opencode-ai/core/global"
-+import { testRender, useRenderer } from "@opentui/solid"
-+import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
-+import type { AssistantMessage, Part, Session as SessionInfo, UserMessage as SDKUserMessage } from "@opencode-ai/sdk/v2"
-+import { onCleanup, type JSX } from "solid-js"
-+import { tmpdir } from "../../../fixture/fixture"
-+import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
-+import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
-+import { CommandPaletteProvider } from "../../../../src/cli/cmd/tui/context/command-palette"
-+import { EditorContextProvider } from "../../../../src/cli/cmd/tui/context/editor"
-+import { ExitProvider, useExit } from "../../../../src/cli/cmd/tui/context/exit"
-+import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
-+import { LocalProvider } from "../../../../src/cli/cmd/tui/context/local"
-+import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
-+import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
-+import { RouteProvider } from "../../../../src/cli/cmd/tui/context/route"
-+import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
-+import { SyncProvider } from "../../../../src/cli/cmd/tui/context/sync"
-+import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
-+import { TuiConfigProvider } from "../../../../src/cli/cmd/tui/context/tui-config"
-+import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
-+import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
-+import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/prompt/stash"
-+import { Session } from "../../../../src/cli/cmd/tui/routes/session"
-+import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
-+import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
-+import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
-+import { createEventSource, createFetch, directory, json } from "./sync-fixture"
-+import { formatUsageStats } from "../../../../src/cli/cmd/tui/routes/session/exit-summary"
-+
-+const sessionID = "ses_exit"
-+const test = baseTest.serial
-+
-+test("formats each usage field independently", () => {
-+  // normal fixture 同时包含三类值，锁定 OpenCode 既有 flow/cost 分隔符，而不是只验证字段存在。
-+  expect(formatUsageStats({ input: 12_300, output: 970, cost: 0.01 })).toBe("↑12.3K ↓970 · $0.01")
-+  // input-only 是中断 Session 的有效记录，不能用 output/cost 的零值制造噪声。
-+  // 全零则返回空字符串，由两个 consumer 共同省略整行，避免永久记录出现 Stats 0。
-+  expect(formatUsageStats({ input: 1_200, output: 0, cost: 0 })).toBe("↑1.2K")
-+  // input+cost 锁定 token flow 与费用之间的中点，避免过滤零 output 后把 cost 当成第二个 flow 字段。
-+  expect(formatUsageStats({ input: 1_200, output: 0, cost: 0.01 })).toBe("↑1.2K · $0.01")
-+  // output+cost 证明同一分隔规则不依赖 input 存在，cost-only 则证明不会产生孤立中点。
-+  expect(formatUsageStats({ input: 0, output: 970, cost: 0.01 })).toBe("↓970 · $0.01")
-+  expect(formatUsageStats({ input: 0, output: 0, cost: 0.01 })).toBe("$0.01")
-+  expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
-+})
-+
-+test("emits Session stats through the real ExitProvider stdout path", async () => {
-+  const user = userMessage("msg_user")
-+  const assistant = assistantMessage("msg_assistant", user.id)
-+  const output = await captureExitOutput(
-+    [user, assistant],
-+    {
-+      [user.id]: [],
-+      [assistant.id]: [
-+        textPart("part_text", assistant.id, "Session exit answer"),
-+        stepFinishPart("part_finish", assistant.id),
-+      ],
-+    },
-+    "Fix parser bug",
-+  )
-+  expect(output).toContain("Stats")
-+  // 970 output + 30 reasoning 必须显示为 1.0K，防止 Session projection 静默丢弃 reasoning。
-+  expect(output).toContain("↑12.3K ↓1.0K · $0.01")
-+  expect(output).toContain("Continue")
-+})
-+
-+test("keeps empty Session stdout free of a zero Stats row", async () => {
-+  const output = await captureExitOutput([], {}, "Empty session")
-+  expect(output).not.toContain("Stats")
-+  expect(output).toContain("Session")
-+  expect(output).toContain("Continue")
-+})
-+
-+async function captureExitOutput(
-+  messages: Array<AssistantMessage | SDKUserMessage>,
-+  parts: Record<string, Part[]>,
-+  title: string,
-+) {
-+  const previous = Global.Path.state
-+  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
-+  await Bun.write(`${tmp.path}/kv.json`, "{}")
-+
-+  const calls = createFetch((url) => {
-+    if (url.pathname === "/session") return json([sessionInfo({ title })])
-+    if (url.pathname === `/session/${sessionID}`) return json(sessionInfo({ title }))
-+    if (url.pathname === `/session/${sessionID}/message`)
-+      return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
-+    return undefined
-+  })
-+  const events = createEventSource()
-+  let requestExit: ReturnType<typeof useExit> | undefined
-+  // 该 harness 使用真实 ExitProvider；测试只替换最终 stdout 边界，不替换 Session route 或 accounting。
-+  // 每个用例串行执行并在 finally 恢复 write，避免全局 stdout 状态泄漏到其他 TUI 测试。
-+  const app = await testRender(
-+    () => <SessionHarness fetch={calls.fetch} events={events.source} bindExit={(exit) => (requestExit = exit)} />,
-+    { width: 80, height: 16, footerHeight: 0 },
-+  )
-+  let exited = false
-+
-+  try {
-+    // message.get() 是 ExitProvider 已发布的 readiness signal，比固定 sleep 更能证明 route 已更新最终文本。
-+    const exit = await waitForExitMessage(app, () => requestExit, title)
-+    let output = ""
-+    const stdout = spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
-+      output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk)
-+      return true
-+    })
-+    try {
-+      await exit()
-+      exited = true
-+    } finally {
-+      // ExitProvider 会先销毁 renderer 再写 stdout；恢复原函数不能放在 exit 调用之前。
-+      stdout.mockRestore()
-+    }
-+    return output
-+  } finally {
-+    if (!exited) app.renderer.destroy()
-+    Global.Path.state = previous
-+  }
-+}
-+
-+function SessionHarness(props: {
-+  fetch: typeof globalThis.fetch
-+  events: ReturnType<typeof createEventSource>["source"]
-+  bindExit: (exit: ReturnType<typeof useExit>) => void
-+}) {
-+  const renderer = useRenderer()
-+  const config = createTuiResolvedConfig()
-+  const keymap = createDefaultOpenTuiKeymap(renderer)
-+  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
-+
-+  return (
-+    <OpencodeKeymapProvider keymap={keymap}>
-+      <ArgsProvider>
-+        <ExitProvider>
-+          <ExitCapture bind={props.bindExit}>
-+            <KVProvider>
-+              <ToastProvider>
-+                <RouteProvider initialRoute={{ type: "session", sessionID }}>
-+                  <TuiConfigProvider config={config}>
-+                    <SDKProvider
-+                      url="http://test"
-+                      directory={directory}
-+                      testTransport={{ fetch: props.fetch, events: props.events }}
-+                    >
-+                      <ProjectProvider>
-+                        <SyncProvider>
-+                          <ThemeProvider mode="dark">
-+                            <LocalProvider>
-+                              <PromptStashProvider>
-+                                <DialogProvider>
-+                                  <CommandPaletteProvider>
-+                                    <FrecencyProvider>
-+                                      <PromptHistoryProvider>
-+                                        <PromptRefProvider>
-+                                          <EditorContextProvider>
-+                                            <Session />
-+                                          </EditorContextProvider>
-+                                        </PromptRefProvider>
-+                                      </PromptHistoryProvider>
-+                                    </FrecencyProvider>
-+                                  </CommandPaletteProvider>
-+                                </DialogProvider>
-+                              </PromptStashProvider>
-+                            </LocalProvider>
-+                          </ThemeProvider>
-+                        </SyncProvider>
-+                      </ProjectProvider>
-+                    </SDKProvider>
-+                  </TuiConfigProvider>
-+                </RouteProvider>
-+              </ToastProvider>
-+            </KVProvider>
-+          </ExitCapture>
-+        </ExitProvider>
-+      </ArgsProvider>
-+    </OpencodeKeymapProvider>
-+  )
-+}
-+
-+function ExitCapture(props: { bind: (exit: ReturnType<typeof useExit>) => void; children: JSX.Element }) {
-+  props.bind(useExit())
-+  return props.children
-+}
-+
-+async function waitForExitMessage(
-+  app: Awaited<ReturnType<typeof testRender>>,
-+  getExit: () => ReturnType<typeof useExit> | undefined,
-+  expected: string,
-+) {
-+  const start = Date.now()
-+  for (;;) {
-+    await app.renderOnce()
-+    const exit = getExit()
-+    const message = exit?.message.get()
-+    // 只在 route 已把目标 title 写入 stored message 后退出，避免测试抢在异步 Sync bootstrap 之前发射旧文本。
-+    if (exit && message?.includes(expected)) return exit
-+    if (Date.now() - start > 2_000) throw new Error(`timed out waiting for exit message containing ${expected}`)
-+    await Bun.sleep(10)
-+  }
-+}
-+
-+function sessionInfo(extra: Partial<SessionInfo> = {}) {
-+  return {
-+    id: sessionID,
-+    slug: "exit",
-+    projectID: "proj_test",
-+    directory,
-+    title: "Fix parser bug",
-+    version: "1.0.0",
-+    time: { created: 1, updated: 1 },
-+    ...extra,
-+  } satisfies SessionInfo
-+}
-+
-+function userMessage(id: string) {
-+  return {
-+    id,
-+    sessionID,
-+    role: "user",
-+    time: { created: 1 },
-+    agent: "build",
-+    model: { providerID: "provider", modelID: "model" },
-+  } satisfies SDKUserMessage
-+}
-+
-+function assistantMessage(id: string, parentID: string) {
-+  return {
-+    id,
-+    sessionID,
-+    role: "assistant",
-+    time: { created: 2, completed: 3 },
-+    parentID,
-+    modelID: "model",
-+    providerID: "provider",
-+    mode: "build",
-+    agent: "build",
-+    path: { cwd: directory, root: directory },
-+    cost: 0.01,
-+    finish: "stop",
-+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+  } satisfies AssistantMessage
-+}
-+
-+function textPart(id: string, messageID: string, text: string) {
-+  return { id, sessionID, messageID, type: "text", text } satisfies Extract<Part, { type: "text" }>
-+}
-+
-+function stepFinishPart(id: string, messageID: string, reasoning = 30) {
-+  // cache 数值故意非零，证明 Session Stats 的 ↑ 只来自 pure input，而不是 cache-inclusive totalInput。
-+  // output/reasoning/cost 仍使用独立 literal，便于断言退出文本的三个显示字段。
-+  return {
-+    id,
-+    sessionID,
-+    messageID,
-+    type: "step-finish",
-+    reason: "stop",
-+    cost: 0.01,
-+    tokens: { input: 12_300, output: 970, reasoning, cache: { read: 100, write: 50 } },
-+  } satisfies Extract<Part, { type: "step-finish" }>
-+}
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index f82f45080847cbc4306ef03e557c0d5f8ae9c89f..764801a07e3b8e3f61e850f47c0021a1714ca638 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -43,6 +43,132 @@ const sessionID = "ses_render"
- // parser worker 状态，导致点击/高亮行为互相污染；本文件按渲染行为串行。
- const test = baseTest.serial
- 
-+test("completed assistant footer renders pure input, output, and cost", async () => {
-+  const user = userMessage("msg_usage_user", 1)
-+  const assistant = {
-+    ...assistantMessage("msg_usage_assistant", 2, user.id),
-+    finish: "stop",
-+    cost: 0.01,
-+  } satisfies AssistantMessage
-+
-+  // 两个真实 Part 共同构成已完成 assistant；footer 必须从 Sync 的 Part 数据读取，而不是 message.tokens 预估。
-+  await withRenderedSession(
-+    [user, assistant],
-+    {
-+      [assistant.id]: [
-+        textPart("part_usage_text", assistant.id, "usage answer"),
-+        stepFinishPart("part_usage_finish", assistant.id, 12_300, 970, 30, 0.01),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) => lines.some((line) => line.includes("usage answer")) && lines.some((line) => line.includes("↑12.3K")),
-+      )
-+      // 真实 renderer 的 footer 锁定用户可观察格式，而不是内部 accounting 字段。
-+      // cache read/write fixture 保持非零，若误读 totalInput，期望的 12.3K 就会变成 cache-inclusive 数值。
-+      // output 与 cost 的 literal 同时证明 formatter 没有只显示 input 而遗漏其他永久字段。
-+      expect(frame.some((line) => line.includes("↑12.3K ↓1.0K · $0.01"))).toBe(true)
-+    },
-+  )
-+})
-+
-+test("completed assistant footer omits zero output and cost", async () => {
-+  const user = userMessage("msg_input_only_user", 1)
-+  const assistant = {
-+    ...assistantMessage("msg_input_only_assistant", 2, user.id),
-+    finish: "stop",
-+  } satisfies AssistantMessage
-+
-+  // 该 fixture 模拟中断或 provider 只确认 input 的场景，专门锁定部分 usage 的显示边界。
-+  await withRenderedSession(
-+    [user, assistant],
-+    {
-+      [assistant.id]: [
-+        textPart("part_input_only_text", assistant.id, "input-only answer"),
-+        stepFinishPart("part_input_only_finish", assistant.id, 1_200, 0, 0, 0),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) => lines.some((line) => line.includes("input-only answer")) && lines.some((line) => line.includes("↑1.2K")),
-+      )
-+      const footer = frame.find((line) => line.includes("↑1.2K")) ?? ""
-+      // input-only 是有效统计，不应因格式化便利带出另外两个零字段。
-+      // 断言针对捕获到的最终 footer 行，而不是 formatUsageStats 的返回值或内部 signal。
-+      // 这样可以发现 JSX 在 formatter 之后重新拼接零值的回归。
-+      expect(footer).not.toContain("↓0")
-+      expect(footer).not.toContain("$0.00")
-+    },
-+  )
-+})
-+
-+test("completed assistant footer accumulates a multi-step request", async () => {
-+  const user = userMessage("msg_multi_step_user", 1)
-+  const first = {
-+    ...assistantMessage("msg_multi_step_first", 2, user.id),
-+    finish: "tool-calls",
-+    cost: 0.005,
-+  } satisfies AssistantMessage
-+  const last = {
-+    ...assistantMessage("msg_multi_step_last", 3, user.id),
-+    finish: "stop",
-+    cost: 0.005,
-+  } satisfies AssistantMessage
-+
-+  // 两个 assistant 共用同一 parent，分别提供 6K/6.3K pure input 和独立 reasoning/cost。
-+  // 只有最终 assistant 是完成 footer，断言因此能区分 request 累计与最后一步快照。
-+  await withRenderedSession(
-+    [user, first, last],
-+    {
-+      [first.id]: [
-+        textPart("part_multi_step_first", first.id, "tool step"),
-+        stepFinishPart("part_multi_step_first_finish", first.id, 6_000, 100, 30, 0.005),
-+      ],
-+      [last.id]: [
-+        textPart("part_multi_step_last", last.id, "multi-step answer"),
-+        stepFinishPart("part_multi_step_last_finish", last.id, 6_300, 900, 70, 0.005),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) => lines.some((line) => line.includes("multi-step answer")) && lines.some((line) => line.includes("↑12.3K")),
-+      )
-+      // 最终 assistant 的 footer 必须读取同一 parent 下两个 assistant 的累计，而不是只取最后一步。
-+      expect(frame.some((line) => line.includes("↑12.3K ↓1.1K · $0.01"))).toBe(true)
-+    },
-+  )
-+})
-+
-+test("completed assistant footer omits a zero usage group", async () => {
-+  const user = userMessage("msg_zero_usage_user", 1)
-+  const assistant = {
-+    ...assistantMessage("msg_zero_usage_assistant", 2, user.id),
-+    finish: "stop",
-+    cost: 0,
-+  } satisfies AssistantMessage
-+
-+  await withRenderedSession(
-+    [user, assistant],
-+    {
-+      [assistant.id]: [
-+        textPart("part_zero_usage_text", assistant.id, "zero usage answer"),
-+        stepFinishPart("part_zero_usage_finish", assistant.id, 0, 0, 0, 0),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("zero usage answer")))
-+      const footer = frame.find((line) => line.includes("Build") && line.includes("model")) ?? ""
-+      // 完成 footer 本身仍保留 mode/model/duration，但全零 usage group 必须完全省略。
-+      expect(footer).not.toContain("↑")
-+      expect(footer).not.toContain("↓")
-+      expect(footer).not.toContain("$")
-+    },
-+  )
-+})
-+
- test("non-shell auto review status opens the reviewer child session", async () => {
-   const childID = "ses_reviewer_child"
-   await withRenderedSession(
-@@ -2888,6 +3014,20 @@ function assistantMessage(id: string, created: number, parentID = "msg_user") {
-   } satisfies AssistantMessage
- }
- 
-+function stepFinishPart(id: string, messageID: string, input: number, output: number, reasoning: number, cost: number) {
-+  // cache 保持固定非零以区分 completed footer 的 pure input 与实时 sidebar 的 totalInput。
-+  // reasoning 参数保留独立入口，确保未来合并 output projection 时不会丢失该组成部分。
-+  return {
-+    id,
-+    sessionID,
-+    messageID,
-+    type: "step-finish",
-+    reason: "stop",
-+    cost,
-+    tokens: { input, output, reasoning, cache: { read: 100, write: 50 } },
-+  } satisfies Extract<Part, { type: "step-finish" }>
-+}
-+
- function textPart(id: string, messageID: string, text: string, extra: Partial<Extract<Part, { type: "text" }>> = {}) {
-   return {
-     id,
 diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode/test/token/accounting.test.ts
-index 40349c2bab19910ae29b307054c94d40f83d17e3..3186c727ee6b8dba9830ae8cf219e81a434da47a 100644
 --- a/packages/opencode/test/token/accounting.test.ts
 +++ b/packages/opencode/test/token/accounting.test.ts
 @@ -18,13 +18,13 @@ function assistantMsg(id: string, parentID: string, input: number, output = 0) {
@@ -1392,11 +666,12 @@ index 40349c2bab19910ae29b307054c94d40f83d17e3..3186c727ee6b8dba9830ae8cf219e81a
    }
  }
  
-@@ -57,4 +57,73 @@ describe("tokenAccounting", () => {
+@@ -57,4 +57,60 @@ describe("tokenAccounting", () => {
      // session 级累计遍历所有 assistant，不受 lastUser 选择影响（回归保护）
      expect(acc.session.input).toBe(3_000)
    })
 +
++  // #490：pure 口径与 cache-inclusive 口径并行；两条断言能同时发现字段缺失与误合并 cache。
 +  test("keeps pure request input separate from cache-inclusive input", () => {
 +    const messages = [userMsg("pure-input-user"), assistantMsg("pure-input-assistant", "pure-input-user", 100)]
 +    const parts = {
@@ -1405,13 +680,12 @@ index 40349c2bab19910ae29b307054c94d40f83d17e3..3186c727ee6b8dba9830ae8cf219e81a
 +
 +    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000)
 +
-+    // 纯 input 只锁定 provider 的 input 字段；cache-inclusive totalInput 仍保护实时上下文口径。
-+    // 100 是独立的 provider input literal，20/5 只作为 cache 干扰项，不从 production 结果反推期望值。
-+    // 这个断言因此能同时发现 pure 字段缺失和误把 cache 合并进永久 input 的回归。
++    // 100 是独立的 provider input literal；20/5 只作为 cache 干扰项，不从生产结果反推期望。
 +    expect(acc.request.totalInputPure).toBe(100)
 +    expect(acc.request.totalInput).toBe(125)
 +  })
 +
++  // #490：显式历史 request 与当前流式 parent 隔离——永久记录不能读取 latest parent 的 output。
 +  test("scopes an explicit historical request away from the current streaming parent", () => {
 +    const messages = [
 +      userMsg("old-user"),
@@ -1424,19 +698,13 @@ index 40349c2bab19910ae29b307054c94d40f83d17e3..3186c727ee6b8dba9830ae8cf219e81a
 +      "new-assistant": [stepFinishPart("new-assistant", 300, 900)],
 +    }
 +
-+    const acc = tokenAccounting(
-+      messages as never,
-+      (id) => parts[id as keyof typeof parts] ?? [],
-+      200_000,
-+      "old-user",
-+    )
++    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, "old-user")
 +
-+    // 旧 parent 的永久记录不能读取当前 latest parent 的流式/完成 output。
-+    // old/new 两个 parent 都有 confirmed output，测试观察的是 request selection 而不是字符串或调用次数。
-+    // 200 与 900 的差异直接对应 Session 中两个可达 assistant parent 的归属边界。
++    // 200 与 900 的差异直接对应两个可达 assistant parent 的归属边界。
 +    expect(acc.request.totalOutput).toBe(200)
 +  })
 +
++  // #490：无 step-finish 的历史持久化 message 经 fallback 也必须保留纯 input。
 +  test("uses pure input from an explicit historical message-token fallback", () => {
 +    const messages = [
 +      userMsg("legacy-user"),
@@ -1452,17 +720,323 @@ index 40349c2bab19910ae29b307054c94d40f83d17e3..3186c727ee6b8dba9830ae8cf219e81a
 +      "current-assistant": [stepFinishPart("current-assistant", 300, 900)],
 +    }
 +
-+    const acc = tokenAccounting(
-+      messages as never,
-+      (id) => parts[id as keyof typeof parts] ?? [],
-+      200_000,
-+      "legacy-user",
-+    )
++    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, "legacy-user")
 +
-+    // 旧持久化 message 没有 step-finish 时，显式历史 request 仍必须保留纯 input。
-+    // cache read/write 仍存在于 fixture，证明 fallback 不能通过 totalInput 间接冒充 pure input。
-+    // output+reasoning 继续沿用旧 message.tokens 兼容契约，避免只修 input 而丢掉历史 cost 语义。
++    // cache read/write 留在 fixture 里，证明 fallback 不能通过 totalInput 间接冒充 pure input。
 +    expect(acc.request.totalInputPure).toBe(77)
 +    expect(acc.request.totalOutput).toBe(14)
 +  })
  })
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -129,7 +129,8 @@ import { ContextUsagePanel } from "./context-usage"
+ import { DialogExportOptions } from "../../ui/dialog-export-options"
+ import * as Model from "../../util/model"
+ import { formatTranscript } from "../../util/transcript"
+-import { sessionEpilogue } from "../../util/presentation"
++import { formatUsageStats, sessionEpilogue } from "../../util/presentation"
++import { tokenAccounting } from "../../util/token-accounting"
+ import { setPreLayoutSiblingMargin } from "../../util/layout"
+ import { useTuiConfig } from "../../config"
+ import { useClipboard } from "../../context/clipboard"
+@@ -262,11 +263,7 @@ export function Session() {
+     return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined
+   })
+ 
+-  createEffect(() => {
+-    const title = Locale.truncate(session()?.title ?? "", 50)
+-    setEpilogue(sessionEpilogue({ title, sessionID: session()?.id }))
+-  })
+-  onCleanup(() => setEpilogue())
++
+   const children = createMemo(() => {
+     const parentID = session()?.parentID ?? session()?.id
+     return sync.data.session
+@@ -274,12 +271,29 @@ export function Session() {
+       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+   })
+   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
++  // #490：Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 epilogue 接触 Message/Part。
++  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
++  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
+   // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
+   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+   // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
+   const viewportCulling = createMemo(() =>
+     shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+   )
++  // #490：epilogue effect 依赖 messages/parts 的 accounting memo，确保退出前已反映最新统计快照。
++  createEffect(() => {
++    const title = Locale.truncate(session()?.title ?? "", 50)
++    const usage = sessionUsage().session
++    setEpilogue(
++      sessionEpilogue({
++        title,
++        sessionID: session()?.id,
++        usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
++      }),
++    )
++  })
++  onCleanup(() => setEpilogue())
++
+   const messagesBeforeRevert = () => {
+     const messageID = session()?.revert?.messageID
+     if (!messageID) return messages()
+@@ -1776,6 +1790,14 @@ const footerVisible = createMemo(() => {
+     // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
+     return assistantTurnDuration(messages(), props.message)
+   })
++  // #490：完成 footer 只记录当前 parent 的永久口径，不读取 prompt/sidebar 的 cache-inclusive total。
++  // 只在 footerVisible 后计算，避免未完成或不可见的 assistant 为视口中每条消息重算统计。
++  // parentID 是 queued/coalesced turn 的归属边界，不能改用全局 latest assistant。
++  const turnUsage = createMemo(() => {
++    if (!footerVisible()) return ""
++    const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, props.message.parentID).request
++    return formatUsageStats({ input: usage.totalInputPure, output: usage.totalOutput, cost: usage.cost })
++  })
+ 
+   const childShortcut = useCommandShortcut("session.child.first")
+   const backgroundShortcut = useCommandShortcut("session.background")
+@@ -1856,6 +1878,7 @@ const footerVisible = createMemo(() => {
+                 <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
+                 {/* #243：durationClock 入参毫秒，与运行中 footer 同一口径 */}
+               </Show>
++              <Show when={turnUsage()}>{(usage) => <span style={{ fg: theme.textMuted }}> · {usage()}</span>}</Show>
+               <Show when={props.message.error?.name === "MessageAbortedError"}>
+                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
+               </Show>
+
+diff --git a/packages/tui/src/util/presentation.ts b/packages/tui/src/util/presentation.ts
+--- a/packages/tui/src/util/presentation.ts
++++ b/packages/tui/src/util/presentation.ts
+@@ -1,3 +1,4 @@
++import { Locale } from "./locale"
+ const logo = {
+   left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
+   right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+@@ -26,12 +27,38 @@ function wordmark(pad = "") {
+   })
+ }
+ 
+-export function sessionEpilogue(input: { title: string; sessionID?: string }) {
++
++// #490：退出文本沿用 sidebar 的 USD 两位小数格式，避免永久记录和实时面板出现不同 cost 文案。
++// formatter 不负责计算 cost，只接受 accounting 已经归属到 Session 的数值。
++const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
++
++export type UsageStats = {
++  input: number
++  output: number
++  cost: number
++}
++
++export function formatUsageStats(usage: UsageStats) {
++  const flow = [
++    usage.input > 0 ? `↑${Locale.number(usage.input)}` : "",
++    usage.output > 0 ? `↓${Locale.number(usage.output)}` : "",
++  ].filter(Boolean)
++  const cost = usage.cost > 0 ? money.format(usage.cost) : ""
++
++  // #490：每个字段单独门控，避免 input-only 的永久记录出现误导性的零 output/cost。
++  // input/output 属于同一 flow 组保持空格分隔；cost 用中点隔开；无 flow 时直接显示 cost。
++  return cost ? (flow.length ? `${flow.join(" ")} · ${cost}` : cost) : flow.join(" ")
++}
++
++export function sessionEpilogue(input: { title: string; sessionID?: string; usage?: UsageStats }) {
+   const weak = (text: string) => `${dim}${text.padEnd(10, " ")}${reset}`
++  const stats = input.usage ? formatUsageStats(input.usage) : ""
+   return [
+     ...wordmark("  "),
+     "",
+     `  ${weak("Session")}${bold}${input.title}${reset}`,
++    // #490：Stats 只作为有实际 usage 时的一行补充；零字段不人为补造。
++    ...(stats ? [`  ${weak("Stats")}${bold}${stats}${reset}`] : []),
+     `  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`,
+     "",
+   ].join("\n")
+
+diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/token-accounting.ts
+--- a/packages/tui/src/util/token-accounting.ts
++++ b/packages/tui/src/util/token-accounting.ts
+@@ -37,6 +37,8 @@ export type TokenAccounting = {
+     input: number
+     output: number
+     totalInput: number
++    // #490：纯 input 永久记录口径（不含 cache）；totalInput 保持 cache-inclusive 实时口径
++    totalInputPure: number
+     totalOutput: number
+     cost: number
+   }
+@@ -113,6 +115,8 @@ export function tokenAccounting(
+   messages: ReadonlyArray<Msg>,
+   getParts: (id: string) => ReadonlyArray<Pt>,
+   contextLimit?: number,
++  // #490：显式历史 request 选择器——只改变 request projection 的 parent，不改变 session 全量遍历
++  requestUserID?: string,
+ ): TokenAccounting {
+   // #122：会话累计与当前 request 边界（按 user 消息切分）
+ // ── 1. lastUser / requestAssistantIDs ──
+@@ -128,32 +132,35 @@ export function tokenAccounting(
+   const lastUser = latestAssistantForUser
+     ? messages.findLast((m) => m.role === "user" && m.id === latestAssistantForUser.parentID)
+     : messages.findLast((m) => m.role === "user")
+-  const latestRequestAssistant = lastUser
+-    ? messages.findLast((m) => m.role === "assistant" && m.parentID === lastUser.id)
++  // #490：selected latest 与 requestAssistantIDs 必须由同一个 parent 派生，不能各自猜测。
++  // 历史 request 必须把 latest assistant、parts 和后续 in-flight 判断绑定到同一 parent；
++  // 否则另一个正在流式的 parent 会把当前永久记录污染成全局 latest 的结果。
++  const selectedRequestUserID = requestUserID ?? lastUser?.id
++  const latestRequestAssistant = selectedRequestUserID
++    ? messages.findLast((m) => m.role === "assistant" && m.parentID === selectedRequestUserID)
+     : undefined
+   const requestAssistantIDs = new Set<string>()
+-  if (lastUser) {
++  if (selectedRequestUserID) {
+     for (const m of messages) {
+-      if (m.role === "assistant" && m.parentID === lastUser.id) requestAssistantIDs.add(m.id)
++      if (m.role === "assistant" && m.parentID === selectedRequestUserID) requestAssistantIDs.add(m.id)
+     }
+   }
++  // #490：requestUserID 只改变 request projection 的选择，不改变 session projection 的全量遍历。
++  // 默认调用方（prompt/sidebar/context）语义零变化：latestAssistantForRequest 即全局 latest。
++  const latestAssistantForRequest = requestUserID ? latestRequestAssistant : latestAssistantForUser
+ 
+   // ── 2. 一次遍历 ──
+   const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
+-  const confirmedRequest = { input: 0, output: 0, cost: 0 }
++  const confirmedRequest = { input: 0, inputPure: 0, output: 0, cost: 0 }
+   // #122：用于校准 input 字符/token 比的累计样本
+   let ratioChars = 0
+   let ratioTokens = 0
+   let outputCharsTotal = 0
+   // #122：输出侧确认 token 样本
+   let outputTokensTotal = 0
+-  // #122：跟踪最近 assistant 以定位当前 step 的 parts
+-  let latestAssistant: Msg | undefined
+-
+   // #122：按消息遍历，user 边界切 request，assistant 累加 session/request
+   for (const msg of messages) {
+     if (msg.role !== "assistant") continue
+-    latestAssistant = msg
+     const parts = getParts(msg.id)
+     const isRequest = requestAssistantIDs.has(msg.id)
+     // #122：本 assistant 是否已出现 step-finish
+@@ -174,6 +181,9 @@ export function tokenAccounting(
+ 
+       if (isRequest) {
+         confirmedRequest.input += p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
++        // #490：纯 input 是永久记录口径；cache 仍只进入既有实时 totalInput，避免改变 prompt/sidebar 的含义。
++        // 这里不把 cache 合并进 pure projection，保证完成记录和用户要求的 input 口径一致。
++        confirmedRequest.inputPure += p.tokens.input
+         confirmedRequest.output += p.tokens.output + p.tokens.reasoning
+         confirmedRequest.cost += p.cost ?? 0
+       }
+@@ -227,6 +237,9 @@ export function tokenAccounting(
+         // 回归只影响 input，且无 step-finish parts 的历史消息仍需保留总计。
+         if (msg.id !== latestRequestAssistant?.id)
+           confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
++        // #490：默认 active request 保留去重规则（Enter 后的预估不能累计两次）；
++        // 显式历史 request 没有当前预估语义，其 message.tokens.input 即永久 pure input。
++        if (msg.id !== latestRequestAssistant?.id || requestUserID) confirmedRequest.inputPure += msg.tokens.input
+         confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
+         confirmedRequest.cost += msg.cost ?? 0
+       }
+@@ -241,12 +254,12 @@ export function tokenAccounting(
+   const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
+ 
+   // ── 4. step（基于 latest assistant）───────────────────────────────
+-  const lastParts = latestAssistant ? getParts(latestAssistant.id) : []
++  const lastParts = latestAssistantForRequest ? getParts(latestAssistantForRequest.id) : []
+   // #122：最后一个 step-finish 划分已确认区与流式追加区
+   const sfIdx = lastParts.findLastIndex((p) => p.type === "step-finish")
+   const stepSF = sfIdx >= 0 ? lastParts[sfIdx] : undefined
+   // #122：消息 completed 才把 step-finish 当最终确认
+-  const msgCompleted = !!latestAssistant?.time?.completed
++  const msgCompleted = !!latestAssistantForRequest?.time?.completed
+ 
+   let stepInput: number
+   let stepConfirmed: boolean
+@@ -257,13 +270,13 @@ export function tokenAccounting(
+   // #122：流式中 step-finish 可能存在但仍需叠加未确认输出
+   } else if (stepSF && !msgCompleted) {
+     // #122：流式进行中：step-finish 存在但消息未 completed
+-    stepInput = latestAssistant?.tokens
+-      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
++    stepInput = latestAssistantForRequest?.tokens
++      ? latestAssistantForRequest.tokens.input + latestAssistantForRequest.tokens.cache.read + latestAssistantForRequest.tokens.cache.write
+       : stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
+     stepConfirmed = false
+   } else {
+-    stepInput = latestAssistant?.tokens
+-      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
++    stepInput = latestAssistantForRequest?.tokens
++      ? latestAssistantForRequest.tokens.input + latestAssistantForRequest.tokens.cache.read + latestAssistantForRequest.tokens.cache.write
+       : 0
+     stepConfirmed = false
+   }
+@@ -317,7 +330,8 @@ export function tokenAccounting(
+   // 写入的工具结果才是已知的未来 input。
+   const inFlightInput = stepConfirmed
+     ? 0
+-    : stepSF && latestAssistant?.id === latestRequestAssistant?.id
++    // #490：selected historical parent 不是 global latest 时，不能把当前 parent 的 pending input 借给它。
++    : stepSF && latestAssistantForRequest?.id === latestAssistantForUser?.id
+       ? pendingToolResultTokens + pendingAttachTokens
+       : stepInput
+   const totalInput = confirmedRequest.input + inFlightInput
+@@ -333,12 +347,12 @@ export function tokenAccounting(
+   const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
+   // #127：assistant 消息级 pending 快照（stream 尚未产生 part 时）
+   const pendingMsg =
+-    latestAssistant?.inputBreakdown && latestAssistant.inputChars
++    latestAssistantForRequest?.inputBreakdown && latestAssistantForRequest.inputChars
+       ? {
+           type: "pending" as const,
+-          inputBreakdown: latestAssistant.inputBreakdown,
+-          inputChars: latestAssistant.inputChars,
+-          inputTokens: latestAssistant.inputTokens,
++          inputBreakdown: latestAssistantForRequest.inputBreakdown,
++          inputChars: latestAssistantForRequest.inputChars,
++          inputTokens: latestAssistantForRequest.inputTokens,
+         }
+       : undefined
+   const breakdownSrc = stepSF?.inputBreakdown
+@@ -447,6 +461,9 @@ export function tokenAccounting(
+       input: stepInput,
+       output: stepOutput,
+       totalInput,
++      // #490：totalInput 继续服务实时上下文；totalInputPure 只服务完成态和退出记录。
++      // 两字段同时返回让 consumer 选择口径，而不是让下游重新遍历 Message/Part。
++      totalInputPure: confirmedRequest.inputPure,
+       totalOutput,
+       // #122：cost 仅累计已确认 request 费用
+       cost: confirmedRequest.cost,
+
+diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
+--- a/packages/tui/test/util/presentation.test.ts
++++ b/packages/tui/test/util/presentation.test.ts
+@@ -1,8 +1,19 @@
+-import { expect, test } from "bun:test"
+-import { sessionEpilogue } from "../../src/util/presentation"
++import { describe, expect, test } from "bun:test"
++import { formatUsageStats, sessionEpilogue } from "../../src/util/presentation"
+ 
+ test("formats session continuation summary", () => {
+   const epilogue = sessionEpilogue({ title: "A session", sessionID: "ses_123" })
+   expect(epilogue).toContain("A session")
+   expect(epilogue).toContain("opencode -s ses_123")
+ })
++
++describe("formatUsageStats", () => {
++  // #490：字段单独门控——input-only 不出现零 output/cost；flow 与 cost 的分隔符随组形态变化。
++  test("gates each field independently and joins flow with cost", () => {
++    expect(formatUsageStats({ input: 12_300, output: 1_000, cost: 0.01 })).toBe("↑12.3K ↓1.0K · $0.01")
++    expect(formatUsageStats({ input: 12_300, output: 0, cost: 0 })).toBe("↑12.3K")
++    expect(formatUsageStats({ input: 0, output: 1_000, cost: 0 })).toBe("↓1.0K")
++    expect(formatUsageStats({ input: 0, output: 0, cost: 0.25 })).toBe("$0.25")
++    expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
++  })
++})
+

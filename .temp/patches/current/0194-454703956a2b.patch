@@ -38,13 +38,11 @@ index a3177275ac..20235fda41 100644
            total += estimate
            if (total <= PRUNE_PROTECT) continue
            pruned += estimate
-@@ -366,6 +369,16 @@ const layer = Layer.effect(
-         stripMedia: true,
-         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-       })
+@@ -405,3 +408,13 @@ const layer = Layer.effect(
+          .join("\n\n")
 +      // #194：compaction summary 上传估算——与 prompt.ts 同一 estimateUploadInput 路径
-+      // #194：summary 绕过 prompt.ts，需在此处独立 seed pending upload snapshot
-+      const compactionMessages = [...modelMessages, { role: "user" as const, content: [{ type: "text" as const, text: nextPrompt }] }]
++      // #194：tip summary 请求体即 nextPrompt 单文本，无需旧版 modelMessages 前缀
++      const compactionMessages = [{ role: "user" as const, content: [{ type: "text" as const, text: nextPrompt }] }]
 +      const compactionEstimate = TokenEstimate.sanitizeModelMessages(compactionMessages)
 +      const estimatedInput = TokenEstimate.estimateUploadInput({
 +        text: compactionEstimate.text,
@@ -52,10 +50,9 @@ index a3177275ac..20235fda41 100644
 +        history: selected.head,
 +        model,
 +      }).inputTokens
-       const ctx = yield* InstanceState.context
-       const msg: SessionV1.Assistant = {
-         id: MessageID.ascending(),
-@@ -381,12 +394,16 @@ const layer = Layer.effect(
+      const ctx = yield* InstanceState.context
+      const msg: SessionV1.Assistant = {
+@@ -416,12 +429,16 @@ const layer = Layer.effect(
            root: ctx.worktree,
          },
          cost: 0,
@@ -144,7 +141,7 @@ index 16715bba2f..d5d78fb956 100644
              const messagesText = messageEstimate.text
              // #175：raw 仅用于 inputChars，不参与 Token.estimate 文本路径
              const rawMessagesText = JSON.stringify(messages)
-@@ -1612,35 +1610,14 @@ const layer = Layer.effect(
+@@ -1612,36 +1610,14 @@ const layer = Layer.effect(
                // #175：count>0 才写 media，兼容无附件会话
                ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
              } as SessionV1.StepFinishPart["inputBreakdown"]
@@ -175,7 +172,8 @@ index 16715bba2f..d5d78fb956 100644
 -            // #175：文本估计后加 media.tokens，只加一次
 -            const estimatedInput =
 -              (historyInputTokens > 0 && historyInputChars > 500
--                ? Math.round(inputChars / clampCharsPerToken(historyInputChars / historyInputTokens))
+-                // #175：校准分支被除数用消毒文本；raw 含 base64 会导致 media.tokens 二次计入
+-                ? Math.round([systemText, messagesText, toolsText].join("\n").length / clampCharsPerToken(historyInputChars / historyInputTokens))
 -                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))) + messageEstimate.attachments.tokens
 +            // #194：输入侧比率校准已由 TokenEstimate.learnInputCharsPerToken 接管
 +            // #194：用 estimateUploadInput 对齐 compaction 同一估算路径

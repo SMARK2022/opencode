@@ -1517,3 +1517,23 @@ index 0000000..3eaa9e0
 +}
 \ No newline at end of file
 
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -965,6 +965,9 @@
+         "solid-js": "catalog:",
+         "strip-ansi": "7.1.2",
+       },
++      "optionalDependencies": {
++        "@picovoice/pvrecorder-node": "1.2.9",
++      },
+       "devDependencies": {
+         "@tsconfig/bun": "catalog:",
+         "@types/bun": "catalog:",
+@@ -2324,4 +2327,6 @@
+     "@pierre/diffs": ["@pierre/diffs@1.2.10", "", { "dependencies": { "@pierre/theme": "1.0.3", "@pierre/theming": "0.0.1", "@shikijs/transformers": "^3.0.0 || ^4.0.0", "diff": "8.0.3", "hast-util-to-html": "9.0.5", "lru_map": "0.4.1", "shiki": "^3.0.0 || ^4.0.0" }, "peerDependencies": { "react": "^18.3.1 || ^19.0.0", "react-dom": "^18.3.1 || ^19.0.0" } }, "sha512-rPeAmDWarxFVTQpaf4y6wTxjZxU44xKJKoJti2zU21P06DVd9nRHZX+xSIObLB307Qjpaesyb1x/j0z94t7vLw=="],
+ 
++    "@picovoice/pvrecorder-node": ["@picovoice/pvrecorder-node@1.2.9", "", {}, "sha512-e398ue4G8YihrnnyTpnVePvOiBEM5+R4D+ChoyyeC8J8KFBMuhGrZwrdmpIPqDqCjCA+YqO2mFaicHstVhEpcg=="],
++
+     "@pierre/theme": ["@pierre/theme@1.0.3", "", {}, "sha512-sWHv11TMoqKxKDgTIk5VbhQjdPhs8DCcBxbjh3mRlS3YOM/OcrWoGX6MM8eBGn9cUu3M46Py0JnxsG2nJaFTuA=="],
+ 

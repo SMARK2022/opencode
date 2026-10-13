@@ -47,7 +47,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
            },
          },
        }),
-@@ -1442,24 +1442,32 @@
+@@ -1480,27 +1502,35 @@
  
          // extend database from config
          for (const [providerID, provider] of configProviders) {
@@ -79,12 +79,15 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
                model.provider?.npm ??
                provider.npm ??
                existingModel?.api.npm ??
+               // Config-defined gateway models bypass fromModelsDevModel, so resolve the
+               // native passthrough npm here before falling back to the catalog default.
+               cloudflareGatewayNpm(providerID, apiID) ??
 -              modelsDev[providerID]?.npm ??
 +              modelsDev[baseType ?? providerID]?.npm ??
                // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
                (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
              const name = iife(() => {
-@@ -1472,7 +1480,7 @@
+@@ -1512,7 +1542,7 @@
                api: {
                  id: apiID,
                  npm: apiNpm,

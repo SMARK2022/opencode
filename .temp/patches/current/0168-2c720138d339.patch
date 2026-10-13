@@ -105,15 +105,14 @@ diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/sr
  import { ProviderTransform } from "@/provider/transform"
  import { SystemPrompt } from "../system"
  import { InstallationVersion } from "@opencode-ai/core/installation/version"
-@@ -205,6 +205,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
-             ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+@@ -205,5 +205,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Prep
              "User-Agent": USER_AGENT,
            }),
+       ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
 +      // #168：默认 UA 之后合并 provider 配置头，允许覆盖 User-Agent
 +      ...Provider.requestHeaders(input.provider.options),
        ...input.model.headers,
        ...headers,
-     },
 diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
 --- a/packages/opencode/src/session/llm/native-runtime.ts
 +++ b/packages/opencode/src/session/llm/native-runtime.ts
@@ -172,10 +171,11 @@ diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencod
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -752,6 +752,82 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
- }
- 
+@@ -753,5 +753,81 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
  describe("session.llm.stream", () => {
+   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
+   const opencodeFixture = { providerID: "opencode-test", modelID: vivgridFixture.modelID }
+ 
 +  // #168：线上抓取 User-Agent，锁定 headers 与 header-ua 两条配置路径
 +  // #168：集成测覆盖 openai-compatible 线上头，防止只测纯函数
 +  for (const item of [
@@ -252,6 +252,5 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +    )
 +  }
 +
-   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
    it.instance(
      "sends temperature, tokens, and reasoning options for openai-compatible models",

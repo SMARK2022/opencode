@@ -17,11 +17,41 @@ index 27b87ae1c5e47eff7e57c80b8c8771631e6141ed..c783745cc9efb22b38f741ca3acfff62
 -          if (updated.length > 200) {
 +          if (updated.length > 300) {
              const oldest = updated[0]
-@@ -855,5 +855,6 @@
-             const [session, messages, todo, diff, status] = await Promise.all([
-               sdk.client.session.get({ sessionID }, { throwOnError: true }),
-               // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
+@@ -862,5 +862,6 @@
+            const [session, messages, todo, diff] = await Promise.all([
+              sdk.client.session.get({ sessionID }, { throwOnError: true }),
+              // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
 +              // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
 -              sdk.client.session.messages({ sessionID, limit: 200 }),
 +              sdk.client.session.messages({ sessionID, limit: 300 }),
-               sdk.client.session.todo({ sessionID }),
+              sdk.client.session.todo({ sessionID }),
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -888,5 +890,6 @@
+                infos.sort(compareMessage)
+                // #162：裁掉窗口外旧消息，保留最近 200
++                // #290：可见切片随 limit 同步 300——缓存阈值/拉取 limit/可见切片三处对齐，缺一即无谓丢弃
+-                const removed = infos.slice(0, -200)
++                const removed = infos.slice(0, -300)
+                // #162：可见消息切片与 hydrate limit 一致
+-                const visible = infos.slice(-200)
++                const visible = infos.slice(-300)
+diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+@@ -202,2 +203,3 @@
+ // #162：窗口扩大后仍必须真正越界，验证实时合并与最旧 parts 的淘汰。
+-test("live messages merged during hydration retain the 200 message window", async () => {
++// #290：窗口 300 后越界种子同步升至 300，断言仍锁定最旧淘汰
++test("live messages merged during hydration retain the 300 message window", async () => {
+@@ -229,2 +230,2 @@
+       json(
+-        Array.from({ length: 200 }, (_, index) => {
++        Array.from({ length: 300 }, (_, index) => {
+@@ -240,3 +241,3 @@
+       await hydrate
+ 
+-    expect(sync.data.message[sessionID]).toHaveLength(200)
++    expect(sync.data.message[sessionID]).toHaveLength(300)

@@ -157,17 +157,15 @@ index fef1719cc..0e8eba978 100644
      const newCompactionUser: SessionV1.WithParts = {
        info: userInfo(NEW_COMPACTION_USER),
        parts: [
-@@ -1656,8 +1656,8 @@
+@@ -1694,6 +1694,6 @@
  
-     expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
-     expect(state.user?.id).toBe(NEW_COMPACTION_USER)
+    expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
+    expect(state.user?.id).toBe(NEW_COMPACTION_USER)
 -    expect(state.tasks).toHaveLength(1)
 -    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
 +    // #269：compaction 不再是可重放 task（#242）——tasks 只剩 subtask，故期望空列表
 +    expect(state.tasks).toEqual([])
-   })
- })
- 
+  })
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 1b21986a8..9f9807e83 100644
 --- a/packages/opencode/test/session/prompt.test.ts

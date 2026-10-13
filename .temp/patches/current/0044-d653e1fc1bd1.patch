@@ -1757,7 +1757,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  import { DialogExportOptions } from "../../ui/dialog-export-options"
  import * as Model from "../../util/model"
  import { formatTranscript } from "../../util/transcript"
-@@ -240,8 +242,12 @@
+@@ -237,7 +239,11 @@
      if (session()?.parentID) return []
      return children().flatMap((x) => sync.data.question[x.id] ?? [])
    })
@@ -1771,7 +1771,6 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
  
    const pending = createMemo(() => {
-     const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
 @@ -609,6 +615,18 @@
        },
      },

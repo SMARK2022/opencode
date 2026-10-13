@@ -9,6 +9,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+
 diff --git a/docs/plans/windows-protected-delete-precheck-precision.md b/docs/plans/windows-protected-delete-precheck-precision.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..da481ab71f3ccc1fffe3e20af1cd3ca564c16f30
@@ -487,47 +488,46 @@ index 0000000000000000000000000000000000000000..da481ab71f3ccc1fffe3e20af1cd3ca5
 +Scope: full original requirement (REQ-01..07 / INV-01..07)
 +Implementation may proceed to commit (REQ-07).
 +```
+
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 965b758b4294deaa22c7d302b0cbf129cd579233..94e7d0d286bc5a000ab3b767f9a492326137bade 100644
+index e15e50500..c85fe272f 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -148,11 +148,6 @@ const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)
- // Windows 驱动器格式化
+@@ -71,7 +71,8 @@ const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|
+ const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
+ const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
  const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
- 
--// Windows 保护目录删除：rd/rmdir/del /s 作用于盘根或用户目录
--const RE_D_WINDOWS_PROTECTED_DELETE = new RegExp(
--  String.raw`\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"` + "`" + String.raw`]|$)|[A-Za-z]:[\\/](?:Users|Windows|Program Files|Documents and Settings)(?:[\\/][^\s)'"` + "`" + String.raw`]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"` + "`" + String.raw`]|$))`,
--  "i",
--)
- 
- // 凭据读取管道到网络传输
- const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(
-@@ -579,7 +574,8 @@ function dangerousRaw(command: string): string | undefined {
- 
-   // ---- Windows 破坏性操作 ----
+-const RE_D_WINDOWS_PROTECTED_DELETE = /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Windows|Program Files|Documents and Settings)(?:[\\/][^\s)'"\x60]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i
++// #530：旧 RE_D_WINDOWS_PROTECTED_DELETE 整串正则已删——跨段 .* 共现把 python heredoc（del + tree-sitter 的 -s + if not m: 盘符形）
++// 误报 dangerous；改由 windowsProtectedDeleteInCommand 同段 token 谓词承载（见 protectedDeleteTarget 附近）。
+ const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
+ const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
+ const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,"i",)
+@@ -791,7 +792,8 @@ function dangerousRaw(command: string): string | undefined {
+   if (RE_D_DECODE_PIPE_INTERPRETER.test(normalized))
+     return "decoded/decompressed payload piped to interpreter"
    if (RE_D_WINDOWS_FORMAT.test(normalized)) return "Windows drive format"
 -  if (RE_D_WINDOWS_PROTECTED_DELETE.test(normalized)) return "Windows protected directory delete"
-+  // Windows 保护递归删除：同段 token 谓词（禁整串子串共现误报）
++  // #530：Windows 保护递归删除：同段 token 谓词（禁整串子串共现误报）
 +  if (windowsProtectedDeleteInCommand(normalized)) return "Windows protected directory delete"
- 
-   // ---- 凭据外传 ----
-   // 敏感文件读取管道到网络传输是 dangerous；单独的敏感读取在 cautiousRaw 处理
-@@ -1074,6 +1070,9 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+   // #220：凭据外传——敏感文件读取管道到网络传输是 dangerous
+   if (RE_D_CREDENTIAL_PIPE_NETWORK.test(normalized)) return "credential read piped to network transfer"
+   if (RE_D_CREDENTIAL_UPLOAD_FLAG.test(normalized)) return "credential file sent with network transfer"
+@@ -935,6 +937,9 @@ function classifyTokens(tokens: string[]): Decision | undefined {
        return { level: "dangerous", reason: "critical PowerShell recursive delete" }
      return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
    }
-+  // 与 rm 对称：del/rd/rmdir 保护根递归删除走同一 Windows 谓词，不降到 cautious
++  // #530：与 rm 对称：del/erase/rd/rmdir 保护根递归删除走同一 Windows 谓词，不降到 cautious
 +  if (windowsProtectedRecursiveDelete(tokens))
 +    return { level: "dangerous", reason: "Windows protected directory delete" }
    if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
      return { level: "cautious", reason: "file deletion requires explicit approval" }
-   if (findDeletesFile(tokens))
-@@ -1463,6 +1462,52 @@ function hasRecursiveDeleteFlags(tokens: string[]) {
+   // #222：find -delete / -exec rm 也属于文件删除——argv 语义判断
+@@ -1180,6 +1185,52 @@ function hasRecursiveDeleteFlags(tokens: string[]) {
    return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item))
  }
  
-+// cmd del/rd/rmdir 可合并的单字母开关；s=递归。禁止 tree-sitter、/setup 等非开关词。
++// #530：cmd del/rd/rmdir 可合并的单字母开关；s=递归。禁止 tree-sitter、/setup 等非开关词。
 +const WINDOWS_CMD_SWITCH_LETTERS = new Set(["a", "f", "p", "q", "s", "u"])
 +
 +function hasWindowsRecursiveDeleteFlag(tokens: string[]) {
@@ -537,7 +537,7 @@ index 965b758b4294deaa22c7d302b0cbf129cd579233..94e7d0d286bc5a000ab3b767f9a49232
 +function isWindowsRecursiveDeleteFlagToken(token: string) {
 +  const t = token.toLowerCase()
 +  if (t === "/s" || t === "-s" || t === "--recursive") return true
-+  // 仅整 token 纯开关 cluster：/s/q、/s/p、/sq；不得裸子串匹配 -sitter
++  // #530：仅整 token 纯开关 cluster：/s/q、/s/p、/sq；不得裸子串匹配 -sitter
 +  if (!(t.startsWith("/") || (t.startsWith("-") && !t.startsWith("--")))) return false
 +  const body = t.slice(1)
 +  if (!body) return false
@@ -550,7 +550,7 @@ index 965b758b4294deaa22c7d302b0cbf129cd579233..94e7d0d286bc5a000ab3b767f9a49232
 +}
 +
 +function windowsProtectedRecursiveDelete(tokens: string[]) {
-+  // 三元组同时成立才 dangerous：命令名 + 递归开关 + 保护根（与 rm 语义对称）
++  // #530：三元组同时成立才 dangerous：命令名 + 递归开关 + 保护根（与 rm 语义对称）
 +  if (tokens.length < 2) return false
 +  const cmd = normalizeCommandName(tokens[0])
 +  if (cmd !== "del" && cmd !== "erase" && cmd !== "rd" && cmd !== "rmdir") return false
@@ -558,12 +558,12 @@ index 965b758b4294deaa22c7d302b0cbf129cd579233..94e7d0d286bc5a000ab3b767f9a49232
 +  return hasWindowsRecursiveDeleteFlag(rest) && rest.some(protectedDeleteTarget)
 +}
 +
-+// 仅空白切分并保留 \。POSIX tokenize 把 \ 当转义吞掉，C:\Users 会变成 C:Users 导致保护根 FN。
++// #530：仅空白切分并保留 \。POSIX tokenize 把 \ 当转义吞掉，C:\Users 会变成 C:Users 导致保护根 FN。
 +function windowsCmdTokens(segment: string) {
 +  return segment.trim().split(/\s+/).filter(Boolean)
 +}
 +
-+// normalize 后按段扫描；sole windowsCmdTokens，禁止再顺序 tokenize（R5）
++// #530：normalize 后按段扫描；sole windowsCmdTokens，禁止再顺序 tokenize（R5 impl audit B-01）
 +function windowsProtectedDeleteInCommand(normalized: string) {
 +  for (const segment of normalized.split(/[;|&]+/)) {
 +    const trimmed = segment.trim()
@@ -573,29 +573,28 @@ index 965b758b4294deaa22c7d302b0cbf129cd579233..94e7d0d286bc5a000ab3b767f9a49232
 +  return false
 +}
 +
+ // #220：protectedDeleteTarget——保护根目录覆盖 POSIX 根、家目录、Windows 盘符、系统目录和 macOS 特有目录
  function protectedDeleteTarget(input: string) {
-   // 保护根目录覆盖本地 POSIX 根、常见家目录别名、Windows 驱动器根、
-   // 系统目录和 macOS 特有目录。这些是递归删除被视为 dangerous 而非
-@@ -1477,8 +1522,9 @@ function protectedDeleteTarget(input: string) {
-   if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
-   // 家目录别名
+   // 折叠多斜杠并解析 .. 穿越，保证 /home//user、/home/../etc 等形式正确判定
+@@ -1191,6 +1242,8 @@ function protectedDeleteTarget(input: string) {
    if (normalized === "~" || normalized === "$HOME") return true
--  // Windows 环境变量家目录
-+  // Windows 环境变量家目录（%USERPROFILE% 大小写不敏感，对齐旧 raw i 旗）
+   // #220: Windows 环境变量家目录
    if (normalized === "$env:USERPROFILE" || normalized === "$env:SystemDrive") return true
++  // #530：Windows 环境变量家目录（%USERPROFILE% 大小写不敏感，对齐旧 raw i 旗）
 +  if (normalized.toLowerCase() === "%userprofile%") return true
-   // Windows 驱动器根：C:\ 或 C:
    if (/^\w:\/?$/.test(normalized)) return true
-   // POSIX 系统根目录（扩展版）
+   // #220: POSIX 系统根目录（扩展版）
+   const posixRoots = new Set([
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index a5eeeac5a833366a9f907d8bf90cce484474cc40..f0d4d64165633749a7b21f3e54bba06be3163f6a 100644
+index c27b0b351..44b1a2933 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -142,6 +142,23 @@ describe("permission precheck bash classifier", () => {
+@@ -279,6 +279,23 @@ describe("permission precheck bash classifier", () => {
      expect(bash("format C:")).toMatchObject({ level: "dangerous" })
      expect(bash("rmdir /s /q C:\\Users\\Alice")).toMatchObject({ level: "dangerous" })
      expect(bash("del /s /q %USERPROFILE%")).toMatchObject({ level: "dangerous" })
-+    // cmd 合并开关 /s/q、/s/p 与盘根 X: 必须保持 Windows protected dangerous（不得 demote）
++    // #530：cmd 合并开关 /s/q、/s/p 与盘根 X: 必须保持 Windows protected dangerous（不得 demote）
 +    expect(bash(String.raw`rmdir /s/q C:\Users\Alice`)).toMatchObject({
 +      level: "dangerous",
 +      reason: "Windows protected directory delete",
@@ -612,15 +611,16 @@ index a5eeeac5a833366a9f907d8bf90cce484474cc40..f0d4d64165633749a7b21f3e54bba06b
 +      level: "dangerous",
 +      reason: "Windows protected directory delete",
 +    })
+     // #217：$env:USERPROFILE/$env:SystemDrive 递归删除 dangerous——反引号闭合也命中
      expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "dangerous" })
      expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "dangerous" })
-     expect(bash("powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
-@@ -149,6 +166,27 @@ describe("permission precheck bash classifier", () => {
+@@ -287,6 +304,28 @@ describe("permission precheck bash classifier", () => {
      expect(bash("echo `rm -rf /`")).toMatchObject({ level: "dangerous" })
    })
  
++  // #530：旧整串正则的用户症状——python heredoc 内 del + tree-sitter 子串 -s + if not m: 盘符形
++  // 不得误报为 Windows protected directory delete（hard deny 会阻断整条命令）。
 +  test("does not treat python del plus package names as Windows protected directory delete", () => {
-+    // 用户症状：Python del + tree-sitter 子串 -s + if not m: 盘符形，不得 hard deny 本 family
 +    const command = [
 +      "python3 <<'PY'",
 +      'del pkg["x"]',
@@ -633,7 +633,7 @@ index a5eeeac5a833366a9f907d8bf90cce484474cc40..f0d4d64165633749a7b21f3e54bba06b
 +      level: "dangerous",
 +      reason: "Windows protected directory delete",
 +    })
-+    // 非单字母开关 token（/setup）不得借保护根抬升本 family
++    // #530：非单字母开关 token（/setup）不得借保护根抬升本 family
 +    expect(bash("del /setup C:")).not.toMatchObject({
 +      level: "dangerous",
 +      reason: "Windows protected directory delete",

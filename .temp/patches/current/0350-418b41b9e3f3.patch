@@ -691,18 +691,17 @@ index 0000000000000000000000000000000000000000..744f6cfb63aee91af9a39f9fa34f381c
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -36,7 +36,9 @@ export const PRUNE_PROTECT = 40_000
- // notice 完整含 path，避免模型压缩后丢失恢复文件路径。
+@@ -37,6 +37,8 @@ export const PRUNE_PROTECT = 40_000
+ // #328：400/2000 的不对称是刻意设计——头部只需容纳 notice 的 path 前缀，尾部要装完整恢复指引。
  const TOOL_OUTPUT_HEAD_CHARS = 400
  const TOOL_OUTPUT_TAIL_CHARS = 2_000
 -const PRUNE_PROTECTED_TOOLS = ["skill"]
 +// [local-smark] read 输出也受 prune 保护：compaction 后模型最常复用的是文件内容，
 +// 丢 read 证据会迫使模型重新读盘；skill 此前已受保护。
 +const PRUNE_PROTECTED_TOOLS = ["skill", "read"]
- const DEFAULT_TAIL_TURNS = 4
  // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
  const MIN_PRESERVE_RECENT_TOKENS = 4_000
-@@ -104,9 +106,13 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
+@@ -144,7 +146,11 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
  // #256：memento 预算没有下限——与整轮尾部不同，它是 summary+tail 之上的增量，
  // 小窗口模型必须允许把它缩到 0，否则压缩重放后立刻再次溢出。
  function preserveRecentUserBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
@@ -1411,15 +1410,15 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
          const result = yield* ops.prompt({
            messageID: MessageID.ascending(),
            sessionID: nextSession.id,
-@@ -222,9 +287,22 @@ export const TaskTool = Tool.define(
-           },
+@@ -237,4 +292,6 @@ export const TaskTool = Tool.define(
            variant: next.model ? undefined : variant,
            agent: next.name,
 -          parts,
 +          parts: parentContext
-+            ? [...parts, { type: "text" as const, text: `<parent_context>\n${parentContext}\n</parent_context>` } as const]
++            ? [...parts, { type: "text" as const, text: `<parent_context>\n${parentContext}\n</parent_context>` }]
 +            : parts,
          })
+@@ -252,2 +311,13 @@ export const TaskTool = Tool.define(
 -        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
 +        let text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
 +        // [local-smark] 空结果验证：子 agent 未产出任何文本时返回提示，
@@ -1434,9 +1433,6 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 +        }
 +        return text
        })
- 
-       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
-
 diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
 --- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
 +++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap

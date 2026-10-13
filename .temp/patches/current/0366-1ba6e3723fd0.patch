@@ -682,7 +682,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
  
  export function DialogSessionList() {
    const dialog = useDialog()
-@@ -73,44 +67,24 @@
+@@ -73,44 +67,25 @@
    // #120：sessionID -> 多行用户消息预览（非单行再折词）
    const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
  
@@ -731,7 +731,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 +  // SDK client 生成物上不存在 preview 方法，as any 调用会在运行时变成
 +  // undefined(...) 同步 TypeError 被 catch 吞掉；sdk.fetch 的 rewrite 仅处理
 +  // GET/HEAD，POST 需手动带 directory query param（#368 useGoalApi 同模式）
-+  async function loadPreviewsBatch(sessionIDs: string[]) {
++  async function loadPreviewsBatch(sessionIDs: string[], signal: AbortSignal) {
 +    const url = new URL("/session/preview", sdk.url)
 +    const dir = sync.path.directory || sdk.directory
 +    if (dir) url.searchParams.set("directory", dir)
@@ -739,13 +739,14 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 +      method: "POST",
 +      headers: { "Content-Type": "application/json" },
 +      body: JSON.stringify({ sessionIDs, limit: SESSION_LIST_PREVIEW_LINES }),
++      signal,
 +    })
 +    if (!resp.ok) return {}
 +    return (await resp.json()) as Record<string, string[]>
    }
  
    createEffect(
-@@ -124,23 +90,15 @@
+@@ -124,23 +90,19 @@
            .filter((s) => !(s.id in (previews() ?? {})))
          if (unloaded.length === 0) return
          void (async () => {
@@ -766,15 +767,20 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 -          }
 -          if (Object.keys(next).length > 0) {
 -            setPreviews((prev) => ({ ...prev, ...next }))
+-          }
++          // #366：竞态防护——每次 sessions 变化创建新 controller；onCleanup 在下次
++          // 触发或卸载时 abort，防止已取消的旧批量响应覆盖新数据（source AbortController 语义）。
++          const controller = new AbortController()
++          onCleanup(() => controller.abort())
 +          try {
 +            // #366：一次批量请求覆盖所有未加载会话；无用户消息的 session
 +            // 不在响应中——调用方按需跳过，与旧逻辑的 lines.length 守卫等价
-+            const next = await loadPreviewsBatch(unloaded.map((s) => s.id))
-+            if (Object.keys(next).length > 0) {
++            const next = await loadPreviewsBatch(unloaded.map((s) => s.id), controller.signal)
++            if (!controller.signal.aborted && Object.keys(next).length > 0) {
 +              setPreviews((prev) => ({ ...prev, ...next }))
 +            }
 +          } catch {
 +            // #120：预览失败不阻断列表
-           }
++          }
          })()
        },

@@ -499,22 +499,14 @@ index 0000000000000000000000000000000000000000..ba319d9cc1d5c3e2f98add75568e3bb1
 +| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 +| --- | --- | --- | --- | --- | --- | --- |
 +|  |  | yes |  |  |  |  |
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd8c614008 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-@@ -2,7 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
- import { DialogSelect } from "@tui/ui/dialog-select"
- import { useRoute } from "@tui/context/route"
- import { useSync } from "@tui/context/sync"
--import { createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount, type JSX } from "solid-js"
-+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from "solid-js"
- import { Locale } from "@/util/locale"
- import { useProject } from "@tui/context/project"
- import { useTheme } from "../context/theme"
+
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+index bae4467f2..c8cda1f05 100644
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
 @@ -19,10 +19,17 @@ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
- import { WorkspaceLabel } from "./workspace-label"
  import { useCommandShortcut } from "../keymap"
+ import { useEvent } from "../context/event"
  import {
 -  resolveSessionListSource,
 +  appendScanHits,
@@ -528,25 +520,30 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
    SESSION_LIST_LOOKBACK_MS,
    SESSION_LIST_SEARCH_LIMIT,
 +  type SearchPhase,
- } from "@tui/util/session-list-params"
+ } from "../util/session-list-params"
  
- type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
-@@ -43,11 +50,164 @@ export function DialogSessionList() {
+ type SessionListFilter = { scope?: "project"; path?: string }
+@@ -96,6 +103,178 @@ export function DialogSessionList() {
    const [search, setSearch] = createDebouncedSignal("", 150)
-   // [local-smark] Session list preview functionality
+   // #120：sessionID -> 多行用户消息预览（非单行再折词）
    const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
-+  // progressive search 状态：generation 与 Abort 绑定 committed query
++  // #544 progressive search 状态：generation 与 Abort 绑定 committed query。
++  // 单一 generation 计数器拒绝过期写回：每次改词自增，异步回调比对后才可 set 信号。
 +  const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
-+  // success complete 只信 scan；error complete 保留 title∪scan（INV-12 已展示 hits）
++  // success complete 只信 scan；error complete 保留 title∪scan（已展示 hits 不抹掉）
++  // terminal 与 phase 分离：phase 驱动 Spinner/文案，terminal 决定 complete 的展示集合来源。
 +  const [searchTerminal, setSearchTerminal] = createSignal<"success" | "error" | undefined>()
++  // title 首屏与 scan 权威流分开存：partial 需要 union 展示，complete 需要单选 scan。
 +  const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
 +  const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
 +  let searchGeneration = 0
 +  let searchController: AbortController | undefined
 +
++  // Hit 形状与 browse 同源（Session.Info）——visibleSessions/options 管道无需分支适配。
 +  type SessionHit = (typeof sync.data.session)[number]
 +
-+  // 与 Path A browse 相同 start/scope，保证 progressive 候选宇宙一致
++  // #544：与 browse 路径相同 start/scope，保证 progressive 候选宇宙一致
++  // sync.session.query() 返回 {scope,path} 过滤——start 由 lookback 常量统一注入。
 +  function sessionListScopeParams() {
 +    return {
 +      start: Date.now() - SESSION_LIST_LOOKBACK_MS,
@@ -554,14 +551,15 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +    }
 +  }
 +
-+  // POST/手写 GET 都需 directory query，workspace routing 才能定位实例
++  // #544：POST/手写 GET 都需 directory query，workspace routing 才能定位实例
 +  function directoryQuery(url: URL) {
++    // sync.path.directory 优先：workspace 子目录会话必须路由回其所属实例。
 +    const dir = sync.path.directory || sdk.directory
 +    if (dir) url.searchParams.set("directory", dir)
 +  }
 +
 +  /**
-+   * progressive Path B 主路径（R3）：
++   * #544 progressive Path B 主路径：
 +   * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
 +   * 2) contentDelay 后再串行 POST /session/search/scan
 +   * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
@@ -569,13 +567,14 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +   */
 +  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
 +    const scope = sessionListScopeParams()
++    // 起始即 awaiting_first：首个 title 响应到达前列表显示 Searching… 而非 Not Found。
 +    setSearchPhase("awaiting_first")
 +    setSearchTerminal(undefined)
 +    setTitleHits([])
 +    setScanFullHits([])
 +
 +    try {
-+      // B1：手写 GET，gen SDK 无 searchMode 字段（INV-11）
++      // B1：手写 GET，gen SDK 无 searchMode 字段；返回是首屏子集，禁止当作 complete 权威集合
 +      const titleUrl = new URL("/session", sdk.url)
 +      directoryQuery(titleUrl)
 +      titleUrl.searchParams.set("search", query)
@@ -586,16 +585,19 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +      if (scope.path) titleUrl.searchParams.set("path", scope.path)
 +      if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
 +
++      // limit 与 Path B 搜索上限同源：title 子集也被 cap 在 400，partial 展示不会超发。
 +      const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
 +      if (signal.aborted || generation !== searchGeneration) return
 +      if (titleRes.ok) {
 +        const titleData = (await titleRes.json()) as SessionHit[]
 +        if (signal.aborted || generation !== searchGeneration) return
++        // 非数组响应按空集处理：title 是增强首屏，坏响应不构成失败终态。
 +        setTitleHits(Array.isArray(titleData) ? titleData : [])
 +      }
 +      setSearchPhase("partial")
 +
 +      // contentDelay：输入 debounce 之后再等一截，慢打时少发过期 scan
++      // 该等待处于 generation 守卫之下：改词后旧代的 timer 会随 Abort 立即失效。
 +      await new Promise<void>((resolve, reject) => {
 +        const timer = setTimeout(resolve, SESSION_LIST_CONTENT_DELAY_MS)
 +        const onAbort = () => {
@@ -607,7 +609,8 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +      })
 +      if (signal.aborted || generation !== searchGeneration) return
 +
-+      // B2：串行 keyset scan；early-stop 只数 scanFullHits
++      // B2：串行 keyset scan——串行而非并发是为了 abort 即停与 SQLite 单写者压力。
++      // early-stop 只数 scanFullHits：title 是子集查询，计入会让 complete 偏离 list top-400。
 +      let cursor: { time_updated: number; id: string } | null = null
 +      let scanHits: SessionHit[] = []
 +      for (;;) {
@@ -617,6 +620,7 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +        const scanUrl = new URL("/session/search/scan", sdk.url)
 +        directoryQuery(scanUrl)
 +        const body = {
++          // start/scope/path 与 browse 同宇宙：候选窗不得引入第二套 scope 语义。
 +          search: query,
 +          cursor: cursor ?? undefined,
 +          batch: SESSION_LIST_CONTENT_BATCH,
@@ -636,6 +640,7 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +        // 非 2xx：标记 error 终态并退出；保留已展示 title/scan hits
 +        if (!scanRes.ok) {
 +          if (signal.aborted || generation !== searchGeneration) return
++          // error 终态仍算 complete：Spinner 停转，但已展示 title/scan hits 不清空。
 +          setSearchTerminal("error")
 +          setSearchPhase("complete")
 +          return
@@ -647,33 +652,36 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +        }
 +        if (signal.aborted || generation !== searchGeneration) return
 +        // 只累积 full-condition 命中；title overlay 不在此写入
++        // append 去重并保序：scan 页本身按 recency 返回，cap 截断即 early-stop 信号。
 +        scanHits = appendScanHits(scanHits, page.sessions ?? [])
 +        setScanFullHits(scanHits)
 +        setSearchPhase("partial")
-+        // done 或无 nextCursor：候选宇宙扫尽
++        // done 或无 nextCursor：候选宇宙扫尽（双条件防御服务端响应缺字段）。
 +        if (page.done || !page.nextCursor) break
 +        cursor = page.nextCursor
 +      }
 +
 +      if (signal.aborted || generation !== searchGeneration) return
-+      // 成功 complete：权威集合仅为 scanFullHits（INV-09）
++      // 成功 complete：权威集合仅为 scanFullHits——title overlay 从此不再参与展示
 +      setSearchTerminal("success")
 +      setSearchPhase("complete")
 +    } catch {
-+      // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback all
++      // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback browse
 +      if (signal.aborted || generation !== searchGeneration) return
 +      setSearchTerminal("error")
 +      setSearchPhase("complete")
 +    }
 +  }
 +
-+  // committed query 变化：清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
++  // #544：committed query 变化——清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
++  // onCleanup 兜底 abort：组件卸载时进行中的请求不允许写回已销毁的信号图。
 +  createEffect(
 +    on(
 +      () => search(),
 +      (query) => {
 +        searchController?.abort()
 +        if (!query) {
++          // 清空是显式回 browse：自增 generation 使任何 in-flight 写回立即过期。
 +          searchGeneration += 1
 +          searchController = undefined
 +          setSearchPhase(undefined)
@@ -682,7 +690,7 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +          setScanFullHits([])
 +          return
 +        }
-+        // 新 generation 立即丢弃旧 hits，避免 C→CJ 串味
++        // 新 generation 立即丢弃旧 hits，避免改词串味
 +        const generation = ++searchGeneration
 +        const controller = new AbortController()
 +        searchController = controller
@@ -692,59 +700,35 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +    ),
 +  )
  
-   // [local-smark] session list preview: 批量获取预览文本
--  // 单次 POST /session/preview 替代原来 N×M 次 session.messages 分页调用。
--  // AbortController 保证 dialog 关闭或搜索切换时取消 in-flight 请求；
--  // signal.aborted 守卫防止已取消的响应覆盖新数据（竞态防护）
-   createEffect(
-     on(
-       () => sessions(),
-@@ -59,17 +219,13 @@ export function DialogSessionList() {
-           .map((s) => s.id)
-         if (ids.length === 0) return
- 
--        // 每次 sessions 变化创建新 controller；onCleanup 在下次触发或卸载时 abort
-         const controller = new AbortController()
-         onCleanup(() => controller.abort())
- 
-         void (async () => {
-           try {
--            // POST 请求需手动设置 directory query param（sdk.fetch 的 rewrite
--            // 仅处理 GET/HEAD），确保 workspace routing 中间件正确定位实例
-             const url = new URL("/session/preview", sdk.url)
--            const dir = sync.path.directory || sdk.directory
--            if (dir) url.searchParams.set("directory", dir)
-+            directoryQuery(url)
- 
-             const res = await sdk.fetch(url, {
-               method: "POST",
-@@ -79,8 +235,6 @@ export function DialogSessionList() {
-             })
-             if (!res.ok) return
-             const data = (await res.json()) as Record<string, string[]>
--            // 竞态守卫：若请求完成时已被 abort，不覆盖新数据
--            // 无条件 setPreviews(data)：空响应也需覆盖，避免搜索切换后残留过期预览
-             if (!controller.signal.aborted) {
-               setPreviews(data)
-             }
-@@ -96,30 +250,36 @@ export function DialogSessionList() {
-   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
-   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
- 
+   // [local-smark] #366：批量预览——单次 POST /session/preview 拉取全部未加载
+   // session 的预览文本，替代逐 session 分页扫描（N×M 次请求 → 1 次）。
+@@ -106,8 +285,7 @@ export function DialogSessionList() {
+   // GET/HEAD，POST 需手动带 directory query param（#368 useGoalApi 同模式）
+   async function loadPreviewsBatch(sessionIDs: string[], signal: AbortSignal) {
+     const url = new URL("/session/preview", sdk.url)
+-    const dir = sync.path.directory || sdk.directory
+-    if (dir) url.searchParams.set("directory", dir)
++    directoryQuery(url)
+     const resp = await sdk.fetch(url, {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+@@ -155,28 +333,40 @@ export function DialogSessionList() {
+     () => sync.session.query(),
+     (filter) => loadDialogSessionList({ filter, list: (query) => sdk.client.session.list(query) }),
+   )
 -  const [searchResults, { refetch }] = createResource(
 -    () => ({ query: search(), filter: sync.session.query() }),
--    async (input) => {
+-    (input) => {
 -      if (!input.query) return undefined
--      const result = await sdk.client.session.list({
+-      return loadDialogSessionList({
 -        search: input.query,
--        start: Date.now() - SESSION_LIST_LOOKBACK_MS,
--        limit: SESSION_LIST_SEARCH_LIMIT,
--        ...input.filter,
+-        filter: input.filter,
+-        list: (query) => sdk.client.session.list(query),
 -      })
--      return result.data ?? []
 -    },
 -  )
-+  // 删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
++  // #544：删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
++  // browse 侧由调用点 refetchBrowse 负责；此处只重建 search 代，避免双拉。
 +  function refetchSearch() {
 +    const query = search()
 +    if (!query) return
@@ -756,7 +740,10 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +  }
  
    const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
--  // 以 debounced query 门闩合流：空串回 Path A；活跃搜索只用 searchResults（含 []）
+-  // #529：以 debounced query 门闩合流：空串回 browse；活跃搜索只消费 searchResults（含 []），
+-  // 修复 createResource loading（undefined）短暂回退浏览列表的 stale 竞态。
++  // #544：partial 展示 = title overlay ∪ scan 流；success complete 只信 scanFullHits
++  // resolveDisplayHits 把终态选择集中到 util——组件不复制集合选择规则。
 +  const displayHits = createMemo(() =>
 +    resolveDisplayHits({
 +      phase: searchPhase(),
@@ -765,6 +752,7 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 +      scanFullHits: scanFullHits(),
 +    }),
 +  )
++  // #529/#544：空 query 回 browse；非空 query 全程停留在 search 源（含 loading），禁止回退闪现
    const listSource = createMemo(() =>
 -    resolveSessionListSource({
 +    resolveProgressiveSessionListSource({
@@ -772,63 +760,76 @@ index 402dda8b529d48feb84657cf9f8566a7ce638e70..21a8960f908d9a1e46dff36dc9362efd
 -      searchResults: searchResults(),
 +      phase: searchPhase(),
 +      hits: displayHits(),
-       browse: sync.data.session,
+       browse: browseResults() ?? sync.data.session,
      }),
    )
-   const sessions = createMemo(() => listSource().sessions)
++  // Spinner 门控 memo：empty 文案与 Spinner 共用同一 phase，两者状态不会分叉。
 +  const searching = createMemo(() => isSessionSearchLoading(search(), searchPhase()))
- 
-   function recover(session: NonNullable<ReturnType<typeof sessions>[number]>) {
-     const workspace = project.workspace.get(session.workspaceID!)
-@@ -175,7 +335,7 @@ export function DialogSessionList() {
-           }
+   const sessions = createMemo(() => {
+     const result = listSource().sessions
+     const synced = new Map(sync.data.session.map((session) => [session.id, session]))
+@@ -266,7 +456,7 @@ export function DialogSessionList() {
            await project.workspace.sync()
            await sync.session.refresh()
+           await refetchBrowse()
 -          if (search()) await refetch()
 +          if (search()) refetchSearch()
            if (info?.workspaceID === session.workspaceID) {
              route.navigate({ type: "home" })
            }
-@@ -298,7 +458,9 @@ export function DialogSessionList() {
-       title="Sessions"
+@@ -381,14 +571,18 @@ export function DialogSessionList() {
        options={options()}
        skipFilter={true}
--      empty={sessionListEmptyLabel(search())}
-+      empty={sessionListEmptyLabel(search(), searchPhase())}
-+      // loading（含 partial）时搜索栏右侧转圈，直至 complete
-+      filterAccessory={searching() ? <Spinner /> : undefined}
+       preserveSelection={true}
+-      // #529：搜索空命中时展示 Not Found <query>，不回退浏览列表也不误用默认文案
++      // #529/#544：搜索空命中展示 Not Found <query>；loading（awaiting/partial）展示 Searching…
+       emptyView={
+-        sessionListEmptyLabel(search()) ? (
++        sessionListEmptyLabel(search(), searchPhase()) ? (
+           <box paddingLeft={4} paddingRight={4} paddingTop={1}>
+-            <text fg={theme.textMuted}>{sessionListEmptyLabel(search())}</text>
++            <text fg={theme.textMuted}>{sessionListEmptyLabel(search(), searchPhase())}</text>
+           </box>
+         ) : undefined
+       }
++      filterAccessory={
++        // #544：loading（含 partial）时搜索栏右侧转圈，直至 complete
++        searching() ? <Spinner /> : undefined
++      }
        current={currentSessionID()}
        onFilter={setSearch}
        onMove={() => {
-@@ -360,7 +522,7 @@ export function DialogSessionList() {
-               if (status && status !== "connected") {
+@@ -451,7 +645,7 @@ export function DialogSessionList() {
                  await sync.session.refresh()
                }
+               await refetchBrowse()
 -              if (search()) await refetch()
 +              if (search()) refetchSearch()
                setToDelete(undefined)
                return
              }
-diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-index f8ea7c20f66d48578c57fd7af4fe93e80536d8a8..c89841d2fecc049d3cf0afc16cc2d410a281b34f 100644
---- a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-@@ -33,6 +33,8 @@ export interface DialogSelectProps<T> {
-   renderFilter?: boolean
-   /** 列表为空时的文案；默认 No results found（Session list 搜索无命中可注入 Not Found …） */
-   empty?: string
-+  /** 搜索框右侧附属（如 progressive 搜索 Spinner） */
+
+diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
+index f5a8c7e91..f86c427e7 100644
+--- a/packages/tui/src/ui/dialog-select.tsx
++++ b/packages/tui/src/ui/dialog-select.tsx
+@@ -56,6 +56,8 @@ export interface DialogSelectProps<T> {
+   currentKey?: string
+   // 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度
+   header?: JSX.Element
++  // #544：搜索框右侧附属（如 progressive 搜索 Spinner）
 +  filterAccessory?: JSX.Element
-   actions?: {
-     command: string
-     title: string
-@@ -421,29 +423,37 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+ }
+ 
+ export interface DialogSelectOption<T = any> {
+@@ -647,31 +649,40 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
            </text>
          </box>
          <Show when={props.renderFilter !== false}>
 -          <box paddingTop={1}>
 -            <input
 -              onInput={(e) => {
+-                if (props.locked) return
 -                batch(() => {
 -                  setStore("filter", e)
 -                  props.onFilter?.(e)
@@ -836,6 +837,7 @@ index f8ea7c20f66d48578c57fd7af4fe93e80536d8a8..c89841d2fecc049d3cf0afc16cc2d410
 -              }}
 -              focusedBackgroundColor={theme.backgroundPanel}
 -              cursorColor={theme.primary}
+-              cursorStyle={tuiConfig.cursor}
 -              focusedTextColor={theme.textMuted}
 -              ref={(r) => {
 -                input = r
@@ -853,6 +855,7 @@ index f8ea7c20f66d48578c57fd7af4fe93e80536d8a8..c89841d2fecc049d3cf0afc16cc2d410
 +            <box flexGrow={1}>
 +              <input
 +                onInput={(e) => {
++                  if (props.locked) return
 +                  batch(() => {
 +                    setStore("filter", e)
 +                    props.onFilter?.(e)
@@ -860,6 +863,7 @@ index f8ea7c20f66d48578c57fd7af4fe93e80536d8a8..c89841d2fecc049d3cf0afc16cc2d410
 +                }}
 +                focusedBackgroundColor={theme.backgroundPanel}
 +                cursorColor={theme.primary}
++                cursorStyle={tuiConfig.cursor}
 +                focusedTextColor={theme.textMuted}
 +                ref={(r) => {
 +                  input = r
@@ -874,7 +878,8 @@ index f8ea7c20f66d48578c57fd7af4fe93e80536d8a8..c89841d2fecc049d3cf0afc16cc2d410
 +                placeholderColor={theme.textMuted}
 +              />
 +            </box>
-+            {/* 可选右侧槽：Session list progressive 搜索把 Spinner 挂在这里 */}
++            {/* #544：可选右侧槽——Session list progressive 搜索把 Spinner 挂在这里；
++                flexGrow 包输入框保证窄终端下输入区优先占宽，附属只取固有宽度。*/}
 +            <Show when={props.filterAccessory}>
 +              <box flexShrink={0} justifyContent="center">
 +                {props.filterAccessory}
@@ -883,25 +888,23 @@ index f8ea7c20f66d48578c57fd7af4fe93e80536d8a8..c89841d2fecc049d3cf0afc16cc2d410
            </box>
          </Show>
        </box>
-diff --git a/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts b/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts
-index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb56819310e271c9 100644
---- a/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/session-list-params.ts
-@@ -2,8 +2,21 @@
- export const SESSION_LIST_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000
- // 浏览缓存上限：默认打开 Sessions 列表时的 session.list limit
+
+diff --git a/packages/tui/src/util/session-list-params.ts b/packages/tui/src/util/session-list-params.ts
+index eb237fb32..fac72c00a 100644
+--- a/packages/tui/src/util/session-list-params.ts
++++ b/packages/tui/src/util/session-list-params.ts
+@@ -4,6 +4,19 @@ export const SESSION_LIST_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000
  export const SESSION_LIST_BROWSE_LIMIT = 1600
--// 搜索结果上限：内容或标题命中后只保留最近更新的 N 条
-+// 搜索结果上限：与 list({search,limit}) 对齐，progressive complete 也必须 ≤ 此值
+ // #529：搜索结果上限：内容或标题命中后只保留最近更新的 N 条
  export const SESSION_LIST_SEARCH_LIMIT = 400
-+// B2：每批扫描的「候选」session 数（不是命中数）；串行以利 abort 与 SQLite 压力
++// #544 B2：每批扫描的「候选」session 数（不是命中数）；串行以利 abort 与 SQLite 压力
 +export const SESSION_LIST_CONTENT_BATCH = 50
-+// title 首屏后、启动 full-condition scan 前的额外等待（毫秒），吸收慢打改词
++// #544：title 首屏后、启动 full-condition scan 前的额外等待（毫秒），吸收慢打改词
 +// 与输入 debounce(150ms) 分工：debounce 稳定 committed query，本值推迟昂贵 scan
 +export const SESSION_LIST_CONTENT_DELAY_MS = 250
 +
 +/**
-+ * progressive 搜索阶段。
++ * #544 progressive 搜索阶段。
 + * - awaiting_first：title 请求未回，列表 empty=Searching…，禁止 Not Found
 + * - partial：可有 title overlay 与部分 scan 命中，Spinner 仍转
 + * - complete：权威结果仅 scanFullHits（或失败终态），Spinner 关
@@ -909,21 +912,22 @@ index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb568193
 +export type SearchPhase = "awaiting_first" | "partial" | "complete"
  
  /**
-  * Path A/B 数据源合流。
-@@ -20,8 +33,98 @@ export function resolveSessionListSource<T>(input: {
+  * #529：Path A/B 数据源合流。
+@@ -16,12 +29,106 @@ export function resolveSessionListSource<T>(input: {
+   searchResults: T[] | undefined
+   browse: T[]
+ }): { source: "browse" | "search"; sessions: T[] } {
++  // 空 query 是唯一合法回 browse 的路径：progressive 各阶段都禁止静默回退。
+   if (!input.query) return { source: "browse", sessions: input.browse }
    return { source: "search", sessions: input.searchResults ?? [] }
  }
  
--/** 仅搜索路径展示 Not Found；浏览路径沿用 DialogSelect 默认 empty */
+-/** #529：仅搜索路径展示 Not Found；浏览路径返回 undefined 沿用 DialogSelect 默认 empty */
 -export function sessionListEmptyLabel(query: string) {
 +/**
-+ * progressive 视图：非空 query 时用 phase + hits，不再把 loading 伪装成 Not Found。
++ * #544 progressive 视图：非空 query 时用 phase + hits，不再把 loading 伪装成 Not Found。
 + * complete 且 hits 空才走 empty 文案；browse 在 query 空时。
-+ *
-+ * 与 resolveSessionListSource 的关系：
-+ * - 旧函数仍服务兼容测试与「searchResults 数组」形态
-+ * - 新 progressive 路径必须走本函数，才能表达 awaiting_first/partial/complete
-+ * - 任一非空 query 都禁止 ?? 回 browse，否则搜索中会闪现其它会话
++ * 任一非空 query 都禁止 ?? 回 browse，否则搜索中会闪现其它会话。
 + */
 +export function resolveProgressiveSessionListSource<T>(input: {
 +  query: string
@@ -931,26 +935,29 @@ index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb568193
 +  hits: T[]
 +  browse: T[]
 +}): { source: "browse" | "search"; sessions: T[]; phase?: SearchPhase } {
++  // 空 query 是唯一合法回 browse 的路径：progressive 各阶段都禁止静默回退。
 +  if (!input.query) return { source: "browse", sessions: input.browse }
 +  // awaiting_first / partial / complete 均停留在 search 源，禁止回 browse
 +  return { source: "search", sessions: input.hits, phase: input.phase ?? "awaiting_first" }
 +}
 +
-+/** 仅搜索路径展示 empty；browse 沿用 DialogSelect 默认 */
++/** #529/#544：仅搜索路径展示 empty；browse 返回 undefined 沿用默认 */
 +export function sessionListEmptyLabel(query: string, phase?: SearchPhase) {
    if (!query) return undefined
-+  // loading 与真·无命中必须可分：未 complete 前禁止 Not Found
++  // #544：loading 与真·无命中必须可分——未 complete 前禁止 Not Found
++  // Searching… 是显式 loading 文案：修复旧版把 undefined 伪装成 Not Found 的假空态。
 +  if (phase === "awaiting_first" || phase === "partial") return "Searching…"
    return `Not Found ${query}`
  }
 +
++// #544：Spinner 门控与 empty 文案共用 phase 语义——query 为空时 browse 永不算 loading。
 +export function isSessionSearchLoading(query: string, phase: SearchPhase | undefined) {
 +  if (!query) return false
 +  return phase !== "complete"
 +}
 +
 +/**
-+ * partial 展示：title overlay ∪ scan 流，按 recency 排序后 cap。
++ * #544 partial 展示：title overlay ∪ scan 流，按 recency 排序后 cap。
 + * 不定义 complete：complete 时调用方应只传 scanFullHits / 直接显示 scanFullHits。
 + * scan 条目覆盖同 id 的 title 条目，保证展示字段以更新后的 Info 为准。
 + */
@@ -959,6 +966,7 @@ index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb568193
 +  scanFullHits: T[],
 +  cap = SESSION_LIST_SEARCH_LIMIT,
 +): T[] {
++  // Map 去重以 scan 为准：同 id 时后写入的 scan 条目覆盖 title 旧快照。
 +  const byId = new Map<string, T>()
 +  // 先 title 后 scan：同 id 时 scan 覆盖 title
 +  for (const item of titleHits) byId.set(item.id, item)
@@ -970,16 +978,17 @@ index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb568193
 +}
 +
 +/**
-+ * early-stop 只数 full-condition scan 命中长度。
++ * #544：early-stop 只数 full-condition scan 命中长度。
 + * 禁止用 titleHits.length：title 是全宇宙子集查询，计入 stop 会跳过 recency 前缀 scan，
 + * 使 complete 偏离今日 list({search,limit:400})。
 + */
++// #544：cap 与服务端 list LIMIT 同值——early-stop 后的集合与一次性 search 查询等价。
 +export function shouldStopSearchScan(scanFullHitsLength: number, cap = SESSION_LIST_SEARCH_LIMIT) {
 +  return scanFullHitsLength >= cap
 +}
 +
 +/**
-+ * 列表展示 hits 选择：
++ * #544 列表展示 hits 选择：
 + * - success complete → 仅 scan（权威 top-400）
 + * - error complete / partial / awaiting → title∪scan，避免失败抹掉已展示首屏
 + */
@@ -990,16 +999,18 @@ index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb568193
 +  scanFullHits: T[]
 +  cap?: number
 +}): T[] {
++  // 双条件终态判定：只有 success+complete 才丢弃 title——error complete 保留首屏。
 +  if (input.phase === "complete" && input.terminal === "success") return input.scanFullHits
 +  return mergeDisplayHits(input.titleHits, input.scanFullHits, input.cap)
 +}
 +
-+// 保持 scan 页返回顺序（已是 recency），满 cap 即截断供 early-stop 使用
++// #544：保持 scan 页返回顺序（已是 recency），满 cap 即截断供 early-stop 使用
 +export function appendScanHits<T extends { id: string }>(
 +  scanFullHits: T[],
 +  pageMatches: T[],
 +  cap = SESSION_LIST_SEARCH_LIMIT,
 +): T[] {
++  // keyset 翻页理论上不重复，seen 仅防御并发代写回与游标重放。
 +  const seen = new Set(scanFullHits.map((item) => item.id))
 +  const next = [...scanFullHits]
 +  for (const item of pageMatches) {
@@ -1011,22 +1022,25 @@ index c3d0738490be30e2fa32433664caf89c6b5bb42b..f45f93c4634be1fd17107deffb568193
 +  }
 +  return next.slice(0, cap)
 +}
+
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-index 77a5447d4eda276d574536913ff7d882e0eb6c09..b8aa33796c8bea8470bd193cf05d8e107334ed35 100644
+index ade7baa26..33807fcd6 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
-@@ -33,8 +33,37 @@ export const ListQuery = Schema.Struct({
+@@ -36,8 +36,40 @@ export const ListQuery = Schema.Struct({
    roots: Schema.optional(QueryBoolean),
    start: Schema.optional(Schema.NumberFromString),
    search: Schema.optional(Schema.String),
-+  // title：progressive 首屏子集；缺省或 all：完整 title∨content（兼容旧客户端与 SDK）
++  // #544：title：progressive 首屏子集；缺省或 all：完整 title∨content（兼容旧客户端与 SDK）
 +  // 不得把 title 模式的结果当作 complete 权威集合
 +  searchMode: Schema.optional(Schema.Literals(["title", "all"] as const)),
    limit: Schema.optional(Schema.NumberFromString),
  })
-+// progressive B2 载荷：cursor 为候选页末行 keyset，batch 是候选窗不是命中数
++// #544 progressive B2 载荷：cursor 为候选页末行 keyset，batch 是候选窗不是命中数
++// batch clamp 在 schema（1-100）与服务层双保险：wire 层先拒明显滥用值。
 +export const SearchScanPayload = Schema.Struct({
 +  search: Schema.String,
++  // cursor 二元组与 orderBy(time_updated DESC, id DESC) 同序——乱序游标会漏行/重复。
 +  cursor: Schema.optional(
 +    Schema.Struct({
 +      time_updated: Schema.Number,
@@ -1040,6 +1054,7 @@ index 77a5447d4eda276d574536913ff7d882e0eb6c09..b8aa33796c8bea8470bd193cf05d8e10
 +  start: Schema.optional(Schema.Number),
 +  directory: Schema.optional(Schema.String),
 +})
++// nextCursor 为 null 即宇宙耗尽；sessions 只含 full-condition 命中，不含 title-only 命中。
 +export const SearchScanResponse = Schema.Struct({
 +  sessions: Schema.Array(Session.Info),
 +  nextCursor: Schema.NullOr(
@@ -1053,21 +1068,21 @@ index 77a5447d4eda276d574536913ff7d882e0eb6c09..b8aa33796c8bea8470bd193cf05d8e10
  export const DiffQuery = Schema.Struct({
    ...WorkspaceRoutingQueryFields,
    ...Struct.omit(SessionSummary.DiffInput.fields, ["sessionID"]),
-@@ -212,6 +241,9 @@ export const SessionPaths = {
-   goal: `${root}/:sessionID/goal`,
-   // [local-smark] 预览端点：POST /session/preview，批量返回 session 预览文本
+@@ -152,6 +184,9 @@ export const SessionPaths = {
+   // POST 语义而非 GET——sessionID 列表作为 payload 传输，规避 URL 长度限制
+   // 路径不含 :sessionID，需要 workspace-routing 添加例外避免品牌校验
    preview: `${root}/preview`,
-+  // progressive search B2：同 list 宇宙 keyset 候选批 + full-condition 命中
++  // #544 progressive search B2：同 list 宇宙 keyset 候选批 + full-condition 命中
 +  // TUI 用手写 sdk.fetch 调用，避免 gen SDK 缺字段
 +  searchScan: `${root}/search/scan`,
  } as const
  
  export const SessionApi = HttpApi.make("session")
-@@ -642,6 +674,20 @@ export const SessionApi = HttpApi.make("session")
+@@ -579,6 +614,20 @@ export const SessionApi = HttpApi.make("session")
                "Retrieve the most recent user message text for multiple sessions in a single request.",
            }),
          ),
-+        // 与 preview 同组：实例路由 + workspace middleware，body 带 search/cursor/batch
++        // #544：与 preview 同组——实例路由 + workspace middleware，body 带 search/cursor/batch
 +        HttpApiEndpoint.post("searchScan", SessionPaths.searchScan, {
 +          query: WorkspaceRoutingQuery,
 +          payload: SearchScanPayload,
@@ -1082,29 +1097,30 @@ index 77a5447d4eda276d574536913ff7d882e0eb6c09..b8aa33796c8bea8470bd193cf05d8e10
 +          }),
 +        ),
        )
-       .annotateMerge(
+ .annotateMerge(
          OpenApi.annotations({
+
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 50aa5507824c49f22ed64afb6f530f67cc69b227..65530d6f38d677309663640047eb15323b2087d9 100644
+index d9161bb78..18538334f 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -37,6 +37,7 @@ import {
+@@ -40,6 +40,7 @@ import {
+   MessagesQuery,
    PermissionResponsePayload,
-   // [local-smark] session preview payload schema
    PreviewPayload,
 +  SearchScanPayload,
    PromptPayload,
    RevertPayload,
    ShellPayload,
-@@ -67,6 +68,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-     const bus = yield* Bus.Service
-     const scope = yield* Scope.Scope
+@@ -85,6 +86,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+         return yield* store.provide({ directory: info.directory }, effect)
+       })
  
-+    // searchMode 原样透传：缺省/all 保持旧全量搜索；title 供 progressive 首屏
++    // #544：searchMode 原样透传——缺省/all 保持旧全量搜索；title 供 progressive 首屏
      const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
+       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
        return yield* session.list({
-         directory: ctx.query.scope === "project" ? undefined : ctx.query.directory,
-@@ -75,10 +77,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -94,10 +96,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
          roots: ctx.query.roots,
          start: ctx.query.start,
          search: ctx.query.search,
@@ -1113,13 +1129,13 @@ index 50aa5507824c49f22ed64afb6f530f67cc69b227..65530d6f38d677309663640047eb1532
        })
      })
  
-+    // progressive B2 HTTP：payload 带 scope 字段，directory 与 list 一样受 scope=project 影响
-+    // query.directory 作缺省，避免 TUI 只在 URL 上带 directory 时丢 scope
++    // #544 progressive B2 HTTP：payload 带 scope 字段，directory 与 list 一样受 scope=project 影响
 +    const searchScan = Effect.fn("SessionHttpApi.searchScan")(function* (ctx: {
 +      payload: typeof SearchScanPayload.Type
 +      query: { directory?: string }
 +    }) {
 +      const payload = ctx.payload
++      const directory = payload.directory ?? (ctx.query.directory ? yield* InstanceState.directory : undefined)
 +      return yield* session.searchScan({
 +        search: payload.search,
 +        cursor: payload.cursor,
@@ -1129,30 +1145,31 @@ index 50aa5507824c49f22ed64afb6f530f67cc69b227..65530d6f38d677309663640047eb1532
 +        roots: payload.roots,
 +        start: payload.start,
 +        // scope=project 时忽略 directory，与 SessionHttpApi.list 一致
-+        directory: payload.scope === "project" ? undefined : (payload.directory ?? ctx.query.directory),
++        directory: payload.scope === "project" ? undefined : directory,
 +      })
 +    })
 +
      const status = Effect.fn("SessionHttpApi.status")(function* () {
        return Object.fromEntries(yield* statusSvc.list())
      })
-@@ -637,5 +660,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-       .handle("goalClear", goalClear)
-       // [local-smark] session preview handler 注册
-       .handle("preview", preview as any)
-+      .handle("searchScan", searchScan as any)
+@@ -737,5 +760,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     // [local-smark] session preview handler 注册：ctx 形状与 Effect.fn 声明
+     // 存在差异（实际 ctx 含 query 字段），保持 as any 与 source 一致
+     .handle("preview", preview as any)
++    .handle("searchScan", searchScan as any)
    }),
  )
-diff --git a/packages/opencode/src/session/search.ts b/packages/opencode/src/session/search.ts
-index a83e2590f6b29a7073be31498aa7022495449cc9..b82a07e64aff2245085df74d6a9290242ea20bbf 100644
---- a/packages/opencode/src/session/search.ts
-+++ b/packages/opencode/src/session/search.ts
-@@ -19,7 +19,11 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./se
-  * 多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
-  * token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
-  */
+
+diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
+index 976ca155b..93e13f965 100644
+--- a/packages/core/src/session/search.ts
++++ b/packages/core/src/session/search.ts
+@@ -9,7 +9,11 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sq
+ // 空白搜索返回 undefined，避免 instr(text, "") 把所有行都当作命中。
+ // #529：多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
+ // token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
 -export function searchCondition(search: string): SQL | undefined {
-+// title = progressive 首屏子集；all = 今日完整合同（每 token title∨content）
++// #544：title = progressive 首屏子集；all = 完整合同（每 token title∨content）
 +// complete 路径与 searchScan 必须使用 all，禁止用 title 定义最终召回
 +export type SearchMode = "title" | "all"
 +
@@ -1160,41 +1177,54 @@ index a83e2590f6b29a7073be31498aa7022495449cc9..b82a07e64aff2245085df74d6a929024
    const tokens = search
      .trim()
      .toLowerCase()
-@@ -27,12 +31,19 @@ export function searchCondition(search: string): SQL | undefined {
-     .filter((token) => token.length > 0)
+@@ -18,13 +22,21 @@ export function searchCondition(search: string): SQL | undefined {
+   // #265：返回 undefined 而非恒真 SQL——上层跳过整个搜索分支，避免空串全表命中
    if (tokens.length === 0) return undefined
  
-+  // title 模式故意不扫 part，才能把首屏压到毫秒级；complete 仍走 all/scan
++  // #544：title 模式故意不扫 part/session_message，才能把首屏压到毫秒级；complete 仍走 all/scan
 +  const mode = options?.mode ?? "all"
-   // 单 token 与历史语义一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
+   // #529：单 token 与历史语义逐字一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
+   // #529：每个 token 的三路 union 自带括号，AND 拼接不会漏进 union 内部的 or 链
 -  const parts = tokens.map((needle) => tokenCondition(needle))
 +  const parts = tokens.map((needle) => (mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle)))
    if (parts.length === 1) return parts[0]
    return sql`(${sql.join(parts, sql` and `)})`
  }
  
-+// 仅标题子串：不能单独定义 multi-token 跨字段命中（title 含 A、正文含 B 会漏）
++// #544：仅标题子串——不能单独定义 multi-token 跨字段命中（title 含 A、正文含 B 会漏）
 +function titleTokenCondition(needle: string) {
++  // #544：textMatches 自带 instr/coalesce/lower 归一——title 与 all 模式的比较语义逐字一致。
 +  return textMatches(sql`${SessionTable.title}`, needle)
 +}
 +
  function tokenCondition(needle: string) {
-   return sql`(
-     ${textMatches(sql`${SessionTable.title}`, needle)}
+   // #265：三路 union——标题、v1 part 白名单、v2 session_message 白名单；hidden 门仅存在于 v1 part 侧 exists，
+   // #265：v2 侧由 sessionMessageMatches 的类型等值判定承担同等排除（等值不命中即不可搜索）
+
+diff --git a/packages/opencode/src/session/search.ts b/packages/opencode/src/session/search.ts
+index c3fdcef43..add18530a 100644
+--- a/packages/opencode/src/session/search.ts
++++ b/packages/opencode/src/session/search.ts
+@@ -1,2 +1,2 @@
+-// #121：实现位于 core，opencode 保留同名入口供本地 import
+-export { searchCondition } from "@opencode-ai/core/session/search"
++// #121：实现位于 core，opencode 保留同名入口供本地 import；#544 起 SearchMode 随 searchCondition 一并 re-export
++export { searchCondition, type SearchMode } from "@opencode-ai/core/session/search"
+
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 0ae7247074400e05bb7da2b51a590c3da1caa2a9..f55904c854abc040f45d0263f4d5b550cdbd5494 100644
+index 25af18936..44d3296b8 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -43,7 +43,7 @@ import { zod } from "@/util/effect-zod"
- import { NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- // [local-smark] session path management
+@@ -49,7 +49,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { SessionMessage } from "@opencode-ai/schema/session-message"
+ import { createDefaultTitle, isDefaultTitle } from "./title"
 -import { searchCondition } from "./search"
 +import { searchCondition, type SearchMode } from "./search"
- import { SessionPath } from "./path"
- import { createDefaultTitle, isDefaultTitle } from "./title"
+ // #113：兼容 Session.isDefaultTitle 导出名
+ export { isDefaultTitle }
  
-@@ -345,9 +345,24 @@ export type ListInput = {
+@@ -313,9 +313,24 @@ export type ListInput = {
    roots?: boolean
    start?: number
    search?: string
@@ -1216,49 +1246,53 @@ index 0ae7247074400e05bb7da2b51a590c3da1caa2a9..f55904c854abc040f45d0263f4d5b550
 +  done: boolean
 +}
 +
- const CreatedEventSchema = Schema.Struct({
-   sessionID: SessionID,
-   info: Info,
-@@ -535,6 +550,8 @@ export type NotFound = NotFoundError
+ export type GlobalListInput = {
+   directory?: string
+   roots?: boolean
+@@ -419,6 +434,8 @@ export type NotFound = NotFoundError
  
  export interface Interface {
    readonly list: (input?: ListInput) => Effect.Effect<Info[]>
 +  /** progressive B2：同 list 宇宙 keyset 扫候选，完整 searchCondition 过滤命中 */
 +  readonly searchScan: (input: SearchScanInput) => Effect.Effect<SearchScanResult>
+   readonly listGlobal: (input?: GlobalListInput) => Effect.Effect<GlobalInfo[]>
    readonly create: (input?: {
      parentID?: SessionID
-     title?: string
-@@ -666,6 +683,16 @@ export const layer: Layer.Layer<
-       )
+@@ -567,6 +584,18 @@ const layer: Layer.Layer<
+       })
      })
  
-+    // B2 服务入口：与 list 同 Instance project，复用 listUniverseConditions
++    // B2 服务入口：与 list 同 Instance project/worktree，复用 listUniverseConditions
++    // ctx.worktree 参与 directoryMatchesPath 判定——scan 候选宇宙与 list 逐字一致。
 +    const searchScan = Effect.fn("Session.searchScan")(function* (input: SearchScanInput) {
 +      const ctx = yield* InstanceState.context
-+      return searchScanByProject({
++      return yield* searchScanByProject(db, {
 +        projectID: ctx.project.id,
 +        experimentalWorkspaces: flags.experimentalWorkspaces,
++        worktree: ctx.worktree,
 +        ...input,
 +      })
 +    })
 +
-     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
-       const rows = yield* db((d) =>
-         d
-@@ -914,6 +941,7 @@ export const layer: Layer.Layer<
+     const listGlobal = Effect.fn("Session.listGlobal")(function* (input?: GlobalListInput) {
+       const conditions: SQL[] = []
+       if (input?.directory) conditions.push(eq(SessionTable.directory, input.directory))
+@@ -914,6 +943,7 @@ const layer: Layer.Layer<
  
      return Service.of({
        list,
 +      searchScan,
+       listGlobal,
        create,
        fork,
-       touch,
-@@ -972,6 +1000,117 @@ function* listByProject(
-     experimentalWorkspaces: boolean
+@@ -1046,6 +1076,129 @@ function listByProject(
+     worktree: string
    },
  ) {
-+  // scope/start 与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
++  // #544：scope/start 谓词与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
++  // searchMode 只作用于 list——缺省 all 与历史行为逐字一致，旧客户端零感知。
 +  const conditions = listUniverseConditions(input)
++  // #121：项目列表——空白 search 不注入条件
 +  if (input.search) {
 +    const condition = searchCondition(input.search, { mode: input.searchMode ?? "all" })
 +    if (condition) conditions.push(condition)
@@ -1266,42 +1300,44 @@ index 0ae7247074400e05bb7da2b51a590c3da1caa2a9..f55904c854abc040f45d0263f4d5b550
 +
 +  const limit = input.limit ?? 100
 +
-+  const rows = Database.use((db) =>
-+    db
-+      .select()
-+      .from(SessionTable)
-+      // A home path-scoped switch query intentionally has no project/path
-+      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
-+      // only filters instead of inventing a dummy true condition.
-+      .where(conditions.length > 0 ? and(...conditions) : undefined)
-+      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
-+      .limit(limit)
-+      .all(),
-+  )
-+  for (const row of rows) {
-+    yield fromRow(row)
-+  }
++  return db
++    .select()
++    .from(SessionTable)
++    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
++    .where(conditions.length > 0 ? and(...conditions) : undefined)
++    .orderBy(desc(SessionTable.time_updated))
++    .limit(limit)
++    .all()
++    .pipe(
++      Effect.orDie,
++      Effect.map((rows) => rows.map(fromRow)),
++    )
 +}
 +
 +/**
-+ * progressive B2 核心实现。
++ * #544 progressive B2 核心实现。
 + * - 候选窗固定 batch 行，推进 recency 宇宙（非 browse 缓存）
 + * - 命中用完整 searchCondition(mode=all)，保证 multi-token 跨字段 AND
 + * - nextCursor 落在候选页最后一行，即使该行未命中也要推进，避免死循环
 + * - done=true 当候选页不足 batch，表示宇宙耗尽
 + */
-+function searchScanByProject(
++function* searchScanByProject(
++  db: Database.Interface["db"],
 +  input: SearchScanInput & {
-+    projectID: ProjectID
++    projectID: ProjectV2.ID
 +    experimentalWorkspaces: boolean
++    worktree: string
 +  },
-+): SearchScanResult {
++) {
 +  // batch 上限 100 防止单次扫过大 JSON；默认 50 对齐 TUI CONTENT_BATCH
++  // clamp 而非拒绝：payload schema 已限 1-100，这里兜底服务内直调的越界值。
 +  const batch = Math.min(Math.max(input.batch ?? 50, 1), 100)
-+  // 候选页：与 list 同 scope/start，故意不含 search，保证每批固定扫 N 行
++  // 候选页：与 list 同 scope/start，故意不含 search，保证每批固定扫 N 行候选
++  // 候选宇宙显式重建而非复用调用方 conditions：scan 不得携带 search 谓词。
 +  const universe = listUniverseConditions({
 +    projectID: input.projectID,
 +    experimentalWorkspaces: input.experimentalWorkspaces,
++    worktree: input.worktree,
 +    directory: input.directory,
 +    scope: input.scope,
 +    path: input.path,
@@ -1311,6 +1347,7 @@ index 0ae7247074400e05bb7da2b51a590c3da1caa2a9..f55904c854abc040f45d0263f4d5b550
 +  })
 +  if (input.cursor) {
 +    // keyset：time_updated DESC, id DESC 的下一页（id 用 sql 比较避免 brand 与 string 过载冲突）
++    // 二元组比较与 orderBy 严格同序——错序会让翻页漏行或重复。
 +    universe.push(
 +      or(
 +        lt(SessionTable.time_updated, input.cursor.time_updated),
@@ -1322,140 +1359,98 @@ index 0ae7247074400e05bb7da2b51a590c3da1caa2a9..f55904c854abc040f45d0263f4d5b550
 +    )
 +  }
 +
-+  const page = Database.use((db) =>
-+    db
-+      .select()
-+      .from(SessionTable)
-+      .where(universe.length > 0 ? and(...universe) : undefined)
-+      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
-+      .limit(batch)
-+      .all(),
-+  )
++  const page = yield* db
++    .select()
++    .from(SessionTable)
++    .where(universe.length > 0 ? and(...universe) : undefined)
++    .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
++    .limit(batch)
++    .all()
++    .pipe(Effect.orDie)
++  // 空页即宇宙耗尽：nextCursor=null 让 TUI 端的 done 短路，不再发起下一批。
 +  if (page.length === 0) return { sessions: [], nextCursor: null, done: true }
 +
 +  // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
 +  // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
++  // 固定 all：complete 召回不得被首屏 title 子集口径污染（INV-09 的服务端锚点）。
 +  const full = searchCondition(input.search, { mode: "all" })
 +  const ids = page.map((row) => row.id)
++  // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
 +  const matchedIds = full
 +    ? new Set(
-+        Database.use((db) =>
-+          db
++        (
++          yield* db
 +            .select({ id: SessionTable.id })
 +            .from(SessionTable)
 +            .where(and(inArray(SessionTable.id, ids), full))
-+            .all(),
++            .all()
++            .pipe(Effect.orDie)
 +        ).map((row) => row.id),
 +      )
 +    : new Set(ids)
 +
 +  // 保持候选页 recency 顺序，只输出 full-condition 命中
++  // 不在 SQL 侧 LIMIT 命中数：候选窗推进量必须与 batch 一致，否则翻页进度失真。
++  // fromRow 与 list 同一映射：scan 结果的字段形状与 list 完全一致，TUI 无需分支。
 +  const sessions = page.filter((row) => matchedIds.has(row.id)).map(fromRow)
 +  const last = page[page.length - 1]!
++  // done 判定只看候选页是否填满：命中为 0 的满页仍要继续翻，直到宇宙耗尽。
 +  const done = page.length < batch
 +  const nextCursor = done ? null : { time_updated: last.time_updated, id: last.id }
 +  return { sessions, nextCursor, done }
 +}
 +
 +/**
-+ * list / searchScan 共用的 scope+start 谓词（不含 search）。
-+ * 故意与 listByProject 历史 path 语义对齐：home 切换放宽、directory fallback、global path 并集。
-+ * searchScan 必须复用此函数，禁止另写 browse 缓存宇宙。
++ * #544：list / searchScan 共用的 scope+start 谓词（不含 search）。
++ * 故意与 listByProject 历史 path 语义逐字对齐（#143/#228 注释原样保留）：home 切换放宽、
++ * directory fallback、global path 并集。searchScan 必须复用此函数，禁止另写 browse 缓存宇宙。
 + */
 +function listUniverseConditions(
 +  input: ListInput & {
-+    projectID: ProjectID
++    projectID: ProjectV2.ID
 +    experimentalWorkspaces: boolean
++    worktree: string
 +  },
 +): SQL[] {
-   const conditions: SQL[] = []
+   // #143：path 过滤时不预置 project_id，以便 OR 全局父会话
+   const conditions: ReturnType<typeof eq>[] = []
  
-   if (input.workspaceID) {
-@@ -979,16 +1118,9 @@ function* listByProject(
-   }
-   if (input.path !== undefined) {
-     const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
--    // The TUI session switcher uses `directory + path` queries to show the
--    // existing current/parent/child path range. Treat `~` as the user's global
--    // switching hub: when the request itself is home, do not add any project or
--    // path predicate so search/start/limit apply across all sessions; otherwise
--    // union in only the exact home-directory sessions. Directory-only calls stay
--    // below in the legacy branch, preserving reset/delete/archive-style exact
--    // directory behavior.
-+    // The TUI session switcher uses directory+path；~ 为全局切换枢纽时不加 project/path 谓词
-     if (includeHomeSwitchScope && isHomeDirectory(input.directory)) {
--      // The surrounding workspace/start/search/roots/limit predicates remain in
--      // force. Only the path/project boundary is widened for `~` switching.
-+      // home switch：不收窄 path/project，start/search/roots 仍生效
-     } else {
-       const projectPath = or(
-         ...relatedPathConditions({
-@@ -1003,18 +1135,20 @@ function* listByProject(
-         path: input.path,
-         projectID: input.projectID,
-       })
--      const globalPath = useDirectoryFallback && input.directory
--        ? or(
--            ...relatedPathConditions({
--              path: SessionPath.relative("/", input.directory),
--              directory: input.directory,
--              global: true,
--            }),
--          )
-+      const globalPath =
-+        useDirectoryFallback && input.directory
-+          ? or(
-+              ...relatedPathConditions({
-+                path: SessionPath.relative("/", input.directory),
-+                directory: input.directory,
-+                global: true,
-+              }),
-+            )
-+          : undefined
-+      const nullPath = input.directory
-+        ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
-         : undefined
--      const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
- 
--      // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
-       conditions.push(
-         or(
-           and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
-@@ -1040,28 +1174,7 @@ function* listByProject(
+@@ -1121,28 +1274,9 @@ function listByProject(
    if (input.start) {
      conditions.push(gte(SessionTable.time_updated, input.start))
    }
+-  // #121：项目列表——空白 search 不注入条件
 -  if (input.search) {
 -    const condition = searchCondition(input.search)
 -    if (condition) conditions.push(condition)
 -  }
 -
 -  const limit = input.limit ?? 100
--
--  const rows = Database.use((db) =>
--    db
--      .select()
--      .from(SessionTable)
--      // A home path-scoped switch query intentionally has no project/path
--      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
--      // only filters instead of inventing a dummy true condition.
--      .where(conditions.length > 0 ? and(...conditions) : undefined)
--      .orderBy(desc(SessionTable.time_updated))
--      .limit(limit)
--      .all(),
--  )
--  for (const row of rows) {
--    yield fromRow(row)
--  }
+ 
+-  return db
+-    .select()
+-    .from(SessionTable)
+-    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
+-    .where(conditions.length > 0 ? and(...conditions) : undefined)
+-    .orderBy(desc(SessionTable.time_updated))
+-    .limit(limit)
+-    .all()
+-    .pipe(
+-      Effect.orDie,
+-      Effect.map((rows) => rows.map(fromRow)),
+-    )
 +  return conditions
  }
- 
- export function* listGlobal(input?: {
-diff --git a/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts b/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
-index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8628597c9 100644
---- a/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
-+++ b/packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
-@@ -1,7 +1,13 @@
+-
+ export const node = LayerNode.make({
+   service: Service,
+   layer: layer,
+
+diff --git a/packages/tui/test/util/session-list-params.test.ts b/packages/tui/test/util/session-list-params.test.ts
+index 75e079d3c..8f44c82be 100644
+--- a/packages/tui/test/util/session-list-params.test.ts
++++ b/packages/tui/test/util/session-list-params.test.ts
+@@ -1,8 +1,16 @@
  import { describe, expect, test } from "bun:test"
  import {
 +  appendScanHits,
@@ -1467,28 +1462,47 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
    sessionListEmptyLabel,
 +  shouldStopSearchScan,
    SESSION_LIST_BROWSE_LIMIT,
++  SESSION_LIST_CONTENT_BATCH,
++  SESSION_LIST_CONTENT_DELAY_MS,
    SESSION_LIST_LOOKBACK_MS,
    SESSION_LIST_SEARCH_LIMIT,
-@@ -24,7 +30,7 @@ describe("session list params", () => {
-     })
+ } from "../../src/util/session-list-params"
+@@ -16,6 +24,7 @@ describe("session list params", () => {
    })
  
--  // 活跃搜索 loading（undefined）不得 ?? 回 browse，避免「无命中前闪现其他会话」
-+  // 兼容旧路径：无 phase 时 loading 仍不回 browse（用 []）
-   test("active search uses empty list while searchResults are loading", () => {
+   // #529：query 清空后 createResource 的 stale searchResults 不得再参与合流
++  // 该用例保留旧 resolveSessionListSource 合同——progressive 迁移后兼容路径仍受测。
+   test("empty query forces browse even when searchResults are stale", () => {
      const browse = [{ id: "a" }]
-     expect(resolveSessionListSource({ query: "needle", searchResults: undefined, browse })).toEqual({
-@@ -41,8 +47,83 @@ describe("session list params", () => {
+     const stale = [{ id: "search-hit" }]
+@@ -35,6 +44,7 @@ describe("session list params", () => {
+   })
+ 
+   // #529：搜索 0 命中必须停在 search 源（Not Found 语义），不能静默回退浏览
++  // progressive 的 complete 空集合同与此同构：hits=[] 仍停在 search 源。
+   test("active search with empty hits stays on search source", () => {
+     const browse = [{ id: "a" }]
+     expect(resolveSessionListSource({ query: "needle", searchResults: [], browse })).toEqual({
+@@ -43,9 +53,93 @@ describe("session list params", () => {
      })
    })
  
+-  // #529：仅搜索路径展示 Not Found；浏览路径返回 undefined 沿用 DialogSelect 默认文案
 -  test("empty label is Not Found only for non-empty query", () => {
++  // #529/#544：仅搜索路径展示 Not Found；无 loading phase 时保持旧语义
 +  test("empty label is Not Found only for non-empty query without loading phase", () => {
      expect(sessionListEmptyLabel("")).toBeUndefined()
      expect(sessionListEmptyLabel("lsp fix")).toBe("Not Found lsp fix")
    })
 +
-+  // INV-01：awaiting_first/partial 显示 Searching…；仅 complete 空结果才 Not Found
++  // #544：progressive 常量与首屏延迟是产品阈值，防止 TUI/服务端 batch 再漂移
++  // batch=50 与服务端 searchScanByProject 默认候选窗一致；delay 吸收慢打改词。
++  test("exports progressive scan batch and delay thresholds", () => {
++    expect(SESSION_LIST_CONTENT_BATCH).toBe(50)
++    expect(SESSION_LIST_CONTENT_DELAY_MS).toBe(250)
++  })
++
++  // #544 INV-01：awaiting_first/partial 显示 Searching…；仅 complete 空结果才 Not Found
 +  // 修复用户看到的「搜了几秒一直 Not Found」假空态
 +  test("empty label is Searching while progressive search is incomplete", () => {
 +    expect(sessionListEmptyLabel("CJK", "awaiting_first")).toBe("Searching…")
@@ -1496,7 +1510,8 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
 +    expect(sessionListEmptyLabel("CJK", "complete")).toBe("Not Found CJK")
 +  })
 +
-+  // partial 有 hits 时仍 source=search，绝不回 browse 闪现其它会话
++  // #544：partial 有 hits 时仍 source=search，绝不回 browse 闪现其它会话
++  // 断言含 phase 回传：调用方据 phase 区分 loading 与 complete 展示。
 +  test("progressive source stays on search with hits during partial", () => {
 +    const browse = [{ id: "b", time: { updated: 1 } }]
 +    const hits = [{ id: "h", time: { updated: 2 } }]
@@ -1510,7 +1525,7 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
 +    ).toEqual({ source: "search", sessions: hits, phase: "partial" })
 +  })
 +
-+  // Spinner 绑定：仅非空 query 且 phase≠complete 时 loading
++  // #544：Spinner 绑定——仅非空 query 且 phase≠complete 时 loading
 +  test("isSessionSearchLoading is false for browse and complete", () => {
 +    expect(isSessionSearchLoading("", "awaiting_first")).toBe(false)
 +    expect(isSessionSearchLoading("q", "complete")).toBe(false)
@@ -1518,14 +1533,14 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
 +    expect(isSessionSearchLoading("q", "awaiting_first")).toBe(true)
 +  })
 +
-+  // INV-09：early-stop 计数禁止混入 titleHits，否则 complete 偏离 list LIMIT
++  // #544 INV-09：early-stop 计数禁止混入 titleHits，否则 complete 偏离 list LIMIT
 +  test("shouldStopSearchScan ignores title and uses scan length only", () => {
 +    expect(shouldStopSearchScan(0)).toBe(false)
 +    expect(shouldStopSearchScan(SESSION_LIST_SEARCH_LIMIT)).toBe(true)
 +    expect(shouldStopSearchScan(SESSION_LIST_SEARCH_LIMIT - 1)).toBe(false)
 +  })
 +
-+  // partial 展示可叠 title∪scan；cap 仅影响 UI，不定义 complete 权威集合
++  // #544：partial 展示可叠 title∪scan；cap 仅影响 UI，不定义 complete 权威集合
 +  test("mergeDisplayHits unions title overlay with scan and caps by recency", () => {
 +    const title = [
 +      { id: "old-title", time: { updated: 100 } },
@@ -1539,7 +1554,8 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
 +    expect(merged.map((item) => item.id)).toEqual(["new-scan", "mid"])
 +  })
 +
-+  // append 保持 scan 页 recency 顺序，并在 cap 处截断以触发 early-stop
++  // #544：append 保持 scan 页 recency 顺序，并在 cap 处截断以触发 early-stop
++  // 重复 id（翻页边界重放）必须被 seen 过滤，否则 cap 计数虚高提前停扫。
 +  test("appendScanHits preserves order and caps", () => {
 +    const base = [{ id: "a" }, { id: "b" }]
 +    const next = appendScanHits(base, [{ id: "b" }, { id: "c" }], 3)
@@ -1547,7 +1563,7 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
 +    expect(appendScanHits(base, [{ id: "c" }, { id: "d" }], 3).map((item) => item.id)).toEqual(["a", "b", "c"])
 +  })
 +
-+  // INV-12：scan 失败 complete 仍保留 title 首屏；success complete 只信 scan
++  // #544 INV-12：scan 失败 complete 仍保留 title 首屏；success complete 只信 scan
 +  test("resolveDisplayHits keeps title overlay on error complete only", () => {
 +    const title = [{ id: "t1", time: { updated: 2 } }]
 +    const scan = [{ id: "s1", time: { updated: 1 } }]
@@ -1563,16 +1579,17 @@ index d421a1e4f078ddf0346fc1739a89c36b27eff173..7566e67582de6dd0a5bfc19895a2b2f8
 +    ).toEqual(["t1"])
 +  })
  })
+
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
-index 22d1e480912b420d048fc70358901c381d0f566b..1f0421cb51961f9dbba40cabb7a03f8de74a0dbd 100644
+index e01a842ba..578591c0d 100644
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts
-@@ -626,6 +626,96 @@ describe("session.list", () => {
+@@ -792,6 +792,105 @@ describe("session.list", () => {
      { git: true },
    )
  
-+  // progressive B1：title 模式只验证标题子串，正文命中必须留给 all/scan
-+  // 防止把 title 子集误当成 complete 全量语义
++  // #544 progressive B1：title 模式只验证标题子串，正文命中必须留给 all/scan
++  // 防止把 title 子集误当成 complete 全量语义；all 分支同时回归旧三路 union 合同
 +  it.instance(
 +    "searchMode title matches title only",
 +    () =>
@@ -1590,6 +1607,7 @@ index 22d1e480912b420d048fc70358901c381d0f566b..1f0421cb51961f9dbba40cabb7a03f8d
 +          }),
 +        )
 +
++        // title 模式经 list 公开入口：覆盖 ListInput.searchMode 到 searchCondition 的全链路。
 +        const titleIDs = (
 +          yield* SessionNs.Service.use((session) => session.list({ search: "cjk", searchMode: "title" }))
 +        ).map((session) => session.id)
@@ -1603,9 +1621,11 @@ index 22d1e480912b420d048fc70358901c381d0f566b..1f0421cb51961f9dbba40cabb7a03f8d
 +        expect(allIDs).toContain(bodyOnly.id)
 +      }),
 +    { git: true },
++    // #544：Windows 宿主 git fixture 冷启动慢于 5s 默认超时，显式 30s 与 daemon 用例同族
++    30_000,
 +  )
 +
-+  // INV-08：token A 在 title、token B 在正文时，title 模式漏、scan 全条件命中
++  // #544 INV-08：token A 在 title、token B 在正文时，title 模式漏、scan 全条件命中
 +  // 这是 progressive 拆阶段后最容易回归的召回合同
 +  it.instance(
 +    "searchScan full condition finds cross-field multi-token matches",
@@ -1623,20 +1643,23 @@ index 22d1e480912b420d048fc70358901c381d0f566b..1f0421cb51961f9dbba40cabb7a03f8d
 +          }),
 +        )
 +
++        // title AND 逐 token 命中标题——alpha/beta 分居两字段时必须整体漏掉。
 +        const titleIDs = (
 +          yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", searchMode: "title" }))
 +        ).map((session) => session.id)
 +        expect(titleIDs).not.toContain(cross.id)
 +
++        // scan 固定 mode=all：候选窗过滤用完整三路 union，跨字段 AND 召回必须可见。
 +        const scan = yield* SessionNs.Service.use((session) =>
 +          session.searchScan({ search: "alpha beta", batch: 50 }),
 +        )
 +        expect(scan.sessions.map((session) => session.id)).toContain(cross.id)
 +      }),
 +    { git: true },
++    30_000,
 +  )
 +
-+  // keyset 翻页：nextCursor 指向候选窗末行，done 表示宇宙耗尽而非命中耗尽
++  // #544：keyset 翻页——nextCursor 指向候选窗末行，done 表示宇宙耗尽而非命中耗尽
 +  it.instance(
 +    "searchScan pages candidates with keyset until done",
 +    () =>
@@ -1644,6 +1667,7 @@ index 22d1e480912b420d048fc70358901c381d0f566b..1f0421cb51961f9dbba40cabb7a03f8d
 +        for (let i = 0; i < 3; i++) {
 +          yield* withSession({ title: `scan-page-holder-${i}` })
 +        }
++        // batch=2 迫使翻页：夹具 3 个 holder 让第一页必然不满窗（done=false 可断言）。
 +        const first = yield* SessionNs.Service.use((session) => session.searchScan({ search: "scan-page", batch: 2 }))
 +        expect(first.sessions.length).toBeGreaterThan(0)
 +        if (first.done) return
@@ -1655,12 +1679,14 @@ index 22d1e480912b420d048fc70358901c381d0f566b..1f0421cb51961f9dbba40cabb7a03f8d
 +            cursor: first.nextCursor!,
 +          }),
 +        )
++        // 两页合集无重复（Set 大小不缩水）——keyset 游标与 orderBy 同序的直接证据。
 +        const ids = new Set([...first.sessions, ...second.sessions].map((session) => session.id))
 +        expect(ids.size).toBeGreaterThanOrEqual(first.sessions.length)
 +      }),
 +    { git: true },
++    30_000,
 +  )
 +
-   // 多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串
+   // #529：多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串。
+   // 跨字段命中（title 含 alpha、body 含 beta）也必须保留——AND 是 token 级不是字段级。
    it.instance(
-     "intersects whitespace-separated search tokens across title and content",

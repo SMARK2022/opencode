@@ -6,9 +6,8 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=20AssistantMessage?=
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -16,6 +16,24 @@ import {
+@@ -16,5 +16,23 @@ import {
  } from "solid-js"
- import { Dynamic } from "solid-js/web"
  import { sessionMessageContentWidth } from "./layout"
 +
 +// #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）

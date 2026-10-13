@@ -1336,17 +1336,17 @@ diff --git a/packages/tui/src/routes/session/dialog-message.tsx b/packages/tui/s
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -310,6 +310,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -311,6 +311,9 @@
        payload: typeof SummarizePayload.Type
      }) {
        const info = yield* requireSession(ctx.params.sessionID)
 +      // revert 进行中时同步返回错误——与下方 assertNotBusy 的 reverting 检查冗余，
 +      // 但端点错误联合声明了 SessionBusyError（HttpApiBuilder 精确匹配要求守卫来源）
 +      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       yield* store.provide(
-         { directory: info.directory },
-         Effect.gen(function* () {
-@@ -344,6 +347,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       // #153：compaction 摘要消息与 revert 清理的落库位置跟随 session 持久化目录
+       yield* inSessionDirectory(
+         ctx.params.sessionID,
+@@ -346,7 +346,12 @@
        params: { sessionID: SessionID }
        payload: typeof PromptPayload.Type
      }) {
@@ -1355,10 +1355,11 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 +      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
 +        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
 +      )
+       yield* requireSession(ctx.params.sessionID)
+       // #153：流式返回的 message 必须来自 session 所属实例，防止跨目录读写
        const message = yield* inSessionDirectory(
          ctx.params.sessionID,
-         promptSvc
-@@ -363,6 +371,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -366,7 +366,11 @@
        params: { sessionID: SessionID }
        payload: typeof PromptPayload.Type
      }) {
@@ -1366,10 +1367,11 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 +      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
 +        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
 +      )
+       yield* requireSession(ctx.params.sessionID)
+       // #153：后台 fork 的 Error 事件必须发布到 session 所属实例，订阅方才能收到
        yield* inSessionDirectory(
          ctx.params.sessionID,
-         promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-@@ -386,6 +398,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -390,6 +390,11 @@
        params: { sessionID: SessionID }
        payload: typeof CommandPayload.Type
      }) {
@@ -1378,18 +1380,19 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 +      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
 +        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
 +      )
+       yield* requireSession(ctx.params.sessionID)
+       // #153：命令消息持久化与 agent 解析依赖 session 目录上下文
        return yield* inSessionDirectory(
-         ctx.params.sessionID,
-         promptSvc
-@@ -399,6 +416,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -404,7 +417,9 @@
        params: { sessionID: SessionID }
        payload: typeof ShellPayload.Type
      }) {
 +      // shell 内部调用 shellImpl（含 cleanup），同样需要 revert 守卫
 +      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
+       yield* requireSession(ctx.params.sessionID)
+       // #153：shell 的输出落盘与快照写入 session 所在存储根，跨目录会写到错误位置
        return yield* inSessionDirectory(
          ctx.params.sessionID,
-         SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })),
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts

@@ -9,17 +9,16 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/plugin/codex.ts b/packages/opencode/src/plugin/codex.ts
-index 6629ca6f474ec9f3f70dd7818fa0273c9d3f8b21..2bdc9d7a17472b1093dbdaf95cac7e1d7b630b19 100644
---- a/packages/opencode/src/plugin/codex.ts
-+++ b/packages/opencode/src/plugin/codex.ts
-@@ -625,7 +625,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
-     "chat.headers": async (input, output) => {
+
+diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
+--- a/packages/opencode/src/plugin/openai/codex.ts
++++ b/packages/opencode/src/plugin/openai/codex.ts
+@@ -581,6 +581,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
        if (input.model.providerID !== "openai") return
+       // #169：openai oauth 会话对外伪装 Codex TUI，保留 tip session-id / title 头
        Object.assign(output.headers, CODEX_HEADERS)
--      output.headers.session_id = input.sessionID
-+      // Codex-compatible proxies recognize the hyphenated header for session affinity.
-+      output.headers["session-id"] = input.sessionID
-     },
-     "chat.params": async (input, output) => {
-       if (input.model.providerID !== "openai") return
++      // #562：session-id 必须用连字符键——ws 池与 Codex 兼容代理只认该形态维持缓存亲和
++      // （源补丁的下划线→连字符修正已由上游 #29471 吸收，此处固化亲和合同不可回退）。
+       output.headers["session-id"] = input.sessionID
+       // Temporary fetch-layer hack: title generation currently shares the conversation
+       // session ID, so the OpenAI plugin marks it for HTTP fallback until transport

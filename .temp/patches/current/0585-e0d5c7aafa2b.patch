@@ -10,9 +10,11 @@ Content-Transfer-Encoding: 8bit
 
 提交经 R10 方案批准、行为回归和独立实现审计通过的 OpenTUI 修复，并同步 canonical plan 的 verified 证据。保留其他工作区变更不进入本次提交。
 
+适配说明：目标 opentui gitlink preimage 与 source 完全一致（0ed2c93ae094，0569 产物）；plan 文档 verbatim 落地；无文本适配需求。
+
+
 diff --git a/docs/plans/code-renderable-highlight-failure-visibility-repair.md b/docs/plans/code-renderable-highlight-failure-visibility-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..a095bca32e960ce2f83a3b52e63123d0919ccf99
 --- /dev/null
 +++ b/docs/plans/code-renderable-highlight-failure-visibility-repair.md
 @@ -0,0 +1,1124 @@
@@ -1140,8 +1142,8 @@ index 0000000000000000000000000000000000000000..a095bca32e960ce2f83a3b52e63123d0
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R10 implementation | yes | B-01 actual Chinese explanatory comments were below the 15% hard gate; one stale active-dirty comment was inaccurate. | Diff/E/C evidence initially drifted from actual nested diff; package-wide typecheck remains blocked by existing unrelated diagnostics; native Zig tests unavailable; installed tarball unchanged by approved release boundary. | BLOCK — implementation rework required. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
 +| 2 | R10 implementation | yes | No blocking findings. | Current nested diff is `378 additions, 9 deletions`; `bun typecheck` remains blocked by unrelated existing diagnostics; native Zig unavailable; installed tarball unchanged by approved release boundary. | APPROVE — R10 implementation | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+
 diff --git a/thirdparty/opentui b/thirdparty/opentui
-index 0ed2c93ae09445cbad516a622b1b420d7b4036bd..fd9cee24c2d5f09103beecd3d9bd5a74a944eed1 160000
 --- a/thirdparty/opentui
 +++ b/thirdparty/opentui
 @@ -1 +1 @@

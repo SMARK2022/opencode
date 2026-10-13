@@ -20,6 +20,8 @@ handle 注册表（65535），最终 Failed to create TextBuffer。
 复现测试（300 消息满窗滑窗 200 次 + settle）泄漏子树 378 → 0；TUI 套件
 325/325、typecheck 全绿。方案与实现均经独立审计 APPROVE。
 
+适配说明：承载 source 的 BlockTool preview 弃用求值泄漏修复。路径迁移：fork 的 cli/cmd/tui/routes/session/index.tsx 归一到 packages/tui/src/routes/session/index.tsx（:3034 hasPreview 改 previewTree memo 模式——存在性检查消费已构建的同一棵树，杜绝「仅为 !== undefined 构造整棵 preview 子树后丢弃」的 ~18 句柄/块泄漏；:3101 挂载点消费 memo 树而非再次调用 getter）；plan 文档（391 行 R1+R2 调查）verbatim。测试迁移：session-message-render.test 无目标等价（无 withRenderedSession harness）——改用 BlockTool 直接挂载 harness（block-tool-visible-once 同款 provider 栈）新建 block-tool-preview-once.test.tsx，fork 检测机械逐字保留（renderablesByNumber 键快照 → 10×20ms 排空 deferred destroy → 父链上行深度 100 → 顶点必须可达 renderer.root → detached==[]）。
+
 diff --git a/docs/plans/tui-freeze-native-handle-exhaustion.md b/docs/plans/tui-freeze-native-handle-exhaustion.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..4a1c1a80cba8772b0006f23a8ed3b0e899e8ca33
@@ -417,105 +419,119 @@ index 0000000000000000000000000000000000000000..4a1c1a80cba8772b0006f23a8ed3b0e8
 +**次要/替代路径清单**：无。无 fallback、无接口变化、无新增生产概念。
 +
 +**未决/未验证项**：`zz-repro-freeze.test.tsx`（调查脚本）按惯例应移至 `.temp/Testing\`，但移动被权限预检拦截（需要用户显式授权文件移动）；该文件不进 commit（untracked，commit 用 `--only` 显式路径排除），待用户确认后清理。dialog-select 的同模式 JSX 存在性检查为低频对话框路径，按审计结论不扩 scope。
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 16225f11d0eb84bad33bc7ad042f8afbbaf91955..021c163742a8a528d8c595ae5fe435b304ca3b87 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -2786,7 +2786,12 @@ function BlockTool(props: {
-   })
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -3031,7 +3031,13 @@ export function BlockTool(props: {
    const [expanded, setExpanded] = createSignal(false)
+   // #459：collapsed 直接消费 collapsible——与上游同构，无需 canCollapse 信号中转。
    const collapsed = createMemo(() => collapsible() && !expanded())
 -  const hasPreview = createMemo(() => props.preview !== undefined)
-+  // preview 树只能构造一次并复用：Solid 的 JSX prop 是 getter，每次访问 props.preview
-+  // 都会立即执行整段 JSX（含 <diff> → new DiffRenderable，占多个 native handle）。
-+  // 若仅为存在性检查访问一次、挂载时再访问一次，第一次构造的子树会被直接丢弃——
-+  // 从未插入渲染树也从未销毁，在超长会话中累积耗尽 native handle 注册表（65535）。
++  // [local-smark] R2 冻结根因：preview 必须经 memo 构建恰好一次。直接对
++  // props.preview 求 `!== undefined` 会纯为存在性检查构造整棵 preview 子树
++  // （DiffRenderable+缓存 Code/LineNumber/Gutter，约 18 个 native 句柄）而后丢弃；
++  // 2845 个 patch part ≈ 51k 句柄直接击穿 65,535 注册表上限（Failed to create
++  // TextBuffer）。存在性检查改为消费已 memo 的同一棵树。
 +  const previewTree = createMemo(() => props.preview)
 +  const hasPreview = createMemo(() => previewTree() !== undefined)
    // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
    // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
    // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
-@@ -2846,7 +2851,7 @@ function BlockTool(props: {
-       {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
-       <Show when={hasPreview()}>
-         <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
+@@ -3098,7 +3104,7 @@ export function BlockTool(props: {
+           marginTop={collapsed() ? 1 : 0}
+           visible={collapsed()}
+         >
 -          {props.preview}
 +          {previewTree()}
          </box>
        </Show>
        {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 8e5693b800e7f7e325a7ac04061baeb31bb131d8..0316cb0c027ccf32e7c9e8badfd5d2df415f263c 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -38,6 +38,7 @@ import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
- import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
- import { useCommandPalette } from "../../../../src/cli/cmd/tui/context/command-palette"
- import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
+
+diff --git a/packages/tui/test/routes/session/block-tool-preview-once.test.tsx b/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
+@@ -0,0 +1,83 @@
++/** @jsxImportSource @opentui/solid */
 +import { Renderable } from "@opentui/core"
- 
- // 剪贴板 mock：命令级回绕回归需要观察 copy 副作用，而不是真的写入系统剪贴板。
- // 本文件 serial 运行，模块级 override 不会与其他文件的 clipboard 用例交叉。
-@@ -3285,6 +3286,62 @@ test("completed apply_patch without auto review keeps per-file blocks only", asy
-   )
- })
- 
-+test("apply_patch preview card mounts without leaking discarded preview tree", async () => {
-+  // renderablesByNumber 是进程级全局注册表，同文件前序用例可能留有历史节点；
-+  // 只检查本用例期间新建的 renderable（快照之后的 num），隔离串行套件污染。
-+  const before = new Set((Renderable as any).renderablesByNumber.keys() as Iterable<number>)
-+  await withRenderedSession(
-+    [assistantMessage("msg_patch_preview_leak", 1)],
-+    {
-+      msg_patch_preview_leak: [
-+        completedToolPart(
-+          "part_patch_preview_leak",
-+          "msg_patch_preview_leak",
-+          "apply_patch",
-+          { patchText: "*** Begin Patch\n*** End Patch" },
-+          {
-+            files: [
-+              {
-+                filePath: "src/a.ts",
-+                relativePath: "src/a.ts",
-+                type: "update",
-+                patch: ["--- src/a.ts", "+++ src/a.ts", "@@", "-old", "+new"].join("\n"),
-+                additions: 1,
-+                deletions: 1,
-+              },
-+            ],
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched src/a.ts")))
-+      // 先让 deferred destroy 排干，避免把正常的待销毁节点误判为泄漏。
-+      for (let i = 0; i < 10; i++) {
-+        await new Promise((resolve) => setTimeout(resolve, 20))
-+        await app.renderOnce()
-+      }
-+      // BlockTool 的 preview 存在性检查不得构造并丢弃第二棵 preview 子树：
-+      // 每个存活 renderable（renderablesByNumber 在销毁时移除）向上走 parent 链
-+      // 都必须能到达 root；链顶悬空即为“创建后从未插入树”的永久泄漏，
-+      // 这是超长会话 native handle 注册表（65535）耗尽的根因。
-+      const root = (app as any).renderer.root
-+      const detached: string[] = []
-+      for (const [num, renderable] of (Renderable as any).renderablesByNumber as Map<number, any>) {
-+        if (before.has(num)) continue
-+        let cur = renderable
-+        let depth = 0
-+        while (cur.parent && depth < 100) {
-+          cur = cur.parent
-+          depth++
-+        }
-+        if (cur !== root) detached.push(`${renderable.constructor?.name}#${renderable.id}`)
-+      }
-+      expect(detached).toEqual([])
-+    },
-+  )
-+})
++import { testRender } from "@opentui/solid"
++import { expect, test } from "bun:test"
++import { randomUUID } from "node:crypto"
++import { mkdir, writeFile } from "node:fs/promises"
++import { tmpdir } from "node:os"
++import path from "node:path"
++import { TuiPathsProvider, TuiStartupProvider } from "../../../src/context/runtime"
++import { KVProvider } from "../../../src/context/kv"
++import { TuiConfigProvider } from "../../../src/config"
++import { ThemeProvider } from "../../../src/context/theme"
++import { RouteProvider } from "../../../src/context/route"
++import { BlockTool } from "../../../src/routes/session"
 +
- test("completed apply_patch with delete file shows diff content and stats in title", async () => {
-   await withRenderedSession(
-     [assistantMessage("msg_patch_delete_diff", 1)],
++// R2 冻结回归锁：preview 必须经 memo 构建恰好一次——存在性检查不得为
++// `!== undefined` 而构造并丢弃整棵 preview 子树（每块约 18 个 native 句柄，
++// 大 apply_patch 会击穿 65,535 注册表上限）。检测机制与源仓一致：渲染前快照
++// Renderable.renderablesByNumber 的键集合，排空 deferred destroy 后，新增
++// renderable 的父链必须全部可达 renderer.root——出现顶点不可达即泄漏。
++// 适配目标：无 withRenderedSession harness，改用 BlockTool 直接挂载
++// （block-tool-visible-once 同款 provider 栈）；fork 检测机械逐字保留。
++
++const stateDir = path.join(tmpdir(), `blocktool-preview-kv-${randomUUID()}`)
++await mkdir(stateDir, { recursive: true })
++await writeFile(path.join(stateDir, "kv.json"), "{}")
++
++function PreviewCard(props: { text: string }) {
++  return (
++    <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: stateDir, worktree: "/work" }}>
++      <TuiStartupProvider value={{ skipInitialLoading: true }}>
++        <KVProvider>
++          <TuiConfigProvider config={{ theme: undefined } as never}>
++            <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
++              <RouteProvider>
++                <BlockTool
++                  title="bash"
++                  totalLines={24}
++                  threshold={20}
++                  maxLines={10}
++                  preview={<text>{props.text}</text>}>
++                  <text>{`${props.text}\napplied`}</text>
++                </BlockTool>
++              </RouteProvider>
++            </ThemeProvider>
++          </TuiConfigProvider>
++        </KVProvider>
++      </TuiStartupProvider>
++    </TuiPathsProvider>
++  )
++}
++
++test("preview card mounts without leaking discarded preview tree", async () => {
++  const before = new Set((Renderable as { renderablesByNumber: Map<number, unknown> }).renderablesByNumber.keys())
++  const app = await testRender(() => <PreviewCard text="$ patch preview" />, { width: 60, height: 40 })
++  try {
++    // Provider 初始化（KV/主题）需要沉淀——与 block-tool-visible-once 同款 100ms。
++    await new Promise((resolve) => setTimeout(resolve, 100))
++    await app.waitForFrame((frame) => frame.includes("patch preview"))
++    // reconciler 的 deferred destroy 经 process.nextTick 排空：固定 10 轮 20ms
++    // 渲染循环后，所有被弃用子树应已完成销毁并从注册表移除。
++    for (let i = 0; i < 10; i++) {
++      await new Promise((resolve) => setTimeout(resolve, 20))
++      await app.renderOnce()
++    }
++    const detached: number[] = []
++    for (const key of (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber.keys()) {
++      if (before.has(key)) continue
++      // 沿父链上行（深度上限 100 防御环）：顶点必须是 renderer.root——
++      // 任何不可达顶点都是已构造却未挂载/未销毁的泄漏子树。
++      let node: Renderable | undefined = (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber.get(key)
++      let top: Renderable | undefined = node
++      for (let depth = 0; depth < 100 && top; depth++) {
++        node = top
++        top = (top as { parent?: Renderable }).parent
++      }
++      if (node !== app.renderer.root) detached.push(key)
++    }
++    expect(detached).toEqual([])
++  } finally {
++    app.renderer.destroy()
++  }
++})

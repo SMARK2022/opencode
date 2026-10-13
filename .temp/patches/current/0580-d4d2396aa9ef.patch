@@ -1,6 +1,6 @@
 From d4d2396aa9efc07a0034ac994553d3ceb8d97b31 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Sun, 16 Aug 2026 11:52:17 +0800
+Date: Sun, 16 Aug 2026 20:42:19 +0800
 Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=A0=B9=E6=B2=BB=20Message=20ID?=
  =?UTF-8?q?=20=E5=9B=9E=E7=BB=95=E5=90=8E=E7=9A=84=E6=8A=95=E5=BD=B1?=
  =?UTF-8?q?=E5=A4=B1=E5=BA=8F?=
@@ -8,13 +8,13 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-TUI 消息投影改按持久创建时间与 SQLite BINARY ID 顺序定位，并为 ID-only 删除维护有界索引。
+TUI Message 数组按 (time.created ASC, SQLite BINARY UTF-8 id ASC) 维护：ID 回绕或任意 caller ID 下插入/更新经 chronology 二分命中；hidden 删除改用同一 chronology key 定位（原纯 ID 二分在有序数组上 found=false，隐藏消息永久残留）；tie-break 统一为码元序（等价 BINARY），snapshot 排序与插入定位不再分歧。
 
-覆盖回绕、任意 caller ID 及同毫秒混合大小写边界，避免新消息被窗口裁剪或删除漏命中。
+适配说明：目标 fork 线已含 messageKey chronology 插入与按 ID 线性 remove（等价上游 #40994 主修复）——source 的 messageByID 派生索引及 H5/H6/H7/H8 索引生命周期裁记（目标 remove 为 findIndex 线性，正确性不依赖索引）；真实残差为①hidden 分支纯 ID 二分（本补丁改 messageKey）与②compareMessage localeCompare 与 messageKey 码元序分歧（本补丁统一码元序）；三个测试用例完整落地（mount(handler, tmp.path) 形态、hidden 事件按运行时字段 as 收窄）。
+
 
 diff --git a/docs/plans/tui-message-id-rollover-ordering-repair.md b/docs/plans/tui-message-id-rollover-ordering-repair.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..db848eeaed97551906fb08e4ccaa2c5f001e3fdc
 --- /dev/null
 +++ b/docs/plans/tui-message-id-rollover-ordering-repair.md
 @@ -0,0 +1,487 @@
@@ -505,212 +505,52 @@ index 0000000000000000000000000000000000000000..db848eeaed97551906fb08e4ccaa2c5f
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 004a977b1d1d9f122202276c8d3bb055f23d95ce..b7aac1a74f7cdb8977b796345d54adaea18f96d0 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -53,6 +53,21 @@ const TUI_DIFF_TOTAL_FILES = "x-opencode-tui-total-files"
- const TUI_DIFF_TOTAL_ADDITIONS = "x-opencode-tui-total-additions"
- const TUI_DIFF_TOTAL_DELETIONS = "x-opencode-tui-total-deletions"
+
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -112,7 +112,9 @@ function search<T>(items: T[], target: string, key: (item: T) => string) {
+ }
  
-+function searchMessage(messages: readonly Message[], target: Message) {
-+  let left = 0
-+  let right = messages.length
-+  // TUI snapshot 的权威顺序是持久创建时间；同毫秒 ID 必须复刻 SQLite BINARY 的 UTF-8 byte order。
-+  // locale/UTF-16 顺序都无法覆盖合法 caller ID；lower-bound 仍让三个生命周期分支共享 O(log n) 语义。
-+  while (left < right) {
-+    const middle = Math.floor((left + right) / 2)
-+    const current = messages[middle]
-+    const order = current.time.created - target.time.created || Buffer.compare(Buffer.from(current.id), Buffer.from(target.id))
-+    if (order < 0) left = middle + 1
-+    else right = middle
-+  }
-+  return { found: messages[left]?.id === target.id, index: left }
-+}
-+
- function projectTuiDiff(diffs: readonly Snapshot.FileDiff[]) {
-   // SSE 仍携带共享完整事件；TUI reducer 是不破坏 share consumer 的首个可收窄 owner。
-   // HTTP body 已由 daemon 截断，但再次应用同一投影可保证测试 transport 和未来 caller 都不能灌回 patch。
-@@ -176,6 +191,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     const route = useRoute()
+ function compareMessage(a: Message, b: Message) {
+-  return a.time.created - b.time.created || a.id.localeCompare(b.id)
++  // 与 messageKey 二分同一码元序（等价 SQLite BINARY 的 UTF-8 字节序）：
++  // localeCompare 会让 snapshot 排序与插入定位在同一毫秒 tie 上分歧，产生重复或错位。
++  return a.time.created - b.time.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+ }
  
-     const fullSyncedSessions = new Set<string>()
-+    // remove event 只有 ID，且公开 caller 可提供非单调 ID；索引保存已有 Message 的 chronology key。
-+    // Map 只引用 bounded store 中的对象，不复制正文，也不引入 ID 排序或失败后的扫描路径。
-+    const messageByID = new Map<string, Map<string, Message>>()
-+    const indexMessage = (message: Message) => {
-+      // update 只替换同 ID 的最新完整 Info；生产者保证 time.created 是不可变的持久创建时间。
-+      // event-first 与 snapshot 两种入口共用此索引形状，remove 不需要判断 Message 来自哪条 transport。
-+      const index = messageByID.get(message.sessionID)
-+      if (index) return index.set(message.id, message)
-+      messageByID.set(message.sessionID, new Map([[message.id, message]]))
-+    }
-+    const unindexMessage = (message: Message) => messageByID.get(message.sessionID)?.delete(message.id)
-     // [local-smark] daemon multi-instance workspace tracking
-     let syncedWorkspace = project.workspace.current()
-     let connectedOnce = false
-@@ -824,8 +850,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+ const messageKey = (message: Message) => message.time.created + message.id
+@@ -782,7 +784,9 @@ export const {
+           if ((info as Record<string, unknown>).hidden) {
              const messages = store.message[info.sessionID]
-             // 同Project事件可能属于未加载Session；本地没有可删除的投影时必须保持消费链继续。
-             if (!messages) break
--            const result = Binary.search(messages, info.id, (m) => m.id)
-+            // hidden event 仍携带原创建时间，必须与普通 update 共用 chronology locator，不能退回 ID 查找。
-+            const result = searchMessage(messages, info)
-             if (result.found) {
-+              unindexMessage(info)
-               setStore(
-                 "message",
-                 info.sessionID,
-@@ -838,14 +866,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           }
-           const messages = store.message[info.sessionID]
-           if (!messages) {
-+            // 首条 SSE 会直接建立数组；先登记索引才能保证紧随其后的 ID-only remove 使用同一投影事实。
-+            indexMessage(info)
-             setStore("message", info.sessionID, [info])
-             break
-           }
--          const result = Binary.search(messages, info.id, (m) => m.id)
-+          const result = searchMessage(messages, info)
-           if (result.found) {
-+            // reconcile 与索引替换属于同一个同步事件边界，后续 remove 只能看到这次 update 的 chronology key。
-+            indexMessage(info)
-             setStore("message", info.sessionID, result.index, reconcile(info))
-             break
-           }
-+          indexMessage(info)
-           setStore(
-             "message",
-             info.sessionID,
-@@ -856,6 +889,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           const updated = store.message[info.sessionID]
-           if (updated.length > 300) {
-             const oldest = updated[0]
-+            // 300 条窗口删除 chronology 首项；索引必须在同一事件调用栈移除相同 Message。
-+            unindexMessage(oldest)
-             batch(() => {
-               setStore(
-                 "message",
-@@ -878,8 +913,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           const messages = store.message[event.properties.sessionID]
-           // daemon的删除事实仍有效，但未加载Session的TUI投影只能安全地no-op。
-           if (!messages) break
--          const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
-+          // ID-only event 先从同一 bounded 投影取回 chronology key；caller ID 本身不承诺任何时间顺序。
-+          // 索引 miss 保持既有 no-op，不能再用线性扫描或纯 ID 二分制造第二套成功路径。
-+          const target = messageByID.get(event.properties.sessionID)?.get(event.properties.messageID)
-+          if (!target) break
-+          const result = searchMessage(messages, target)
-           if (result.found) {
-+            unindexMessage(target)
-             setStore(
-               "message",
-               event.properties.sessionID,
-@@ -1138,6 +1178,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-             sdk.client.session.todo({ sessionID }),
-             sdk.client.session.status({ workspace: project.workspace.current() }),
-           ])
-+          // 同一份 infos 同时提交 store 和索引，避免两次 projection 对 hidden/window 范围产生分歧。
-+          const infos = (messages.data ?? []).map((message) => message.info)
-           // [local-smark] goal fetch：非致命，失败不影响 session sync
-           // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
-           // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
-@@ -1156,9 +1198,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-               if (match.found) draft.session[match.index] = session.data!
-               if (!match.found) draft.session.splice(match.index, 0, session.data!)
-               draft.todo[sessionID] = todo.data ?? []
--              const infos: (typeof draft.message)[string] = []
-               for (const message of messages.data ?? []) {
--                infos.push(message.info)
-                 // HTTP 快照合并：DB 在 streaming 期间 text="" ，
-                 // mergeLiveParts 保留本地已通过 delta 累积的长文本
-                 draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
-@@ -1166,6 +1206,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-               draft.message[sessionID] = infos
-             }),
-           )
-+          // force sync 是整页 authoritative replacement；重建而非增量合并可清除已不在窗口内的旧 key。
-+          messageByID.set(sessionID, new Map(infos.map((message) => [message.id, message])))
-           setStore("session_status", reconcile(status.data ?? {}))
-           // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
-           // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732b33ef17f 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -6,7 +6,16 @@ import { tmpdir } from "../../../fixture/fixture"
- import { createTuiPluginApi } from "../../../fixture/tui-plugin"
+             if (messages) {
+-              const result = search(messages, info.id, (m) => m.id)
++              // 0580：数组按 messageKey chronology 有序；hidden 定位必须用同一 key——
++              // 纯 ID 搜索在 ID 回绕/任意 caller ID 下 found=false，隐藏消息永远无法移除。
++              const result = search(messages, messageKey(info), messageKey)
+               if (result.found) {
+                 setStore(
+                   "message",
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -3,7 +3,7 @@ import { describe, expect, spyOn, test } from "bun:test"
+ import { testRender } from "@opentui/solid"
+ import { tmpdir } from "../../../fixture/fixture"
  import { directory, json, mount, wait, worktree } from "./sync-fixture"
- import type { TuiSlotPlugin } from "@opencode-ai/plugin/tui"
 -import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
-+import type {
-+  AssistantMessage,
-+  GlobalEvent,
-+  Message,
-+  Part,
-+  PermissionRequest,
-+  QuestionRequest,
-+  ToolPart,
-+  UserMessage,
-+} from "@opencode-ai/sdk/v2"
++import type { AssistantMessage, GlobalEvent, Message, Part, PermissionRequest, QuestionRequest, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
+ import type { TuiSlotPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
  import type { JSX } from "solid-js"
- import { internalTuiPlugins } from "@/cli/cmd/tui/plugin/internal"
- 
-@@ -115,6 +124,17 @@ function assistantMessage(): AssistantMessage {
-   }
- }
- 
-+function userMessage(id: string, created: number): UserMessage {
-+  return {
-+    id,
-+    sessionID: "ses_1",
-+    role: "user",
-+    time: { created },
-+    agent: "build",
-+    model: { providerID: "provider", modelID: "model" },
-+  }
-+}
-+
- function pendingToolPart(id = "part_1", callID = "call_1"): ToolPart {
-   return {
-     id,
-@@ -127,7 +147,7 @@ function pendingToolPart(id = "part_1", callID = "call_1"): ToolPart {
-   }
- }
- 
--function messageEvent(info: AssistantMessage): GlobalEvent {
-+function messageEvent(info: Message): GlobalEvent {
-   return {
-     directory,
-     project: "proj_test",
-@@ -135,6 +155,18 @@ function messageEvent(info: AssistantMessage): GlobalEvent {
-   }
- }
- 
-+function messageRemovedEvent(messageID: string): GlobalEvent {
-+  return {
-+    directory,
-+    project: "proj_test",
-+    payload: {
-+      id: `evt_removed_${messageID}`,
-+      type: "message.removed",
-+      properties: { sessionID: "ses_1", messageID },
-+    },
-+  }
-+}
-+
- function partEvent(part: Part): GlobalEvent {
-   return {
-     directory,
-@@ -1382,4 +1414,144 @@ describe("tui sync", () => {
-       Global.Path.state = previous
+ import { createBuiltinPlugins } from "../../../../src/feature-plugins/builtins"
+@@ -846,8 +846,156 @@ describe("tui sync", () => {
+       app.renderer.destroy()
      }
    })
 +
 +  test("keeps Message lifecycle chronological across ID rollover", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    // 前180条仍在回绕前的 lexical-high 区间，后120条已进入 lexical-low；
 +    // worked times 独立规定 chronology，测试不能借 ID 排序生成 expected。
@@ -729,10 +569,12 @@ index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732
 +        return json(history.map((info) => ({ info, parts: [] })))
 +      if (url.pathname === "/session/ses_1/todo") return json([])
 +      if (url.pathname === "/session/ses_1/diff") return json([])
-+    })
++      if (url.pathname === "/session/status") return json({})
++    }, tmp.path)
 +
 +    try {
 +      await sync.session.sync("ses_1", { force: true })
++      // 插入使长度瞬时 301；窗口 shift 必须裁掉 chronology 首项而非数组首项误判。
 +      emit(messageEvent(target))
 +      // 后续公开事件是 reducer 队列边界；它生效后即可断言前一条 Message 事件，避免时间等待竞态。
 +      emit(branchEvent("rollover-inserted"))
@@ -752,26 +594,24 @@ index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732
 +        expect.objectContaining({ agent: "updated" }),
 +      ])
 +
-+      emit(messageEvent({ ...target, hidden: { time: 301, reason: "undo" } }))
++      // 目标 SDK 类型面暂无 hidden 字段；reducer 按运行时字段消费，as 收窄不绕过行为。
++      emit(messageEvent({ ...target, hidden: { time: 301, reason: "undo" } } as unknown as Message))
 +      emit(branchEvent("rollover-hidden"))
 +      await wait(() => sync.data.vcs?.branch === "rollover-hidden")
-+      // hidden 紧跟同 ID update，能同时证明索引替换没有制造旧 key 或重复 Message。
++      // hidden 必须经 chronology 定位命中回绕后的 lexical-low ID；纯 ID 搜索会永久残留。
 +      expect(sync.data.message.ses_1?.some((message) => message.id === target.id)).toBe(false)
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
-+  test("removes arbitrary Message IDs through chronology index", async () => {
-+    const previous = Global.Path.state
++  test("removes arbitrary Message IDs through chronology order", async () => {
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
-+    const { app, emit, sync } = await mount()
++    const { app, emit, sync } = await mount(undefined, tmp.path)
 +
 +    try {
-+      // 不走 HTTP snapshot：首条 event 必须同时创建 Message[] 与 ID 索引。
++      // 不走 HTTP snapshot：首条 event 必须创建数组并保持 chronology 插入序。
 +      // 后续 ID 故意形成 m,z,a,y，证明公开 caller ID 既非全局升序也非单次旋转数组。
 +      const messages = [
 +        userMessage("msg_m", 1),
@@ -788,24 +628,21 @@ index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732
 +      emit(messageRemovedEvent("msg_y"))
 +      emit(branchEvent("arbitrary-removed"))
 +      await wait(() => sync.data.vcs?.branch === "arbitrary-removed")
-+      // remove 只有 ID；正确路径必须从首条 create 建立的索引取回 time.created 后复用 chronology 二分。
++      // remove 只有 ID；目标按 ID 线性查找定位，不依赖数组按 ID 有序。
 +      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_m", "msg_z", "msg_a"])
 +
 +      emit(messageRemovedEvent("msg_missing"))
 +      emit(branchEvent("arbitrary-missing"))
 +      await wait(() => sync.data.vcs?.branch === "arbitrary-missing")
-+      // missing ID 是 contracted no-op；它不能触发 scan、重排或删除邻近 chronology 项。
++      // missing ID 是 contracted no-op；不能触发重排或删除邻近 chronology 项。
 +      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_m", "msg_z", "msg_a"])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
 +  test("matches SQLite BINARY order for same-millisecond Message IDs", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    // SQLite BINARY 比较 UTF-8 bytes：大写 B(0x42) 必须排在小写 a(0x61) 之前。
 +    // 两条 time.created 相同，确保测试只对 tie-break 敏感，不让时间主键掩盖 collation 分歧。
@@ -818,10 +655,12 @@ index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732
 +        return json([upper, lower].map((info) => ({ info, parts: [] })))
 +      if (url.pathname === "/session/ses_1/todo") return json([])
 +      if (url.pathname === "/session/ses_1/diff") return json([])
-+    })
++      if (url.pathname === "/session/status") return json({})
++    }, tmp.path)
 +
 +    try {
 +      await sync.session.sync("ses_1", { force: true })
++      // 快照排序即目标排序；B<a 是本补丁统一码元序（等价 BINARY）的断言面。
 +      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a"])
 +
 +      emit(messageEvent({ ...upper, agent: "binary-updated" }))
@@ -831,7 +670,7 @@ index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732
 +      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a"])
 +      expect(sync.data.message.ses_1?.[0]).toMatchObject({ agent: "binary-updated" })
 +
-+      emit(messageEvent({ ...upper, hidden: { time: 101, reason: "undo" } }))
++      emit(messageEvent({ ...upper, hidden: { time: 101, reason: "undo" } } as unknown as Message))
 +      emit(branchEvent("binary-hidden"))
 +      await wait(() => sync.data.vcs?.branch === "binary-hidden")
 +      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_a"])
@@ -839,11 +678,51 @@ index a2a9e4bede45bc0c89ffa6c3ea2dc9e53b6f15ed..e9ba3f565b76f2fa1f55d570f1dbe732
 +      emit(messageRemovedEvent(lower.id))
 +      emit(branchEvent("binary-removed"))
 +      await wait(() => sync.data.vcs?.branch === "binary-removed")
-+      // explicit remove 复用同一 locator，证明 ID index 没有绕过 BINARY chronology 前提。
++      // explicit remove 复用同一 ID 线性定位，证明 BINARY chronology 前提未被绕过。
 +      expect(sync.data.message.ses_1).toEqual([])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
  })
+ 
++function userMessage(id: string, created: number): UserMessage {
++  // userMessage 工厂只填 chronology 断言所需字段；model 三元组满足 SDK User 必填。
++  return {
++    id,
++    sessionID: "ses_1",
++    role: "user",
++    time: { created },
++    agent: "build",
++    model: { providerID: "provider", modelID: "model" },
++  }
++}
++
+ function assistantMessage(): AssistantMessage {
+   return {
+     id: "msg_1",
+@@ -877,7 +1025,7 @@ function pendingToolPart(id = "part_1", callID = "call_1"): ToolPart {
+   }
+ }
+ 
+-function messageEvent(info: AssistantMessage): GlobalEvent {
++function messageEvent(info: Message): GlobalEvent {
+   return {
+     directory,
+     project: "proj_test",
+@@ -885,6 +1033,15 @@ function messageEvent(info: AssistantMessage): GlobalEvent {
+   }
+ }
+ 
++function messageRemovedEvent(messageID: string): GlobalEvent {
++  // remove 事件只携带 ID；与 update 事件同源目录保证进入同一 reducer 队列。
++  return {
++    directory,
++    project: "proj_test",
++    payload: { id: `evt_removed_${messageID}`, type: "message.removed", properties: { sessionID: "ses_1", messageID } },
++  }
++}
++
+ function partEvent(part: Part): GlobalEvent {
+   return {
+     directory,

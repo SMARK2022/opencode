@@ -1039,8 +1039,8 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
        withShell(
          item,
          Effect.gen(function* () {
-@@ -446,7 +455,9 @@ describe("tool.shell permissions", () => {
-   
+@@ -500,7 +509,9 @@ describe("tool.shell permissions", () => {
+ 
    // #158：ssh 引号内 Unix 管道视为远程载荷，不触发本地兼容拦截
    for (const item of ps) {
 -    it.live(`does not reject Unix commands inside remote ssh string [${item.label}]`, () =>
@@ -1093,12 +1093,11 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
          withShell(
            { label: "bash", shell: bash },
            runIn(
-@@ -2466,4 +2484,371 @@ describe("tool.shell execution notice policy", () => {
+@@ -2709,4 +2727,371 @@ describe("tool.shell execution notice policy", () => {
      expect(notice).toContain('reason="completed"')
      expect(notice).toContain('elapsed_ms="121000"')
    })
 -})
-\ No newline at end of file
 +})
 +
 +// 内双引号源码做二次解析，导致 Bash 风格的 \" 转义被剥离、$() 被展开。

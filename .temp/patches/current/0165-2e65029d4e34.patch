@@ -447,6 +447,14 @@ index 1111111111..2222222222 100644
          args: { continue: true },
          pluginHost: {
            async start(input) {
+@@ -163,5 +163,5 @@
+         directory,
+         config: createTuiResolvedConfig({ plugin_enabled: {} }),
+-        fetch: calls.fetch,
+-        events: events.source,
++        // #165：TuiInput 收敛为 testTransport 嵌套注入，run 调用同步迁移
++        testTransport: { fetch: calls.fetch, events: events.source },
+         args: {},
 diff --git a/packages/cli/src/tui.ts b/packages/cli/src/tui.ts
 index 1111111111..2222222222 100644
 --- a/packages/cli/src/tui.ts
