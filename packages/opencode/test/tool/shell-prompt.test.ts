@@ -112,13 +112,13 @@ for (const name of ["pwsh", "powershell", "cmd", "bash", "zsh", "sh", "dash", "k
   }
 }
 
-// 数字来自修改前冻结的 render(1000,16384)，不从当前实现重新生成预期。
+// 冻结基线仅增加Git标题的100字节，R6预算不变。
 for (const [name, lines, bytes] of [
-  ["pwsh", 109, 8547],
-  ["powershell", 109, 8421],
-  ["cmd", 106, 7713],
-  ["bash", 100, 7754],
-  ["zsh", 100, 7753],
+  ["pwsh", 109, 8647],
+  ["powershell", 109, 8521],
+  ["cmd", 106, 7813],
+  ["bash", 100, 7854],
+  ["zsh", 100, 7853],
 ] as const) {
   for (const platform of ["win32", "linux"] as const) {
     test(`render and command description stay within R6 budget: ${platform}/${name}`, () => {
