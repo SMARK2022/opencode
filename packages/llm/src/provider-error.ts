@@ -1,6 +1,19 @@
 import { Schema } from "effect"
 import { LLMError, ProviderErrorEvent } from "./schema"
 
+// 来源头、HTML和页面指纹缺一不可，不能把普通鉴权或JSON策略拒绝误判为拦截。
+export const isCloudflareBlock = (status: number | undefined, headers: Readonly<Record<string, string>> | undefined, body: string) =>
+  status === 403 &&
+  headers?.server?.trim().toLowerCase() === "cloudflare" &&
+  !!headers["cf-ray"]?.trim() &&
+  /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(body) &&
+  (headers["cf-mitigated"]?.trim().toLowerCase() === "challenge" ||
+    (body.includes("window._cf_chl_opt") && body.includes("/cdn-cgi/challenge-platform/")) ||
+    (/\bid\s*=\s*["']cf-error-details["']/i.test(body) && body.includes("/cdn-cgi/styles/cf.errors.css")) ||
+    (body.includes("Unable to load site") &&
+      body.includes("Please try again later") &&
+      body.includes("https://status.openai.com/")))
+
 const patterns = [
   /prompt is too long/i,
   /request_too_large/i,

@@ -1,6 +1,7 @@
 import type { NamedError } from "../util/error"
 import { SessionV1 } from "../v1/session"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
+import { isCloudflareBlock } from "@opencode-ai/llm"
 import { iife } from "../util/iife"
 import { GO_UPSELL_MESSAGE, GO_UPSELL_URL } from "./retry-constants"
 export { GO_UPSELL_MESSAGE, GO_UPSELL_URL }
@@ -94,8 +95,11 @@ export function retryable(error: Err, provider: string) {
     // 5xx errors are transient server failures and should always be retried,
     // even when the provider SDK doesn't explicitly mark them as retryable.
     // #191：移除 status !== undefined 守卫——无 statusCode 的可重试错误（transport）也应重试
+    // SDK的不可重试标志不能覆盖明确429或Cloudflare拦截，退避与既有文本识别仍归原policy。
     if (
       !error.data.isRetryable &&
+      status !== 429 &&
+      !isCloudflareBlock(status, error.data.responseHeaders, error.data.responseBody ?? "") &&
       !(status !== undefined && status >= 500) &&
       !matchesRetryableMessage(error.data.message) &&
       !matchesRetryableMessage(error.data.responseBody)
