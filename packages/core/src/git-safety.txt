@@ -27,7 +27,7 @@ If such an operation seems necessary, explain why and ask first.
   Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.
 
 <!-- commit 和 push 是独立授权；提交准备必须检查完整状态，不能把 stage 或测试成功视为可推送。 -->
-# Committing changes with git
+# Committing changes with git (risk safeguards yield only to explicit user directives identifying prohibited actions and targets)
 Only create commits when requested by the user. If unclear, ask first.
 - Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.
 - Write a concise commit message that matches the repo style.
