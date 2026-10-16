@@ -15,6 +15,9 @@ import { testEffect } from "../lib/effect"
 const providerID = ProviderID.make("test")
 const retryProvider = "test"
 const it = testEffect(Layer.mergeAll(SessionStatus.defaultLayer, CrossSpawnSpawner.defaultLayer))
+const cloudflareHeaders = { server: "cloudflare", "cf-ray": "test-HKG" }
+const cloudflareBody =
+  '<html>Unable to load site. Please try again later. <a href="https://status.openai.com/">Status</a></html>'
 
 function apiError(headers?: Record<string, string>): MessageV2.APIError {
   return Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
@@ -182,6 +185,39 @@ describe("session.retry.retryable", () => {
     }).toObject()
 
     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+  })
+
+  test.each(["openai", "anthropic", "smark-codex", "custom-provider"])(
+    "retries Cloudflare HTML blocks for %s even when the SDK marks them non-retryable",
+    (provider) => {
+      const error = MessageV2.fromError(
+        new APICallError({
+          message: "Forbidden",
+          url: "https://example.com/v1/responses",
+          requestBodyValues: {},
+          statusCode: 403,
+          responseHeaders: cloudflareHeaders,
+          responseBody: cloudflareBody,
+          isRetryable: false,
+        }),
+        { providerID: ProviderID.make(provider) },
+      )
+      if (!MessageV2.APIError.isInstance(error)) throw new Error("expected APIError")
+      expect(error.data.isRetryable).toBe(false)
+      expect(SessionRetry.retryable(error, provider)).toEqual({ message: error.data.message })
+    },
+  )
+
+  test("retries 429 errors even when isRetryable is false", () => {
+    const error = new MessageV2.APIError({
+      message: "Too many requests",
+      isRetryable: false,
+      statusCode: 429,
+      responseHeaders: { "retry-after": "7" },
+    }).toObject()
+
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Too many requests" })
+    expect(SessionRetry.delay(1, error)).toBe(7000)
   })
 
   test("retries 500 errors even when isRetryable is false", () => {
@@ -554,10 +590,9 @@ describe("session.message-v2.fromError", () => {
   })
 
   test("converts SSE read timeouts to retryable APIError", () => {
-    const result = MessageV2.fromError(
-      Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }),
-      { providerID },
-    )
+    const result = MessageV2.fromError(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }), {
+      providerID,
+    })
 
     expect(MessageV2.APIError.isInstance(result)).toBe(true)
     if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")

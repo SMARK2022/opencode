@@ -73,9 +73,23 @@ export function retryable(error: Err, provider: string) {
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
   if (MessageV2.APIError.isInstance(error)) {
     const status = error.data.statusCode
-    // 5xx errors are transient server failures and should always be retried,
-    // even when the provider SDK doesn't explicitly mark them as retryable.
-    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
+    const headers = error.data.responseHeaders
+    const body = error.data.responseBody ?? ""
+    const cloudflare =
+      status === 403 &&
+      headers?.server?.trim().toLowerCase() === "cloudflare" &&
+      !!headers["cf-ray"]?.trim() &&
+      /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(body) &&
+      (headers["cf-mitigated"]?.trim().toLowerCase() === "challenge" ||
+        (body.includes("window._cf_chl_opt") && body.includes("/cdn-cgi/challenge-platform/")) ||
+        (/\bid\s*=\s*["']cf-error-details["']/i.test(body) && body.includes("/cdn-cgi/styles/cf.errors.css")) ||
+        (body.includes("Unable to load site") &&
+          body.includes("Please try again later") &&
+          body.includes("https://status.openai.com/")))
+
+    // Use the existing retry policy even when the SDK marks these failures non-retryable.
+    if (!error.data.isRetryable && status !== 429 && !cloudflare && !(status !== undefined && status >= 500))
+      return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
       return {
         message: GO_UPSELL_MESSAGE,
