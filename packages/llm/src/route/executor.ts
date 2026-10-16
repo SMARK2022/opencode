@@ -22,7 +22,7 @@ import {
   TransportReason,
   UnknownProviderReason,
 } from "../schema"
-import { isContextOverflow } from "../provider-error"
+import { isCloudflareBlock, isContextOverflow } from "../provider-error"
 import { FetchTiming } from "./http-timing"
 
 export interface Interface {
@@ -228,6 +228,7 @@ const statusReason = (input: {
   readonly message: string
   readonly retryAfterMs?: number | undefined
   readonly rateLimit?: HttpRateLimitDetails | undefined
+  readonly cloudflare: boolean
   readonly http: HttpContext
 }) => {
   const body = input.http.body ?? ""
@@ -237,6 +238,10 @@ const statusReason = (input: {
   if (input.status === 401) {
     return new AuthenticationReason({ message: input.message, kind: "invalid", http: input.http })
   }
+  // 既有policy拒绝优先；拦截页复用请求建立阶段重试，不重放已接受的流。
+  if (input.cloudflare) return new ProviderInternalReason({
+    message: input.message, status: input.status, retryAfterMs: input.retryAfterMs, http: input.http,
+  })
   if (input.status === 403) {
     return new AuthenticationReason({ message: input.message, kind: "insufficient-permissions", http: input.http })
   }
@@ -290,6 +295,8 @@ const statusError =
         method: "execute",
         reason: statusReason({
           status: response.status,
+          // 诊断副本已截断脱敏，指纹必须读取同次请求的完整响应，不另存原文。
+          cloudflare: isCloudflareBlock(response.status, headers, body ?? ""),
           message: providerMessage(response.status, details),
           retryAfterMs: retryAfter,
           rateLimit,

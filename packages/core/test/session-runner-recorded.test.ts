@@ -46,6 +46,8 @@ const cassette =
       })
     : HttpRecorder.http("session-runner/openai-chat-streams-text", {
         directory: path.resolve(import.meta.dir, "fixtures/recordings"),
+        // checkout换行不改变模型原话，其余wire字段继续严格比较。
+        redact: { body: (body) => body.replaceAll("\\r\\n", "\\n") },
       })
 const executor = RequestExecutor.layer.pipe(Layer.provide(cassette))
 const client = LLMClient.layer.pipe(Layer.provide(executor))
@@ -135,7 +137,8 @@ const it = testEffect(
 const sessionID = SessionV2.ID.make("ses_runner_recorded")
 
 describe("SessionRunnerLLM recorded", () => {
-  it.effect("executes one recorded V2 prompt through the recorded HTTP transport", () =>
+  // 实际文件与HTTP流使用真实时钟，不让重试或流间隔停在未推进的TestClock。
+  it.live("executes one recorded V2 prompt through the recorded HTTP transport", () =>
     Effect.gen(function* () {
       const { db } = yield* Database.Service
       yield* db
@@ -183,6 +186,8 @@ describe("SessionRunnerLLM recorded", () => {
       ).toEqual([
         "session.next.prompt.admitted.1",
         "session.next.prompted.1",
+        // 当前runner在provider step之前持久记录请求输入估算。
+        "session.next.request.estimated.1",
         "session.next.step.started.1",
         "session.next.text.started.1",
         "session.next.text.ended.1",

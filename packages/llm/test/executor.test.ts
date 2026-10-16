@@ -250,6 +250,69 @@ describe("RequestExecutor", () => {
     ),
   )
 
+  it.effect("retries only identified Cloudflare blocks and preserves cancellation", () =>
+    Effect.gen(function* () {
+      const headers = { server: " CloudFlare ", "cf-ray": "test-HKG", "retry-after-ms": "0" }
+      const challenge = '<html>window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>'
+      // 四种source指纹都走真实executor；第五例把标记放在诊断截断边界之后。
+      for (const [body, extra] of [
+        ["<!DOCTYPE HTML><html>challenge</html>", { "cf-mitigated": "challenge" }],
+        [challenge, {}],
+        ['<html><div id="cf-error-details"></div>/cdn-cgi/styles/cf.errors.css</html>', {}],
+        ['<html>Unable to load site. Please try again later. https://status.openai.com/</html>', {}],
+        [`<html>${"x".repeat(17000)}window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>`, {}],
+      ] as const) {
+        const attempts = yield* Ref.make(0)
+        const response = yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          return yield* executor.execute(request)
+        }).pipe(Effect.provide(countedResponsesLayer(attempts, [
+          new Response(body, { status: 403, headers: { ...headers, ...extra } }),
+          new Response("ok", { status: 200 }),
+        ])))
+        expect(response.status).toBe(200)
+        expect(yield* Ref.get(attempts)).toBe(2)
+      }
+      // 缺来源、缺ray、非HTML、错状态与普通权限页不扩大为网关重试；policy/quota仍优先。
+      for (const [status, body, responseHeaders, tag] of [
+        [403, challenge, { server: "other", "cf-ray": "test" }, "Authentication"],
+        [403, challenge, { server: "cloudflare" }, "Authentication"],
+        [403, '{"error":"window._cf_chl_opt /cdn-cgi/challenge-platform/"}', headers, "Authentication"],
+        [400, challenge, headers, "InvalidRequest"],
+        [403, "<html>Permission denied</html>", headers, "Authentication"],
+        [401, challenge, headers, "Authentication"],
+        [403, '<html>content_policy window._cf_chl_opt /cdn-cgi/challenge-platform/</html>', headers, "ContentPolicy"],
+        [429, '{"error":"insufficient_quota"}', headers, "QuotaExceeded"],
+      ] as const) {
+        const attempts = yield* Ref.make(0)
+        const error = yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          return yield* executor.execute(request).pipe(Effect.flip)
+        }).pipe(Effect.provide(countedResponsesLayer(attempts, [
+          new Response(body, { status, headers: responseHeaders }),
+          new Response("unexpected retry", { status: 200 }),
+        ])))
+        expectLLMError(error)
+        expect(error.reason._tag).toBe(tag)
+        expect(error.retryable).toBe(false)
+        expect(yield* Ref.get(attempts)).toBe(1)
+      }
+      // 取消仍中断既有sleep；推进整个等待窗口也不得再发请求。
+      const attempts = yield* Ref.make(0)
+      const fiber = yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* executor.execute(request)
+      }).pipe(Effect.provide(countedResponsesLayer(attempts, [
+        new Response(challenge, { status: 403, headers: { server: "cloudflare", "cf-ray": "test", "retry-after": "7" } }),
+      ])), Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(yield* Ref.get(attempts)).toBe(1)
+      yield* Fiber.interrupt(fiber)
+      yield* TestClock.adjust(8000)
+      expect(yield* Ref.get(attempts)).toBe(1)
+    }),
+  )
+
   it.effect("retries retryable status responses before returning the stream", () =>
     Effect.gen(function* () {
       const executor = yield* RequestExecutor.Service
@@ -359,8 +422,9 @@ describe("RequestExecutor", () => {
 
   it.effect("honors Retry-After delta seconds before retrying", () =>
     Effect.gen(function* () {
+      for (const status of [503, 403, 429]) {
       const attempts = yield* Ref.make(0)
-      return yield* Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const executor = yield* RequestExecutor.Service
         const fiber = yield* executor.execute(request).pipe(Effect.forkChild)
 
@@ -379,11 +443,13 @@ describe("RequestExecutor", () => {
       }).pipe(
         Effect.provide(
           countedResponsesLayer(attempts, [
-            new Response("busy", { status: 503, headers: { "retry-after": "2" } }),
+            // 只替换失败证据，仍使用真实时钟/请求数断言验证503、403和429的同一退避入口。
+            new Response(status === 403 ? "<html>challenge</html>" : "busy", { status, headers: { "retry-after": "2", "server": "cloudflare", "cf-ray": "test", "cf-mitigated": "challenge" } }),
             new Response("ok", { status: 200 }),
           ]),
         ),
       )
+      }
     }),
   )
 

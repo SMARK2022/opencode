@@ -17,6 +17,9 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 const providerID = ProviderV2.ID.make("test")
 const retryProvider = "test"
 const it = testEffect(LayerNode.compile(LayerNode.group([SessionStatus.node, CrossSpawnSpawner.node])))
+const cloudflareHeaders = { server: "cloudflare", "cf-ray": "test-HKG" }
+const cloudflareBody =
+  '<html>Unable to load site. Please try again later. <a href="https://status.openai.com/">Status</a></html>'
 
 function apiError(headers?: Record<string, string>): SessionV1.APIError {
   return Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
@@ -285,6 +288,45 @@ describe("session.retry.retryable", () => {
     }).toObject()
 
     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+  })
+
+  test.each(["openai", "anthropic", "smark-codex", "custom-provider"])(
+    "retries Cloudflare HTML blocks for %s even when the SDK marks them non-retryable",
+    (provider) => {
+      // 保留source的outage页，并用无通用重试措辞的challenge锁定新增指纹路径。
+      for (const responseBody of [cloudflareBody, '<html><script>window._cf_chl_opt={};</script>/cdn-cgi/challenge-platform/</html>']) {
+        const error = MessageV2.fromError(
+          new APICallError({
+            message: "Forbidden",
+            url: "https://example.com/v1/responses",
+            requestBodyValues: {},
+            statusCode: 403,
+            responseHeaders: cloudflareHeaders,
+            responseBody,
+            isRetryable: false,
+          }),
+          { providerID: ProviderV2.ID.make(provider) },
+        )
+        if (!SessionV1.APIError.isInstance(error)) throw new Error("expected APIError")
+        expect(error.data.isRetryable).toBe(false)
+        expect(SessionRetry.retryable(error, provider)).toEqual({ message: error.data.message })
+      }
+    },
+  )
+
+  test("retries 429 errors even when isRetryable is false", () => {
+    // 中性message排除旧文本正则提前命中，仍保留source原始输入和七秒Retry-After断言。
+    for (const message of ["Too many requests", "Wait"]) {
+      const error = new SessionV1.APIError({
+        message,
+        isRetryable: false,
+        statusCode: 429,
+        responseHeaders: { "retry-after": "7" },
+      }).toObject()
+
+      expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message })
+      expect(SessionRetry.delay(1, error)).toBe(7000)
+    }
   })
 
   test("retries 500 errors even when isRetryable is false", () => {

@@ -286,8 +286,8 @@ Commands:
                                                                                      [aliases: cost]
   opencode stats tokens                 show token-only input/output/cache stacks and ledger
                                                                                     [aliases: token]
-  opencode stats insights               show trend insights, risks, recommendations, and outliers
-                                                                                  [aliases: insight]
+  opencode stats insights               show quantitative usage shape, attribution, outliers, and
+                                        run-rate                                  [aliases: insight]
   opencode stats forecast               project cost run-rate and month-end spend[aliases: run-rate]
 
 Options:
@@ -296,11 +296,13 @@ Options:
       --print-logs   print logs to stderr                                                  [boolean]
       --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
       --pure         run without external plugins                                          [boolean]
-      --days         show stats for the last N days (0 means today, default: all time)      [number]
+      --days         show stats for the last N days (0 means today)           [number] [default: 60]
+      --all-time     include all recorded usage instead of the default 60 days
+                                                                          [boolean] [default: false]
       --project      filter by project (default: all projects, empty string: current project)
                                                                                             [string]
       --color        ANSI color mode [string] [choices: "auto", "always", "never"] [default: "auto"]
-      --tools        number of tools to show in overview mode                               [number]
+      --tools        shortcut to tool breakdown; optionally pass number of tools
       --models       legacy shortcut: show top model rows in the dashboard; pass a number for top N
   -n, --limit        number of model/provider rows to show                                  [number]
   -i, --interactive  cycle dashboard views with keyboard shortcuts        [boolean] [default: false]"
